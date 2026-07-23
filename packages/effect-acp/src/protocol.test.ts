@@ -198,20 +198,18 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
           direction: "outgoing",
           stage: "decoded",
           payload: {
-            _tag: "Request",
-            id: "",
-            tag: "session/cancel",
-            payload: {
+            jsonrpc: "2.0",
+            method: "session/cancel",
+            params: {
               sessionId: "session-1",
             },
-            headers: [],
           },
         },
         {
           direction: "outgoing",
           stage: "raw",
           payload:
-            '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-1"},"id":"","headers":[]}\n',
+            '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-1"}}\n',
         },
       ]);
     }),
@@ -261,7 +259,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       assert.instanceOf(bigintError, AcpError.AcpProtocolParseError);
       assert.equal(bigintError.operation, "encode-message");
       assert.equal(bigintError.method, "x/test");
-      assert.instanceOf(bigintError.cause, TypeError);
+      assert.isTrue(Schema.isSchemaError(bigintError.cause));
       assert.equal(
         bigintError.message,
         "ACP protocol operation 'encode-message' failed for method 'x/test'.",
@@ -273,7 +271,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       assert.instanceOf(circularError, AcpError.AcpProtocolParseError);
       assert.equal(circularError.operation, "encode-message");
       assert.equal(circularError.method, "x/test");
-      assert.instanceOf(circularError.cause, TypeError);
+      assert.isTrue(Schema.isSchemaError(circularError.cause));
 
       const requestError = yield* transport.request("x/request", 1n).pipe(
         Effect.match({

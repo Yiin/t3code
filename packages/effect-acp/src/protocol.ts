@@ -77,6 +77,15 @@ const decodeElicitationComplete = Schema.decodeUnknownEffect(
 );
 const parserFactory = RpcSerialization.ndJsonRpc();
 
+const JsonRpcNotificationFrame = Schema.Struct({
+  jsonrpc: Schema.Literal("2.0"),
+  method: Schema.String,
+  params: Schema.optionalKey(Schema.Unknown),
+});
+const encodeNotificationFrame = Schema.encodeEffect(
+  Schema.fromJsonString(JsonRpcNotificationFrame),
+);
+
 export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(function* (
   options: AcpPatchedProtocolOptions,
 ): Effect.fn.Return<AcpPatchedProtocol, never, Scope.Scope> {
@@ -517,13 +526,23 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     method: string,
     payload: unknown,
   ) {
-    yield* offerOutgoing({
-      _tag: "Request",
-      id: "",
-      tag: method,
-      payload,
-      headers: [],
-    });
+    // A JSON-RPC notification must omit `id`. Encoding it through
+    // `parser.encode` as a Request with `id: ""` produces a frame that strict
+    // agents (kimi) refuse to route to their notification handlers, so the
+    // ndjson frame is built by hand here.
+    const frame =
+      payload === undefined
+        ? { jsonrpc: "2.0" as const, method }
+        : { jsonrpc: "2.0" as const, method, params: payload };
+    yield* logProtocol({ direction: "outgoing", stage: "decoded", payload: frame });
+    const encoded = yield* encodeNotificationFrame(frame).pipe(
+      Effect.mapError((cause) =>
+        AcpError.AcpProtocolParseError.fromEncodingError(method, undefined, cause),
+      ),
+      Effect.map((json) => `${json}\n`),
+    );
+    yield* logProtocol({ direction: "outgoing", stage: "raw", payload: encoded });
+    yield* Queue.offer(outgoing, encoded).pipe(Effect.asVoid);
   });
 
   const sendRequest = Effect.fn("sendRequest")(function* (method: string, payload: unknown) {
