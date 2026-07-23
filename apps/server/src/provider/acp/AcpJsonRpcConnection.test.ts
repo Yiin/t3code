@@ -245,6 +245,54 @@ describe("AcpSessionRuntime", () => {
       const firstPromptResult = yield* Fiber.join(promptFiber);
       expect(firstPromptResult).toMatchObject({ stopReason: "cancelled" });
 
+      // The cancelled prompt never settles on the agent side, so the next
+      // prompt proceeds only after the settle timeout force-interrupts it.
+      const secondPromptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "second" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust("10 seconds");
+      const secondPromptResult = yield* Fiber.join(secondPromptFiber);
+      expect(secondPromptResult).toMatchObject({ stopReason: "end_turn" });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("holds the next prompt until a cancelled turn settles on the agent", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const firstPromptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "first" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      yield* runtime.cancel;
+      const firstPromptResult = yield* Fiber.join(firstPromptFiber);
+      expect(firstPromptResult).toMatchObject({ stopReason: "cancelled" });
+
+      // The mock rejects overlapping session/prompt requests like kimi acp
+      // does, and delays its cancel processing; the runtime must hold this
+      // prompt until the cancelled turn actually settles on the agent.
       const secondPromptResult = yield* runtime.prompt({
         prompt: [{ type: "text", text: "second" }],
       });
@@ -256,7 +304,8 @@ describe("AcpSessionRuntime", () => {
             command: mockAgentCommand,
             args: mockAgentArgs,
             env: {
-              T3_ACP_HANG_FIRST_PROMPT_FOREVER: "1",
+              T3_ACP_REJECT_OVERLAPPING_PROMPTS: "1",
+              T3_ACP_CANCEL_PROCESSING_DELAY_MS: "200",
             },
           },
           cwd: process.cwd(),

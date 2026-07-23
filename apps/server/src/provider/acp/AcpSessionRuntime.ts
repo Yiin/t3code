@@ -49,6 +49,7 @@ export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStre
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+const defaultCancelledTurnSettleTimeout = Duration.seconds(10);
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -63,6 +64,13 @@ export interface AcpSessionRuntimeOptions {
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /**
+   * How long the next prompt waits for a cancelled turn's `session/prompt`
+   * request to settle on the agent before force-interrupting it. ACP allows
+   * one turn at a time, and strict agents (kimi) reject a new `session/prompt`
+   * while the previous turn is still active.
+   */
+  readonly cancelledTurnSettleTimeout?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
@@ -196,6 +204,9 @@ export class AcpSessionRuntime extends Context.Service<
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
+     * The in-flight `prompt` caller is released immediately with
+     * `stopReason: "cancelled"`, while the underlying `session/prompt` request
+     * stays pending until the agent ends the turn, as the protocol requires.
      * @see https://agentclientprotocol.com/protocol/schema#session/cancel
      */
     readonly cancel: Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -293,10 +304,16 @@ export const make = (
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
     const promptSerializationSemaphore = yield* Semaphore.make(1);
-    const activePromptFiberRef = yield* Ref.make<
+    const activeCancelSignalRef = yield* Ref.make<Option.Option<Deferred.Deferred<void>>>(
+      Option.none(),
+    );
+    const lingeringPromptFiberRef = yield* Ref.make<
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    const cancelledTurnSettleTimeout = Duration.fromInputUnsafe(
+      options.cancelledTurnSettleTimeout ?? defaultCancelledTurnSettleTimeout,
+    );
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -720,6 +737,23 @@ export const make = (
         promptSerializationSemaphore.withPermit(
           Effect.gen(function* () {
             const started = yield* getStartedState;
+            // ACP allows one turn at a time. A cancelled turn's session/prompt
+            // request stays pending until the agent acknowledges the cancel,
+            // so wait for it to settle before opening the next turn; strict
+            // agents (kimi) reject an overlapping session/prompt outright.
+            const lingering = yield* Ref.get(lingeringPromptFiberRef);
+            if (Option.isSome(lingering)) {
+              yield* Fiber.await(lingering.value).pipe(
+                Effect.timeoutOption(cancelledTurnSettleTimeout),
+                Effect.flatMap(
+                  Option.match({
+                    onNone: () => Fiber.interrupt(lingering.value).pipe(Effect.ignore),
+                    onSome: () => Effect.void,
+                  }),
+                ),
+              );
+              yield* Ref.set(lingeringPromptFiberRef, Option.none());
+            }
             yield* closeActiveAssistantSegment({
               queue: eventQueue,
               assistantSegmentRef,
@@ -731,13 +765,20 @@ export const make = (
             const cancelledResponse = {
               stopReason: "cancelled",
             } satisfies EffectAcpSchema.PromptResponse;
+            const cancelSignal = yield* Deferred.make<void>();
             const promptRpcFiber = yield* runLoggedRequest(
               "session/prompt",
               requestPayload,
               acp.agent.prompt(requestPayload),
             ).pipe(Effect.forkIn(runtimeScope));
-            yield* Ref.set(activePromptFiberRef, Option.some(promptRpcFiber));
-            return yield* Fiber.join(promptRpcFiber).pipe(
+            yield* Ref.set(activeCancelSignalRef, Option.some(cancelSignal));
+            return yield* Effect.raceFirst(
+              Fiber.join(promptRpcFiber),
+              Deferred.await(cancelSignal).pipe(
+                Effect.andThen(Ref.set(lingeringPromptFiberRef, Option.some(promptRpcFiber))),
+                Effect.as(cancelledResponse),
+              ),
+            ).pipe(
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)
                   ? Effect.succeed(cancelledResponse)
@@ -745,8 +786,11 @@ export const make = (
               ),
               Effect.ensuring(
                 Effect.gen(function* () {
-                  yield* Fiber.interrupt(promptRpcFiber).pipe(Effect.ignore);
-                  yield* Ref.set(activePromptFiberRef, Option.none());
+                  const parked = yield* Ref.get(lingeringPromptFiberRef);
+                  if (!(Option.isSome(parked) && parked.value === promptRpcFiber)) {
+                    yield* Fiber.interrupt(promptRpcFiber).pipe(Effect.ignore);
+                  }
+                  yield* Ref.set(activeCancelSignalRef, Option.none());
                 }),
               ),
               Effect.tap(() =>
@@ -761,13 +805,13 @@ export const make = (
       cancel: getStartedState.pipe(
         Effect.flatMap((started) =>
           Effect.gen(function* () {
-            const activePromptFiber = yield* Ref.get(activePromptFiberRef);
-            if (Option.isSome(activePromptFiber)) {
-              yield* Fiber.interrupt(activePromptFiber.value).pipe(Effect.ignore);
-            }
             yield* acp.agent
               .cancel({ sessionId: started.sessionId })
               .pipe(Effect.ignore, Effect.forkIn(runtimeScope));
+            const cancelSignal = yield* Ref.get(activeCancelSignalRef);
+            if (Option.isSome(cancelSignal)) {
+              yield* Deferred.succeed(cancelSignal.value, undefined);
+            }
           }),
         ),
       ),

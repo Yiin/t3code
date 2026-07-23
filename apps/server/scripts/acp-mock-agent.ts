@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -23,6 +24,8 @@ const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLET
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === "1";
+const rejectOverlappingPrompts = process.env.T3_ACP_REJECT_OVERLAPPING_PROMPTS === "1";
+const cancelProcessingDelayMs = Number(process.env.T3_ACP_CANCEL_PROCESSING_DELAY_MS ?? "0");
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
@@ -56,6 +59,11 @@ let currentFast = false;
 let promptCount = 0;
 let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
+// Strict single-turn state (T3_ACP_REJECT_OVERLAPPING_PROMPTS): the turn stays
+// active until session/cancel ends it, mirroring agents like kimi acp.
+let activeStrictTurn:
+  | { readonly id: number; readonly done: Deferred.Deferred<AcpSchema.StopReason> }
+  | undefined;
 
 function promptIdFromRequestMeta(
   request: Pick<AcpSchema.PromptRequest, "_meta">,
@@ -437,6 +445,12 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
+      if (Number.isFinite(cancelProcessingDelayMs) && cancelProcessingDelayMs > 0) {
+        yield* Effect.sleep(`${cancelProcessingDelayMs} millis`);
+      }
+      if (activeStrictTurn !== undefined) {
+        yield* Deferred.succeed(activeStrictTurn.done, "cancelled");
+      }
       if (emitLateUpdateAfterCancel) {
         yield* Effect.sleep("50 millis");
         yield* Effect.sync(() => {
@@ -463,6 +477,26 @@ const program = Effect.gen(function* () {
 
       if (failPrompt) {
         return yield* AcpError.AcpRequestError.internalError("Mock prompt failure");
+      }
+
+      if (rejectOverlappingPrompts) {
+        if (activeStrictTurn !== undefined) {
+          return yield* AcpError.AcpRequestError.invalidParams(
+            `Cannot launch a new turn while another turn (ID ${activeStrictTurn.id}) is active`,
+            { method: "session/prompt", params: request },
+          );
+        }
+        if (cancelledSessions.delete(requestedSessionId)) {
+          return { stopReason: "cancelled" };
+        }
+        if (promptCount === 1) {
+          const done = yield* Deferred.make<AcpSchema.StopReason>();
+          activeStrictTurn = { id: promptCount - 1, done };
+          const stopReason = yield* Deferred.await(done);
+          activeStrictTurn = undefined;
+          return { stopReason };
+        }
+        return { stopReason: "end_turn" };
       }
 
       if (emitStaleXAiPromptCompleteBeforeSecondHang && promptCount === 1) {
