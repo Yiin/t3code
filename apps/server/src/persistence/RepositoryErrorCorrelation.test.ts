@@ -1,4 +1,11 @@
-import { AuthSessionId, ThreadId, type AuthEnvironmentScope } from "@t3tools/contracts";
+import {
+  AuthSessionId,
+  EpicRunId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type AuthEnvironmentScope,
+} from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -8,8 +15,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as AuthPairingLinks from "./AuthPairingLinks.ts";
 import * as AuthSessions from "./AuthSessions.ts";
 import * as PersistenceErrors from "./Errors.ts";
+import { EpicRunStoreLive } from "./Layers/EpicRuns.ts";
 import { SqlitePersistenceMemory } from "./Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "./ProviderSessionRuntime.ts";
+import { EpicRunStore } from "./Services/EpicRuns.ts";
 
 const issuedAt = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
 const expiresAt = DateTime.makeUnsafe("2027-06-20T00:00:00.000Z");
@@ -23,6 +32,7 @@ const authPairingLinkLayer = AuthPairingLinks.layer.pipe(
 const providerSessionRuntimeLayer = ProviderSessionRuntime.layer.pipe(
   Layer.provideMerge(SqlitePersistenceMemory),
 );
+const epicRunStoreLayer = EpicRunStoreLive.pipe(Layer.provideMerge(SqlitePersistenceMemory));
 
 describe("persistence error correlation", () => {
   it.effect("correlates auth session SQL and row-decode failures without sensitive fields", () =>
@@ -257,5 +267,66 @@ describe("persistence error correlation", () => {
       assert.notInclude(sqlFailure.message, runtimePayload);
       assert.notInclude(sqlFailure.message, lastSeenAt);
     }).pipe(Effect.provide(providerSessionRuntimeLayer)),
+  );
+
+  it.effect("correlates epic run row-decode and SQL failures by run id only", () =>
+    Effect.gen(function* () {
+      const runs = yield* EpicRunStore;
+      const sql = yield* SqlClient.SqlClient;
+      const runId = EpicRunId.make("run-correlation");
+      const prompt = "epic-prompt-secret-sentinel";
+      const cwd = "/tmp/epic-cwd-secret-sentinel";
+      const createdAt = "2026-06-20T00:00:00.000Z";
+
+      const run = {
+        runId,
+        epicId: "t3code-vst",
+        projectId: ProjectId.make("project-correlation"),
+        cwd,
+        prompt,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        runtimeMode: "full-access",
+        status: "running",
+        maxIterations: 5,
+        iterationsCompleted: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        lastError: null,
+        createdAt,
+        updatedAt: createdAt,
+      } as const;
+
+      yield* runs.upsertRun(run);
+      yield* sql`
+        UPDATE epic_runs
+        SET model_selection_json = ${"epic-model-selection-secret-sentinel"}
+        WHERE run_id = ${runId}
+      `;
+
+      const decodeError = yield* Effect.flip(runs.getRun({ runId }));
+      assert.instanceOf(decodeError, PersistenceErrors.PersistenceDecodeError);
+      assert.deepStrictEqual(decodeError.correlation, { runId });
+      assert.equal(
+        decodeError.message,
+        `Decode error in EpicRunStore.getRun:decodeRow: ${decodeError.issue}`,
+      );
+      assert.notInclude(decodeError.issue, prompt);
+      assert.notInclude(decodeError.issue, cwd);
+      assert.notInclude(decodeError.issue, "epic-model-selection-secret-sentinel");
+      assert.notInclude(decodeError.message, prompt);
+
+      yield* sql`DROP TABLE epic_runs`;
+      const upsertError = yield* Effect.flip(runs.upsertRun(run));
+      assert.instanceOf(upsertError, PersistenceErrors.PersistenceSqlError);
+      assert.deepStrictEqual(upsertError.correlation, { runId });
+      assert.equal(upsertError.message, "SQL error in EpicRunStore.upsertRun:query");
+      assert.notInclude(upsertError.message, prompt);
+      assert.notInclude(upsertError.message, cwd);
+      assert.notInclude(upsertError.message, createdAt);
+    }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 });

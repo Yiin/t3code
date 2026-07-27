@@ -43,6 +43,8 @@ export const TurnId = makeEntityId("TurnId");
 export type TurnId = typeof TurnId.Type;
 export const AuthSessionId = makeEntityId("AuthSessionId");
 export type AuthSessionId = typeof AuthSessionId.Type;
+export const EpicRunId = makeEntityId("EpicRunId");
+export type EpicRunId = typeof EpicRunId.Type;
 
 export const ProviderItemId = makeEntityId("ProviderItemId");
 export type ProviderItemId = typeof ProviderItemId.Type;
