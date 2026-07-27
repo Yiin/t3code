@@ -90,6 +90,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -320,6 +321,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.subscribeBeadsStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.beadsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsPull, AuthOrchestrationOperateScope],
   [WS_METHODS.gitRunStackedAction, AuthOrchestrationOperateScope],
@@ -415,6 +418,7 @@ const makeWsRpcLayer = (
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const beadsStatusBroadcaster = yield* BeadsStatusBroadcaster.BeadsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
@@ -1760,6 +1764,18 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "vcs",
             },
+          ),
+        [WS_METHODS.subscribeBeadsStatus]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeBeadsStatus,
+            beadsStatusBroadcaster.streamStatus(input),
+            { "rpc.aggregate": "beads" },
+          ),
+        [WS_METHODS.beadsRefreshStatus]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.beadsRefreshStatus,
+            beadsStatusBroadcaster.refreshStatus(input.workspaceRoot),
+            { "rpc.aggregate": "beads" },
           ),
         [WS_METHODS.vcsPull]: (input) =>
           observeRpcEffect(

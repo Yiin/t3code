@@ -101,6 +101,8 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
+import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
+import * as ProcessRunner from "./processRunner.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -333,6 +335,7 @@ const buildAppUnderTest = (options?: {
     >;
     reviewService?: Partial<ReviewService.ReviewService["Service"]>;
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcaster["Service"]>;
+    beadsStatusBroadcaster?: Partial<BeadsStatusBroadcaster.BeadsStatusBroadcaster["Service"]>;
     projectSetupScriptRunner?: Partial<
       ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]
     >;
@@ -524,6 +527,19 @@ const buildAppUnderTest = (options?: {
           ...options.layers.vcsStatusBroadcaster,
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
+    const beadsStatusBroadcasterLayer = options?.layers?.beadsStatusBroadcaster
+      ? Layer.mock(BeadsStatusBroadcaster.BeadsStatusBroadcaster)({
+          ...options.layers.beadsStatusBroadcaster,
+        })
+      : BeadsStatusBroadcaster.layer.pipe(
+          // The real broadcaster is inert until something subscribes; a test that
+          // does must stub `bd` rather than shell out to the host's CLI.
+          Layer.provide(
+            Layer.mock(ProcessRunner.ProcessRunner)({
+              run: () => Effect.die("ProcessRunner not stubbed in this test"),
+            }),
+          ),
+        );
 
     const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
@@ -641,7 +657,9 @@ const buildAppUnderTest = (options?: {
           ...options?.layers?.sourceControlRepositoryService,
         }),
       ),
-      Layer.provideMerge(vcsStatusBroadcasterLayer),
+      // Grouped in one slot, mirroring the production wiring in server.ts:
+      // independent status broadcasters, and `pipe` tops out at 20 args.
+      Layer.provideMerge(Layer.mergeAll(vcsStatusBroadcasterLayer, beadsStatusBroadcasterLayer)),
       Layer.provide(
         Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
           runForThread: () => Effect.succeed({ status: "no-script" as const }),

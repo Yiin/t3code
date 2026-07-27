@@ -1,0 +1,134 @@
+[
+  {
+    "id": "t3code-vst.15",
+    "title": "Beads read-model service in apps/server with WS subscription",
+    "description": "Goal: t3code observes beads state instead of owning a parallel store. Add a serv",
+    "status": "in_progress",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "stanislovas.janonis@gmail.com",
+    "created_at": "2026-07-27T16:37:37Z",
+    "updated_at": "2026-07-27T18:23:49Z",
+    "dependencies": [
+      {
+        "issue_id": "t3code-vst.15",
+        "depends_on_id": "t3code-vst",
+        "type": "parent-child",
+        "created_at": "2026-07-27T16:37:36Z",
+        "created_by": "Yiin",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 2,
+    "comment_count": 0,
+    "parent": "t3code-vst"
+  },
+  {
+    "id": "t3code-vst.11",
+    "title": "Add EpicRunner service: server-owned ralph loop over orchestration turns",
+    "description": "Create a daemon service in apps/server/src/runner/ (Services/EpicRunner.ts for t",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "stanislovas.janonis@gmail.com",
+    "created_at": "2026-07-27T16:36:52Z",
+    "updated_at": "2026-07-27T16:36:52Z",
+    "dependencies": [
+      {
+        "issue_id": "t3code-vst.11",
+        "depends_on_id": "t3code-vst.10",
+        "type": "blocks",
+        "created_at": "2026-07-27T16:41:04Z",
+        "created_by": "Yiin",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "t3code-vst.11",
+        "depends_on_id": "t3code-vst",
+        "type": "parent-child",
+        "created_at": "2026-07-27T16:36:52Z",
+        "created_by": "Yiin",
+        "metadata": "{}"
+      },
+      {
+        "issue_id": "t3code-vst.11",
+        "depends_on_id": "t3code-vst.2",
+        "type": "blocks",
+        "created_at": "2026-07-27T16:41:04Z",
+        "created_by": "Yiin",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 2,
+    "dependent_count": 4,
+    "comment_count": 0,
+    "parent": "t3code-vst"
+  },
+  {
+    "id": "t3code-vst.2",
+    "title": "Research: RALPH_DONE detection and final-message extraction across providers",
+    "description": "Knowledge-only research child (findings as a bd comment; zero commits). The plan",
+    "status": "closed",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "stanislovas.janonis@gmail.com",
+    "created_at": "2026-07-27T16:35:00Z",
+    "updated_at": "2026-07-27T17:57:27Z",
+    "dependencies": [
+      {
+        "issue_id": "t3code-vst.2",
+        "depends_on_id": "t3code-vst",
+        "type": "parent-child",
+        "created_at": "2026-07-27T16:35:00Z",
+        "created_by": "Yiin",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 1,
+    "comment_count": 1,
+    "parent": "t3code-vst"
+  },
+  {
+    "id": "t3code-vst.1",
+    "title": "Research: provider skill/command behavior and tool-availability matrix inside t3code",
+    "description": "Knowledge-only research child (deliver findings as a bd comment on this child; z",
+    "status": "closed",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "stanislovas.janonis@gmail.com",
+    "created_at": "2026-07-27T16:34:52Z",
+    "updated_at": "2026-07-27T18:15:49Z",
+    "dependencies": [
+      {
+        "issue_id": "t3code-vst.1",
+        "depends_on_id": "t3code-vst",
+        "type": "parent-child",
+        "created_at": "2026-07-27T16:34:51Z",
+        "created_by": "Yiin",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 5,
+    "comment_count": 2,
+    "parent": "t3code-vst"
+  },
+  {
+    "id": "t3code-vst",
+    "title": "Epic: first-class epic planning & cooking (plan-epic / cook-epic / cook-it) in t3code",
+    "description": "## Goal\nMake the plan-epic / cook-it / cook-epic workflow (plus its runner \"ralp",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "epic",
+    "owner": "stanislovas.janonis@gmail.com",
+    "created_at": "2026-07-27T16:22:52Z",
+    "updated_at": "2026-07-27T18:16:21Z",
+    "dependencies": null,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": null
+  }
+]

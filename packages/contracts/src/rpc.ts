@@ -14,6 +14,7 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
+import { BeadsStatusInput, BeadsStatusResult } from "./beads.ts";
 import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
@@ -174,6 +175,9 @@ export const WS_METHODS = {
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
 
+  // Beads methods (read-only: beads state is owned by the bd CLI)
+  beadsRefreshStatus: "beads.refreshStatus",
+
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
   gitResolvePullRequest: "git.resolvePullRequest",
@@ -230,6 +234,7 @@ export const WS_METHODS = {
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
+  subscribeBeadsStatus: "subscribeBeadsStatus",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribePreviewEvents: "subscribePreviewEvents",
@@ -417,6 +422,19 @@ export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   success: VcsStatusStreamEvent,
   error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
   stream: true,
+});
+
+export const WsSubscribeBeadsStatusRpc = Rpc.make(WS_METHODS.subscribeBeadsStatus, {
+  payload: BeadsStatusInput,
+  success: BeadsStatusResult,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+export const WsBeadsRefreshStatusRpc = Rpc.make(WS_METHODS.beadsRefreshStatus, {
+  payload: BeadsStatusInput,
+  success: BeadsStatusResult,
+  error: EnvironmentAuthorizationError,
 });
 
 export const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
@@ -726,6 +744,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemBrowseRpc,
   WsAssetsCreateUrlRpc,
   WsSubscribeVcsStatusRpc,
+  WsSubscribeBeadsStatusRpc,
+  WsBeadsRefreshStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,
