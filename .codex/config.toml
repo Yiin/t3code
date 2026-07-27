@@ -7,3 +7,6 @@ startup_timeout_sec = 20.0
 
 [mcp_servers.xcodebuildmcp.env]
 XCODEBUILDMCP_ENABLED_WORKFLOWS = "simulator,ui-automation,debugging,logging"
+
+[features]
+hooks = true
