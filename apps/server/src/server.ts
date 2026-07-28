@@ -16,6 +16,8 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
+import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
+import { EpicRunnerLive } from "./runner/Layers/EpicRunner.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -283,10 +285,18 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   ),
 );
 
-const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
-  Layer.provideMerge(ProviderLayerLive),
-  Layer.provideMerge(OrchestrationLayerLive),
+// The runner provides its own store and process runner rather than expecting a
+// root chain to carry them — the same convention `ProjectionPipeline` follows
+// for its repositories.
+const EpicRunnerLayerLive = EpicRunnerLive.pipe(
+  Layer.provide(EpicRunStoreLive),
+  Layer.provide(ProcessRunner.layer),
 );
+
+const ProviderRuntimeLayerLive = Layer.mergeAll(
+  ProviderSessionReaperLive,
+  EpicRunnerLayerLive,
+).pipe(Layer.provideMerge(ProviderLayerLive), Layer.provideMerge(OrchestrationLayerLive));
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
