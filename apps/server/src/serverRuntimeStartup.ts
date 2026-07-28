@@ -34,6 +34,7 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import { diagnoseProviderCommandPath } from "./provider/ProviderCommandPathDiagnostic.ts";
 import * as EpicRunner from "./runner/Services/EpicRunner.ts";
 import {
   formatHeadlessServeOutput,
@@ -307,6 +308,7 @@ export const make = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
 
   const startup = Effect.gen(function* () {
+    yield* diagnoseProviderCommandPath();
     yield* Effect.logDebug("startup phase: starting keybindings runtime");
     yield* runStartupPhase(
       "keybindings.start",

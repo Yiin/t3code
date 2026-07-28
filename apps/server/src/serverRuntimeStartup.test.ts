@@ -1,11 +1,15 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DEFAULT_MODEL, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -15,6 +19,164 @@ import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngi
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import { diagnoseProviderCommandPath } from "./provider/ProviderCommandPathDiagnostic.ts";
+
+it.effect("warns when required provider commands are missing from an empty PATH", () =>
+  Effect.gen(function* () {
+    const messages: Array<unknown> = [];
+    const logger = Logger.make(({ message }) => {
+      messages.push(message);
+    });
+
+    yield* diagnoseProviderCommandPath({ PATH: "" }).pipe(
+      Effect.withLogger(logger),
+      Effect.provide(NodeServices.layer),
+    );
+
+    assert.equal(messages.length, 1);
+    assert.deepStrictEqual(messages[0], [
+      "Provider sessions may fail because required commands are missing from PATH.",
+      {
+        missingCommands: ["bd", "git"],
+        searchedPath: "",
+      },
+    ]);
+  }),
+);
+
+it.effect("warns when PATH entries are non-executable files on POSIX", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const binDirectory = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-provider-command-path-",
+      });
+      yield* Effect.all(
+        ["bd", "git"].map((command) => {
+          const commandPath = path.join(binDirectory, command);
+          return fs
+            .writeFileString(commandPath, "#!/bin/sh\n")
+            .pipe(Effect.andThen(fs.chmod(commandPath, 0o644)));
+        }),
+      );
+
+      const messages: Array<unknown> = [];
+      const logger = Logger.make(({ message }) => {
+        messages.push(message);
+      });
+      yield* diagnoseProviderCommandPath({ PATH: binDirectory }).pipe(
+        Effect.withLogger(logger),
+        Effect.provideService(HostProcessPlatform, "linux"),
+      );
+
+      assert.equal(messages.length, 1);
+      assert.deepStrictEqual(messages[0], [
+        "Provider sessions may fail because required commands are missing from PATH.",
+        {
+          missingCommands: ["bd", "git"],
+          searchedPath: binDirectory,
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect("warns when PATH entries named for commands are directories", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const binDirectory = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-provider-command-path-",
+      });
+      yield* Effect.all(
+        ["bd", "git"].map((command) => fs.makeDirectory(path.join(binDirectory, command))),
+      );
+
+      const messages: Array<unknown> = [];
+      const logger = Logger.make(({ message }) => {
+        messages.push(message);
+      });
+      yield* diagnoseProviderCommandPath({ PATH: binDirectory }).pipe(
+        Effect.withLogger(logger),
+        Effect.provideService(HostProcessPlatform, "linux"),
+      );
+
+      assert.equal(messages.length, 1);
+      assert.deepStrictEqual(messages[0], [
+        "Provider sessions may fail because required commands are missing from PATH.",
+        {
+          missingCommands: ["bd", "git"],
+          searchedPath: binDirectory,
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect("warns when Windows PATH contains only extensionless command files", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const binDirectory = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-provider-command-path-",
+      });
+      yield* Effect.all(
+        ["bd", "git"].map((command) =>
+          fs.writeFileString(path.join(binDirectory, command), "not a Windows executable"),
+        ),
+      );
+
+      const messages: Array<unknown> = [];
+      const logger = Logger.make(({ message }) => {
+        messages.push(message);
+      });
+      yield* diagnoseProviderCommandPath({
+        PATH: binDirectory,
+        PATHEXT: ".CMD",
+      }).pipe(Effect.withLogger(logger), Effect.provideService(HostProcessPlatform, "win32"));
+
+      assert.equal(messages.length, 1);
+      assert.deepStrictEqual(messages[0], [
+        "Provider sessions may fail because required commands are missing from PATH.",
+        {
+          missingCommands: ["bd", "git"],
+          searchedPath: binDirectory,
+        },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect("accepts Windows command files listed by PATHEXT", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const binDirectory = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-provider-command-path-",
+      });
+      yield* Effect.all(
+        ["bd.CMD", "git.CMD"].map((command) =>
+          fs.writeFileString(path.join(binDirectory, command), "@echo off\r\n"),
+        ),
+      );
+
+      const messages: Array<unknown> = [];
+      const logger = Logger.make(({ message }) => {
+        messages.push(message);
+      });
+      yield* diagnoseProviderCommandPath({
+        PATH: binDirectory,
+        PATHEXT: ".CMD",
+      }).pipe(Effect.withLogger(logger), Effect.provideService(HostProcessPlatform, "win32"));
+
+      assert.deepStrictEqual(messages, []);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
 
 it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
   assert.deepStrictEqual(ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection(), {
