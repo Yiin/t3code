@@ -26,6 +26,7 @@ import {
 } from "./auth.ts";
 import { AuthSessionId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
+import { EpicRun, EpicRunInput, EpicRunRef, EpicRunStatus } from "./epicRuns.ts";
 import {
   ClientOrchestrationCommand,
   DispatchResult,
@@ -56,6 +57,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_scope",
   "scope_not_granted",
   "invalid_command",
+  "invalid_epic_run",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -158,7 +160,10 @@ export class EnvironmentInternalError extends Schema.TaggedErrorClass<Environmen
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "epic_run_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedErrorClass<EnvironmentResourceNotFoundError>()(
@@ -489,6 +494,70 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentEpicRunMutationErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentRequestInvalidError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentEpicRunReadErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+
+export class EnvironmentEpicRunsHttpApi extends HttpApiGroup.make("epicRuns")
+  .add(
+    HttpApiEndpoint.post("start", "/api/epic-runs", {
+      headers: OptionalBearerHeaders,
+      payload: EpicRunInput,
+      success: EpicRun,
+      error: EnvironmentEpicRunMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("list", "/api/epic-runs", {
+      headers: OptionalBearerHeaders,
+      payload: { status: Schema.optional(EpicRunStatus) },
+      success: Schema.Array(EpicRun),
+      error: EnvironmentEpicRunReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("get", "/api/epic-runs/:runId", {
+      headers: OptionalBearerHeaders,
+      params: EpicRunRef,
+      success: EpicRun,
+      error: EnvironmentEpicRunReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("pause", "/api/epic-runs/:runId/pause", {
+      headers: OptionalBearerHeaders,
+      params: EpicRunRef,
+      success: EpicRun,
+      error: EnvironmentEpicRunMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("resume", "/api/epic-runs/:runId/resume", {
+      headers: OptionalBearerHeaders,
+      params: EpicRunRef,
+      success: EpicRun,
+      error: EnvironmentEpicRunMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("cancel", "/api/epic-runs/:runId/cancel", {
+      headers: OptionalBearerHeaders,
+      params: EpicRunRef,
+      success: EpicRun,
+      error: EnvironmentEpicRunMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 export class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -554,4 +623,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
+  .add(EnvironmentEpicRunsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

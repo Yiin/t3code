@@ -51,6 +51,11 @@ import {
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
+  EpicRunNotFoundError as EpicRunNotFoundTransportError,
+  EpicRunPreflightBlockedError as EpicRunPreflightBlockedTransportError,
+  EpicRunnerDispatchError as EpicRunnerDispatchTransportError,
+  EpicRunnerStoreError as EpicRunnerStoreTransportError,
+  EpicRunStateError as EpicRunStateTransportError,
   EnvironmentAuthorizationError,
   ThreadId,
   type TerminalAttachStreamEvent,
@@ -92,6 +97,8 @@ import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
 import * as EpicRunPreflight from "./beads/EpicRunPreflight.ts";
+import * as EpicRunner from "./runner/Services/EpicRunner.ts";
+import type { EpicRunnerError } from "./runner/Errors.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -325,6 +332,12 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.subscribeBeadsStatus, AuthOrchestrationReadScope],
   [WS_METHODS.beadsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.epicRunPreflight, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunStart, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunPause, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunResume, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunCancel, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunList, AuthOrchestrationReadScope],
+  [WS_METHODS.subscribeEpicRuns, AuthOrchestrationReadScope],
   [WS_METHODS.vcsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsPull, AuthOrchestrationOperateScope],
   [WS_METHODS.gitRunStackedAction, AuthOrchestrationOperateScope],
@@ -422,6 +435,7 @@ const makeWsRpcLayer = (
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const beadsStatusBroadcaster = yield* BeadsStatusBroadcaster.BeadsStatusBroadcaster;
       const epicRunPreflight = yield* EpicRunPreflight.EpicRunPreflight;
+      const epicRunner = yield* EpicRunner.EpicRunner;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
@@ -514,6 +528,32 @@ const makeWsRpcLayer = (
           method,
           authorizeEffect(requiredScopeForMethod(method), effect),
           traceAttributes,
+        );
+      const sanitizeEpicRunnerError = <A, R>(effect: Effect.Effect<A, EpicRunnerError, R>) =>
+        effect.pipe(
+          Effect.mapError((error) => {
+            switch (error._tag) {
+              case "EpicRunnerStoreError":
+                return new EpicRunnerStoreTransportError({ operation: error.operation });
+              case "EpicRunnerDispatchError":
+                return new EpicRunnerDispatchTransportError({
+                  commandType: error.commandType,
+                  detail: error.detail,
+                });
+              case "EpicRunNotFoundError":
+                return new EpicRunNotFoundTransportError({ runId: error.runId });
+              case "EpicRunStateError":
+                return new EpicRunStateTransportError({
+                  runId: error.runId,
+                  detail: error.detail,
+                });
+              case "EpicRunPreflightBlockedError":
+                return new EpicRunPreflightBlockedTransportError({
+                  epicId: error.epicId,
+                  blockers: error.blockers,
+                });
+            }
+          }),
         );
       const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
         isOrchestrationDispatchCommandError(cause)
@@ -1788,6 +1828,48 @@ const makeWsRpcLayer = (
               epicRunPreflight.check(input),
             ),
             { "rpc.aggregate": "beads" },
+          ),
+        [WS_METHODS.epicRunStart]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunStart,
+            sanitizeEpicRunnerError(epicRunner.startRun(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.epicRunPause]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunPause,
+            sanitizeEpicRunnerError(epicRunner.pauseRun(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.epicRunResume]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunResume,
+            sanitizeEpicRunnerError(epicRunner.resumeRun(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.epicRunCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunCancel,
+            sanitizeEpicRunnerError(epicRunner.cancelRun(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.epicRunList]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunList,
+            sanitizeEpicRunnerError(epicRunner.listRuns(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.subscribeEpicRuns]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeEpicRuns,
+            epicRunner.streamRuns.pipe(
+              Stream.map((run) => ({
+                version: 1 as const,
+                type: "run-state-changed" as const,
+                run,
+              })),
+            ),
+            { "rpc.aggregate": "epic-run" },
           ),
         [WS_METHODS.vcsPull]: (input) =>
           observeRpcEffect(

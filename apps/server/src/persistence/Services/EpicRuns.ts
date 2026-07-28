@@ -23,15 +23,18 @@
  * @module EpicRunStore
  */
 import {
+  EpicRun as EpicRunSchema,
+  type EpicRun as EpicRunType,
   EpicRunId,
+  EpicRunStatus as EpicRunStatusSchema,
+  type EpicRunStatus as EpicRunStatusType,
   IsoDateTime,
-  ModelSelection,
   NonNegativeInt,
-  PositiveInt,
-  ProjectId,
-  RuntimeMode,
   ThreadId,
-  TrimmedNonEmptyString,
+  EpicRunRef,
+  type EpicRunRef as EpicRunRefType,
+  ListEpicRunsInput as ListEpicRunsInputSchema,
+  type ListEpicRunsInput as ListEpicRunsInputType,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -40,8 +43,10 @@ import * as Schema from "effect/Schema";
 
 import type { EpicRunStoreError } from "../Errors.ts";
 
-export const EpicRunStatus = Schema.Literals(["running", "paused", "done", "failed", "cancelled"]);
-export type EpicRunStatus = typeof EpicRunStatus.Type;
+export const EpicRun = EpicRunSchema;
+export type EpicRun = EpicRunType;
+export const EpicRunStatus = EpicRunStatusSchema;
+export type EpicRunStatus = EpicRunStatusType;
 
 export const EpicRunIterationStatus = Schema.Literals([
   "running",
@@ -50,32 +55,6 @@ export const EpicRunIterationStatus = Schema.Literals([
   "abandoned",
 ]);
 export type EpicRunIterationStatus = typeof EpicRunIterationStatus.Type;
-
-export const EpicRun = Schema.Struct({
-  runId: EpicRunId,
-  /**
-   * `epicId` stays a free-form `TrimmedNonEmptyString` on purpose: it comes from
-   * the external `bd` CLI, whose id shapes are not ours to constrain. A durable
-   * store must never fail to decode because the tool it tracks changed how it
-   * names things.
-   */
-  epicId: TrimmedNonEmptyString,
-  projectId: ProjectId,
-  cwd: TrimmedNonEmptyString,
-  prompt: Schema.String,
-  modelSelection: ModelSelection,
-  runtimeMode: RuntimeMode,
-  status: EpicRunStatus,
-  maxIterations: PositiveInt,
-  iterationsCompleted: NonNegativeInt,
-  currentThreadId: Schema.NullOr(ThreadId),
-  currentTurnStartedAt: Schema.NullOr(IsoDateTime),
-  consecutiveFailures: NonNegativeInt,
-  lastError: Schema.NullOr(Schema.String),
-  createdAt: IsoDateTime,
-  updatedAt: IsoDateTime,
-});
-export type EpicRun = typeof EpicRun.Type;
 
 export const EpicRunIteration = Schema.Struct({
   runId: EpicRunId,
@@ -88,15 +67,11 @@ export const EpicRunIteration = Schema.Struct({
 });
 export type EpicRunIteration = typeof EpicRunIteration.Type;
 
-export const GetEpicRunInput = Schema.Struct({
-  runId: EpicRunId,
-});
-export type GetEpicRunInput = typeof GetEpicRunInput.Type;
+export const GetEpicRunInput = EpicRunRef;
+export type GetEpicRunInput = EpicRunRefType;
 
-export const ListEpicRunsInput = Schema.Struct({
-  status: Schema.optional(EpicRunStatus),
-});
-export type ListEpicRunsInput = typeof ListEpicRunsInput.Type;
+export const ListEpicRunsInput = ListEpicRunsInputSchema;
+export type ListEpicRunsInput = ListEpicRunsInputType;
 
 export const ListEpicRunIterationsInput = Schema.Struct({
   runId: EpicRunId,

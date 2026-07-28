@@ -29,38 +29,17 @@
  *
  * @module EpicRunner
  */
-import type { EpicRunId, ModelSelection, ProjectId, RuntimeMode } from "@t3tools/contracts";
+import type { EpicRunRef, ListEpicRunsInput, StartEpicRunInput } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import type * as Stream from "effect/Stream";
 
-import type { EpicRun, EpicRunStatus } from "../../persistence/Services/EpicRuns.ts";
+import type { EpicRun } from "../../persistence/Services/EpicRuns.ts";
 import type { EpicRunnerError } from "../Errors.ts";
 
-export interface StartEpicRunInput {
-  /**
-   * The beads epic id. Informational: the runner never writes `bd` status, it
-   * only records which epic a run belongs to.
-   */
-  readonly epicId: string;
-  readonly projectId: ProjectId;
-  /** Repo the iterations run in, and whose `HEAD` the commit cross-check reads. */
-  readonly cwd: string;
-  /** Full iteration prompt, handed verbatim to every iteration. */
-  readonly prompt: string;
-  readonly modelSelection: ModelSelection;
-  readonly runtimeMode?: RuntimeMode | undefined;
-  readonly maxIterations?: number | undefined;
-}
-
-export interface EpicRunRef {
-  readonly runId: EpicRunId;
-}
-
-export interface ListEpicRunsFilter {
-  readonly status?: EpicRunStatus | undefined;
-}
+export type { EpicRunRef, StartEpicRunInput };
+export type ListEpicRunsFilter = ListEpicRunsInput;
 
 /**
  * EpicRunnerShape - Service API for unattended epic runs.

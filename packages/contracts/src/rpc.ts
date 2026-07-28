@@ -22,6 +22,14 @@ import {
   EpicRunPreflightResult,
 } from "./beads.ts";
 import {
+  EpicRun,
+  EpicRunEvent,
+  EpicRunInput,
+  EpicRunRef,
+  EpicRunTransportError,
+  ListEpicRunsInput,
+} from "./epicRuns.ts";
+import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
@@ -184,6 +192,12 @@ export const WS_METHODS = {
   // Beads methods (read-only: beads state is owned by the bd CLI)
   beadsRefreshStatus: "beads.refreshStatus",
   epicRunPreflight: "epicRunPreflight",
+  epicRunStart: "epicRun.start",
+  epicRunPause: "epicRun.pause",
+  epicRunResume: "epicRun.resume",
+  epicRunCancel: "epicRun.cancel",
+  epicRunList: "epicRun.list",
+  subscribeEpicRuns: "epicRun.subscribe",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -448,6 +462,40 @@ export const WsEpicRunPreflightRpc = Rpc.make(WS_METHODS.epicRunPreflight, {
   payload: EpicRunPreflightInput,
   success: EpicRunPreflightResult,
   error: Schema.Union([EpicRunPreflightError, EnvironmentAuthorizationError]),
+});
+
+const EpicRunRpcError = Schema.Union([EpicRunTransportError, EnvironmentAuthorizationError]);
+
+export const WsEpicRunStartRpc = Rpc.make(WS_METHODS.epicRunStart, {
+  payload: EpicRunInput,
+  success: EpicRun,
+  error: EpicRunRpcError,
+});
+export const WsEpicRunPauseRpc = Rpc.make(WS_METHODS.epicRunPause, {
+  payload: EpicRunRef,
+  success: EpicRun,
+  error: EpicRunRpcError,
+});
+export const WsEpicRunResumeRpc = Rpc.make(WS_METHODS.epicRunResume, {
+  payload: EpicRunRef,
+  success: EpicRun,
+  error: EpicRunRpcError,
+});
+export const WsEpicRunCancelRpc = Rpc.make(WS_METHODS.epicRunCancel, {
+  payload: EpicRunRef,
+  success: EpicRun,
+  error: EpicRunRpcError,
+});
+export const WsEpicRunListRpc = Rpc.make(WS_METHODS.epicRunList, {
+  payload: ListEpicRunsInput,
+  success: Schema.Array(EpicRun),
+  error: EpicRunRpcError,
+});
+export const WsSubscribeEpicRunsRpc = Rpc.make(WS_METHODS.subscribeEpicRuns, {
+  payload: Schema.Struct({}),
+  success: EpicRunEvent,
+  error: EnvironmentAuthorizationError,
+  stream: true,
 });
 
 export const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
@@ -760,6 +808,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeBeadsStatusRpc,
   WsBeadsRefreshStatusRpc,
   WsEpicRunPreflightRpc,
+  WsEpicRunStartRpc,
+  WsEpicRunPauseRpc,
+  WsEpicRunResumeRpc,
+  WsEpicRunCancelRpc,
+  WsEpicRunListRpc,
+  WsSubscribeEpicRunsRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,

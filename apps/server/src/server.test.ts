@@ -11,6 +11,7 @@ import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  EpicRunId,
   EventId,
   GitCommandError,
   KeybindingRule,
@@ -52,6 +53,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -86,6 +88,13 @@ import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import { EpicRunner } from "./runner/Services/EpicRunner.ts";
+import {
+  EpicRunPreflightBlockedError,
+  EpicRunnerDispatchError,
+  EpicRunnerStoreError,
+  EpicRunStateError,
+} from "./runner/Errors.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -356,6 +365,7 @@ const buildAppUnderTest = (options?: {
     >;
     relayClient?: Partial<RelayClient.RelayClient["Service"]>;
     cloudCliTokenManager?: Partial<CloudCliTokenManager.CloudCliTokenManager["Service"]>;
+    epicRunner?: Partial<EpicRunner["Service"]>;
   };
 }) =>
   Effect.gen(function* () {
@@ -666,6 +676,17 @@ const buildAppUnderTest = (options?: {
           beadsStatusBroadcasterLayer,
           Layer.succeed(EpicRunPreflight, {
             check: () => Effect.succeed({ ok: true, blockers: [], warnings: [] }),
+          }),
+          Layer.mock(EpicRunner)({
+            start: () => Effect.void,
+            startRun: () => Effect.die("EpicRunner not stubbed in this test"),
+            pauseRun: () => Effect.die("EpicRunner not stubbed in this test"),
+            resumeRun: () => Effect.die("EpicRunner not stubbed in this test"),
+            cancelRun: () => Effect.die("EpicRunner not stubbed in this test"),
+            listRuns: () => Effect.succeed([]),
+            getRun: () => Effect.succeed(Option.none()),
+            streamRuns: Stream.empty,
+            ...options?.layers?.epicRunner,
           }),
         ),
       ),
@@ -2286,6 +2307,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     Effect.gen(function* () {
       const appliedRuntimeConfigs: Array<unknown> = [];
       yield* buildAppUnderTest({
+        config: { host: "0.0.0.0" },
         layers: {
           cloudManagedEndpointRuntime: {
             applyConfig: (config) => {
@@ -7375,6 +7397,401 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assertFailure(result, terminalError);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves epic-run WS and HTTP success paths, including live changes", () =>
+    Effect.gen(function* () {
+      const runnerCalls: Array<{ readonly method: string; readonly input: unknown }> = [];
+      const subscriptionReady = yield* Deferred.make<void>();
+      const runChanges = yield* Queue.unbounded<import("@t3tools/contracts").EpicRun>();
+      const run = {
+        runId: EpicRunId.make("run-transport"),
+        epicId: "t3code-vst",
+        projectId: defaultProjectId,
+        cwd: "/tmp/t3code",
+        prompt: "Cook one child",
+        modelSelection: defaultModelSelection,
+        runtimeMode: "full-access" as const,
+        status: "running" as const,
+        maxIterations: 10,
+        iterationsCompleted: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        lastError: null,
+        createdAt: "2026-07-28T00:00:00.000Z",
+        updatedAt: "2026-07-28T00:00:00.000Z",
+      };
+      yield* buildAppUnderTest({
+        layers: {
+          epicRunner: {
+            startRun: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "start", input });
+                return run;
+              }),
+            pauseRun: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "pause", input });
+                return { ...run, status: "paused" as const };
+              }),
+            resumeRun: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "resume", input });
+                return run;
+              }),
+            cancelRun: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "cancel", input });
+                return { ...run, status: "cancelled" as const };
+              }),
+            listRuns: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "list", input });
+                return [run];
+              }),
+            getRun: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "get", input });
+                return Option.some(run);
+              }),
+            streamRuns: Stream.callback((events) =>
+              Deferred.succeed(subscriptionReady, undefined).pipe(
+                Effect.andThen(Queue.take(runChanges)),
+                Effect.flatMap((changedRun) => Queue.offer(events, changedRun)),
+                Effect.andThen(Queue.end(events)),
+              ),
+            ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const started = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.epicRunStart]({
+            epicId: run.epicId,
+            projectId: run.projectId,
+            cwd: run.cwd,
+            prompt: run.prompt,
+            modelSelection: run.modelSelection,
+            runtimeMode: run.runtimeMode,
+          }),
+        ),
+      );
+      assert.equal(started.runId, run.runId);
+      const wsResults = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            client[WS_METHODS.epicRunList]({}),
+            client[WS_METHODS.epicRunPause]({ runId: run.runId }),
+            client[WS_METHODS.epicRunResume]({ runId: run.runId }),
+            client[WS_METHODS.epicRunCancel]({ runId: run.runId }),
+          ]),
+        ),
+      );
+      assert.equal(wsResults[0][0]?.runId, run.runId);
+      assert.equal(wsResults[1].status, "paused");
+      assert.equal(wsResults[2].status, "running");
+      assert.equal(wsResults[3].status, "cancelled");
+
+      const event = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const eventFiber = yield* client[WS_METHODS.subscribeEpicRuns]({}).pipe(
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            yield* Deferred.await(subscriptionReady);
+            yield* Queue.offer(runChanges, run);
+            return yield* Fiber.join(eventFiber);
+          }),
+        ),
+      );
+      assert.equal(Option.getOrThrow(event).run.runId, run.runId);
+
+      runnerCalls.length = 0;
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const start = yield* HttpClient.post("/api/epic-runs", {
+        headers: { cookie },
+        body: yield* HttpBody.json({
+          epicId: run.epicId,
+          projectId: run.projectId,
+          cwd: run.cwd,
+          prompt: run.prompt,
+          modelSelection: run.modelSelection,
+        }),
+      });
+      const list = yield* HttpClient.get("/api/epic-runs?status=running", { headers: { cookie } });
+      const get = yield* HttpClient.get(`/api/epic-runs/${run.runId}`, { headers: { cookie } });
+      const pause = yield* HttpClient.post(`/api/epic-runs/${run.runId}/pause`, {
+        headers: { cookie },
+      });
+      const resume = yield* HttpClient.post(`/api/epic-runs/${run.runId}/resume`, {
+        headers: { cookie },
+      });
+      const cancel = yield* HttpClient.post(`/api/epic-runs/${run.runId}/cancel`, {
+        headers: { cookie },
+      });
+      assert.equal(start.status, 200);
+      assert.equal(list.status, 200);
+      assert.equal(get.status, 200);
+      assert.equal(pause.status, 200);
+      assert.equal(resume.status, 200);
+      assert.equal(cancel.status, 200);
+      assert.equal(((yield* start.json) as { readonly runId: string }).runId, run.runId);
+      assert.equal(
+        ((yield* list.json) as ReadonlyArray<{ readonly runId: string }>)[0]?.runId,
+        run.runId,
+      );
+      assert.equal(((yield* get.json) as { readonly runId: string }).runId, run.runId);
+      assert.equal(((yield* pause.json) as { readonly status: string }).status, "paused");
+      assert.equal(((yield* resume.json) as { readonly status: string }).status, "running");
+      assert.equal(((yield* cancel.json) as { readonly status: string }).status, "cancelled");
+      assert.deepEqual(
+        runnerCalls.map(({ method }) => method),
+        ["start", "list", "get", "pause", "resume", "cancel"],
+      );
+      assert.deepInclude(runnerCalls[0]?.input as object, {
+        epicId: run.epicId,
+        runtimeMode: "full-access",
+      });
+      assert.deepEqual(runnerCalls[1]?.input, { status: "running" });
+      for (const call of runnerCalls.slice(2)) {
+        assert.equal((call.input as { readonly runId: string }).runId, run.runId);
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("enforces epic-run auth and maps missing and illegal transitions", () =>
+    Effect.gen(function* () {
+      const missingId = EpicRunId.make("run-missing");
+      const readableRun = {
+        runId: EpicRunId.make("run-readable"),
+        epicId: "t3code-vst",
+        projectId: defaultProjectId,
+        cwd: "/tmp/t3code",
+        prompt: "Cook",
+        modelSelection: defaultModelSelection,
+        runtimeMode: "full-access" as const,
+        status: "running" as const,
+        maxIterations: 3,
+        iterationsCompleted: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        lastError: null,
+        createdAt: "2026-07-28T00:00:00.000Z",
+        updatedAt: "2026-07-28T00:00:00.000Z",
+      };
+      const mutationCalls: string[] = [];
+      yield* buildAppUnderTest({
+        config: { host: "0.0.0.0" },
+        layers: {
+          epicRunner: {
+            listRuns: () => Effect.succeed([readableRun]),
+            getRun: ({ runId }) =>
+              Effect.succeed(
+                runId === readableRun.runId ? Option.some(readableRun) : Option.none(),
+              ),
+            streamRuns: Stream.make(readableRun),
+            startRun: () =>
+              Effect.sync(() => {
+                mutationCalls.push("start");
+                return readableRun;
+              }),
+            pauseRun: ({ runId }) =>
+              Effect.sync(() => {
+                mutationCalls.push("pause");
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(new EpicRunStateError({ runId, detail: "already done" })),
+                ),
+              ),
+            resumeRun: () =>
+              Effect.sync(() => {
+                mutationCalls.push("resume");
+                return readableRun;
+              }),
+            cancelRun: () =>
+              Effect.sync(() => {
+                mutationCalls.push("cancel");
+                return readableRun;
+              }),
+          },
+        },
+      });
+
+      const unauthenticated = yield* HttpClient.get("/api/epic-runs");
+      assert.equal(unauthenticated.status, 401);
+
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+        body: yield* HttpBody.json({ scopes: ["orchestration:read"] }),
+      });
+      assert.equal(pairing.status, 200);
+      const pairingBody = (yield* pairing.json) as { readonly credential: string };
+      const { response: tokenResponse, body: tokenBody } = yield* exchangeAccessToken(
+        pairingBody.credential,
+        { scope: "orchestration:read" },
+      );
+      assert.equal(tokenResponse.status, 200);
+      const readAuthorization = `Bearer ${tokenBody.access_token ?? ""}`;
+      const forbidden = yield* HttpClient.post(`/api/epic-runs/${missingId}/pause`, {
+        headers: { authorization: readAuthorization },
+      });
+      assert.equal(forbidden.status, 403);
+      const forbiddenBody = (yield* forbidden.json) as {
+        readonly requiredScope: string;
+      };
+      assert.equal(forbiddenBody.requiredScope, "orchestration:operate");
+      assert.deepEqual(mutationCalls, []);
+      const readableList = yield* HttpClient.get("/api/epic-runs", {
+        headers: { authorization: readAuthorization },
+      });
+      const readableGet = yield* HttpClient.get(`/api/epic-runs/${readableRun.runId}`, {
+        headers: { authorization: readAuthorization },
+      });
+      assert.equal(readableList.status, 200);
+      assert.equal(readableGet.status, 200);
+
+      const missing = yield* HttpClient.get(`/api/epic-runs/${missingId}`, {
+        headers: { cookie: ownerCookie },
+      });
+      const conflict = yield* HttpClient.post(`/api/epic-runs/${missingId}/pause`, {
+        headers: { cookie: ownerCookie },
+      });
+      assert.equal(missing.status, 404);
+      assert.equal(conflict.status, 409);
+      const missingBody = (yield* missing.json) as { readonly reason: string };
+      const conflictBody = (yield* conflict.json) as { readonly message: string };
+      assert.equal(missingBody.reason, "epic_run_not_found");
+      assert.include(conflictBody.message, "already done");
+
+      const ticketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+        headers: { authorization: readAuthorization },
+      });
+      const ticketBody = (yield* ticketResponse.json) as { readonly ticket: string };
+      const readWsUrl = `${yield* getWsServerUrl("/ws", {
+        authenticated: false,
+      })}?wsTicket=${encodeURIComponent(ticketBody.ticket)}`;
+      const readWs = yield* Effect.scoped(
+        withWsRpcClient(readWsUrl, (client) =>
+          Effect.all([
+            client[WS_METHODS.epicRunList]({}),
+            client[WS_METHODS.subscribeEpicRuns]({}).pipe(Stream.runHead),
+          ]),
+        ),
+      );
+      assert.equal(readWs[0][0]?.runId, readableRun.runId);
+      assert.equal(Option.getOrThrow(readWs[1]).run.runId, readableRun.runId);
+      const callsBeforeDenied = mutationCalls.length;
+      const deniedErrors = yield* Effect.forEach(
+        ["start", "pause", "resume", "cancel"] as const,
+        (method) =>
+          Effect.gen(function* () {
+            const deniedTicketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+              headers: { authorization: readAuthorization },
+            });
+            const deniedTicketBody = (yield* deniedTicketResponse.json) as {
+              readonly ticket: string;
+            };
+            const deniedWsUrl = `${yield* getWsServerUrl("/ws", {
+              authenticated: false,
+            })}?wsTicket=${encodeURIComponent(deniedTicketBody.ticket)}`;
+            return yield* Effect.flip(
+              Effect.scoped(
+                withWsRpcClient(deniedWsUrl, (client) => {
+                  switch (method) {
+                    case "start":
+                      return client[WS_METHODS.epicRunStart]({
+                        epicId: readableRun.epicId,
+                        projectId: readableRun.projectId,
+                        cwd: readableRun.cwd,
+                        prompt: readableRun.prompt,
+                        modelSelection: readableRun.modelSelection,
+                        runtimeMode: readableRun.runtimeMode,
+                      });
+                    case "pause":
+                      return client[WS_METHODS.epicRunPause]({ runId: missingId });
+                    case "resume":
+                      return client[WS_METHODS.epicRunResume]({ runId: missingId });
+                    case "cancel":
+                      return client[WS_METHODS.epicRunCancel]({ runId: missingId });
+                  }
+                }),
+              ),
+            );
+          }),
+      );
+      for (const error of deniedErrors) {
+        assert.equal(error._tag, "EnvironmentAuthorizationError");
+        if (error._tag === "EnvironmentAuthorizationError") {
+          assert.equal(error.requiredScope, "orchestration:operate");
+        }
+      }
+      assert.equal(mutationCalls.length, callsBeforeDenied);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("maps epic-run store, dispatch, and preflight failures", () =>
+    Effect.gen(function* () {
+      const runId = EpicRunId.make("run-errors");
+      yield* buildAppUnderTest({
+        layers: {
+          epicRunner: {
+            listRuns: () => Effect.fail(new EpicRunnerStoreError({ operation: "listRuns" })),
+            cancelRun: () =>
+              Effect.fail(
+                new EpicRunnerDispatchError({
+                  commandType: "thread.turn.interrupt",
+                  detail: "provider unavailable",
+                }),
+              ),
+            startRun: () =>
+              Effect.fail(
+                new EpicRunPreflightBlockedError({
+                  epicId: "t3code-vst",
+                  blockers: ["dirty_worktree"],
+                }),
+              ),
+          },
+        },
+      });
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const store = yield* HttpClient.get("/api/epic-runs", { headers: { cookie } });
+      const dispatch = yield* HttpClient.post(`/api/epic-runs/${runId}/cancel`, {
+        headers: { cookie },
+      });
+      const preflight = yield* HttpClient.post("/api/epic-runs", {
+        headers: { cookie },
+        body: yield* HttpBody.json({
+          epicId: "t3code-vst",
+          projectId: defaultProjectId,
+          cwd: "/tmp/t3code",
+          prompt: "Cook",
+          modelSelection: defaultModelSelection,
+        }),
+      });
+      assert.equal(store.status, 500);
+      assert.equal(dispatch.status, 500);
+      assert.equal(preflight.status, 409);
+      const storeBody = (yield* store.json) as {
+        readonly code: string;
+        readonly reason: string;
+      };
+      const dispatchBody = (yield* dispatch.json) as {
+        readonly code: string;
+        readonly reason: string;
+      };
+      assert.deepInclude(storeBody, { code: "internal_error", reason: "internal_error" });
+      assert.deepInclude(dispatchBody, { code: "internal_error", reason: "internal_error" });
+      assert.include(
+        ((yield* preflight.json) as { readonly message: string }).message,
+        "dirty_worktree",
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 });
