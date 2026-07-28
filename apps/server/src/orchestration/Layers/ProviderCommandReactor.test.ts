@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  type ChatAttachment,
   ModelSelection,
   ProviderRuntimeEvent,
   ProviderSession,
@@ -146,6 +147,7 @@ describe("ProviderCommandReactor", () => {
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
+    readonly skillsRoot?: string;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -378,7 +380,11 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(
+        ServerSettingsService.layerTest(
+          input?.skillsRoot !== undefined ? { skillsRoot: input.skillsRoot } : {},
+        ),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -476,6 +482,160 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  it("expands registered slash skills only for OpenCode while preserving turn metadata and display", async () => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+    NodeFS.mkdirSync(skillDirectory);
+    NodeFS.writeFileSync(
+      NodePath.join(skillDirectory, "SKILL.md"),
+      "---\nname: cook-it\ndescription: Cook it\n---\nSkill instructions.\n",
+    );
+    const modelSelection = createModelSelection(
+      ProviderInstanceId.make("opencode"),
+      "opencode-model",
+    );
+    const harness = await createHarness({
+      threadModelSelection: modelSelection,
+      skillsRoot,
+    });
+    const attachment: ChatAttachment = {
+      type: "image",
+      id: "image-1",
+      name: "proof.png",
+      mimeType: "image/png",
+      sizeBytes: 42,
+    };
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.interaction-mode.set",
+        commandId: CommandId.make("cmd-skill-interaction-mode"),
+        threadId: ThreadId.make("thread-1"),
+        interactionMode: "plan",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-skill"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-skill"),
+          role: "user",
+          text: "/cook-it t3code-vst.17",
+          attachments: [attachment],
+        },
+        modelSelection,
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: ThreadId.make("thread-1"),
+      input: expect.stringContaining(
+        "The user invoked the /cook-it skill. Follow its instructions below.",
+      ),
+      attachments: [attachment],
+      modelSelection,
+      interactionMode: "plan",
+    });
+    expect(String((harness.sendTurn.mock.calls[0]![0] as { input: string }).input)).toContain(
+      "ARGUMENTS: t3code-vst.17",
+    );
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.messages.at(-1)?.text).toBe("/cook-it t3code-vst.17");
+  });
+
+  it.each(["codex", "kimi", "claudeAgent"])(
+    "passes slash skills through for %s sessions",
+    async (provider) => {
+      const skillsRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"),
+      );
+      createdBaseDirs.add(skillsRoot);
+      const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+      NodeFS.mkdirSync(skillDirectory);
+      NodeFS.writeFileSync(
+        NodePath.join(skillDirectory, "SKILL.md"),
+        "---\nname: cook-it\n---\nSkill instructions.\n",
+      );
+      const harness = await createHarness({
+        threadModelSelection: createModelSelection(ProviderInstanceId.make(provider), "test-model"),
+        skillsRoot,
+      });
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-start-${provider}`),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId(`user-message-${provider}`),
+            role: "user",
+            text: "/cook-it task",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "/cook-it task" });
+    },
+  );
+
+  it.each(["/unknown task", "$cook-it task", "/cook-it-extra task", "/cook-it.foo", " /cook-it"])(
+    "passes non-matching OpenCode input through: %s",
+    async (messageText) => {
+      const skillsRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"),
+      );
+      createdBaseDirs.add(skillsRoot);
+      const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+      NodeFS.mkdirSync(skillDirectory);
+      NodeFS.writeFileSync(
+        NodePath.join(skillDirectory, "SKILL.md"),
+        "---\nname: cook-it\n---\nSkill instructions.\n",
+      );
+      const harness = await createHarness({
+        threadModelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "test-model",
+        ),
+        skillsRoot,
+      });
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-boundary-passthrough"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-boundary-passthrough"),
+            role: "user",
+            text: messageText,
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: messageText.trim() });
+    },
+  );
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {

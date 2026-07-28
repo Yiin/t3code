@@ -120,6 +120,19 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings skills root", () => {
+  it("defaults to a resolved path and accepts patches", () => {
+    const settings = decodeServerSettings({});
+    expect(settings.skillsRoot).not.toContain("~");
+    if (settings.skillsRoot.length > 0) {
+      expect(settings.skillsRoot.startsWith("/")).toBe(true);
+    }
+    expect(decodeServerSettingsPatch({ skillsRoot: "/tmp/custom-skills" }).skillsRoot).toBe(
+      "/tmp/custom-skills",
+    );
+  });
+});
+
 describe("ServerSettingsPatch.providerInstances", () => {
   it("treats providerInstances as an optional whole-map replacement", () => {
     const patch = decodeServerSettingsPatch({});

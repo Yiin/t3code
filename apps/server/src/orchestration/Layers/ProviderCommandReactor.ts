@@ -41,6 +41,11 @@ import {
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import {
+  expandSkillCommand,
+  makeSkillCommandRegistry,
+  parseSkillCommand,
+} from "../../skills/SkillCommandRegistry.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -87,6 +92,7 @@ const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
+const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -196,6 +202,7 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const skillCommandRegistry = yield* makeSkillCommandRegistry();
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -636,6 +643,17 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.map((sessions) => sessions.find((session) => session.threadId === input.threadId)),
       );
+    let providerInput = normalizedInput;
+    if (providerInput !== undefined && activeSession?.provider === OPENCODE_DRIVER) {
+      const parsedCommand = parseSkillCommand(input.messageText);
+      if (parsedCommand !== undefined) {
+        const { skillsRoot } = yield* serverSettingsService.getSettings;
+        const skill = yield* skillCommandRegistry.find(skillsRoot, parsedCommand.name);
+        if (skill !== undefined) {
+          providerInput = expandSkillCommand(skill, parsedCommand.arguments);
+        }
+      }
+    }
     const sessionModelSwitch =
       activeSession === undefined
         ? "in-session"
@@ -661,7 +679,7 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
-      ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(providerInput ? { input: providerInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
