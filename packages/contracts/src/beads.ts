@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const BeadsStatusInput = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
@@ -68,3 +68,54 @@ export const BeadsStatusResult = Schema.Union([
   }),
 ]);
 export type BeadsStatusResult = typeof BeadsStatusResult.Type;
+
+export const EpicRunPreflightMode = Schema.Literals(["parallel", "sequential"]);
+export type EpicRunPreflightMode = typeof EpicRunPreflightMode.Type;
+
+export const EpicRunPreflightInput = Schema.Struct({
+  workspaceRoot: TrimmedNonEmptyString,
+  epicId: TrimmedNonEmptyString,
+  mode: EpicRunPreflightMode,
+});
+export type EpicRunPreflightInput = typeof EpicRunPreflightInput.Type;
+
+export const EpicRunPreflightBlocker = Schema.Union([
+  Schema.TaggedStruct("dirty_tree", {
+    paths: Schema.Array(TrimmedNonEmptyString),
+  }),
+  Schema.TaggedStruct("detached_head", {}),
+  Schema.TaggedStruct("run_in_progress", {
+    owner: TrimmedNonEmptyString,
+    runDir: TrimmedNonEmptyString,
+    host: TrimmedNonEmptyString,
+    pid: PositiveInt,
+  }),
+  Schema.TaggedStruct("epic_not_found", {
+    epicId: TrimmedNonEmptyString,
+  }),
+]);
+export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
+
+export const EpicRunPreflightWarning = Schema.Union([
+  Schema.TaggedStruct("stale_claims", {
+    childIds: Schema.Array(TrimmedNonEmptyString),
+  }),
+  Schema.TaggedStruct("nothing_ready", {
+    epicId: TrimmedNonEmptyString,
+  }),
+]);
+export type EpicRunPreflightWarning = typeof EpicRunPreflightWarning.Type;
+
+export const EpicRunPreflightResult = Schema.Struct({
+  ok: Schema.Boolean,
+  blockers: Schema.Array(EpicRunPreflightBlocker),
+  warnings: Schema.Array(EpicRunPreflightWarning),
+});
+export type EpicRunPreflightResult = typeof EpicRunPreflightResult.Type;
+
+export class EpicRunPreflightError extends Schema.TaggedErrorClass<EpicRunPreflightError>()(
+  "EpicRunPreflightError",
+  {
+    message: TrimmedNonEmptyString,
+  },
+) {}

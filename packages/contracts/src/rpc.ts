@@ -14,7 +14,13 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
-import { BeadsStatusInput, BeadsStatusResult } from "./beads.ts";
+import {
+  BeadsStatusInput,
+  BeadsStatusResult,
+  EpicRunPreflightError,
+  EpicRunPreflightInput,
+  EpicRunPreflightResult,
+} from "./beads.ts";
 import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
@@ -177,6 +183,7 @@ export const WS_METHODS = {
 
   // Beads methods (read-only: beads state is owned by the bd CLI)
   beadsRefreshStatus: "beads.refreshStatus",
+  epicRunPreflight: "epicRunPreflight",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -435,6 +442,12 @@ export const WsBeadsRefreshStatusRpc = Rpc.make(WS_METHODS.beadsRefreshStatus, {
   payload: BeadsStatusInput,
   success: BeadsStatusResult,
   error: EnvironmentAuthorizationError,
+});
+
+export const WsEpicRunPreflightRpc = Rpc.make(WS_METHODS.epicRunPreflight, {
+  payload: EpicRunPreflightInput,
+  success: EpicRunPreflightResult,
+  error: Schema.Union([EpicRunPreflightError, EnvironmentAuthorizationError]),
 });
 
 export const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
@@ -746,6 +759,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeVcsStatusRpc,
   WsSubscribeBeadsStatusRpc,
   WsBeadsRefreshStatusRpc,
+  WsEpicRunPreflightRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,

@@ -27,6 +27,8 @@ import {
   type EpicRunStoreShape,
 } from "../../persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
+import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
+import { EpicRunLock } from "../Services/EpicRunLock.ts";
 import { EpicRunner } from "../Services/EpicRunner.ts";
 import { makeEpicRunnerLive } from "./EpicRunner.ts";
 
@@ -177,6 +179,13 @@ function createHarness(input: {
   readonly seedRuns?: ReadonlyArray<EpicRun>;
   readonly seedIterations?: ReadonlyArray<EpicRunIteration>;
   readonly workspaceRoot?: string;
+  readonly preflightResult?: {
+    readonly ok: boolean;
+    readonly blockers: ReadonlyArray<{ readonly _tag: "detached_head" }>;
+    readonly warnings: ReadonlyArray<never>;
+  };
+  readonly onLockAcquire?: () => void;
+  readonly onLockRelease?: () => void;
 }) {
   const store = makeMemoryStore();
   for (const run of input.seedRuns ?? []) {
@@ -354,6 +363,39 @@ function createHarness(input: {
     iterationTimeoutMs: 500,
     ...input.options,
   }).pipe(
+    Layer.provide(
+      Layer.succeed(EpicRunPreflight, {
+        check: () =>
+          Effect.succeed(input.preflightResult ?? { ok: true, blockers: [], warnings: [] }),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(EpicRunLock, {
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off
+        inspect: () => Effect.succeed(undefined),
+        acquire: (lockInput) =>
+          Effect.sync(() => {
+            input.onLockAcquire?.();
+            return {
+              path: `/tmp/${lockInput.epicId}`,
+              owner: {
+                owner: "t3code",
+                host: "test",
+                pid: process.pid,
+                pgid: process.pid,
+                runDir: lockInput.runDir,
+                startedAt: NOW,
+                heartbeatAt: 0,
+              },
+              heartbeat: Effect.succeed(true),
+              release: Effect.sync(() => {
+                input.onLockRelease?.();
+                return true;
+              }),
+            };
+          }),
+      }),
+    ),
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processRunnerLayer),
@@ -707,5 +749,65 @@ describe("EpicRunner", () => {
       const exit = yield* Effect.exit(runner.resumeRun({ runId: run.runId }));
       assert.isTrue(Exit.isFailure(exit));
     }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("refuses to persist or fork a run when preflight is blocked", () => {
+    let acquired = 0;
+    const harness = createHarness({
+      script: [],
+      preflightResult: {
+        ok: false,
+        blockers: [{ _tag: "detached_head" }],
+        warnings: [],
+      },
+      onLockAcquire: () => {
+        acquired += 1;
+      },
+    });
+
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(startRun());
+      assert.isTrue(Exit.isFailure(exit));
+      assert.strictEqual(harness.store.runs.size, 0);
+      assert.strictEqual(acquired, 0);
+      assert.strictEqual(harness.turnsStarted(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("releases its lock when a run reaches a terminal state", () => {
+    let acquired = 0;
+    let released = 0;
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      onLockAcquire: () => {
+        acquired += 1;
+      },
+      onLockRelease: () => {
+        released += 1;
+      },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      yield* waitFor(() => released === 1);
+      assert.strictEqual(acquired, 1);
+      assert.strictEqual(released, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("drains active leases when the runner layer scope closes", () => {
+    let released = 0;
+    const harness = createHarness({
+      script: [{ text: "still working", head: "head-1" }],
+      onLockRelease: () => {
+        released += 1;
+      },
+    });
+
+    return Effect.gen(function* () {
+      yield* startRun().pipe(Effect.provide(harness.layer));
+      assert.strictEqual(released, 1);
+    });
   });
 });

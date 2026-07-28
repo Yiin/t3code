@@ -102,6 +102,7 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
+import { EpicRunPreflight } from "./beads/EpicRunPreflight.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
@@ -659,7 +660,15 @@ const buildAppUnderTest = (options?: {
       ),
       // Grouped in one slot, mirroring the production wiring in server.ts:
       // independent status broadcasters, and `pipe` tops out at 20 args.
-      Layer.provideMerge(Layer.mergeAll(vcsStatusBroadcasterLayer, beadsStatusBroadcasterLayer)),
+      Layer.provideMerge(
+        Layer.mergeAll(
+          vcsStatusBroadcasterLayer,
+          beadsStatusBroadcasterLayer,
+          Layer.succeed(EpicRunPreflight, {
+            check: () => Effect.succeed({ ok: true, blockers: [], warnings: [] }),
+          }),
+        ),
+      ),
       Layer.provide(
         Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
           runForThread: () => Effect.succeed({ status: "no-script" as const }),

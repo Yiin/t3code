@@ -73,8 +73,21 @@ export class EpicRunStateError extends Schema.TaggedErrorClass<EpicRunStateError
   }
 }
 
+export class EpicRunPreflightBlockedError extends Schema.TaggedErrorClass<EpicRunPreflightBlockedError>()(
+  "EpicRunPreflightBlockedError",
+  {
+    epicId: Schema.String,
+    blockers: Schema.Array(Schema.String),
+  },
+) {
+  override get message(): string {
+    return `Epic ${this.epicId} cannot start: ${this.blockers.join(", ")}`;
+  }
+}
+
 export type EpicRunnerError =
   | EpicRunnerStoreError
   | EpicRunnerDispatchError
   | EpicRunNotFoundError
-  | EpicRunStateError;
+  | EpicRunStateError
+  | EpicRunPreflightBlockedError;

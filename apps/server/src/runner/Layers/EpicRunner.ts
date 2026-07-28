@@ -12,12 +12,14 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 
+import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -28,11 +30,13 @@ import {
 import * as ProcessRunner from "../../processRunner.ts";
 import {
   EpicRunNotFoundError,
+  EpicRunPreflightBlockedError,
   EpicRunStateError,
   EpicRunnerDispatchError,
   EpicRunnerStoreError,
   type EpicRunnerError,
 } from "../Errors.ts";
+import { EpicRunLock, type EpicRunLockLease } from "../Services/EpicRunLock.ts";
 import { classifyIteration, type EpicIterationOutcome } from "../ralphProtocol.ts";
 import {
   EpicRunner,
@@ -124,6 +128,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const store = yield* EpicRunStore;
     const processRunner = yield* ProcessRunner.ProcessRunner;
     const crypto = yield* Crypto.Crypto;
+    const preflight = yield* EpicRunPreflight;
+    const runLock = yield* EpicRunLock;
+    const leases = new Map<EpicRunId, EpicRunLockLease>();
 
     const iterationTimeoutMs = Math.max(
       1,
@@ -228,6 +235,74 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             Effect.logDebug("epic.runner.head-read-failed", { cwd, cause }).pipe(Effect.as(null)),
           ),
         );
+
+    const releaseLease = (runId: EpicRunId) => {
+      const lease = leases.get(runId);
+      if (lease === undefined) return Effect.void;
+      leases.delete(runId);
+      return lease.release.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.lock-release-failed", { runId, cause }),
+        ),
+        Effect.asVoid,
+      );
+    };
+    const releaseLeaseOnFailure =
+      (runId: EpicRunId) =>
+      <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+        effect.pipe(
+          Effect.onExit((exit) => (Exit.isFailure(exit) ? releaseLease(runId) : Effect.void)),
+        );
+
+    yield* Effect.addFinalizer(() =>
+      Effect.forEach([...leases.keys()], releaseLease, { discard: true }),
+    );
+
+    const acquireLease = Effect.fn("EpicRunner.acquireLease")(function* (
+      runId: EpicRunId,
+      input: Pick<StartEpicRunInput, "cwd" | "epicId">,
+    ) {
+      const result = yield* preflight
+        .check({
+          workspaceRoot: input.cwd,
+          epicId: input.epicId,
+          mode: "sequential",
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new EpicRunPreflightBlockedError({
+                epicId: input.epicId,
+                blockers: [error.message],
+              }),
+          ),
+        );
+      if (!result.ok) {
+        return yield* new EpicRunPreflightBlockedError({
+          epicId: input.epicId,
+          blockers: result.blockers.map((blocker) => blocker._tag),
+        });
+      }
+      const lease = yield* runLock
+        .acquire({
+          workspaceRoot: input.cwd,
+          epicId: input.epicId,
+          owner: "t3code",
+          runDir: input.cwd,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new EpicRunPreflightBlockedError({
+                epicId: input.epicId,
+                blockers: [
+                  error._tag === "EpicRunLockHeldError" ? "run_in_progress" : error.message,
+                ],
+              }),
+          ),
+        );
+      leases.set(runId, lease);
+    });
 
     /**
      * The `worktreePath` an iteration's thread must carry to actually run in
@@ -664,6 +739,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             Effect.flatMap(() => markRunFailed(runId, String(defect))),
           ),
         ),
+        Effect.ensuring(releaseLease(runId)),
       );
 
     const forkLoop = (runId: EpicRunId) =>
@@ -692,8 +768,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           updatedAt: createdAt,
         };
 
-        yield* saveRun(run);
-        yield* forkLoop(runId);
+        yield* acquireLease(runId, input);
+        yield* saveRun(run).pipe(releaseLeaseOnFailure(runId));
+        yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
         yield* Effect.logInfo("epic.runner.run-started", {
           runId,
           epicId: run.epicId,
@@ -736,8 +813,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           lastError: null,
           updatedAt: yield* nowIso,
         };
-        yield* saveRun(resumed);
-        yield* forkLoop(runId);
+        yield* acquireLease(runId, { cwd: run.cwd, epicId: run.epicId });
+        yield* saveRun(resumed).pipe(releaseLeaseOnFailure(runId));
+        yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
         return resumed;
       });
 
@@ -793,6 +871,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           updatedAt: cancelledAt,
         };
         yield* saveRun(cancelled);
+        yield* releaseLease(runId);
         return cancelled;
       });
 
@@ -817,25 +896,45 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           .pipe(Effect.mapError(storeError("listRuns")));
 
         for (const run of running) {
-          // An iteration still recorded as `running` at boot is by definition
-          // abandoned: the restart killed its provider subprocess and nothing
-          // re-attaches. `epic_run_iterations.turn_status` is the sole
-          // in-flight marker, so no projection join is needed to know that.
-          const latest = yield* store
-            .getLatestIteration({ runId: run.runId })
-            .pipe(Effect.mapError(storeError("getLatestIteration")));
-          if (Option.isSome(latest) && latest.value.turnStatus === "running") {
-            yield* store
-              .updateIteration({
-                runId: run.runId,
-                iterationIndex: latest.value.iterationIndex,
-                turnStatus: "abandoned",
-                summary: "abandoned by server restart",
-                finishedAt: yield* nowIso,
-              })
-              .pipe(Effect.mapError(storeError("updateIteration")));
+          const acquireError = yield* acquireLease(run.runId, {
+            cwd: run.cwd,
+            epicId: run.epicId,
+          }).pipe(
+            Effect.match({
+              onFailure: (error) => error,
+              onSuccess: () => null,
+            }),
+          );
+          if (acquireError !== null) {
+            yield* saveRun({
+              ...run,
+              status: "failed",
+              lastError: acquireError.message,
+              updatedAt: yield* nowIso,
+            });
+            continue;
           }
-          yield* forkLoop(run.runId);
+          yield* Effect.gen(function* () {
+            // An iteration still recorded as `running` at boot is by definition
+            // abandoned: the restart killed its provider subprocess and nothing
+            // re-attaches. `epic_run_iterations.turn_status` is the sole
+            // in-flight marker, so no projection join is needed to know that.
+            const latest = yield* store
+              .getLatestIteration({ runId: run.runId })
+              .pipe(Effect.mapError(storeError("getLatestIteration")));
+            if (Option.isSome(latest) && latest.value.turnStatus === "running") {
+              yield* store
+                .updateIteration({
+                  runId: run.runId,
+                  iterationIndex: latest.value.iterationIndex,
+                  turnStatus: "abandoned",
+                  summary: "abandoned by server restart",
+                  finishedAt: yield* nowIso,
+                })
+                .pipe(Effect.mapError(storeError("updateIteration")));
+            }
+            yield* forkLoop(run.runId);
+          }).pipe(releaseLeaseOnFailure(run.runId));
         }
 
         yield* Effect.logInfo("epic.runner.started", {
