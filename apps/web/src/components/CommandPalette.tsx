@@ -26,6 +26,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   LinkIcon,
+  LayersIcon,
   MessageSquareIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -373,6 +374,7 @@ function reduceCommandPaletteUiState(
 }
 
 export function CommandPalette({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
   const [state, dispatch] = useReducer(reduceCommandPaletteUiState, {
     open: false,
     openIntent: null,
@@ -422,11 +424,14 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           openNewThreadIn();
         } else if (detail.open === "add-project") {
           openAddProject();
+        } else if (detail.open === "epics") {
+          setOpen(false);
+          void navigate({ to: "/epics" });
         } else {
           setOpen(true);
         }
       }),
-    [openAddProject, openNewThreadIn, setOpen],
+    [navigate, openAddProject, openNewThreadIn, setOpen],
   );
 
   return (
@@ -1055,6 +1060,17 @@ function OpenCommandPaletteDialog(props: {
       groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:epics",
+    searchTerms: ["epics", "plans", "beads", "work"],
+    title: "Open epics",
+    icon: <LayersIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/epics" });
+    },
+  });
 
   actionItems.push({
     kind: "action",

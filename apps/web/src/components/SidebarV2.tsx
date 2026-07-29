@@ -17,6 +17,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
+  LayersIcon,
   MessageSquareIcon,
   PlusIcon,
   SearchIcon,
@@ -34,7 +35,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useLocation, useParams, useRouter } from "@tanstack/react-router";
 
 import {
   isAtomCommandInterrupted,
@@ -750,6 +751,7 @@ export default function SidebarV2() {
   const projects = useProjects();
   const threads = useThreadShells();
   const router = useRouter();
+  const pathname = useLocation({ select: (location) => location.pathname });
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const autoSettleAfterDays = useClientSettings((s) => s.sidebarAutoSettleAfterDays);
@@ -766,6 +768,11 @@ export default function SidebarV2() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
+  const openEpics = useCallback(() => {
+    clearSelection();
+    if (isMobile) setOpenMobile(false);
+    void router.navigate({ to: "/epics" });
+  }, [clearSelection, isMobile, router, setOpenMobile]);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((s) => s.rangeSelectTo);
@@ -1509,6 +1516,16 @@ export default function SidebarV2() {
               </Tooltip>
             </div>
           </div>
+          <SidebarMenuButton
+            size="sm"
+            type="button"
+            onClick={openEpics}
+            isActive={pathname.startsWith("/epics")}
+            className="mt-1 h-8 gap-2 rounded-md px-2 text-sm font-medium text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground data-[active=true]:bg-sidebar-row-hover data-[active=true]:text-sidebar-foreground"
+          >
+            <LayersIcon className="size-4 shrink-0" />
+            <span>Epics</span>
+          </SidebarMenuButton>
         </SidebarGroup>
         {projects.length > 0 ? (
           <SidebarGroup className="px-2 pb-2 pt-0">

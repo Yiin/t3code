@@ -7,6 +7,7 @@ import {
   FolderPlusIcon,
   Globe2Icon,
   LoaderIcon,
+  LayersIcon,
   SearchIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -3106,6 +3107,11 @@ export default function Sidebar() {
   const suppressProjectClickForContextMenuRef = useRef(false);
   const desktopUpdateState = useDesktopUpdateState();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
+  const openEpics = useCallback(() => {
+    clearSelection();
+    if (isMobile) setOpenMobile(false);
+    void navigate({ to: "/epics" });
+  }, [clearSelection, isMobile, navigate, setOpenMobile]);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const platform = navigator.platform;
   const shortcutModifiers = useShortcutModifierState();
@@ -3708,6 +3714,20 @@ export default function Sidebar() {
             projectsLength={projects.length}
           />
 
+          <SidebarGroup className="px-2 py-2">
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  type="button"
+                  onClick={openEpics}
+                  isActive={pathname.startsWith("/epics")}
+                >
+                  <LayersIcon className="size-4" />
+                  <span>Epics</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroup>
           <SidebarSeparator />
           <SidebarChromeFooter />
         </>
