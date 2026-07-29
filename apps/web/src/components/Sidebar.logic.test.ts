@@ -678,6 +678,16 @@ describe("resolveSidebarV2Status", () => {
     ).toBe("working");
   });
 
+  it("puts an active epic run below user action and above provider activity", () => {
+    expect(resolveSidebarV2Status({ ...idle, session: null }, true)).toBe("run-active");
+    expect(resolveSidebarV2Status({ ...idle, hasPendingApprovals: true, session }, true)).toBe(
+      "approval",
+    );
+    expect(resolveSidebarV2Status({ ...idle, hasPendingUserInput: true, session }, true)).toBe(
+      "input",
+    );
+  });
+
   it("reports failed only while the session status is error", () => {
     expect(
       resolveSidebarV2Status({
@@ -779,6 +789,27 @@ describe("resolveThreadStatusPill", () => {
         thread: baseThread,
       }),
     ).toMatchObject({ label: "Working", pulse: true });
+  });
+
+  it("shows a detached active run before provider session activity", () => {
+    expect(
+      resolveThreadStatusPill({
+        runActive: true,
+        thread: {
+          ...baseThread,
+          session: { ...baseThread.session, status: "stopped", activeTurnId: null },
+        },
+      }),
+    ).toMatchObject({ label: "Run active", pulse: true, dotClass: "bg-success" });
+  });
+
+  it("keeps pending approval ahead of an active run", () => {
+    expect(
+      resolveThreadStatusPill({
+        runActive: true,
+        thread: { ...baseThread, hasPendingApprovals: true },
+      }),
+    ).toMatchObject({ label: "Pending Approval" });
   });
 
   it("shows plan ready when a settled plan turn has a proposed plan ready for follow-up", () => {

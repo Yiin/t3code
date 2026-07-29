@@ -9,6 +9,7 @@ import { useMemo } from "react";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { useProject } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
+import { epicsEnvironment, isRunActiveForThread } from "../state/epics";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { vcsEnvironment } from "../state/vcs";
 import { useUiStateStore } from "../uiStateStore";
@@ -188,7 +189,7 @@ export function ThreadStatusLabel({
           <span
             className={`size-[9px] rounded-full ${status.dotClass} ${
               status.pulse ? "animate-status-pulse" : ""
-            }`}
+            } motion-reduce:animate-none`}
           />
         </TooltipTrigger>
         <TooltipPopup side="top">{status.label}</TooltipPopup>
@@ -209,7 +210,7 @@ export function ThreadStatusLabel({
         <span
           className={`h-1.5 w-1.5 rounded-full ${status.dotClass} ${
             status.pulse ? "animate-status-pulse" : ""
-          }`}
+          } motion-reduce:animate-none`}
         />
         <span className="hidden md:inline">{status.label}</span>
       </TooltipTrigger>
@@ -244,6 +245,9 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
         })
       : null,
   );
+  const allRuns = useEnvironmentQuery(
+    epicsEnvironment.allRuns({ environmentId: thread.environmentId, input: {} }),
+  );
   const pr = resolveThreadPr({
     threadBranch: thread.branch,
     gitStatus: gitStatus.data,
@@ -251,6 +255,7 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   });
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
   const threadStatus = resolveThreadStatusPill({
+    runActive: isRunActiveForThread(allRuns.data, thread.id),
     thread: {
       ...thread,
       lastVisitedAt,

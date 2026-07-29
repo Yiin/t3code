@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import {
   legacyProjectCwdPreferenceKey,
+  markEpicsVisited,
   markThreadUnread,
   markThreadVisited,
   parsePersistedState,
@@ -23,12 +24,20 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
+    epicsLastVisitedAt: null,
     defaultAdvertisedEndpointKey: null,
     ...overrides,
   };
 }
 
 describe("uiStateStore pure functions", () => {
+  it("stores a valid epics visit timestamp monotonically", () => {
+    const initial = makeUiState();
+    const visited = markEpicsVisited(initial, "2026-07-29T10:00:00.000Z");
+    expect(visited.epicsLastVisitedAt).toBe("2026-07-29T10:00:00.000Z");
+    expect(markEpicsVisited(visited, "2026-07-29T09:00:00.000Z")).toBe(visited);
+    expect(markEpicsVisited(visited, "invalid")).toBe(visited);
+  });
   it("stores server timestamps without moving visit state backwards", () => {
     const threadId = ThreadId.make("thread-1");
     const initialState = makeUiState();
@@ -164,6 +173,7 @@ describe("parsePersistedState", () => {
     });
 
     expect(parsed).toEqual({
+      epicsLastVisitedAt: null,
       projectExpandedById: {
         logical: false,
       },
@@ -286,6 +296,7 @@ describe("uiStateStore persistence", () => {
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,
+      epicsLastVisitedAt: null,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
           "turn-1": false,

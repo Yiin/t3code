@@ -23,6 +23,7 @@ import {
   ThreadWorktreeIndicator,
 } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
+import { EpicsUnreadBadge } from "./EpicsUnreadBadge";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
@@ -45,6 +46,8 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   type ContextMenuItem,
   DEFAULT_SERVER_SETTINGS,
+  type EnvironmentId,
+  type EpicRun,
   ProjectId,
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
@@ -115,6 +118,7 @@ import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
+import { epicsEnvironment, isRunActiveForThread } from "../state/epics";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -386,6 +390,9 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     environmentId: thread.environmentId,
     threadId: thread.id,
   });
+  const allRuns = useEnvironmentQuery(
+    epicsEnvironment.allRuns({ environmentId: thread.environmentId, input: {} }),
+  );
   const isMobile = useIsMobile();
   const discoveredPorts = useThreadDiscoveredPorts({
     environmentId: thread.environmentId,
@@ -457,6 +464,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   const isThreadRunning =
     thread.session?.status === "running" && thread.session.activeTurnId != null;
   const threadStatus = resolveThreadStatusPill({
+    runActive: isRunActiveForThread(allRuns.data, thread.id),
     thread: {
       ...thread,
       lastVisitedAt,
@@ -1066,6 +1074,19 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   );
 });
 
+function SidebarProjectRunsQuery(props: {
+  environmentId: EnvironmentId;
+  onRuns: (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => void;
+}) {
+  const query = useEnvironmentQuery(
+    epicsEnvironment.allRuns({ environmentId: props.environmentId, input: {} }),
+  );
+  useEffect(() => {
+    props.onRuns(props.environmentId, query.data);
+  }, [props.environmentId, props.onRuns, query.data]);
+  return null;
+}
+
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
   isThreadListExpanded: boolean;
@@ -1195,6 +1216,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
   const projectThreads = sidebarThreads;
+  const [epicRunsByEnvironment, setEpicRunsByEnvironment] = useState<
+    ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>
+  >(() => new Map());
+  const handleEpicRuns = useCallback(
+    (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => {
+      setEpicRunsByEnvironment((current) => {
+        if (current.get(environmentId) === runs) return current;
+        const next = new Map(current);
+        next.set(environmentId, runs);
+        return next;
+      });
+    },
+    [],
+  );
   const projectPreferenceKeys = useMemo(() => projectExpansionPreferenceKeys(project), [project]);
   const projectExpanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, projectPreferenceKeys),
@@ -1262,6 +1297,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       );
       return resolveThreadStatusPill({
+        runActive: isRunActiveForThread(
+          epicRunsByEnvironment.get(thread.environmentId) ?? null,
+          thread.id,
+        ),
         thread: {
           ...thread,
           ...(lastVisitedAt !== null && lastVisitedAt !== undefined ? { lastVisitedAt } : {}),
@@ -1282,7 +1321,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       projectStatus,
       visibleProjectThreads,
     };
-  }, [projectThreads, threadLastVisitedAts, threadSortOrder]);
+  }, [epicRunsByEnvironment, projectThreads, threadLastVisitedAts, threadSortOrder]);
   const pinnedCollapsedThread = useMemo(() => {
     const activeThreadKey = activeRouteThreadKey ?? undefined;
     if (!activeThreadKey || projectExpanded) {
@@ -1314,6 +1353,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       );
       return resolveThreadStatusPill({
+        runActive: isRunActiveForThread(
+          epicRunsByEnvironment.get(thread.environmentId) ?? null,
+          thread.id,
+        ),
         thread: {
           ...thread,
           ...(lastVisitedAt !== null && lastVisitedAt !== undefined ? { lastVisitedAt } : {}),
@@ -1349,6 +1392,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       shouldShowThreadPanel: projectExpanded || pinnedCollapsedThread !== null,
     };
   }, [
+    epicRunsByEnvironment,
     isThreadListExpanded,
     pinnedCollapsedThread,
     projectExpanded,
@@ -2249,6 +2293,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   return (
     <>
+      {[...new Set(project.memberProjects.map((member) => member.environmentId))].map(
+        (environmentId) => (
+          <SidebarProjectRunsQuery
+            key={environmentId}
+            environmentId={environmentId}
+            onRuns={handleEpicRuns}
+          />
+        ),
+      )}
       <div className="group/project-header relative">
         <SidebarMenuButton
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
@@ -3724,6 +3777,7 @@ export default function Sidebar() {
                 >
                   <LayersIcon className="size-4" />
                   <span>Epics</span>
+                  <EpicsUnreadBadge />
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>

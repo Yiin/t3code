@@ -93,6 +93,7 @@ export interface ThreadStatusPill {
     | "Completed"
     | "Pending Approval"
     | "Awaiting Input"
+    | "Run active"
     | "Plan Ready";
   colorClass: string;
   dotClass: string;
@@ -102,6 +103,7 @@ export interface ThreadStatusPill {
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
+  "Run active": 3.5,
   Working: 3,
   Connecting: 3,
   "Plan Ready": 2,
@@ -424,20 +426,24 @@ export function resolveThreadRowClassName(input: {
 // whether it finished, asked a question, or proposed a plan.
 // Unread completion is tracked separately: it describes whether a ready
 // thread needs attention, not what the thread is currently doing.
-export type SidebarV2Status = "approval" | "input" | "working" | "failed" | "ready";
+export type SidebarV2Status = "approval" | "input" | "run-active" | "working" | "failed" | "ready";
 
 type SidebarV2StatusInput = Pick<
   SidebarThreadSummary,
   "hasPendingApprovals" | "hasPendingUserInput" | "session"
 >;
 
-export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2Status {
+export function resolveSidebarV2Status(
+  thread: SidebarV2StatusInput,
+  runActive = false,
+): SidebarV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
   }
   if (thread.hasPendingUserInput) {
     return "input";
   }
+  if (runActive) return "run-active";
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";
   }
@@ -484,8 +490,9 @@ export function sortThreadsForSidebarV2<
 
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
+  runActive?: boolean;
 }): ThreadStatusPill | null {
-  const { thread } = input;
+  const { thread, runActive = false } = input;
 
   if (thread.hasPendingApprovals) {
     return {
@@ -502,6 +509,15 @@ export function resolveThreadStatusPill(input: {
       colorClass: "text-indigo-600 dark:text-indigo-300/90",
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
+    };
+  }
+
+  if (runActive) {
+    return {
+      label: "Run active",
+      colorClass: "text-success",
+      dotClass: "bg-success",
+      pulse: true,
     };
   }
 

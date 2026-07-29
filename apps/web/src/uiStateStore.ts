@@ -20,6 +20,7 @@ export interface PersistedUiState {
   projectExpandedById?: Record<string, boolean>;
   projectOrder?: string[];
   threadLastVisitedAtById?: Record<string, string>;
+  epicsLastVisitedAt?: string;
   collapsedProjectCwds?: string[];
   expandedProjectCwds?: string[];
   projectOrderCwds?: string[];
@@ -35,6 +36,7 @@ export interface UiProjectState {
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
   threadChangedFilesExpandedById: Record<string, Record<string, boolean>>;
+  epicsLastVisitedAt: string | null;
 }
 
 export interface UiEndpointState {
@@ -47,6 +49,7 @@ const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   threadLastVisitedAtById: {},
+  epicsLastVisitedAt: null,
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
 };
@@ -96,6 +99,10 @@ function sanitizeTimestampRecord(value: unknown): Record<string, string> {
   );
 }
 
+function sanitizeTimestamp(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
 export function parsePersistedState(parsed: PersistedUiState): UiState {
   const projectExpandedById =
     parsed.projectExpandedById === undefined
@@ -124,6 +131,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     projectExpandedById,
     projectOrder,
     threadLastVisitedAtById: sanitizeTimestampRecord(parsed.threadLastVisitedAtById),
+    epicsLastVisitedAt: sanitizeTimestamp(parsed.epicsLastVisitedAt),
     threadChangedFilesExpandedById: sanitizePersistedThreadChangedFilesExpanded(
       parsed.threadChangedFilesExpandedById,
     ),
@@ -209,6 +217,7 @@ export function persistState(state: UiState): void {
         projectExpandedById,
         projectOrder: state.projectOrder,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
+        ...(state.epicsLastVisitedAt ? { epicsLastVisitedAt: state.epicsLastVisitedAt } : {}),
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         threadChangedFilesExpandedById,
       } satisfies PersistedUiState),
@@ -247,6 +256,14 @@ export function markThreadVisited(state: UiState, threadId: string, visitedAt: s
       [threadId]: visitedAt,
     },
   };
+}
+
+export function markEpicsVisited(state: UiState, visitedAt: string): UiState {
+  const visitedAtMs = Date.parse(visitedAt);
+  if (!Number.isFinite(visitedAtMs)) return state;
+  const previousMs = state.epicsLastVisitedAt ? Date.parse(state.epicsLastVisitedAt) : NaN;
+  if (Number.isFinite(previousMs) && previousMs >= visitedAtMs) return state;
+  return { ...state, epicsLastVisitedAt: visitedAt };
 }
 
 export function markThreadUnread(
@@ -412,6 +429,7 @@ export function reorderProjects(
 }
 
 interface UiStateStore extends UiState {
+  markEpicsVisited: (visitedAt: string) => void;
   markThreadVisited: (threadId: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
@@ -426,6 +444,7 @@ interface UiStateStore extends UiState {
 
 export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
+  markEpicsVisited: (visitedAt) => set((state) => markEpicsVisited(state, visitedAt)),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
   markThreadUnread: (threadId, latestTurnCompletedAt) =>
