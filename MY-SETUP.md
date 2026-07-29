@@ -26,6 +26,9 @@ The canonical `plan-epic`, `cook-epic`, `cook-it`, and `ralph` skills live in
 `~/.agents/skills`. The links are absolute; rerun the installer if this checkout
 moves.
 
+See [docs/epic-runs.md](docs/epic-runs.md) for how terminal and T3 Code epic
+runs share Beads, Git, and the epic run lock.
+
 ## Survives restarts — systemd --user service
 
 Installed unit: `~/.config/systemd/user/t3code.service`
