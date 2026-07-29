@@ -123,6 +123,7 @@ export function HomeRouteScreen() {
           onEnvironmentChange={setSelectedEnvironmentId}
           onProjectChange={setSelectedProjectKey}
           onOpenSettings={() => navigation.navigate("SettingsSheet", { screen: "Settings" })}
+          onOpenEpics={() => navigation.navigate("Epics")}
           onProjectGroupingModeChange={setProjectGroupingMode}
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}

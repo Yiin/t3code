@@ -34,6 +34,7 @@ import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
+import { EpicDetailScreen, EpicsListScreen } from "./features/epics/EpicsRouteScreens";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
 import { AddProjectRepositoryRoute } from "./features/projects/AddProjectRepositoryRoute";
@@ -390,6 +391,16 @@ export const RootStack = createNativeStackNavigator({
       screen: ThreadRouteScreen,
       linking: THREAD_LINKING_PREFIX,
       options: GLASS_HEADER_OPTIONS,
+    }),
+    Epics: createNativeStackScreen({
+      screen: EpicsListScreen,
+      linking: "epics",
+      options: { ...GLASS_HEADER_OPTIONS, title: "Epics" },
+    }),
+    EpicDetail: createNativeStackScreen({
+      screen: EpicDetailScreen,
+      linking: "epics/:environmentId/:epicId",
+      options: { ...GLASS_HEADER_OPTIONS, title: "Epic" },
     }),
     ThreadTerminal: createNativeStackScreen({
       screen: ThreadTerminalRouteScreen,

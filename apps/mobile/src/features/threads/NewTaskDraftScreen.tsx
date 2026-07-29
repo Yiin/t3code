@@ -50,6 +50,7 @@ import { useRemoteConnectionStatus } from "../../state/use-remote-environment-re
 import { branchBadgeLabel, useNewTaskFlow } from "./new-task-flow-provider";
 import { useCreateProjectThread } from "./use-project-actions";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
+import { nextInitialPromptInstall } from "../epics/epics.logic";
 
 function formatWorkspaceLabel(input: {
   readonly workspaceMode: string;
@@ -72,6 +73,9 @@ export function NewTaskDraftScreen(props: {
   readonly pendingTaskId?: string;
   /** Durable native share inbox item to merge into this project draft. */
   readonly incomingShareId?: string;
+  /** One-shot seed used by entry points such as Plan epic. */
+  readonly initialPrompt?: string;
+  readonly initialPromptRequestId?: string;
 }) {
   const projects = useProjects();
   const createProjectThread = useCreateProjectThread();
@@ -112,6 +116,18 @@ export function NewTaskDraftScreen(props: {
   const latestIncomingShareIdRef = useRef(props.incomingShareId);
   latestDraftKeyRef.current = flow.draftKey;
   latestIncomingShareIdRef.current = props.incomingShareId;
+  const appliedInitialPromptRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!flow.draftKey) return;
+    const next = nextInitialPromptInstall(
+      flow.prompt,
+      props.initialPrompt,
+      props.initialPromptRequestId,
+      appliedInitialPromptRef.current,
+    );
+    appliedInitialPromptRef.current = next.appliedRequest;
+    if (next.prompt !== flow.prompt) flow.setPrompt(next.prompt);
+  }, [flow, props.initialPrompt, props.initialPromptRequestId]);
   const isImportingShare = importingShareKey !== null;
   const alertedUnavailableIncomingShareIdRef = useRef<string | null>(null);
   const incomingShare = props.incomingShareId ? getShare(props.incomingShareId) : null;
