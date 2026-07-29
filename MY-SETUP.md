@@ -19,6 +19,13 @@ node apps/server/dist/bin.mjs auth pairing create
 
 Providers must be authed (already are: claude, codex, opencode).
 
+## Skills
+
+The canonical `plan-epic`, `cook-epic`, `cook-it`, and `ralph` skills live in
+`skills/`. Edit them there, then run `./skills/install.sh` to link them into
+`~/.agents/skills`. The links are absolute; rerun the installer if this checkout
+moves.
+
 ## Survives restarts — systemd --user service
 
 Installed unit: `~/.config/systemd/user/t3code.service`
