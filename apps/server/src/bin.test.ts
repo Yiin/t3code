@@ -159,6 +159,96 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     );
   });
 
+type RawEpicRequest = {
+  readonly method: string;
+  readonly url: string;
+  readonly authorization: string | undefined;
+  readonly body: unknown;
+};
+
+const withRawEpicCliServer = <A, E, R>(input: {
+  readonly baseDir: string;
+  readonly snapshot: unknown;
+  readonly requests: Array<RawEpicRequest>;
+  readonly status: () => "running" | "done" | "failed" | "cancelled";
+  readonly run: () => Effect.Effect<A, E, R>;
+}) =>
+  Effect.acquireUseRelease(
+    Effect.promise(
+      () =>
+        new Promise<{ readonly server: NodeHttp.Server; readonly port: number }>(
+          (resolve, reject) => {
+            const server = NodeHttp.createServer((request, response) => {
+              const chunks: Array<Buffer> = [];
+              request.on("data", (chunk: Buffer) => chunks.push(chunk));
+              request.on("end", () => {
+                const raw = Buffer.concat(chunks).toString("utf8");
+                const body = raw.length === 0 ? undefined : JSON.parse(raw);
+                input.requests.push({
+                  method: request.method ?? "",
+                  url: request.url ?? "",
+                  authorization: request.headers.authorization,
+                  body,
+                });
+                const currentStatus = input.status();
+                const run = {
+                  runId: "run-cli-1",
+                  epicId: "epic-cli",
+                  projectId: "project-placeholder",
+                  cwd: "/placeholder",
+                  prompt: "go",
+                  modelSelection: { instanceId: "codex", model: "gpt-5" },
+                  runtimeMode: "full-access",
+                  status: currentStatus,
+                  maxIterations: 8,
+                  iterationsCompleted: currentStatus === "running" ? 1 : 8,
+                  currentThreadId: null,
+                  currentTurnStartedAt: null,
+                  consecutiveFailures: currentStatus === "failed" ? 1 : 0,
+                  lastError: currentStatus === "failed" ? "iteration failed" : null,
+                  createdAt: "2026-07-29T00:00:00.000Z",
+                  updatedAt: "2026-07-29T00:00:01.000Z",
+                  threadRefs: [],
+                  recentIterations: [],
+                };
+                const payload =
+                  request.url === "/api/orchestration/snapshot"
+                    ? input.snapshot
+                    : request.url === "/api/epic-runs" && request.method === "GET"
+                      ? []
+                      : request.url?.startsWith("/api/epic-runs")
+                        ? {
+                            ...run,
+                            ...(body && typeof body === "object" ? body : {}),
+                          }
+                        : { code: "not_found" };
+                response.statusCode = request.url?.startsWith("/api/") ? 200 : 404;
+                response.setHeader("content-type", "application/json");
+                response.end(JSON.stringify(payload));
+              });
+            });
+            server.once("error", reject);
+            server.listen(0, "127.0.0.1", () => {
+              const address = server.address();
+              if (!address || typeof address === "string") return reject(new Error("no port"));
+              resolve({ server, port: address.port });
+            });
+          },
+        ),
+    ),
+    ({ port }) =>
+      Effect.gen(function* () {
+        const config = yield* makeCliTestServerConfig(input.baseDir);
+        yield* persistServerRuntimeState({
+          path: config.serverRuntimeStatePath,
+          state: yield* makePersistedServerRuntimeState({ config, port }),
+        });
+        return yield* input.run();
+      }),
+    ({ server }) =>
+      Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
+
 it.layer(NodeServices.layer)("bin cli parsing", (it) => {
   it.effect("accepts the built-in lowercase log-level flag values", () =>
     runCliWithRuntime(["--log-level", "debug", "--version"]),
@@ -211,6 +301,262 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       assert.include(output, "uninstall");
       assert.include(output, "update");
       assert.include(output, "status");
+    }),
+  );
+
+  it.effect("exposes the complete epic command surface and start flags", () =>
+    Effect.gen(function* () {
+      const { output: epicHelp } = yield* captureStdout(runCli(["epic", "--help"]));
+      for (const command of ["start", "list", "status", "pause", "resume", "cancel", "watch"]) {
+        assert.include(epicHelp, command);
+      }
+
+      const { output: startHelp } = yield* captureStdout(runCli(["epic", "start", "--help"]));
+      for (const flag of [
+        "--cwd",
+        "--epic",
+        "--prompt-file",
+        "--prompt",
+        "--instance",
+        "--model",
+        "--max-iterations",
+        "--json",
+      ]) {
+        assert.include(startHelp, flag);
+      }
+    }),
+  );
+
+  it.effect("reports a missing daemon through the parsed epic list command", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cli-epic-missing-"));
+      const failure = yield* runCliWithRuntime([
+        "epic",
+        "list",
+        "--base-dir",
+        baseDir,
+        "--json",
+      ]).pipe(Effect.flip);
+      assert.include(
+        failure instanceof Error ? failure.message : String(failure),
+        "systemctl --user start t3code.service",
+      );
+    }),
+  );
+
+  it.effect("clears an unreachable daemon runtime record", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-epic-unreachable-"),
+      );
+      const config = yield* makeCliTestServerConfig(baseDir);
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: {
+          version: 1,
+          pid: 999_999,
+          host: "127.0.0.1",
+          port: 1,
+          origin: "http://127.0.0.1:1",
+          startedAt: "2026-07-29T00:00:00.000Z",
+        },
+      });
+      yield* runCliWithRuntime(["epic", "list", "--base-dir", baseDir]).pipe(Effect.flip);
+      assert.isFalse(NodeFS.existsSync(config.serverRuntimeStatePath));
+    }),
+  );
+
+  it.effect("rejects non-positive epic iteration limits during CLI parsing", () =>
+    Effect.gen(function* () {
+      const failure = yield* runCliWithRuntime([
+        "epic",
+        "start",
+        "--cwd",
+        "/tmp",
+        "--epic",
+        "epic-1",
+        "--prompt",
+        "go",
+        "--instance",
+        "codex",
+        "--model",
+        "gpt-5",
+        "--max-iterations",
+        "0",
+      ]).pipe(Effect.flip);
+      assert.isTrue(CliError.isCliError(failure));
+    }),
+  );
+
+  it.effect("requires exactly one epic prompt source before daemon discovery", () =>
+    Effect.gen(function* () {
+      const baseArgs = [
+        "epic",
+        "start",
+        "--cwd",
+        "/tmp",
+        "--epic",
+        "epic-1",
+        "--instance",
+        "codex",
+        "--model",
+        "gpt-5",
+      ];
+      for (const promptArgs of [[], ["--prompt", "go", "--prompt-file", "/tmp/prompt.txt"]]) {
+        const failure = yield* runCliWithRuntime([...baseArgs, ...promptArgs]).pipe(Effect.flip);
+        assert.include(
+          failure instanceof Error ? failure.message : String(failure),
+          "Exactly one of --prompt or --prompt-file is required",
+        );
+      }
+    }),
+  );
+
+  it.effect("drives epic start, reads, controls, and watch through the live HTTP daemon", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cli-epic-live-"));
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-epic-workspace-"),
+      );
+      yield* runCliWithRuntime([
+        "project",
+        "add",
+        workspaceRoot,
+        "--title",
+        "Epic Project",
+        "--base-dir",
+        baseDir,
+      ]);
+      const snapshot = yield* readPersistedSnapshot(baseDir);
+      const project = snapshot.projects.find(
+        (candidate) => candidate.workspaceRoot === workspaceRoot,
+      );
+      assert.isDefined(project);
+      const requests: Array<RawEpicRequest> = [];
+      let status: "running" | "done" | "failed" | "cancelled" = "running";
+      let watchPollsUntilDone: number | undefined;
+
+      yield* withRawEpicCliServer({
+        baseDir,
+        snapshot,
+        requests,
+        status: () => {
+          if (watchPollsUntilDone === undefined) return status;
+          watchPollsUntilDone += 1;
+          return watchPollsUntilDone >= 2 ? "done" : "running";
+        },
+        run: () =>
+          Effect.gen(function* () {
+            const { output: startOutput } = yield* captureStdout(
+              runCli([
+                "epic",
+                "start",
+                "--cwd",
+                workspaceRoot,
+                "--epic",
+                "epic-cli",
+                "--prompt",
+                "cook this",
+                "--instance",
+                "codex",
+                "--model",
+                "gpt-5",
+                "--max-iterations",
+                "8",
+                "--base-dir",
+                baseDir,
+                "--json",
+              ]),
+            );
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - verifies CLI presentation JSON.
+            assert.equal(JSON.parse(startOutput).runId, "run-cli-1");
+            const startRequest = requests.find(
+              (request) => request.method === "POST" && request.url === "/api/epic-runs",
+            );
+            assert.deepInclude(startRequest?.body as object, {
+              epicId: "epic-cli",
+              projectId: project!.id,
+              cwd: workspaceRoot,
+              prompt: "cook this",
+              modelSelection: { instanceId: "codex", model: "gpt-5" },
+              runtimeMode: "full-access",
+              maxIterations: 8,
+            });
+            assert.match(startRequest?.authorization ?? "", /^Bearer /);
+
+            const promptFile = NodePath.join(workspaceRoot, "epic-prompt.txt");
+            NodeFS.writeFileSync(promptFile, "prompt from file");
+            yield* runCliWithRuntime([
+              "epic",
+              "start",
+              "--cwd",
+              workspaceRoot,
+              "--epic",
+              "epic-cli",
+              "--prompt-file",
+              promptFile,
+              "--instance",
+              "codex",
+              "--model",
+              "gpt-5",
+              "--base-dir",
+              baseDir,
+            ]);
+            const latestStart = requests.findLast(
+              (request) => request.method === "POST" && request.url === "/api/epic-runs",
+            );
+            assert.equal((latestStart?.body as { prompt?: string })?.prompt, "prompt from file");
+
+            const { output: listOutput } = yield* captureStdout(
+              runCli(["epic", "list", "--base-dir", baseDir]),
+            );
+            assert.equal(
+              listOutput,
+              "runs[0]{runId,status,epicId,iterations,currentThreadId,lastError}:",
+            );
+            for (const command of ["status", "pause", "resume", "cancel"] as const) {
+              const { output } = yield* captureStdout(
+                runCli(["epic", command, "run-cli-1", "--base-dir", baseDir, "--json"]),
+              );
+              // @effect-diagnostics-next-line preferSchemaOverJson:off - verifies CLI presentation JSON.
+              assert.equal(JSON.parse(output).runId, "run-cli-1");
+            }
+
+            watchPollsUntilDone = 0;
+            const { output: watchOutput } = yield* captureStdout(
+              runCli(["epic", "watch", "run-cli-1", "--base-dir", baseDir, "--json"]),
+            );
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - verifies CLI presentation JSON.
+            assert.equal(JSON.parse(watchOutput).status, "done");
+
+            watchPollsUntilDone = undefined;
+            status = "failed";
+            const failed = yield* runCliWithRuntime([
+              "epic",
+              "watch",
+              "run-cli-1",
+              "--base-dir",
+              baseDir,
+            ]).pipe(Effect.flip);
+            assert.include(
+              failed instanceof Error ? failed.message : String(failed),
+              "status failed",
+            );
+
+            status = "cancelled";
+            const cancelled = yield* runCliWithRuntime([
+              "epic",
+              "watch",
+              "run-cli-1",
+              "--base-dir",
+              baseDir,
+            ]).pipe(Effect.flip);
+            assert.include(
+              cancelled instanceof Error ? cancelled.message : String(cancelled),
+              "status cancelled",
+            );
+          }),
+      });
     }),
   );
 
