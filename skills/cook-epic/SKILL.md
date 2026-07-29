@@ -7,7 +7,7 @@ description: Execute a beads epic unattended with fresh-context workers — para
 
 Run all ready children of a beads epic with fresh-context workers through the
 `run.sh` beside this `SKILL.md`. Each worker is a new headless session of
-the current harness (kimi/claude/codex) with no conversation context; all
+the current harness (kimi/claude/codex/opencode) with no conversation context; all
 coordination flows through beads (claims, notes, status) and git (commits,
 merges). Two execution shapes, picked per epic (step 2):
 
@@ -36,21 +36,21 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 1. **Parse the request.** The first argument after `/cook-epic` is the epic id.
    Map optional knobs:
 
-   | User says | Environment variable | Default |
-   |---|---|---|
-   | "sequential", "one at a time" | `COOKEPIC_SEQUENTIAL=1` | decided by shape (step 2) |
-   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated) | detected in step 2 |
-   | "4 workers", "parallel 5" | `COOKEPIC_WORKERS` | 3 (forces parallel) |
-   | "gate: bun run build" | `COOKEPIC_GATE` | **required** — see below |
-   | "no gate", "skip verification" | `COOKEPIC_NO_GATE=1` | unset |
-   | "budget $40" | `COOKEPIC_BUDGET_USD` | none; claude/ccx only |
-   | "2h per worker" | `COOKEPIC_WORKER_TIMEOUT` (seconds) | 5400 |
-   | "yolo", "skip permissions" | `COOKEPIC_PERMISSION_MODE=bypassPermissions` | `auto` |
-   | "use \<model\>" | `COOKEPIC_MODEL` | harness default |
-   | "fleet memory 12G", "half the CPU" | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50 |
-   | "cap at 80 dispatches" | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run) | 50 |
-   | "5 attempts per child" | `COOKEPIC_MAX_ATTEMPTS` | 3 |
-   | "no push", "local-only", "push at the end" | `COOKEPIC_NO_PUSH=1` | unset |
+   | User says                                       | Environment variable                                                  | Default                                                        |
+   | ----------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------- |
+   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                      |
+   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                             |
+   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                            |
+   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                       |
+   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                          |
+   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode) |
+   | "2h per worker"                                 | `COOKEPIC_WORKER_TIMEOUT` (seconds)                                   | 5400                                                           |
+   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                         |
+   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | harness default                                                |
+   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                  |
+   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                             |
+   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                              |
+   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                          |
 
    `COOKEPIC_NO_PUSH=1` disables every push: the coordinator fast-forwards the
    base branch locally after each gated merge but never pushes it, workers are
@@ -127,22 +127,26 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
      exclusive use of the repo, like ralph.
 
 4. **Create the run directory** (never in the project tree):
+
    ```bash
    RUN_DIR=$(mktemp -d "/var/tmp/cook-epic.$(date +%Y%m%d-%H%M%S).XXXXXX")
    ```
 
 5. **Select the harness yourself; never ask the user.** Running in Kimi Code:
    `COOKEPIC_HARNESS=kimi`. Claude Code: `claude`. ccx: `ccx`. Codex: `codex`.
+   OpenCode: `opencode`.
 
 6. **Resolve the runner from this skill, then launch from the project root.** Derive `SKILL_DIR` from the directory containing the `SKILL.md` you loaded. Use `${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}`; this lets callers pin a specific copy with `COOKEPIC_RUNNER`. Only when the loaded skill path is unavailable or ambiguous, fall back to `~/.agents/skills/cook-epic/run.sh`.
 
    In a server or remote harness, detach the coordinator by default so the OS
    owns it after the chat session closes:
+
    ```bash
    cd <project-root> && nohup setsid env COOKEPIC_EPIC=<epic> \
      COOKEPIC_HARNESS=<harness> \
      "${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}" "$RUN_DIR" >/dev/null 2>&1 &
    ```
+
    Add only the optional variables the user requested (plus
    `COOKEPIC_SEQUENTIAL` / `COOKEPIC_SIBLINGS` when step 2 chose sequential)
    after `env`. In a plain interactive CLI, a non-detached launch is still fine
@@ -304,7 +308,7 @@ reboot) none of that runs, so before you touch anything:
 ```bash
 # Is a worker still alive? Check the WORKER, not run.sh.
 systemctl --user list-units --all 'cook-epic-*.scope'
-ps -eo pid,etimes,args | grep -E '[c]laude -p|[c]odex exec|[k]imi -p'
+ps -eo pid,etimes,args | grep -E '[c]laude -p|[c]odex exec|[k]imi -p|[o]pencode run'
 ```
 
 Until that comes back empty, the checkout belongs to that worker. Do not clean
@@ -334,7 +338,7 @@ landed.
   another agent) pushes to the base branch mid-run, the loop stops with a
   reconciliation error rather than guessing.
 - Budgets are soft: the cap stops NEW dispatches; in-flight workers finish.
-  Cost is only tracked on claude/ccx; kimi and codex workers report no spend.
+  Cost is only tracked on claude/ccx; kimi, codex, and opencode workers report no spend.
 - Workers share one beads database and one `node_modules`. If a child adds a
   dependency, expect the integration gate to need an install — this is the
   known sharp edge; watch for it in parked merges.

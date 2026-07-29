@@ -12,7 +12,7 @@
 #
 # Environment (all optional unless noted):
 #   COOKEPIC_EPIC              beads epic id                       (REQUIRED)
-#   COOKEPIC_HARNESS           auto, kimi, claude, ccx, or codex   (default auto)
+#   COOKEPIC_HARNESS           auto, kimi, claude, ccx, codex, or opencode (default auto)
 #   COOKEPIC_WORKERS           max concurrent workers              (default 3)
 #   COOKEPIC_MAX_DISPATCHES    global spawn cap                    (default 50)
 #   COOKEPIC_WORKER_TIMEOUT    per-worker timeout, seconds         (default 5400; 0 = none)
@@ -25,6 +25,8 @@
 #   COOKEPIC_MEMORY_HIGH       cook-epic.slice MemoryHigh              (default 60%)
 #   COOKEPIC_PERMISSION_MODE   auto or bypassPermissions           (default auto)
 #   COOKEPIC_MODEL             harness-native model override
+#   COOKEPIC_BIN               selected harness binary override
+#   OPENCODE_BIN               OpenCode binary                     (default opencode)
 #   COOKEPIC_SPAWN_DELAY       seconds between dispatches          (default 2)
 #   COOKEPIC_BUDGET_USD        soft spend cap (claude/ccx only; stops new dispatches)
 #   COOKEPIC_WORKER_CMD        test hook: run this instead of a harness
@@ -165,7 +167,7 @@ detect_ccx_environment() {
 
 detect_harness() {
   case "${COOKEPIC_HARNESS:-auto}" in
-    kimi|claude|codex) printf '%s\n' "$COOKEPIC_HARNESS"; return ;;
+    kimi|claude|codex|opencode) printf '%s\n' "$COOKEPIC_HARNESS"; return ;;
     ccx) detect_ccx_environment && { printf 'ccx\n'; return; } || return 3 ;;
     auto|'') ;;
     *) return 2 ;;
@@ -180,11 +182,17 @@ detect_harness() {
       kimi|kimi-*) printf 'kimi\n'; return ;;
       codex|codex-*) printf 'codex\n'; return ;;
       claude|claude-*) printf 'claude\n'; return ;;
+      opencode|opencode-*) printf 'opencode\n'; return ;;
     esac
     pid=${parent//[[:space:]]/}
   done
-  if [ -n "${CODEX_THREAD_ID:-}" ]; then printf 'codex\n'
-  elif [ "${CLAUDECODE:-}" = 1 ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then printf 'claude\n'
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ -z "${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    printf 'codex\n'
+  elif [ -z "${CODEX_THREAD_ID:-}" ] && { [ "${CLAUDECODE:-}" = 1 ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; }; then
+    printf 'claude\n'
+  elif [ -z "${CODEX_THREAD_ID:-}${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ] \
+    && [ -n "${OPENCODE:-}${OPENCODE_PID:-}" ]; then
+    printf 'opencode\n'
   else return 1; fi
 }
 
@@ -193,9 +201,9 @@ if [ -n "$WORKER_CMD" ]; then
 else
   HARNESS=$(detect_harness) || {
     case $? in
-      2) die "invalid COOKEPIC_HARNESS ${COOKEPIC_HARNESS:-}" 'use auto, kimi, claude, ccx, or codex' ;;
+      2) die "invalid COOKEPIC_HARNESS ${COOKEPIC_HARNESS:-}" 'use auto, kimi, claude, ccx, codex, or opencode' ;;
       3) die 'COOKEPIC_HARNESS=ccx requires the inherited ccx proxy environment' 'launch from ccx' ;;
-      *) die 'could not identify the invoking harness' 'set COOKEPIC_HARNESS to kimi, claude, ccx, or codex' ;;
+      *) die 'could not identify the invoking harness' 'set COOKEPIC_HARNESS to kimi, claude, ccx, codex, or opencode' ;;
     esac
   }
 fi
@@ -204,10 +212,20 @@ case "$HARNESS" in
   kimi)       AGENT_BIN="${COOKEPIC_BIN:-kimi}";   COST_SUPPORTED=0 ;;
   claude|ccx) AGENT_BIN="${COOKEPIC_BIN:-claude}"; COST_SUPPORTED=1 ;;
   codex)      AGENT_BIN="${COOKEPIC_BIN:-codex}";  COST_SUPPORTED=0 ;;
+  opencode)   AGENT_BIN="${COOKEPIC_BIN:-${OPENCODE_BIN:-opencode}}"; COST_SUPPORTED=0 ;;
   worker-cmd) AGENT_BIN="$WORKER_CMD";             COST_SUPPORTED=0 ;;
 esac
 command -v "$AGENT_BIN" >/dev/null 2>&1 || die "harness binary not found: $AGENT_BIN" 'install it or set COOKEPIC_BIN'
 [ -n "$BUDGET" ] && [ "$COST_SUPPORTED" -eq 0 ] && say "WARNING: budget not enforceable on $HARNESS (no cost reporting); ignoring COOKEPIC_BUDGET_USD"
+
+if [ "$HARNESS" = opencode ]; then
+  case "$PERM_MODE" in
+    # OpenCode has one unattended permission switch. Both Cook Epic modes map
+    # to --auto; bypassPermissions is accepted for parity, not as a stronger mode.
+    auto|bypassPermissions) ;;
+    *) die "unsupported OpenCode permission mode: $PERM_MODE" 'use auto or bypassPermissions' ;;
+  esac
+fi
 
 # --------------------------------------------------------------- run lock ----
 # MIRRORED BLOCK — cook-epic/run.sh and ralph/run.sh carry an identical copy.
@@ -776,6 +794,10 @@ spawn_worker() { # <child> <title>
         esac
         [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
         fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" exec --json "$(<"$prompt")" >"$artifact" 2>>"$LOG" ;;
+      opencode)
+        args=(run --format json --auto)
+        [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
+        fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" >"$artifact" 2>>"$LOG" ;;
     esac
   ) &
   pid=$!
