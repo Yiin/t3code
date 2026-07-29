@@ -45,7 +45,7 @@ Capture the returned id (e.g. `bd-1a2b3c`) — call it `$EPIC` below.
 
 ### 2. Investigate in depth (fan-out)
 
-Decompose the subject into **3–6 investigation areas** — the facets that actually matter for _this_ subject, not a fixed checklist. Typical facets: current-state/codebase recon, data model, external APIs/constraints, UI surface, testing strategy, migration/rollout, risks and unknowns.
+Decompose the subject into **3–6 investigation areas** — the facets that actually matter for *this* subject, not a fixed checklist. Typical facets: current-state/codebase recon, data model, external APIs/constraints, UI surface, testing strategy, migration/rollout, risks and unknowns.
 
 #### Investigation ownership
 
@@ -74,49 +74,26 @@ Use a structured `schema` so investigators return data, not prose, when using `W
 
 ```js
 export const meta = {
-  name: "plan-epic-investigate",
-  description: "Fan out investigators over facets of an epic and return child-issue specs",
-  phases: [{ title: "Investigate" }],
-};
+  name: 'plan-epic-investigate',
+  description: 'Fan out investigators over facets of an epic and return child-issue specs',
+  phases: [{ title: 'Investigate' }],
+}
 // Inline the epic id and full area briefs here — no args dependency.
-const EPIC = "bd-xxxxxx";
+const EPIC = 'bd-xxxxxx'
 const AREAS = [
-  { key: "area-1", brief: `...self-contained brief with the evidence and questions...` },
+  { key: 'area-1', brief: `...self-contained brief with the evidence and questions...` },
   // one entry per investigation area
-];
-const ISSUE = {
-  type: "object",
-  required: ["findings", "issues"],
-  properties: {
-    findings: { type: "string" },
-    issues: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["title", "description", "acceptance"],
-        properties: {
-          title: { type: "string" },
-          description: { type: "string" },
-          acceptance: { type: "string" },
-          depends_on: { type: "array", items: { type: "string" } },
-        },
-      },
-    },
-  },
-};
-const results = await parallel(
-  AREAS.map(
-    (a) => () =>
-      agent(
-        `Investigate for epic ${EPIC}. ${a.brief}\nReturn findings (cite file:line) and self-contained child-issue specs.`,
-        { label: `investigate:${a.key}`, phase: "Investigate", schema: ISSUE },
-      ),
-  ),
-);
-return results.map((r, i) => ({
-  area: AREAS[i].key,
-  result: r ?? "FAILED — dispatch a gap investigator for this area",
-}));
+]
+const ISSUE = { type: 'object', required: ['findings', 'issues'], properties: {
+  findings: { type: 'string' },
+  issues: { type: 'array', items: { type: 'object',
+    required: ['title', 'description', 'acceptance'],
+    properties: { title: {type:'string'}, description: {type:'string'},
+      acceptance: {type:'string'}, depends_on: {type:'array', items:{type:'string'}} } } } } }
+const results = await parallel(AREAS.map(a => () =>
+  agent(`Investigate for epic ${EPIC}. ${a.brief}\nReturn findings (cite file:line) and self-contained child-issue specs.`,
+    { label: `investigate:${a.key}`, phase: 'Investigate', schema: ISSUE })))
+return results.map((r, i) => ({ area: AREAS[i].key, result: r ?? 'FAILED — dispatch a gap investigator for this area' }))
 ```
 
 Read the results yourself in the main thread — you own synthesis, the user can't see agent output.
@@ -126,7 +103,7 @@ Read the results yourself in the main thread — you own synthesis, the user can
 In the main thread:
 
 - **Dedupe and merge** overlapping proposals across areas.
-- **Order** them: pick a sensible sequence, and encode hard ordering as dependencies so `bd ready --parent $EPIC` only surfaces truly-claimable work. `bd link <later> <earlier>` means _earlier blocks later_.
+- **Order** them: pick a sensible sequence, and encode hard ordering as dependencies so `bd ready --parent $EPIC` only surfaces truly-claimable work. `bd link <later> <earlier>` means *earlier blocks later*.
 - **Right-size**: each child is one `/cook-it`-able unit — concrete file-level changes, its own tests, a clear done state. Split anything too big.
 - **Mark research children**: when a child's deliverable is knowledge, not code (recon, API exploration, a spike), title it `Research: …` or give it the `research` label, and write its acceptance as the questions it must answer. Runners expect its findings as a `bd comment` on the child and zero commits — an unmarked research child fails cook-epic's commits check and burns its retry budget.
 
@@ -137,7 +114,7 @@ description, acceptance, priority, depends_on}` before any Beads writes.
 
 - For one or two children, the main thread may create and link them directly.
 - For **more than two children**, the main thread must not run the child `bd
-create` or `bd link` commands. Fan out child creation to writer agents in
+  create` or `bd link` commands. Fan out child creation to writer agents in
   parallel.
 - Give each writer only the repo root, epic id, and the complete normalized spec
   for **one child**. A writer may receive two children only when they are tightly
@@ -261,7 +238,7 @@ skill: ralph
 args: /cook-it <EPIC>
 ```
 
-No `-` separator here: skill stacking is a _typed-message parser_ behavior, so an argument
+No `-` separator here: skill stacking is a *typed-message parser* behavior, so an argument
 passed through the Skill tool never trips it. Then follow ralph's own reporting contract —
 relay each finished iteration, stay quiet in between.
 
@@ -298,7 +275,7 @@ No prose needed in it: `/cook-it <epic-id>` detects `issue_type: epic` and runs 
 of the Handoff Protocol above, and ralph's runner already appends the one-unit-of-work /
 commit / `RALPH_DONE` rules to every iteration's prompt.
 
-**Keep the `-`.** Claude Code _stacks_ skills typed back to back: `/ralph /cook-it <EPIC>`
+**Keep the `-`.** Claude Code *stacks* skills typed back to back: `/ralph /cook-it <EPIC>`
 expands both, handing the trailing `<EPIC>` to each as `$ARGUMENTS`. Ralph would get a bare
 epic id as its loop prompt (not `/cook-it <EPIC>`), and cook-it would fire in the foreground
 at the same time. Expansion stops at the first token that isn't an inline skill, so the `-`
@@ -320,11 +297,11 @@ done
 ## Why the handoff lives on the epic
 
 - **One source of truth per epic.** Goal, architecture, live state, and "what next" sit on the bead, not in a file that collides when several epics are active.
-- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so sequential ralph iterations never race a read-modify-write. The description holds the _stable_ doc; only the shared-brain Context section is edited, and only on a real decision change.
+- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so sequential ralph iterations never race a read-modify-write. The description holds the *stable* doc; only the shared-brain Context section is edited, and only on a real decision change.
 - **The last note is the pointer.** Instead of maintaining a mutable "Next up" block, each iteration ends its note with `Next: …`. The freshest instruction is always the last line of the log.
 
 ## Cautions
 
 - Keep the Handoff Protocol text stable across epics. If you improve it, improve it here in the skill so every future epic gets the better version, rather than hand-editing one epic.
 - Don't over-decompose. Children that are too fine create loop overhead; children that are too coarse choke `/cook-it`. One reviewable commit's worth of work each is the target.
-- Order with dependencies, not priorities alone — `ralph` claims by readiness, so a child that must come first has to _block_ the others, or it can be picked early; priorities only break ties within the ready frontier.
+- Order with dependencies, not priorities alone — `ralph` claims by readiness, so a child that must come first has to *block* the others, or it can be picked early; priorities only break ties within the ready frontier.
