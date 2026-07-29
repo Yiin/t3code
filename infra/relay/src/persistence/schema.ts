@@ -1,6 +1,6 @@
 import type {
   RelayAgentActivityAggregateState,
-  RelayAgentActivityState,
+  RelayPublishedActivityState,
   RelayAgentAwarenessPreferences,
 } from "@t3tools/contracts/relay";
 import {
@@ -133,7 +133,7 @@ export const relayAgentActivityRows = pgTable(
     environmentId: varchar("environment_id", { length: 191 }).notNull(),
     environmentPublicKey: text("environment_public_key").notNull(),
     threadId: varchar("thread_id", { length: 191 }).notNull(),
-    stateJson: jsonb("state_json").notNull().$type<RelayAgentActivityState>(),
+    stateJson: jsonb("state_json").notNull().$type<RelayPublishedActivityState>(),
     updatedAt: varchar("updated_at", { length: 64 }).notNull(),
     createdAt: varchar("created_at", { length: 64 }).notNull(),
   },

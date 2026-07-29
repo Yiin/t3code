@@ -29,6 +29,7 @@ import {
 } from "../../persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
+import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import {
   EpicRunLock,
   EpicRunLockError,
@@ -201,6 +202,7 @@ function createHarness(input: {
   readonly preflightError?: EpicRunPreflightError;
   readonly upsertDelayMs?: number;
   readonly readyOutput?: string;
+  readonly onEpicRunPublish?: (run: import("@t3tools/contracts").EpicRun) => Effect.Effect<void>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs);
   for (const run of input.seedRuns ?? []) {
@@ -436,6 +438,13 @@ function createHarness(input: {
     Layer.provide(snapshotLayer),
     Layer.provide(processRunnerLayer),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
+    Layer.provide(
+      Layer.succeed(AgentAwarenessRelay, {
+        publishThread: () => Effect.void,
+        publishEpicRun: input.onEpicRunPublish ?? (() => Effect.void),
+        start: () => Effect.void,
+      }),
+    ),
     Layer.provide(NodeServices.layer),
   );
 
@@ -470,6 +479,37 @@ const startRun = (maxIterations = 10) =>
 // between attempts, so it needs the real clock rather than a virtual one that
 // only advances when a test tells it to.
 describe("EpicRunner", () => {
+  it.live("publishes each persisted run transition", () => {
+    const publishedStatuses: string[] = [];
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      onEpicRunPublish: (run) =>
+        Effect.sync(() => {
+          publishedStatuses.push(run.status);
+        }),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      yield* waitFor(() => publishedStatuses.includes("done"));
+      assert.deepStrictEqual(publishedStatuses, ["running", "done"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps running when epic activity publication fails", () => {
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      onEpicRunPublish: () => Effect.die("relay unavailable"),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "done");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("chooses the first direct-ready child and ignores an earlier grandchild", () => {
     const harness = createHarness({
       script: [{ text: "RALPH_DONE", head: "head-0" }],
@@ -484,7 +524,9 @@ describe("EpicRunner", () => {
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
         /Cook exactly `direct-a` this iteration\.$/,
       );
-      const readyRequest = harness.processRequests.find((request) => request.command === "bd")!;
+      const readyRequest = harness.processRequests.find(
+        (request) => request.command === "bd" && request.args[0] === "ready",
+      )!;
       assert.deepStrictEqual(readyRequest.args, ["ready", "--parent", "epic-1", "--json"]);
       assert.strictEqual(readyRequest.cwd, "/tmp/epic-runner-repo");
     }).pipe(Effect.provide(harness.layer));

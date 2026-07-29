@@ -8,7 +8,7 @@ import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 import * as HttpApiSecurity from "effect/unstable/httpapi/HttpApiSecurity";
 import * as OpenApi from "effect/unstable/httpapi/OpenApi";
 
-import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, EpicRunId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 
 export const RelayAgentAwarenessPlatform = Schema.Literal("ios");
@@ -22,6 +22,7 @@ export const RelayAgentAwarenessPhase = Schema.Literals([
   "completed",
   "failed",
   "stale",
+  "stopped",
 ]);
 export type RelayAgentAwarenessPhase = typeof RelayAgentAwarenessPhase.Type;
 
@@ -32,6 +33,7 @@ export const RelayAgentAwarenessPreferences = Schema.Struct({
   notifyOnInput: Schema.Boolean,
   notifyOnCompletion: Schema.Boolean,
   notifyOnFailure: Schema.Boolean,
+  runEventsEnabled: Schema.optional(Schema.Boolean),
 });
 export type RelayAgentAwarenessPreferences = typeof RelayAgentAwarenessPreferences.Type;
 
@@ -106,6 +108,39 @@ export const RelayAgentActivityState = Schema.Struct({
 });
 export type RelayAgentActivityState = typeof RelayAgentActivityState.Type;
 
+export const RelayEpicRunActivityPhase = Schema.Literals([
+  "starting",
+  "running",
+  "waiting_for_approval",
+  "waiting_for_input",
+  "stopped",
+  "completed",
+  "failed",
+  "stale",
+]);
+export type RelayEpicRunActivityPhase = typeof RelayEpicRunActivityPhase.Type;
+
+export const RelayEpicRunActivityState = Schema.Struct({
+  kind: Schema.Literal("epic_run"),
+  environmentId: EnvironmentId,
+  runId: EpicRunId,
+  epicId: TrimmedNonEmptyString,
+  epicTitle: TrimmedNonEmptyString,
+  phase: RelayEpicRunActivityPhase,
+  iteration: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  maxIterations: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  childTitle: Schema.optional(TrimmedNonEmptyString),
+  updatedAt: TrimmedNonEmptyString,
+  deepLink: TrimmedNonEmptyString,
+});
+export type RelayEpicRunActivityState = typeof RelayEpicRunActivityState.Type;
+
+export const RelayPublishedActivityState = Schema.Union([
+  RelayAgentActivityState,
+  RelayEpicRunActivityState,
+]);
+export type RelayPublishedActivityState = typeof RelayPublishedActivityState.Type;
+
 export const RelayAgentActivityAggregateRow = Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
@@ -119,12 +154,40 @@ export const RelayAgentActivityAggregateRow = Schema.Struct({
 });
 export type RelayAgentActivityAggregateRow = typeof RelayAgentActivityAggregateRow.Type;
 
+export const RelayEpicRunActivityAggregateRow = Schema.Struct({
+  kind: Schema.Literal("epic_run"),
+  environmentId: EnvironmentId,
+  // Legacy display fields stay present so older widget bundles can render a
+  // run row as ordinary activity while newer bundles use the run fields.
+  threadId: ThreadId,
+  projectTitle: TrimmedNonEmptyString,
+  threadTitle: TrimmedNonEmptyString,
+  modelTitle: TrimmedNonEmptyString,
+  runId: EpicRunId,
+  epicId: TrimmedNonEmptyString,
+  epicTitle: TrimmedNonEmptyString,
+  phase: RelayEpicRunActivityPhase,
+  iteration: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  maxIterations: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  childTitle: Schema.optional(TrimmedNonEmptyString),
+  status: TrimmedNonEmptyString,
+  updatedAt: TrimmedNonEmptyString,
+  deepLink: TrimmedNonEmptyString,
+});
+export type RelayEpicRunActivityAggregateRow = typeof RelayEpicRunActivityAggregateRow.Type;
+
+export const RelayPublishedActivityAggregateRow = Schema.Union([
+  RelayAgentActivityAggregateRow,
+  RelayEpicRunActivityAggregateRow,
+]);
+export type RelayPublishedActivityAggregateRow = typeof RelayPublishedActivityAggregateRow.Type;
+
 export const RelayAgentActivityAggregateState = Schema.Struct({
   title: TrimmedNonEmptyString,
   subtitle: TrimmedNonEmptyString,
   activeCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   updatedAt: TrimmedNonEmptyString,
-  activities: Schema.Array(RelayAgentActivityAggregateRow),
+  activities: Schema.Array(RelayPublishedActivityAggregateRow),
 });
 export type RelayAgentActivityAggregateState = typeof RelayAgentActivityAggregateState.Type;
 
@@ -196,6 +259,15 @@ export type RelayAgentActivityPublishProofPayload =
   typeof RelayAgentActivityPublishProofPayload.Type;
 export type RelayAgentActivityPublishProof = string;
 
+export const RelayEpicRunActivityPublishProofPayload = Schema.Struct({
+  ...RelaySignedJwtRegisteredClaims,
+  environmentId: EnvironmentId,
+  epicId: TrimmedNonEmptyString,
+  state: Schema.NullOr(RelayEpicRunActivityState),
+});
+export type RelayEpicRunActivityPublishProofPayload =
+  typeof RelayEpicRunActivityPublishProofPayload.Type;
+
 export const RelayAgentActivityPublishRequest = Schema.Struct({
   state: Schema.NullOr(RelayAgentActivityState).annotate({
     description: "Current agent-awareness state, or null to remove the published state.",
@@ -205,6 +277,16 @@ export const RelayAgentActivityPublishRequest = Schema.Struct({
   }),
 }).annotate({ description: "Publishes a signed agent-awareness update from an environment." });
 export type RelayAgentActivityPublishRequest = typeof RelayAgentActivityPublishRequest.Type;
+
+export const RelayEpicRunActivityPublishRequest = Schema.Struct({
+  state: Schema.NullOr(RelayEpicRunActivityState).annotate({
+    description: "Current epic-run state, or null to remove the published state.",
+  }),
+  proof: TrimmedNonEmptyString.annotate({
+    description: "Environment-signed JWT covering this published epic-run state.",
+  }),
+}).annotate({ description: "Publishes a signed epic-run update from an environment." });
+export type RelayEpicRunActivityPublishRequest = typeof RelayEpicRunActivityPublishRequest.Type;
 
 export const RelayEnvironmentLinkScope = Schema.Literals([
   "agent_activity_notifications",
@@ -1017,6 +1099,19 @@ export const RelayServerGroup = HttpApiGroup.make("server")
         error: RelayAgentActivityPublishErrors,
       },
     ).annotate(OpenApi.Summary, "Publish agent activity"),
+    HttpApiEndpoint.post(
+      "publishEpicRunActivity",
+      "/v1/environments/:environmentId/epics/:epicId/agent-activity",
+      {
+        params: Schema.Struct({
+          environmentId: EnvironmentId,
+          epicId: TrimmedNonEmptyString,
+        }),
+        payload: RelayEpicRunActivityPublishRequest,
+        success: RelayPublishResponse,
+        error: RelayAgentActivityPublishErrors,
+      },
+    ).annotate(OpenApi.Summary, "Publish epic-run activity"),
   )
   .annotate(OpenApi.Description, "Environment-authenticated activity publication.")
   .middleware(RelayEnvironmentAuth);

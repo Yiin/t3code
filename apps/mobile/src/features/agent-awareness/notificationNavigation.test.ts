@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { consumeLastAgentNotificationResponse } from "./notificationResponseConsumer";
 
 import {
+  encodeEpicDeepLink,
+  encodeThreadDeepLink,
   extractAgentNotificationDeepLink,
   routeAgentNotificationResponseOnce,
 } from "./notificationPayload";
@@ -92,6 +94,35 @@ describe("consumeLastAgentNotificationResponse", () => {
 });
 
 describe("extractAgentNotificationDeepLink", () => {
+  it("round-trips encoded thread and epic routes", () => {
+    const thread = encodeThreadDeepLink({ environmentId: "env 1", threadId: "thread/2" });
+    const epic = encodeEpicDeepLink({ environmentId: "env 1", epicId: "epic/2" });
+
+    expect(extractAgentNotificationDeepLink(responseWithData({ deepLink: thread }))).toBe(thread);
+    expect(extractAgentNotificationDeepLink(responseWithData({ deepLink: epic }))).toBe(epic);
+  });
+
+  it("uses explicit epic deep links from APNs payload data", () => {
+    expect(
+      extractAgentNotificationDeepLink(
+        responseWithData({
+          deepLink: "/epics/env%201/epic%2F2",
+        }),
+      ),
+    ).toBe("/epics/env%201/epic%2F2");
+  });
+
+  it("falls back to the epic route from environment and epic ids", () => {
+    expect(
+      extractAgentNotificationDeepLink(
+        responseWithData({
+          environmentId: "env 1",
+          epicId: "epic/2",
+        }),
+      ),
+    ).toBe("/epics/env%201/epic%2F2");
+  });
+
   it("uses explicit deep links from APNs payload data", () => {
     expect(
       extractAgentNotificationDeepLink(
@@ -150,11 +181,28 @@ describe("extractAgentNotificationDeepLink", () => {
     expect(
       extractAgentNotificationDeepLink(responseWithData({ deepLink: "/threads/env/thread?x=1" })),
     ).toBeNull();
+    expect(
+      extractAgentNotificationDeepLink(responseWithData({ deepLink: "/epics/env/epic#fragment" })),
+    ).toBeNull();
+    expect(
+      extractAgentNotificationDeepLink(responseWithData({ deepLink: "/epics/env/%E0%A4%A" })),
+    ).toBeNull();
     expect(extractAgentNotificationDeepLink({})).toBeNull();
   });
 });
 
 describe("routeAgentNotificationResponseOnce", () => {
+  it("routes an epic response from a notification listener or cold start", () => {
+    const navigations: Array<string> = [];
+    routeAgentNotificationResponseOnce({
+      handledResponseIds: new Set<string>(),
+      response: responseWithData({ environmentId: "env", epicId: "epic" }, "run-finished"),
+      navigate: (deepLink) => navigations.push(deepLink),
+    });
+
+    expect(navigations).toEqual(["/epics/env/epic"]);
+  });
+
   it("does not navigate twice when the initial and listener responses refer to one notification", () => {
     const handledResponseIds = new Set<string>();
     const navigations: Array<string> = [];

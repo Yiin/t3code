@@ -30,7 +30,9 @@ import {
   type AgentActivityRowProps,
 } from "./AgentActivity";
 
-function makeRow(overrides: Partial<AgentActivityRowProps>): AgentActivityRowProps {
+function makeRow(
+  overrides: Partial<Exclude<AgentActivityRowProps, { readonly kind: "epic_run" }>>,
+): AgentActivityRowProps {
   return {
     environmentId: "env-1",
     threadId: "thread-1",
@@ -187,6 +189,35 @@ describe("AgentActivity widget layout", () => {
     );
   });
 
+  it("renders epic title and iteration context for a run row", () => {
+    const layout = AgentActivity(
+      {
+        ...props,
+        activities: [
+          {
+            kind: "epic_run",
+            environmentId: "env-1",
+            runId: "run-1",
+            epicId: "epic-1",
+            epicTitle: "Ship mobile notifications",
+            phase: "running",
+            iteration: 2,
+            maxIterations: 5,
+            childTitle: "Wire Live Activities",
+            status: "Running",
+            updatedAt: "2026-05-25T13:07:00.000Z",
+            deepLink: "/epics/env-1/epic-1",
+          },
+        ],
+      },
+      environment as never,
+    );
+    const banner = JSON.stringify(layout.banner);
+    expect(banner).toContain("Ship mobile notifications");
+    expect(banner).toContain("Iteration 2/5 — Wire Live Activities");
+    expect(banner).toContain('"widgetURL":"t3code://epics/env-1/epic-1"');
+  });
+
   it("omits the deep link for unsafe paths and empty aggregates", () => {
     expect(JSON.stringify(AgentActivity(props, environment as never))).not.toContain("widgetURL");
     expect(
@@ -236,6 +267,66 @@ describe("AgentActivity widget layout", () => {
     expect(JSON.stringify(layout.compactTrailing)).toContain("Failed");
     expect(JSON.stringify(layout.expandedLeading)).toContain("Failed");
     expect(JSON.stringify(layout.minimal)).toContain("xmark.octagon.fill");
+  });
+
+  it("renders stopped epic runs as a neutral stopped outcome", () => {
+    const stoppedRun: AgentActivityRowProps = {
+      kind: "epic_run",
+      environmentId: "env-1",
+      runId: "run-1",
+      epicId: "epic-1",
+      epicTitle: "Ship mobile notifications",
+      phase: "stopped",
+      iteration: 2,
+      maxIterations: 5,
+      childTitle: "Wire Live Activities",
+      status: "Stopped",
+      updatedAt: "2026-05-25T13:07:00.000Z",
+      deepLink: "/epics/env-1/epic-1",
+    };
+    const layout = AgentActivity(
+      { ...props, activeCount: 0, activities: [stoppedRun] },
+      environment as never,
+    );
+
+    expect(JSON.stringify(layout.banner)).toContain("Epic run stopped");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("Stopped");
+    expect(JSON.stringify(layout.expandedLeading)).toContain("Stopped");
+    expect(JSON.stringify(layout.minimal)).toContain("pause.circle.fill");
+    expect(JSON.stringify(layout)).not.toContain("#6ee7b7");
+    expect(JSON.stringify(layout)).not.toContain("checkmark.circle.fill");
+  });
+
+  it("lets a stopped run dominate an earlier completed row", () => {
+    const layout = AgentActivity(
+      {
+        ...props,
+        activeCount: 0,
+        activities: [
+          makeRow({ phase: "completed", status: "Done" }),
+          {
+            kind: "epic_run",
+            environmentId: "env-1",
+            runId: "run-1",
+            epicId: "epic-1",
+            epicTitle: "Ship mobile notifications",
+            phase: "stopped",
+            iteration: 2,
+            maxIterations: 5,
+            status: "Stopped",
+            updatedAt: "2026-05-25T13:07:00.000Z",
+            deepLink: "/epics/env-1/epic-1",
+          },
+        ],
+      },
+      environment as never,
+    );
+
+    expect(JSON.stringify(layout.banner)).toContain("Epic run stopped");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("Stopped");
+    expect(JSON.stringify(layout.compactTrailing)).toContain("secondary");
+    expect(JSON.stringify(layout.minimal)).toContain("pause.circle.fill");
+    expect(JSON.stringify(layout.minimal)).not.toContain("checkmark.circle.fill");
   });
 
   it("lets a failure dominate mixed finished outcomes across every presentation", () => {

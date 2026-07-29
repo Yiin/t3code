@@ -41,6 +41,7 @@ export const ApnsNotificationPayload = Schema.Struct({
   body: Schema.String,
   environmentId: Schema.String,
   threadId: Schema.String,
+  epicId: Schema.optional(Schema.String),
   deepLink: Schema.String,
   // Optional so delivery jobs queued by older relay builds still decode.
   // New jobs use these fields to avoid delivering a stale Done/attention

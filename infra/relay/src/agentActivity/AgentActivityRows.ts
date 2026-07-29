@@ -1,5 +1,8 @@
-import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
-import { RelayAgentActivityState as RelayAgentActivityStateSchema } from "@t3tools/contracts/relay";
+import type {
+  RelayEpicRunActivityState,
+  RelayPublishedActivityState,
+} from "@t3tools/contracts/relay";
+import { RelayPublishedActivityState as RelayPublishedActivityStateSchema } from "@t3tools/contracts/relay";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -67,7 +70,7 @@ export class AgentActivityRows extends Context.Service<
   {
     readonly upsert: (input: {
       readonly environmentPublicKey: string;
-      readonly state: RelayAgentActivityState;
+      readonly state: RelayPublishedActivityState;
     }) => Effect.Effect<void, AgentActivityRowUpsertPersistenceError>;
     readonly pruneTerminal: (input: {
       readonly updatedBefore: string;
@@ -80,14 +83,14 @@ export class AgentActivityRows extends Context.Service<
     readonly listForUser: (input: {
       readonly userId: string;
     }) => Effect.Effect<
-      ReadonlyArray<RelayAgentActivityState>,
+      ReadonlyArray<RelayPublishedActivityState>,
       AgentActivityRowListPersistenceError
     >;
     readonly getForUserThread: (input: {
       readonly userId: string;
       readonly environmentId: string;
       readonly threadId: string;
-    }) => Effect.Effect<RelayAgentActivityState | null, AgentActivityRowListPersistenceError>;
+    }) => Effect.Effect<RelayPublishedActivityState | null, AgentActivityRowListPersistenceError>;
   }
 >()("t3code-relay/agentActivity/AgentActivityRows") {}
 
@@ -95,12 +98,20 @@ const decodeJsonString = Schema.decodeEffect(Schema.UnknownFromJsonString);
 const encodeJsonValue = Schema.encodeEffect(Schema.UnknownFromJsonString);
 
 const encodeRelayAgentActivityStateJson = Schema.encodeEffect(
-  Schema.fromJsonString(RelayAgentActivityStateSchema),
+  Schema.fromJsonString(RelayPublishedActivityStateSchema),
 );
 
 const decodeRelayAgentActivityStateJson = Schema.decodeUnknownOption(
-  Schema.fromJsonString(RelayAgentActivityStateSchema),
+  Schema.fromJsonString(RelayPublishedActivityStateSchema),
 );
+
+export function activityStateStorageKey(state: RelayPublishedActivityState): string {
+  return isEpicRunState(state) ? `epic:${state.epicId}` : state.threadId;
+}
+
+function isEpicRunState(state: RelayPublishedActivityState): state is RelayEpicRunActivityState {
+  return "kind" in state && state.kind === "epic_run";
+}
 
 export const make = Effect.gen(function* () {
   const db = yield* RelayDb.RelayDb;
@@ -109,17 +120,17 @@ export const make = Effect.gen(function* () {
     upsert: Effect.fn("relay.agent_activity_rows.upsert")(function* (input) {
       yield* Effect.annotateCurrentSpan({
         "relay.environment_id": input.state.environmentId,
-        "relay.thread_id": input.state.threadId,
+        "relay.activity_id": activityStateStorageKey(input.state),
       });
       const now = yield* DateTime.now;
       const stateJson = yield* encodeRelayAgentActivityStateJson(input.state).pipe(
         Effect.flatMap(decodeJsonString),
-        Effect.map(Function.cast<unknown, RelayAgentActivityState>),
+        Effect.map(Function.cast<unknown, RelayPublishedActivityState>),
         Effect.mapError(
           (cause) =>
             new AgentActivityRowUpsertPersistenceError({
               environmentId: input.state.environmentId,
-              threadId: input.state.threadId,
+              threadId: activityStateStorageKey(input.state),
               cause,
             }),
         ),
@@ -129,7 +140,7 @@ export const make = Effect.gen(function* () {
         .values({
           environmentId: input.state.environmentId,
           environmentPublicKey: input.environmentPublicKey,
-          threadId: input.state.threadId,
+          threadId: activityStateStorageKey(input.state),
           stateJson,
           updatedAt: input.state.updatedAt,
           createdAt: DateTime.formatIso(now),
@@ -150,7 +161,7 @@ export const make = Effect.gen(function* () {
             (cause) =>
               new AgentActivityRowUpsertPersistenceError({
                 environmentId: input.state.environmentId,
-                threadId: input.state.threadId,
+                threadId: activityStateStorageKey(input.state),
                 cause,
               }),
           ),
@@ -191,7 +202,7 @@ export const make = Effect.gen(function* () {
         .delete(relayAgentActivityRows)
         .where(
           and(
-            sql`${relayAgentActivityRows.stateJson} ->> 'phase' IN ('completed', 'failed')`,
+            sql`${relayAgentActivityRows.stateJson} ->> 'phase' IN ('completed', 'failed', 'stopped')`,
             lt(relayAgentActivityRows.updatedAt, input.updatedBefore),
           ),
         )

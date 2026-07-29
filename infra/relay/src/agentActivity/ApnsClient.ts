@@ -188,6 +188,7 @@ function makePushNotificationRequest(input: {
       },
       environmentId: input.notification.environmentId,
       threadId: input.notification.threadId,
+      ...(input.notification.epicId ? { epicId: input.notification.epicId } : {}),
       deepLink: input.notification.deepLink,
     },
   };

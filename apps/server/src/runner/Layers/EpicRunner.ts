@@ -31,6 +31,7 @@ import {
   type EpicRunIterationStatus,
 } from "../../persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
+import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import {
   EpicRunNotFoundError,
   EpicRunLaunchError,
@@ -72,6 +73,14 @@ const ReadyChildren = Schema.fromJsonString(
   ),
 );
 const decodeReadyChildren = Schema.decodeUnknownEffect(ReadyChildren);
+const decodeIssueTitle = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Struct({ title: Schema.String }),
+      Schema.Array(Schema.Struct({ title: Schema.String })),
+    ]),
+  ),
+);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -152,7 +161,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const crypto = yield* Crypto.Crypto;
     const preflight = yield* EpicRunPreflight;
     const runLock = yield* EpicRunLock;
+    const agentAwarenessRelay = yield* AgentAwarenessRelay;
     const leases = new Map<EpicRunId, EpicRunLockLease>();
+    const issueTitleCache = new Map<string, string>();
 
     const iterationTimeoutMs = Math.max(
       1,
@@ -266,16 +277,55 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       return undefined;
     });
 
-    const publishRun = (run: EpicRun) =>
-      enrichRun(run).pipe(
-        Effect.flatMap((enriched) => PubSub.publish(changes, enriched)),
-        Effect.asVoid,
+    const readIssueTitle = (cwd: string, issueId: string) => {
+      const cached = issueTitleCache.get(issueId);
+      if (cached) return Effect.succeed(cached);
+      return processRunner.run({ command: "bd", args: ["show", issueId, "--json"], cwd }).pipe(
+        Effect.flatMap((output) =>
+          Effect.try({
+            try: () => {
+              const decoded = decodeIssueTitle(output.stdout);
+              if (Option.isNone(decoded)) return issueId;
+              const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
+              const title = value?.title.trim() ?? "";
+              return title.length > 0 ? title : issueId;
+            },
+            catch: () => issueId,
+          }),
+        ),
+        Effect.orElseSucceed(() => issueId),
+        Effect.tap((title) => Effect.sync(() => issueTitleCache.set(issueId, title))),
+      );
+    };
+
+    const publishRunBestEffort = (run: TransportEpicRun) =>
+      Effect.gen(function* () {
+        const latestIssueId = run.recentIterations.at(-1)?.issueId ?? null;
+        const epicTitle = yield* readIssueTitle(run.cwd, run.epicId);
+        const childTitle =
+          latestIssueId === null ? undefined : yield* readIssueTitle(run.cwd, latestIssueId);
+        yield* agentAwarenessRelay.publishEpicRun({
+          ...run,
+          epicTitle,
+          ...(childTitle ? { childTitle } : {}),
+        });
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic runner activity publish failed", {
+            runId: run.runId,
+            epicId: run.epicId,
+            cause,
+          }),
+        ),
       );
 
     const saveRun = (run: EpicRun) =>
       store.upsertRun(run).pipe(
         Effect.mapError(storeError("upsertRun")),
-        Effect.flatMap(() => publishRun(run)),
+        Effect.flatMap(() => enrichRun(run)),
+        Effect.tap((enriched) => publishRunBestEffort(enriched)),
+        Effect.flatMap((enriched) => PubSub.publish(changes, enriched)),
+        Effect.asVoid,
       );
 
     const requireRun = (runId: EpicRunId) =>

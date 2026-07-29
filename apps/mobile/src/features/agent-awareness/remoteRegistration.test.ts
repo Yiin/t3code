@@ -258,6 +258,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
         notifyOnInput: true,
         notifyOnCompletion: true,
         notifyOnFailure: true,
+        runEventsEnabled: true,
       },
     });
   });
@@ -334,6 +335,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
         notifyOnInput: true,
         notifyOnCompletion: true,
         notifyOnFailure: true,
+        runEventsEnabled: true,
       },
     });
   });

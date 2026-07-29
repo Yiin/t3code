@@ -1,9 +1,12 @@
 import type {
   RelayAgentActivityAggregateState,
-  RelayAgentActivityState,
+  RelayEpicRunActivityState,
+  RelayPublishedActivityAggregateRow,
+  RelayPublishedActivityState,
   RelayDeliveryResult,
   RelayPublishResponse,
 } from "@t3tools/contracts/relay";
+import type { ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -38,7 +41,7 @@ export class AgentActivityPublisher extends Context.Service<
       readonly environmentId: string;
       readonly environmentPublicKey: string;
       readonly threadId: string;
-      readonly state: RelayAgentActivityState | null;
+      readonly state: RelayPublishedActivityState | null;
     }) => Effect.Effect<RelayPublishResponse, AgentActivityPublishError>;
     readonly replayForLiveActivityRegistration: (input: {
       readonly userId: string;
@@ -55,7 +58,7 @@ export const make = Effect.gen(function* () {
 
   const publishForDeliveryUser = Effect.fnUntraced(function* (input: {
     readonly deliveryUser: EnvironmentLinks.AgentAwarenessDeliveryUserRecord;
-    readonly state: RelayAgentActivityState | null;
+    readonly state: RelayPublishedActivityState | null;
     readonly nowMs: number;
   }) {
     const activeStates = yield* rows.listForUser({ userId: input.deliveryUser.userId });
@@ -181,7 +184,7 @@ export const make = Effect.gen(function* () {
   });
 });
 
-function statusForPhase(phase: RelayAgentActivityState["phase"]): string {
+function statusForPhase(phase: RelayPublishedActivityState["phase"]): string {
   switch (phase) {
     case "waiting_for_approval":
       return "Approval";
@@ -199,10 +202,38 @@ function statusForPhase(phase: RelayAgentActivityState["phase"]): string {
       return "Working";
     case "stale":
       return "Waiting";
+    case "stopped":
+      return "Stopped";
   }
 }
 
-function aggregateRowForState(state: RelayAgentActivityState) {
+function isEpicRunState(state: RelayPublishedActivityState): state is RelayEpicRunActivityState {
+  return "kind" in state && state.kind === "epic_run";
+}
+
+function aggregateRowForState(
+  state: RelayPublishedActivityState,
+): RelayPublishedActivityAggregateRow {
+  if (isEpicRunState(state)) {
+    return {
+      kind: state.kind,
+      environmentId: state.environmentId,
+      threadId: `epic:${state.epicId}` as ThreadId,
+      projectTitle: state.epicTitle,
+      threadTitle: state.childTitle ?? state.epicTitle,
+      modelTitle: "Epic runner",
+      runId: state.runId,
+      epicId: state.epicId,
+      epicTitle: state.epicTitle,
+      phase: state.phase,
+      iteration: state.iteration,
+      maxIterations: state.maxIterations,
+      ...(state.childTitle === undefined ? {} : { childTitle: state.childTitle }),
+      status: statusForPhase(state.phase),
+      updatedAt: state.updatedAt,
+      deepLink: state.deepLink,
+    };
+  }
   return {
     environmentId: state.environmentId,
     threadId: state.threadId,
@@ -216,7 +247,9 @@ function aggregateRowForState(state: RelayAgentActivityState) {
   };
 }
 
-function terminalAggregateState(state: RelayAgentActivityState): RelayAgentActivityAggregateState {
+function terminalAggregateState(
+  state: RelayPublishedActivityState,
+): RelayAgentActivityAggregateState {
   return sanitizeAgentActivityAggregateState({
     title: "T3 Code",
     subtitle: state.phase === "failed" ? "Agent work failed" : "Agent work completed",
@@ -231,7 +264,7 @@ function terminalAggregateState(state: RelayAgentActivityState): RelayAgentActiv
 // short enough that the activity list stays about live work.
 export const TERMINAL_AGENT_ACTIVITY_DISPLAY_TTL_MS = 15 * 60 * 1_000;
 
-function isRecentTerminalState(state: RelayAgentActivityState, nowMs: number): boolean {
+function isRecentTerminalState(state: RelayPublishedActivityState, nowMs: number): boolean {
   if (!isTerminalPhase(state)) {
     return false;
   }
@@ -246,8 +279,8 @@ function isRecentTerminalState(state: RelayAgentActivityState, nowMs: number): b
 }
 
 export function makeAggregateState(input: {
-  readonly activeStates: ReadonlyArray<RelayAgentActivityState>;
-  readonly terminalState: RelayAgentActivityState | null;
+  readonly activeStates: ReadonlyArray<RelayPublishedActivityState>;
+  readonly terminalState: RelayPublishedActivityState | null;
   readonly nowMs: number;
 }): RelayAgentActivityAggregateState | null {
   const activeStates = input.activeStates.filter(

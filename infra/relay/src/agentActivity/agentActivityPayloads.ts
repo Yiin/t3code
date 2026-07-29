@@ -1,15 +1,16 @@
 import type {
-  RelayAgentActivityAggregateRow,
+  RelayPublishedActivityAggregateRow,
+  RelayEpicRunActivityAggregateRow,
   RelayAgentActivityAggregateState,
-  RelayAgentActivityState,
+  RelayPublishedActivityState,
 } from "@t3tools/contracts/relay";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import type { ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
 
-export function isTerminalPhase(state: RelayAgentActivityState): boolean {
-  return state.phase === "completed" || state.phase === "failed";
+export function isTerminalPhase(state: RelayPublishedActivityState): boolean {
+  return state.phase === "completed" || state.phase === "failed" || state.phase === "stopped";
 }
 
 // Rows are only removed when their environment publishes a terminal state. An
@@ -23,7 +24,7 @@ const RUNNING_AGENT_ACTIVITY_ROW_TTL_MS = 2 * 60 * 60 * 1_000;
 const WAITING_AGENT_ACTIVITY_ROW_TTL_MS = 24 * 60 * 60 * 1_000;
 
 export function isExpiredAgentActivityState(
-  state: RelayAgentActivityState,
+  state: RelayPublishedActivityState,
   nowMs: number,
 ): boolean {
   const updatedAtMs = Option.match(DateTime.make(state.updatedAt), {
@@ -64,8 +65,19 @@ function sanitizeDeepLink(value: string): string {
 }
 
 export function sanitizeAgentActivityAggregateRow(
-  row: RelayAgentActivityAggregateRow,
-): RelayAgentActivityAggregateRow {
+  row: RelayPublishedActivityAggregateRow,
+): RelayPublishedActivityAggregateRow {
+  if (isEpicRunAggregateRow(row)) {
+    return {
+      ...row,
+      epicTitle: truncateText(row.epicTitle, MAX_SUMMARY_TEXT_LENGTH),
+      ...(row.childTitle === undefined
+        ? {}
+        : { childTitle: truncateText(row.childTitle, MAX_SUMMARY_TEXT_LENGTH) }),
+      status: truncateText(row.status, MAX_STATUS_TEXT_LENGTH),
+      deepLink: sanitizeDeepLink(row.deepLink),
+    };
+  }
   return {
     ...row,
     projectTitle: truncateText(row.projectTitle, MAX_SUMMARY_TEXT_LENGTH),
@@ -74,6 +86,12 @@ export function sanitizeAgentActivityAggregateRow(
     status: truncateText(row.status, MAX_STATUS_TEXT_LENGTH),
     deepLink: sanitizeDeepLink(row.deepLink),
   };
+}
+
+function isEpicRunAggregateRow(
+  row: RelayPublishedActivityAggregateRow,
+): row is RelayEpicRunActivityAggregateRow {
+  return "kind" in row && row.kind === "epic_run";
 }
 
 export function sanitizeAgentActivityAggregateState(

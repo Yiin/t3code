@@ -15,6 +15,8 @@ import type {
 import type {
   RelayAgentActivityPublishProofPayload,
   RelayAgentActivityState,
+  RelayEpicRunActivityPublishProofPayload,
+  RelayEpicRunActivityState,
 } from "@t3tools/contracts/relay";
 import { CommandId, ProviderInstanceId } from "@t3tools/contracts";
 import { RelayClientTracer } from "@t3tools/shared/relayTracing";
@@ -98,6 +100,14 @@ function makeMemorySecretStore() {
 }
 
 describe.sequential("signRelayAgentActivityPublishProof", () => {
+  it("maps every persisted epic run status to a mobile activity phase", () => {
+    expect(AgentAwarenessRelay.epicRunActivityPhase("running")).toBe("running");
+    expect(AgentAwarenessRelay.epicRunActivityPhase("paused")).toBe("stopped");
+    expect(AgentAwarenessRelay.epicRunActivityPhase("cancelled")).toBe("stopped");
+    expect(AgentAwarenessRelay.epicRunActivityPhase("done")).toBe("completed");
+    expect(AgentAwarenessRelay.epicRunActivityPhase("failed")).toBe("failed");
+  });
+
   it("distinguishes pending link credentials from disabled publication", () => {
     expect(
       AgentAwarenessRelay.resolveAgentActivityPublishingStartupState({
@@ -410,6 +420,54 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
       ),
     ).rejects.toBeDefined();
   });
+
+  it.effect("signs an epic-run activity publish JWT", () =>
+    Effect.gen(function* () {
+      const keyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const epicState: RelayEpicRunActivityState = {
+        kind: "epic_run",
+        environmentId: state.environmentId,
+        runId: "run-1" as RelayEpicRunActivityState["runId"],
+        epicId: "epic-1",
+        epicTitle: "Epic one",
+        phase: "running",
+        iteration: 2,
+        maxIterations: 10,
+        childTitle: "Child two",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        deepLink: "/epics/env/epic-1",
+      };
+      const payload = {
+        iss: "t3-env:env",
+        aud: "https://relay.example.test",
+        sub: "env",
+        jti: "epic-nonce-1",
+        iat: 100,
+        exp: 200,
+        environmentId: state.environmentId,
+        epicId: "epic-1",
+        state: epicState,
+      } satisfies RelayEpicRunActivityPublishProofPayload;
+
+      const proof = yield* AgentAwarenessRelay.signRelayEpicRunActivityPublishProof({
+        privateKey: keyPair.privateKey,
+        payload,
+      });
+
+      const verified = yield* verifyRelayJwt({
+        publicKey: keyPair.publicKey,
+        token: proof,
+        typ: RELAY_ACTIVITY_PUBLISH_TYP,
+        issuer: "t3-env:env",
+        audience: "https://relay.example.test",
+        nowEpochSeconds: 150,
+      });
+      expect(verified).toMatchObject({ jti: "epic-nonce-1", state: epicState });
+    }),
+  );
 
   it.effect("keeps the orchestration listener armed until relay config is installed", () =>
     Effect.scoped(

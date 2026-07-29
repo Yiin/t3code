@@ -369,6 +369,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
           publishThread: () => Effect.void,
+          publishEpicRun: () => Effect.void,
           start: () => Effect.void,
         }),
       ),

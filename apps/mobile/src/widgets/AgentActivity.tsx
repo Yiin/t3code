@@ -25,9 +25,11 @@ export type AgentActivityPhase =
   | "waiting_for_input"
   | "completed"
   | "failed"
-  | "stale";
+  | "stale"
+  | "stopped";
 
-export interface AgentActivityRowProps {
+export interface AgentThreadActivityRowProps {
+  readonly kind?: never;
   readonly environmentId: string;
   readonly threadId: string;
   readonly projectTitle: string;
@@ -38,6 +40,23 @@ export interface AgentActivityRowProps {
   readonly updatedAt: string;
   readonly deepLink: string;
 }
+
+export interface AgentEpicRunActivityRowProps {
+  readonly kind: "epic_run";
+  readonly environmentId: string;
+  readonly runId: string;
+  readonly epicId: string;
+  readonly epicTitle: string;
+  readonly phase: AgentActivityPhase;
+  readonly iteration: number;
+  readonly maxIterations: number;
+  readonly childTitle?: string;
+  readonly status: string;
+  readonly updatedAt: string;
+  readonly deepLink: string;
+}
+
+export type AgentActivityRowProps = AgentThreadActivityRowProps | AgentEpicRunActivityRowProps;
 
 export interface AgentActivityProps {
   readonly title: string;
@@ -72,7 +91,9 @@ export function AgentActivity(
   // Mac notification center) renders it on a light one — so pick the web
   // palette's light (-600) or dark (-300) variant off the color scheme.
   const isLightScheme = environment.colorScheme === "light";
-  const phaseTint = (phase: AgentActivityPhase | undefined): string => {
+  const phaseTint = (
+    phase: AgentActivityPhase | AgentEpicRunActivityRowProps["phase"] | undefined,
+  ): string => {
     if (environment.isLuminanceReduced) {
       return secondaryForeground;
     }
@@ -85,6 +106,8 @@ export function AgentActivity(
         return isLightScheme ? "#dc2626" : "#fca5a5"; // red-600 / red-300
       case "completed":
         return isLightScheme ? "#059669" : "#6ee7b7"; // emerald-600 / emerald-300
+      case "stopped":
+        return secondaryForeground;
       case "starting":
       case "running":
       default:
@@ -94,7 +117,9 @@ export function AgentActivity(
 
   // Order attention-first so whatever needs the user floats to the top of every
   // presentation, then failures, then in-flight work, then finished/stale.
-  const phasePriority = (phase: AgentActivityPhase): number => {
+  const phasePriority = (
+    phase: AgentActivityPhase | AgentEpicRunActivityRowProps["phase"],
+  ): number => {
     if (phase === "waiting_for_approval" || phase === "waiting_for_input") return 0;
     if (phase === "failed") return 1;
     if (phase === "running" || phase === "starting") return 2;
@@ -114,7 +139,8 @@ export function AgentActivity(
   );
   const attentionRow = attentionRows[0];
   const failedRow = props.activities.find((row) => row.phase === "failed");
-  const heroRow = attentionRow ?? failedRow ?? row0;
+  const stoppedRow = props.activities.find((row) => row.phase === "stopped");
+  const heroRow = attentionRow ?? failedRow ?? stoppedRow ?? row0;
   const tint = phaseTint(heroRow?.phase);
   // Headline count leans on the accent when a human is actually blocked.
   const headerTint = attentionRow
@@ -131,8 +157,12 @@ export function AgentActivity(
   // minimal glyph — must agree, and a failure anywhere should dominate a
   // newer success.
   const allDone = props.activeCount === 0;
-  const doneLabel = failedRow ? "Failed" : "Done";
-  const outcomeLabel = failedRow ? "Agent work failed" : "Agent work completed";
+  const doneLabel = failedRow ? "Failed" : stoppedRow ? "Stopped" : "Done";
+  const outcomeLabel = failedRow
+    ? "Agent work failed"
+    : stoppedRow
+      ? "Epic run stopped"
+      : "Agent work completed";
 
   // Header copy: "5 active agents" + (", 1 needs attention"). The banner renders
   // the two parts in-line so the attention half can carry the accent color;
@@ -157,7 +187,9 @@ export function AgentActivity(
   // A scannable status glyph per phase — reads faster than colored words and
   // ties the compact / expanded / banner / watch presentations together.
   type SFName = NonNullable<ComponentProps<typeof Image>["systemName"]>;
-  const phaseSymbol = (phase: AgentActivityPhase): SFName => {
+  const phaseSymbol = (
+    phase: AgentActivityPhase | AgentEpicRunActivityRowProps["phase"],
+  ): SFName => {
     switch (phase) {
       case "waiting_for_approval":
         return "exclamationmark.circle.fill";
@@ -167,6 +199,8 @@ export function AgentActivity(
         return "xmark.octagon.fill";
       case "completed":
         return "checkmark.circle.fill";
+      case "stopped":
+        return "pause.circle.fill";
       case "starting":
         return "circle.dotted";
       case "stale":
@@ -199,7 +233,7 @@ export function AgentActivity(
           lineLimit(1),
         ]}
       >
-        {row.threadTitle}
+        {row.kind === "epic_run" ? row.epicTitle : row.threadTitle}
       </Text>
       {/* No layoutPriority and no frame on the project: two bare texts take
           their ideal width when it fits and shrink proportionally only when it
@@ -208,7 +242,9 @@ export function AgentActivity(
           width even for short names; layoutPriority let the project starve the
           title.) */}
       <Text modifiers={[font({ size: 11 }), foregroundStyle(secondaryForeground), lineLimit(1)]}>
-        {row.projectTitle}
+        {row.kind === "epic_run"
+          ? `Iteration ${row.iteration}/${row.maxIterations}${row.childTitle ? ` — ${row.childTitle}` : ""}`
+          : row.projectTitle}
       </Text>
       <Spacer minLength={8} />
       <Text
@@ -313,7 +349,7 @@ export function AgentActivity(
                 lineLimit(1),
               ]}
             >
-              {row0.threadTitle}
+              {row0.kind === "epic_run" ? row0.epicTitle : row0.threadTitle}
             </Text>
             <Spacer minLength={6} />
             <Text modifiers={[font({ size: 11 }), foregroundStyle(phaseTint(row0.phase))]}>

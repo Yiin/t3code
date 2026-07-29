@@ -1,5 +1,6 @@
 import type {
   EnvironmentId,
+  EpicRun,
   OrchestrationEvent,
   OrchestrationProjectShell,
   OrchestrationThreadShell,
@@ -9,6 +10,9 @@ import {
   RelayApi,
   type RelayAgentActivityPublishProofPayload,
   type RelayAgentActivityState,
+  type RelayEpicRunActivityPublishProofPayload,
+  type RelayEpicRunActivityPhase,
+  type RelayEpicRunActivityState,
 } from "@t3tools/contracts/relay";
 import { projectThreadAwareness } from "@t3tools/shared/agentAwareness";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -49,6 +53,9 @@ export class AgentAwarenessRelay extends Context.Service<
   AgentAwarenessRelay,
   {
     readonly publishThread: (threadId: ThreadId) => Effect.Effect<void>;
+    readonly publishEpicRun: (
+      run: EpicRun & { readonly epicTitle?: string; readonly childTitle?: string },
+    ) => Effect.Effect<void>;
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
   }
 >()("t3/relay/AgentAwarenessRelay") {}
@@ -185,6 +192,17 @@ export function signRelayAgentActivityPublishProof(input: {
   });
 }
 
+export function signRelayEpicRunActivityPublishProof(input: {
+  readonly privateKey: string;
+  readonly payload: RelayEpicRunActivityPublishProofPayload;
+}) {
+  return signRelayJwt({
+    privateKey: input.privateKey,
+    typ: RELAY_ACTIVITY_PUBLISH_TYP,
+    payload: input.payload,
+  });
+}
+
 const makePublishProof = Effect.fn("makePublishProof")(function* (input: {
   readonly privateKey: string;
   readonly relayIssuer: string;
@@ -208,6 +226,44 @@ const makePublishProof = Effect.fn("makePublishProof")(function* (input: {
   } satisfies RelayAgentActivityPublishProofPayload;
   return yield* signRelayAgentActivityPublishProof({ privateKey: input.privateKey, payload });
 });
+
+const makeEpicRunPublishProof = Effect.fn("makeEpicRunPublishProof")(function* (input: {
+  readonly privateKey: string;
+  readonly relayIssuer: string;
+  readonly environmentId: string;
+  readonly epicId: string;
+  readonly state: RelayEpicRunActivityState;
+  readonly jti: string;
+}) {
+  const now = yield* DateTime.now;
+  const expiresAt = DateTime.add(now, { minutes: 5 });
+  const payload = {
+    iss: `t3-env:${input.environmentId}`,
+    aud: normalizeRelayIssuer(input.relayIssuer),
+    sub: input.environmentId,
+    jti: input.jti,
+    iat: Math.floor(now.epochMilliseconds / 1_000),
+    exp: Math.floor(expiresAt.epochMilliseconds / 1_000),
+    environmentId: input.environmentId as RelayEpicRunActivityPublishProofPayload["environmentId"],
+    epicId: input.epicId,
+    state: input.state,
+  } satisfies RelayEpicRunActivityPublishProofPayload;
+  return yield* signRelayEpicRunActivityPublishProof({ privateKey: input.privateKey, payload });
+});
+
+export function epicRunActivityPhase(status: EpicRun["status"]): RelayEpicRunActivityPhase {
+  switch (status) {
+    case "running":
+      return "running";
+    case "paused":
+    case "cancelled":
+      return "stopped";
+    case "done":
+      return "completed";
+    case "failed":
+      return "failed";
+  }
+}
 
 // Compact, log-safe view of the fields the awareness phase ladder reads.
 export function describeThreadShellForAwareness(
@@ -510,6 +566,77 @@ export const make = Effect.gen(function* () {
       withRelayClientTracing,
     );
 
+  const publishEpicRunUnsafe = Effect.fn("publishEpicRunUnsafe")(function* (
+    run: EpicRun & { readonly epicTitle?: string; readonly childTitle?: string },
+  ) {
+    const publishAgentActivity = yield* readPublishAgentActivityEnabled.pipe(
+      Effect.orElseSucceed(() => false),
+    );
+    if (!publishAgentActivity) return;
+    const relayConfig = yield* readRelayConfig.pipe(Effect.orElseSucceed(() => null));
+    if (!relayConfig) return;
+
+    const environmentId = yield* serverEnvironment.getEnvironmentId;
+    const relayClient = yield* makeRelayClient(relayConfig);
+    const latestIteration = run.recentIterations.at(-1);
+    const state: RelayEpicRunActivityState = {
+      kind: "epic_run",
+      environmentId,
+      runId: run.runId,
+      epicId: run.epicId,
+      // The durable run currently stores the epic id, not a separate title.
+      // The relay payload keeps the title field additive and can receive a
+      // richer title after the run read model gains one.
+      epicTitle: run.epicTitle ?? run.epicId,
+      phase: epicRunActivityPhase(run.status),
+      iteration:
+        run.status === "running" && run.currentThreadId !== null
+          ? run.iterationsCompleted + 1
+          : run.iterationsCompleted,
+      maxIterations: run.maxIterations,
+      ...(run.childTitle
+        ? { childTitle: run.childTitle }
+        : latestIteration?.issueId
+          ? { childTitle: latestIteration.issueId }
+          : {}),
+      updatedAt: run.updatedAt,
+      deepLink: `/epics/${encodeURIComponent(environmentId)}/${encodeURIComponent(run.epicId)}`,
+    };
+    const proof = yield* makeEpicRunPublishProof({
+      privateKey: cloudLinkKeyPair.privateKey,
+      relayIssuer: relayConfig.issuer,
+      environmentId,
+      epicId: run.epicId,
+      state,
+      jti: yield* crypto.randomUUIDv4,
+    });
+    const response = yield* relayClient.server.publishEpicRunActivity({
+      params: { environmentId, epicId: run.epicId },
+      payload: { state, proof },
+    });
+    yield* Effect.logInfo("epic run activity publish completed", {
+      environmentId,
+      epicId: run.epicId,
+      runId: run.runId,
+      phase: state.phase,
+      ok: response.ok,
+      deliveries: deliveryStats(response.deliveries),
+    });
+  });
+
+  const publishEpicRun: AgentAwarenessRelay["Service"]["publishEpicRun"] = (run) =>
+    publishEpicRunUnsafe(run).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("epic run activity publish failed", {
+          runId: run.runId,
+          epicId: run.epicId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.withSpan("AgentAwarenessRelay.publishEpicRun"),
+      withRelayClientTracing,
+    );
+
   const publishActiveThreadsUnsafe = Effect.gen(function* () {
     const publishAgentActivity = yield* readPublishAgentActivityEnabled.pipe(
       Effect.orElseSucceed(() => false),
@@ -632,6 +759,7 @@ export const make = Effect.gen(function* () {
 
   return AgentAwarenessRelay.of({
     publishThread,
+    publishEpicRun,
     start,
   });
 });

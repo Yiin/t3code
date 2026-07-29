@@ -36,6 +36,7 @@ import {
   type ApnsDeliveryJobVerificationError,
 } from "./apnsDeliveryJobs.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
+import { activityStateStorageKey } from "./AgentActivityRows.ts";
 import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
@@ -363,11 +364,15 @@ function notificationForAggregate(input: {
   if (!enabled) {
     return null;
   }
+  const isEpicRun = "kind" in activity && activity.kind === "epic_run";
   return {
-    title: activity.threadTitle,
-    body: `${activity.status}: ${activity.projectTitle}`,
+    title: isEpicRun ? activity.epicTitle : activity.threadTitle,
+    body: isEpicRun
+      ? `${activity.status}: Iteration ${activity.iteration}/${activity.maxIterations}${activity.childTitle ? ` — ${activity.childTitle}` : ""}`
+      : `${activity.status}: ${activity.projectTitle}`,
     environmentId: activity.environmentId,
     threadId: activity.threadId,
+    ...(isEpicRun ? { epicId: activity.epicId } : {}),
     deepLink: activity.deepLink,
     phase: activity.phase,
     updatedAt: activity.updatedAt,
@@ -765,7 +770,7 @@ export const make = Effect.gen(function* () {
       Effect.map((currentStates) => {
         const currentByThread = new Map(
           currentStates.map((current) => [
-            `${current.environmentId}\u0000${current.threadId}`,
+            `${current.environmentId}\u0000${activityStateStorageKey(current)}`,
             current,
           ]),
         );

@@ -34,7 +34,7 @@ function identifierFromNotificationResponse(response: unknown): string | null {
   return typeof identifier === "string" ? identifier : null;
 }
 
-function encodeThreadDeepLink(input: {
+export function encodeThreadDeepLink(input: {
   readonly environmentId: string;
   readonly threadId: string;
 }): string | null {
@@ -44,7 +44,17 @@ function encodeThreadDeepLink(input: {
   return `/threads/${encodeURIComponent(input.environmentId)}/${encodeURIComponent(input.threadId)}`;
 }
 
-function normalizeThreadDeepLink(value: string): string | null {
+export function encodeEpicDeepLink(input: {
+  readonly environmentId: string;
+  readonly epicId: string;
+}): string | null {
+  if (input.environmentId.length === 0 || input.epicId.length === 0) {
+    return null;
+  }
+  return `/epics/${encodeURIComponent(input.environmentId)}/${encodeURIComponent(input.epicId)}`;
+}
+
+function normalizeAgentDeepLink(value: string): string | null {
   if (
     value.trim() !== value ||
     value.startsWith("//") ||
@@ -55,15 +65,16 @@ function normalizeThreadDeepLink(value: string): string | null {
   }
 
   const parts = value.split("/");
-  if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "threads") {
+  if (parts.length !== 4 || parts[0] !== "" || (parts[1] !== "threads" && parts[1] !== "epics")) {
     return null;
   }
 
   try {
-    return encodeThreadDeepLink({
-      environmentId: decodeURIComponent(parts[2] ?? ""),
-      threadId: decodeURIComponent(parts[3] ?? ""),
-    });
+    const environmentId = decodeURIComponent(parts[2] ?? "");
+    const resourceId = decodeURIComponent(parts[3] ?? "");
+    return parts[1] === "threads"
+      ? encodeThreadDeepLink({ environmentId, threadId: resourceId })
+      : encodeEpicDeepLink({ environmentId, epicId: resourceId });
   } catch {
     return null;
   }
@@ -73,13 +84,17 @@ export function extractAgentNotificationDeepLink(response: unknown): string | nu
   const data = dataFromNotificationResponse(response);
   const deepLink = data?.deepLink;
   if (typeof deepLink === "string") {
-    const normalizedDeepLink = normalizeThreadDeepLink(deepLink);
+    const normalizedDeepLink = normalizeAgentDeepLink(deepLink);
     if (normalizedDeepLink) {
       return normalizedDeepLink;
     }
   }
 
   const environmentId = data?.environmentId;
+  const epicId = data?.epicId;
+  if (typeof environmentId === "string" && typeof epicId === "string") {
+    return encodeEpicDeepLink({ environmentId, epicId });
+  }
   const threadId = data?.threadId;
   if (typeof environmentId === "string" && typeof threadId === "string") {
     return encodeThreadDeepLink({ environmentId, threadId });

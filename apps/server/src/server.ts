@@ -305,6 +305,7 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(ProcessRunner.layer),
   Layer.provide(EpicRunPreflightLayerLive),
   Layer.provide(EpicRunLock.layer),
+  Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 
 const ProviderRuntimeLayerLive = Layer.mergeAll(
