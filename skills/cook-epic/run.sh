@@ -24,7 +24,9 @@
 #   COOKEPIC_IO_WEIGHT         cook-epic.slice IOWeight                (default 50)
 #   COOKEPIC_MEMORY_HIGH       cook-epic.slice MemoryHigh              (default 60%)
 #   COOKEPIC_PERMISSION_MODE   auto or bypassPermissions           (default auto)
-#   COOKEPIC_MODEL             harness-native model override
+#   COOKEPIC_MODEL             harness-native model override; unset on claude/ccx
+#                              means tiered defaults (sonnet workers, opus plans,
+#                              fable reviews); an explicit value pins every stage
 #   COOKEPIC_BIN               selected harness binary override
 #   OPENCODE_BIN               OpenCode binary                     (default opencode)
 #   COOKEPIC_SPAWN_DELAY       seconds between dispatches          (default 2)
@@ -531,6 +533,15 @@ else
   SIBLING_RULE='Work only in this repository.'
 fi
 
+# Model tiers for Claude-family workers: implementation sessions launch on
+# Sonnet (see spawn_worker), and the prompt tells them to raise planning to
+# Opus and reviews to Fable via subagent model overrides. An explicit
+# COOKEPIC_MODEL pins every stage to that one model instead.
+MODEL_TIER_RULE=''
+if { [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; } && [ -z "${COOKEPIC_MODEL:-}" ]; then
+  MODEL_TIER_RULE="Model tiers: your session runs on Sonnet — implement in it directly. When you dispatch a planning agent (a Plan or plan-composition subagent), pass model 'opus'; when you dispatch reviewer agents, pass model 'fable'. Mechanical work needs no subagents at all."
+fi
+
 mkdir -p "$WORKTREE_ROOT"
 
 # ---------------------------------------------------- resource governance ----
@@ -669,6 +680,7 @@ claim_child() { # <child> <worker>
 
 render_prompt() { # <child> <worker> <branch> <wt> <offset> <outfile>
   sed -e "s|@SIBLING_RULE@|$SIBLING_RULE|g" \
+      -e "s|@MODEL_TIERS@|$MODEL_TIER_RULE|g" \
       -e "s|@PUSH_RULE@|$PUSH_RULE|g" \
       -e "s|@PUSH_MERGE_FIX@|$PUSH_MERGE_FIX|g" \
       -e "s|@PUSH_VERIFY@|$PUSH_VERIFY|g" \
@@ -784,7 +796,9 @@ spawn_worker() { # <child> <title>
         fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" >"$artifact" 2>>"$LOG" ;;
       claude|ccx)
         args=(-p --permission-mode "$PERM_MODE" --output-format json)
-        [ -n "${COOKEPIC_MODEL:-}" ] && args+=(--model "$COOKEPIC_MODEL")
+        # Default Claude-family workers to Sonnet: implementation does not need
+        # the top-tier model, and the prompt raises plan/review stages itself.
+        args+=(--model "${COOKEPIC_MODEL:-sonnet}")
         fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" >"$artifact" 2>>"$LOG" ;;
       codex)
         case "$PERM_MODE" in

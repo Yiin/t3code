@@ -16,6 +16,8 @@ Several workers share one machine with the user's live desktop session. Expensiv
 - NEVER run full production builds, whole test suites, e2e/browser suites (Playwright, Cypress), or anything that launches a browser — with one exception: a `Merge fix:` task whose issue names the gate command.
 - That exception must be serialized through the machine-wide lock: `flock "$COOKEPIC_RUN_DIR/heavy.lock" <gate command>`. At most one heavy command runs on this machine at a time; never run one unlocked.
 
+@MODEL_TIERS@
+
 ## Workflow
 
 1. Orient: `bd show @EPIC@` (Goal + Context & architecture — the shared brain; honor decisions recorded there) and `bd show @CHILD@` (your spec and acceptance criteria).

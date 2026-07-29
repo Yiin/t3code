@@ -9,6 +9,8 @@ argument-hint: <issue id, epic id, or short task description>
 
 End-to-end execution of a well-scoped engineering task. You own the **result**, not a checklist. The fixed spine is plan → implement → verify → gate → commit; the variable part is how much independent scrutiny each stage gets, and you decide that from the task itself. A one-line fix and a multi-subsystem feature deserve different amounts of review — spending three agents on the former is waste, spending one on the latter is negligence. Every verification step exists to raise confidence in the result; when you scale one down, say which criterion below justified it, so the user can veto.
 
+**Model tiers (Claude-family harness only).** When you dispatch subagents, match the model to the stage: plan-composition and plan-critique agents get model `opus`, implementer agents get model `sonnet`, reviewer agents get model `fable`. Work done in your own session stays on the session model. If the user named a model explicitly, that pins every stage instead.
+
 ## When this skill fits
 
 - The task is concrete and bounded (a bug fix, a small refactor, one-feature implementation).

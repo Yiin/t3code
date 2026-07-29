@@ -36,21 +36,21 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 1. **Parse the request.** The first argument after `/cook-epic` is the epic id.
    Map optional knobs:
 
-   | User says                                       | Environment variable                                                  | Default                                                        |
-   | ----------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------- |
-   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                      |
-   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                             |
-   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                            |
-   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                       |
-   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                          |
-   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode) |
-   | "2h per worker"                                 | `COOKEPIC_WORKER_TIMEOUT` (seconds)                                   | 5400                                                           |
-   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                         |
-   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | harness default                                                |
-   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                  |
-   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                             |
-   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                              |
-   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                          |
+   | User says                                       | Environment variable                                                  | Default                                                                                                                  |
+   | ----------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                                                                                |
+   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                                                                                       |
+   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                                                                                      |
+   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                                                                                 |
+   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                                                                                    |
+   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                                           |
+   | "2h per worker"                                 | `COOKEPIC_WORKER_TIMEOUT` (seconds)                                   | 5400                                                                                                                     |
+   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                                                                                   |
+   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | claude/ccx: tiered (sonnet workers, opus plans, fable reviews); explicit value pins every stage; others: harness default |
+   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                                                                            |
+   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                                                                                       |
+   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                                                                                        |
+   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                                                                                    |
 
    `COOKEPIC_NO_PUSH=1` disables every push: the coordinator fast-forwards the
    base branch locally after each gated merge but never pushes it, workers are

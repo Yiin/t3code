@@ -13,6 +13,8 @@ You are @WORKER@, a fresh-context worker executing one child of the beads epic @
 - Run only CHEAP checks yourself: typecheck, lint, and unit tests scoped to the files you touched (see `AGENTS.md` / project docs for the exact commands). After you finish, the coordinator runs the full integration gate on your commits — a gate failure comes back as a retry whose bd note names the gate command; only then may you run that gate yourself to fix what it reports.
 - NEVER run full production builds, whole test suites, or e2e/browser suites (Playwright, Cypress) on your own initiative.
 
+@MODEL_TIERS@
+
 ## Workflow
 
 1. Orient: `bd show @EPIC@` (Goal + Context & architecture — the shared brain; honor decisions recorded there) and `bd show @CHILD@` (your spec and acceptance criteria). If an earlier attempt failed, `bd show @CHILD@` notes say why — address that first.
