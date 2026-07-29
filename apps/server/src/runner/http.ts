@@ -25,6 +25,8 @@ const mapRunnerError = <A, R>(effect: Effect.Effect<A, EpicRunnerError, R>) =>
         Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
       EpicRunPreflightBlockedError: (error) =>
         Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+      EpicRunLaunchError: (error) =>
+        Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
       EpicRunnerStoreError: (error) => failEnvironmentInternal("internal_error", error),
       EpicRunnerDispatchError: (error) => failEnvironmentInternal("internal_error", error),
     }),
@@ -41,6 +43,13 @@ export const epicRunsHttpApiLayer = HttpApiBuilder.group(
       requireEnvironmentScope(AuthOrchestrationOperateScope).pipe(Effect.andThen(effect));
 
     return handlers
+      .handle(
+        "launch",
+        Effect.fn("environment.epicRuns.launch")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* operate(mapRunnerError(runner.launchRun(args.payload)));
+        }),
+      )
       .handle(
         "start",
         Effect.fn("environment.epicRuns.start")(function* (args) {

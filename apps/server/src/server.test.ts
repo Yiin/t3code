@@ -91,6 +91,7 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import { EpicRunner } from "./runner/Services/EpicRunner.ts";
 import {
   EpicRunPreflightBlockedError,
+  EpicRunLaunchError,
   EpicRunnerDispatchError,
   EpicRunnerStoreError,
   EpicRunStateError,
@@ -7423,6 +7424,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         createdAt: "2026-07-28T00:00:00.000Z",
         updatedAt: "2026-07-28T00:00:00.000Z",
         threadRefs: [],
+        recentIterations: [],
       };
       yield* buildAppUnderTest({
         layers: {
@@ -7430,6 +7432,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             startRun: (input) =>
               Effect.sync(() => {
                 runnerCalls.push({ method: "start", input });
+                return run;
+              }),
+            launchRun: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "launch", input });
                 return run;
               }),
             pauseRun: (input) =>
@@ -7482,6 +7489,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(started.runId, run.runId);
+      const launchInput = { epicId: run.epicId, projectId: run.projectId, cwd: run.cwd };
+      const launched = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.epicRunLaunch](launchInput)),
+      );
+      assert.equal(launched.runId, run.runId);
+      assert.deepEqual(runnerCalls[1], { method: "launch", input: launchInput });
       const wsResults = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           Effect.all([
@@ -7524,6 +7537,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           modelSelection: run.modelSelection,
         }),
       });
+      const launch = yield* HttpClient.post("/api/epic-runs/launch", {
+        headers: { cookie },
+        body: yield* HttpBody.json(launchInput),
+      });
       const list = yield* HttpClient.get("/api/epic-runs?status=running", { headers: { cookie } });
       const get = yield* HttpClient.get(`/api/epic-runs/${run.runId}`, { headers: { cookie } });
       const pause = yield* HttpClient.post(`/api/epic-runs/${run.runId}/pause`, {
@@ -7536,12 +7553,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         headers: { cookie },
       });
       assert.equal(start.status, 200);
+      assert.equal(launch.status, 200);
       assert.equal(list.status, 200);
       assert.equal(get.status, 200);
       assert.equal(pause.status, 200);
       assert.equal(resume.status, 200);
       assert.equal(cancel.status, 200);
       assert.equal(((yield* start.json) as { readonly runId: string }).runId, run.runId);
+      assert.equal(((yield* launch.json) as { readonly runId: string }).runId, run.runId);
       assert.equal(
         ((yield* list.json) as ReadonlyArray<{ readonly runId: string }>)[0]?.runId,
         run.runId,
@@ -7552,14 +7571,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(((yield* cancel.json) as { readonly status: string }).status, "cancelled");
       assert.deepEqual(
         runnerCalls.map(({ method }) => method),
-        ["start", "list", "get", "pause", "resume", "cancel"],
+        ["start", "launch", "list", "get", "pause", "resume", "cancel"],
       );
+      assert.deepEqual(runnerCalls[1], { method: "launch", input: launchInput });
       assert.deepInclude(runnerCalls[0]?.input as object, {
         epicId: run.epicId,
         runtimeMode: "full-access",
       });
-      assert.deepEqual(runnerCalls[1]?.input, { status: "running" });
-      for (const call of runnerCalls.slice(2)) {
+      assert.deepEqual(runnerCalls[2]?.input, { status: "running" });
+      for (const call of runnerCalls.slice(3)) {
         assert.equal((call.input as { readonly runId: string }).runId, run.runId);
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -7586,6 +7606,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         createdAt: "2026-07-28T00:00:00.000Z",
         updatedAt: "2026-07-28T00:00:00.000Z",
         threadRefs: [],
+        recentIterations: [],
       };
       const mutationCalls: string[] = [];
       yield* buildAppUnderTest({
@@ -7603,6 +7624,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 mutationCalls.push("start");
                 return readableRun;
               }),
+            launchRun: () => Effect.succeed(readableRun),
             pauseRun: ({ runId }) =>
               Effect.sync(() => {
                 mutationCalls.push("pause");
@@ -7649,6 +7671,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         readonly requiredScope: string;
       };
       assert.equal(forbiddenBody.requiredScope, "orchestration:operate");
+      const forbiddenLaunch = yield* HttpClient.post("/api/epic-runs/launch", {
+        headers: { authorization: readAuthorization },
+        body: yield* HttpBody.json({
+          epicId: readableRun.epicId,
+          projectId: readableRun.projectId,
+          cwd: readableRun.cwd,
+        }),
+      });
+      assert.equal(forbiddenLaunch.status, 403);
       assert.deepEqual(mutationCalls, []);
       const readableList = yield* HttpClient.get("/api/epic-runs", {
         headers: { authorization: readAuthorization },
@@ -7759,6 +7790,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   blockers: ["dirty_worktree"],
                 }),
               ),
+            launchRun: () =>
+              Effect.fail(new EpicRunLaunchError({ reason: "model_default_missing" })),
           },
         },
       });
@@ -7777,9 +7810,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           modelSelection: defaultModelSelection,
         }),
       });
+      const launch = yield* HttpClient.post("/api/epic-runs/launch", {
+        headers: { cookie },
+        body: yield* HttpBody.json({
+          epicId: "t3code-vst",
+          projectId: defaultProjectId,
+          cwd: "/tmp/t3code",
+        }),
+      });
       assert.equal(store.status, 500);
       assert.equal(dispatch.status, 500);
       assert.equal(preflight.status, 409);
+      assert.equal(launch.status, 409);
       const storeBody = (yield* store.json) as {
         readonly code: string;
         readonly reason: string;

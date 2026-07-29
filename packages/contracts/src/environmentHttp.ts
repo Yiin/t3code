@@ -26,7 +26,13 @@ import {
 } from "./auth.ts";
 import { AuthSessionId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
-import { EpicRun, EpicRunInput, EpicRunRef, EpicRunStatus } from "./epicRuns.ts";
+import {
+  EpicRun,
+  EpicRunInput,
+  EpicRunRef,
+  EpicRunStatus,
+  LaunchEpicRunInput,
+} from "./epicRuns.ts";
 import {
   ClientOrchestrationCommand,
   DispatchResult,
@@ -509,6 +515,14 @@ const EnvironmentEpicRunReadErrors = [
 ] as const;
 
 export class EnvironmentEpicRunsHttpApi extends HttpApiGroup.make("epicRuns")
+  .add(
+    HttpApiEndpoint.post("launch", "/api/epic-runs/launch", {
+      headers: OptionalBearerHeaders,
+      payload: LaunchEpicRunInput,
+      success: EpicRun,
+      error: EnvironmentEpicRunMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.post("start", "/api/epic-runs", {
       headers: OptionalBearerHeaders,

@@ -52,6 +52,7 @@ import {
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   EpicRunNotFoundError as EpicRunNotFoundTransportError,
+  EpicRunLaunchError as EpicRunLaunchTransportError,
   EpicRunPreflightBlockedError as EpicRunPreflightBlockedTransportError,
   EpicRunnerDispatchError as EpicRunnerDispatchTransportError,
   EpicRunnerStoreError as EpicRunnerStoreTransportError,
@@ -333,6 +334,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.beadsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.epicRunPreflight, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunStart, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunLaunch, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunPause, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunResume, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunCancel, AuthOrchestrationOperateScope],
@@ -552,6 +554,8 @@ const makeWsRpcLayer = (
                   epicId: error.epicId,
                   blockers: error.blockers,
                 });
+              case "EpicRunLaunchError":
+                return new EpicRunLaunchTransportError({ reason: error.reason });
             }
           }),
         );
@@ -1833,6 +1837,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.epicRunStart,
             sanitizeEpicRunnerError(epicRunner.startRun(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.epicRunLaunch]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunLaunch,
+            sanitizeEpicRunnerError(epicRunner.launchRun(input)),
             { "rpc.aggregate": "epic-run" },
           ),
         [WS_METHODS.epicRunPause]: (input) =>

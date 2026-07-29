@@ -14,6 +14,7 @@ import {
   WS_METHODS,
   WsEpicRunCancelRpc,
   WsEpicRunListRpc,
+  WsEpicRunLaunchRpc,
   WsEpicRunPauseRpc,
   WsEpicRunResumeRpc,
   WsEpicRunStartRpc,
@@ -58,6 +59,18 @@ describe("EpicRun contracts", () => {
       createdAt: "2026-07-28T00:00:00.000Z",
       updatedAt: "2026-07-28T00:01:00.000Z",
       threadRefs: [{ issueId: "t3code-vst.1", threadId: "thread-1", iterationIndex: 1 }],
+      recentIterations: [
+        {
+          iterationIndex: 1,
+          threadId: "thread-1",
+          issueId: "t3code-vst.1",
+          turnStatus: "completed",
+          summary: "built it",
+          why: "needed it",
+          startedAt: "2026-07-28T00:00:00.000Z",
+          finishedAt: "2026-07-28T00:01:00.000Z",
+        },
+      ],
     });
     const event = { version: 1 as const, type: "run-state-changed" as const, run };
 
@@ -68,6 +81,7 @@ describe("EpicRun contracts", () => {
   it("declares every public epic-run RPC method", () => {
     expect(WS_METHODS).toMatchObject({
       epicRunStart: "epicRun.start",
+      epicRunLaunch: "epicRun.launch",
       epicRunPause: "epicRun.pause",
       epicRunResume: "epicRun.resume",
       epicRunCancel: "epicRun.cancel",
@@ -76,6 +90,7 @@ describe("EpicRun contracts", () => {
     });
     for (const rpc of [
       WsEpicRunStartRpc,
+      WsEpicRunLaunchRpc,
       WsEpicRunPauseRpc,
       WsEpicRunResumeRpc,
       WsEpicRunCancelRpc,

@@ -29,7 +29,13 @@
  *
  * @module EpicRunner
  */
-import type { EpicRun, EpicRunRef, ListEpicRunsInput, StartEpicRunInput } from "@t3tools/contracts";
+import type {
+  EpicRun,
+  EpicRunRef,
+  LaunchEpicRunInput,
+  ListEpicRunsInput,
+  StartEpicRunInput,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
@@ -59,6 +65,7 @@ export interface EpicRunnerShape {
    * the loop itself runs in the background for the lifetime of the server.
    */
   readonly startRun: (input: StartEpicRunInput) => Effect.Effect<EpicRun, EpicRunnerError>;
+  readonly launchRun: (input: LaunchEpicRunInput) => Effect.Effect<EpicRun, EpicRunnerError>;
 
   /**
    * Ask a running loop to stop after its current iteration finishes.

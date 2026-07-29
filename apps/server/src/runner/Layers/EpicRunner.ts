@@ -4,6 +4,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   type EpicRun as TransportEpicRun,
   EpicRunId,
+  type LaunchEpicRunInput,
   MessageId,
   ThreadId,
   type OrchestrationSessionStatus,
@@ -32,6 +33,7 @@ import {
 import * as ProcessRunner from "../../processRunner.ts";
 import {
   EpicRunNotFoundError,
+  EpicRunLaunchError,
   EpicRunPreflightBlockedError,
   EpicRunStateError,
   EpicRunnerDispatchError,
@@ -55,6 +57,8 @@ const DEFAULT_RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
 const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
 const DEFAULT_MAX_ITERATIONS = 50;
+const RECENT_ITERATIONS_LIMIT = 25;
+export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 const GIT_HEAD_TIMEOUT_MS = 15_000;
 const MAX_SETTLE_READS = 20;
 const ReadyChildren = Schema.fromJsonString(
@@ -210,9 +214,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       const iterations = yield* store
         .listIterations({ runId: run.runId })
         .pipe(Effect.mapError(storeError("listIterations")));
+      const recentIterations = iterations.slice(-RECENT_ITERATIONS_LIMIT);
       return {
         ...run,
-        threadRefs: iterations.flatMap((iteration) =>
+        recentIterations,
+        threadRefs: recentIterations.flatMap((iteration) =>
           iteration.issueId === null
             ? []
             : [
@@ -566,6 +572,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             issueId,
             turnStatus: "running",
             summary: null,
+            why: null,
             startedAt,
             finishedAt: null,
           })
@@ -673,6 +680,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             iterationIndex: input.iterationIndex,
             turnStatus: iterationStatus,
             summary: outcome.report?.summary ?? outcome.detail,
+            why: outcome.report?.why ?? null,
             finishedAt,
           })
           .pipe(Effect.mapError(storeError("updateIteration")));
@@ -871,6 +879,29 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         return yield* enrichRun(run);
       });
 
+    const launchRun: EpicRunnerShape["launchRun"] = (input: LaunchEpicRunInput) =>
+      Effect.gen(function* () {
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(input.projectId)
+          .pipe(Effect.mapError(storeError("getProjectShellById")));
+        if (Option.isNone(project)) {
+          return yield* new EpicRunLaunchError({ reason: "project_not_found" });
+        }
+        if (project.value.workspaceRoot !== input.cwd) {
+          return yield* new EpicRunLaunchError({ reason: "cwd_mismatch" });
+        }
+        if (project.value.defaultModelSelection === null) {
+          return yield* new EpicRunLaunchError({ reason: "model_default_missing" });
+        }
+        return yield* startRun({
+          ...input,
+          prompt: EPIC_RUN_ITERATION_PROMPT,
+          modelSelection: project.value.defaultModelSelection,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          maxIterations: defaultMaxIterations,
+        });
+      });
+
     const pauseRun: EpicRunnerShape["pauseRun"] = ({ runId }) =>
       Effect.gen(function* () {
         const run = yield* requireRun(runId);
@@ -949,6 +980,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               iterationIndex: latest.value.iterationIndex,
               turnStatus: "abandoned",
               summary: "cancelled",
+              why: null,
               finishedAt: cancelledAt,
             })
             .pipe(Effect.mapError(storeError("updateIteration")));
@@ -1029,6 +1061,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   iterationIndex: latest.value.iterationIndex,
                   turnStatus: "abandoned",
                   summary: "abandoned by server restart",
+                  why: null,
                   finishedAt: yield* nowIso,
                 })
                 .pipe(Effect.mapError(storeError("updateIteration")));
@@ -1052,6 +1085,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     return {
       start,
       startRun,
+      launchRun,
       pauseRun,
       resumeRun,
       cancelRun,

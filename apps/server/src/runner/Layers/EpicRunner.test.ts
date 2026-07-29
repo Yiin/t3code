@@ -157,6 +157,7 @@ const makeMemoryStore = () => {
           ...existing,
           turnStatus: input.turnStatus,
           summary: input.summary,
+          why: input.why,
           finishedAt: input.finishedAt,
         };
       }),
@@ -483,6 +484,52 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("launches from the persisted project defaults and rejects a cwd mismatch", () => {
+    const harness = createHarness({ script: [], readyOutput: "[]" });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const mismatch = yield* Effect.flip(
+        runner.launchRun({ epicId: "epic-1", projectId, cwd: "/tmp/wrong" }),
+      );
+      assert.strictEqual(mismatch._tag, "EpicRunLaunchError");
+      if (mismatch._tag === "EpicRunLaunchError") {
+        assert.strictEqual(mismatch.reason, "cwd_mismatch");
+      }
+
+      const launched = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      assert.deepStrictEqual(launched.modelSelection, modelSelection);
+      assert.strictEqual(launched.runtimeMode, "full-access");
+      assert.match(launched.prompt, /RALPH_MSG:/);
+
+      for (let iterationIndex = 0; iterationIndex < 30; iterationIndex += 1) {
+        harness.store.iterations.push({
+          runId: launched.runId,
+          iterationIndex,
+          threadId: ThreadId.make(`tail-${iterationIndex}`),
+          issueId: `child-${iterationIndex}`,
+          turnStatus: "completed",
+          summary: `summary-${iterationIndex}`,
+          why: `why-${iterationIndex}`,
+          startedAt: NOW,
+          finishedAt: NOW,
+        });
+      }
+      const listed = (yield* runner.listRuns()).find((run) => run.runId === launched.runId)!;
+      assert.deepStrictEqual(
+        listed.recentIterations.map((iteration) => iteration.iterationIndex),
+        Array.from({ length: 25 }, (_, offset) => offset + 5),
+      );
+      assert.deepStrictEqual(
+        listed.threadRefs.map((reference) => reference.iterationIndex),
+        Array.from({ length: 25 }, (_, offset) => offset + 5),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("keeps iterating while the agent commits, then stops on RALPH_DONE", () => {
     const harness = createHarness({
       script: [
@@ -514,6 +561,7 @@ describe("EpicRunner", () => {
         ["completed", "completed", "completed"],
       );
       assert.strictEqual(harness.store.iterations[0]?.summary, "first");
+      assert.strictEqual(harness.store.iterations[0]?.why, "needed");
       assert.deepStrictEqual(
         harness.store.iterations.map((iteration) => iteration.issueId),
         ["child-1", "child-2", "child-3"],
@@ -672,6 +720,7 @@ describe("EpicRunner", () => {
           issueId: "child-0",
           turnStatus: "running",
           summary: null,
+          why: null,
           startedAt: NOW,
           finishedAt: null,
         },

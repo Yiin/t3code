@@ -209,6 +209,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           issue_id,
           turn_status,
           summary,
+          why,
           started_at,
           finished_at
         )
@@ -219,6 +220,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.issueId},
           ${row.turnStatus},
           ${row.summary},
+          ${row.why},
           ${row.startedAt},
           ${row.finishedAt}
         )
@@ -233,6 +235,7 @@ const makeEpicRunStore = Effect.gen(function* () {
         SET
           turn_status = ${input.turnStatus},
           summary = ${input.summary},
+          why = ${input.why},
           finished_at = ${input.finishedAt}
         WHERE run_id = ${input.runId}
           AND iteration_index = ${input.iterationIndex}
@@ -251,6 +254,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           issue_id AS "issueId",
           turn_status AS "turnStatus",
           summary,
+          why,
           started_at AS "startedAt",
           finished_at AS "finishedAt"
         FROM epic_run_iterations
@@ -271,6 +275,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           issue_id AS "issueId",
           turn_status AS "turnStatus",
           summary,
+          why,
           started_at AS "startedAt",
           finished_at AS "finishedAt"
         FROM epic_run_iterations

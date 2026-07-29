@@ -29,6 +29,25 @@ export type StartEpicRunInput = Omit<EpicRunInput, "runtimeMode"> & {
   readonly runtimeMode?: EpicRunInput["runtimeMode"] | undefined;
 };
 
+export const LaunchEpicRunInput = Schema.Struct({
+  epicId: TrimmedNonEmptyString,
+  projectId: ProjectId,
+  cwd: TrimmedNonEmptyString,
+});
+export type LaunchEpicRunInput = typeof LaunchEpicRunInput.Type;
+
+export const EpicRunIterationReport = Schema.Struct({
+  iterationIndex: NonNegativeInt,
+  threadId: ThreadId,
+  issueId: Schema.NullOr(TrimmedNonEmptyString),
+  turnStatus: Schema.Literals(["running", "completed", "failed", "abandoned"]),
+  summary: Schema.NullOr(Schema.String),
+  why: Schema.NullOr(Schema.String),
+  startedAt: IsoDateTime,
+  finishedAt: Schema.NullOr(IsoDateTime),
+});
+export type EpicRunIterationReport = typeof EpicRunIterationReport.Type;
+
 /** The public run read model, including iteration-derived thread references. */
 export const EpicRunThreadRef = Schema.Struct({
   issueId: TrimmedNonEmptyString,
@@ -55,6 +74,9 @@ export const EpicRun = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   threadRefs: Schema.Array(EpicRunThreadRef).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  recentIterations: Schema.Array(EpicRunIterationReport).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type EpicRun = typeof EpicRun.Type;
 
@@ -109,11 +131,19 @@ export class EpicRunPreflightBlockedError extends Schema.TaggedErrorClass<EpicRu
   },
 ) {}
 
+export class EpicRunLaunchError extends Schema.TaggedErrorClass<EpicRunLaunchError>()(
+  "EpicRunLaunchError",
+  {
+    reason: Schema.Literals(["project_not_found", "cwd_mismatch", "model_default_missing"]),
+  },
+) {}
+
 export const EpicRunTransportError = Schema.Union([
   EpicRunnerStoreError,
   EpicRunnerDispatchError,
   EpicRunNotFoundError,
   EpicRunStateError,
   EpicRunPreflightBlockedError,
+  EpicRunLaunchError,
 ]);
 export type EpicRunTransportError = typeof EpicRunTransportError.Type;

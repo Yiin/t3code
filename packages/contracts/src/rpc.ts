@@ -25,6 +25,7 @@ import {
   EpicRun,
   EpicRunEvent,
   EpicRunInput,
+  LaunchEpicRunInput,
   EpicRunRef,
   EpicRunTransportError,
   ListEpicRunsInput,
@@ -193,6 +194,7 @@ export const WS_METHODS = {
   beadsRefreshStatus: "beads.refreshStatus",
   epicRunPreflight: "epicRunPreflight",
   epicRunStart: "epicRun.start",
+  epicRunLaunch: "epicRun.launch",
   epicRunPause: "epicRun.pause",
   epicRunResume: "epicRun.resume",
   epicRunCancel: "epicRun.cancel",
@@ -468,6 +470,11 @@ const EpicRunRpcError = Schema.Union([EpicRunTransportError, EnvironmentAuthoriz
 
 export const WsEpicRunStartRpc = Rpc.make(WS_METHODS.epicRunStart, {
   payload: EpicRunInput,
+  success: EpicRun,
+  error: EpicRunRpcError,
+});
+export const WsEpicRunLaunchRpc = Rpc.make(WS_METHODS.epicRunLaunch, {
+  payload: LaunchEpicRunInput,
   success: EpicRun,
   error: EpicRunRpcError,
 });
@@ -809,6 +816,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsBeadsRefreshStatusRpc,
   WsEpicRunPreflightRpc,
   WsEpicRunStartRpc,
+  WsEpicRunLaunchRpc,
   WsEpicRunPauseRpc,
   WsEpicRunResumeRpc,
   WsEpicRunCancelRpc,

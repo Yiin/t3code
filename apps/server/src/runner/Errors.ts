@@ -85,9 +85,21 @@ export class EpicRunPreflightBlockedError extends Schema.TaggedErrorClass<EpicRu
   }
 }
 
+export class EpicRunLaunchError extends Schema.TaggedErrorClass<EpicRunLaunchError>()(
+  "EpicRunLaunchError",
+  {
+    reason: Schema.Literals(["project_not_found", "cwd_mismatch", "model_default_missing"]),
+  },
+) {
+  override get message(): string {
+    return `Epic run launch rejected: ${this.reason}`;
+  }
+}
+
 export type EpicRunnerError =
   | EpicRunnerStoreError
   | EpicRunnerDispatchError
   | EpicRunNotFoundError
   | EpicRunStateError
-  | EpicRunPreflightBlockedError;
+  | EpicRunPreflightBlockedError
+  | EpicRunLaunchError;

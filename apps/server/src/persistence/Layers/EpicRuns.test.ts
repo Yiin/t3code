@@ -151,6 +151,7 @@ describe("EpicRunStore", () => {
           issueId: `issue-${iterationIndex}`,
           turnStatus: "completed",
           summary: `iteration ${iterationIndex}`,
+          why: `reason ${iterationIndex}`,
           startedAt: "2026-07-27T00:00:00.000Z",
           finishedAt: "2026-07-27T00:05:00.000Z",
         });
@@ -188,6 +189,7 @@ describe("EpicRunStore", () => {
         issueId: "issue-0",
         turnStatus: "running",
         summary: null,
+        why: null,
         startedAt: "2026-07-27T00:00:30.000Z",
         finishedAt: null,
       });
@@ -204,6 +206,7 @@ describe("EpicRunStore", () => {
         iterationIndex: 0,
         turnStatus: "abandoned",
         summary: null,
+        why: null,
         finishedAt: "2026-07-27T00:10:00.000Z",
       });
 
@@ -221,6 +224,7 @@ describe("EpicRunStore", () => {
         issueId: "issue-1",
         turnStatus: "running",
         summary: null,
+        why: null,
         startedAt: "2026-07-27T00:10:01.000Z",
         finishedAt: null,
       });
@@ -241,6 +245,7 @@ describe("EpicRunStore", () => {
           issueId: "issue-0",
           turnStatus: "running",
           summary: null,
+          why: null,
           startedAt: "2026-07-27T00:11:00.000Z",
           finishedAt: null,
         }),

@@ -1,5 +1,6 @@
 import { EnvironmentId, EpicRun, EpicRunnerStoreError, WS_METHODS } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -20,7 +21,13 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
-import { createEpicsEnvironmentAtoms, epicRunChanges, latestEpicRun } from "./epics.ts";
+import {
+  activeEpicRunForThread,
+  createEpicsEnvironmentAtoms,
+  epicRunChanges,
+  latestEpicRun,
+  mergeEpicRuns,
+} from "./epics.ts";
 
 const decodeRun = Schema.decodeUnknownSync(EpicRun);
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
@@ -108,6 +115,149 @@ function waitFor(ref: Ref.Ref<number>, expected: number) {
 }
 
 describe("epic run folding", () => {
+  it("monotonically merges seeds and live changes without dropping known runs", () => {
+    const first = run("run-1", "epic-1", "2026-07-29T00:01:00.000Z", 1);
+    const second = run("run-2", "epic-2", "2026-07-29T00:02:00.000Z", 1);
+    const updated = run("run-1", "epic-1", "2026-07-29T00:03:00.000Z", 2);
+    const seeded = mergeEpicRuns([], [first, second]);
+
+    expect(mergeEpicRuns(seeded, [first])).toBe(seeded);
+    expect(mergeEpicRuns(seeded, [updated])).toEqual([updated, second]);
+    expect(mergeEpicRuns(mergeEpicRuns(seeded, [updated]), [first])).toEqual([updated, second]);
+  });
+
+  it("does not arbitrarily replace equal-timestamp values", () => {
+    const lower = run("run-1", "epic-1", "2026-07-29T00:01:00.000Z", 1);
+    const higher = run("run-1", "epic-1", "2026-07-29T00:01:00.000Z", 2);
+
+    expect(mergeEpicRuns(mergeEpicRuns([], [lower]), [higher])).toEqual([lower]);
+    expect(mergeEpicRuns(mergeEpicRuns([], [higher]), [lower])).toEqual([higher]);
+  });
+
+  it.effect("prefers equal-time live cancellation when the seed arrives first", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const timestamp = "2026-07-29T00:01:00.000Z";
+        const seeded = run("run-1", "epic-1", timestamp, 1);
+        const cancelled = decodeRun({ ...seeded, status: "cancelled" });
+        const events = yield* Queue.unbounded<{
+          readonly version: 1;
+          readonly type: "run-state-changed";
+          readonly run: EpicRun;
+        }>();
+        const listCalls = yield* Ref.make(0);
+        const subscriptionCalls = yield* Ref.make(0);
+        const sessionRef = yield* SubscriptionRef.make(
+          Option.some(session(Effect.succeed([seeded]), events, listCalls, subscriptionCalls)),
+        );
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+          session: sessionRef,
+          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
+          Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* waitFor(listCalls, 1);
+        yield* Queue.offer(events, { version: 1, type: "run-state-changed", run: cancelled });
+        for (
+          let attempt = 0;
+          attempt < 100 && (yield* Ref.get(observed)).at(-1)?.status !== "cancelled";
+          attempt += 1
+        ) {
+          yield* Effect.yieldNow;
+        }
+        expect((yield* Ref.get(observed)).at(-1)?.status).toBe("cancelled");
+      }),
+    ),
+  );
+
+  it.effect("does not let an equal-time reconnect seed revive a live cancellation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const timestamp = "2026-07-29T00:01:00.000Z";
+        const seeded = run("run-1", "epic-1", timestamp, 1);
+        const cancelled = decodeRun({ ...seeded, status: "cancelled" });
+        const seedReady = yield* Deferred.make<void>();
+        const seedCompleted = yield* Deferred.make<void>();
+        const events = yield* Queue.unbounded<{
+          readonly version: 1;
+          readonly type: "run-state-changed";
+          readonly run: EpicRun;
+        }>();
+        const listCalls = yield* Ref.make(0);
+        const subscriptionCalls = yield* Ref.make(0);
+        const sessionRef = yield* SubscriptionRef.make(
+          Option.some(
+            session(
+              Deferred.await(seedReady).pipe(
+                Effect.as([seeded]),
+                Effect.tap(() => Deferred.succeed(seedCompleted, undefined)),
+              ),
+              events,
+              listCalls,
+              subscriptionCalls,
+            ),
+          ),
+        );
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+          session: sessionRef,
+          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
+          Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* waitFor(subscriptionCalls, 1);
+        yield* Queue.offer(events, { version: 1, type: "run-state-changed", run: cancelled });
+        yield* Deferred.succeed(seedReady, undefined);
+        yield* Deferred.await(seedCompleted);
+        for (
+          let attempt = 0;
+          attempt < 100 && (yield* Ref.get(observed)).at(-1)?.status !== "cancelled";
+          attempt += 1
+        ) {
+          yield* Effect.yieldNow;
+        }
+        expect((yield* Ref.get(observed)).at(-1)?.status).toBe("cancelled");
+      }),
+    ),
+  );
+
+  it("resolves active cooking threads from currentThreadId or bounded references", () => {
+    const current = decodeRun({
+      ...run("run-1", "epic-1", "2026-07-29T00:01:00.000Z"),
+      currentThreadId: "thread-current",
+    });
+    const referenced = decodeRun({
+      ...run("run-2", "epic-2", "2026-07-29T00:02:00.000Z"),
+      threadRefs: [{ issueId: "issue-1", threadId: "thread-ref", iterationIndex: 0 }],
+    });
+    const finished = decodeRun({
+      ...run("run-3", "epic-3", "2026-07-29T00:03:00.000Z"),
+      status: "done",
+      currentThreadId: "thread-finished",
+    });
+
+    expect(activeEpicRunForThread([current, referenced, finished], "thread-current")).toBe(current);
+    expect(activeEpicRunForThread([current, referenced, finished], "thread-ref")).toBe(referenced);
+    expect(activeEpicRunForThread([current, referenced, finished], "thread-finished")).toBeNull();
+  });
+
   it("selects the latest run for the requested epic", () => {
     const older = run("run-1", "epic-1", "2026-07-29T00:01:00.000Z", 1);
     const newer = run("run-1", "epic-1", "2026-07-29T00:02:00.000Z", 2);
@@ -437,6 +587,12 @@ describe("createEpicsEnvironmentAtoms", () => {
     };
     const listAtom = epics.list(listTarget);
     const runAtom = epics.run(runTarget);
+    const latestRunAtom = epics.latestRun(runTarget);
+    const allRunsAtom = epics.allRuns({ environmentId: ENVIRONMENT_ID, input: {} });
+    const threadRunAtom = epics.activeRunForThread({
+      environmentId: ENVIRONMENT_ID,
+      input: { threadId: "thread-1" },
+    });
 
     expect(epics.list({ ...listTarget, input: { ...listTarget.input } })).toBe(listAtom);
     expect(
@@ -454,7 +610,13 @@ describe("createEpicsEnvironmentAtoms", () => {
     ).not.toBe(runAtom);
     expect(listAtom.idleTTL).toBe(5 * 60_000);
     expect(runAtom.idleTTL).toBe(5 * 60_000);
+    expect(latestRunAtom.idleTTL).toBe(5 * 60_000);
+    expect(allRunsAtom.idleTTL).toBe(5 * 60_000);
+    expect(threadRunAtom.idleTTL).toBe(5 * 60_000);
     expect(listAtom.label?.[0]).toContain("environment-data:epics:list");
     expect(runAtom.label?.[0]).toContain("environment-data:epics:run");
+    expect(latestRunAtom.label?.[0]).toContain("environment-data:epics:latest-run");
+    expect(allRunsAtom.label?.[0]).toContain("environment-data:epics:all-runs");
+    expect(threadRunAtom.label?.[0]).toContain("environment-data:epics:active-run-for-thread");
   });
 });
