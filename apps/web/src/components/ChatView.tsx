@@ -138,7 +138,7 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
-import { ChevronDownIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import { ChefHatIcon, ChevronDownIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -203,6 +203,7 @@ import {
   useThreadRefs,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
+import { epicsEnvironment } from "../state/epics";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -1428,6 +1429,15 @@ function ChatViewContent(props: ChatViewProps) {
     () => (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null),
     [activeThread],
   );
+  const activeEpicRunQuery = useEnvironmentQuery(
+    activeThread
+      ? epicsEnvironment.activeRunForThread({
+          environmentId: activeThread.environmentId,
+          input: { threadId: activeThread.id },
+        })
+      : null,
+  );
+  const activeEpicRun = activeEpicRunQuery.data;
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
@@ -1798,6 +1808,33 @@ function ChatViewContent(props: ChatViewProps) {
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
+    if (activeEpicRun) {
+      items.push({
+        id: `epic-run:${activeEpicRun.runId}`,
+        variant: "success",
+        icon: <ChefHatIcon />,
+        title: "This thread is part of an active epic run",
+        description: activeEpicRun.epicId,
+        actions: (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() =>
+              void navigate({
+                to: "/epics/$environmentId/$epicId",
+                params: {
+                  environmentId: activeThread?.environmentId ?? environmentId,
+                  epicId: activeEpicRun.epicId,
+                },
+                search: { project: activeEpicRun.projectId },
+              })
+            }
+          >
+            View run
+          </Button>
+        ),
+      });
+    }
     if (activeEnvironmentUnavailableState) {
       const connection = activeEnvironmentUnavailableState.connection;
       const isReconnecting =
@@ -1872,7 +1909,10 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return items;
   }, [
+    activeEpicRun,
+    activeThread?.environmentId,
     activeEnvironmentUnavailableState,
+    environmentId,
     handleReconnectActiveEnvironment,
     navigate,
     setDismissedVersionMismatchKey,

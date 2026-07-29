@@ -188,12 +188,13 @@ export function epicRunChanges(identity: {
 }) {
   return epicRunCollectionChanges().pipe(
     Stream.mapAccum(
-      () => null as EpicRun | null,
-      (current, runs) => {
+      () => ({ initialized: false, run: null as EpicRun | null }),
+      (state, runs) => {
         const next = latestEpicRunForIdentity(runs, identity);
-        return next === null || next === current
-          ? ([current, []] as const)
-          : ([next, [next]] as const);
+        const nextState = { initialized: true, run: next };
+        return state.initialized && next === state.run
+          ? ([state, []] as const)
+          : ([nextState, [next]] as const);
       },
     ),
   );

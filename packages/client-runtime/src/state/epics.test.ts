@@ -159,7 +159,7 @@ describe("epic run folding", () => {
           disconnect: Effect.void,
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun | null>>([]);
         yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -216,7 +216,7 @@ describe("epic run folding", () => {
           disconnect: Effect.void,
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun | null>>([]);
         yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -340,7 +340,7 @@ describe("epic run folding", () => {
           disconnect: Effect.void,
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun | null>>([]);
         yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -417,7 +417,7 @@ describe("epic run folding", () => {
           disconnect: Effect.void,
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun | null>>([]);
         yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -449,6 +449,46 @@ describe("epic run folding", () => {
           yield* Effect.yieldNow;
         }
         expect(yield* Ref.get(observed)).toEqual([matchingSeed, matchingLive]);
+      }),
+    ),
+  );
+
+  it.effect("emits initialized idle state when no run exists", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const listCalls = yield* Ref.make(0);
+        const subscriptionCalls = yield* Ref.make(0);
+        const events = yield* Queue.unbounded<{
+          readonly version: 1;
+          readonly type: "run-state-changed";
+          readonly run: EpicRun;
+        }>();
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+          session: yield* SubscriptionRef.make(
+            Option.some(session(Effect.succeed([]), events, listCalls, subscriptionCalls)),
+          ),
+          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun | null>>([]);
+        yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
+          Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* waitFor(listCalls, 1);
+        for (
+          let attempt = 0;
+          attempt < 100 && (yield* Ref.get(observed)).length === 0;
+          attempt += 1
+        ) {
+          yield* Effect.yieldNow;
+        }
+        expect(yield* Ref.get(observed)).toEqual([null]);
       }),
     ),
   );
@@ -498,7 +538,7 @@ describe("epic run folding", () => {
           disconnect: Effect.void,
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun | null>>([]);
         yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
