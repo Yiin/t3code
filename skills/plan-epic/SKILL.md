@@ -27,7 +27,7 @@ Not this skill: a single bounded task (use `/cook-it` directly), or open-ended "
 
 ### 0. Scope the subject
 
-Read the request. If it's underspecified in a way that changes the decomposition (unstated platform, unclear boundary of what's in vs out, a decision only the user can make), ask 1–3 sharp questions with `AskUserQuestion`. Otherwise proceed — investigation resolves most gaps.
+Read the request. If it's underspecified in a way that changes the decomposition (unstated platform, unclear boundary of what's in vs out, a decision only the user can make), ask 1–3 sharp questions. Use `AskUserQuestion` when the harness provides it; otherwise ask in a plain reply and wait for the user's answer. Otherwise proceed — investigation resolves most gaps.
 
 State back, in one or two sentences, the outcome the epic delivers and what's explicitly out of scope. This becomes the epic's Goal.
 
@@ -45,7 +45,7 @@ Capture the returned id (e.g. `bd-1a2b3c`) — call it `$EPIC` below.
 
 ### 2. Investigate in depth (fan-out)
 
-Decompose the subject into **3–6 investigation areas** — the facets that actually matter for *this* subject, not a fixed checklist. Typical facets: current-state/codebase recon, data model, external APIs/constraints, UI surface, testing strategy, migration/rollout, risks and unknowns.
+Decompose the subject into **3–6 investigation areas** — the facets that actually matter for _this_ subject, not a fixed checklist. Typical facets: current-state/codebase recon, data model, external APIs/constraints, UI surface, testing strategy, migration/rollout, risks and unknowns.
 
 #### Investigation ownership
 
@@ -53,7 +53,10 @@ Deep source reading in the main thread burns the context that synthesis needs �
 that's why investigators exist. The main thread does only enough orientation to
 define the areas: confirm the repo and Beads database, check worktree state,
 read a small top-level file inventory or existing architecture index. The
-investigators own deep source inspection.
+investigators own deep source inspection. The exception is a harness with no
+subagent tool and no usable headless CLI: in that mode the main thread must do
+the investigation sequentially, keeping one area's notes compact before moving
+to the next.
 
 After dispatching them, don't repeat their work — no broad searches, no
 re-reading the files they're auditing, no independently validating every cited
@@ -62,8 +65,22 @@ prerequisites. If a result lacks evidence or misses a facet, send a focused
 follow-up to that investigator or dispatch a narrow gap investigator; don't
 rebuild the answer in the main context. Read the returned findings once, then
 synthesize — spot-check only a concrete conflict that affects decomposition.
+These dispatch rules apply only when investigators are available; in
+main-thread-only mode, fill a missing facet directly before synthesis.
 
-Dispatch **one agent per area, in parallel**. Prefer the `Workflow` tool when available (the sketch below); otherwise send parallel `Agent` (`general-purpose` / `Explore`) calls in a single message. Each investigator gets a self-contained brief and returns:
+Choose the strongest investigation mode the harness provides:
+
+1. Prefer the `Workflow` tool when available (the sketch below).
+2. Otherwise, if a subagent tool is available, dispatch one subagent per area in
+   parallel (`Agent` with `general-purpose` / `Explore`, or the harness's
+   equivalent).
+3. With no subagent tool, investigate the areas sequentially in the main thread.
+   To preserve fresh context when a supported headless CLI is installed, you may
+   instead write each self-contained brief to a temporary file, invoke the same
+   harness as a one-shot process (`claude -p`, `codex exec`, or `kimi -p`), and
+   read its output before synthesis. Do not assume shelling out is available.
+
+Whichever mode is used, each investigator gets a self-contained brief and returns:
 
 - **Findings**: what exists today, the constraints, the risky unknowns — cited at `file:line` where it read code.
 - **Proposed child issues**: for its area, a list of `{title, description, acceptance, depends_on}`. Descriptions must be self-contained — a fresh-context agent will implement them from the bead text alone. A proposal whose deliverable is knowledge rather than code should be titled `Research: …` (see step 3).
@@ -74,26 +91,49 @@ Use a structured `schema` so investigators return data, not prose, when using `W
 
 ```js
 export const meta = {
-  name: 'plan-epic-investigate',
-  description: 'Fan out investigators over facets of an epic and return child-issue specs',
-  phases: [{ title: 'Investigate' }],
-}
+  name: "plan-epic-investigate",
+  description: "Fan out investigators over facets of an epic and return child-issue specs",
+  phases: [{ title: "Investigate" }],
+};
 // Inline the epic id and full area briefs here — no args dependency.
-const EPIC = 'bd-xxxxxx'
+const EPIC = "bd-xxxxxx";
 const AREAS = [
-  { key: 'area-1', brief: `...self-contained brief with the evidence and questions...` },
+  { key: "area-1", brief: `...self-contained brief with the evidence and questions...` },
   // one entry per investigation area
-]
-const ISSUE = { type: 'object', required: ['findings', 'issues'], properties: {
-  findings: { type: 'string' },
-  issues: { type: 'array', items: { type: 'object',
-    required: ['title', 'description', 'acceptance'],
-    properties: { title: {type:'string'}, description: {type:'string'},
-      acceptance: {type:'string'}, depends_on: {type:'array', items:{type:'string'}} } } } } }
-const results = await parallel(AREAS.map(a => () =>
-  agent(`Investigate for epic ${EPIC}. ${a.brief}\nReturn findings (cite file:line) and self-contained child-issue specs.`,
-    { label: `investigate:${a.key}`, phase: 'Investigate', schema: ISSUE })))
-return results.map((r, i) => ({ area: AREAS[i].key, result: r ?? 'FAILED — dispatch a gap investigator for this area' }))
+];
+const ISSUE = {
+  type: "object",
+  required: ["findings", "issues"],
+  properties: {
+    findings: { type: "string" },
+    issues: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["title", "description", "acceptance"],
+        properties: {
+          title: { type: "string" },
+          description: { type: "string" },
+          acceptance: { type: "string" },
+          depends_on: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  },
+};
+const results = await parallel(
+  AREAS.map(
+    (a) => () =>
+      agent(
+        `Investigate for epic ${EPIC}. ${a.brief}\nReturn findings (cite file:line) and self-contained child-issue specs.`,
+        { label: `investigate:${a.key}`, phase: "Investigate", schema: ISSUE },
+      ),
+  ),
+);
+return results.map((r, i) => ({
+  area: AREAS[i].key,
+  result: r ?? "FAILED — dispatch a gap investigator for this area",
+}));
 ```
 
 Read the results yourself in the main thread — you own synthesis, the user can't see agent output.
@@ -103,19 +143,19 @@ Read the results yourself in the main thread — you own synthesis, the user can
 In the main thread:
 
 - **Dedupe and merge** overlapping proposals across areas.
-- **Order** them: pick a sensible sequence, and encode hard ordering as dependencies so `bd ready --parent $EPIC` only surfaces truly-claimable work. `bd link <later> <earlier>` means *earlier blocks later*.
+- **Order** them: pick a sensible sequence, and encode hard ordering as dependencies so `bd ready --parent $EPIC` only surfaces truly-claimable work. `bd link <later> <earlier>` means _earlier blocks later_.
 - **Right-size**: each child is one `/cook-it`-able unit — concrete file-level changes, its own tests, a clear done state. Split anything too big.
 - **Mark research children**: when a child's deliverable is knowledge, not code (recon, API exploration, a spike), title it `Research: …` or give it the `research` label, and write its acceptance as the questions it must answer. Runners expect its findings as a `bd comment` on the child and zero commits — an unmarked research child fails cook-epic's commits check and burns its retry budget.
 
 Assign each synthesized child a stable key and normalize it to `{key, title,
 description, acceptance, priority, depends_on}` before any Beads writes.
 
-#### Delegate child creation when there are more than two children
+#### Create children without overloading the main context
 
 - For one or two children, the main thread may create and link them directly.
-- For **more than two children**, the main thread must not run the child `bd
-  create` or `bd link` commands. Fan out child creation to writer agents in
-  parallel.
+- For **more than two children**, fan out child creation to writer subagents in
+  parallel when the harness provides a subagent tool. Without one, create and
+  link the normalized children sequentially in the main thread.
 - Give each writer only the repo root, epic id, and the complete normalized spec
   for **one child**. A writer may receive two children only when they are tightly
   coupled and sharing that context is cheaper than another agent. Never give a
@@ -124,12 +164,13 @@ description, acceptance, priority, depends_on}` before any Beads writes.
   and returns `{key, id}`. Run writers in waves when concurrency is limited.
   Assume Beads supports concurrent writers; retry or reduce concurrency only
   after an actual lock/transient failure.
-- After all ids return, dispatch one lightweight linker agent with only the
+- After all ids return, dispatch one lightweight linker subagent, when available, with only the
   `{key: id}` map and dependency edge list. It runs the `bd link` commands and
   returns `bd list --parent $EPIC --pretty`. It does not need child descriptions
-  or investigation findings.
-- The main thread verifies the returned tree read-only. Send corrections back to
-  the responsible writer/linker; do not take over the mutations locally.
+  or investigation findings. Without a subagent tool, run those links directly.
+- The main thread verifies the returned tree read-only. When writers/linkers were
+  used, send corrections back to the responsible one rather than taking over its
+  mutations locally.
 
 Investigation agents remain read-only. Child writers are a separate phase after
 the main thread has finished synthesis.
@@ -231,16 +272,10 @@ for. Nothing else about the plan changes between the two.
 
 **Launch it** when the request said to act on the plan, not just produce it — "/plan-epic X
 and run it", "…then start cooking", "plan and execute", "kick it off". Treat that as the
-authorization; don't ask again. Invoke the `ralph` skill with the loop prompt:
-
-```
-skill: ralph
-args: /cook-it <EPIC>
-```
-
-No `-` separator here: skill stacking is a *typed-message parser* behavior, so an argument
-passed through the Skill tool never trips it. Then follow ralph's own reporting contract —
-relay each finished iteration, stay quiet in between.
+authorization; don't ask again. Use the harness's native skill invocation when it provides
+one. If it provides no skill expansion, read the `ralph` skill body and follow it with
+`/cook-it <EPIC>` as the loop prompt. Then follow ralph's own reporting contract — relay each
+finished iteration, stay quiet in between.
 
 If the request asked for **parallel** execution ("in parallel", "swarm it", "several workers"),
 invoke the `cook-epic` skill with the epic id instead of ralph — it runs a pool of
@@ -256,14 +291,14 @@ Two things still stop you, even under an explicit "run it":
   dependency graph is over-constrained — fix the ordering, don't start a loop that immediately
   gutters.
 
-**Hand it over** when the user only asked to plan. Print the command for the harness you're running in (both forms below) and copy it:
+**Hand it over** when the user only asked to plan. Print and copy the form for the
+harness you're running in:
 
-```
-/ralph - /cook-it <EPIC>
-
-codex:
-$ralph $cook-it <EPIC>
-```
+| Harness capability        | Command                                                                   |
+| ------------------------- | ------------------------------------------------------------------------- |
+| Claude Code typed skills  | `/ralph - /cook-it <EPIC>`                                                |
+| Codex native skills       | `$ralph $cook-it <EPIC>`                                                  |
+| No native skill expansion | Paste the `ralph` skill body and use `/cook-it <EPIC>` as its loop prompt |
 
 Offer the parallel alternative alongside when the children are largely independent:
 
@@ -275,33 +310,38 @@ No prose needed in it: `/cook-it <epic-id>` detects `issue_type: epic` and runs 
 of the Handoff Protocol above, and ralph's runner already appends the one-unit-of-work /
 commit / `RALPH_DONE` rules to every iteration's prompt.
 
-**Keep the `-`.** Claude Code *stacks* skills typed back to back: `/ralph /cook-it <EPIC>`
+**Keep the `-` in the Claude Code typed form.** Claude Code _stacks_ skills typed back to back: `/ralph /cook-it <EPIC>`
 expands both, handing the trailing `<EPIC>` to each as `$ARGUMENTS`. Ralph would get a bare
 epic id as its loop prompt (not `/cook-it <EPIC>`), and cook-it would fire in the foreground
 at the same time. Expansion stops at the first token that isn't an inline skill, so the `-`
 keeps `/cook-it <EPIC>` intact as ralph's literal argument, and the leading dash is inert in
-the child's prompt. Codex's `$` form doesn't stack, so it needs no separator.
+the child's prompt. Codex's `$` form expands both mentions without that separator. Harnesses
+without native skill expansion must receive the skill body rather than a literal skill name.
 
 Put it on the clipboard too, picking the form that matches the harness you're running in
 (Claude Code → the `/` form, Codex → the `$` form). Best-effort: if there's no clipboard tool
 or display — a remote or headless session — say so in one clause and move on. Never let this
-fail the handoff.
+fail the handoff. Set `HANDOFF_COMMAND` to the exact Claude or Codex command you printed before
+running the snippet. The no-expansion fallback includes a skill body and cannot be represented
+by this short command, so skip clipboard copying for that mode and say so.
 
 ```bash
+HANDOFF_COMMAND="/ralph - /cook-it $EPIC" # Claude Code
+# HANDOFF_COMMAND="\$ralph \$cook-it $EPIC" # Codex
 for c in "wl-copy" "xclip -selection clipboard" "pbcopy"; do
   command -v ${c%% *} >/dev/null 2>&1 &&
-    printf '/ralph - /cook-it %s' "$EPIC" | $c && echo "copied to clipboard" && break
+    printf '%s' "$HANDOFF_COMMAND" | $c && echo "copied to clipboard" && break
 done
 ```
 
 ## Why the handoff lives on the epic
 
 - **One source of truth per epic.** Goal, architecture, live state, and "what next" sit on the bead, not in a file that collides when several epics are active.
-- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so sequential ralph iterations never race a read-modify-write. The description holds the *stable* doc; only the shared-brain Context section is edited, and only on a real decision change.
+- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so sequential ralph iterations never race a read-modify-write. The description holds the _stable_ doc; only the shared-brain Context section is edited, and only on a real decision change.
 - **The last note is the pointer.** Instead of maintaining a mutable "Next up" block, each iteration ends its note with `Next: …`. The freshest instruction is always the last line of the log.
 
 ## Cautions
 
 - Keep the Handoff Protocol text stable across epics. If you improve it, improve it here in the skill so every future epic gets the better version, rather than hand-editing one epic.
 - Don't over-decompose. Children that are too fine create loop overhead; children that are too coarse choke `/cook-it`. One reviewable commit's worth of work each is the target.
-- Order with dependencies, not priorities alone — `ralph` claims by readiness, so a child that must come first has to *block* the others, or it can be picked early; priorities only break ties within the ready frontier.
+- Order with dependencies, not priorities alone — `ralph` claims by readiness, so a child that must come first has to _block_ the others, or it can be picked early; priorities only break ties within the ready frontier.
