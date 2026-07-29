@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   MessageId,
+  EpicRunPreflightError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -28,7 +29,12 @@ import {
 } from "../../persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
-import { EpicRunLock } from "../Services/EpicRunLock.ts";
+import {
+  EpicRunLock,
+  EpicRunLockError,
+  EpicRunLockHeldError,
+  type EpicRunLockLease,
+} from "../Services/EpicRunLock.ts";
 import { EpicRunner } from "../Services/EpicRunner.ts";
 import { makeEpicRunnerLive } from "./EpicRunner.ts";
 
@@ -121,15 +127,19 @@ const makeThreadDetail = (input: {
  * implementation has its own suite, and what matters here is the order the
  * runner writes in, not how the rows are stored.
  */
-const makeMemoryStore = () => {
+const makeMemoryStore = (upsertDelayMs = 0) => {
   const runs = new Map<string, EpicRun>();
   const iterations: EpicRunIteration[] = [];
 
   const shape: EpicRunStoreShape = {
-    upsertRun: (run) =>
-      Effect.sync(() => {
+    upsertRun: (run) => {
+      const save = Effect.sync(() => {
         runs.set(run.runId, run);
-      }),
+      });
+      return upsertDelayMs === 0
+        ? save
+        : Effect.sleep(`${upsertDelayMs} millis`).pipe(Effect.flatMap(() => save));
+    },
     getRun: ({ runId }) =>
       Effect.sync(() => {
         const run = runs.get(runId);
@@ -187,9 +197,12 @@ function createHarness(input: {
   };
   readonly onLockAcquire?: () => void;
   readonly onLockRelease?: () => void;
+  readonly lockAcquireError?: EpicRunLockError;
+  readonly preflightError?: EpicRunPreflightError;
+  readonly upsertDelayMs?: number;
   readonly readyOutput?: string;
 }) {
-  const store = makeMemoryStore();
+  const store = makeMemoryStore(input.upsertDelayMs);
   for (const run of input.seedRuns ?? []) {
     store.runs.set(run.runId, run);
   }
@@ -208,6 +221,7 @@ function createHarness(input: {
   let turnsStarted = 0;
   let sequence = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
+  const heldLocks = new Set<string>();
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -375,18 +389,30 @@ function createHarness(input: {
     Layer.provide(
       Layer.succeed(EpicRunPreflight, {
         check: () =>
-          Effect.succeed(input.preflightResult ?? { ok: true, blockers: [], warnings: [] }),
+          input.preflightError === undefined
+            ? Effect.succeed(input.preflightResult ?? { ok: true, blockers: [], warnings: [] })
+            : Effect.fail(input.preflightError),
       }),
     ),
     Layer.provide(
       Layer.succeed(EpicRunLock, {
         // @effect-diagnostics-next-line effectSucceedWithVoid:off
         inspect: () => Effect.succeed(undefined),
-        acquire: (lockInput) =>
-          Effect.sync(() => {
+        acquire: (
+          lockInput,
+        ): Effect.Effect<EpicRunLockLease, EpicRunLockError | EpicRunLockHeldError> =>
+          Effect.suspend<EpicRunLockLease, EpicRunLockError | EpicRunLockHeldError, never>(() => {
+            if (input.lockAcquireError !== undefined) {
+              return Effect.fail(input.lockAcquireError);
+            }
+            const path = `/tmp/${lockInput.epicId}`;
+            if (heldLocks.has(path)) {
+              return Effect.fail(new EpicRunLockHeldError(path, undefined));
+            }
+            heldLocks.add(path);
             input.onLockAcquire?.();
-            return {
-              path: `/tmp/${lockInput.epicId}`,
+            return Effect.succeed({
+              path,
               owner: {
                 owner: "t3code",
                 host: "test",
@@ -398,10 +424,11 @@ function createHarness(input: {
               },
               heartbeat: Effect.succeed(true),
               release: Effect.sync(() => {
+                heldLocks.delete(path);
                 input.onLockRelease?.();
                 return true;
               }),
-            };
+            });
           }),
       }),
     ),
@@ -416,7 +443,9 @@ function createHarness(input: {
     layer,
     store,
     turnsStarted: () => turnsStarted,
+    activeLockCount: () => heldLocks.size,
     processRequests,
+    commands: dispatched,
     commandsOfType: <T extends OrchestrationCommand["type"]>(type: T) =>
       dispatched.filter(
         (command): command is Extract<OrchestrationCommand, { readonly type: T }> =>
@@ -530,7 +559,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("keeps iterating while the agent commits, then stops on RALPH_DONE", () => {
+  it.live("reaches completion without consuming streamRuns, stopping on RALPH_DONE", () => {
     const harness = createHarness({
       script: [
         { text: 'work\nRALPH_MSG: {"summary":"first","why":"needed"}', head: "head-1" },
@@ -570,6 +599,116 @@ describe("EpicRunner", () => {
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
         /Cook exactly `child-1` this iteration\.$/,
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("returns the same active run for sequential duplicate starts", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", stall: true }],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const first = yield* startRun();
+      yield* waitFor(() => harness.turnsStarted() === 1);
+      const duplicate = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "different settings must not replace the active run",
+        modelSelection: { ...modelSelection, model: "different-model" },
+        maxIterations: 99,
+      });
+
+      assert.strictEqual(duplicate.runId, first.runId);
+      assert.strictEqual(duplicate.prompt, first.prompt);
+      assert.strictEqual(harness.store.runs.size, 1);
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      assert.strictEqual(harness.store.iterations.length, 1);
+      yield* runner.cancelRun({ runId: first.runId });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("returns the winning run for concurrent duplicate starts", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", stall: true }],
+      options: { iterationTimeoutMs: 60_000 },
+      // The loser sees the held lock well before the winning row is visible.
+      upsertDelayMs: 25,
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const [first, duplicate] = yield* Effect.all([startRun(), startRun()], {
+        concurrency: "unbounded",
+      });
+      yield* waitFor(() => harness.turnsStarted() === 1);
+
+      assert.strictEqual(duplicate.runId, first.runId);
+      assert.strictEqual(harness.store.runs.size, 1);
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      assert.strictEqual(harness.store.iterations.length, 1);
+      yield* runner.cancelRun({ runId: first.runId });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("preserves generic lock acquisition failures", () => {
+    const harness = createHarness({
+      script: [],
+      lockAcquireError: new EpicRunLockError("test-generic-lock-failure"),
+    });
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(startRun());
+      assert.strictEqual(error._tag, "EpicRunPreflightBlockedError");
+      if (error._tag === "EpicRunPreflightBlockedError") {
+        assert.deepStrictEqual(error.blockers, [
+          "Epic run lock operation failed: test-generic-lock-failure",
+        ]);
+      }
+      assert.strictEqual(harness.store.runs.size, 0);
+      assert.strictEqual(harness.turnsStarted(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("preserves preflight check failures", () => {
+    const harness = createHarness({
+      script: [],
+      preflightError: new EpicRunPreflightError({ message: "preflight exploded" }),
+    });
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(startRun());
+      assert.strictEqual(error._tag, "EpicRunPreflightBlockedError");
+      if (error._tag === "EpicRunPreflightBlockedError") {
+        assert.deepStrictEqual(error.blockers, ["preflight exploded"]);
+      }
+      assert.strictEqual(harness.store.runs.size, 0);
+      assert.strictEqual(harness.turnsStarted(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("returns an active duplicate launch before validating project defaults", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", stall: true }],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const active = yield* startRun();
+      yield* waitFor(() => harness.turnsStarted() === 1);
+
+      const duplicate = yield* runner.launchRun({
+        epicId: active.epicId,
+        projectId: ProjectId.make("project-that-does-not-own-the-cwd"),
+        cwd: active.cwd,
+      });
+      assert.strictEqual(duplicate.runId, active.runId);
+      assert.strictEqual(harness.store.runs.size, 1);
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      yield* runner.cancelRun({ runId: active.runId });
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -651,7 +790,7 @@ describe("EpicRunner", () => {
     return Effect.gen(function* () {
       const runner = yield* EpicRunner;
       const run = yield* startRun();
-      yield* waitFor(() => harness.store.iterations.length === 1);
+      yield* waitFor(() => harness.turnsStarted() === 1);
 
       const cancelled = yield* runner.cancelRun({ runId: run.runId });
       assert.strictEqual(cancelled.status, "cancelled");
@@ -734,6 +873,19 @@ describe("EpicRunner", () => {
 
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
       assert.strictEqual(harness.store.iterations[0]?.summary, "abandoned by server restart");
+      const staleThreadId = harness.store.iterations[0]!.threadId;
+      const interruptIndex = harness.commands.findIndex(
+        (command) => command.type === "thread.turn.interrupt" && command.threadId === staleThreadId,
+      );
+      const stopIndex = harness.commands.findIndex(
+        (command) => command.type === "thread.session.stop" && command.threadId === staleThreadId,
+      );
+      const nextCreateIndex = harness.commands.findIndex(
+        (command) => command.type === "thread.create",
+      );
+      assert.isAtLeast(interruptIndex, 0);
+      assert.isAbove(stopIndex, interruptIndex);
+      assert.isAbove(nextCreateIndex, stopIndex);
       // The resumed loop picks up at the next index, not the abandoned one.
       assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
     }).pipe(Effect.provide(harness.layer));
@@ -783,7 +935,11 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.iterations.length === 1);
       yield* runner.pauseRun({ runId: run.runId });
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "paused");
-      yield* settle;
+      yield* waitFor(
+        () =>
+          harness.store.iterations[0]?.turnStatus === "completed" &&
+          harness.activeLockCount() === 0,
+      );
 
       yield* runner.resumeRun({ runId: run.runId });
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
