@@ -35,6 +35,7 @@ export function mergeComposerSlashCommands(input: {
     id: `provider-slash-command:${input.provider}:${command.name}`,
     type: "provider-slash-command",
     provider: input.provider,
+    source: "source" in command && command.source === "workspace" ? "workspace" : "provider",
     command,
     label: `/${command.name}`,
     description:

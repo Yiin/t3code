@@ -1,6 +1,7 @@
 import { isLiquidGlassSupported, LiquidGlassView } from "@callstack/liquid-glass";
 import type { ComposerTriggerKind } from "@t3tools/shared/composerTrigger";
-import type { ServerProviderSkill, ServerProviderSlashCommand } from "@t3tools/contracts";
+import type { ServerProviderSkill } from "@t3tools/contracts";
+import { mobileSlashCommandGroups, type MobileSlashCommandItem } from "./composerSlashCommands";
 import { SymbolView } from "../../components/AppSymbol";
 import { memo } from "react";
 import { Pressable, ScrollView, useColorScheme, View, type ViewStyle } from "react-native";
@@ -16,20 +17,7 @@ export type ComposerCommandItem =
       readonly label: string;
       readonly description: string;
     }
-  | {
-      readonly id: string;
-      readonly type: "slash-command";
-      readonly command: string;
-      readonly label: string;
-      readonly description: string;
-    }
-  | {
-      readonly id: string;
-      readonly type: "provider-slash-command";
-      readonly command: ServerProviderSlashCommand;
-      readonly label: string;
-      readonly description: string;
-    }
+  | MobileSlashCommandItem
   | {
       readonly id: string;
       readonly type: "skill";
@@ -41,6 +29,7 @@ export type ComposerCommandItem =
 interface ComposerCommandPopoverProps {
   readonly items: ReadonlyArray<ComposerCommandItem>;
   readonly triggerKind: ComposerTriggerKind | null;
+  readonly groupSlashCommandSections?: boolean;
   readonly isLoading: boolean;
   readonly onSelect: (item: ComposerCommandItem) => void;
 }
@@ -143,6 +132,7 @@ const CommandRow = memo(function CommandRow(props: {
         alignItems: "center",
         paddingHorizontal: 14,
         paddingVertical: 10,
+        minHeight: 44,
         gap: 10,
         opacity: pressed ? 0.6 : 1,
         borderBottomWidth: props.isLast ? 0 : 0.5,
@@ -171,10 +161,20 @@ export const ComposerCommandPopover = memo(function ComposerCommandPopover(
 ) {
   const isDarkMode = useColorScheme() === "dark";
   const label = groupLabel(props.triggerKind);
+  const groups =
+    props.triggerKind === "slash-command"
+      ? mobileSlashCommandGroups(
+          props.items.filter(
+            (item): item is MobileSlashCommandItem =>
+              item.type === "slash-command" || item.type === "provider-slash-command",
+          ),
+          props.groupSlashCommandSections ?? true,
+        )
+      : null;
 
   return (
     <PopoverSurface isDarkMode={isDarkMode}>
-      {label ? (
+      {label && groups === null ? (
         <View className="px-3.5 pt-2.5 pb-1">
           <Text className="text-3xs font-t3-bold tracking-[0.8px] uppercase text-foreground-muted">
             {label}
@@ -187,13 +187,24 @@ export const ComposerCommandPopover = memo(function ComposerCommandPopover(
           keyboardShouldPersistTaps="always"
           showsVerticalScrollIndicator={false}
         >
-          {props.items.map((item, index) => (
-            <CommandRow
-              key={item.id}
-              item={item}
-              onPress={() => props.onSelect(item)}
-              isLast={index === props.items.length - 1}
-            />
+          {(groups ?? [{ id: "default", label: null, items: props.items }]).map((group) => (
+            <View key={group.id}>
+              {group.label ? (
+                <View className="px-3.5 pt-2.5 pb-1">
+                  <Text className="text-3xs font-t3-bold tracking-[0.8px] uppercase text-foreground-muted">
+                    {group.label}
+                  </Text>
+                </View>
+              ) : null}
+              {group.items.map((item, index) => (
+                <CommandRow
+                  key={item.id}
+                  item={item}
+                  onPress={() => props.onSelect(item)}
+                  isLast={index === group.items.length - 1}
+                />
+              ))}
+            </View>
           ))}
         </ScrollView>
       ) : (

@@ -25,6 +25,7 @@ import {
   connectionStatusText,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
+import { resolveLatestFinalizedPlannedEpic } from "@t3tools/client-runtime/state/planned-epic";
 import {
   parseScopedThreadKey,
   scopedThreadKey,
@@ -204,6 +205,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { epicsEnvironment } from "../state/epics";
+import { launchPlannedEpic, plannedEpicIdentity, plannedEpicRoute } from "../plannedEpicFollowUp";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -1138,6 +1140,7 @@ function ChatViewContent(props: ChatViewProps) {
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
+  const launchEpicRun = useAtomCommand(epicsEnvironment.launchRun, { reportFailure: false });
   const environmentById = useMemo(
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
@@ -1438,6 +1441,11 @@ function ChatViewContent(props: ChatViewProps) {
       : null,
   );
   const activeEpicRun = activeEpicRunQuery.data;
+  const plannedEpic = useMemo(
+    () => resolveLatestFinalizedPlannedEpic(activeThread ?? null),
+    [activeThread],
+  );
+  const [pendingPlannedEpicKey, setPendingPlannedEpicKey] = useState<string | null>(null);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
@@ -1835,6 +1843,51 @@ function ChatViewContent(props: ChatViewProps) {
         ),
       });
     }
+    if (plannedEpic && !activeEpicRun) {
+      const plannedEpicKey = plannedEpicIdentity(plannedEpic);
+      const epicRoute = plannedEpicRoute(plannedEpic);
+      const isLaunching = pendingPlannedEpicKey === plannedEpicKey;
+      items.push({
+        id: `planned-epic:${plannedEpic.epicId}:${plannedEpic.projectId}`,
+        variant: "success",
+        icon: <ChefHatIcon />,
+        title: `Epic ${plannedEpic.epicId} planned`,
+        actions: (
+          <>
+            <Button size="xs" variant="outline" onClick={() => void navigate(epicRoute)}>
+              View epic
+            </Button>
+            <Button
+              size="xs"
+              disabled={isLaunching}
+              onClick={() => {
+                if (isLaunching) return;
+                setPendingPlannedEpicKey(plannedEpicKey);
+                void launchPlannedEpic({
+                  correlation: plannedEpic,
+                  launch: launchEpicRun,
+                  navigate,
+                  onSettled: () => setPendingPlannedEpicKey(null),
+                  onFailure: (result) => {
+                    if (!isAtomCommandInterrupted(result)) {
+                      toastManager.add(
+                        stackedThreadToast({
+                          type: "error",
+                          title: "Could not start unattended run",
+                          description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+                        }),
+                      );
+                    }
+                  },
+                });
+              }}
+            >
+              {isLaunching ? "Starting..." : "Start unattended run"}
+            </Button>
+          </>
+        ),
+      });
+    }
     if (activeEnvironmentUnavailableState) {
       const connection = activeEnvironmentUnavailableState.connection;
       const isReconnecting =
@@ -1911,6 +1964,9 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeEpicRun,
     activeThread?.environmentId,
+    launchEpicRun,
+    pendingPlannedEpicKey,
+    plannedEpic,
     activeEnvironmentUnavailableState,
     environmentId,
     handleReconnectActiveEnvironment,
