@@ -52,6 +52,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.previewAutomationConnect
   | typeof WS_METHODS.subscribeVcsStatus
   | typeof WS_METHODS.subscribeBeadsStatus
+  | typeof WS_METHODS.subscribeEpicRuns
   | typeof WS_METHODS.terminalAttach;
 
 export type EnvironmentStreamCommandRpcTag =
@@ -63,7 +64,7 @@ export type EnvironmentStreamRpcTag =
   | EnvironmentStreamCommandRpcTag;
 
 export type EnvironmentUnaryRpcTag = Exclude<EnvironmentRpcTag, EnvironmentStreamRpcTag>;
-const isRpcClientError = Schema.is(RpcClientError.RpcClientError);
+export const isRpcClientTransportFailure = Schema.is(RpcClientError.RpcClientError);
 
 export type EnvironmentRpcInput<TTag extends EnvironmentRpcTag> = Parameters<RpcMethod<TTag>>[0];
 
@@ -108,12 +109,18 @@ const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
 export const request = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
 >(tag: TTag, input: EnvironmentRpcInput<TTag>) {
+  const session = yield* currentSession();
+  return yield* requestInSession(session, tag, input);
+});
+
+export const requestInSession = Effect.fn("EnvironmentRpc.requestInSession")(function* <
+  TTag extends EnvironmentUnaryRpcTag,
+>(session: RpcSession, tag: TTag, input: EnvironmentRpcInput<TTag>) {
   const supervisor = yield* EnvironmentSupervisor;
   yield* Effect.annotateCurrentSpan({
     "environment.id": supervisor.target.environmentId,
     "rpc.method": tag,
   });
-  const session = yield* currentSession();
   const observer = yield* EnvironmentRpcRequestObserver;
   const method = session.client[tag] as (
     input: EnvironmentRpcInput<TTag>,
@@ -207,7 +214,8 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
                                 hasOnlyExpectedFailures &&
                                 cause.reasons.every(
                                   (reason) =>
-                                    reason._tag === "Fail" && isRpcClientError(reason.error),
+                                    reason._tag === "Fail" &&
+                                    isRpcClientTransportFailure(reason.error),
                                 );
                               if (isTransportFailure) {
                                 return Stream.fromEffect(

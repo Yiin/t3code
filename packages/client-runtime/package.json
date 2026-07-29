@@ -55,6 +55,10 @@
       "types": "./src/state/entities.ts",
       "default": "./src/state/entities.ts"
     },
+    "./state/epics": {
+      "types": "./src/state/epics.ts",
+      "default": "./src/state/epics.ts"
+    },
     "./state/filesystem": {
       "types": "./src/state/filesystem.ts",
       "default": "./src/state/filesystem.ts"
