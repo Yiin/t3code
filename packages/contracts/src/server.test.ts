@@ -1,9 +1,10 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ServerProvider } from "./server.ts";
+import { ServerConfig, ServerProvider } from "./server.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
+const decodeServerSlashCommands = Schema.decodeUnknownSync(ServerConfig.fields.serverSlashCommands);
 
 describe("ServerProvider", () => {
   it("defaults capability arrays when decoding provider snapshots", () => {
@@ -70,5 +71,11 @@ describe("ServerProvider", () => {
     });
 
     expect(parsed.continuation?.groupKey).toBe("codex:home:/Users/julius/.codex");
+  });
+});
+
+describe("ServerConfig", () => {
+  it("defaults workspace slash commands when decoding older snapshots", () => {
+    expect(decodeServerSlashCommands(undefined)).toEqual([]);
   });
 });

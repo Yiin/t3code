@@ -215,6 +215,13 @@ export const ServerObservability = Schema.Struct({
 });
 export type ServerObservability = typeof ServerObservability.Type;
 
+export const ServerWorkspaceSlashCommand = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  description: Schema.optional(TrimmedNonEmptyString),
+  source: Schema.Literal("workspace"),
+});
+export type ServerWorkspaceSlashCommand = typeof ServerWorkspaceSlashCommand.Type;
+
 export const ServerTraceDiagnosticsErrorKind = Schema.Literals([
   "trace-file-not-found",
   "trace-file-read-failed",
@@ -415,6 +422,9 @@ export const ServerConfig = Schema.Struct({
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
   providers: ServerProviders,
+  serverSlashCommands: Schema.Array(ServerWorkspaceSlashCommand).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   availableEditors: Schema.Array(EditorId),
   observability: ServerObservability,
   settings: ServerSettings,

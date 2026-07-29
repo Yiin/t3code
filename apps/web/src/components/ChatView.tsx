@@ -1924,6 +1924,8 @@ function ChatViewContent(props: ChatViewProps) {
     versionMismatchServerLabel,
   ]);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
+  const serverSlashCommands =
+    environmentById.get(environmentId)?.serverConfig?.serverSlashCommands ?? [];
   const unlockedSelectedProvider = resolveSelectableProvider(
     providerStatuses,
     selectedProviderByThreadId ?? threadProvider,
@@ -5654,6 +5656,7 @@ function ChatViewContent(props: ChatViewProps) {
                         interactionMode={interactionMode}
                         lockedProvider={lockedProvider}
                         providerStatuses={providerStatuses as ServerProvider[]}
+                        serverSlashCommands={serverSlashCommands}
                         activeProjectDefaultModelSelection={activeProject?.defaultModelSelection}
                         activeThreadModelSelection={activeThread?.modelSelection}
                         activeThreadActivities={activeThread?.activities}

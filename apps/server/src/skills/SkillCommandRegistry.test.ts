@@ -70,6 +70,21 @@ describe("SkillCommandRegistry", () => {
     }),
   );
 
+  effectIt.effect("lists authoritative metadata in stable scan order and deduplicates names", () =>
+    Effect.gen(function* () {
+      const root = makeRoot();
+      writeSkill(root, "z-last", "---\nname: duplicate\ndescription: Last\n---\nlast");
+      writeSkill(root, "b-second", "---\nname: second\n---\nsecond");
+      writeSkill(root, "a-first", "---\nname: duplicate\ndescription: First\n---\nfirst");
+      const registry = yield* makeSkillCommandRegistry();
+
+      expect(yield* registry.list(root)).toEqual([
+        { name: "duplicate", description: "First" },
+        { name: "second" },
+      ]);
+    }),
+  );
+
   effectIt.effect("invalidates cached results on add, change, and removal", () =>
     Effect.gen(function* () {
       const root = makeRoot();
@@ -79,12 +94,14 @@ describe("SkillCommandRegistry", () => {
 
       writeSkill(root, "two", "---\nname: two\n---\nadded");
       expect(yield* registry.find(root, "two")).toBeDefined();
+      expect(yield* registry.list(root)).toEqual([{ name: "one" }, { name: "two" }]);
 
       writeSkill(root, "one", "---\nname: one\n---\nchanged and longer");
       expect((yield* registry.find(root, "one"))?.content).toContain("changed");
 
       NodeFS.rmSync(NodePath.join(root, "two"), { recursive: true });
       expect(yield* registry.find(root, "two")).toBeUndefined();
+      expect(yield* registry.list(root)).toEqual([{ name: "one" }]);
     }),
   );
 
@@ -109,6 +126,7 @@ describe("SkillCommandRegistry", () => {
       const root = NodePath.join(makeRoot(), "missing");
       const registry = yield* makeSkillCommandRegistry();
       expect(yield* registry.find(root, "anything")).toBeUndefined();
+      expect(yield* registry.list(root)).toEqual([]);
     }),
   );
 });

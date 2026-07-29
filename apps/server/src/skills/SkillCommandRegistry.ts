@@ -20,6 +20,7 @@ interface CacheEntry {
 
 export interface SkillCommandRegistry {
   readonly find: (root: string, name: string) => Effect.Effect<SkillCommand | undefined>;
+  readonly list: (root: string) => Effect.Effect<ReadonlyArray<Omit<SkillCommand, "content">>>;
 }
 
 const SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/;
@@ -122,7 +123,46 @@ export const makeSkillCommandRegistry = Effect.fn("makeSkillCommandRegistry")(fu
       ),
     );
 
-  return { find } satisfies SkillCommandRegistry;
+  const list: SkillCommandRegistry["list"] = (root) =>
+    scanSemaphore.withPermits(1)(
+      Ref.get(cache).pipe(
+        Effect.flatMap((current) =>
+          Effect.tryPromise(() => scan(root, current.get(NodePath.resolve(root)))),
+        ),
+        Effect.flatMap((next) =>
+          Ref.modify(cache, (current) => {
+            const cached = current.get(NodePath.resolve(root));
+            const entry = cached?.fingerprint === next.fingerprint ? cached : next;
+            if (entry === cached) {
+              return [
+                Array.from(entry.commands.values(), ({ name, description }) => ({
+                  name,
+                  ...(description ? { description } : {}),
+                })),
+                current,
+              ] as const;
+            }
+            const updated = new Map(current);
+            updated.set(NodePath.resolve(root), next);
+            return [
+              Array.from(next.commands.values(), ({ name, description }) => ({
+                name,
+                ...(description ? { description } : {}),
+              })),
+              updated,
+            ] as const;
+          }),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("skill command registry scan failed; returning no commands", {
+            root,
+            cause,
+          }).pipe(Effect.as([])),
+        ),
+      ),
+    );
+
+  return { find, list } satisfies SkillCommandRegistry;
 });
 
 export const parseSkillCommand = (

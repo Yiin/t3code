@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind } from "@t3tools/contracts";
 
 import type { ComposerCommandItem } from "./ComposerCommandMenu";
-import { searchSlashCommandItems } from "./composerSlashCommandSearch";
+import { mergeComposerSlashCommands, searchSlashCommandItems } from "./composerSlashCommandSearch";
 
 describe("searchSlashCommandItems", () => {
   const claudeDriver = ProviderDriverKind.make("claudeAgent");
@@ -67,5 +67,41 @@ describe("searchSlashCommandItems", () => {
     expect(searchSlashCommandItems(items, "gfc").map((item) => item.id)).toEqual([
       "provider-slash-command:claudeAgent:gh-fix-ci",
     ]);
+  });
+});
+
+describe("mergeComposerSlashCommands", () => {
+  const provider = ProviderDriverKind.make("claudeAgent");
+
+  it("includes workspace commands when the provider reports none", () => {
+    expect(
+      mergeComposerSlashCommands({
+        provider,
+        providerCommands: [],
+        workspaceCommands: [{ name: "cook-it", description: "Cook a task", source: "workspace" }],
+      }),
+    ).toMatchObject([
+      {
+        command: { name: "cook-it", description: "Cook a task" },
+        label: "/cook-it",
+        description: "Cook a task",
+      },
+    ]);
+  });
+
+  it("deduplicates case-insensitively with the provider command winning", () => {
+    const items = mergeComposerSlashCommands({
+      provider,
+      providerCommands: [{ name: "Cook-It", description: "Provider description" }],
+      workspaceCommands: [
+        { name: "cook-it", description: "Workspace description", source: "workspace" },
+        { name: "PLAN-EPIC", source: "workspace" },
+        { name: "plan-epic", source: "workspace" },
+      ],
+    });
+
+    expect(items.map((item) => item.command.name)).toEqual(["Cook-It", "PLAN-EPIC"]);
+    expect(items[0]?.description).toBe("Provider description");
+    expect(items[1]?.description).toBe("Run command");
   });
 });
