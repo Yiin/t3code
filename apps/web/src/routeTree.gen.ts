@@ -24,6 +24,7 @@ import { Route as SettingsBetaRouteImport } from './routes/settings.beta'
 import { Route as SettingsArchivedRouteImport } from './routes/settings.archived'
 import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
 import { Route as ChatEpicsRouteImport } from './routes/_chat.epics'
+import { Route as ChatEpicsIndexRouteImport } from './routes/_chat.epics.index'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
 import { Route as ChatEpicsEnvironmentIdEpicIdRouteImport } from './routes/_chat.epics.$environmentId.$epicId'
@@ -102,6 +103,11 @@ const ChatEpicsRoute = ChatEpicsRouteImport.update({
   path: '/epics',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatEpicsIndexRoute = ChatEpicsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ChatEpicsRoute,
+} as any)
 const ChatDraftDraftIdRoute = ChatDraftDraftIdRouteImport.update({
   id: '/draft/$draftId',
   path: '/draft/$draftId',
@@ -137,13 +143,13 @@ export interface FileRoutesByFullPath {
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/epics/': typeof ChatEpicsIndexRoute
   '/epics/$environmentId/$epicId': typeof ChatEpicsEnvironmentIdEpicIdRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
-  '/epics': typeof ChatEpicsRouteWithChildren
   '/connect/callback': typeof ConnectCallbackRoute
   '/settings/archived': typeof SettingsArchivedRoute
   '/settings/beta': typeof SettingsBetaRoute
@@ -156,6 +162,7 @@ export interface FileRoutesByTo {
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/epics': typeof ChatEpicsIndexRoute
   '/epics/$environmentId/$epicId': typeof ChatEpicsEnvironmentIdEpicIdRoute
 }
 export interface FileRoutesById {
@@ -177,6 +184,7 @@ export interface FileRoutesById {
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
+  '/_chat/epics/': typeof ChatEpicsIndexRoute
   '/_chat/epics/$environmentId/$epicId': typeof ChatEpicsEnvironmentIdEpicIdRoute
 }
 export interface FileRouteTypes {
@@ -198,13 +206,13 @@ export interface FileRouteTypes {
     | '/settings/source-control'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
+    | '/epics/'
     | '/epics/$environmentId/$epicId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
     | '/pair'
     | '/settings'
-    | '/epics'
     | '/connect/callback'
     | '/settings/archived'
     | '/settings/beta'
@@ -217,6 +225,7 @@ export interface FileRouteTypes {
     | '/'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
+    | '/epics'
     | '/epics/$environmentId/$epicId'
   id:
     | '__root__'
@@ -237,6 +246,7 @@ export interface FileRouteTypes {
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
+    | '/_chat/epics/'
     | '/_chat/epics/$environmentId/$epicId'
   fileRoutesById: FileRoutesById
 }
@@ -355,6 +365,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatEpicsRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/epics/': {
+      id: '/_chat/epics/'
+      path: '/'
+      fullPath: '/epics/'
+      preLoaderRoute: typeof ChatEpicsIndexRouteImport
+      parentRoute: typeof ChatEpicsRoute
+    }
     '/_chat/draft/$draftId': {
       id: '/_chat/draft/$draftId'
       path: '/draft/$draftId'
@@ -380,10 +397,12 @@ declare module '@tanstack/react-router' {
 }
 
 interface ChatEpicsRouteChildren {
+  ChatEpicsIndexRoute: typeof ChatEpicsIndexRoute
   ChatEpicsEnvironmentIdEpicIdRoute: typeof ChatEpicsEnvironmentIdEpicIdRoute
 }
 
 const ChatEpicsRouteChildren: ChatEpicsRouteChildren = {
+  ChatEpicsIndexRoute: ChatEpicsIndexRoute,
   ChatEpicsEnvironmentIdEpicIdRoute: ChatEpicsEnvironmentIdEpicIdRoute,
 }
 

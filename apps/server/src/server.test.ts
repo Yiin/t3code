@@ -7422,6 +7422,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         lastError: null,
         createdAt: "2026-07-28T00:00:00.000Z",
         updatedAt: "2026-07-28T00:00:00.000Z",
+        threadRefs: [],
       };
       yield* buildAppUnderTest({
         layers: {
@@ -7584,6 +7585,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         lastError: null,
         createdAt: "2026-07-28T00:00:00.000Z",
         updatedAt: "2026-07-28T00:00:00.000Z",
+        threadRefs: [],
       };
       const mutationCalls: string[] = [];
       yield* buildAppUnderTest({

@@ -6,6 +6,7 @@ import {
   epicPresentationStatus,
   epicResultState,
   epicStatusLabel,
+  latestEpicThreadId,
   parseEpicRouteParams,
   selectEpicDetail,
   uniqueEpicProjectSources,
@@ -40,6 +41,18 @@ describe("epics logic", () => {
       { id: "other", parent: "app-2" },
     ] as BeadsIssueSummary[];
     expect(epicChildren("app-1", issues).map((issue) => issue.id)).toEqual(["child"]);
+  });
+
+  it("links an issue to its newest cooking iteration", () => {
+    const run = {
+      threadRefs: [
+        { issueId: "child", threadId: "older", iterationIndex: 1 },
+        { issueId: "other", threadId: "other", iterationIndex: 9 },
+        { issueId: "child", threadId: "newer", iterationIndex: 3 },
+      ],
+    } as unknown as EpicRun;
+    expect(latestEpicThreadId(run, "child")).toBe("newer");
+    expect(latestEpicThreadId(run, "missing")).toBeNull();
   });
 
   it("dedupes environment and workspace pairs while preserving preferred order", () => {

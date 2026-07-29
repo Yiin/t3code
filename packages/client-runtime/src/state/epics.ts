@@ -14,20 +14,34 @@ import { createEnvironmentRpcCommand, createEnvironmentSubscriptionAtomFamily } 
 export function latestEpicRun(
   current: EpicRun | null,
   candidates: ReadonlyArray<EpicRun>,
-  epicId: string,
+  identity: { readonly epicId: string; readonly projectId: string; readonly cwd: string },
 ): EpicRun | null {
+  const currentForIdentity =
+    current?.epicId === identity.epicId &&
+    current.projectId === identity.projectId &&
+    current.cwd === identity.cwd
+      ? current
+      : null;
   return candidates.reduce<EpicRun | null>((latest, candidate) => {
-    if (candidate.epicId !== epicId) {
+    if (
+      candidate.epicId !== identity.epicId ||
+      candidate.projectId !== identity.projectId ||
+      candidate.cwd !== identity.cwd
+    ) {
       return latest;
     }
     if (latest === null || candidate.updatedAt > latest.updatedAt) {
       return candidate;
     }
     return latest;
-  }, current);
+  }, currentForIdentity);
 }
 
-export function epicRunChanges(epicId: string) {
+export function epicRunChanges(identity: {
+  readonly epicId: string;
+  readonly projectId: string;
+  readonly cwd: string;
+}) {
   return Stream.unwrap(
     EnvironmentSupervisor.pipe(
       Effect.map((supervisor) => {
@@ -53,7 +67,7 @@ export function epicRunChanges(epicId: string) {
           Stream.mapAccum(
             () => null as EpicRun | null,
             (current, runs) => {
-              const next = latestEpicRun(current, runs, epicId);
+              const next = latestEpicRun(current, runs, identity);
               return next === null || next === current
                 ? ([current, []] as const)
                 : ([next, [next]] as const);
@@ -75,7 +89,11 @@ export function createEpicsEnvironmentAtoms<R, E>(
     }),
     run: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:epics:run",
-      subscribe: (input: { readonly epicId: string }) => epicRunChanges(input.epicId),
+      subscribe: (input: {
+        readonly epicId: string;
+        readonly projectId: string;
+        readonly cwd: string;
+      }) => epicRunChanges(input),
     }),
     startRun: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:epics:start-run",

@@ -29,13 +29,12 @@
  *
  * @module EpicRunner
  */
-import type { EpicRunRef, ListEpicRunsInput, StartEpicRunInput } from "@t3tools/contracts";
+import type { EpicRun, EpicRunRef, ListEpicRunsInput, StartEpicRunInput } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import type * as Stream from "effect/Stream";
 
-import type { EpicRun } from "../../persistence/Services/EpicRuns.ts";
 import type { EpicRunnerError } from "../Errors.ts";
 
 export type { EpicRunRef, StartEpicRunInput };

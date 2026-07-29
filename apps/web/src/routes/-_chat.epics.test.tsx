@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { Button } from "../components/ui/button";
-import { EpicsEmptyState } from "./_chat.epics";
+import { EpicsEmptyState } from "./_chat.epics.index";
 
 function findButton(node: ReactNode): ReactElement<{ readonly onClick: () => void }> | null {
   if (!isValidElement(node)) return null;

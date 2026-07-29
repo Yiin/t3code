@@ -31,12 +31,18 @@ const TARGET = new PrimaryConnectionTarget({
   wsBaseUrl: "wss://environment.example.test",
 });
 
-function run(runId: string, epicId: string, updatedAt: string, iterationsCompleted = 0): EpicRun {
+function run(
+  runId: string,
+  epicId: string,
+  updatedAt: string,
+  iterationsCompleted = 0,
+  identity: { readonly projectId?: string; readonly cwd?: string } = {},
+): EpicRun {
   return decodeRun({
     runId,
     epicId,
-    projectId: "project-1",
-    cwd: "/repo",
+    projectId: identity.projectId ?? "project-1",
+    cwd: identity.cwd ?? "/repo",
     prompt: "Cook one child.",
     modelSelection: {
       provider: "codex",
@@ -56,8 +62,9 @@ function run(runId: string, epicId: string, updatedAt: string, iterationsComplet
 }
 
 function fold(epicId: string, batches: ReadonlyArray<ReadonlyArray<EpicRun>>) {
+  const identity = { epicId, projectId: "project-1", cwd: "/repo" };
   return batches.reduce<EpicRun | null>(
-    (current, batch) => latestEpicRun(current, batch, epicId),
+    (current, batch) => latestEpicRun(current, batch, identity),
     null,
   );
 }
@@ -106,9 +113,20 @@ describe("epic run folding", () => {
     const newer = run("run-1", "epic-1", "2026-07-29T00:02:00.000Z", 2);
     const otherEpic = run("run-2", "epic-2", "2026-07-29T00:03:00.000Z", 3);
 
-    expect(latestEpicRun(null, [older, otherEpic, newer], "epic-1")).toEqual(newer);
-    expect(latestEpicRun(newer, [older], "epic-1")).toBe(newer);
-    expect(latestEpicRun(null, [otherEpic], "epic-1")).toBeNull();
+    const identity = { epicId: "epic-1", projectId: "project-1", cwd: "/repo" };
+    expect(latestEpicRun(null, [older, otherEpic, newer], identity)).toEqual(newer);
+    expect(latestEpicRun(newer, [older], identity)).toBe(newer);
+    expect(latestEpicRun(null, [otherEpic], identity)).toBeNull();
+  });
+
+  it("does not carry a run across project or workspace identity", () => {
+    const current = run("run-1", "epic-1", "2026-07-29T00:02:00.000Z");
+    expect(
+      latestEpicRun(current, [], { epicId: "epic-1", projectId: "project-2", cwd: "/repo" }),
+    ).toBeNull();
+    expect(
+      latestEpicRun(current, [], { epicId: "epic-1", projectId: "project-1", cwd: "/other" }),
+    ).toBeNull();
   });
 
   it("is independent of list-seed and live-event ordering", () => {
@@ -173,7 +191,7 @@ describe("epic run folding", () => {
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
         const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
-        yield* epicRunChanges("epic-1").pipe(
+        yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
           Effect.forkChild,
@@ -211,6 +229,76 @@ describe("epic run folding", () => {
         expect((yield* Ref.get(observed)).at(-1)).toEqual(afterReconnect);
         expect(yield* Ref.get(listCalls)).toBe(2);
         expect(yield* Ref.get(subscriptionCalls)).toBe(2);
+      }),
+    ),
+  );
+
+  it.effect("filters mismatched seed rows and live events by the full run identity", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const matchingSeed = run("matching-seed", "epic-1", "2026-07-29T00:01:00.000Z");
+        const wrongProject = run("wrong-project", "epic-1", "2026-07-29T00:09:00.000Z", 0, {
+          projectId: "project-2",
+        });
+        const wrongCwd = run("wrong-cwd", "epic-1", "2026-07-29T00:10:00.000Z", 0, {
+          cwd: "/other",
+        });
+        const wrongEpic = run("wrong-epic", "epic-2", "2026-07-29T00:11:00.000Z");
+        const matchingLive = run("matching-live", "epic-1", "2026-07-29T00:12:00.000Z");
+        const listCalls = yield* Ref.make(0);
+        const subscriptionCalls = yield* Ref.make(0);
+        const events = yield* Queue.unbounded<{
+          readonly version: 1;
+          readonly type: "run-state-changed";
+          readonly run: EpicRun;
+        }>();
+        const rpcSession = session(
+          Effect.succeed([wrongProject, wrongCwd, wrongEpic, matchingSeed]),
+          events,
+          listCalls,
+          subscriptionCalls,
+        );
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+          session: yield* SubscriptionRef.make(Option.some(rpcSession)),
+          prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
+        yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
+          Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkChild,
+        );
+        yield* waitFor(listCalls, 1);
+        for (const candidate of [wrongProject, wrongCwd, wrongEpic]) {
+          yield* Queue.offer(events, {
+            version: 1,
+            type: "run-state-changed",
+            run: candidate,
+          });
+        }
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          yield* Effect.yieldNow;
+        }
+        expect(yield* Ref.get(observed)).toEqual([matchingSeed]);
+
+        yield* Queue.offer(events, {
+          version: 1,
+          type: "run-state-changed",
+          run: matchingLive,
+        });
+        for (
+          let attempt = 0;
+          attempt < 100 && (yield* Ref.get(observed)).length < 2;
+          attempt += 1
+        ) {
+          yield* Effect.yieldNow;
+        }
+        expect(yield* Ref.get(observed)).toEqual([matchingSeed, matchingLive]);
       }),
     ),
   );
@@ -261,7 +349,7 @@ describe("epic run folding", () => {
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
         const observed = yield* Ref.make<ReadonlyArray<EpicRun>>([]);
-        yield* epicRunChanges("epic-1").pipe(
+        yield* epicRunChanges({ epicId: "epic-1", projectId: "project-1", cwd: "/repo" }).pipe(
           Stream.runForEach((value) => Ref.update(observed, (values) => [...values, value])),
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
           Effect.forkChild,
@@ -316,7 +404,11 @@ describe("epic run folding", () => {
           retryNow: Effect.void,
         } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
 
-        const error = yield* epicRunChanges("epic-1").pipe(
+        const error = yield* epicRunChanges({
+          epicId: "epic-1",
+          projectId: "project-1",
+          cwd: "/repo",
+        }).pipe(
           Stream.runDrain,
           Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
           Effect.flip,
@@ -341,7 +433,7 @@ describe("createEpicsEnvironmentAtoms", () => {
     };
     const runTarget = {
       environmentId: ENVIRONMENT_ID,
-      input: { epicId: "epic-1" },
+      input: { epicId: "epic-1", projectId: "project-1", cwd: "/repo" },
     };
     const listAtom = epics.list(listTarget);
     const runAtom = epics.run(runTarget);
@@ -357,7 +449,7 @@ describe("createEpicsEnvironmentAtoms", () => {
     expect(
       epics.run({
         environmentId: ENVIRONMENT_ID,
-        input: { epicId: "epic-2" },
+        input: { epicId: "epic-2", projectId: "project-1", cwd: "/repo" },
       }),
     ).not.toBe(runAtom);
     expect(listAtom.idleTTL).toBe(5 * 60_000);

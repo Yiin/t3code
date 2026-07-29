@@ -29,11 +29,14 @@ export type StartEpicRunInput = Omit<EpicRunInput, "runtimeMode"> & {
   readonly runtimeMode?: EpicRunInput["runtimeMode"] | undefined;
 };
 
-/**
- * The complete durable run row. Keeping the transport and persistence shape
- * identical prevents a newly persisted field from disappearing at an API
- * boundary.
- */
+/** The public run read model, including iteration-derived thread references. */
+export const EpicRunThreadRef = Schema.Struct({
+  issueId: TrimmedNonEmptyString,
+  threadId: ThreadId,
+  iterationIndex: NonNegativeInt,
+});
+export type EpicRunThreadRef = typeof EpicRunThreadRef.Type;
+
 export const EpicRun = Schema.Struct({
   runId: EpicRunId,
   epicId: TrimmedNonEmptyString,
@@ -51,6 +54,7 @@ export const EpicRun = Schema.Struct({
   lastError: Schema.NullOr(Schema.String),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  threadRefs: Schema.Array(EpicRunThreadRef).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type EpicRun = typeof EpicRun.Type;
 

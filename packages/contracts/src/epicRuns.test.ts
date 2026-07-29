@@ -57,6 +57,7 @@ describe("EpicRun contracts", () => {
       lastError: null,
       createdAt: "2026-07-28T00:00:00.000Z",
       updatedAt: "2026-07-28T00:01:00.000Z",
+      threadRefs: [{ issueId: "t3code-vst.1", threadId: "thread-1", iterationIndex: 1 }],
     });
     const event = { version: 1 as const, type: "run-state-changed" as const, run };
 

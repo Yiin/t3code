@@ -24,7 +24,6 @@
  */
 import {
   EpicRun as EpicRunSchema,
-  type EpicRun as EpicRunType,
   EpicRunId,
   EpicRunStatus as EpicRunStatusSchema,
   type EpicRunStatus as EpicRunStatusType,
@@ -43,8 +42,11 @@ import * as Schema from "effect/Schema";
 
 import type { EpicRunStoreError } from "../Errors.ts";
 
-export const EpicRun = EpicRunSchema;
-export type EpicRun = EpicRunType;
+const { threadRefs: _threadRefs, ...storedEpicRunFields } = EpicRunSchema.fields;
+export const StoredEpicRun = Schema.Struct(storedEpicRunFields);
+export type StoredEpicRun = typeof StoredEpicRun.Type;
+export const EpicRun = StoredEpicRun;
+export type EpicRun = StoredEpicRun;
 export const EpicRunStatus = EpicRunStatusSchema;
 export type EpicRunStatus = EpicRunStatusType;
 
@@ -60,6 +62,7 @@ export const EpicRunIteration = Schema.Struct({
   runId: EpicRunId,
   iterationIndex: NonNegativeInt,
   threadId: ThreadId,
+  issueId: Schema.NullOr(Schema.String),
   turnStatus: EpicRunIterationStatus,
   summary: Schema.NullOr(Schema.String),
   startedAt: IsoDateTime,

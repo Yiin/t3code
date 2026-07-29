@@ -186,6 +186,7 @@ function createHarness(input: {
   };
   readonly onLockAcquire?: () => void;
   readonly onLockRelease?: () => void;
+  readonly readyOutput?: string;
 }) {
   const store = makeMemoryStore();
   for (const run of input.seedRuns ?? []) {
@@ -205,6 +206,7 @@ function createHarness(input: {
   let head = input.initialHead ?? "head-0";
   let turnsStarted = 0;
   let sequence = 0;
+  const processRequests: ProcessRunner.ProcessRunInput[] = [];
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -343,15 +345,21 @@ function createHarness(input: {
   });
 
   const processRunnerLayer = Layer.succeed(ProcessRunner.ProcessRunner, {
-    run: () =>
-      Effect.sync(() => ({
-        stdout: `${head}\n`,
-        stderr: "",
-        code: 0 as never,
-        timedOut: false,
-        stdoutTruncated: false,
-        stderrTruncated: false,
-      })),
+    run: (request: ProcessRunner.ProcessRunInput) =>
+      Effect.sync(() => {
+        processRequests.push(request);
+        return {
+          stdout:
+            request.command === "bd"
+              ? (input.readyOutput ?? `[{"id":"child-${turnsStarted + 1}","parent":"epic-1"}]`)
+              : `${head}\n`,
+          stderr: "",
+          code: 0 as never,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        };
+      }),
     runStreaming: () => Effect.die("unused"),
   } as never);
 
@@ -407,6 +415,7 @@ function createHarness(input: {
     layer,
     store,
     turnsStarted: () => turnsStarted,
+    processRequests,
     commandsOfType: <T extends OrchestrationCommand["type"]>(type: T) =>
       dispatched.filter(
         (command): command is Extract<OrchestrationCommand, { readonly type: T }> =>
@@ -431,6 +440,49 @@ const startRun = (maxIterations = 10) =>
 // between attempts, so it needs the real clock rather than a virtual one that
 // only advances when a test tells it to.
 describe("EpicRunner", () => {
+  it.live("chooses the first direct-ready child and ignores an earlier grandchild", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      readyOutput:
+        '[{"id":"grandchild","parent":"child-a"},{"id":"direct-a","parent":"epic-1"},{"id":"direct-b","parent":"epic-1"}]',
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations[0]?.issueId, "direct-a");
+      assert.match(
+        harness.commandsOfType("thread.turn.start")[0]!.message.text,
+        /Cook exactly `direct-a` this iteration\.$/,
+      );
+      const readyRequest = harness.processRequests.find((request) => request.command === "bd")!;
+      assert.deepStrictEqual(readyRequest.args, ["ready", "--parent", "epic-1", "--json"]);
+      assert.strictEqual(readyRequest.cwd, "/tmp/epic-runner-repo");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("treats descendants without a direct child as an empty backlog", () => {
+    const harness = createHarness({
+      script: [],
+      readyOutput: '[{"id":"grandchild","parent":"child-a"}]',
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations.length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.create").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("finishes without dispatch when no direct child is ready", () => {
+    const harness = createHarness({ script: [], readyOutput: "[]" });
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations.length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.create").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("keeps iterating while the agent commits, then stops on RALPH_DONE", () => {
     const harness = createHarness({
       script: [
@@ -462,6 +514,14 @@ describe("EpicRunner", () => {
         ["completed", "completed", "completed"],
       );
       assert.strictEqual(harness.store.iterations[0]?.summary, "first");
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.issueId),
+        ["child-1", "child-2", "child-3"],
+      );
+      assert.match(
+        harness.commandsOfType("thread.turn.start")[0]!.message.text,
+        /Cook exactly `child-1` this iteration\.$/,
+      );
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -609,6 +669,7 @@ describe("EpicRunner", () => {
           runId: staleRun.runId,
           iterationIndex: 0,
           threadId: ThreadId.make(`epic-run-${runId}-0`),
+          issueId: "child-0",
           turnStatus: "running",
           summary: null,
           startedAt: NOW,

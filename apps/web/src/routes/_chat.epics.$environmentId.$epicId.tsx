@@ -3,7 +3,12 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, CheckIcon, CircleAlertIcon, CircleDashedIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { epicChildren, epicStatusLabel, uniqueEpicProjectSources } from "../epics.logic";
+import {
+  epicChildren,
+  epicStatusLabel,
+  latestEpicThreadId,
+  uniqueEpicProjectSources,
+} from "../epics.logic";
 import { epicsEnvironment } from "../state/epics";
 import { useProjects } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
@@ -84,6 +89,16 @@ function EpicDetailRouteView() {
     .find((entry) => entry !== null);
   const pending = sources.some((source) => results.get(source.projectId)?.pending !== false);
   const children = match ? epicChildren(epicId, match.snapshot.issues) : [];
+  const runQuery = useEnvironmentQuery(
+    epicsEnvironment.run({
+      environmentId: environmentId as EnvironmentId,
+      input: {
+        epicId,
+        projectId: match?.source.projectId ?? "",
+        cwd: match?.source.workspaceRoot ?? "",
+      },
+    }),
+  );
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
@@ -124,11 +139,9 @@ function EpicDetailRouteView() {
                     const done = issue.status === "closed" || issue.status === "done";
                     const blocked = issue.blockedBy.length > 0 || issue.status === "blocked";
                     const Icon = done ? CheckIcon : blocked ? CircleAlertIcon : CircleDashedIcon;
-                    return (
-                      <div
-                        key={issue.id}
-                        className="flex min-h-16 items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
-                      >
+                    const threadId = latestEpicThreadId(runQuery.data, issue.id);
+                    const content = (
+                      <>
                         <span
                           className={
                             done
@@ -148,7 +161,24 @@ function EpicDetailRouteView() {
                             {issue.id} · {epicStatusLabel(issue.status)}
                           </div>
                         </div>
+                      </>
+                    );
+                    return threadId === null ? (
+                      <div
+                        key={issue.id}
+                        className="flex min-h-16 items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
+                      >
+                        {content}
                       </div>
+                    ) : (
+                      <Link
+                        key={issue.id}
+                        to="/$environmentId/$threadId"
+                        params={{ environmentId, threadId }}
+                        className="flex min-h-16 items-center gap-3 border-b border-border px-4 py-3 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset last:border-b-0"
+                      >
+                        {content}
+                      </Link>
                     );
                   })
                 )}

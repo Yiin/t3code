@@ -2,6 +2,7 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  type EpicRun as TransportEpicRun,
   EpicRunId,
   MessageId,
   ThreadId,
@@ -17,6 +18,7 @@ import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
@@ -55,6 +57,15 @@ const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
 const DEFAULT_MAX_ITERATIONS = 50;
 const GIT_HEAD_TIMEOUT_MS = 15_000;
 const MAX_SETTLE_READS = 20;
+const ReadyChildren = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      parent: Schema.optional(Schema.NullOr(Schema.String)),
+    }),
+  ),
+);
+const decodeReadyChildren = Schema.decodeUnknownEffect(ReadyChildren);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -156,7 +167,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       options?.defaultMaxIterations ?? DEFAULT_MAX_ITERATIONS,
     );
 
-    const changes = yield* Effect.acquireRelease(PubSub.unbounded<EpicRun>(), (pubsub) =>
+    const changes = yield* Effect.acquireRelease(PubSub.unbounded<TransportEpicRun>(), (pubsub) =>
       PubSub.shutdown(pubsub),
     );
     // Scoped to the layer, so every loop is interrupted on server shutdown and
@@ -195,7 +206,31 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         Effect.catchCause((cause) => Effect.logWarning(label, { cause })),
       );
 
-    const publishRun = (run: EpicRun) => PubSub.publish(changes, run).pipe(Effect.asVoid);
+    const enrichRun = Effect.fn("EpicRunner.enrichRun")(function* (run: EpicRun) {
+      const iterations = yield* store
+        .listIterations({ runId: run.runId })
+        .pipe(Effect.mapError(storeError("listIterations")));
+      return {
+        ...run,
+        threadRefs: iterations.flatMap((iteration) =>
+          iteration.issueId === null
+            ? []
+            : [
+                {
+                  issueId: iteration.issueId,
+                  threadId: iteration.threadId,
+                  iterationIndex: iteration.iterationIndex,
+                },
+              ],
+        ),
+      } satisfies TransportEpicRun;
+    });
+
+    const publishRun = (run: EpicRun) =>
+      enrichRun(run).pipe(
+        Effect.flatMap((enriched) => PubSub.publish(changes, enriched)),
+        Effect.asVoid,
+      );
 
     const saveRun = (run: EpicRun) =>
       store.upsertRun(run).pipe(
@@ -234,6 +269,57 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           Effect.catchCause((cause) =>
             Effect.logDebug("epic.runner.head-read-failed", { cwd, cause }).pipe(Effect.as(null)),
           ),
+        );
+
+    const selectReadyChild = (run: EpicRun): Effect.Effect<string | null, EpicRunnerError> =>
+      processRunner
+        .run({
+          command: "bd",
+          args: ["ready", "--parent", run.epicId, "--json"],
+          cwd: run.cwd,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "bd.ready",
+                detail: "Could not read the epic's ready children",
+                cause,
+              }),
+          ),
+          Effect.flatMap((output) => {
+            if (output.code !== 0) {
+              return Effect.fail(
+                new EpicRunnerDispatchError({
+                  commandType: "bd.ready",
+                  detail: output.stderr.trim() || `bd ready exited with code ${output.code}`,
+                }),
+              );
+            }
+            return decodeReadyChildren(output.stdout).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "bd.ready",
+                    detail: `Invalid bd ready output: ${String(cause)}`,
+                    cause,
+                  }),
+              ),
+              Effect.flatMap((value) => {
+                const direct = value.find((issue) => issue.parent === run.epicId);
+                return direct === undefined
+                  ? Effect.succeed(null)
+                  : direct.id.trim().length === 0
+                    ? Effect.fail(
+                        new EpicRunnerDispatchError({
+                          commandType: "bd.ready",
+                          detail: "Invalid bd ready output: first ready child has no id",
+                        }),
+                      )
+                    : Effect.succeed(direct.id);
+              }),
+            );
+          }),
         );
 
     const releaseLease = (runId: EpicRunId) => {
@@ -458,6 +544,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     }): Effect.Effect<EpicIterationOutcome, EpicRunnerError> =>
       Effect.gen(function* () {
         const run = input.run;
+        const issueId = yield* selectReadyChild(run);
+        if (issueId === null) {
+          return { kind: "backlog-empty", detail: null, report: null };
+        }
         // Deterministic, and unique because iteration indices are never reused:
         // a crash cannot leave two threads competing for one iteration row.
         const threadId = ThreadId.make(`epic-run-${run.runId}-${input.iterationIndex}`);
@@ -473,6 +563,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             runId: run.runId,
             iterationIndex: input.iterationIndex,
             threadId,
+            issueId,
             turnStatus: "running",
             summary: null,
             startedAt,
@@ -513,7 +604,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             message: {
               messageId: MessageId.make(`${threadId}-prompt`),
               role: "user",
-              text: run.prompt,
+              text: `${run.prompt}\n\nCook exactly \`${issueId}\` this iteration.`,
               attachments: [],
             },
             modelSelection: run.modelSelection,
@@ -777,7 +868,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           cwd: run.cwd,
           maxIterations: run.maxIterations,
         });
-        return run;
+        return yield* enrichRun(run);
       });
 
     const pauseRun: EpicRunnerShape["pauseRun"] = ({ runId }) =>
@@ -794,7 +885,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // exits at that boundary, so the turn in flight finishes its unit of
         // work rather than leaving the repo and backlog half-done.
         yield* saveRun(paused);
-        return paused;
+        return yield* enrichRun(paused);
       });
 
     const resumeRun: EpicRunnerShape["resumeRun"] = ({ runId }) =>
@@ -816,7 +907,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         yield* acquireLease(runId, { cwd: run.cwd, epicId: run.epicId });
         yield* saveRun(resumed).pipe(releaseLeaseOnFailure(runId));
         yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
-        return resumed;
+        return yield* enrichRun(resumed);
       });
 
     const cancelRun: EpicRunnerShape["cancelRun"] = ({ runId }) =>
@@ -872,16 +963,25 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         };
         yield* saveRun(cancelled);
         yield* releaseLease(runId);
-        return cancelled;
+        return yield* enrichRun(cancelled);
       });
 
     const listRuns: EpicRunnerShape["listRuns"] = (input) =>
-      store
-        .listRuns(input?.status === undefined ? {} : { status: input.status })
-        .pipe(Effect.mapError(storeError("listRuns")));
+      store.listRuns(input?.status === undefined ? {} : { status: input.status }).pipe(
+        Effect.mapError(storeError("listRuns")),
+        Effect.flatMap((runs) => Effect.forEach(runs, enrichRun)),
+      );
 
     const getRun: EpicRunnerShape["getRun"] = ({ runId }) =>
-      store.getRun({ runId }).pipe(Effect.mapError(storeError("getRun")));
+      store.getRun({ runId }).pipe(
+        Effect.mapError(storeError("getRun")),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.succeed(Option.none<TransportEpicRun>()),
+            onSome: (run) => enrichRun(run).pipe(Effect.map(Option.some)),
+          }),
+        ),
+      );
 
     const streamRuns = Stream.unwrap(
       Effect.map(PubSub.subscribe(changes), (subscription) =>

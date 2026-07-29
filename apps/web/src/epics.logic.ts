@@ -65,6 +65,19 @@ export function epicChildren(
   return issues.filter((issue) => issue.parent === epicId);
 }
 
+export function latestEpicThreadId(run: EpicRun | null, issueId: string): string | null {
+  if (run === null) return null;
+  return (
+    run.threadRefs.reduce<(typeof run.threadRefs)[number] | null>(
+      (latest, ref) =>
+        ref.issueId === issueId && (latest === null || ref.iterationIndex > latest.iterationIndex)
+          ? ref
+          : latest,
+      null,
+    )?.threadId ?? null
+  );
+}
+
 export function uniqueEpicProjectSources(
   projects: ReadonlyArray<EpicProjectSource>,
 ): ReadonlyArray<EpicProjectSource> {
