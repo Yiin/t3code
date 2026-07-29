@@ -262,6 +262,23 @@ bd note $EPIC "Epic planned. Next: pick the first ready child via bd ready --par
 
 ### 5. Report and hand off to the user
 
+Every successful planning response must emit this exact single-line terminal
+marker:
+
+```text
+T3_EPIC_PLAN: {"v":1,"epicId":"<EPIC>"}
+```
+
+The grammar is strict: the prefix is `T3_EPIC_PLAN: `, the JSON object contains
+exactly `v` (the number `1`) and non-empty string `epicId`. Do not place
+marker-like prose elsewhere.
+
+- For a plan-only handoff, finish all handoff and clipboard prose first, then
+  emit the marker as the absolute final line of the response.
+- When launching a loop, emit the marker after all planning/handoff prose and
+  immediately before the launched loop begins producing output. The loop's own
+  reporting may follow it.
+
 Report first, in every case:
 
 - The epic id and the child tree (`bd list --parent $EPIC --pretty`).

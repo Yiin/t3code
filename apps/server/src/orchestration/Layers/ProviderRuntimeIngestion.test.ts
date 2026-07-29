@@ -946,6 +946,98 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("correlates terminal epic markers across projected streaming and rejects malformed markers", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const emitMessage = (itemId: string, delta: string) => {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(`evt-${itemId}-delta`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId(`turn-${itemId}`),
+        itemId: asItemId(itemId),
+        payload: { streamKind: "assistant_text", delta },
+      });
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId(`evt-${itemId}-complete`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId(`turn-${itemId}`),
+        itemId: asItemId(itemId),
+        payload: { itemType: "assistant_message", status: "completed" },
+      });
+    };
+
+    emitMessage("item-valid-marker", 'Planned.\nT3_EPIC_PLAN: {"v":1,"epicId":"t3code-vst"}');
+    let thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-valid-marker" && !message.streaming,
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-valid-marker",
+      )?.correlation,
+    ).toMatchObject({ epicId: "t3code-vst", threadId: "thread-1", projectId: "project-1" });
+
+    emitMessage("item-malformed-marker", 'T3_EPIC_PLAN: {"v":1,"epicId":"wrong"}\ntrailing prose');
+    thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-malformed-marker" && !message.streaming,
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-malformed-marker",
+      )?.correlation,
+    ).toBeUndefined();
+  });
+
+  it("correlates a terminal epic marker buffered until completion", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-buffered-marker-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-marker"),
+      itemId: asItemId("item-buffered-marker"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: 'Planned.\nT3_EPIC_PLAN: {"v":1,"epicId":"t3code-vst"}',
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-buffered-marker-complete"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-marker"),
+      itemId: asItemId("item-buffered-marker"),
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-buffered-marker" && !message.streaming,
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-buffered-marker",
+      )?.correlation,
+    ).toMatchObject({ epicId: "t3code-vst" });
+  });
+
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -26,6 +26,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { parseTerminalEpicPlanMarker } from "@t3tools/shared/epicPlanMarker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -1017,6 +1018,10 @@ const make = Effect.gen(function* () {
             ? input.fallbackText!
             : "";
       const hasRenderableText = hasRenderableAssistantText(text);
+      const projectedThread = yield* resolveThreadDetail(input.threadId);
+      const projectedText =
+        projectedThread?.messages.find((message) => message.id === input.messageId)?.text ?? "";
+      const marker = parseTerminalEpicPlanMarker(`${projectedText}${text}`);
 
       if (hasRenderableText) {
         yield* orchestrationEngine.dispatch({
@@ -1037,6 +1042,7 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           messageId: input.messageId,
           ...(input.turnId ? { turnId: input.turnId } : {}),
+          ...(marker ? { plannedEpicId: marker.epicId } : {}),
           createdAt: input.createdAt,
         });
       }

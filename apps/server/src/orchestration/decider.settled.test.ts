@@ -27,7 +27,19 @@ function makeReadModel(
 ): OrchestrationReadModel {
   return {
     snapshotSequence: 0,
-    projects: [],
+    projects: [
+      {
+        id: ProjectId.make("project-1"),
+        title: "Project",
+        workspaceRoot: "/repo",
+        repositoryIdentity: null,
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: NOW,
+        updatedAt: NOW,
+        deletedAt: null,
+      },
+    ],
     threads: [
       {
         id: ThreadId.make("thread-1"),
@@ -104,6 +116,37 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
         // updatedAt must NOT rewind to the historical settledAt: sorting and
         // relative-time labels key on it.
         expect(reEmitEvents[0].payload.updatedAt).not.toBe(SETTLED_AT);
+      }
+    }),
+  );
+
+  it.effect("enriches a planned epic from authoritative thread and project state", () =>
+    Effect.gen(function* () {
+      const base = makeReadModel(null);
+      const readModel: OrchestrationReadModel = {
+        ...base,
+        threads: [{ ...base.threads[0]!, worktreePath: "/repo/worktree" }],
+      };
+      const event = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make("cmd-complete-plan"),
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("assistant-plan"),
+          plannedEpicId: "t3code-vst",
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const events = Array.isArray(event) ? event : [event];
+      expect(events[0]?.type).toBe("thread.message-sent");
+      if (events[0]?.type === "thread.message-sent") {
+        expect(events[0].payload.correlation).toEqual({
+          threadId: "thread-1",
+          epicId: "t3code-vst",
+          projectId: "project-1",
+          cwd: "/repo/worktree",
+        });
       }
     }),
   );

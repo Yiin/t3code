@@ -7,6 +7,10 @@
       "types": "./src/projectFavicon.ts",
       "import": "./src/projectFavicon.ts"
     },
+    "./epicPlanMarker": {
+      "types": "./src/epicPlanMarker.ts",
+      "import": "./src/epicPlanMarker.ts"
+    },
     "./model": {
       "types": "./src/model.ts",
       "import": "./src/model.ts"

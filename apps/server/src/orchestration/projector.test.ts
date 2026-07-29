@@ -470,6 +470,12 @@ describe("orchestration projector", () => {
             messageId: "assistant:msg-1",
             role: "assistant",
             text: "",
+            correlation: {
+              threadId: "thread-1",
+              epicId: "t3code-vst",
+              projectId: "project-1",
+              cwd: "/repo/worktree",
+            },
             turnId: "turn-1",
             streaming: false,
             createdAt: completeAt,
@@ -484,6 +490,12 @@ describe("orchestration projector", () => {
     expect(message?.text).toBe("hello");
     expect(message?.streaming).toBe(false);
     expect(message?.updatedAt).toBe(completeAt);
+    expect(message?.correlation).toEqual({
+      threadId: "thread-1",
+      epicId: "t3code-vst",
+      projectId: "project-1",
+      cwd: "/repo/worktree",
+    });
   });
 
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {

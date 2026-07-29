@@ -874,11 +874,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.message.assistant.complete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const project = command.plannedEpicId
+        ? yield* requireProject({ readModel, command, projectId: thread.projectId })
+        : null;
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -892,6 +895,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.messageId,
           role: "assistant",
           text: "",
+          ...(command.plannedEpicId && project
+            ? {
+                correlation: {
+                  threadId: thread.id,
+                  epicId: command.plannedEpicId,
+                  projectId: project.id,
+                  cwd: thread.worktreePath ?? project.workspaceRoot,
+                },
+              }
+            : {}),
           turnId: command.turnId ?? null,
           streaming: false,
           createdAt: command.createdAt,

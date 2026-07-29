@@ -319,6 +319,54 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("preserves correlation when a streaming delta is completed", () => {
+      const correlation = {
+        threadId: ThreadId.make("thread-1"),
+        epicId: "t3code-vst",
+        projectId: ProjectId.make("project-1"),
+        cwd: "/repo/worktree",
+      };
+      const threadWithMessage: OrchestrationThread = {
+        ...baseThread,
+        messages: [
+          {
+            id: MessageId.make("msg-correlation"),
+            role: "assistant",
+            text: "Planned",
+            correlation,
+            turnId: TurnId.make("turn-1"),
+            streaming: true,
+            createdAt: "2026-04-01T06:00:00.000Z",
+            updatedAt: "2026-04-01T06:00:00.000Z",
+          },
+        ],
+      };
+      const result = applyThreadDetailEvent(threadWithMessage, {
+        ...baseEventFields,
+        sequence: 8,
+        occurredAt: "2026-04-01T06:01:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-correlation"),
+          role: "assistant",
+          text: "",
+          correlation,
+          turnId: TurnId.make("turn-1"),
+          streaming: false,
+          createdAt: "2026-04-01T06:00:00.000Z",
+          updatedAt: "2026-04-01T06:01:00.000Z",
+        },
+      });
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages[0]?.text).toBe("Planned");
+        expect(result.thread.messages[0]?.correlation).toEqual(correlation);
+      }
+    });
+
     it("updates latestTurn for assistant messages with a turn", () => {
       const result = applyThreadDetailEvent(baseThread, {
         ...baseEventFields,

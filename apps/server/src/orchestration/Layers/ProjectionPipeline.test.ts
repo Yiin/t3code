@@ -122,6 +122,12 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           messageId: MessageId.make("message-1"),
           role: "assistant",
           text: "hello",
+          correlation: {
+            threadId: ThreadId.make("thread-1"),
+            epicId: "t3code-vst",
+            projectId: ProjectId.make("project-1"),
+            cwd: "/repo/worktree",
+          },
           turnId: null,
           streaming: false,
           createdAt: now,
@@ -149,13 +155,22 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       const messageRows = yield* sql<{
         readonly messageId: string;
         readonly text: string;
+        readonly correlationJson: string | null;
       }>`
         SELECT
           message_id AS "messageId",
-          text
+          text,
+          correlation_json AS "correlationJson"
         FROM projection_thread_messages
       `;
-      assert.deepEqual(messageRows, [{ messageId: "message-1", text: "hello" }]);
+      assert.deepEqual(messageRows, [
+        {
+          messageId: "message-1",
+          text: "hello",
+          correlationJson:
+            '{"threadId":"thread-1","epicId":"t3code-vst","projectId":"project-1","cwd":"/repo/worktree"}',
+        },
+      ]);
 
       const stateRows = yield* sql<{
         readonly projector: string;
