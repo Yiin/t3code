@@ -7,9 +7,11 @@ argument-hint: <issue id, epic id, or short task description>
 
 # Cook It
 
-End-to-end execution of a well-scoped engineering task. You own the **result**, not a checklist. The fixed spine is plan → implement → verify → gate → commit; the variable part is how much independent scrutiny each stage gets, and you decide that from the task itself. A one-line fix and a multi-subsystem feature deserve different amounts of review — spending three agents on the former is waste, spending one on the latter is negligence. Every verification step exists to raise confidence in the result; when you scale one down, say which criterion below justified it, so the user can veto.
+End-to-end execution of a well-scoped engineering task. You own the **result**, not a checklist. The fixed spine is plan → implement → verify → gate → commit; the variable part is how much independent scrutiny each stage gets, and you decide that from the task itself. A one-line fix and a multi-subsystem feature deserve different amounts of review — spending three agents on the former is waste, spending one on the latter is negligence. **The justification burden runs both ways**: name the criterion that let you scale a step down, and name the one that made you escalate past the baseline. Unjustified ceremony is as much a defect as unjustified confidence, and most tasks that reach this skill are small — the cheap path is the default, not the exception.
 
 **Model tiers (Claude-family harness only).** When you dispatch subagents, match the model to the stage: plan-composition and plan-critique agents get model `opus`, implementer agents get model `sonnet`, reviewer agents get model `fable`. Work done in your own session stays on the session model. If the user named a model explicitly, that pins every stage instead.
+
+**Harness fallback (applies to every dispatch below).** When the harness provides subagents, use them. Otherwise invoke a fresh one-shot process of the same headless harness with a self-contained brief in a temporary file (following `ralph/run.sh`'s invocation pattern) — except for repository writes, which stay in the main thread. If the same harness cannot be invoked headlessly at all, do the step in the main thread and say plainly that independent review was unavailable.
 
 ## When this skill fits
 
@@ -25,6 +27,12 @@ End-to-end execution of a well-scoped engineering task. You own the **result**, 
 - The quality gate is already red on the current branch for reasons unrelated to the task.
 
 If any of these apply, stop and surface it to the user before cooking.
+
+**Unattended runs.** You are unattended whenever nobody can answer mid-run: a headless one-shot invocation, a `ralph` loop, a `cook-epic` worker. There, "stop and ask the user" is not a real option — it stalls the loop or burns the iteration. So decide, and decide well.
+
+Everywhere the skill says to ask, resolve it yourself instead: work out what the task is plainly trying to achieve, assume the author meant the sensible thing, and take the option that best serves that goal. Issue text, bead wording, and plan prose are guidance, not spec — when they are ambiguous, underspecified, or lightly wrong about the code, follow their intent rather than their letter, and say in your report where you departed and why. A defensible call the user can veto afterwards beats a stalled run every time. Record the call in the commit message or the issue so it is reviewable. Step 5 spells out the gate case.
+
+Two things this does not license. Never silently bypass a check — scaling verification still goes through the routing criteria, and skipping it because nobody is watching is not one of them. And do not guess at a decision that is genuinely the user's: an irreversible or outward-facing action, or a product, security, or policy call with real consequences either way and no clearly better option. Those you park — do the work that does not depend on the answer, leave the rest, file the issue naming the exact decision needed, and say so in your report. The test is not "is this ambiguous?" but "would a reasonable person reading the goal land somewhere obvious?" If yes, land there.
 
 ## Three routing decisions
 
@@ -49,7 +57,8 @@ If none hold — single-file fix, mechanical change, behavior fully pinned down 
 **3. What shape of implementation review does the change need?** The review always runs for code changes; its shape scales (step 4):
 
 - **Evidence-only** — for plan-free mechanical work whose outcome direct evidence already proves (a translation diff, a green test run, research findings posted to the bead): no reviewer agent; cite the evidence in your report instead. Never for logic changes.
-- **Baseline** — one reviewer agent over the diff. Right for small, single-concern changes.
+- **Self-review** — for a logic change that meets all three: it is small (one file, one concern), it has **no sibling path** it parallels, and it is fully covered by a test the same change adds, which you watched fail before the fix and pass after. You run step 4's checklist yourself over `git diff HEAD`; no reviewer agent. State the three conditions in your report. The moment a parallel path exists, this tier is off.
+- **Baseline** — one reviewer agent over the diff. Right for small, single-concern changes that miss any self-review condition.
 - **+ Design review** — the diff touches UI (components, styles, layout, user-facing pages): add a reviewer that loads the `ui-ux-pro-max` skill first and audits the implementation against it — visual hierarchy, spacing, interaction states, accessibility, responsiveness, consistency with the product's existing style.
 - **Fan-out** — the implementation is big (many files, several distinct concerns, new subsystem): partition it by its actual structure — core logic, error/edge paths, data layer, tests, UI — and dispatch one skeptical reviewer per part, in parallel. Each owns its part fully; at least one must run the omission/parity pass described in step 4.
 
@@ -91,13 +100,7 @@ Share the plan with the user as a short markdown block before dispatching agents
 
 ### 2. Critique the plan (when it warrants it)
 
-Use a fresh reviewer to review the plan **without implementing**. When the harness
-provides subagents, spawn a `general-purpose` reviewer. Otherwise invoke a fresh
-one-shot process of the same headless harness using a self-contained brief in a
-temporary file (following `ralph/run.sh`'s harness invocation pattern). If the
-same harness cannot be invoked headlessly, perform the critique in the main
-thread and explicitly say that independent review was unavailable. The reviewer
-must:
+Use a fresh `general-purpose` reviewer to review the plan **without implementing**. The reviewer must:
 
 - Have full self-contained context (issue summary, file paths to read, what the plan proposes, the safety claims you're making).
 - Be asked to verify correctness, surface blind spots, check whether the safety reasoning holds, evaluate test coverage, and note any safer alternatives worth considering.
@@ -110,13 +113,7 @@ Fold any reasonable feedback into a refined plan. If the agent flags blockers yo
 
 ### 3. Implement
 
-Implement the governing plan — refined by critique when it ran, otherwise as
-composed or adopted. When the harness provides subagents, spawn a
-`general-purpose` implementer. In a no-subagent harness, implementation happens
-in the main thread; do not outsource repository writes to a one-shot process.
-Plan-free mechanical work small enough to do directly (a translation edit,
-running a verification command) may also be done in the main thread. A spawned
-implementer must:
+Implement the governing plan — refined by critique when it ran, otherwise as composed or adopted. Spawn a `general-purpose` implementer, or work in the main thread when the harness has no subagents, or when the work is plan-free and small enough to do directly (a translation edit, running a verification command). A spawned implementer must:
 
 - Receive the full plan text (not "implement based on the review"), including exact file paths, the behavior contract the change must honor, and the test cases to cover.
 - Be told what NOT to change (non-goals from the plan) to prevent scope creep.
@@ -128,14 +125,7 @@ If the implementation turned out substantially bigger or different in kind than 
 
 ### 4. Review the implementation
 
-Always runs, in the shape chosen (and possibly revised) above. In the evidence-only shape this step collapses to stating the evidence (the diff or output that proves the outcome) in your report — no agents. Otherwise, reviewers hunt for **improvements, not just defects** — a working implementation that's needlessly complex, inconsistent with the codebase, or missing an obvious simplification should come back with that feedback.
-
-When the harness provides subagents, dispatch the selected reviewer shape through
-them. Without subagents, invoke fresh one-shot processes of the same headless
-harness with self-contained briefs: one for baseline, one additional reviewer
-for design, or one per fan-out part. If the harness cannot be invoked headlessly,
-perform each selected review pass in the main thread and explicitly say that
-independent review was unavailable.
+Always runs, in the shape chosen (and possibly revised) above. Two shapes are agent-free: **evidence-only** collapses this step to stating the evidence (the diff or output that proves the outcome) in your report, and **self-review** means you apply the checklist below to `git diff HEAD` yourself. Otherwise, dispatch the chosen shape — one baseline reviewer, plus a design reviewer, or one per fan-out part — and have them hunt for **improvements, not just defects**. A working implementation that's needlessly complex, inconsistent with the codebase, or missing an obvious simplification should come back with that feedback.
 
 Every reviewer must:
 
@@ -145,7 +135,7 @@ Every reviewer must:
 - Confirm the diff scope is limited to what the plan said.
 - Report under ~400 words with a verdict: APPROVE / APPROVE-WITH-NITS / BLOCK.
 
-At least one reviewer (the only one, in baseline shape) must additionally **hunt for omissions** — the same parity lens as step 2, now applied to the diff. Diff review catches bad lines; it misses missing ones. The agent must open the sibling path (even if it's untouched and out of the diff), check the new path replicates every per-invocation step, and cite the sibling at file:line.
+**The omission/parity pass is mandatory whenever the change adds or modifies a path parallel to an existing one** — no shape and no criterion excuses it, and its presence is what rules out the self-review tier. At least one reviewer (the only one, in baseline shape) applies the same parity lens as step 2, now to the diff. Diff review catches bad lines; it misses missing ones. The agent must open the sibling path (even if it's untouched and out of the diff), check the new path replicates every per-invocation step, and cite the sibling at file:line.
 
 Shape-specific briefs:
 
@@ -154,22 +144,22 @@ Shape-specific briefs:
 
 Merge the verdicts: dedupe overlapping findings, drop nits you can defend ignoring (say why), and treat any single BLOCK as a BLOCK.
 
-If BLOCK, describe exactly what to fix. With subagents, send that brief back to
-the implementer using `SendMessage` or the harness's equivalent. Without
-subagents, fix it in the main thread and invoke a fresh one-shot reviewer when
-the harness supports headless invocation; do not reuse the first reviewer's
-context. If headless invocation is unavailable, re-review in the main thread and
-state that independent review was unavailable. Re-run only the reviewer(s) whose
-scope the fix touched. Don't get stuck — if a second BLOCK round produces
-conflicting feedback, surface to the user.
+If BLOCK, describe exactly what to fix and send that brief back to the implementer (`SendMessage` or the harness's equivalent). Re-run only the reviewer(s) whose scope the fix touched, always with fresh context — never reuse the first reviewer's. Cap at two BLOCK rounds; if the second produces conflicting feedback, surface it to the user, or file it and stop when unattended.
 
 ### 5. Run the quality gate
 
 If the task changed no code (research findings, a verification run), skip the gate and commit steps — the deliverable is the step-4 evidence and the issue closure in step 7.
 
-Invoke the project's `dev-commands` skill to learn the exact gate command, then run it. For example, in vangrd: `bun run typecheck:server && bun run typecheck:web && bun run lint && npm test`.
+Invoke the project's `dev-commands` skill to learn the exact gate commands — never guess them. The full gate in vangrd, for example, is `bun run typecheck:server && bun run typecheck:web && bun run lint && npm test`.
 
-**Pre-existing failures handling:** if the gate is red for reasons unrelated to the task (lint warnings on untouched files, broken tests on unrelated paths), stop and ask the user before proceeding. Default offer: "fix auto-fixable lint as a drive-by in a separate commit, file a bug for any unrelated test failures, then commit the task work." Do not silently bypass the gate.
+**Scale the gate to the change.** When the change stays inside one area, run the proportional gate: the typecheck for that area, lint on the changed files, and the tests that cover the change. Say which commands you ran. Run the full gate when the change crosses areas, touches shared types, config, or generated output, or when nothing downstream will run it. A downstream integration gate counts — cook-epic's `COOKEPIC_GATE`, a CI pipeline, a batching loop that gates once before pushing — so when one exists, the proportional gate is enough here.
+
+**Pre-existing red.** First prove the red is pre-existing and unrelated: the failing files sit outside your diff, and the failure reproduces without your change (re-run that one target at the base commit in a scratch worktree — never `git stash`, the tree may hold another agent's work). If you can't prove it, treat the failure as yours and fix it. Once proven:
+
+- **Attended:** stop and ask. Default offer: "fix auto-fixable lint as a drive-by in a separate commit, file a bug for any unrelated test failures, then commit the task work."
+- **Unattended:** commit the task work, file a bd issue recording the exact failing command and its output, and name that issue in your final report.
+
+Do not silently bypass the gate in either mode.
 
 ### 6. Commit and push
 
@@ -190,16 +180,17 @@ If the task is tied to a bd issue, close it with a one-paragraph summary citing 
 
 Claude Code may provide the `Workflow` tool. When it is available, drive steps
 2–5 through it instead of dispatching agents one call at a time. Other harnesses
-must use their subagent tools or the no-subagent mode above; they must not assume
-the Workflow API exists. Make the routing decisions in the main thread first,
+must use their subagent tools or the fallback above; they must not assume the
+Workflow API exists. Make the routing decisions in the main thread first,
 then encode the chosen shape in the script: include a plan-critique stage only if
 routing said so, and build the review stage as a single agent, agent + design
-reviewer, or a `parallel()` fan-out to match the review shape. Use a bounded
-`while` loop for the BLOCK→fix→re-review cycle (cap at two rounds, then surface
-to the user), `phase()` calls that mirror the numbered steps so the user can
-follow progress in `/workflows`, and `schema` on the critique agents to get back
-a structured verdict (`APPROVE` / `APPROVE-WITH-NITS` / `BLOCK` plus findings)
-rather than parsing prose.
+reviewer, or a `parallel()` fan-out to match the review shape. A workflow is
+itself an escalation — for an evidence-only or self-review change, skip it and
+work directly. Use a bounded `while` loop for the BLOCK→fix→re-review cycle
+(cap at two rounds, then surface to the user), `phase()` calls that mirror the
+numbered steps so the user can follow progress in `/workflows`, and `schema` on
+the critique agents to get back a structured verdict (`APPROVE` /
+`APPROVE-WITH-NITS` / `BLOCK` plus findings) rather than parsing prose.
 
 Two parts stay in the main thread, outside the workflow:
 
@@ -207,9 +198,6 @@ Two parts stay in the main thread, outside the workflow:
 - **Commit and push (step 6).** These are outward-facing; run them yourself after the workflow returns its verdict and the gate is green, so you stay in control of what gets committed and pushed.
 
 If the implementation comes back bigger than planned (step 3's revisit rule), let the workflow finish, then dispatch the missing reviewers yourself — the review shape follows the diff, not the script.
-
-If the `Workflow` tool isn't available, use the harness's subagent tool or the
-no-subagent mode described above.
 
 **Passing the plan as `args` — do this exactly.** The harness sometimes delivers `args` as a JSON-encoded string rather than a parsed object, so `args.plan` can silently be `undefined` and the critique agent receives the literal text "undefined" as its plan. Pass the governing plan text — the composed plan, or the adopted instructions when planning was skipped — as a **plain string** (`args: "<the full plan markdown>"`, not `args: {plan: ...}`), and start every script body with this guard so a malformed delivery fails loudly instead of wasting a run:
 
@@ -223,7 +211,8 @@ if (!plan || typeof plan !== "string" || plan === "undefined" || plan.length < 8
 
 ## What not to do
 
-- Don't skip or shrink verification out of confidence. Scale it down only through the routing criteria, and state which criterion applied — confidence is not a criterion. The implementation review always runs for code changes; only the evidence-only shape (mechanical work, outcome proven by direct evidence) replaces the reviewer.
+- Don't skip or shrink verification out of confidence, and don't inflate it out of caution. Both directions need a named criterion, and neither confidence nor caution is one. The implementation review always runs for code changes; the evidence-only and self-review shapes replace the reviewer _agent_, not the review.
+- Don't stall an unattended run waiting for an answer nobody will give. Take the documented unattended path, file what you would have asked, and report it.
 - Don't run the _stages_ in parallel — each depends on the previous. Reviewers _within_ step 4's fan-out are the exception: they're independent reads and should run concurrently.
 - Don't compose the plan inside an agent — the user can't see agent output, so the plan needs to be in your direct response.
 - Don't amend commits to absorb late fixes. Stack additional commits.
@@ -239,7 +228,7 @@ Each agent prompt must be self-contained: it doesn't see the prior conversation.
 /cook-it vangrd-uqi2
 ```
 
-→ Read the issue; the instructions leave choices open → compose a plan. It spans a schema change and a new write path → critique it, then implement, then fan-out review (data layer / write path / tests, with the write-path reviewer running the parity pass). Gate, commit, push, close bd issue.
+→ Read the issue; the instructions leave choices open → compose a plan. It spans a schema change and a new write path → critique it, then implement, then fan-out review (data layer / write path / tests, with the write-path reviewer running the parity pass). Full gate, commit, push, close bd issue.
 
 ```
 /cook-it maximo-app-3ci        # ← an epic
@@ -251,7 +240,7 @@ Each agent prompt must be self-contained: it doesn't see the prior conversation.
 /cook-it fix the off-by-one in scanner.ts pagination
 ```
 
-→ Behavior pinned by the report → the report is the plan: skip composing one, skip critique, state why. Implement, baseline review (one agent, includes the omission pass), gate, commit, push.
+→ Behavior pinned by the report → the report is the plan: skip composing one, skip critique, state why. Implement with a regression test, self-review (one file, no sibling path, test fails before and passes after), proportional gate (scanner typecheck + that test file), commit, push.
 
 ```
 /cook-it add the export button to the reports page
