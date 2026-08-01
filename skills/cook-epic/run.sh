@@ -806,7 +806,7 @@ fi
 # ---------------------------------------------------------------- state ----
 declare -A PID2CHILD=() PID2BRANCH=() PID2WORKER=() PID2WT=() PID2ARTIFACT=() PID2OUTPUT_BYTES=() PID2RATE_LIMIT=() PID2COST=()
 declare -A PID2STOP_REASON=()
-declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=()
+declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=() PERM_DENIALS=()
 declare -A PRE_HEAD=() PRE_SIB_HEAD=() FIRST_SIG=() FIRST_HEAD=() FIRST_SIB_HEAD=() FIRST_UNTRACKED=() # sequential verification
 declare -A LIVE_STARTED=() LIVE_LAST_PROGRESS=() LIVE_OUTPUT_SIZE=() LIVE_CPU=() LIVE_IO=() LIVE_TREE=()
 declare -A LIVE_NEXT_INSPECT=() LIVE_NEXT_REPO_PROBE=() LIVE_GENERATION=() LIVE_CGROUP=()
@@ -1757,16 +1757,25 @@ capture_untracked_baseline() { # <repo> <key>
 # Return success when a repository has dirt beyond the child's first-dispatch
 # baseline. Pre-existing untracked paths remain permitted, matching preflight.
 sequential_repo_dirty() { # <repo> <child-key>
-  local repo="$1" key="$2" current baseline
+  local repo="$1" key="$2" current baseline added
   if ! git -C "$repo" diff-index --quiet HEAD -- . ':(exclude).beads' 2>/dev/null; then
+    say "dirty: $repo has uncommitted tracked changes: $(git -C "$repo" diff-index --name-only HEAD -- . ':(exclude).beads' 2>/dev/null | head -10 | paste -sd ' ' -)"
     return 0
   fi
   if registered_nested_worktree_dirty "$repo"; then
+    say "dirty: $repo has a dirty or unknown registered nested worktree"
     return 0
   fi
   current=$(sequential_untracked_paths "$repo" | sort)
   baseline="${FIRST_UNTRACKED[$key]:-}"
-  [ "$current" = "$baseline" ] || return 0
+  # Only paths ADDED since the child's first dispatch count as dirt. Paths that
+  # vanish from the baseline (operator cleanup, hooks) must not fail every
+  # remaining attempt against a stale snapshot.
+  added=$(comm -13 <(printf '%s\n' "$baseline") <(printf '%s\n' "$current") | grep -v '^$' || true)
+  if [ -n "$added" ]; then
+    say "dirty: $repo gained untracked paths since first dispatch: $(printf '%s\n' "$added" | head -10 | paste -sd ' ' -)"
+    return 0
+  fi
   return 1
 }
 
@@ -1867,6 +1876,25 @@ fail_attempt() { # <child> <worker> <reason> — reopen + back off, or block for
   fi
 }
 
+# A failed attempt whose worker recorded permission denials is unlikely to be
+# fixed by identical retries: the auto-mode classifier blocks the same action
+# again. One retry is allowed (denials can be stochastic); a second
+# denial-bearing failure blocks the child for a human immediately instead of
+# burning the remaining attempts. Sets ESCALATED_REASON; callers read it.
+escalate_permission_denials() { # <child> <denied-flag> <reason>
+  local child="$1" denied="$2" reason="$3"
+  if [ "$denied" -eq 1 ]; then
+    PERM_DENIALS[$child]=$(( ${PERM_DENIALS[$child]:-0} + 1 ))
+    if [ "${PERM_DENIALS[$child]}" -ge 2 ]; then
+      ATTEMPTS[$child]=$(( MAX_ATTEMPTS - 1 ))
+      reason="persistent permission denials across ${PERM_DENIALS[$child]} attempts (last: $reason) — needs a human or an elevated session"
+    else
+      reason="$reason; permission denials recorded"
+    fi
+  fi
+  ESCALATED_REASON="$reason"
+}
+
 reap_worker() { # <pid> <rc>
   local pid="$1" rc="$2"
   local child="${PID2CHILD[$pid]}" branch="${PID2BRANCH[$pid]}" worker="${PID2WORKER[$pid]}"
@@ -1885,6 +1913,10 @@ reap_worker() { # <pid> <rc>
   status=$(bd show "$child" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .status // "?"')
   commits=$(git rev-list --count "$BASE_BRANCH..$branch" 2>/dev/null || echo 0)
   title=$(bd show "$child" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .title // ""')
+  # Claude/ccx result records carry permission_denials only when non-empty;
+  # other harnesses never match, leaving the flag 0.
+  local perm_denied=0
+  grep -q '"permission_denials":\[{' "$artifact" 2>/dev/null && perm_denied=1
 
   # Rate limit: don't burn an attempt; back off before re-dispatch.
   if [ -z "$stopped_reason" ] && [ "$status" != closed ] && { [ -f "$rate_marker" ] || grep -qiE 'rate.?limit|\b429\b|overloaded|quota exceeded' "$artifact" 2>/dev/null; }; then
@@ -1909,7 +1941,7 @@ reap_worker() { # <pid> <rc>
   # Sequential mode has its own verification: commits are already on the base
   # branch in the main checkout, so "landing" means gate + push, not a merge.
   if [ "$SEQUENTIAL" = 1 ]; then
-    reap_sequential "$child" "$worker" "$rc" "$status" "$title" "$stopped_reason"
+    reap_sequential "$child" "$worker" "$rc" "$status" "$title" "$stopped_reason" "$perm_denied"
     return
   fi
 
@@ -1930,6 +1962,25 @@ reap_worker() { # <pid> <rc>
         '{event:"researched",child:$child,worker:$worker,comments:$comments,cost:$cost,ts:$ts}'
       say "$child researched on $worker (findings in beads, no code) — nothing to merge"
       RESEARCHED=$((RESEARCHED + 1))
+      cleanup_worktree "$wt"
+      git branch -D "$branch" >>"$LOG" 2>&1 || true
+      return
+    fi
+  fi
+
+  # A non-research child may correctly close with an empty branch when its work
+  # already exists (operator pre-commit, external/infra effects). Accept that
+  # only with evidence: a new bead comment since dispatch. A bare close with no
+  # commits and no comment still fails as unverifiable.
+  if [ "$status" = closed ] && ! is_research_child "$child" "$title" && [ "$commits" -eq 0 ]; then
+    local nc_comments
+    nc_comments=$(comment_count_of "$child")
+    if [ "$nc_comments" -gt "${PRECOMMENTS[$child]:-0}" ]; then
+      mbox --arg child "$child" --arg worker "$worker" --argjson comments "$nc_comments" \
+        --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"completed-no-code",child:$child,worker:$worker,comments:$comments,cost:$cost,ts:$ts}'
+      say "$child completed on $worker with no new commits (evidence in bead comment) — nothing to merge"
+      MERGED=$((MERGED + 1))
       cleanup_worktree "$wt"
       git branch -D "$branch" >>"$LOG" 2>&1 || true
       return
@@ -1962,10 +2013,11 @@ reap_worker() { # <pid> <rc>
     if is_research_child "$child" "$title"; then
       reason="closed without findings (no new bead comment)"
     else
-      reason="closed without commits"
+      reason="closed without commits or bead-comment evidence"
     fi
   fi
-  fail_attempt "$child" "$worker" "$reason"
+  escalate_permission_denials "$child" "$perm_denied" "$reason"
+  fail_attempt "$child" "$worker" "$ESCALATED_REASON"
   cleanup_worktree "$wt"
 }
 
@@ -1974,8 +2026,8 @@ reap_worker() { # <pid> <rc>
 # tree clean, and the tree moved since dispatch (or since the child's first
 # dispatch, which covers crash-before-close retries that only needed to close)
 # — then run the integration gate and push whatever moved.
-reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason>
-  local child="$1" worker="$2" rc="$3" status="$4" title="$5" stopped_reason="${6:-}"
+reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason> <perm-denied>
+  local child="$1" worker="$2" rc="$3" status="$4" title="$5" stopped_reason="${6:-}" perm_denied="${7:-0}"
   local commits=0 dirty=0 s head summary now_comments reason effects landing
   # While a sequential worker owns the checkout its commits are indistinguishable
   # from an external writer. Accept its ending HEAD, then detect any movement
@@ -2017,6 +2069,23 @@ reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason>
     fi
   fi
 
+  # Non-research child closed with zero new commits, clean tree, unmoved sig:
+  # accept only with a new bead comment as evidence of verified completion.
+  if [ "$status" = closed ] && ! is_research_child "$child" "$title" \
+     && [ "$commits" -eq 0 ] && [ "$dirty" -eq 0 ] \
+     && [ "${FIRST_SIG[$child]:-}" = "$(tree_sig)" ]; then
+    now_comments=$(comment_count_of "$child")
+    if [ "$now_comments" -gt "${PRECOMMENTS[$child]:-0}" ]; then
+      [ "$SEQUENTIAL_RECOVERY_CHILD" = "$child" ] && SEQUENTIAL_RECOVERY_CHILD=''
+      mbox --arg child "$child" --arg worker "$worker" --argjson comments "$now_comments" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"completed-no-code",child:$child,worker:$worker,comments:$comments,ts:$ts}'
+      say "$child completed on $worker with no new commits (evidence in bead comment)"
+      printf -- '- %s completed with no new commits (evidence in bead comment)\n' "$child" >> "$SUMMARY"
+      MERGED=$((MERGED + 1))
+      return
+    fi
+  fi
+
   if [ "$status" = closed ] && [ "$dirty" -eq 0 ] \
      && { [ "$commits" -gt 0 ] || [ "${FIRST_SIG[$child]:-}" != "$(tree_sig)" ]; }; then
     if [ -n "$GATE" ]; then
@@ -2037,7 +2106,7 @@ reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason>
     done
     if [ "$dirty" -eq 1 ]; then
       sequential_claim_recovery_if_effects "$child"
-      fail_attempt "$child" "$worker" 'integration gate left uncommitted changes — this child owns cleanup before any other child can run'
+      fail_attempt "$child" "$worker" "integration gate left uncommitted changes (see 'dirty:' lines in the run log) — this child owns cleanup before any other child can run"
       return
     fi
     if [ "$PUSH_ENABLED" -eq 1 ]; then
@@ -2067,15 +2136,16 @@ reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason>
   reason="${stopped_reason:-exited rc=$rc}"
   [ -z "$stopped_reason" ] && [ -n "$WORKER_TIMEOUT" ] && [ "$rc" -eq 124 ] && reason="timed out after ${WORKER_TIMEOUT}s"
   if [ -z "$stopped_reason" ] && [ "$dirty" -eq 1 ]; then
-    reason="left uncommitted changes in the working tree — this child owns cleanup before any other child can run"
+    reason="left uncommitted changes in the working tree (see 'dirty:' lines in the run log) — this child owns cleanup before any other child can run"
   elif [ -z "$stopped_reason" ] && [ "$status" = closed ] && [ "$commits" -eq 0 ]; then
     if is_research_child "$child" "$title"; then
       reason="closed without findings (no new bead comment)"
     else
-      reason="closed without commits"
+      reason="closed without commits or bead-comment evidence"
     fi
   fi
-  fail_attempt "$child" "$worker" "$reason"
+  escalate_permission_denials "$child" "$perm_denied" "$reason"
+  fail_attempt "$child" "$worker" "$ESCALATED_REASON"
 }
 
 reap_finished() {

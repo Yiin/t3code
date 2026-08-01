@@ -389,6 +389,18 @@ pausing a finished run). Report it; do not retry.
   code. A research child with commits passes normal gate and landing after that
   findings check; without commits, its empty branch is dropped. Closing one
   with no new comment fails as "closed without findings".
+  **Non-research children may also finish with zero new commits** when the
+  work already exists (operator pre-commit, external/infra effects): that is
+  accepted only when the bead gained a comment since dispatch — the comment is
+  the evidence. A bare close with no commits and no comment still fails.
+- **Permission denials park fast**: a failed attempt whose worker log records
+  permission denials is retried once (denials can be stochastic); a second
+  denial-bearing failure blocks the child for a human immediately instead of
+  burning the remaining attempts.
+- **Dirt verdicts are evidence-backed**: untracked-path drift counts only
+  paths ADDED since the child's first dispatch (paths that vanish from the
+  baseline are ignored), and every dirty verdict logs the repo and offending
+  paths as `dirty:` lines in the run log.
 - **Completion**: when no open children remain and queues are drained, the
   coordinator closes the epic and exits.
 
