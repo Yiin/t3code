@@ -15,7 +15,19 @@
 #   COOKEPIC_HARNESS           auto, kimi, claude, ccx, codex, or opencode (default auto)
 #   COOKEPIC_WORKERS           max concurrent workers              (default 3)
 #   COOKEPIC_MAX_DISPATCHES    global spawn cap                    (default 50)
-#   COOKEPIC_WORKER_TIMEOUT    per-worker timeout, seconds         (default 5400; 0 = none)
+#   COOKEPIC_WORKER_TIMEOUT    optional absolute worker timeout, seconds (unset = none)
+#   COOKEPIC_IDLE_THRESHOLD    seconds without progress before inspection (default 1800)
+#   COOKEPIC_INSPECTOR_TIMEOUT inspector timeout, seconds          (default 120)
+#   COOKEPIC_INSPECT_RETRY_DELAY delay after failed inspection     (default 300)
+#   COOKEPIC_INSPECT_MIN_DELAY minimum inspector next-check delay  (default 60)
+#   COOKEPIC_INSPECT_MAX_DELAY maximum inspector next-check delay  (default 7200)
+#   COOKEPIC_STOP_GRACE        grace before a stopped worker gets KILL (default 15)
+#   COOKEPIC_REPO_PROBE_INTERVAL seconds between quiet repository probes (default 60)
+#   COOKEPIC_REPO_PROBE_TIMEOUT repository probe timeout, seconds (default 2)
+#   COOKEPIC_WORKER_ARTIFACT_BYTES rolling worker output limit (default 1048576)
+#   COOKEPIC_INSPECTOR_RESULT_BYTES inspector result limit (default 4096)
+#   COOKEPIC_INSPECTOR_LOG_BYTES inspector raw log limit (default 32768)
+#   COOKEPIC_REPO_EVIDENCE_BYTES aggregate repository evidence limit (default 8192)
 #   COOKEPIC_MAX_ATTEMPTS      attempts per child before blocked   (default 3)
 #   COOKEPIC_GATE              integration gate run before landing (REQUIRED unless COOKEPIC_NO_GATE=1)
 #   COOKEPIC_NO_GATE           1 = run without a gate; workers only do cheap checks, so
@@ -32,6 +44,13 @@
 #   COOKEPIC_SPAWN_DELAY       seconds between dispatches          (default 2)
 #   COOKEPIC_BUDGET_USD        soft spend cap (claude/ccx only; stops new dispatches)
 #   COOKEPIC_WORKER_CMD        test hook: run this instead of a harness
+#   COOKEPIC_INSPECTOR_CMD     test hook: receives prompt and result paths
+#   COOKEPIC_CLOCK_CMD         test hook: prints integer epoch seconds
+#   COOKEPIC_RESOURCE_SAMPLER_CMD test hook: receives worker and pid; prints CPU-usec and I/O bytes
+#   COOKEPIC_WORKER_ACTIVE_CMD test hook: receives worker and pid
+#   COOKEPIC_WORKER_STOP_CMD   test hook: receives worker, pid, and grace seconds
+#   COOKEPIC_PROCESS_START_TICKS_CMD test hook: receives pid; prints process start ticks
+#   COOKEPIC_DISABLE_SYSTEMD   test hook: 1 forces owned process-group fallback
 #   COOKEPIC_PUSH_CMD         test hook: receives repo then git push arguments
 #   COOKEPIC_SEQUENTIAL        1 = sequential mode: one worker at a time, directly
 #                              in the main checkout on the base branch (no worktrees,
@@ -47,13 +66,15 @@
 set -uo pipefail
 
 RUN_DIR="${1:?usage: run.sh <run-dir>}"
+mkdir -p "$RUN_DIR"
+RUN_DIR="$(cd "$RUN_DIR" && pwd -P)"
 LOG="$RUN_DIR/loop.log"
 MAILBOX="$RUN_DIR/mailbox.jsonl"
 SUMMARY="$RUN_DIR/summary.md"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$SKILL_DIR/worker-prompt.md"
+INSPECTOR_TEMPLATE="$SKILL_DIR/inspector-prompt.md"
 
-mkdir -p "$RUN_DIR"
 : > "$LOG"; : > "$MAILBOX"; : > "$SUMMARY"
 
 say() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >> "$LOG"; }
@@ -73,7 +94,22 @@ EPIC="${COOKEPIC_EPIC:-}"
 [ -n "$EPIC" ] || die 'COOKEPIC_EPIC is required' 'set it to the beads epic id'
 WORKERS="${COOKEPIC_WORKERS:-3}"
 MAX_DISPATCHES="${COOKEPIC_MAX_DISPATCHES:-50}"
-WORKER_TIMEOUT="${COOKEPIC_WORKER_TIMEOUT:-5400}"
+WORKER_TIMEOUT="${COOKEPIC_WORKER_TIMEOUT:-}"
+IDLE_THRESHOLD="${COOKEPIC_IDLE_THRESHOLD:-1800}"
+INSPECTOR_TIMEOUT="${COOKEPIC_INSPECTOR_TIMEOUT:-120}"
+INSPECT_RETRY_DELAY="${COOKEPIC_INSPECT_RETRY_DELAY:-300}"
+INSPECT_MIN_DELAY="${COOKEPIC_INSPECT_MIN_DELAY:-60}"
+INSPECT_MAX_DELAY="${COOKEPIC_INSPECT_MAX_DELAY:-7200}"
+STOP_GRACE="${COOKEPIC_STOP_GRACE:-15}"
+SUPERVISION_TICK="${COOKEPIC_SUPERVISION_TICK:-5}"
+REPO_PROBE_INTERVAL="${COOKEPIC_REPO_PROBE_INTERVAL:-60}"
+REPO_PROBE_TIMEOUT="${COOKEPIC_REPO_PROBE_TIMEOUT:-2}"
+WORKER_ARTIFACT_BYTES="${COOKEPIC_WORKER_ARTIFACT_BYTES:-1048576}"
+INSPECTOR_RESULT_BYTES="${COOKEPIC_INSPECTOR_RESULT_BYTES:-4096}"
+INSPECTOR_LOG_BYTES="${COOKEPIC_INSPECTOR_LOG_BYTES:-32768}"
+REPO_EVIDENCE_BYTES="${COOKEPIC_REPO_EVIDENCE_BYTES:-8192}"
+CPU_PROGRESS_USEC=100000
+IO_PROGRESS_BYTES=4096
 MAX_ATTEMPTS="${COOKEPIC_MAX_ATTEMPTS:-3}"
 GATE="${COOKEPIC_GATE:-}"
 NO_GATE="${COOKEPIC_NO_GATE:-0}"
@@ -86,6 +122,13 @@ PERM_MODE="${COOKEPIC_PERMISSION_MODE:-auto}"
 SPAWN_DELAY="${COOKEPIC_SPAWN_DELAY:-2}"
 BUDGET="${COOKEPIC_BUDGET_USD:-}"
 WORKER_CMD="${COOKEPIC_WORKER_CMD:-}"
+INSPECTOR_CMD="${COOKEPIC_INSPECTOR_CMD:-}"
+CLOCK_CMD="${COOKEPIC_CLOCK_CMD:-}"
+RESOURCE_SAMPLER_CMD="${COOKEPIC_RESOURCE_SAMPLER_CMD:-}"
+WORKER_ACTIVE_CMD="${COOKEPIC_WORKER_ACTIVE_CMD:-}"
+WORKER_STOP_CMD="${COOKEPIC_WORKER_STOP_CMD:-}"
+PROCESS_START_TICKS_CMD="${COOKEPIC_PROCESS_START_TICKS_CMD:-}"
+DISABLE_SYSTEMD="${COOKEPIC_DISABLE_SYSTEMD:-0}"
 RATE_LIMIT_BACKOFF="${COOKEPIC_RATE_LIMIT_BACKOFF:-120}"
 NO_PUSH="${COOKEPIC_NO_PUSH:-}"
 SEQUENTIAL="${COOKEPIC_SEQUENTIAL:-0}"
@@ -99,7 +142,22 @@ fi
 [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_WORKERS must be a positive integer' 'use 1 or more'
 [[ "$MAX_DISPATCHES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_MAX_DISPATCHES must be a positive integer' 'use 1 or more'
 [[ "$MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_MAX_ATTEMPTS must be a positive integer' 'use 1 or more'
-[[ "$WORKER_TIMEOUT" =~ ^[0-9]+$ ]] || die 'COOKEPIC_WORKER_TIMEOUT must be zero or a positive integer' 'use whole seconds'
+[ -z "$WORKER_TIMEOUT" ] || [[ "$WORKER_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_WORKER_TIMEOUT must be a positive integer when set' 'use whole seconds or unset it for no absolute timeout'
+[[ "$IDLE_THRESHOLD" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_IDLE_THRESHOLD must be a positive integer' 'use whole seconds'
+[[ "$INSPECTOR_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECTOR_TIMEOUT must be a positive integer' 'use whole seconds'
+[[ "$INSPECT_RETRY_DELAY" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECT_RETRY_DELAY must be a positive integer' 'use whole seconds'
+[[ "$INSPECT_MIN_DELAY" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECT_MIN_DELAY must be a positive integer' 'use whole seconds'
+[[ "$INSPECT_MAX_DELAY" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECT_MAX_DELAY must be a positive integer' 'use whole seconds'
+[[ "$STOP_GRACE" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_STOP_GRACE must be a positive integer' 'use whole seconds'
+[[ "$SUPERVISION_TICK" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_SUPERVISION_TICK must be a positive integer' 'use whole seconds'
+[[ "$REPO_PROBE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_REPO_PROBE_INTERVAL must be a positive integer' 'use whole seconds'
+[[ "$REPO_PROBE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_REPO_PROBE_TIMEOUT must be a positive integer' 'use whole seconds'
+[[ "$WORKER_ARTIFACT_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_WORKER_ARTIFACT_BYTES must be a positive integer' 'use bytes'
+[[ "$INSPECTOR_RESULT_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECTOR_RESULT_BYTES must be a positive integer' 'use bytes'
+[[ "$INSPECTOR_LOG_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECTOR_LOG_BYTES must be a positive integer' 'use bytes'
+[[ "$REPO_EVIDENCE_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_REPO_EVIDENCE_BYTES must be a positive integer' 'use bytes'
+[ "$DISABLE_SYSTEMD" = 0 ] || [ "$DISABLE_SYSTEMD" = 1 ] || die 'COOKEPIC_DISABLE_SYSTEMD must be 0 or 1' 'use 1 only in fallback tests'
+[ "$INSPECT_MIN_DELAY" -le "$INSPECT_MAX_DELAY" ] || die 'COOKEPIC_INSPECT_MIN_DELAY must not exceed COOKEPIC_INSPECT_MAX_DELAY' 'raise the maximum or lower the minimum'
 [[ "$SPAWN_DELAY" =~ ^[0-9]+$ ]] || die 'COOKEPIC_SPAWN_DELAY must be zero or a positive integer' 'use whole seconds'
 [[ "$RATE_LIMIT_BACKOFF" =~ ^[0-9]+$ ]] || die 'COOKEPIC_RATE_LIMIT_BACKOFF must be zero or a positive integer' 'use whole seconds'
 [ -z "$BUDGET" ] || [[ "$BUDGET" =~ ^[0-9]+([.][0-9]+)?$ ]] || die 'COOKEPIC_BUDGET_USD must be a positive number' 'provide a dollar amount or remove it'
@@ -109,11 +167,12 @@ if [ -z "$GATE" ] && [ "$NO_GATE" != 1 ]; then
       'set COOKEPIC_GATE to the build+test command, or COOKEPIC_NO_GATE=1 to knowingly run unverified'
 fi
 
-for tool in jq timeout git bd flock; do
+for tool in jq timeout git bd flock setsid sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required" "install $tool and rerun"
 done
 [ -d .beads ] || die 'no .beads directory here' 'launch from the project root of a beads-enabled repo'
 [ -f "$TEMPLATE" ] || die "worker prompt template missing: $TEMPLATE" 'reinstall the cook-epic skill'
+[ -f "$INSPECTOR_TEMPLATE" ] || die "inspector prompt template missing: $INSPECTOR_TEMPLATE" 'reinstall the cook-epic skill'
 if git ls-files .beads | grep -qE '^\.beads/(dolt/|dolt-server\.|.*\.db$)'; then
   die 'the beads DATA dir is git-tracked; worktrees would fork the database' 'untrack the dolt data before running cook-epic'
 fi
@@ -151,11 +210,11 @@ if [ "$SEQUENTIAL" = 1 ]; then
 fi
 
 RUN_ID="${RUN_DIR##*/}"
-# systemd unit names may not carry the dots a run-dir name has, so workers get
-# a sanitized id. Naming each worker's scope deterministically is what lets the
-# coordinator tell "my worker is gone" from "my bookkeeping subshell died but
-# the worker is still running" — see worker_scope_active().
-SCOPE_ID="$(printf '%s' "$RUN_ID" | tr -c 'a-zA-Z0-9' '-')"
+# Scope names must be stable without collapsing distinct repositories or run
+# paths onto the same lossy basename. NUL separators make the tuple unambiguous.
+SCOPE_ID="$(printf '%s\0%s\0%s\0%s\0' "$REPO" "$RUN_DIR" "$EPIC" "$RUN_ID" | sha256sum)"
+SCOPE_ID="${SCOPE_ID%% *}"
+SCOPE_ID="${SCOPE_ID:0:24}"
 WORKTREE_ROOT="$REPO/.worktrees/cook-epic-$RUN_ID"
 INTEG_BRANCH="cook-epic-integration-$RUN_ID"
 INTEG_WT="$WORKTREE_ROOT/.integration"
@@ -274,6 +333,13 @@ run_lock_start_ticks() { # <pid> -> start time in clock ticks ('' when gone)
   local stat
   stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
   awk '{print $20}' <<< "${stat##*') '}"
+}
+process_start_ticks() { # <pid> -> owned-process identity, with a test seam for PID reuse
+  if [ -n "$PROCESS_START_TICKS_CMD" ]; then
+    "$PROCESS_START_TICKS_CMD" "$1" 2>>"$LOG" || true
+  else
+    run_lock_start_ticks "$1"
+  fi
 }
 run_lock_pgid() {
   local stat
@@ -548,23 +614,31 @@ mkdir -p "$WORKTREE_ROOT"
 # The whole fleet — every worker, everything it spawns (builds, browsers), and
 # the integration gate — runs inside cook-epic.slice, so the interactive
 # session always wins CPU/IO contention and the fleet cannot swap-thrash the
-# machine. Falls back to `nice` when there is no systemd user session.
+# machine. Real workers require a systemd user scope so descendants cannot
+# escape supervision by changing their process group or session.
 # heavy.lock additionally serializes the expensive commands (integration gate,
 # Merge fix gate reruns) machine-wide: at most one runs at a time.
 HEAVY_LOCK="$RUN_DIR/heavy.lock"
 touch "$HEAVY_LOCK"
 SCOPE_OK=0
-if command -v systemd-run >/dev/null 2>&1 \
+if [ "$DISABLE_SYSTEMD" -ne 1 ] && command -v systemd-run >/dev/null 2>&1 \
    && systemd-run --user --scope --quiet -- true >/dev/null 2>&1; then
+  if systemctl --user list-units --all --plain --no-legend --no-pager \
+      "cook-epic-$SCOPE_ID-*.scope" 2>/dev/null | grep -q '[^[:space:]]'; then
+    die "pre-existing worker or inspector scope uses run identity $SCOPE_ID" \
+      'use a different run directory or reconcile the existing scope before launching'
+  fi
   SCOPE_OK=1
   systemctl --user set-property --runtime cook-epic.slice \
     CPUWeight="$CPU_WEIGHT" IOWeight="$IO_WEIGHT" MemoryHigh="$MEMORY_HIGH" >>"$LOG" 2>&1 \
     || say 'WARNING: could not set cook-epic.slice properties; scoping without limits'
 else
-  say 'WARNING: systemd-run --user unavailable — falling back to nice (weaker isolation)'
+  [ -n "$WORKER_CMD" ] || die 'a systemd user session is required for worker supervision' \
+    'start the systemd user manager or run this workload through the server-owned EpicRunner'
+  say 'WARNING: systemd disabled for a test-hook worker; process sessions are not a production isolation seam'
 fi
 
-fleet_run() { # run a command under the fleet's resource cgroup (best effort)
+fleet_run() { # run a command under the fleet's resource cgroup
   if [ "$SCOPE_OK" -eq 1 ]; then
     # FLEET_UNIT names the scope so the coordinator can later ask whether this
     # exact worker is still alive, and stop it rather than orphan it.
@@ -578,25 +652,124 @@ fleet_run() { # run a command under the fleet's resource cgroup (best effort)
   fi
 }
 
-worker_scope_active() { # <worker> -> 0 when that worker's scope still has tasks
-  [ "$SCOPE_OK" -eq 1 ] || return 1
-  systemctl --user is-active --quiet "cook-epic-$SCOPE_ID-$1.scope" 2>/dev/null
+fallback_exec() { # <identity file> <command...>
+  local identity="$1" pid rc=0
+  shift
+  rm -f "$identity"
+  setsid bash -c '
+    identity=$1
+    shift
+    stat=$(cat "/proc/$$/stat" 2>/dev/null) || exit 125
+    rest=${stat##*\) }
+    read -ra fields <<< "$rest"
+    pgid=${fields[2]:-0}
+    sid=${fields[3]:-0}
+    ticks=${fields[19]:-}
+    [ "$pgid" = "$$" ] && [ "$sid" = "$$" ] && [ -n "$ticks" ] || exit 125
+    tmp="$identity.tmp.$$"
+    printf "%s %s %s\n" "$$" "$ticks" "$pgid" > "$tmp" || exit 125
+    mv -f "$tmp" "$identity" || exit 125
+    exec nice -n 10 "$@"
+  ' bash "$identity" "$@" &
+  pid=$!
+  wait "$pid" || rc=$?
+  return "$rc"
 }
 
-# A scoped worker lives in its own cgroup, so a signal aimed at the
-# coordinator's process group kills the bookkeeping subshell but NOT the worker
-# — which then keeps mutating the checkout with nobody supervising it. Never
-# exit leaving one behind.
-stop_run_workers() {
-  [ "$SCOPE_OK" -eq 1 ] || return 0
-  local unit
-  for unit in $(systemctl --user list-units --plain --no-legend --all \
-                  "cook-epic-$SCOPE_ID-*.scope" 2>/dev/null | awk '{print $1}'); do
-    say "stopping surviving worker scope $unit"
-    systemctl --user stop "$unit" >>"$LOG" 2>&1 || true
+owned_identity_load() { # <identity file> <bookkeeping pid>
+  local identity="$1" bookkeeping="$2" attempts=0 pid ticks pgid
+  while [ "$attempts" -lt 500 ]; do
+    if read -r pid ticks pgid 2>/dev/null < "$identity" \
+       && [[ "$pid" =~ ^[1-9][0-9]*$ && "$ticks" =~ ^[1-9][0-9]*$ && "$pgid" = "$pid" ]]; then
+      OWNED_PID="$pid"; OWNED_TICKS="$ticks"; OWNED_PGID="$pgid"
+      return 0
+    fi
+    kill -0 "$bookkeeping" 2>/dev/null || break
+    sleep 0.01
+    attempts=$((attempts + 1))
   done
+  return 1
 }
-trap 'stop_run_workers; run_lock_release' EXIT
+
+worker_exec() { # <identity file> <command...>
+  local identity="$1"
+  shift
+  if [ "$SCOPE_OK" -eq 1 ]; then fleet_run "$@"; else fallback_exec "$identity" "$@"; fi
+}
+
+inspector_exec() { # <identity file> <command...>
+  local identity="$1"
+  shift
+  if [ "$SCOPE_OK" -eq 1 ]; then fleet_run "$@"; else fallback_exec "$identity" "$@"; fi
+}
+
+worker_scope_active() { # <worker> -> 0 when that worker's scope still has tasks
+  [ "$SCOPE_OK" -eq 1 ] || return 1
+  systemctl --user is-active --quiet "$(worker_unit "$1")" 2>/dev/null
+}
+
+# Keep a rolling tail while recording state that must survive truncation.
+bounded_stream() { # <path> <limit> [byte count] [rate marker] [cost path] [overflow marker]
+  local path="$1" limit="$2" count_path="${3:-}" rate_path="${4:-}" cost_path="${5:-}" overflow_path="${6:-}"
+  local LC_ALL=C
+  local chunk='' scan='' overlap='' remaining='' cost='' total=0 retained=0 size read_rc compact_at tmp="$path.tmp.$BASHPID"
+  compact_at=$((limit + (limit > 65536 ? limit : 65536)))
+  : > "$path"
+  [ -z "$count_path" ] || printf '0\n' > "$count_path"
+  [ -z "$overflow_path" ] || rm -f "$overflow_path"
+  while true; do
+    chunk=''; read_rc=0
+    IFS= LC_ALL=C read -r -t 0.2 -N 4096 chunk || read_rc=$?
+    if [ -n "$chunk" ]; then
+      printf '%s' "$chunk" >> "$path"
+      total=$((total + ${#chunk}))
+      retained=$((retained + ${#chunk}))
+      if [ -n "$count_path" ]; then
+        printf '%s\n' "$total" > "$count_path"
+      fi
+      if [ -n "$rate_path$cost_path" ]; then
+        scan="$overlap$chunk"
+        if [ -n "$rate_path" ]; then
+          shopt -s nocasematch
+          [[ "$scan" =~ rate.?limit|(^|[^0-9])429([^0-9]|$)|overloaded|quota[[:space:]]+exceeded ]] && : > "$rate_path"
+          shopt -u nocasematch
+        fi
+        if [ -n "$cost_path" ]; then
+          remaining="$scan"
+          while [[ "$remaining" =~ \"total_cost_usd\"[[:space:]]*:[[:space:]]*([0-9]+([.][0-9]+)?) ]]; do
+            cost="${BASH_REMATCH[1]}"
+            remaining="${remaining#*"${BASH_REMATCH[0]}"}"
+          done
+          [ -z "$cost" ] || printf '%s\n' "$cost" > "$cost_path"
+        fi
+        overlap="${scan: -256}"
+      fi
+      [ -z "$overflow_path" ] || [ "$total" -le "$limit" ] || : > "$overflow_path"
+      if [ "$retained" -ge "$compact_at" ]; then
+        tail -c "$limit" "$path" > "$tmp" 2>/dev/null || : > "$tmp"
+        mv -f "$tmp" "$path"
+        retained="$limit"
+      fi
+    fi
+    [ "$read_rc" -eq 1 ] && break
+  done
+  size="$retained"
+  if [ "$size" -gt "$limit" ]; then
+    tail -c "$limit" "$path" > "$tmp" 2>/dev/null || : > "$tmp"
+    mv -f "$tmp" "$path"
+  fi
+}
+
+capture_worker() { # <artifact> <bytes> <rate marker> <cost path> <command...>
+  local artifact="$1" bytes="$2" rate="$3" cost="$4" fifo="$1.pipe" sink rc=0
+  shift 4
+  rm -f "$fifo"; mkfifo "$fifo"
+  bounded_stream "$artifact" "$WORKER_ARTIFACT_BYTES" "$bytes" "$rate" "$cost" < "$fifo" & sink=$!
+  "$@" > "$fifo" 2>&1 || rc=$?
+  wait "$sink" 2>/dev/null || true
+  rm -f "$fifo"
+  return "$rc"
+}
 
 # Set up a worktree's untracked essentials. Beads access uses bd's native
 # redirect mechanism (.beads/redirect holds the relative path to the main
@@ -631,9 +804,17 @@ if [ "$SEQUENTIAL" != 1 ]; then
 fi
 
 # ---------------------------------------------------------------- state ----
-declare -A PID2CHILD=() PID2BRANCH=() PID2WORKER=() PID2WT=() PID2ARTIFACT=()
+declare -A PID2CHILD=() PID2BRANCH=() PID2WORKER=() PID2WT=() PID2ARTIFACT=() PID2OUTPUT_BYTES=() PID2RATE_LIMIT=() PID2COST=()
+declare -A PID2STOP_REASON=()
 declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=()
 declare -A PRE_HEAD=() PRE_SIB_HEAD=() FIRST_SIG=() FIRST_HEAD=() FIRST_SIB_HEAD=() FIRST_UNTRACKED=() # sequential verification
+declare -A LIVE_STARTED=() LIVE_LAST_PROGRESS=() LIVE_OUTPUT_SIZE=() LIVE_CPU=() LIVE_IO=() LIVE_TREE=()
+declare -A LIVE_NEXT_INSPECT=() LIVE_NEXT_REPO_PROBE=() LIVE_GENERATION=() LIVE_CGROUP=()
+declare -A LIVE_INSPECT_PID=() LIVE_INSPECT_BOOK_PID=() LIVE_INSPECT_STARTED=() LIVE_INSPECT_GENERATION=() LIVE_INSPECT_TICKS=() LIVE_INSPECT_PGID=()
+declare -A LIVE_INSPECT_RESULT=() LIVE_INSPECT_RAW=() LIVE_INSPECT_RC=() LIVE_INSPECT_FORCED_RC=()
+declare -A LIVE_INSPECT_PROCESS_FP=() LIVE_INSPECT_REPO_FP=()
+declare -A LIVE_PENDING_STOP_PROCESS_FP=() LIVE_PENDING_STOP_REPO_FP=() LIVE_PENDING_STOP_GENERATION=()
+declare -A LIVE_AGENT_PID=() LIVE_ROOT_TICKS=() LIVE_ROOT_PGID=() LIVE_LAST_DELTA=() LIVE_DEADLINE=()
 # Run-wide baselines are captured immediately before the first worker starts.
 # Per-child baselines survive retries, so a cleanup-only retry still reports
 # commits made by that child's earlier partial attempt.
@@ -651,9 +832,683 @@ STOPPING=0
 FATAL_STOP=0
 STOP_REASON=''
 
-trap 'STOPPING=1; say "signal received — draining"' TERM INT
+trap 'STOPPING=1; say "signal received — draining"' TERM INT HUP
 
 active_workers() { echo "${#PID2CHILD[@]}"; }
+
+# ---------------------------------------------------------- supervision ----
+# The coordinator owns liveness state. Sampling can request an inspection, but
+# only a valid high-confidence inspector decision can stop a worker.
+clock_now() {
+  local now
+  if [ -n "$CLOCK_CMD" ]; then
+    now=$("$CLOCK_CMD" 2>>"$LOG") || now=''
+    [[ "$now" =~ ^[0-9]+$ ]] || { say 'WARNING: clock adapter returned invalid output; using system clock'; now=$(date +%s); }
+    printf '%s\n' "$now"
+  else
+    date +%s
+  fi
+}
+
+bounded_delay() { # <requested> -> configured inspection delay
+  local delay="$1"
+  [[ "$delay" =~ ^[1-9][0-9]*$ ]] || delay="$IDLE_THRESHOLD"
+  [ "$delay" -ge "$INSPECT_MIN_DELAY" ] || delay="$INSPECT_MIN_DELAY"
+  [ "$delay" -le "$INSPECT_MAX_DELAY" ] || delay="$INSPECT_MAX_DELAY"
+  printf '%s\n' "$delay"
+}
+
+worker_unit() { printf 'cook-epic-%s-%s.scope\n' "$SCOPE_ID" "$1"; }
+inspector_unit() { printf 'cook-epic-%s-inspect-%s.scope\n' "$SCOPE_ID" "$1"; }
+CLK_TCK=$(getconf CLK_TCK 2>/dev/null || printf 100)
+
+scope_control_group() { # <unit>
+  systemctl --user show --property=ControlGroup --value "$1" 2>/dev/null
+}
+
+cache_worker_cgroup() { # <worker>
+  local worker="$1" attempts=0
+  [ "$SCOPE_OK" -eq 1 ] || return 0
+  while [ "$attempts" -lt 50 ]; do
+    if worker_scope_active "$worker"; then
+      scope_control_group "$(worker_unit "$worker")"
+      return
+    fi
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+}
+
+owned_group_valid() { # <leader pid> <start ticks> <owned pgid>
+  local root="$1" ticks="$2" pgid="$3" stat rest current
+  [[ "$root" =~ ^[1-9][0-9]*$ && "$pgid" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "$root" = "$pgid" ] && [ -n "$ticks" ] || return 1
+  current=$(process_start_ticks "$root")
+  if [ -n "$current" ]; then
+    [ "$ticks" = "$current" ] || return 1
+    if stat=$(cat "/proc/$root/stat" 2>/dev/null); then
+      rest=${stat##*') '}
+      read -ra fields <<< "$rest"
+      [ "${fields[2]:-0}" = "$pgid" ] && [ "${fields[3]:-0}" = "$pgid" ] || return 1
+      [ "${fields[0]:-}" = Z ] || return 0
+    fi
+  fi
+  # Descendants retain the owned PGID and SID after their session leader exits.
+  # Linux does not reuse that numeric ID until the remaining group is empty.
+  ps -eo pgid=,sid=,stat= 2>/dev/null \
+    | awk -v pgid="$pgid" '$1 == pgid && $2 == pgid && $3 !~ /^Z/ {found=1} END {exit !found}'
+}
+
+process_group_ids() { # <pgid> -> every non-zombie member, without asserting ownership
+  ps -eo pid=,pgid=,stat= 2>/dev/null | awk -v pgid="$1" '$2 == pgid && $3 !~ /^Z/ {print $1}'
+}
+
+owned_process_ids() { # <leader pid> <start ticks> <owned pgid>
+  owned_group_valid "$1" "$2" "$3" || return 0
+  process_group_ids "$3"
+}
+
+worker_process_ids() { # <worker> <bookkeeping pid>
+  local worker="$1" root="$2" cgroup="${LIVE_CGROUP[$1]:-}"
+  if [ "$SCOPE_OK" -eq 1 ] && [ -n "$cgroup" ] && [ -r "/sys/fs/cgroup$cgroup/cgroup.procs" ]; then
+    sort -n -u "/sys/fs/cgroup$cgroup/cgroup.procs" 2>/dev/null
+    return
+  fi
+  owned_process_ids "${LIVE_AGENT_PID[$root]:-$root}" "${LIVE_ROOT_TICKS[$root]:-}" "${LIVE_ROOT_PGID[$root]:-0}"
+}
+
+sample_worker_resources() { # <worker> <bookkeeping pid> -> "cpu-usec io-bytes"
+  local worker="$1" root="$2" agent="${LIVE_AGENT_PID[$2]:-$2}" cgroup="${LIVE_CGROUP[$1]:-}" cpu io pid stat rest ticks=0 bytes=0
+  if [ -n "$RESOURCE_SAMPLER_CMD" ]; then
+    "$RESOURCE_SAMPLER_CMD" "$worker" "$agent" 2>>"$LOG"
+    return
+  fi
+  if [ "$SCOPE_OK" -eq 1 ]; then
+    if [ -n "$cgroup" ] && [ -r "/sys/fs/cgroup$cgroup/cpu.stat" ]; then
+      cpu=$(awk '$1 == "usage_usec" {print $2}' "/sys/fs/cgroup$cgroup/cpu.stat" 2>/dev/null)
+      io=0
+      if [ -r "/sys/fs/cgroup$cgroup/io.stat" ]; then
+        io=$(awk '{for(i=1;i<=NF;i++){if($i~/^rbytes=/||$i~/^wbytes=/){split($i,a,"="); n+=a[2]}}} END{print n+0}' "/sys/fs/cgroup$cgroup/io.stat" 2>/dev/null)
+      fi
+      printf '%s %s\n' "${cpu:-0}" "${io:-0}"
+      return
+    fi
+  fi
+  while read -r pid; do
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
+    rest=${stat##*') '}
+    read -ra fields <<< "$rest"
+    ticks=$((ticks + ${fields[11]:-0} + ${fields[12]:-0}))
+    if [ -r "/proc/$pid/io" ]; then
+      bytes=$((bytes + $(awk '$1 == "read_bytes:" || $1 == "write_bytes:" {n += $2} END {print n+0}' "/proc/$pid/io" 2>/dev/null)))
+    fi
+  done < <(worker_process_ids "$worker" "$root")
+  printf '%s %s\n' "$((ticks * 1000000 / CLK_TCK))" "$bytes"
+}
+
+repository_status() { # <repo>
+  timeout --kill-after=1 "$REPO_PROBE_TIMEOUT" env GIT_OPTIONAL_LOCKS=0 git -C "$1" status \
+    --porcelain=v1 --untracked-files=no -- . ':(exclude).beads' 2>/dev/null
+}
+
+repository_snapshot() { # <repo> <label> <hot|inspection>
+  local repo="$1" label="$2" form="$3" status_hash diff_hash head summary
+  if [ "$form" = hot ]; then
+    status_hash=$(repository_status "$repo" | cksum) || { printf '%s hash=probe-timeout\n' "$label"; return; }
+    diff_hash=$(timeout --kill-after=1 "$REPO_PROBE_TIMEOUT" env GIT_OPTIONAL_LOCKS=0 git -C "$repo" diff \
+      --no-ext-diff --no-textconv HEAD -- . ':(exclude).beads' 2>/dev/null | cksum) \
+      || { printf '%s hash=probe-timeout\n' "$label"; return; }
+    head=$(timeout --kill-after=1 "$REPO_PROBE_TIMEOUT" env GIT_OPTIONAL_LOCKS=0 git -C "$repo" rev-parse HEAD 2>/dev/null) \
+      || { printf '%s hash=probe-timeout\n' "$label"; return; }
+    printf '%s\n%s\n%s\n' "$head" "$status_hash" "$diff_hash" | cksum \
+      | awk -v label="$label" '{print label " hash=" $1 ":" $2}'
+    return
+  fi
+  summary=$(repository_status "$repo" | awk -v label="$label" '
+    BEGIN {modified=0; added=0; deleted=0; renamed=0; conflicted=0}
+    {
+      code=substr($0,1,2)
+      if (code ~ /U|AA|DD/) conflicted++
+      else if (code ~ /R/) renamed++
+      else if (code ~ /A/) added++
+      else if (code ~ /D/) deleted++
+      else modified++
+    }
+    END {
+      printf "%s tracked_modified=%d added=%d deleted=%d renamed=%d conflicted=%d probe_timeout=false\n", label, modified, added, deleted, renamed, conflicted
+    }') || summary="$label tracked_modified=0 added=0 deleted=0 renamed=0 conflicted=0 probe_timeout=true"
+  printf '%s\n' "$summary"
+}
+
+repository_snapshots() { # <worker bookkeeping pid> <hot|inspection>
+  local root="$1" form="$2" output s index=0
+  output=$(repository_snapshot "${PID2WT[$root]}" main "$form")
+  if [ "$SEQUENTIAL" = 1 ]; then
+    for s in "${SIBLINGS[@]}"; do
+      index=$((index + 1))
+      output+=$'\n'"$(repository_snapshot "$s" "sibling-$index" "$form")"
+      [ "${#output}" -lt "$REPO_EVIDENCE_BYTES" ] || break
+    done
+  fi
+  printf '%s\n' "${output:0:REPO_EVIDENCE_BYTES}"
+}
+
+worker_is_active() { # <worker> <bookkeeping pid>
+  local worker="$1" pid="$2" agent="${LIVE_AGENT_PID[$2]:-$2}"
+  if [ -n "$WORKER_ACTIVE_CMD" ]; then "$WORKER_ACTIVE_CMD" "$worker" "$agent"; return; fi
+  worker_scope_active "$worker" && return 0
+  owned_group_active "$agent" "${LIVE_ROOT_TICKS[$pid]:-}" "${LIVE_ROOT_PGID[$pid]:-0}"
+}
+
+process_summary() { # <worker> <bookkeeping pid>
+  local pids total
+  pids=$(worker_process_ids "$1" "$2" | paste -sd, -)
+  [ -n "$pids" ] || { printf 'no_live_processes=true\n'; return; }
+  total=$(tr ',' '\n' <<< "$pids" | wc -l)
+  printf 'process_count=%s\n' "$total"
+  ps -o comm= -p "$pids" 2>/dev/null | awk '
+    BEGIN {
+      split("bash sh dash zsh fish git node bun deno python python3 ruby rails go cargo rustc make cmake ninja java javac gradle chromium chrome playwright vite tsc eslint pytest rspec sleep", names)
+      for (i in names) allowed[names[i]]=1
+    }
+    {name=allowed[$1] ? $1 : "other"; count[name]++}
+    END {for (name in count) print "tool=" name " count=" count[name]}
+  ' | sort | sed -n '1,40p'
+}
+
+worker_process_fingerprint() { # <worker> <bookkeeping pid>
+  local worker="$1" root="$2" pids shape
+  pids=$(worker_process_ids "$worker" "$root" | paste -sd, -)
+  [ -n "$pids" ] || { printf 'unavailable\n'; return; }
+  # Compare process shape, not exact PIDs. Agents routinely replace short-lived
+  # helpers such as sleep while their meaningful state remains unchanged.
+  shape=$(ps -o comm= -p "$pids" 2>/dev/null | awk '
+    $1 == "sleep" || $1 == "timeout" {next}
+    {count[$1]++}
+    END {for (key in count) print key "=" count[key]}
+  ' | sort)
+  [ -n "$shape" ] || shape='transient-helpers-only'
+  printf '%s\n' "$shape" | sha256sum | awk '{print $1}'
+}
+
+inspection_repo_fingerprint() { # <worker bookkeeping pid>
+  repository_snapshots "$1" hot
+}
+
+render_inspector_prompt() { # <worker bookkeeping pid> <now> <prompt path>
+  local root="$1" now="$2" prompt="$3" child worker elapsed idle processes repos output_bytes
+  child="${PID2CHILD[$root]}"; worker="${PID2WORKER[$root]}"
+  elapsed=$((now - ${LIVE_STARTED[$root]})); idle=$((now - ${LIVE_LAST_PROGRESS[$root]}))
+  output_bytes=$(<"${PID2OUTPUT_BYTES[$root]}")
+  [[ "$output_bytes" =~ ^[0-9]+$ ]] || output_bytes=0
+  processes=$(process_summary "$worker" "$root")
+  repos=$(repository_snapshots "$root" inspection)
+  cp -f "$INSPECTOR_TEMPLATE" "$prompt"
+  cat >> "$prompt" <<EOF
+
+## Bounded allowlisted activity summary
+
+Worker: $worker
+Child: $child
+Elapsed seconds: $elapsed
+Idle seconds: $idle
+Last sample deltas: ${LIVE_LAST_DELTA[$root]:-unavailable}
+Worker output bytes: $output_bytes
+Worker exit state: running
+
+### Process tree and resources
+
+$processes
+
+### Bounded repository activity
+
+$repos
+EOF
+  if [ "$(stat -c %s "$prompt" 2>/dev/null || printf 0)" -gt $((REPO_EVIDENCE_BYTES + 8192)) ]; then
+    truncate -s $((REPO_EVIDENCE_BYTES + 8192)) "$prompt"
+  fi
+  chmod 600 "$prompt"
+}
+
+capture_inspector() { # <result> <raw> <command...>
+  local result="$1" raw="$2" result_fifo="$1.pipe" raw_fifo="$2.pipe" result_sink raw_sink rc=0
+  shift 2
+  rm -f "$result_fifo" "$raw_fifo"; mkfifo "$result_fifo" "$raw_fifo"
+  bounded_stream "$result" "$INSPECTOR_RESULT_BYTES" '' '' '' "$result.overflow" < "$result_fifo" & result_sink=$!
+  bounded_stream "$raw" "$INSPECTOR_LOG_BYTES" < "$raw_fifo" & raw_sink=$!
+  "$@" > "$result_fifo" 2> "$raw_fifo" || rc=$?
+  wait "$result_sink" 2>/dev/null || true
+  wait "$raw_sink" 2>/dev/null || true
+  rm -f "$result_fifo" "$raw_fifo"
+  return "$rc"
+}
+
+capture_inspector_raw() { # <raw> <command...>
+  local raw="$1" fifo="$1.pipe" sink rc=0
+  shift
+  rm -f "$fifo"; mkfifo "$fifo"
+  bounded_stream "$raw" "$INSPECTOR_LOG_BYTES" < "$fifo" & sink=$!
+  "$@" > "$fifo" 2>&1 || rc=$?
+  wait "$sink" 2>/dev/null || true
+  rm -f "$fifo"
+  return "$rc"
+}
+
+run_inspector_harness() { # <worker> <prompt> <result> <raw> <identity file>
+  local worker="$1" prompt="$2" result="$3" raw="$4" identity="$5" rc=0 config sink fifo
+  export FLEET_UNIT="cook-epic-$SCOPE_ID-inspect-$worker" COOKEPIC_INSPECTOR=1 COOKEPIC_RUN_DIR="$RUN_DIR"
+  if [ -n "$INSPECTOR_CMD" ]; then
+    fifo="$result.pipe"
+    rm -f "$fifo"; mkfifo "$fifo"
+    bounded_stream "$result" "$INSPECTOR_RESULT_BYTES" '' '' '' "$result.overflow" < "$fifo" & sink=$!
+    capture_inspector_raw "$raw" inspector_exec "$identity" "$INSPECTOR_CMD" "$prompt" "$fifo" || rc=$?
+    if [ "$rc" -eq 0 ]; then wait "$sink" 2>/dev/null || true
+    else kill "$sink" 2>/dev/null || true; fi
+    wait "$sink" 2>/dev/null || true
+    rm -f "$fifo"
+    return "$rc"
+  fi
+  case "$HARNESS" in
+    claude|ccx)
+      capture_inspector "$result" "$raw" inspector_exec "$identity" \
+        "$AGENT_BIN" -p --safe-mode --disable-slash-commands --tools '' --permission-mode plan \
+        --no-session-persistence --output-format text --model "${COOKEPIC_MODEL:-sonnet}" -- "$(<"$prompt")"
+      ;;
+    kimi)
+      local -a kimi_args=(-p "$(<"$prompt")" --agent-file "$SKILL_DIR/inspector-agent.md" --output-format text)
+      [ -n "${COOKEPIC_MODEL:-}" ] && kimi_args+=(-m "$COOKEPIC_MODEL")
+      capture_inspector "$result" "$raw" inspector_exec "$identity" "$AGENT_BIN" "${kimi_args[@]}"
+      ;;
+    codex) return 126 ;; # launch_inspector handles Codex without starting a process
+    opencode)
+      config='{"permission":"deny","snapshot":false,"share":"disabled","instructions":[],"subagent_depth":0,"agent":{"cook-epic-inspector":{"description":"Decide worker liveness from supplied evidence","mode":"primary","steps":1,"permission":"deny"}}}'
+      OPENCODE_CONFIG_CONTENT="$config" capture_inspector "$raw" "$raw.stderr" inspector_exec "$identity" \
+        "$AGENT_BIN" run --pure --agent cook-epic-inspector --format json --dir "$RUN_DIR" -- "$(<"$prompt")" || rc=$?
+      [ "$rc" -eq 0 ] || return "$rc"
+      [ ! -e "$raw.overflow" ] || return 65
+      jq -rs '[.[] | .part.text? // .text? // empty] | join("")' "$raw" 2>>"$LOG" \
+        | bounded_stream "$result" "$INSPECTOR_RESULT_BYTES" '' '' '' "$result.overflow"
+      ;;
+    worker-cmd) return 127 ;;
+  esac
+}
+
+launch_inspector() { # <worker bookkeeping pid> <now>
+  local root="$1" now="$2" child worker prompt result raw rcfile identity book_pid idle elapsed
+  child="${PID2CHILD[$root]}"; worker="${PID2WORKER[$root]}"
+  prompt="$RUN_DIR/inspector-$worker.prompt.md"; result="$RUN_DIR/inspector-$worker.result.json"
+  raw="$RUN_DIR/inspector-$worker.raw.log"; rcfile="$RUN_DIR/inspector-$worker.rc"; identity="$RUN_DIR/inspector-$worker.owned"
+  idle=$((now - ${LIVE_LAST_PROGRESS[$root]})); elapsed=$((now - ${LIVE_STARTED[$root]}))
+  mbox --arg child "$child" --arg worker "$worker" --argjson idle "$idle" --argjson elapsed "$elapsed" --arg ts "$(date +%H:%M:%S)" \
+    '{event:"worker-idle",child:$child,worker:$worker,idleSeconds:$idle,elapsedSeconds:$elapsed,ts:$ts}'
+  if [ "$HARNESS" = codex ] && [ -z "$INSPECTOR_CMD" ]; then
+    inspection_uncertain "$root" 'Codex inspection is disabled because Codex cannot enforce the no-tool contract' "$now"
+    return 0
+  fi
+  LIVE_INSPECT_PROCESS_FP[$root]=$(worker_process_fingerprint "$worker" "$root")
+  LIVE_INSPECT_REPO_FP[$root]=$(inspection_repo_fingerprint "$root")
+  render_inspector_prompt "$root" "$now" "$prompt"
+  : > "$result"; : > "$raw"; rm -f "$rcfile" "$identity" "$result.overflow" "$raw.overflow" "$raw.stderr.overflow"
+  chmod 600 "$result" "$raw"
+  say "$child on $worker has no progress for ${idle}s; starting read-only inspection"
+  (
+    cd "$RUN_DIR" || exit 98
+    run_inspector_harness "$worker" "$prompt" "$result" "$raw" "$identity"
+    rc=$?
+    printf '%s\n' "$rc" > "$rcfile"
+    exit "$rc"
+  ) &
+  book_pid=$!
+  LIVE_INSPECT_BOOK_PID[$root]="$book_pid"; LIVE_INSPECT_STARTED[$root]="$now"
+  LIVE_INSPECT_GENERATION[$root]="${LIVE_GENERATION[$root]}"
+  if [ "$SCOPE_OK" -eq 1 ]; then
+    LIVE_INSPECT_PID[$root]="$book_pid"
+    LIVE_INSPECT_TICKS[$root]=$(process_start_ticks "$book_pid")
+    LIVE_INSPECT_PGID[$root]=0
+  elif owned_identity_load "$identity" "$book_pid"; then
+    LIVE_INSPECT_PID[$root]="$OWNED_PID"
+    LIVE_INSPECT_TICKS[$root]="$OWNED_TICKS"
+    LIVE_INSPECT_PGID[$root]="$OWNED_PGID"
+  else
+    LIVE_INSPECT_PID[$root]=0; LIVE_INSPECT_TICKS[$root]=''; LIVE_INSPECT_PGID[$root]=0
+  fi
+  LIVE_INSPECT_RESULT[$root]="$result"; LIVE_INSPECT_RAW[$root]="$raw"; LIVE_INSPECT_RC[$root]="$rcfile"
+  mbox --arg child "$child" --arg worker "$worker" --argjson timeout "$INSPECTOR_TIMEOUT" --arg ts "$(date +%H:%M:%S)" \
+    '{event:"inspection-started",child:$child,worker:$worker,timeoutSeconds:$timeout,ts:$ts}'
+}
+
+valid_inspector_decision() { # <result path>
+  [ ! -e "$1.overflow" ] || return 1
+  [ "$(stat -c %s "$1" 2>/dev/null || printf 0)" -le "$INSPECTOR_RESULT_BYTES" ] || return 1
+  jq -cse '
+    select(length == 1) | .[0]
+    | select(type == "object")
+    | select(((keys_unsorted - ["decision","confidence","rationale","next_check_seconds"]) | length) == 0)
+    | select(has("decision") and has("confidence") and has("rationale"))
+    | select((.decision == "continue") or (.decision == "stop") or (.decision == "uncertain"))
+    | select((.confidence == "high") or (.confidence == "medium") or (.confidence == "low"))
+    | select((.rationale | type) == "string" and (.rationale | test("[^[:space:]]")) and (.rationale | length) <= 240)
+    | select((has("next_check_seconds") | not) or ((.next_check_seconds | type) == "number" and (.next_check_seconds | floor) == .next_check_seconds and .next_check_seconds > 0))
+    | select((.decision != "stop") or (has("next_check_seconds") | not))
+  ' "$1" 2>/dev/null
+}
+
+owned_group_active() { # <leader pid> <start ticks> <pgid>
+  [ -n "$(owned_process_ids "$1" "$2" "$3")" ]
+}
+
+owned_process_identities() { # <leader pid> <start ticks> <pgid> -> pid start-ticks
+  local pid ticks
+  while read -r pid; do
+    ticks=$(run_lock_start_ticks "$pid")
+    [ -n "$ticks" ] && printf '%s %s\n' "$pid" "$ticks"
+  done < <(owned_process_ids "$1" "$2" "$3")
+}
+
+process_identity_active() { # <pid> <start ticks>
+  local stat rest
+  [ -n "$2" ] && [ "$2" = "$(run_lock_start_ticks "$1")" ] || return 1
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  rest=${stat##*') '}
+  read -ra fields <<< "$rest"
+  [ "${fields[0]:-}" != Z ]
+}
+
+wait_owned_identities() { # <newline-separated pid/start-ticks snapshot>
+  local identities="$1" pid ticks active
+  while true; do
+    active=0
+    while read -r pid ticks; do
+      [ -n "$pid" ] || continue
+      process_identity_active "$pid" "$ticks" && active=1
+    done <<< "$identities"
+    [ "$active" -eq 1 ] || return 0
+    sleep 0.05
+  done
+}
+
+owned_identities_active() { # <newline-separated pid/start-ticks snapshot>
+  local identities="$1" pid ticks
+  while read -r pid ticks; do
+    [ -n "$pid" ] || continue
+    process_identity_active "$pid" "$ticks" && return 0
+  done <<< "$identities"
+  return 1
+}
+
+signal_owned_group() { # <signal> <leader pid> <start ticks> <pgid>
+  local signal="$1" root="$2" ticks="$3" pgid="$4"
+  owned_group_valid "$root" "$ticks" "$pgid" || return 1
+  kill "-$signal" -- "-$pgid" 2>/dev/null || true
+}
+
+stop_owned_group() { # <leader pid> <start ticks> <pgid>
+  local root="$1" ticks="$2" pgid="$3" deadline identities
+  owned_group_active "$root" "$ticks" "$pgid" || return 0
+  deadline=$(( $(date +%s) + STOP_GRACE ))
+  # Repeat TERM against a freshly validated group. A TERM handler can create a
+  # child after the first group signal, and that child still owns the checkout.
+  while owned_group_active "$root" "$ticks" "$pgid" && [ "$(date +%s)" -lt "$deadline" ]; do
+    signal_owned_group TERM "$root" "$ticks" "$pgid" || return 0
+    sleep 0.1
+  done
+  owned_group_active "$root" "$ticks" "$pgid" || return 0
+  identities=$(owned_process_identities "$root" "$ticks" "$pgid")
+  signal_owned_group KILL "$root" "$ticks" "$pgid" || return 0
+  wait_owned_identities "$identities"
+  # SIGKILL cannot run a handler, so no member can fork after the final signal.
+  # Wait for every non-zombie member, including one created just before KILL.
+  while [ -n "$(process_group_ids "$pgid")" ]; do sleep 0.05; done
+}
+
+stop_worker_action() { # <worker> <bookkeeping pid>
+  local worker="$1" pid="$2" agent="${LIVE_AGENT_PID[$2]:-$2}" unit deadline
+  if [ -n "$WORKER_STOP_CMD" ]; then "$WORKER_STOP_CMD" "$worker" "$agent" "$STOP_GRACE" >>"$LOG" 2>&1 || true; return; fi
+  unit=$(worker_unit "$worker")
+  if worker_scope_active "$worker"; then
+    systemctl --user kill --kill-who=all --signal=TERM "$unit" >>"$LOG" 2>&1 || true
+    deadline=$(( $(date +%s) + STOP_GRACE ))
+    while worker_scope_active "$worker" && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+    if worker_scope_active "$worker"; then
+      systemctl --user kill --kill-who=all --signal=KILL "$unit" >>"$LOG" 2>&1 || true
+    fi
+    systemctl --user stop "$unit" >>"$LOG" 2>&1 || true
+  else
+    stop_owned_group "$agent" "${LIVE_ROOT_TICKS[$pid]:-}" "${LIVE_ROOT_PGID[$pid]:-0}"
+  fi
+}
+
+inspector_scope_active() { # <worker root pid>
+  [ "$SCOPE_OK" -eq 1 ] || return 1
+  systemctl --user is-active --quiet "$(inspector_unit "${PID2WORKER[$1]}")" 2>/dev/null
+}
+
+inspector_is_active() { # <worker root pid>
+  inspector_scope_active "$1" && return 0
+  owned_group_active "${LIVE_INSPECT_PID[$1]:-0}" "${LIVE_INSPECT_TICKS[$1]:-}" "${LIVE_INSPECT_PGID[$1]:-0}"
+}
+
+stop_inspector_action() { # <worker root pid>
+  local root="$1" pid="${LIVE_INSPECT_PID[$1]}" book_pid="${LIVE_INSPECT_BOOK_PID[$1]}" unit deadline
+  unit=$(inspector_unit "${PID2WORKER[$root]}")
+  if inspector_scope_active "$root"; then
+    systemctl --user kill --kill-who=all --signal=TERM "$unit" >>"$LOG" 2>&1 || true
+    deadline=$(( $(date +%s) + STOP_GRACE ))
+    while inspector_scope_active "$root" && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.1; done
+    inspector_scope_active "$root" && systemctl --user kill --kill-who=all --signal=KILL "$unit" >>"$LOG" 2>&1 || true
+    systemctl --user stop "$unit" >>"$LOG" 2>&1 || true
+  else
+    stop_owned_group "$pid" "${LIVE_INSPECT_TICKS[$root]:-}" "${LIVE_INSPECT_PGID[$root]:-0}"
+  fi
+  wait "$book_pid" 2>/dev/null || true
+}
+
+clear_inspector_record() { # <worker root pid>
+  local root="$1"
+  unset "LIVE_INSPECT_PID[$root]" "LIVE_INSPECT_BOOK_PID[$root]" "LIVE_INSPECT_STARTED[$root]" "LIVE_INSPECT_GENERATION[$root]"
+  unset "LIVE_INSPECT_TICKS[$root]" "LIVE_INSPECT_PGID[$root]" "LIVE_INSPECT_FORCED_RC[$root]"
+  unset "LIVE_INSPECT_RESULT[$root]" "LIVE_INSPECT_RAW[$root]" "LIVE_INSPECT_RC[$root]"
+  unset "LIVE_INSPECT_PROCESS_FP[$root]" "LIVE_INSPECT_REPO_FP[$root]"
+}
+
+clear_pending_stop() { # <worker root pid>
+  unset "LIVE_PENDING_STOP_PROCESS_FP[$1]" "LIVE_PENDING_STOP_REPO_FP[$1]" "LIVE_PENDING_STOP_GENERATION[$1]"
+}
+
+stop_run_inspectors() {
+  local root
+  for root in "${!LIVE_INSPECT_PID[@]}"; do
+    inspector_is_active "$root" || { wait "${LIVE_INSPECT_BOOK_PID[$root]}" 2>/dev/null || true; clear_inspector_record "$root"; continue; }
+    say "stopping active inspector for ${PID2CHILD[$root]:-unknown}"
+    stop_inspector_action "$root"
+    clear_inspector_record "$root"
+  done
+}
+
+stop_run_workers() {
+  local root
+  for root in "${!PID2CHILD[@]}"; do
+    if worker_is_active "${PID2WORKER[$root]}" "$root"; then
+      say "stopping active worker ${PID2WORKER[$root]} for ${PID2CHILD[$root]}"
+      stop_worker_action "${PID2WORKER[$root]}" "$root"
+    fi
+    wait "$root" 2>/dev/null || true
+  done
+}
+
+trap 'stop_run_inspectors; stop_run_workers; run_lock_release' EXIT
+
+inspection_uncertain() { # <worker root pid> <reason> <now>
+  local root="$1" reason="$2" now="$3" child worker delay
+  child="${PID2CHILD[$root]}"; worker="${PID2WORKER[$root]}"
+  clear_pending_stop "$root"
+  delay=$(bounded_delay "$INSPECT_RETRY_DELAY")
+  LIVE_NEXT_INSPECT[$root]=$((now + delay))
+  mbox --arg child "$child" --arg worker "$worker" --arg reason "$reason" --argjson delay "$delay" --arg ts "$(date +%H:%M:%S)" \
+    '{event:"inspection-uncertain",child:$child,worker:$worker,reason:$reason,nextCheckSeconds:$delay,ts:$ts}'
+  say "inspection for $child on $worker was uncertain: $reason; keeping worker alive and checking again in ${delay}s"
+}
+
+reap_inspector() { # <worker bookkeeping pid> <now>
+  local root="$1" now="$2" inspector_pid rc=0 decision_json decision confidence rationale requested delay child worker result generation
+  local process_fp repo_fp current_process_fp current_repo_fp pending_matches=0
+  inspector_pid="${LIVE_INSPECT_BOOK_PID[$root]}"
+  inspector_is_active "$root" && return 1
+  wait "$inspector_pid" 2>/dev/null || rc=$?
+  [ -f "${LIVE_INSPECT_RC[$root]}" ] && rc=$(<"${LIVE_INSPECT_RC[$root]}")
+  [ -z "${LIVE_INSPECT_FORCED_RC[$root]:-}" ] || rc="${LIVE_INSPECT_FORCED_RC[$root]}"
+  child="${PID2CHILD[$root]}"; worker="${PID2WORKER[$root]}"
+  result="${LIVE_INSPECT_RESULT[$root]}"; generation="${LIVE_INSPECT_GENERATION[$root]}"
+  process_fp="${LIVE_INSPECT_PROCESS_FP[$root]}"; repo_fp="${LIVE_INSPECT_REPO_FP[$root]}"
+  clear_inspector_record "$root"
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ]; then inspection_uncertain "$root" "inspector timed out after ${INSPECTOR_TIMEOUT}s" "$now"
+    else inspection_uncertain "$root" "inspector failed with rc=$rc" "$now"; fi
+    return 0
+  fi
+  decision_json=$(valid_inspector_decision "$result") || {
+    inspection_uncertain "$root" 'inspector returned malformed output' "$now"
+    return 0
+  }
+  decision=$(jq -r .decision <<< "$decision_json")
+  confidence=$(jq -r .confidence <<< "$decision_json")
+  rationale=$(jq -r .rationale <<< "$decision_json" | tr '\n' ' ')
+  requested=$(jq -r '.next_check_seconds // empty' <<< "$decision_json")
+  case "$decision:$confidence" in
+    stop:high)
+      if [ "${LIVE_GENERATION[$root]}" -ne "$generation" ]; then
+        inspection_uncertain "$root" 'worker made progress while inspection was running; stale stop ignored' "$now"
+        return 0
+      fi
+      current_process_fp=$(worker_process_fingerprint "$worker" "$root")
+      current_repo_fp=$(inspection_repo_fingerprint "$root")
+      if [ "$process_fp" = unavailable ] || [[ "$repo_fp" == *probe-timeout* ]] \
+         || [ "$current_process_fp" != "$process_fp" ] || [ "$current_repo_fp" != "$repo_fp" ]; then
+        inspection_uncertain "$root" 'worker fingerprint changed during inspection; stop confirmation cleared' "$now"
+        return 0
+      fi
+      if [ -n "${LIVE_PENDING_STOP_PROCESS_FP[$root]:-}" ] \
+         && [ "${LIVE_PENDING_STOP_PROCESS_FP[$root]}" = "$process_fp" ] \
+         && [ "${LIVE_PENDING_STOP_REPO_FP[$root]}" = "$repo_fp" ] \
+         && [ "${LIVE_PENDING_STOP_GENERATION[$root]}" = "$generation" ]; then
+        pending_matches=1
+      fi
+      if [ "$pending_matches" -ne 1 ]; then
+        LIVE_PENDING_STOP_PROCESS_FP[$root]="$process_fp"
+        LIVE_PENDING_STOP_REPO_FP[$root]="$repo_fp"
+        LIVE_PENDING_STOP_GENERATION[$root]="$generation"
+        delay=$(bounded_delay "$INSPECT_MIN_DELAY")
+        LIVE_NEXT_INSPECT[$root]=$((now + delay))
+        mbox --arg child "$child" --arg worker "$worker" --arg rationale "$rationale" --argjson delay "$delay" --arg ts "$(date +%H:%M:%S)" \
+          '{event:"inspection-stop-pending",child:$child,worker:$worker,rationale:$rationale,nextCheckSeconds:$delay,ts:$ts}'
+        say "inspector requested stop confirmation for $child on $worker: $rationale; checking a fresh snapshot in ${delay}s"
+        return 0
+      fi
+      clear_pending_stop "$root"
+      PID2STOP_REASON[$root]="inspector requested stop: $rationale"
+      mbox --arg child "$child" --arg worker "$worker" --arg rationale "$rationale" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"inspection-stop",child:$child,worker:$worker,rationale:$rationale,ts:$ts}'
+      say "inspector requested stop for $child on $worker: $rationale"
+      stop_worker_action "$worker" "$root"
+      ;;
+    continue:*)
+      clear_pending_stop "$root"
+      delay=$(bounded_delay "${requested:-$IDLE_THRESHOLD}")
+      LIVE_NEXT_INSPECT[$root]=$((now + delay))
+      mbox --arg child "$child" --arg worker "$worker" --arg rationale "$rationale" --argjson delay "$delay" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"inspection-continue",child:$child,worker:$worker,rationale:$rationale,nextCheckSeconds:$delay,ts:$ts}'
+      say "inspector continued $child on $worker: $rationale; next check in ${delay}s"
+      ;;
+    *) inspection_uncertain "$root" "decision=$decision confidence=$confidence: $rationale" "$now" ;;
+  esac
+  return 0
+}
+
+liveness_start() { # <worker bookkeeping pid>
+  local root="$1" now cpu io size worker cgroup=''
+  now=$(clock_now); worker="${PID2WORKER[$root]}"
+  if [ "$SCOPE_OK" -eq 1 ]; then
+    LIVE_AGENT_PID[$root]="$root"
+    LIVE_ROOT_TICKS[$root]=$(process_start_ticks "$root")
+  fi
+  cgroup=$(cache_worker_cgroup "$worker")
+  LIVE_CGROUP[$worker]="$cgroup"
+  read -r cpu io <<< "$(sample_worker_resources "$worker" "$root")"
+  [[ "$cpu" =~ ^[0-9]+$ ]] || cpu=0; [[ "$io" =~ ^[0-9]+$ ]] || io=0
+  size=$(<"${PID2OUTPUT_BYTES[$root]}")
+  [[ "$size" =~ ^[0-9]+$ ]] || size=0
+  LIVE_STARTED[$root]="$now"; LIVE_LAST_PROGRESS[$root]="$now"; LIVE_NEXT_INSPECT[$root]=$((now + IDLE_THRESHOLD))
+  LIVE_NEXT_REPO_PROBE[$root]=$((now + REPO_PROBE_INTERVAL)); LIVE_GENERATION[$root]=0
+  LIVE_OUTPUT_SIZE[$root]="$size"; LIVE_CPU[$root]="$cpu"; LIVE_IO[$root]="$io"; LIVE_TREE[$root]=''
+  [ -z "$WORKER_TIMEOUT" ] || LIVE_DEADLINE[$root]=$((now + WORKER_TIMEOUT))
+  LIVE_LAST_DELTA[$root]='initial sample'
+}
+
+cleanup_worker_liveness() { # <worker bookkeeping pid>
+  local root="$1" worker="${PID2WORKER[$1]}"
+  if [ -n "${LIVE_INSPECT_PID[$root]:-}" ]; then
+    inspector_is_active "$root" && stop_inspector_action "$root"
+    wait "${LIVE_INSPECT_BOOK_PID[$root]}" 2>/dev/null || true
+    clear_inspector_record "$root"
+  fi
+  unset "LIVE_STARTED[$root]" "LIVE_LAST_PROGRESS[$root]" "LIVE_OUTPUT_SIZE[$root]" "LIVE_CPU[$root]" "LIVE_IO[$root]" "LIVE_TREE[$root]"
+  unset "LIVE_NEXT_INSPECT[$root]" "LIVE_NEXT_REPO_PROBE[$root]" "LIVE_GENERATION[$root]" "LIVE_CGROUP[$worker]"
+  unset "LIVE_AGENT_PID[$root]" "LIVE_ROOT_TICKS[$root]" "LIVE_ROOT_PGID[$root]" "LIVE_LAST_DELTA[$root]" "LIVE_DEADLINE[$root]"
+  clear_pending_stop "$root"
+}
+
+supervise_workers() {
+  local root now worker size cpu io tree output_delta cpu_delta io_delta progress idle tree_changed=false
+  now=$(clock_now)
+  for root in "${!PID2CHILD[@]}"; do
+    worker="${PID2WORKER[$root]}"
+    if ! worker_is_active "$worker" "$root"; then
+      [ -z "${LIVE_INSPECT_PID[$root]:-}" ] || cleanup_worker_liveness "$root"
+      continue
+    fi
+    if [ -n "${LIVE_DEADLINE[$root]:-}" ] && [ "$now" -ge "${LIVE_DEADLINE[$root]}" ]; then
+      PID2STOP_REASON[$root]="timed out after ${WORKER_TIMEOUT}s"
+      say "${PID2CHILD[$root]} on $worker reached its absolute ${WORKER_TIMEOUT}s timeout"
+      stop_worker_action "$worker" "$root"
+      continue
+    fi
+    size=$(<"${PID2OUTPUT_BYTES[$root]}")
+    [[ "$size" =~ ^[0-9]+$ ]] || size="${LIVE_OUTPUT_SIZE[$root]}"
+    read -r cpu io <<< "$(sample_worker_resources "$worker" "$root")"
+    [[ "$cpu" =~ ^[0-9]+$ ]] || cpu="${LIVE_CPU[$root]}"; [[ "$io" =~ ^[0-9]+$ ]] || io="${LIVE_IO[$root]}"
+    output_delta=$((size - ${LIVE_OUTPUT_SIZE[$root]})); cpu_delta=$((cpu - ${LIVE_CPU[$root]})); io_delta=$((io - ${LIVE_IO[$root]}))
+    progress=0
+    [ "$output_delta" -gt 0 ] && progress=1
+    [ "$cpu_delta" -ge "$CPU_PROGRESS_USEC" ] && progress=1
+    [ "$io_delta" -ge "$IO_PROGRESS_BYTES" ] && progress=1
+    tree_changed=false
+    if [ "$progress" -eq 0 ] && [ "$now" -ge "${LIVE_NEXT_REPO_PROBE[$root]}" ]; then
+      tree=$(repository_snapshots "$root" hot)
+      if [ -n "${LIVE_TREE[$root]}" ] && [ "$tree" != "${LIVE_TREE[$root]}" ]; then progress=1; tree_changed=true; fi
+      LIVE_TREE[$root]="$tree"; LIVE_NEXT_REPO_PROBE[$root]=$((now + REPO_PROBE_INTERVAL))
+    fi
+    LIVE_LAST_DELTA[$root]="output_bytes=$output_delta cpu_usec=$cpu_delta io_bytes=$io_delta repo_changed=$tree_changed"
+    LIVE_OUTPUT_SIZE[$root]="$size"; LIVE_CPU[$root]="$cpu"; LIVE_IO[$root]="$io"
+    if [ "$progress" -eq 1 ]; then
+      clear_pending_stop "$root"
+      LIVE_LAST_PROGRESS[$root]="$now"
+      LIVE_NEXT_INSPECT[$root]=$((now + IDLE_THRESHOLD))
+      LIVE_GENERATION[$root]=$(( ${LIVE_GENERATION[$root]} + 1 ))
+    fi
+    if [ -n "${LIVE_INSPECT_PID[$root]:-}" ]; then
+      if inspector_is_active "$root" && [ $((now - ${LIVE_INSPECT_STARTED[$root]})) -ge "$INSPECTOR_TIMEOUT" ]; then
+        LIVE_INSPECT_FORCED_RC[$root]=124
+        stop_inspector_action "$root"
+      fi
+      reap_inspector "$root" "$now" || true
+      continue
+    fi
+    idle=$((now - ${LIVE_LAST_PROGRESS[$root]}))
+    if [ "$idle" -ge "$IDLE_THRESHOLD" ] && [ "$now" -ge "${LIVE_NEXT_INSPECT[$root]}" ]; then
+      launch_inspector "$root" "$now"
+    fi
+  done
+}
 
 sequential_main_moved_unowned() {
   [ "$SEQUENTIAL" = 1 ] || return 1
@@ -708,7 +1563,7 @@ comment_count_of() { # <child> -> prints the bead's comment count (0 on any fail
 spawn_worker() { # <child> <title>
   local child="$1" title="$2"
   WORKER_NUM=$((WORKER_NUM + 1))
-  local worker="w$WORKER_NUM" branch wt offset prompt artifact pid
+  local worker="w$WORKER_NUM" branch wt offset prompt artifact bytes rate cost identity pid
   offset=$((WORKER_NUM * 20))
 
   if [ "$SEQUENTIAL" = 1 ]; then
@@ -768,6 +1623,8 @@ spawn_worker() { # <child> <title>
   prompt="$RUN_DIR/prompt-$child.md"
   render_prompt "$child" "$worker" "$branch" "$wt" "$offset" "$prompt"
   artifact="$RUN_DIR/worker-$child.log"
+  bytes="$artifact.bytes"; rate="$artifact.rate-limit"; cost="$artifact.cost"; identity="$RUN_DIR/worker-$worker.owned"
+  : > "$artifact"; printf '0\n' > "$bytes"; rm -f "$rate" "$cost" "$identity"
 
   (
     cd "$wt" || exit 98
@@ -785,21 +1642,22 @@ spawn_worker() { # <child> <title>
        && [ -z "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS+x}" ]; then
       export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
     fi
+    rc=0
     case "$HARNESS" in
       worker-cmd)
-        fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "$prompt" >"$artifact" 2>>"$LOG" ;;
+        capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "$prompt" || rc=$? ;;
       kimi)
         # kimi rejects permission flags (-y/--auto) combined with -p; prompt
         # mode already runs tools non-interactively, so PERM_MODE is a no-op.
         args=(-p "$(<"$prompt")" --output-format stream-json)
         [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
-        fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" >"$artifact" 2>>"$LOG" ;;
+        capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" || rc=$? ;;
       claude|ccx)
         args=(-p --permission-mode "$PERM_MODE" --output-format json)
         # Default Claude-family workers to Sonnet: implementation does not need
         # the top-tier model, and the prompt raises plan/review stages itself.
         args+=(--model "${COOKEPIC_MODEL:-sonnet}")
-        fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" >"$artifact" 2>>"$LOG" ;;
+        capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" || rc=$? ;;
       codex)
         case "$PERM_MODE" in
           auto) args=(-a never -s danger-full-access) ;;
@@ -807,18 +1665,27 @@ spawn_worker() { # <child> <title>
           *) args=(-a never -s "$PERM_MODE") ;;
         esac
         [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
-        fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" exec --json "$(<"$prompt")" >"$artifact" 2>>"$LOG" ;;
+        capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" exec --json "$(<"$prompt")" || rc=$? ;;
       opencode)
         args=(run --format json --auto)
         [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
-        fleet_run timeout "$WORKER_TIMEOUT" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" >"$artifact" 2>>"$LOG" ;;
+        capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" || rc=$? ;;
     esac
+    exit "$rc"
   ) &
   pid=$!
 
   PID2CHILD[$pid]="$child"; PID2BRANCH[$pid]="$branch"; PID2WORKER[$pid]="$worker"
-  PID2WT[$pid]="$wt"; PID2ARTIFACT[$pid]="$artifact"
+  PID2WT[$pid]="$wt"; PID2ARTIFACT[$pid]="$artifact"; PID2OUTPUT_BYTES[$pid]="$bytes"; PID2RATE_LIMIT[$pid]="$rate"; PID2COST[$pid]="$cost"
+  if [ "$SCOPE_OK" -eq 1 ]; then
+    LIVE_AGENT_PID[$pid]="$pid"; LIVE_ROOT_PGID[$pid]=0
+  elif owned_identity_load "$identity" "$pid"; then
+    LIVE_AGENT_PID[$pid]="$OWNED_PID"; LIVE_ROOT_TICKS[$pid]="$OWNED_TICKS"; LIVE_ROOT_PGID[$pid]="$OWNED_PGID"
+  else
+    LIVE_AGENT_PID[$pid]=0; LIVE_ROOT_TICKS[$pid]=''; LIVE_ROOT_PGID[$pid]=0
+  fi
   INFLIGHT[$child]=1
+  liveness_start "$pid"
   DISPATCHED=$((DISPATCHED + 1))
   mbox --arg child "$child" --arg worker "$worker" --arg branch "$branch" --arg ts "$(date +%H:%M:%S)" \
     '{event:"dispatched",child:$child,worker:$worker,branch:$branch,ts:$ts}'
@@ -827,9 +1694,14 @@ spawn_worker() { # <child> <title>
 }
 
 # ----------------------------------------------------------------- reap ----
-extract_cost() { # <artifact> -> prints cost or empty
+extract_cost() { # <artifact> <streamed cost path> -> prints cost or empty
   [ "$COST_SUPPORTED" -eq 1 ] || return 0
-  jq -r '.total_cost_usd // empty' "$1" 2>/dev/null || true
+  if [ -s "$2" ]; then
+    < "$2" tr -d '\n'
+    return
+  fi
+  grep -aoE '"total_cost_usd"[[:space:]]*:[[:space:]]*[0-9]+([.][0-9]+)?' "$1" 2>/dev/null \
+    | tail -n 1 | sed -E 's/.*:[[:space:]]*//' || true
 }
 
 cleanup_worktree() { # <wt> — only coordinator-owned run-scoped paths are removable
@@ -999,18 +1871,23 @@ reap_worker() { # <pid> <rc>
   local pid="$1" rc="$2"
   local child="${PID2CHILD[$pid]}" branch="${PID2BRANCH[$pid]}" worker="${PID2WORKER[$pid]}"
   local wt="${PID2WT[$pid]}" artifact="${PID2ARTIFACT[$pid]}"
+  local stopped_reason="${PID2STOP_REASON[$pid]:-}"
+  cleanup_worker_liveness "$pid"
+  local rate_marker="${PID2RATE_LIMIT[$pid]}" cost_path="${PID2COST[$pid]}"
   unset "PID2CHILD[$pid]" "PID2BRANCH[$pid]" "PID2WORKER[$pid]" "PID2WT[$pid]" "PID2ARTIFACT[$pid]"
+  unset "PID2OUTPUT_BYTES[$pid]" "PID2RATE_LIMIT[$pid]" "PID2COST[$pid]"
+  unset "PID2STOP_REASON[$pid]"
   unset "INFLIGHT[$child]"
 
   local cost status commits title
-  cost=$(extract_cost "$artifact")
+  cost=$(extract_cost "$artifact" "$cost_path")
   [ -n "$cost" ] && TOTAL_COST=$(jq -cn --argjson t "$TOTAL_COST" --argjson c "$cost" '$t + $c')
   status=$(bd show "$child" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .status // "?"')
   commits=$(git rev-list --count "$BASE_BRANCH..$branch" 2>/dev/null || echo 0)
   title=$(bd show "$child" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .title // ""')
 
   # Rate limit: don't burn an attempt; back off before re-dispatch.
-  if [ "$status" != closed ] && grep -qiE 'rate.?limit|\b429\b|overloaded|quota exceeded' "$artifact" 2>/dev/null; then
+  if [ -z "$stopped_reason" ] && [ "$status" != closed ] && { [ -f "$rate_marker" ] || grep -qiE 'rate.?limit|\b429\b|overloaded|quota exceeded' "$artifact" 2>/dev/null; }; then
     if [ "$SEQUENTIAL" = 1 ]; then
       sequential_claim_recovery_if_effects "$child"
       # A rate-limited sequential worker still owned the checkout and may have
@@ -1032,7 +1909,7 @@ reap_worker() { # <pid> <rc>
   # Sequential mode has its own verification: commits are already on the base
   # branch in the main checkout, so "landing" means gate + push, not a merge.
   if [ "$SEQUENTIAL" = 1 ]; then
-    reap_sequential "$child" "$worker" "$rc" "$status" "$title"
+    reap_sequential "$child" "$worker" "$rc" "$status" "$title" "$stopped_reason"
     return
   fi
 
@@ -1079,9 +1956,9 @@ reap_worker() { # <pid> <rc>
   fi
 
   # Failure path (incl. closed-without-commits, timeout, gutter).
-  local reason="exited rc=$rc"
-  [ "$rc" -eq 124 ] && reason="timed out after ${WORKER_TIMEOUT}s"
-  if [ "$status" = closed ] && [ "$commits" -eq 0 ]; then
+  local reason="${stopped_reason:-exited rc=$rc}"
+  [ -z "$stopped_reason" ] && [ -n "$WORKER_TIMEOUT" ] && [ "$rc" -eq 124 ] && reason="timed out after ${WORKER_TIMEOUT}s"
+  if [ -z "$stopped_reason" ] && [ "$status" = closed ] && [ "$commits" -eq 0 ]; then
     if is_research_child "$child" "$title"; then
       reason="closed without findings (no new bead comment)"
     else
@@ -1097,8 +1974,8 @@ reap_worker() { # <pid> <rc>
 # tree clean, and the tree moved since dispatch (or since the child's first
 # dispatch, which covers crash-before-close retries that only needed to close)
 # — then run the integration gate and push whatever moved.
-reap_sequential() { # <child> <worker> <rc> <status> <title>
-  local child="$1" worker="$2" rc="$3" status="$4" title="$5"
+reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason>
+  local child="$1" worker="$2" rc="$3" status="$4" title="$5" stopped_reason="${6:-}"
   local commits=0 dirty=0 s head summary now_comments reason effects landing
   # While a sequential worker owns the checkout its commits are indistinguishable
   # from an external writer. Accept its ending HEAD, then detect any movement
@@ -1187,11 +2064,11 @@ reap_sequential() { # <child> <worker> <rc> <status> <title>
     return
   fi
 
-  reason="exited rc=$rc"
-  [ "$rc" -eq 124 ] && reason="timed out after ${WORKER_TIMEOUT}s"
-  if [ "$dirty" -eq 1 ]; then
+  reason="${stopped_reason:-exited rc=$rc}"
+  [ -z "$stopped_reason" ] && [ -n "$WORKER_TIMEOUT" ] && [ "$rc" -eq 124 ] && reason="timed out after ${WORKER_TIMEOUT}s"
+  if [ -z "$stopped_reason" ] && [ "$dirty" -eq 1 ]; then
     reason="left uncommitted changes in the working tree — this child owns cleanup before any other child can run"
-  elif [ "$status" = closed ] && [ "$commits" -eq 0 ]; then
+  elif [ -z "$stopped_reason" ] && [ "$status" = closed ] && [ "$commits" -eq 0 ]; then
     if is_research_child "$child" "$title"; then
       reason="closed without findings (no new bead comment)"
     else
@@ -1204,16 +2081,9 @@ reap_sequential() { # <child> <worker> <rc> <status> <title>
 reap_finished() {
   local pid rc
   for pid in "${!PID2CHILD[@]}"; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      # The subshell being gone does NOT mean the worker is. A signal to the
-      # coordinator's process group (session teardown, Ctrl-C) kills the
-      # subshell while the scoped worker keeps running — and judging the child
-      # now would read a working tree the live worker is still writing to,
-      # declaring "left uncommitted changes" against work in progress and
-      # freeing the checkout for a sibling. Wait for the scope to end.
-      if worker_scope_active "${PID2WORKER[$pid]}"; then
-        continue
-      fi
+    if ! worker_is_active "${PID2WORKER[$pid]}" "$pid"; then
+      # The cgroup or owned process group must drain before the result is read.
+      # Root PID identity includes start ticks, so a recycled PID is not live.
       wait "$pid"; rc=$?
       reap_worker "$pid" "$rc"
     fi
@@ -1346,6 +2216,7 @@ dispatchable() { # <child>
 
 finish() { # <reason>
   local reason="$1" effects
+  stop_run_inspectors
   bd merge-slot release --holder "$HOLDER" >/dev/null 2>&1 || true
   if [ "$SEQUENTIAL" != 1 ]; then
     git worktree remove --force "$INTEG_WT" >>"$LOG" 2>&1 || true
@@ -1364,12 +2235,13 @@ finish() { # <reason>
   say "cook-epic finished: $reason (dispatched=$DISPATCHED merged=$MERGED researched=$RESEARCHED)"
 }
 
-say "cook-epic start: epic=$EPIC harness=$HARNESS mode=$([ "$SEQUENTIAL" = 1 ] && echo "sequential(siblings:${SIBLINGS[*]:-none})" || echo "parallel:$WORKERS") base=$BASE_BRANCH gate='${GATE:-none}' timeout=${WORKER_TIMEOUT}s attempts=$MAX_ATTEMPTS push=$PUSH_ENABLED cgroup=$([ "$SCOPE_OK" -eq 1 ] && echo "cook-epic.slice cpu=$CPU_WEIGHT io=$IO_WEIGHT mem-high=$MEMORY_HIGH" || echo nice-fallback)"
+say "cook-epic start: epic=$EPIC harness=$HARNESS mode=$([ "$SEQUENTIAL" = 1 ] && echo "sequential(siblings:${SIBLINGS[*]:-none})" || echo "parallel:$WORKERS") base=$BASE_BRANCH gate='${GATE:-none}' timeout=${WORKER_TIMEOUT:-none} idle-threshold=${IDLE_THRESHOLD}s inspector-timeout=${INSPECTOR_TIMEOUT}s attempts=$MAX_ATTEMPTS push=$PUSH_ENABLED cgroup=$([ "$SCOPE_OK" -eq 1 ] && echo "cook-epic.slice cpu=$CPU_WEIGHT io=$IO_WEIGHT mem-high=$MEMORY_HIGH" || echo nice-fallback)"
 
-TICK=5
+TICK="$SUPERVISION_TICK"
 while true; do
   [ -e "$RUN_DIR/STOP" ] && [ "$STOPPING" -eq 0 ] && { STOPPING=1; STOP_REASON='STOP file'; say 'STOP file found — draining'; }
 
+  supervise_workers
   reap_finished
   if sequential_main_moved_unowned; then
     fatal_reconcile "base branch $BASE_BRANCH moved while no sequential worker owned the checkout; operator must reconcile"
@@ -1404,7 +2276,9 @@ while true; do
   if [ "$STOPPING" -eq 0 ] && [ "$DISPATCHED" -lt "$MAX_DISPATCHES" ]; then
     if [ -n "$BUDGET" ] && [ "$COST_SUPPORTED" -eq 1 ] \
       && jq -en --argjson spent "$TOTAL_COST" --argjson budget "$BUDGET" '$spent >= $budget' >/dev/null; then
-      STOPPING=1; STOP_REASON="budget \$$BUDGET reached"
+      # Keep the amount out of STOP_REASON: it lands in the mailbox and is
+      # rendered into the chat transcript. The run log carries the detail.
+      STOPPING=1; STOP_REASON="budget cap reached"
       say "budget reached — draining"
     else
       slots=$(( WORKERS - $(active_workers) ))

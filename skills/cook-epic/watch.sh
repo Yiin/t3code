@@ -22,9 +22,11 @@ FMT='
     elif .verified? == true then "verified"
     else "verified" # mailbox lines written before verified existed
     end;
+  # total_cost is deliberately not printed: dollar figures must not be
+  # surfaced in chat. It stays in mailbox.jsonl for anyone who asks.
+  # (Keep this comment apostrophe-free: FMT is a single-quoted shell string.)
   if .event=="finished" then
-    "🏁 cook-epic finished: \(.reason) — dispatched \(.dispatched // 0), landed \(.merged // 0), \(verification)" +
-      (if .total_cost == null then "" else ", $\(.total_cost)" end)
+    "🏁 cook-epic finished: \(.reason) — dispatched \(.dispatched // 0), landed \(.merged // 0), \(verification)"
   elif .event=="dispatched" then
     "🚀 \(.child): \(.worker) dispatched on \(.branch)"
   elif .event=="done" then
@@ -39,6 +41,18 @@ FMT='
     "⛔ \(.child): blocked after \(.attempts) attempts (\(.reason)) — needs a human"
   elif .event=="rate-limited" then
     "⏳ \(.child): \(.worker) hit a rate limit — requeueing in 120s"
+  elif .event=="worker-idle" then
+    "idle \(.child): \(.worker) has no progress for \(.idleSeconds)s"
+  elif .event=="inspection-started" then
+    "inspect \(.child): structural liveness check started (limit \(.timeoutSeconds)s)"
+  elif .event=="inspection-continue" then
+    "continue \(.child): \(.rationale) (check again in \(.nextCheckSeconds)s)"
+  elif .event=="inspection-uncertain" then
+    "uncertain \(.child): \(.reason) (check again in \(.nextCheckSeconds)s)"
+  elif .event=="inspection-stop-pending" then
+    "confirm stop \(.child): \(.rationale) (fresh check in \(.nextCheckSeconds)s)"
+  elif .event=="inspection-stop" then
+    "stop \(.child): inspector found the worker stuck (\(.rationale))"
   else
     "• \(.child // "-"): \(.event)"
   end

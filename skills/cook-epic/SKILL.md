@@ -44,7 +44,12 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                                                                                 |
    | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                                                                                    |
    | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                                           |
-   | "2h per worker"                                 | `COOKEPIC_WORKER_TIMEOUT` (seconds)                                   | 5400                                                                                                                     |
+   | "2h absolute limit per worker"                  | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                          | unset; no absolute timeout                                                                                               |
+   | "inspect after 45m idle"                        | `COOKEPIC_IDLE_THRESHOLD` (positive seconds)                          | 1800                                                                                                                     |
+   | "inspector limit 90s"                           | `COOKEPIC_INSPECTOR_TIMEOUT` (positive seconds)                       | 120                                                                                                                      |
+   | "retry failed inspections after 10m"            | `COOKEPIC_INSPECT_RETRY_DELAY` (positive seconds)                     | 300                                                                                                                      |
+   | "bound inspector delays to 2m through 1h"       | `COOKEPIC_INSPECT_MIN_DELAY` / `COOKEPIC_INSPECT_MAX_DELAY`           | 60 / 7200                                                                                                                |
+   | "give stopped workers 30s to exit"              | `COOKEPIC_STOP_GRACE` (positive seconds)                              | 15                                                                                                                       |
    | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                                                                                   |
    | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | claude/ccx: tiered (sonnet workers, opus plans, fable reviews); explicit value pins every stage; others: harness default |
    | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                                                                            |
@@ -76,7 +81,22 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    gated. Claude and ccx workers receive
    `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` only when the caller has not set
    it, so a finished headless worker is not held for background waits. This
-   does not change `COOKEPIC_WORKER_TIMEOUT`, which remains the outer limit.
+   does not add an absolute worker limit. Workers have no absolute time limit
+   by default. Set
+   `COOKEPIC_WORKER_TIMEOUT` only when an operator needs a fixed positive
+   limit. Zero and other invalid values fail preflight.
+
+   The coordinator samples cumulative output bytes and worker-scope CPU and
+   I/O on each tick. It runs a bounded repository probe only after these
+   signals stay quiet. The repository probe defaults to a 60-second interval,
+   has a hard timeout, and does not enumerate untracked files. Any changed
+   signal refreshes liveness. Process existence alone does not count. After
+   `COOKEPIC_IDLE_THRESHOLD` seconds with no changed signal, one bounded
+   read-only inspector reviews the evidence while the worker keeps running.
+   Only a valid high-confidence `stop` result can stop the worker. All failed,
+   malformed, timed out, low-confidence, and uncertain results keep it alive.
+   Codex cannot enforce a no-tool inspector session. Codex inspections return
+   `uncertain` without launching Codex.
 
 2. **Choose the execution shape.** Read the children
    (`bd list --parent <EPIC> --all --flat --json`, plus `bd show` on a few)
@@ -168,7 +188,7 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 7. **Report progress** by running `"$SKILL_DIR/watch.sh" "$RUN_DIR"` (falling back to `~/.agents/skills/cook-epic/watch.sh` only when the loaded skill path is unavailable or ambiguous)
    with the harness's long-running monitor mechanism. Relay each emitted event
    line to the user: dispatches, completions (including research completions),
-   merges, parks, retries, blocks.
+   merges, parks, retries, blocks, idle detections, and inspection decisions.
    Stay silent between event lines — no heartbeats. Exception: an actionable
    blocker (external base-branch movement, push rejection) or a direct user
    status request.
@@ -195,11 +215,10 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    `COOKEPIC_MAX_DISPATCHES`), children landed (`$RUN_DIR/summary.md`), every
    repository that gained commits (count and ending hash), and anything
    parked/blocked (needs a human). In no-push mode, say “gated, landed
-   locally.” Failed children keep their branch plus raw worker output in
-   `$RUN_DIR/worker-<child>.log` — point the user there when anything was
-   blocked. Report spend only when a budget cap is what stopped the run.
-   A run that ended with exit 75 dispatched nothing: report the holding run
-   instead (see step 6) and stop there.
+   locally.” Failed children keep their branch plus a bounded worker output
+   tail in `$RUN_DIR/worker-<child>.log`. Point the user there when anything
+   was blocked. A run that ended with exit 75 dispatched nothing: report the
+   holding run instead (see step 6) and stop there.
 
 ## How it works (what to tell the user when asked)
 
@@ -276,8 +295,30 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 - **Resource governance**: every worker (and the integration gate) runs in
   the `cook-epic.slice` cgroup — CPUWeight/IOWeight 50, MemoryHigh 60% by
   default — so the interactive session wins contention and the fleet cannot
-  swap-thrash the machine. Without a systemd user session it falls back to
-  `nice`.
+  swap-thrash the machine. A systemd user session is required for terminal
+  runs. The cgroup is the ownership seam for workers and their descendants.
+  Without it, a child can leave a shell process group and escape safe cleanup.
+- **Liveness supervision**: workers have no default absolute timeout. Every
+  coordinator tick compares cumulative output bytes and cumulative CPU and I/O
+  for the worker scope. A quiet worker gets a slower bounded Git probe. The
+  probe omits untracked files and has a hard timeout. Changed evidence resets
+  the idle clock and increments a progress generation. After 1800 idle seconds
+  by default, the coordinator starts one inspector in a separate scope. The
+  inspector gets only structural evidence. This
+  includes byte counts, tool names, process counts, elapsed times, resource
+  deltas, exit state, and bounded repository status counts. It never gets raw
+  worker output, command arguments, child text, environment values, URLs,
+  headers, cookies, or file contents. Its strict JSON result is `continue`,
+  `stop`, or `uncertain`. Only a high-confidence `stop` from the current
+  progress generation ends the worker. The coordinator sends `TERM`, waits
+  `COOKEPIC_STOP_GRACE`, then sends `KILL` if needed. All other outcomes
+  schedule another bounded check and keep the worker alive. The coordinator
+  does not launch a Codex inspector because Codex cannot disable tools
+  completely. It records a fail-safe `uncertain` result instead.
+- **Bounded output**: each worker keeps a rolling output tail and a separate
+  cumulative byte count. Inspector prompts, results, raw logs, and repository
+  evidence also have fixed limits. Rate-limit detection survives worker log
+  rotation. Claude cost extraction and final result tails remain available.
 - **Verification is by effects**: a child counts as done when `bd` shows it
   closed AND its branch has commits — worker self-reports are ignored.
   **Research children are the exception**: a child whose title starts with
@@ -299,11 +340,12 @@ session ending, a Ctrl-C, an agent harness tearing down its shell — kills the
 coordinator and its bookkeeping subshell while the worker keeps running and
 keeps writing to the checkout.
 
-`run.sh` now handles this itself: worker scopes are named
-`cook-epic-<run-id>-<worker>.scope`, `reap_finished` refuses to judge a child
-whose scope is still active, and an EXIT trap stops any surviving worker scope
-rather than orphaning it. But if the coordinator was hard-killed (SIGKILL, OOM,
-reboot) none of that runs, so before you touch anything:
+`run.sh` handles normal exits itself. Worker scopes are named
+`cook-epic-<run-id>-<worker>.scope`. Inspector scopes are named
+`cook-epic-<run-id>-inspect-<worker>.scope`. `reap_finished` refuses to judge a
+child whose worker scope is still active. An EXIT trap stops surviving worker
+and inspector scopes. A hard kill, OOM, or reboot cannot run that trap. Manual
+recovery is still required after those failures. Before you touch anything:
 
 ```bash
 # Is a worker still alive? Check the WORKER, not run.sh.
@@ -347,6 +389,6 @@ landed.
   — and title them `Research: …` (or label them `research`) so the coordinator
   verifies them by bead comment instead of commits. Do NOT ask them for a
   notes/report file; the repo is not the knowledge store.
-- Failed attempts keep their branch (partial commits survive) and their raw
-  harness output in `$RUN_DIR/worker-<child>.log` — that log is the forensic
-  trail; worktrees themselves are recycled.
+- Failed attempts keep their branch and a bounded rolling harness output tail
+  in `$RUN_DIR/worker-<child>.log`. The adjacent `.bytes` file records total
+  output bytes. Worktrees themselves are recycled.
