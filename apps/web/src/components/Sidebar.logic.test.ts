@@ -5,6 +5,7 @@ import {
   createThreadJumpHintVisibilityController,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
+  groupEpicRunIterationThreads,
   resolveAdjacentThreadId,
   getFallbackThreadIdAfterDelete,
   getVisibleThreadsForProject,
@@ -28,7 +29,9 @@ import {
 } from "./Sidebar.logic";
 import {
   EnvironmentId,
+  epicRunIterationThreadId,
   OrchestrationLatestTurn,
+  parseEpicRunIterationThreadId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -737,6 +740,111 @@ describe("sortThreadsForSidebarV2", () => {
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("groupEpicRunIterationThreads", () => {
+  const thread = (id: string) => ({ id });
+  const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+  const iterationThread = (index: number) =>
+    thread(epicRunIterationThreadId({ runId, iterationIndex: index }));
+
+  const run = {
+    runId,
+    epicId: "t3code-ypi",
+    status: "running" as const,
+    threadRefs: [
+      {
+        threadId: epicRunIterationThreadId({ runId, iterationIndex: 0 }),
+        issueId: "t3code-ypi.1",
+        iterationIndex: 0,
+      },
+      {
+        threadId: epicRunIterationThreadId({ runId, iterationIndex: 1 }),
+        issueId: "t3code-ypi.2",
+        iterationIndex: 1,
+      },
+    ],
+  };
+
+  // The whole feature rests on the client parsing an id the server built. If
+  // EpicRunner stops using `epicRunIterationThreadId`, this fails instead of
+  // the sidebar silently going back to one flat row per iteration.
+  it("parses an id built by the server helper", () => {
+    expect(
+      parseEpicRunIterationThreadId(epicRunIterationThreadId({ runId, iterationIndex: 7 })),
+    ).toEqual({ runId, iterationIndex: 7 });
+  });
+
+  it("folds a run's iterations into one group, ordered by iteration index", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [iterationThread(1), iterationThread(0)],
+      runs: [run],
+    });
+
+    expect(nodes).toHaveLength(1);
+    const group = nodes[0];
+    expect(group).toMatchObject({
+      kind: "epic-run",
+      runId,
+      epicId: "t3code-ypi",
+      status: "running",
+    });
+    expect(group?.kind === "epic-run" ? group.iterations : []).toEqual([
+      { iterationIndex: 0, issueId: "t3code-ypi.1", thread: iterationThread(0) },
+      { iterationIndex: 1, issueId: "t3code-ypi.2", thread: iterationThread(1) },
+    ]);
+  });
+
+  it("leaves non-epic threads untouched and keeps the group in the newest iteration's slot", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [
+        thread("newer-thread"),
+        iterationThread(1),
+        thread("older-thread"),
+        iterationThread(0),
+      ],
+      runs: [run],
+    });
+
+    expect(
+      nodes.map((node) => (node.kind === "thread" ? node.thread.id : `group:${node.runId}`)),
+    ).toEqual(["newer-thread", `group:${runId}`, "older-thread"]);
+  });
+
+  it("groups separate runs separately", () => {
+    const otherRunId = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+    const nodes = groupEpicRunIterationThreads({
+      threads: [
+        iterationThread(0),
+        thread(epicRunIterationThreadId({ runId: otherRunId, iterationIndex: 0 })),
+      ],
+    });
+
+    expect(nodes.map((node) => (node.kind === "epic-run" ? node.runId : node.thread.id))).toEqual([
+      runId,
+      otherRunId,
+    ]);
+  });
+
+  it("groups before the run read model arrives, with labels left null", () => {
+    const nodes = groupEpicRunIterationThreads({ threads: [iterationThread(0)] });
+
+    expect(nodes[0]).toMatchObject({
+      kind: "epic-run",
+      runId,
+      epicId: null,
+      status: null,
+      iterations: [{ iterationIndex: 0, issueId: null }],
+    });
+  });
+
+  it("ignores thread ids that only look like iteration ids", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [thread("epic-runner-notes"), thread(`epic-run-${runId}-final`)],
+    });
+
+    expect(nodes.every((node) => node.kind === "thread")).toBe(true);
   });
 });
 

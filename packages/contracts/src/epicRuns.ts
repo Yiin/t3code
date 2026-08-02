@@ -88,6 +88,37 @@ export const EpicRun = Schema.Struct({
 });
 export type EpicRun = typeof EpicRun.Type;
 
+/**
+ * Iteration thread ids are structural, not opaque: the sidebar folds a run's
+ * iterations into one row by parsing them, with no extra server round trip.
+ * Build and parse both live here so the two sides cannot drift — a change to
+ * the shape breaks the round-trip test instead of silently ungrouping the
+ * sidebar.
+ */
+const EPIC_RUN_THREAD_ID_PREFIX = "epic-run-";
+const EPIC_RUN_THREAD_ID_PATTERN = new RegExp(`^${EPIC_RUN_THREAD_ID_PREFIX}(.+)-(\\d+)$`);
+
+export const epicRunIterationThreadId = (input: {
+  readonly runId: string;
+  readonly iterationIndex: number;
+}): string => `${EPIC_RUN_THREAD_ID_PREFIX}${input.runId}-${input.iterationIndex}`;
+
+export type EpicRunIterationThreadRef = {
+  readonly runId: string;
+  readonly iterationIndex: number;
+};
+
+/** `null` for any thread id the runner did not build — plain threads included. */
+export const parseEpicRunIterationThreadId = (
+  threadId: string,
+): EpicRunIterationThreadRef | null => {
+  const match = EPIC_RUN_THREAD_ID_PATTERN.exec(threadId);
+  if (match === null) return null;
+  const [, runId, iterationIndex] = match;
+  if (runId === undefined || runId.length === 0 || iterationIndex === undefined) return null;
+  return { runId, iterationIndex: Number.parseInt(iterationIndex, 10) };
+};
+
 export const EpicRunRef = Schema.Struct({
   runId: EpicRunId,
 });

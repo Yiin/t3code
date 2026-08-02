@@ -1,5 +1,6 @@
 import * as React from "react";
-import type { ContextMenuItem } from "@t3tools/contracts";
+import { parseEpicRunIterationThreadId } from "@t3tools/contracts";
+import type { ContextMenuItem, EpicRunStatus } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
   getThreadSortTimestamp,
@@ -486,6 +487,114 @@ export function sortThreadsForSidebarV2<
       parseTimestampMs(right.createdAt) - parseTimestampMs(left.createdAt) ||
       left.id.localeCompare(right.id),
   );
+}
+
+/** One iteration row inside a run group, carrying the thread it stands for. */
+export type SidebarEpicRunIteration<T> = {
+  readonly iterationIndex: number;
+  /** The bd issue the iteration cooked; `null` until the run read model loads. */
+  readonly issueId: string | null;
+  readonly thread: T;
+};
+
+export type SidebarEpicRunGroup<T> = {
+  readonly kind: "epic-run";
+  readonly runId: string;
+  /** `null` when the run is not in `runs` yet — grouping never waits on it. */
+  readonly epicId: string | null;
+  readonly status: EpicRunStatus | null;
+  /** Ascending by iteration index, so 'iteration 1' renders first. */
+  readonly iterations: readonly SidebarEpicRunIteration<T>[];
+};
+
+export type SidebarThreadNode<T> =
+  | { readonly kind: "thread"; readonly thread: T }
+  | SidebarEpicRunGroup<T>;
+
+/** The slice of `EpicRun` the sidebar needs; the caller feeds it from the
+    existing `allRuns` subscription. */
+export type SidebarEpicRunSummary = {
+  readonly runId: string;
+  readonly epicId: string;
+  readonly status: EpicRunStatus;
+  readonly threadRefs: ReadonlyArray<{
+    readonly threadId: string;
+    readonly issueId: string;
+    readonly iterationIndex: number;
+  }>;
+};
+
+type MutableSidebarEpicRunGroup<T> = {
+  kind: "epic-run";
+  runId: string;
+  epicId: string | null;
+  status: EpicRunStatus | null;
+  iterations: Array<SidebarEpicRunIteration<T>>;
+};
+
+/**
+ * Folds an epic run's iteration threads into one group node, leaving every
+ * other thread untouched and in place. A run of 50 iterations otherwise pushes
+ * 50 near-identical rows into the sidebar and buries real threads.
+ *
+ * Grouping is derived from the thread id alone (see
+ * `parseEpicRunIterationThreadId`), so it works before `runs` arrives; the run
+ * read model only supplies the labels. The group takes the list slot of its
+ * first-listed iteration, which in a recency-ordered list is the newest one, so
+ * the surrounding order is preserved whichever way the caller sorted.
+ */
+export function groupEpicRunIterationThreads<T extends { readonly id: string }>(input: {
+  threads: readonly T[];
+  runs?: readonly SidebarEpicRunSummary[] | undefined;
+}): Array<SidebarThreadNode<T>> {
+  const issueIdByThreadId = new Map<string, string>();
+  const runsById = new Map<string, SidebarEpicRunSummary>();
+  for (const run of input.runs ?? []) {
+    runsById.set(run.runId, run);
+    for (const ref of run.threadRefs) {
+      issueIdByThreadId.set(ref.threadId, ref.issueId);
+    }
+  }
+
+  const nodes: Array<SidebarThreadNode<T>> = [];
+  const groupsByRunId = new Map<string, MutableSidebarEpicRunGroup<T>>();
+
+  for (const thread of input.threads) {
+    const parsed = parseEpicRunIterationThreadId(thread.id);
+    if (parsed === null) {
+      nodes.push({ kind: "thread", thread });
+      continue;
+    }
+
+    const iteration: SidebarEpicRunIteration<T> = {
+      iterationIndex: parsed.iterationIndex,
+      issueId: issueIdByThreadId.get(thread.id) ?? null,
+      thread,
+    };
+
+    const existing = groupsByRunId.get(parsed.runId);
+    if (existing !== undefined) {
+      existing.iterations.push(iteration);
+      continue;
+    }
+
+    const run = runsById.get(parsed.runId);
+    const group: MutableSidebarEpicRunGroup<T> = {
+      kind: "epic-run",
+      runId: parsed.runId,
+      epicId: run?.epicId ?? null,
+      status: run?.status ?? null,
+      iterations: [iteration],
+    };
+    groupsByRunId.set(parsed.runId, group);
+    nodes.push(group);
+  }
+
+  for (const group of groupsByRunId.values()) {
+    group.iterations.sort((left, right) => left.iterationIndex - right.iterationIndex);
+  }
+
+  return nodes;
 }
 
 export function resolveThreadStatusPill(input: {

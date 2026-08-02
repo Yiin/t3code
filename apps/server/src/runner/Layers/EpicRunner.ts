@@ -4,6 +4,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   type EpicRun as TransportEpicRun,
   EpicRunId,
+  epicRunIterationThreadId,
   type LaunchEpicRunInput,
   MessageId,
   ThreadId,
@@ -738,8 +739,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           return { kind: "backlog-empty", detail: null, report: null };
         }
         // Deterministic, and unique because iteration indices are never reused:
-        // a crash cannot leave two threads competing for one iteration row.
-        const threadId = ThreadId.make(`epic-run-${run.runId}-${input.iterationIndex}`);
+        // a crash cannot leave two threads competing for one iteration row. The
+        // shape is a contract — the sidebar parses it back to fold a run's
+        // iterations into one row — so it is built by the shared helper.
+        const threadId = ThreadId.make(
+          epicRunIterationThreadId({ runId: run.runId, iterationIndex: input.iterationIndex }),
+        );
         const startedAt = yield* nowIso;
         const headBefore = yield* readHeadCommit(run.cwd);
 

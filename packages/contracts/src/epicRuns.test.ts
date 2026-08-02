@@ -9,6 +9,8 @@ import {
   EpicRunInput,
   EpicRunnerDispatchError,
   EpicRunnerStoreError,
+  epicRunIterationThreadId,
+  parseEpicRunIterationThreadId,
 } from "./epicRuns.ts";
 import {
   WS_METHODS,
@@ -49,6 +51,7 @@ describe("EpicRun contracts", () => {
       ...input,
       runtimeMode: "full-access",
       runId: EpicRunId.make("run-1"),
+      originThreadId: ThreadId.make("thread-origin"),
       status: "running",
       maxIterations: 10,
       iterationsCompleted: 1,
@@ -76,6 +79,21 @@ describe("EpicRun contracts", () => {
 
     expect(decodeEpicRun(encodeEpicRun(run))).toEqual(run);
     expect(decodeEpicRunEvent(encodeEpicRunEvent(event))).toEqual(event);
+  });
+
+  it("round-trips iteration thread ids, and rejects ids it did not build", () => {
+    const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+    expect(
+      parseEpicRunIterationThreadId(epicRunIterationThreadId({ runId, iterationIndex: 12 })),
+    ).toEqual({ runId, iterationIndex: 12 });
+    for (const alien of [
+      "thread-1",
+      "epic-runner-notes",
+      `epic-run-${runId}-final`,
+      "epic-run--1",
+    ]) {
+      expect(parseEpicRunIterationThreadId(alien)).toBeNull();
+    }
   });
 
   it("declares every public epic-run RPC method", () => {
