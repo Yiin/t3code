@@ -12,6 +12,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import type { SqlError } from "effect/unstable/sql/SqlError";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
@@ -134,6 +135,60 @@ const insertFillerActivities = (count: number) =>
         '2026-04-01T00:01:00.000Z'
       FROM filler
     `;
+  });
+
+/** Sets every projector's applied sequence to `sequence`. */
+const setProjectionStateSequence = (sequence: number) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`DELETE FROM projection_state`;
+    for (const projector of Object.values(ORCHESTRATION_PROJECTOR_NAMES)) {
+      yield* sql`
+        INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+        VALUES (${projector}, ${sequence}, '2026-04-01T00:02:00.000Z')
+      `;
+    }
+  });
+
+/**
+ * One projector-shaped write: append an activity and bump every projector's
+ * applied sequence in a single transaction, the way the projection pipeline
+ * does.
+ */
+const appendActivityAndBumpSequence = (sequence: number) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            sequence,
+            created_at
+          )
+          VALUES (
+            'activity-interleaved',
+            'thread-1',
+            NULL,
+            'info',
+            'runtime.note',
+            'interleaved projector write',
+            '{"source":"interleaved"}',
+            ${sequence},
+            '2026-04-01T00:02:01.000Z'
+          )
+        `;
+        yield* sql`UPDATE projection_state SET last_applied_sequence = ${sequence}`;
+      }),
+    );
   });
 
 const projectionSnapshotLayer = it.layer(
@@ -1475,6 +1530,31 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("tolerates a snapshotSequence behind the returned rows, which only replays", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(3); // sequences 101..103
+      yield* setProjectionStateSequence(101);
+
+      const snapshot = yield* snapshotQuery.getThreadDetailSnapshot(ThreadId.make("thread-1"));
+      assert.equal(snapshot._tag, "Some");
+      if (snapshot._tag !== "Some") {
+        return;
+      }
+
+      // This is the safe skew and the code makes no attempt to avoid it. The
+      // client re-applies events 102 and 103, which it already has, and
+      // converges. Only the opposite direction loses events.
+      assert.equal(snapshot.value.snapshotSequence, 101);
+      assert.deepEqual(
+        snapshot.value.thread.activities.map((activity) => activity.sequence),
+        [101, 102, 103],
+      );
+    }),
+  );
+
   it.effect("uses projection_threads.latest_turn_id for targeted thread latest turn queries", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -1992,3 +2072,129 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+/**
+ * The projector write to run the instant the next top-level transaction
+ * commits, or `null` when the probe is disarmed.
+ *
+ * @see makeTransactionBoundaryProbeClient
+ */
+let pendingProjectorWrite: Effect.Effect<void, SqlError, SqlClient.SqlClient> | null = null;
+
+/** Arms the probe with one projector-shaped write at `sequence`. */
+const armProjectorWriteAtNextCommit = (sequence: number) =>
+  Effect.sync(() => {
+    pendingProjectorWrite = appendActivityAndBumpSequence(sequence);
+  });
+
+/**
+ * A SqlClient that runs the armed projector write the instant a top-level
+ * transaction commits.
+ *
+ * This makes the transaction boundary directly observable from a test. Any read
+ * the production code performs after that commit — that is, any read that left
+ * the transaction — sees the write; every read still inside the transaction
+ * cannot. Racing a real writer fiber cannot do this: the SqlClient's
+ * semaphore(1) only wakes waiters on a scheduled task, so a fiber that releases
+ * the permit and immediately re-takes it always wins, and the window never
+ * opens. See the sibling test for the probe's own liveness check.
+ */
+const makeTransactionBoundaryProbeClient = Effect.gen(function* () {
+  const realSql = yield* SqlClient.SqlClient;
+
+  const runPendingProjectorWrite = Effect.suspend(() => {
+    const pending = pendingProjectorWrite;
+    pendingProjectorWrite = null;
+    return pending ?? Effect.void;
+  }).pipe(Effect.provideService(SqlClient.SqlClient, realSql), Effect.orDie);
+
+  return Object.assign(
+    (...args: ReadonlyArray<unknown>) =>
+      (realSql as unknown as (...called: ReadonlyArray<unknown>) => unknown)(...args),
+    realSql,
+    {
+      withTransaction: <R, E, A>(self: Effect.Effect<A, E, R>) =>
+        realSql.withTransaction(self).pipe(Effect.tap(() => runPendingProjectorWrite)),
+    },
+  ) as unknown as SqlClient.SqlClient;
+});
+
+const transactionBoundaryProbeLayer = it.layer(
+  OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provideMerge(RepositoryIdentityResolver.layer),
+    Layer.provideMerge(
+      Layer.effect(SqlClient.SqlClient, makeTransactionBoundaryProbeClient).pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      ),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (it) => {
+  it.effect("the interleaving probe is visible to a read that leaves the transaction", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(3); // sequences 101..103
+      yield* setProjectionStateSequence(103);
+
+      // Liveness check for the probe itself. Commit a transaction that reads
+      // nothing, so the probe's write lands, then read projection_state with no
+      // transaction open. Without this test the invariant test below could pass
+      // because the probe is broken rather than because the code is correct.
+      yield* armProjectorWriteAtNextCommit(104);
+      yield* sql.withTransaction(Effect.void);
+
+      const sequence = yield* snapshotQuery.getSnapshotSequence();
+      assert.equal(sequence.snapshotSequence, 104);
+    }),
+  );
+
+  it.effect("never returns a snapshotSequence ahead of the thread rows it returns", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(3); // sequences 101..103
+      yield* setProjectionStateSequence(103);
+
+      // The probe commits activity 104 and bumps projection_state to 104 at the
+      // moment getThreadDetailSnapshot's transaction commits.
+      yield* armProjectorWriteAtNextCommit(104);
+      const snapshot = yield* snapshotQuery.getThreadDetailSnapshot(ThreadId.make("thread-1"));
+
+      // Harness check, not the invariant: the probe disarms itself when it
+      // fires, so a null here proves the call really did commit a transaction
+      // with the interleaving write behind it. A rewrite that stops using
+      // `withTransaction` altogether would leave this armed and fail loudly
+      // rather than pass for the wrong reason.
+      assert.equal(pendingProjectorWrite, null);
+
+      assert.equal(snapshot._tag, "Some");
+      if (snapshot._tag !== "Some") {
+        return;
+      }
+      const sequences = snapshot.value.thread.activities.map((activity) => activity.sequence);
+      assert.deepEqual(sequences, [101, 102, 103]);
+
+      // The invariant. The client drops every live event whose sequence is <=
+      // snapshotSequence (ws.ts, and the client-runtime shellReducer/threads
+      // gates), so a sequence AHEAD of the returned rows is the unsafe skew:
+      // activity 104 would be in neither the snapshot nor the stream, and the
+      // thread would stay permanently short until a full re-subscribe. Reading
+      // projection_state outside the transaction that read the rows returns 104
+      // here and breaks this.
+      const highestReturned = Math.max(...sequences.map((sequence) => sequence ?? -1));
+      assert.isAtMost(snapshot.value.snapshotSequence, highestReturned);
+      assert.equal(snapshot.value.snapshotSequence, 103);
+
+      // The probe's write did commit, so a read one step later really does see
+      // 104 — the snapshot above was consistent, not merely early.
+      const afterSnapshot = yield* snapshotQuery.getSnapshotSequence();
+      assert.equal(afterSnapshot.snapshotSequence, 104);
+    }),
+  );
+});
