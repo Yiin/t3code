@@ -2,12 +2,14 @@ import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   MessageId,
   type OrchestrationEvent,
   type OrchestrationMessage,
   type OrchestrationProposedPlanId,
   CheckpointRef,
   isToolLifecycleItemType,
+  type RuntimeItemId,
   ThreadId,
   type ThreadTokenUsageSnapshot,
   TurnId,
@@ -19,13 +21,14 @@ import {
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { type DrainableWorker, makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { parseTerminalEpicPlanMarker } from "@t3tools/shared/epicPlanMarker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -42,6 +45,16 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
+const toolUpdateThrottleKey = (threadId: ThreadId, itemId: RuntimeItemId) =>
+  `${threadId}:${itemId}`;
+
+// A coalesced-but-not-yet-dispatched tool.updated activity, held for at most
+// TOOL_UPDATE_THROTTLE_WINDOW_MILLIS before the trailing-edge flush fires.
+interface PendingToolUpdate {
+  readonly threadId: ThreadId;
+  readonly event: ProviderRuntimeEvent;
+  readonly activity: OrchestrationThreadActivity;
+}
 
 // Fallback when the in-memory description cache no longer has the task name
 // (server restart, session-exit sweep, TTL/capacity eviction): earlier
@@ -92,6 +105,17 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
 const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
+// Leading-edge throttle window for streamed item.updated -> tool.updated
+// activity dispatches, keyed by (threadId, itemId). The first update after a
+// quiet period dispatches immediately; further updates inside the window are
+// coalesced into a single pending value and flushed by a trailing-edge timer
+// (see dispatchOrCoalesceToolUpdate) so a fast stream never issues more than
+// one thread.activity.append command per window per tool call.
+const TOOL_UPDATE_THROTTLE_WINDOW_MILLIS = 150;
+const PENDING_TOOL_UPDATE_CACHE_CAPACITY = 10_000;
+const PENDING_TOOL_UPDATE_TTL = Duration.minutes(120);
+const LAST_TOOL_UPDATE_DISPATCH_CACHE_CAPACITY = 10_000;
+const LAST_TOOL_UPDATE_DISPATCH_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
@@ -108,6 +132,15 @@ type RuntimeIngestionInput =
   | {
       source: "domain";
       event: TurnStartRequestedDomainEvent;
+    }
+  | {
+      // Synthetic input: the trailing-edge timer forked from
+      // dispatchOrCoalesceToolUpdate enqueues this instead of dispatching
+      // directly, so the flush is serialized with the same queue that
+      // processes runtime/domain events and never races them over the
+      // pending/last-dispatch throttle caches.
+      source: "tool-update-flush";
+      key: string;
     };
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
@@ -618,9 +651,23 @@ export function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      // Streamed argument/output chunks for the same tool call arrive as many
+      // item.updated events. Key the row by the tool-call item (scoped to the
+      // thread, since itemId is only unique within a provider session, not
+      // globally -- activity_id is a single global primary key) instead of
+      // the per-delta eventId, so the upsert replaces the row in place rather
+      // than inserting a new one per chunk. Fall back to eventId when the
+      // provider didn't send an itemId; there is nothing to coalesce there,
+      // so each such event still gets its own (already-unique) row. Keep the
+      // "tool-updated:" prefix: item.started/item.completed stay keyed by
+      // eventId, and a shared itemId-only key across the three kinds would
+      // make them upsert-overwrite each other on the same primary key.
       return [
         {
-          id: event.eventId,
+          id:
+            event.itemId !== undefined
+              ? EventId.make(`tool-updated:${event.threadId}:${event.itemId}`)
+              : event.eventId,
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.updated",
@@ -694,6 +741,11 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  // Assigned once, near the bottom of this generator, once processInputSafely
+  // exists. dispatchOrCoalesceToolUpdate below only reads it from inside a
+  // forked, sleeping fiber -- by the time that fiber wakes, start() has
+  // already run and this is always assigned.
+  let worker: DrainableWorker<RuntimeIngestionInput>;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -736,6 +788,127 @@ const make = Effect.gen(function* () {
 
   const rememberTaskDescription = (threadId: ThreadId, taskId: string, description: string) =>
     Cache.set(taskDescriptionByTaskKey, providerTaskKey(threadId, taskId), description);
+
+  // Coalesced item.updated -> tool.updated activity awaiting dispatch, keyed
+  // by toolUpdateThrottleKey(threadId, itemId). Entries live for at most one
+  // throttle window in the normal case: the trailing-edge fiber forked from
+  // dispatchOrCoalesceToolUpdate flushes (and invalidates) them unconditionally,
+  // so TTL/capacity eviction here is a backstop, not the flush mechanism.
+  const pendingToolUpdateByThrottleKey = yield* Cache.make<string, PendingToolUpdate>({
+    capacity: PENDING_TOOL_UPDATE_CACHE_CAPACITY,
+    timeToLive: PENDING_TOOL_UPDATE_TTL,
+    lookup: () => Effect.die(new Error("pending tool update must be set before it is looked up")),
+  });
+
+  // Epoch millis (via Clock, never Date.now()) of the last dispatched
+  // tool.updated for a throttle key; 0 means "never", which always clears the
+  // throttle window so the first update for a key dispatches immediately.
+  const lastToolUpdateDispatchAtByThrottleKey = yield* Cache.make<string, number>({
+    capacity: LAST_TOOL_UPDATE_DISPATCH_CACHE_CAPACITY,
+    timeToLive: LAST_TOOL_UPDATE_DISPATCH_TTL,
+    lookup: () => Effect.succeed(0),
+  });
+
+  const dispatchToolUpdateActivity = (pending: PendingToolUpdate) =>
+    providerCommandId(pending.event, "thread-activity-append-tool-updated").pipe(
+      Effect.flatMap((commandId) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: pending.threadId,
+          activity: pending.activity,
+          createdAt: pending.activity.createdAt,
+        }),
+      ),
+    );
+
+  // Dispatches whatever is currently pending for this key, if anything, and
+  // clears it. Safe to call redundantly (from the trailing-edge timer, from a
+  // terminal-event accelerator, or from the session-exit sweep): a no-op once
+  // the pending entry has already been flushed once.
+  const flushPendingToolUpdate = (key: string) =>
+    Cache.getOption(pendingToolUpdateByThrottleKey, key).pipe(
+      Effect.flatMap((pendingOption) =>
+        Option.match(pendingOption, {
+          onNone: () => Effect.void,
+          onSome: (pending) =>
+            Cache.invalidate(pendingToolUpdateByThrottleKey, key).pipe(
+              Effect.andThen(Clock.currentTimeMillis),
+              Effect.tap((dispatchedAt) =>
+                Cache.set(lastToolUpdateDispatchAtByThrottleKey, key, dispatchedAt),
+              ),
+              Effect.andThen(dispatchToolUpdateActivity(pending)),
+            ),
+        }),
+      ),
+    );
+
+  // Best-effort accelerator for terminal events that are thread- or
+  // turn-scoped rather than item-scoped (turn.completed, turn.aborted,
+  // session.exited, runtime.error): flush every item still pending for this
+  // thread instead of waiting out the throttle window. This is purely a
+  // latency improvement -- the trailing-edge timer in
+  // dispatchOrCoalesceToolUpdate is what guarantees a pending update is never
+  // stranded, including on paths this sweep cannot see (e.g. a failure
+  // earlier in processRuntimeEvent for some other event on this thread).
+  const flushPendingToolUpdatesForThread = (threadId: ThreadId) =>
+    Cache.entries(pendingToolUpdateByThrottleKey).pipe(
+      Effect.flatMap((entries) =>
+        Effect.forEach(
+          Array.from(entries).filter(([, pending]) => pending.threadId === threadId),
+          ([key]) => flushPendingToolUpdate(key),
+          { concurrency: 1 },
+        ),
+      ),
+      Effect.asVoid,
+    );
+
+  // Leading-edge throttle + trailing-edge guarantee for item.updated ->
+  // tool.updated dispatches. See TOOL_UPDATE_THROTTLE_WINDOW_MILLIS.
+  //
+  // - First update for a key after a quiet period: dispatch immediately.
+  // - Update inside the window: overwrite the pending value for this key and,
+  //   only if nothing was already pending (i.e. no flush is already
+  //   scheduled), fork a timer that flushes whatever is pending once the
+  //   window elapses. Because the timer re-reads the pending cache at fire
+  //   time rather than closing over a specific activity, later updates in the
+  //   same burst are picked up for free without scheduling a second timer.
+  // - The forked timer enqueues onto the same DrainableWorker queue that
+  //   processRuntimeEvent runs on (via a synthetic "tool-update-flush" input)
+  //   instead of dispatching directly, so it never races the main
+  //   processing loop over the pending/last-dispatch caches.
+  const dispatchOrCoalesceToolUpdate = (
+    threadId: ThreadId,
+    itemId: RuntimeItemId,
+    event: ProviderRuntimeEvent,
+    activity: OrchestrationThreadActivity,
+  ) =>
+    Effect.gen(function* () {
+      const key = toolUpdateThrottleKey(threadId, itemId);
+      const now = yield* Clock.currentTimeMillis;
+      const lastDispatchedAt = yield* Cache.get(lastToolUpdateDispatchAtByThrottleKey, key);
+      const elapsed = now - lastDispatchedAt;
+
+      if (elapsed >= TOOL_UPDATE_THROTTLE_WINDOW_MILLIS) {
+        yield* Cache.set(lastToolUpdateDispatchAtByThrottleKey, key, now);
+        yield* dispatchToolUpdateActivity({ threadId, event, activity });
+        return;
+      }
+
+      const hadPendingBeforeSet = yield* Cache.has(pendingToolUpdateByThrottleKey, key);
+      yield* Cache.set(pendingToolUpdateByThrottleKey, key, { threadId, event, activity });
+      if (hadPendingBeforeSet) {
+        return;
+      }
+
+      const remaining = Math.max(TOOL_UPDATE_THROTTLE_WINDOW_MILLIS - elapsed, 0);
+      yield* Effect.forkScoped(
+        Effect.sleep(Duration.millis(remaining)).pipe(
+          Effect.andThen(() => worker.enqueue({ source: "tool-update-flush", key })),
+          Effect.asVoid,
+        ),
+      );
+    });
 
   // Entries are left in place after completion so replayed or duplicate
   // terminal events stay titled; TTL, capacity, and the session-exit sweep
@@ -1177,6 +1350,13 @@ const make = Effect.gen(function* () {
       const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
       const proposedPlanKeys = Array.from(yield* Cache.keys(bufferedProposedPlanById));
       const taskDescriptionKeys = Array.from(yield* Cache.keys(taskDescriptionByTaskKey));
+      // Nothing should be left pending here: the processRuntimeEvent
+      // accelerator flushes every pending tool.updated for this thread (via
+      // flushPendingToolUpdatesForThread) before this function runs. Only the
+      // last-dispatch bookkeeping needs sweeping.
+      const toolUpdateDispatchKeys = Array.from(
+        yield* Cache.keys(lastToolUpdateDispatchAtByThrottleKey),
+      );
       yield* Effect.forEach(
         turnKeys,
         (key) =>
@@ -1216,6 +1396,14 @@ const make = Effect.gen(function* () {
         taskDescriptionKeys,
         (key) =>
           key.startsWith(prefix) ? Cache.invalidate(taskDescriptionByTaskKey, key) : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        toolUpdateDispatchKeys,
+        (key) =>
+          key.startsWith(prefix)
+            ? Cache.invalidate(lastToolUpdateDispatchAtByThrottleKey, key)
+            : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
     });
@@ -1300,6 +1488,31 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
+
+      // Best-effort accelerator: flush any pending (throttled) tool.updated
+      // activity for this item/thread at a natural stopping point, instead of
+      // waiting out the throttle window. Placed first, before any of the
+      // per-event work below that can fail, so a later failure in this
+      // function can never suppress it. It is deliberately *not* the source
+      // of correctness: dispatchOrCoalesceToolUpdate's trailing-edge timer
+      // flushes unconditionally, including turn.aborted/session-exit/error
+      // paths this switch also covers, and any path it doesn't (e.g. this
+      // event itself throwing before reaching here).
+      switch (event.type) {
+        case "item.completed":
+          if (event.itemId !== undefined) {
+            yield* flushPendingToolUpdate(toolUpdateThrottleKey(thread.id, event.itemId));
+          }
+          break;
+        case "turn.completed":
+        case "turn.aborted":
+        case "session.exited":
+        case "runtime.error":
+          yield* flushPendingToolUpdatesForThread(thread.id);
+          break;
+        default:
+          break;
+      }
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
@@ -1771,8 +1984,14 @@ const make = Effect.gen(function* () {
       }
 
       const activities = runtimeEventToActivities(event, taskTitle);
-      yield* Effect.forEach(activities, (activity) =>
-        providerCommandId(event, "thread-activity-append").pipe(
+      yield* Effect.forEach(activities, (activity) => {
+        // Only item.updated's tool.updated activity is throttled -- every
+        // other kind (approvals, tool.started/completed, task.*, ...) keeps
+        // dispatching straight through, one command per event, as before.
+        if (event.type === "item.updated" && event.itemId !== undefined) {
+          return dispatchOrCoalesceToolUpdate(thread.id, event.itemId, event, activity);
+        }
+        return providerCommandId(event, "thread-activity-append").pipe(
           Effect.flatMap((commandId) =>
             orchestrationEngine.dispatch({
               type: "thread.activity.append",
@@ -1782,14 +2001,22 @@ const make = Effect.gen(function* () {
               createdAt: activity.createdAt,
             }),
           ),
-        ),
-      ).pipe(Effect.asVoid);
+        );
+      }).pipe(Effect.asVoid);
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 
-  const processInput = (input: RuntimeIngestionInput) =>
-    input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
+  const processInput = (input: RuntimeIngestionInput) => {
+    switch (input.source) {
+      case "runtime":
+        return processRuntimeEvent(input.event);
+      case "domain":
+        return processDomainEvent(input.event);
+      case "tool-update-flush":
+        return flushPendingToolUpdate(input.key);
+    }
+  };
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
@@ -1799,14 +2026,15 @@ const make = Effect.gen(function* () {
         }
         return Effect.logWarning("provider runtime ingestion failed to process event", {
           source: input.source,
-          eventId: input.event.eventId,
-          eventType: input.event.type,
+          ...(input.source === "tool-update-flush"
+            ? { toolUpdateThrottleKey: input.key }
+            : { eventId: input.event.eventId, eventType: input.event.type }),
           cause: Cause.pretty(cause),
         });
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processInputSafely);
+  worker = yield* makeDrainableWorker(processInputSafely);
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {

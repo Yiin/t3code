@@ -2955,8 +2955,12 @@ describe("ProviderRuntimeIngestion", () => {
     expect(planActivity?.kind).toBe("turn.plan.updated");
     expect(Array.isArray(planPayload?.plan)).toBe(true);
 
+    // item.updated's activity id is derived from (threadId, itemId), not
+    // eventId -- see runtimeEventToActivities's "item.updated" case -- so the
+    // streamed chunks of one tool call collapse to a single upserted row.
     const toolUpdate = thread.activities.find(
-      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-item-updated",
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "tool-updated:thread-1:item-p1-tool",
     );
     const toolUpdatePayload =
       toolUpdate?.payload && typeof toolUpdate.payload === "object"
@@ -3568,5 +3572,451 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+
+  describe("tool.updated throttling", () => {
+    function emitToolUpdate(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      options: {
+        eventId: string;
+        threadId?: ThreadId;
+        turnId: string;
+        itemId: string;
+        detail: string;
+      },
+    ) {
+      harness.emit({
+        type: "item.updated",
+        eventId: asEventId(options.eventId),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: options.threadId ?? asThreadId("thread-1"),
+        turnId: asTurnId(options.turnId),
+        itemId: asItemId(options.itemId),
+        payload: {
+          itemType: "command_execution",
+          status: "in_progress",
+          title: "Run tests",
+          detail: options.detail,
+        },
+      });
+    }
+
+    it("coalesces a burst of streamed item.updated chunks into one row carrying the last chunk's detail, with no terminal event ever arriving", async () => {
+      const harness = await createHarness();
+      const itemId = "item-throttle-burst";
+      const activityId = `tool-updated:thread-1:${itemId}`;
+
+      for (let index = 1; index <= 5; index += 1) {
+        emitToolUpdate(harness, {
+          eventId: `evt-throttle-burst-${index}`,
+          turnId: "turn-throttle-burst",
+          itemId,
+          detail: `chunk-${index}`,
+        });
+      }
+
+      // No item.completed, turn.completed, turn.aborted, session.exited, or
+      // runtime.error is ever emitted for this item/thread -- the only thing
+      // that can flush chunks 2-5 (held by the leading-edge throttle behind
+      // chunk 1's immediate dispatch) is the trailing-edge timer, so this
+      // proves that mechanism, not the terminal-event accelerator.
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) =>
+          (
+            entry.activities.find(
+              (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+            )?.payload as Record<string, unknown> | undefined
+          )?.detail === "chunk-5",
+      );
+
+      const toolUpdates = thread.activities.filter(
+        (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+      );
+      expect(toolUpdates).toHaveLength(1);
+      expect(toolUpdates[0]?.kind).toBe("tool.updated");
+      expect((toolUpdates[0]?.payload as Record<string, unknown> | undefined)?.detail).toBe(
+        "chunk-5",
+      );
+    });
+
+    it("does not coalesce two different itemIds in the same thread into each other", async () => {
+      const harness = await createHarness();
+      const activityIdA = "tool-updated:thread-1:item-throttle-a";
+      const activityIdB = "tool-updated:thread-1:item-throttle-b";
+
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-a-1",
+        turnId: "turn-throttle-two-items",
+        itemId: "item-throttle-a",
+        detail: "a-chunk-1",
+      });
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-b-1",
+        turnId: "turn-throttle-two-items",
+        itemId: "item-throttle-b",
+        detail: "b-chunk-1",
+      });
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-a-2",
+        turnId: "turn-throttle-two-items",
+        itemId: "item-throttle-a",
+        detail: "a-chunk-2",
+      });
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-b-2",
+        turnId: "turn-throttle-two-items",
+        itemId: "item-throttle-b",
+        detail: "b-chunk-2",
+      });
+
+      const thread = await waitForThread(harness.readModel, (entry) => {
+        const a = entry.activities.find(
+          (activity: ProviderRuntimeTestActivity) => activity.id === activityIdA,
+        )?.payload as Record<string, unknown> | undefined;
+        const b = entry.activities.find(
+          (activity: ProviderRuntimeTestActivity) => activity.id === activityIdB,
+        )?.payload as Record<string, unknown> | undefined;
+        return a?.detail === "a-chunk-2" && b?.detail === "b-chunk-2";
+      });
+
+      const activityA = thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === activityIdA,
+      );
+      const activityB = thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === activityIdB,
+      );
+      expect((activityA?.payload as Record<string, unknown> | undefined)?.detail).toBe("a-chunk-2");
+      expect((activityB?.payload as Record<string, unknown> | undefined)?.detail).toBe("b-chunk-2");
+    });
+
+    it("still produces an activity for item.updated with no itemId, keyed by eventId (unthrottled fallback)", async () => {
+      const harness = await createHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+
+      harness.emit({
+        type: "item.updated",
+        eventId: asEventId("evt-throttle-no-item-id"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-throttle-no-item-id"),
+        payload: {
+          itemType: "command_execution",
+          status: "in_progress",
+          title: "Run tests",
+          detail: "only-chunk",
+        },
+      });
+
+      await harness.drain();
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      const activity = thread?.activities.find(
+        (candidate: ProviderRuntimeTestActivity) => candidate.id === "evt-throttle-no-item-id",
+      );
+      expect(activity?.kind).toBe("tool.updated");
+      expect((activity?.payload as Record<string, unknown> | undefined)?.detail).toBe("only-chunk");
+    });
+
+    it("keeps item.started and item.completed on their own distinct rows, not overwritten by the tool.updated row for the same item", async () => {
+      const harness = await createHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+      const itemId = "item-throttle-lifecycle";
+
+      harness.emit({
+        type: "item.started",
+        eventId: asEventId("evt-throttle-lifecycle-started"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-throttle-lifecycle"),
+        itemId: asItemId(itemId),
+        payload: {
+          itemType: "command_execution",
+          title: "Run tests",
+          detail: "starting",
+        },
+      });
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-lifecycle-updated",
+        turnId: "turn-throttle-lifecycle",
+        itemId,
+        detail: "running",
+      });
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId("evt-throttle-lifecycle-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-throttle-lifecycle"),
+        itemId: asItemId(itemId),
+        payload: {
+          itemType: "command_execution",
+          title: "Run tests",
+          detail: "done",
+        },
+      });
+
+      await harness.drain();
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+
+      const started = thread?.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-throttle-lifecycle-started",
+      );
+      const updated = thread?.activities.find(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === `tool-updated:thread-1:${itemId}`,
+      );
+      const completed = thread?.activities.find(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "evt-throttle-lifecycle-completed",
+      );
+
+      expect(started?.kind).toBe("tool.started");
+      expect(updated?.kind).toBe("tool.updated");
+      expect(completed?.kind).toBe("tool.completed");
+      expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe("running");
+      expect((completed?.payload as Record<string, unknown> | undefined)?.detail).toBe("done");
+    });
+
+    it("flushes a throttled tool.updated immediately when item.completed arrives for the same item", async () => {
+      const harness = await createHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+      const itemId = "item-throttle-completed-accelerator";
+      const activityId = `tool-updated:thread-1:${itemId}`;
+
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-completed-accel-1",
+        turnId: "turn-throttle-completed-accelerator",
+        itemId,
+        detail: "chunk-1",
+      });
+      // Arrives inside the throttle window right behind chunk 1's immediate
+      // (leading-edge) dispatch, so it is held pending rather than dispatched.
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-completed-accel-2",
+        turnId: "turn-throttle-completed-accelerator",
+        itemId,
+        detail: "chunk-2-held",
+      });
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId("evt-throttle-completed-accel-done"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-throttle-completed-accelerator"),
+        itemId: asItemId(itemId),
+        payload: {
+          itemType: "command_execution",
+          title: "Run tests",
+          detail: "done",
+        },
+      });
+
+      // drain() alone proves this: it only waits for the queue this event was
+      // processed on, not for the ~150ms trailing-edge timer, so chunk-2-held
+      // must have been flushed synchronously by item.completed's accelerator.
+      await harness.drain();
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      const updated = thread?.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+      );
+      expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe(
+        "chunk-2-held",
+      );
+    });
+
+    it("flushes a throttled tool.updated when turn.aborted arrives (interrupted turn, no turn.completed ever follows)", async () => {
+      const harness = await createHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+      const itemId = "item-throttle-turn-aborted";
+      const activityId = `tool-updated:thread-1:${itemId}`;
+
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-turn-aborted-1",
+        turnId: "turn-throttle-aborted",
+        itemId,
+        detail: "chunk-1",
+      });
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-turn-aborted-2",
+        turnId: "turn-throttle-aborted",
+        itemId,
+        detail: "chunk-2-held",
+      });
+      harness.emit({
+        type: "turn.aborted",
+        eventId: asEventId("evt-throttle-turn-aborted"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-throttle-aborted"),
+        payload: {
+          reason: "interrupted by user",
+        },
+      });
+
+      await harness.drain();
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      const updated = thread?.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+      );
+      expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe(
+        "chunk-2-held",
+      );
+    });
+
+    it("flushes a throttled tool.updated when session.exited arrives (session exit, no turn.completed ever follows)", async () => {
+      const harness = await createHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+      const itemId = "item-throttle-session-exited";
+      const activityId = `tool-updated:thread-1:${itemId}`;
+
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-session-exited-1",
+        turnId: "turn-throttle-session-exited",
+        itemId,
+        detail: "chunk-1",
+      });
+      emitToolUpdate(harness, {
+        eventId: "evt-throttle-session-exited-2",
+        turnId: "turn-throttle-session-exited",
+        itemId,
+        detail: "chunk-2-held",
+      });
+      harness.emit({
+        type: "session.exited",
+        eventId: asEventId("evt-throttle-session-exited"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        payload: {},
+      });
+
+      await harness.drain();
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      const updated = thread?.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+      );
+      expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe(
+        "chunk-2-held",
+      );
+    });
+
+    effectIt.effect(
+      "does not let the same itemId in two different threads collide on the global activity_id primary key",
+      () =>
+        Effect.gen(function* () {
+          const harness = yield* Effect.promise(() => createHarness());
+          const otherThreadId = asThreadId("thread-throttle-other");
+          const createdAt = "2026-01-01T00:00:00.000Z";
+          const sharedItemId = "item-shared-across-threads";
+
+          yield* harness.engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("cmd-thread-create-throttle-other"),
+            threadId: otherThreadId,
+            projectId: asProjectId("project-1"),
+            title: "Other Thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+          });
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-session-set-throttle-other"),
+            threadId: otherThreadId,
+            session: {
+              threadId: otherThreadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              updatedAt: createdAt,
+              lastError: null,
+            },
+            createdAt,
+          });
+
+          emitToolUpdate(harness, {
+            eventId: "evt-throttle-shared-thread-1",
+            turnId: "turn-throttle-shared-thread-1",
+            itemId: sharedItemId,
+            detail: "thread-1-detail",
+          });
+          emitToolUpdate(harness, {
+            eventId: "evt-throttle-shared-thread-2",
+            threadId: otherThreadId,
+            turnId: "turn-throttle-shared-thread-2",
+            itemId: sharedItemId,
+            detail: "thread-2-detail",
+          });
+
+          const activityId = `tool-updated:thread-1:${sharedItemId}`;
+          const otherActivityId = `tool-updated:${otherThreadId}:${sharedItemId}`;
+
+          const thread1 = yield* Effect.promise(() =>
+            waitForThread(
+              harness.readModel,
+              (entry) =>
+                (
+                  entry.activities.find(
+                    (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+                  )?.payload as Record<string, unknown> | undefined
+                )?.detail === "thread-1-detail",
+              2000,
+              asThreadId("thread-1"),
+            ),
+          );
+          const thread2 = yield* Effect.promise(() =>
+            waitForThread(
+              harness.readModel,
+              (entry) =>
+                (
+                  entry.activities.find(
+                    (activity: ProviderRuntimeTestActivity) => activity.id === otherActivityId,
+                  )?.payload as Record<string, unknown> | undefined
+                )?.detail === "thread-2-detail",
+              2000,
+              otherThreadId,
+            ),
+          );
+
+          // The bug this guards against: itemId is only unique within a
+          // provider session, so without the threadId in the key, thread-2's
+          // row for this itemId would upsert onto (and move) thread-1's row
+          // instead of getting its own -- thread-1 would end up with no
+          // tool.updated activity at all.
+          expect(
+            thread1.activities.some(
+              (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
+            ),
+          ).toBe(true);
+          expect(
+            thread2.activities.some(
+              (activity: ProviderRuntimeTestActivity) => activity.id === otherActivityId,
+            ),
+          ).toBe(true);
+          expect(
+            thread1.activities.some(
+              (activity: ProviderRuntimeTestActivity) => activity.id === otherActivityId,
+            ),
+          ).toBe(false);
+        }),
+    );
   });
 });
