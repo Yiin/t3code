@@ -7,12 +7,13 @@ import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import { ChatAttachment, EpicPlanCorrelation } from "@t3tools/contracts";
 
-import { toPersistenceSqlError } from "../Errors.ts";
+import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   GetProjectionThreadMessageInput,
   ProjectionThreadMessageRepository,
   type ProjectionThreadMessageRepositoryShape,
   DeleteProjectionThreadMessagesInput,
+  LatestUserMessageAtByThreadIdInput,
   ListProjectionThreadMessagesInput,
   ProjectionThreadMessage,
 } from "../Services/ProjectionThreadMessages.ts";
@@ -24,6 +25,17 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
     correlation: Schema.NullOr(Schema.fromJsonString(EpicPlanCorrelation)),
   }),
 );
+
+const LatestUserMessageAtRowSchema = Schema.Struct({
+  latestUserMessageAt: Schema.NullOr(Schema.String),
+});
+
+function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
+  return (cause: unknown) =>
+    Schema.isSchemaError(cause)
+      ? toPersistenceDecodeError(decodeOperation)(cause)
+      : toPersistenceSqlError(sqlOperation)(cause);
+}
 
 function toProjectionThreadMessage(
   row: Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>,
@@ -165,6 +177,18 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  const readLatestUserMessageAt = SqlSchema.findOne({
+    Request: LatestUserMessageAtByThreadIdInput,
+    Result: LatestUserMessageAtRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          MAX(created_at) AS "latestUserMessageAt"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId} AND role = 'user'
+      `,
+  });
+
   const upsert: ProjectionThreadMessageRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadMessageRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadMessageRepository.upsert:query")),
@@ -193,11 +217,24 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       ),
     );
 
+  const latestUserMessageAtByThreadId: ProjectionThreadMessageRepositoryShape["latestUserMessageAtByThreadId"] =
+    (input) =>
+      readLatestUserMessageAt(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionThreadMessageRepository.latestUserMessageAtByThreadId:query",
+            "ProjectionThreadMessageRepository.latestUserMessageAtByThreadId:decodeRows",
+          ),
+        ),
+        Effect.map((row) => row.latestUserMessageAt),
+      );
+
   return {
     upsert,
     getByMessageId,
     listByThreadId,
     deleteByThreadId,
+    latestUserMessageAtByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;
 });
 

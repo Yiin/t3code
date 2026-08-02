@@ -2477,6 +2477,704 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       ]);
     }),
   );
+
+  it.effect(
+    "keeps the shell summary correct for a thread with a large non-user-input activity history",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        const threadId = "thread-shell-summary-large";
+        // Formats an ISO timestamp offset from 2026-03-04T09:00:00.000Z by
+        // pure arithmetic (no `new Date()`, per the Effect lint rule).
+        const isoAtOffsetMs = (offsetMs: number): string => {
+          const pad = (value: number, width: number) => value.toString().padStart(width, "0");
+          const totalSeconds = Math.floor(offsetMs / 1000);
+          const milliseconds = offsetMs % 1000;
+          const seconds = totalSeconds % 60;
+          const totalMinutes = Math.floor(totalSeconds / 60);
+          const minutes = totalMinutes % 60;
+          const hours = 9 + Math.floor(totalMinutes / 60);
+          return `2026-03-04T${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(milliseconds, 3)}Z`;
+        };
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-shell-summary-large-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-shell-summary-large"),
+          occurredAt: "2026-03-04T09:00:00.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-shell-summary-large"),
+            title: "Project Shell Summary Large",
+            workspaceRoot: "/tmp/project-shell-summary-large",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-03-04T09:00:00.000Z",
+            updatedAt: "2026-03-04T09:00:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-shell-summary-large-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:01.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            projectId: ProjectId.make("project-shell-summary-large"),
+            title: "Thread Shell Summary Large",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-03-04T09:00:01.000Z",
+            updatedAt: "2026-03-04T09:00:01.000Z",
+          },
+        });
+
+        // A large run of activities that carry no requestId at all. These
+        // exercise the `continue` branch at derivePendingUserInputCountFromActivities
+        // and must not affect either pending count, only the (removed) full scan cost.
+        for (let index = 0; index < 500; index += 1) {
+          const occurredAt = isoAtOffsetMs(2_000 + index * 10);
+          yield* appendAndProject({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`evt-shell-summary-large-tool-${index}`),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make(threadId),
+            occurredAt,
+            commandId: CommandId.make(`cmd-shell-summary-large-tool-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-shell-summary-large-tool-${index}`),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make(threadId),
+              activity: {
+                id: EventId.make(`activity-shell-summary-large-tool-${index}`),
+                tone: "tool",
+                kind: "tool.updated",
+                summary: `Tool updated ${index}`,
+                payload: {},
+                turnId: null,
+                createdAt: occurredAt,
+              },
+            },
+          });
+        }
+
+        // approval.requested / approval.resolved DO carry a requestId but must
+        // be no-ops for pendingUserInputCount — they only feed
+        // projection_pending_approvals. One request is left pending, one is
+        // resolved, to also exercise pendingApprovalCount end-to-end. Reuses a
+        // requestId value also used by a user-input activity below to prove
+        // the two accountings never cross-pollute.
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-shell-summary-large-approval-1"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:07.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-approval-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-approval-1"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-shell-summary-large-approval-resolved-req"),
+              tone: "approval",
+              kind: "approval.requested",
+              summary: "Command approval requested",
+              payload: { requestId: "shared-request-1", requestKind: "command" },
+              turnId: null,
+              createdAt: "2026-03-04T09:00:07.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-shell-summary-large-approval-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:08.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-approval-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-approval-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-shell-summary-large-approval-resolved-res"),
+              tone: "approval",
+              kind: "approval.resolved",
+              summary: "Command approval resolved",
+              payload: { requestId: "shared-request-1", decision: "accept" },
+              turnId: null,
+              createdAt: "2026-03-04T09:00:08.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-shell-summary-large-approval-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:09.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-approval-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-approval-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-shell-summary-large-approval-pending-req"),
+              tone: "approval",
+              kind: "approval.requested",
+              summary: "Command approval requested",
+              payload: { requestId: "approval-request-pending", requestKind: "command" },
+              turnId: null,
+              createdAt: "2026-03-04T09:00:09.000Z",
+            },
+          },
+        });
+
+        // user-input.requested / .resolved: one closed, one left open.
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-shell-summary-large-user-input-1"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:10.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-user-input-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-user-input-1"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-shell-summary-large-user-input-requested-shared"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              payload: { requestId: "shared-request-1" },
+              turnId: null,
+              createdAt: "2026-03-04T09:00:10.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-shell-summary-large-user-input-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:11.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-user-input-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-user-input-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-shell-summary-large-user-input-resolved-shared"),
+              tone: "info",
+              kind: "user-input.resolved",
+              summary: "User input resolved",
+              payload: { requestId: "shared-request-1" },
+              turnId: null,
+              createdAt: "2026-03-04T09:00:11.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-shell-summary-large-user-input-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:12.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-user-input-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-user-input-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-shell-summary-large-user-input-requested-open"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              payload: { requestId: "user-input-request-open" },
+              turnId: null,
+              createdAt: "2026-03-04T09:00:12.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-shell-summary-large-message-assistant"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:13.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-message-assistant"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-message-assistant"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            messageId: MessageId.make("message-shell-summary-large-assistant"),
+            role: "assistant",
+            text: "assistant reply",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-04T09:00:13.000Z",
+            updatedAt: "2026-03-04T09:00:13.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-shell-summary-large-message-user"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:00:14.000Z",
+          commandId: CommandId.make("cmd-shell-summary-large-message-user"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-summary-large-message-user"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            messageId: MessageId.make("message-shell-summary-large-user"),
+            role: "user",
+            text: "user message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-04T09:00:14.000Z",
+            updatedAt: "2026-03-04T09:00:14.000Z",
+          },
+        });
+
+        const activityCountRows = yield* sql<{ readonly total: number }>`
+          SELECT COUNT(*) AS "total"
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+        `;
+        assert.equal(activityCountRows[0]?.total, 506);
+
+        const threadRows = yield* sql<{
+          readonly latestUserMessageAt: string | null;
+          readonly pendingApprovalCount: number;
+          readonly pendingUserInputCount: number;
+          readonly hasActionableProposedPlan: number;
+        }>`
+          SELECT
+            latest_user_message_at AS "latestUserMessageAt",
+            pending_approval_count AS "pendingApprovalCount",
+            pending_user_input_count AS "pendingUserInputCount",
+            has_actionable_proposed_plan AS "hasActionableProposedPlan"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(threadRows, [
+          {
+            latestUserMessageAt: "2026-03-04T09:00:14.000Z",
+            pendingApprovalCount: 1,
+            pendingUserInputCount: 1,
+            hasActionableProposedPlan: 0,
+          },
+        ]);
+      }),
+  );
+
+  it.effect("keeps pendingUserInputCount correct across requested -> resolved sequences", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      const threadId = "thread-user-input-requested-resolved";
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-user-input-req-res-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-user-input-requested-resolved"),
+        occurredAt: "2026-03-04T09:10:00.000Z",
+        commandId: CommandId.make("cmd-user-input-req-res-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-req-res-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-user-input-requested-resolved"),
+          title: "Project User Input Requested Resolved",
+          workspaceRoot: "/tmp/project-user-input-requested-resolved",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-03-04T09:10:00.000Z",
+          updatedAt: "2026-03-04T09:10:00.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-user-input-req-res-2"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make(threadId),
+        occurredAt: "2026-03-04T09:10:01.000Z",
+        commandId: CommandId.make("cmd-user-input-req-res-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-req-res-2"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make(threadId),
+          projectId: ProjectId.make("project-user-input-requested-resolved"),
+          title: "Thread User Input Requested Resolved",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-03-04T09:10:01.000Z",
+          updatedAt: "2026-03-04T09:10:01.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-user-input-req-res-3"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make(threadId),
+        occurredAt: "2026-03-04T09:10:02.000Z",
+        commandId: CommandId.make("cmd-user-input-req-res-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-req-res-3"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make(threadId),
+          activity: {
+            id: EventId.make("activity-user-input-req-res-requested"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: { requestId: "user-input-request-req-res" },
+            turnId: null,
+            createdAt: "2026-03-04T09:10:02.000Z",
+          },
+        },
+      });
+
+      const afterRequested = yield* sql<{ readonly pendingUserInputCount: number }>`
+        SELECT pending_user_input_count AS "pendingUserInputCount"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(afterRequested, [{ pendingUserInputCount: 1 }]);
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-user-input-req-res-4"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make(threadId),
+        occurredAt: "2026-03-04T09:10:03.000Z",
+        commandId: CommandId.make("cmd-user-input-req-res-4"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-req-res-4"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make(threadId),
+          activity: {
+            id: EventId.make("activity-user-input-req-res-resolved"),
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "User input resolved",
+            payload: { requestId: "user-input-request-req-res" },
+            turnId: null,
+            createdAt: "2026-03-04T09:10:03.000Z",
+          },
+        },
+      });
+
+      const afterResolved = yield* sql<{ readonly pendingUserInputCount: number }>`
+        SELECT pending_user_input_count AS "pendingUserInputCount"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(afterResolved, [{ pendingUserInputCount: 0 }]);
+    }),
+  );
+
+  it.effect(
+    "does not clear pendingUserInputCount for a non-stale provider.user-input.respond.failed detail",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        const threadId = "thread-user-input-nonstale-failure";
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-user-input-nonstale-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-user-input-nonstale-failure"),
+          occurredAt: "2026-03-04T09:20:00.000Z",
+          commandId: CommandId.make("cmd-user-input-nonstale-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-user-input-nonstale-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-user-input-nonstale-failure"),
+            title: "Project User Input Non-Stale Failure",
+            workspaceRoot: "/tmp/project-user-input-nonstale-failure",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-03-04T09:20:00.000Z",
+            updatedAt: "2026-03-04T09:20:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-user-input-nonstale-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:20:01.000Z",
+          commandId: CommandId.make("cmd-user-input-nonstale-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-user-input-nonstale-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            projectId: ProjectId.make("project-user-input-nonstale-failure"),
+            title: "Thread User Input Non-Stale Failure",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-03-04T09:20:01.000Z",
+            updatedAt: "2026-03-04T09:20:01.000Z",
+          },
+        });
+
+        // requested(r1) then failed(r1, non-stale detail) => stays open (count 1).
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-user-input-nonstale-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:20:02.000Z",
+          commandId: CommandId.make("cmd-user-input-nonstale-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-user-input-nonstale-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-user-input-nonstale-requested-r1"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              payload: { requestId: "user-input-request-r1" },
+              turnId: null,
+              createdAt: "2026-03-04T09:20:02.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-user-input-nonstale-4"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:20:03.000Z",
+          commandId: CommandId.make("cmd-user-input-nonstale-4"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-user-input-nonstale-4"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-user-input-nonstale-failed-r1"),
+              tone: "error",
+              kind: "provider.user-input.respond.failed",
+              summary: "Provider user input response failed",
+              payload: { requestId: "user-input-request-r1", detail: "provider timeout" },
+              turnId: null,
+              createdAt: "2026-03-04T09:20:03.000Z",
+            },
+          },
+        });
+
+        // failed(r2, non-stale detail) with no prior requested(r2) => stays 0
+        // for r2; does not accidentally open a request.
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-user-input-nonstale-5"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make(threadId),
+          occurredAt: "2026-03-04T09:20:04.000Z",
+          commandId: CommandId.make("cmd-user-input-nonstale-5"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-user-input-nonstale-5"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make("activity-user-input-nonstale-failed-r2"),
+              tone: "error",
+              kind: "provider.user-input.respond.failed",
+              summary: "Provider user input response failed",
+              payload: { requestId: "user-input-request-r2", detail: "provider timeout" },
+              turnId: null,
+              createdAt: "2026-03-04T09:20:04.000Z",
+            },
+          },
+        });
+
+        const threadRows = yield* sql<{ readonly pendingUserInputCount: number }>`
+          SELECT pending_user_input_count AS "pendingUserInputCount"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(threadRows, [{ pendingUserInputCount: 1 }]);
+      }),
+  );
+
+  it.effect("ignores user-input activities whose payload carries no requestId", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      const threadId = "thread-user-input-missing-request-id";
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-user-input-missing-req-id-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-user-input-missing-request-id"),
+        occurredAt: "2026-03-04T09:30:00.000Z",
+        commandId: CommandId.make("cmd-user-input-missing-req-id-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-missing-req-id-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-user-input-missing-request-id"),
+          title: "Project User Input Missing Request Id",
+          workspaceRoot: "/tmp/project-user-input-missing-request-id",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-03-04T09:30:00.000Z",
+          updatedAt: "2026-03-04T09:30:00.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-user-input-missing-req-id-2"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make(threadId),
+        occurredAt: "2026-03-04T09:30:01.000Z",
+        commandId: CommandId.make("cmd-user-input-missing-req-id-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-missing-req-id-2"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make(threadId),
+          projectId: ProjectId.make("project-user-input-missing-request-id"),
+          title: "Thread User Input Missing Request Id",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-03-04T09:30:01.000Z",
+          updatedAt: "2026-03-04T09:30:01.000Z",
+        },
+      });
+
+      // Kind is in the narrowed SQL filter, but the payload has no
+      // requestId. The narrowed query has no json_extract guard (unlike
+      // migration 024), so this row must decode cleanly and be skipped by
+      // the `continue` branch in the fold.
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-user-input-missing-req-id-3"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make(threadId),
+        occurredAt: "2026-03-04T09:30:02.000Z",
+        commandId: CommandId.make("cmd-user-input-missing-req-id-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-user-input-missing-req-id-3"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make(threadId),
+          activity: {
+            id: EventId.make("activity-user-input-missing-req-id"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: {},
+            turnId: null,
+            createdAt: "2026-03-04T09:30:02.000Z",
+          },
+        },
+      });
+
+      const threadRows = yield* sql<{ readonly pendingUserInputCount: number }>`
+          SELECT pending_user_input_count AS "pendingUserInputCount"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+      assert.deepEqual(threadRows, [{ pendingUserInputCount: 0 }]);
+    }),
+  );
 });
 
 it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(

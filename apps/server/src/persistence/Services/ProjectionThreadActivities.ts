@@ -44,6 +44,12 @@ export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
 export type DeleteProjectionThreadActivitiesInput =
   typeof DeleteProjectionThreadActivitiesInput.Type;
 
+export const ListUserInputProjectionThreadActivitiesInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ListUserInputProjectionThreadActivitiesInput =
+  typeof ListUserInputProjectionThreadActivitiesInput.Type;
+
 /**
  * ProjectionThreadActivityRepositoryShape - Service API for projected thread activity.
  */
@@ -73,6 +79,18 @@ export interface ProjectionThreadActivityRepositoryShape {
   readonly deleteByThreadId: (
     input: DeleteProjectionThreadActivitiesInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * List projected thread activity rows for a thread, restricted to the
+   * kinds `derivePendingUserInputCountFromActivities` inspects
+   * (`user-input.requested`, `user-input.resolved`,
+   * `provider.user-input.respond.failed`).
+   *
+   * Returned in the same order as {@link listByThreadId}.
+   */
+  readonly listUserInputByThreadId: (
+    input: ListUserInputProjectionThreadActivitiesInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 }
 
 /**

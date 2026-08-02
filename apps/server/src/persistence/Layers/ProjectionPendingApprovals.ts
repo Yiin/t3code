@@ -1,17 +1,24 @@
+import { NonNegativeInt } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
   GetProjectionPendingApprovalInput,
+  CountPendingProjectionPendingApprovalsInput,
   DeleteProjectionPendingApprovalInput,
   ListProjectionPendingApprovalsInput,
   ProjectionPendingApproval,
   ProjectionPendingApprovalRepository,
   type ProjectionPendingApprovalRepositoryShape,
 } from "../Services/ProjectionPendingApprovals.ts";
+
+const CountPendingRowSchema = Schema.Struct({
+  count: NonNegativeInt,
+});
 
 const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -95,6 +102,18 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
       `,
   });
 
+  const countPendingProjectionPendingApprovalRows = SqlSchema.findOne({
+    Request: CountPendingProjectionPendingApprovalsInput,
+    Result: CountPendingRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          COUNT(*) AS "count"
+        FROM projection_pending_approvals
+        WHERE thread_id = ${threadId} AND status = 'pending'
+      `,
+  });
+
   const upsert: ProjectionPendingApprovalRepositoryShape["upsert"] = (row) =>
     upsertProjectionPendingApprovalRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionPendingApprovalRepository.upsert:query")),
@@ -123,11 +142,21 @@ const makeProjectionPendingApprovalRepository = Effect.gen(function* () {
       ),
     );
 
+  const countPendingByThreadId: ProjectionPendingApprovalRepositoryShape["countPendingByThreadId"] =
+    (input) =>
+      countPendingProjectionPendingApprovalRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionPendingApprovalRepository.countPendingByThreadId:query"),
+        ),
+        Effect.map((row) => row.count),
+      );
+
   return {
     upsert,
     listByThreadId,
     getByRequestId,
     deleteByRequestId,
+    countPendingByThreadId,
   } satisfies ProjectionPendingApprovalRepositoryShape;
 });
 

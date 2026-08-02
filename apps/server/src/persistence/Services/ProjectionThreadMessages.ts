@@ -51,6 +51,11 @@ export const DeleteProjectionThreadMessagesInput = Schema.Struct({
 });
 export type DeleteProjectionThreadMessagesInput = typeof DeleteProjectionThreadMessagesInput.Type;
 
+export const LatestUserMessageAtByThreadIdInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type LatestUserMessageAtByThreadIdInput = typeof LatestUserMessageAtByThreadIdInput.Type;
+
 /**
  * ProjectionThreadMessageRepositoryShape - Service API for projected thread messages.
  */
@@ -86,6 +91,16 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly deleteByThreadId: (
     input: DeleteProjectionThreadMessagesInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Read the most recent `createdAt` among a thread's `user`-role messages.
+   *
+   * Returns `null` when the thread has no user messages. Does not consider
+   * assistant or system messages.
+   */
+  readonly latestUserMessageAtByThreadId: (
+    input: LatestUserMessageAtByThreadIdInput,
+  ) => Effect.Effect<string | null, ProjectionRepositoryError>;
 }
 
 /**
