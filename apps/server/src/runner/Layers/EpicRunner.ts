@@ -460,19 +460,36 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       );
 
     /**
-     * Look up the run's most recent iteration and release its child via
+     * Release every child this run claimed and left in progress, via
      * {@link releaseClaimedChild}. The lone finalizer this runner needs — every
      * terminal exit funnels through one loop, and one restart bookkeeping path
      * that never reaches the loop at all — rather than a release call
      * scattered across each of the outcomes that can strand a claim.
+     *
+     * Every iteration is swept, not just the latest: an earlier iteration can
+     * commit and classify as done while the in-thread agent leaves its own
+     * child `in_progress`, and nothing else would ever reopen that one
+     * (t3code-1bk). `releaseClaimedChild` re-reads each issue and no-ops unless
+     * it is still `in_progress`, so sweeping already-closed iterations is free
+     * of side effects. Ids are de-duplicated because a retried iteration can
+     * claim the same child twice.
      */
     const releaseStrandedChild = (runId: EpicRunId): Effect.Effect<void> =>
       Effect.gen(function* () {
         const run = yield* store.getRun({ runId });
         if (Option.isNone(run)) return;
-        const latest = yield* store.getLatestIteration({ runId });
-        if (Option.isNone(latest) || latest.value.issueId === null) return;
-        yield* releaseClaimedChild(run.value.cwd, latest.value.issueId);
+        const iterations = yield* store.listIterations({ runId });
+        const issueIds = [
+          ...new Set(
+            iterations
+              .map((iteration) => iteration.issueId)
+              .filter((issueId): issueId is string => issueId !== null),
+          ),
+        ];
+        yield* Effect.forEach(issueIds, (issueId) => releaseClaimedChild(run.value.cwd, issueId), {
+          concurrency: 1,
+          discard: true,
+        });
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("epic.runner.release-stranded-child-lookup-failed", {

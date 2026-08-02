@@ -962,6 +962,38 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("releases stranded children from earlier iterations, not just the latest", () => {
+    const failing = {
+      text: null,
+      head: "head-0",
+      turnState: "error",
+      sessionStatus: "error",
+    } as const;
+    const harness = createHarness({
+      script: [failing, failing, failing],
+      // `child-1` belongs to the FIRST iteration and `child-3` to the last.
+      // Before t3code-1bk only the latest iteration was swept, so `child-1`
+      // stayed claimed forever and `bd ready` could never resurface it.
+      childStatuses: { "child-1": "in_progress", "child-3": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      yield* waitFor(
+        () =>
+          harness.childStatus("child-1") === "open" && harness.childStatus("child-3") === "open",
+      );
+
+      assert.strictEqual(harness.childStatus("child-1"), "open");
+      assert.strictEqual(harness.childStatus("child-3"), "open");
+      const released = harness.processRequests
+        .filter((request) => request.command === "bd" && request.args[0] === "update")
+        .map((request) => request.args[1]);
+      assert.deepStrictEqual(released, ["child-1", "child-3"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("does not touch a child that was already closed when the run failed", () => {
     const failing = {
       text: null,
