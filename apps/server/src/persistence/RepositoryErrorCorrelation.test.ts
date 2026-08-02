@@ -289,6 +289,7 @@ describe("persistence error correlation", () => {
           model: "gpt-5.4",
         },
         runtimeMode: "full-access",
+        originThreadId: null,
         status: "running",
         maxIterations: 5,
         iterationsCompleted: 0,

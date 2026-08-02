@@ -7414,6 +7414,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         prompt: "Cook one child",
         modelSelection: defaultModelSelection,
         runtimeMode: "full-access" as const,
+        originThreadId: null,
         status: "running" as const,
         maxIterations: 10,
         iterationsCompleted: 0,
@@ -7489,7 +7490,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(started.runId, run.runId);
-      const launchInput = { epicId: run.epicId, projectId: run.projectId, cwd: run.cwd };
+      // `originThreadId` is what an in-thread skill sends; both transports must
+      // carry it through to the runner untouched.
+      const launchInput = {
+        epicId: run.epicId,
+        projectId: run.projectId,
+        cwd: run.cwd,
+        originThreadId: ThreadId.make("thread-launcher"),
+      };
       const launched = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) => client[WS_METHODS.epicRunLaunch](launchInput)),
       );
@@ -7596,6 +7604,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         prompt: "Cook",
         modelSelection: defaultModelSelection,
         runtimeMode: "full-access" as const,
+        originThreadId: null,
         status: "running" as const,
         maxIterations: 3,
         iterationsCompleted: 0,

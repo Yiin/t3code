@@ -484,6 +484,7 @@ it.effect(
         environmentId: EnvironmentId.make("env-1"),
         projectId: ProjectId.make("project-1"),
         workspaceRoot: "/tmp/workspace",
+        threadId,
         token: "t3-token-1",
       });
       assert.deepEqual(auth.issued, [

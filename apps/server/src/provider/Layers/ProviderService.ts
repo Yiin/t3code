@@ -337,6 +337,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         environmentId: mcpSession.environmentId,
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
+        threadId: input.threadId,
         token: issued.token,
       } satisfies T3SessionEnvironment;
     });

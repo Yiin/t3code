@@ -317,6 +317,7 @@ const testT3Environment = {
   environmentId: EnvironmentId.make("env-1"),
   projectId: ProjectId.make("project-1"),
   workspaceRoot: "/tmp/workspace",
+  threadId: asThreadId("thread-t3-env-origin"),
   token: "t3-token-1",
 } as const;
 
@@ -346,6 +347,7 @@ t3EnvironmentLayer("CodexAdapterLive t3Environment injection", (it) => {
       NodeAssert.equal(options?.environment?.T3_ENVIRONMENT_ID, "env-1");
       NodeAssert.equal(options?.environment?.T3_PROJECT_ID, "project-1");
       NodeAssert.equal(options?.environment?.T3_WORKSPACE_ROOT, "/tmp/workspace");
+      NodeAssert.equal(options?.environment?.T3_THREAD_ID, "thread-t3-env-origin");
       NodeAssert.equal(options?.environment?.T3_SERVER_TOKEN, "t3-token-1");
       NodeAssert.deepEqual(options?.appServerArgs, [
         "-c",
@@ -376,6 +378,7 @@ t3EnvironmentLayer("CodexAdapterLive t3Environment injection", (it) => {
         T3_ENVIRONMENT_ID: "env-1",
         T3_PROJECT_ID: "project-1",
         T3_WORKSPACE_ROOT: "/tmp/workspace",
+        T3_THREAD_ID: "thread-t3-env-origin",
         T3_SERVER_TOKEN: "t3-token-1",
       });
       NodeAssert.equal(options?.appServerArgs, undefined);

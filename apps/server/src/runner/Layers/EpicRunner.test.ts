@@ -675,6 +675,36 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("records the launching thread, and null when there is none", () => {
+    const harness = createHarness({ script: [], readyOutput: "[]" });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+
+      const fromThread = yield* runner.launchRun({
+        epicId: "epic-from-thread",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        originThreadId: ThreadId.make("thread-launcher"),
+      });
+      assert.strictEqual(fromThread.originThreadId, "thread-launcher");
+
+      // The Epics page launches without a thread; nothing may infer one from
+      // the run's own iteration threads, which are children of the run.
+      const fromEpicsPage = yield* runner.launchRun({
+        epicId: "epic-from-page",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      assert.strictEqual(fromEpicsPage.originThreadId, null);
+
+      assert.strictEqual(
+        harness.store.runs.get(fromThread.runId)?.originThreadId,
+        "thread-launcher",
+      );
+      assert.strictEqual(harness.store.runs.get(fromEpicsPage.runId)?.originThreadId, null);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("reaches completion without consuming streamRuns, stopping on RALPH_DONE", () => {
     const harness = createHarness({
       script: [
@@ -1100,6 +1130,7 @@ describe("EpicRunner", () => {
       prompt: "do one unit of work",
       modelSelection,
       runtimeMode: "full-access",
+      originThreadId: null,
       status: "running",
       maxIterations: 10,
       iterationsCompleted: 1,
@@ -1183,6 +1214,7 @@ describe("EpicRunner", () => {
       prompt: "do one unit of work",
       modelSelection,
       runtimeMode: "full-access",
+      originThreadId: null,
       status: "running",
       maxIterations: 10,
       iterationsCompleted: 1,

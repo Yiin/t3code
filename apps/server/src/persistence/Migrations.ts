@@ -50,6 +50,7 @@ import Migration0034 from "./Migrations/034_EpicRuns.ts";
 import Migration0035 from "./Migrations/035_EpicRunIterationIssueId.ts";
 import Migration0036 from "./Migrations/036_EpicRunIterationWhy.ts";
 import Migration0037 from "./Migrations/037_ProjectionThreadMessageCorrelation.ts";
+import Migration0038 from "./Migrations/038_EpicRunOriginThreadId.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -99,6 +100,7 @@ export const migrationEntries = [
   [35, "EpicRunIterationIssueId", Migration0035],
   [36, "EpicRunIterationWhy", Migration0036],
   [37, "ProjectionThreadMessageCorrelation", Migration0037],
+  [38, "EpicRunOriginThreadId", Migration0038],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

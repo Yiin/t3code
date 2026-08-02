@@ -23,6 +23,7 @@ export const EpicRunInput = Schema.Struct({
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed("full-access"))),
   maxIterations: Schema.optional(PositiveInt),
+  originThreadId: Schema.optional(ThreadId),
 });
 export type EpicRunInput = typeof EpicRunInput.Type;
 export type StartEpicRunInput = Omit<EpicRunInput, "runtimeMode"> & {
@@ -33,6 +34,7 @@ export const LaunchEpicRunInput = Schema.Struct({
   epicId: TrimmedNonEmptyString,
   projectId: ProjectId,
   cwd: TrimmedNonEmptyString,
+  originThreadId: Schema.optional(ThreadId),
 });
 export type LaunchEpicRunInput = typeof LaunchEpicRunInput.Type;
 
@@ -64,6 +66,12 @@ export const EpicRun = Schema.Struct({
   prompt: Schema.String,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
+  /**
+   * The thread whose agent launched this run, when a skill launched it from
+   * inside one; `null` for a launch from the Epics page. Never inferred from
+   * the run's own iteration threads — those are children, not the launcher.
+   */
+  originThreadId: Schema.NullOr(ThreadId),
   status: EpicRunStatus,
   maxIterations: PositiveInt,
   iterationsCompleted: NonNegativeInt,

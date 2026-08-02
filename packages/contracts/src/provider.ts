@@ -62,6 +62,9 @@ export const T3SessionEnvironment = Schema.Struct({
   environmentId: EnvironmentId,
   projectId: ProjectId,
   workspaceRoot: TrimmedNonEmptyString,
+  // The agent's own thread. A skill needs it to attribute work it starts back
+  // to the thread it runs in — for example an epic run's `originThreadId`.
+  threadId: ThreadId,
   token: TrimmedNonEmptyString,
 });
 export type T3SessionEnvironment = typeof T3SessionEnvironment.Type;

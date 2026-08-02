@@ -1049,6 +1049,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           prompt: input.prompt,
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+          // Only ever what the launcher supplied: the run's own iteration
+          // threads are children, so they can never stand in for an origin.
+          originThreadId: input.originThreadId ?? null,
           status: "running",
           maxIterations: Math.max(1, Math.trunc(input.maxIterations ?? defaultMaxIterations)),
           iterationsCompleted: 0,

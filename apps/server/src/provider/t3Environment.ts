@@ -12,6 +12,7 @@ export function toT3EnvironmentEnv(t3Environment: T3SessionEnvironment): Record<
     T3_ENVIRONMENT_ID: t3Environment.environmentId,
     T3_PROJECT_ID: t3Environment.projectId,
     T3_WORKSPACE_ROOT: t3Environment.workspaceRoot,
+    T3_THREAD_ID: t3Environment.threadId,
     T3_SERVER_TOKEN: t3Environment.token,
   };
 }

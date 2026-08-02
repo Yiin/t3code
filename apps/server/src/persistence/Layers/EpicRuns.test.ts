@@ -22,6 +22,7 @@ const makeRun = (overrides: Partial<EpicRun> = {}): EpicRun => ({
   prompt: "Cook the epic.",
   modelSelection,
   runtimeMode: "full-access",
+  originThreadId: null,
   status: "running",
   maxIterations: 10,
   iterationsCompleted: 0,
@@ -47,6 +48,7 @@ describe("EpicRunStore", () => {
       const run = makeRun({
         currentThreadId: ThreadId.make("thread-epic-1"),
         currentTurnStartedAt: "2026-07-27T00:01:00.000Z",
+        originThreadId: ThreadId.make("thread-launcher-1"),
       });
       yield* store.upsertRun(run);
 
@@ -67,6 +69,20 @@ describe("EpicRunStore", () => {
         // @effect-diagnostics-next-line preferSchemaOverJson:off
         JSON.stringify(modelSelection),
       );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  // A run launched from the Epics page has no launcher thread, and neither do
+  // rows written before the column existed.
+  it.effect("round-trips a run with no origin thread", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+
+      const run = makeRun({ runId: EpicRunId.make("run-no-origin") });
+      yield* store.upsertRun(run);
+
+      const persisted = yield* store.getRun({ runId: run.runId });
+      assert.strictEqual(Option.getOrNull(persisted)?.originThreadId, null);
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

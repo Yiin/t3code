@@ -228,8 +228,8 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 
 When the skill executes inside a t3code agent session, the server injects
 `T3_SERVER_URL`, `T3_ENVIRONMENT_ID`, `T3_PROJECT_ID`, `T3_WORKSPACE_ROOT`,
-and `T3_SERVER_TOKEN` into the environment. Hand the epic to the server-owned
-EpicRunner instead of launching the terminal coordinator.
+`T3_THREAD_ID`, and `T3_SERVER_TOKEN` into the environment. Hand the epic to
+the server-owned EpicRunner instead of launching the terminal coordinator.
 
 **Detection.** `T3_SERVER_URL` unset → terminal `run.sh` coordinator. Set →
 probe `GET $T3_SERVER_URL/.well-known/t3/environment` (unauthenticated).
@@ -242,8 +242,12 @@ failed, not just that you fell back).
 curl -sS -X POST "$T3_SERVER_URL/api/epic-runs/launch" \
   -H "Authorization: Bearer $T3_SERVER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"epicId\": \"<beads epic id>\", \"projectId\": \"$T3_PROJECT_ID\", \"cwd\": \"$T3_WORKSPACE_ROOT\"}"
+  -d "{\"epicId\": \"<beads epic id>\", \"projectId\": \"$T3_PROJECT_ID\", \"cwd\": \"$T3_WORKSPACE_ROOT\", \"originThreadId\": \"$T3_THREAD_ID\"}"
 ```
+
+`originThreadId` is your own thread. The server groups the run's iteration
+threads under it in the sidebar. Drop the field when `T3_THREAD_ID` is unset —
+send it only when you have a real value, never an empty string.
 
 **Response handling.**
 
