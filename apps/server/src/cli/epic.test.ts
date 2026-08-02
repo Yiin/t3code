@@ -46,10 +46,10 @@ const run = {
 } as const;
 
 it("resolves the project whose normalized workspace root matches", () => {
-  // The shell snapshot only ever contains active projects — the server-side
-  // query filters `deleted_at IS NULL` — so a deleted project is simply never
-  // in `projects` and any cwd that only ever mapped to one resolves to
-  // nothing, same as any other unmatched cwd.
+  // The shell snapshot only ever contains active projects — getShellSnapshot
+  // drops deleted rows while assembling the response — so a deleted project is
+  // simply never in `projects`, and any cwd that only ever mapped to one
+  // resolves to nothing, same as any other unmatched cwd.
   const snapshot = {
     projects: [{ id: ProjectId.make("project-1"), workspaceRoot: "/repo" }],
   } as never;
