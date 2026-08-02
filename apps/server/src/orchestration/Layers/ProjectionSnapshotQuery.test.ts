@@ -191,6 +191,71 @@ const appendActivityAndBumpSequence = (sequence: number) =>
     );
   });
 
+/**
+ * Runs one read under a collecting tracer and asserts that each named read ran
+ * its statement inside the transaction and its row decode after it.
+ *
+ * The transaction holds the single connection permit for its whole duration, so
+ * a decode that drifted back inside would block every writer for its own cost
+ * on top of the query's. Spans are the only place that boundary is observable.
+ */
+const assertRowDecodesLeaveTheTransaction =
+  (label: string, operations: ReadonlyArray<string>) =>
+  <A, E, R>(read: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const spans: Array<Tracer.Span> = [];
+      const collectingTracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          spans.push(span);
+          return span;
+        },
+      });
+
+      // An enclosing span, so "the decode is outside the transaction" is an
+      // assertion about a real parent rather than about two undefined ones.
+      yield* read.pipe(Effect.withSpan(`test.${label}`), Effect.withTracer(collectingTracer));
+
+      const spanNamed = (name: string) => {
+        const matches = spans.filter((span) => span.name === name);
+        assert.equal(matches.length, 1, `expected exactly one ${name} span from ${label}`);
+        return matches[0]!;
+      };
+      const parentIdOf = (span: Tracer.Span) => span.parent.pipe(Option.getOrUndefined)?.spanId;
+
+      const readSpan = spanNamed(`test.${label}`);
+      const transactionSpan = spanNamed("sql.transaction");
+      assert.equal(parentIdOf(transactionSpan), readSpan.spanId, label);
+
+      for (const operation of operations) {
+        const querySpan = spanNamed(`${operation}:query`);
+        const decodeSpan = spanNamed(`${operation}:decodeRows`);
+
+        assert.equal(parentIdOf(querySpan), transactionSpan.spanId, `${operation}:query`);
+        assert.equal(parentIdOf(decodeSpan), readSpan.spanId, `${operation}:decodeRows`);
+        assert.equal(
+          querySpan.attributes.get("db.rows"),
+          decodeSpan.attributes.get("db.rows"),
+          `${operation} row counts`,
+        );
+      }
+
+      // Named rather than counted, so a read added to the transaction later
+      // fails here instead of passing unnoticed. `projection_state` is the one
+      // read still fused: it holds one row per projector, so its decode cannot
+      // grow with the workspace, and its statement must stay inside the
+      // transaction to keep the resume cursor consistent with the rows.
+      const transactionChildNames = spans
+        .filter((span) => parentIdOf(span) === transactionSpan.spanId)
+        .map((span) => span.name)
+        .toSorted();
+      assert.deepStrictEqual(
+        transactionChildNames.filter((name) => name !== "sql.execute"),
+        operations.map((operation) => `${operation}:query`).toSorted(),
+        label,
+      );
+    });
+
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolver.layer),
@@ -1695,6 +1760,41 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           .map((operation) => `${operation}:query`)
           .toSorted(),
       );
+    }),
+  );
+
+  // Same rule for the bulk snapshots. `getCommandReadModel` matters most: every
+  // command dispatch waits on it, so a row decode left inside its transaction
+  // would hold the single connection permit against every writer for the decode
+  // as well as the queries.
+  it.effect("decodes bulk snapshot rows outside the transaction that read them", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedActivityCapFixture;
+      yield* setProjectionStateSequence(101);
+
+      yield* assertRowDecodesLeaveTheTransaction("getCommandReadModel", [
+        "ProjectionSnapshotQuery.getCommandReadModel:listProjects",
+        "ProjectionSnapshotQuery.getCommandReadModel:listThreads",
+        "ProjectionSnapshotQuery.getCommandReadModel:listThreadProposedPlans",
+        "ProjectionSnapshotQuery.getCommandReadModel:listThreadSessions",
+        "ProjectionSnapshotQuery.getCommandReadModel:listLatestTurns",
+      ])(snapshotQuery.getCommandReadModel());
+
+      yield* assertRowDecodesLeaveTheTransaction("getShellSnapshot", [
+        "ProjectionSnapshotQuery.getShellSnapshot:listProjects",
+        "ProjectionSnapshotQuery.getShellSnapshot:listThreads",
+        "ProjectionSnapshotQuery.getShellSnapshot:listThreadSessions",
+        "ProjectionSnapshotQuery.getShellSnapshot:listLatestTurns",
+      ])(snapshotQuery.getShellSnapshot());
+
+      yield* assertRowDecodesLeaveTheTransaction("getArchivedShellSnapshot", [
+        "ProjectionSnapshotQuery.getArchivedShellSnapshot:listProjects",
+        "ProjectionSnapshotQuery.getArchivedShellSnapshot:listThreads",
+        "ProjectionSnapshotQuery.getArchivedShellSnapshot:listThreadSessions",
+        "ProjectionSnapshotQuery.getArchivedShellSnapshot:listLatestTurns",
+      ])(snapshotQuery.getArchivedShellSnapshot());
     }),
   );
 
