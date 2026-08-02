@@ -12,7 +12,10 @@ import type {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  AuthSessionId,
+  EnvironmentId,
   EventId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
@@ -22,6 +25,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -57,9 +61,23 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
+import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
+import { makeUnconfiguredEnvironmentAuth } from "../../auth/environmentAuthTestStub.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
+
+// Default EnvironmentAuth double for suites that never exercise T3_*
+// injection: no `projectId`/`workspaceRoot` on the start input means
+// ProviderService never calls into it. It dies loudly if that changes.
+const environmentAuthTestLayer = Layer.succeed(
+  EnvironmentAuth.EnvironmentAuth,
+  makeUnconfiguredEnvironmentAuth(),
+);
+
+const makeProviderServiceLiveForTest = (options?: Parameters<typeof makeProviderServiceLive>[0]) =>
+  makeProviderServiceLive(options).pipe(Layer.provide(environmentAuthTestLayer));
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
@@ -88,27 +106,28 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
-  const startSession = vi.fn((input: ProviderSessionStartInput) =>
-    Effect.sync(() => {
-      const now = "2026-01-01T00:00:00.000Z";
-      const session: ProviderSession = {
-        provider,
-        ...(input.providerInstanceId !== undefined
-          ? { providerInstanceId: input.providerInstanceId }
-          : {}),
-        status: "ready",
-        runtimeMode: input.runtimeMode,
-        threadId: input.threadId,
-        resumeCursor: input.resumeCursor ?? {
-          opaque: `resume-${String(input.threadId)}`,
-        },
-        cwd: input.cwd ?? process.cwd(),
-        createdAt: now,
-        updatedAt: now,
-      };
-      sessions.set(session.threadId, session);
-      return session;
-    }),
+  const startSession = vi.fn(
+    (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, ProviderAdapterError> =>
+      Effect.sync(() => {
+        const now = "2026-01-01T00:00:00.000Z";
+        const session: ProviderSession = {
+          provider,
+          ...(input.providerInstanceId !== undefined
+            ? { providerInstanceId: input.providerInstanceId }
+            : {}),
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          threadId: input.threadId,
+          resumeCursor: input.resumeCursor ?? {
+            opaque: `resume-${String(input.threadId)}`,
+          },
+          cwd: input.cwd ?? process.cwd(),
+          createdAt: now,
+          updatedAt: now,
+        };
+        sessions.set(session.threadId, session);
+        return session;
+      }),
   );
 
   const sendTurn = vi.fn(
@@ -288,7 +307,7 @@ function makeProviderServiceLayer() {
 
   const layer = it.layer(
     Layer.mergeAll(
-      makeProviderServiceLive().pipe(
+      makeProviderServiceLiveForTest().pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
@@ -339,7 +358,7 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = Layer.mergeAll(
-      makeProviderServiceLive().pipe(
+      makeProviderServiceLiveForTest().pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
@@ -365,6 +384,219 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
     assert.equal(codex.stopAll.mock.calls.length, 1);
   }),
 );
+
+function makeEnvironmentAuthDouble() {
+  const issued: Array<{
+    readonly scopes: ReadonlyArray<string> | undefined;
+    readonly label: string | undefined;
+  }> = [];
+  const revoked: Array<AuthSessionId> = [];
+  let counter = 0;
+  const service = EnvironmentAuth.EnvironmentAuth.of({
+    issueSession: (
+      input?: Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["issueSession"]>[0],
+    ) =>
+      Effect.sync((): EnvironmentAuth.IssuedBearerSession => {
+        counter += 1;
+        issued.push({ scopes: input?.scopes, label: input?.label });
+        return {
+          sessionId: AuthSessionId.make(`t3-auth-session-${counter}`),
+          token: `t3-token-${counter}`,
+          method: "bearer-access-token",
+          scopes: input?.scopes ?? [],
+          subject: "t3-test",
+          client: { deviceType: "bot" },
+          expiresAt: DateTime.makeUnsafe(0),
+        };
+      }),
+    revokeSession: (sessionId: AuthSessionId) =>
+      Effect.sync(() => {
+        revoked.push(sessionId);
+        return true;
+      }),
+  } as unknown as EnvironmentAuth.EnvironmentAuth["Service"]);
+  return {
+    layer: Layer.succeed(EnvironmentAuth.EnvironmentAuth, service),
+    issued,
+    revoked,
+  };
+}
+
+function makeT3EnvironmentTestLayers(auth: ReturnType<typeof makeEnvironmentAuthDouble>) {
+  const codex = makeFakeCodexAdapter();
+  const registry = makeAdapterRegistryMock({
+    [CODEX_DRIVER]: codex.adapter,
+  });
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = makeProviderServiceLive().pipe(
+    Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+    Layer.provide(directoryLayer),
+    Layer.provide(defaultServerSettingsLayer),
+    Layer.provide(auth.layer),
+    Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+  return { codex, providerLayer };
+}
+
+const setTestMcpProviderSession = (threadId: ThreadId) => {
+  McpProviderSession.setMcpProviderSession({
+    environmentId: EnvironmentId.make("env-1"),
+    threadId,
+    providerSessionId: "mcp-session-1",
+    providerInstanceId: codexInstanceId,
+    endpoint: "http://127.0.0.1:3773/mcp",
+    authorizationHeader: "Bearer mcp-token",
+  });
+};
+
+it.effect(
+  "ProviderServiceLive injects t3Environment when MCP session and project context exist",
+  () => {
+    const threadId = asThreadId("thread-t3-env");
+    return Effect.gen(function* () {
+      const auth = makeEnvironmentAuthDouble();
+      const { codex, providerLayer } = makeT3EnvironmentTestLayers(auth);
+      setTestMcpProviderSession(threadId);
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+          projectId: ProjectId.make("project-1"),
+          workspaceRoot: "/tmp/workspace",
+        });
+      }).pipe(Effect.provide(Layer.merge(providerLayer, NodeServices.layer)));
+
+      const startInput = codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepEqual(startInput?.t3Environment, {
+        serverUrl: "http://127.0.0.1:3773",
+        environmentId: EnvironmentId.make("env-1"),
+        projectId: ProjectId.make("project-1"),
+        workspaceRoot: "/tmp/workspace",
+        token: "t3-token-1",
+      });
+      assert.deepEqual(auth.issued, [
+        {
+          scopes: ["orchestration:read", "orchestration:operate"],
+          label: `agent-thread-${threadId}`,
+        },
+      ]);
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    );
+  },
+);
+
+it.effect("ProviderServiceLive omits t3Environment when no MCP session exists", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("thread-t3-env-no-mcp");
+    const auth = makeEnvironmentAuthDouble();
+    const { codex, providerLayer } = makeT3EnvironmentTestLayers(auth);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+        projectId: ProjectId.make("project-1"),
+        workspaceRoot: "/tmp/workspace",
+      });
+    }).pipe(Effect.provide(Layer.merge(providerLayer, NodeServices.layer)));
+
+    const startInput = codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.t3Environment, undefined);
+    assert.equal(auth.issued.length, 0);
+  }),
+);
+
+it.effect("ProviderServiceLive omits t3Environment when project context is absent", () => {
+  const threadId = asThreadId("thread-t3-env-no-project");
+  return Effect.gen(function* () {
+    const auth = makeEnvironmentAuthDouble();
+    const { codex, providerLayer } = makeT3EnvironmentTestLayers(auth);
+    setTestMcpProviderSession(threadId);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(Layer.merge(providerLayer, NodeServices.layer)));
+
+    const startInput = codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.t3Environment, undefined);
+    assert.equal(auth.issued.length, 0);
+  }).pipe(Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))));
+});
+
+it.effect("ProviderServiceLive revokes the t3Environment token when the session stops", () => {
+  const threadId = asThreadId("thread-t3-env-stop");
+  return Effect.gen(function* () {
+    const auth = makeEnvironmentAuthDouble();
+    const { providerLayer } = makeT3EnvironmentTestLayers(auth);
+    setTestMcpProviderSession(threadId);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+        projectId: ProjectId.make("project-1"),
+        workspaceRoot: "/tmp/workspace",
+      });
+      yield* provider.stopSession({ threadId });
+    }).pipe(Effect.provide(Layer.merge(providerLayer, NodeServices.layer)));
+
+    assert.deepEqual(auth.revoked, [AuthSessionId.make("t3-auth-session-1")]);
+  }).pipe(Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))));
+});
+
+it.effect("ProviderServiceLive revokes the t3Environment token when session start fails", () => {
+  const threadId = asThreadId("thread-t3-env-start-fails");
+  return Effect.gen(function* () {
+    const auth = makeEnvironmentAuthDouble();
+    const { codex, providerLayer } = makeT3EnvironmentTestLayers(auth);
+    setTestMcpProviderSession(threadId);
+    codex.startSession.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: String(CODEX_DRIVER),
+          method: "startSession",
+          detail: "simulated start failure",
+        }),
+      ),
+    );
+
+    const failure = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+        projectId: ProjectId.make("project-1"),
+        workspaceRoot: "/tmp/workspace",
+      });
+    }).pipe(Effect.flip, Effect.provide(Layer.merge(providerLayer, NodeServices.layer)));
+
+    assert.equal(failure._tag, "ProviderAdapterRequestError");
+    assert.deepEqual(auth.revoked, [AuthSessionId.make("t3-auth-session-1")]);
+  }).pipe(Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))));
+});
 
 it.effect("ProviderServiceLive rejects new sessions for disabled providers", () =>
   Effect.gen(function* () {
@@ -398,7 +630,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
       Layer.provide(SqlitePersistenceMemory),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
-    const providerLayer = makeProviderServiceLive().pipe(
+    const providerLayer = makeProviderServiceLiveForTest().pipe(
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
@@ -482,7 +714,7 @@ it.effect(
       const directoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
       );
-      const providerLayer = makeProviderServiceLive().pipe(
+      const providerLayer = makeProviderServiceLiveForTest().pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(serverSettingsLayer),
@@ -552,7 +784,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
       Layer.provide(SqlitePersistenceMemory),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
-    const providerLayer = makeProviderServiceLive().pipe(
+    const providerLayer = makeProviderServiceLiveForTest().pipe(
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
@@ -597,7 +829,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
       Layer.provide(SqlitePersistenceMemory),
     );
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
-    const providerLayer = makeProviderServiceLive({
+    const providerLayer = makeProviderServiceLiveForTest({
       canonicalEventLogger: {
         filePath: "memory://provider-canonical-events",
         write: (event, threadId) => {
@@ -667,7 +899,7 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
       });
     }).pipe(Effect.provide(directoryLayer));
 
-    const providerLayer = makeProviderServiceLive().pipe(
+    const providerLayer = makeProviderServiceLiveForTest().pipe(
       Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
@@ -731,7 +963,7 @@ it.effect(
       const firstDirectoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
       );
-      const firstProviderLayer = makeProviderServiceLive().pipe(
+      const firstProviderLayer = makeProviderServiceLiveForTest().pipe(
         Layer.provide(
           Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, firstRegistry),
         ),
@@ -790,7 +1022,7 @@ it.effect(
       const secondDirectoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
       );
-      const secondProviderLayer = makeProviderServiceLive().pipe(
+      const secondProviderLayer = makeProviderServiceLiveForTest().pipe(
         Layer.provide(
           Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
         ),
@@ -1301,7 +1533,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const firstDirectoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
       );
-      const firstProviderLayer = makeProviderServiceLive().pipe(
+      const firstProviderLayer = makeProviderServiceLiveForTest().pipe(
         Layer.provide(
           Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, firstRegistry),
         ),
@@ -1339,7 +1571,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const secondDirectoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
       );
-      const secondProviderLayer = makeProviderServiceLive().pipe(
+      const secondProviderLayer = makeProviderServiceLiveForTest().pipe(
         Layer.provide(
           Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
         ),
@@ -1407,7 +1639,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         const firstDirectoryLayer = ProviderSessionDirectoryLive.pipe(
           Layer.provide(runtimeRepositoryLayer),
         );
-        const firstProviderLayer = makeProviderServiceLive().pipe(
+        const firstProviderLayer = makeProviderServiceLiveForTest().pipe(
           Layer.provide(
             Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, firstRegistry),
           ),
@@ -1440,7 +1672,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         const secondDirectoryLayer = ProviderSessionDirectoryLive.pipe(
           Layer.provide(runtimeRepositoryLayer),
         );
-        const secondProviderLayer = makeProviderServiceLive().pipe(
+        const secondProviderLayer = makeProviderServiceLiveForTest().pipe(
           Layer.provide(
             Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, secondRegistry),
           ),

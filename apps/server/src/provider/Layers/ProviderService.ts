@@ -10,8 +10,11 @@
  * @module ProviderServiceLive
  */
 import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   ModelSelection,
   NonNegativeInt,
+  ProjectId,
   ThreadId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
@@ -19,10 +22,12 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  type AuthSessionId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type T3SessionEnvironment,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
@@ -53,6 +58,7 @@ import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
+import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 const isModelSelection = Schema.is(ModelSelection);
@@ -125,6 +131,7 @@ function toRuntimePayloadFromSession(
     readonly modelSelection?: unknown;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
+    readonly t3EnvironmentContext?: T3EnvironmentContext;
   },
 ): Record<string, unknown> {
   return {
@@ -137,6 +144,39 @@ function toRuntimePayloadFromSession(
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
       : {}),
+    ...(extra?.t3EnvironmentContext !== undefined
+      ? { t3EnvironmentContext: extra.t3EnvironmentContext }
+      : {}),
+  };
+}
+
+interface T3EnvironmentContext {
+  readonly projectId: ProjectId;
+  readonly workspaceRoot: string;
+}
+
+function readPersistedT3EnvironmentContext(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): T3EnvironmentContext | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const raw =
+    "t3EnvironmentContext" in runtimePayload ? runtimePayload.t3EnvironmentContext : undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const projectId = "projectId" in raw ? raw.projectId : undefined;
+  const workspaceRoot = "workspaceRoot" in raw ? raw.workspaceRoot : undefined;
+  if (typeof projectId !== "string" || projectId.trim().length === 0) {
+    return undefined;
+  }
+  if (typeof workspaceRoot !== "string" || workspaceRoot.trim().length === 0) {
+    return undefined;
+  }
+  return {
+    projectId: ProjectId.make(projectId),
+    workspaceRoot,
   };
 }
 
@@ -212,8 +252,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  // Auth sessions minted for `t3Environment` injection, keyed by thread so the
+  // token is revoked when the thread's MCP session is cleared.
+  const t3EnvironmentAuthSessions = new Map<ThreadId, AuthSessionId>();
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     McpSessionRegistry.issueActiveMcpCredential({ threadId, providerInstanceId }).pipe(
       Effect.tap((credential) =>
@@ -222,10 +266,80 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           : Effect.void,
       ),
     );
+  const revokeT3EnvironmentAuthSession = (threadId: ThreadId) =>
+    Effect.suspend((): Effect.Effect<void> => {
+      const sessionId = t3EnvironmentAuthSessions.get(threadId);
+      if (sessionId === undefined) {
+        return Effect.void;
+      }
+      t3EnvironmentAuthSessions.delete(threadId);
+      return environmentAuth.revokeSession(sessionId).pipe(
+        Effect.tap((revoked) =>
+          revoked
+            ? Effect.void
+            : Effect.logDebug("provider.session.t3-env-token-already-gone", { threadId }),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider.session.t3-env-token-revoke-failed", { threadId, cause }),
+        ),
+        Effect.asVoid,
+      );
+    });
   const clearMcpSession = (threadId: ThreadId) =>
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+      Effect.tap(() => revokeT3EnvironmentAuthSession(threadId)),
     );
+
+  /**
+   * Builds the `T3_*` injection payload for a session start. Requires both a
+   * live MCP session for the thread (the agent only spawns inside t3code when
+   * one exists) and project context from the orchestration layer; otherwise
+   * returns `undefined` and no token is minted.
+   */
+  const resolveT3SessionEnvironment = (input: {
+    readonly threadId: ThreadId;
+    readonly projectId?: ProjectId | undefined;
+    readonly workspaceRoot?: string | undefined;
+  }): Effect.Effect<T3SessionEnvironment | undefined> =>
+    Effect.gen(function* () {
+      if (input.projectId === undefined || input.workspaceRoot === undefined) {
+        return undefined;
+      }
+      const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      if (mcpSession === undefined) {
+        return undefined;
+      }
+      // A re-start of the same thread mints a fresh token; drop the old one so
+      // tokens do not accumulate.
+      yield* revokeT3EnvironmentAuthSession(input.threadId);
+      // Fail open: an auth-store error must not kill the session start. The
+      // agent still works; it just gets no t3code API access.
+      const issued = yield* environmentAuth
+        .issueSession({
+          scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+          label: `agent-thread-${input.threadId}`,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("provider.session.t3-env-token-mint-failed", {
+              threadId: input.threadId,
+              error,
+            }).pipe(Effect.as(undefined)),
+          ),
+        );
+      if (issued === undefined) {
+        return undefined;
+      }
+      t3EnvironmentAuthSessions.set(input.threadId, issued.sessionId);
+      return {
+        serverUrl: mcpSession.endpoint.replace(/\/mcp$/, ""),
+        environmentId: mcpSession.environmentId,
+        projectId: input.projectId,
+        workspaceRoot: input.workspaceRoot,
+        token: issued.token,
+      } satisfies T3SessionEnvironment;
+    });
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -263,6 +377,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly modelSelection?: unknown;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
+      readonly t3EnvironmentContext?: T3EnvironmentContext;
     },
   ) =>
     Effect.gen(function* () {
@@ -396,8 +511,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const persistedT3EnvironmentContext = readPersistedT3EnvironmentContext(
+        input.binding.runtimePayload,
+      );
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      const t3Environment = yield* resolveT3SessionEnvironment({
+        threadId: input.binding.threadId,
+        projectId: persistedT3EnvironmentContext?.projectId,
+        workspaceRoot: persistedT3EnvironmentContext?.workspaceRoot,
+      });
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -406,6 +529,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
+          ...(t3Environment !== undefined ? { t3Environment } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         })
         .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
@@ -591,12 +715,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
+        const t3Environment = yield* resolveT3SessionEnvironment({
+          threadId,
+          projectId: parsed.projectId,
+          workspaceRoot: parsed.workspaceRoot,
+        });
         const session = yield* adapter
           .startSession({
             ...input,
             providerInstanceId: resolvedInstanceId,
             ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
             ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
+            ...(t3Environment !== undefined ? { t3Environment } : {}),
           })
           .pipe(Effect.onError(() => clearMcpSession(threadId)));
 
@@ -618,6 +748,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          // Persist the project context so a post-restart recovery can rebuild
+          // the T3_* injection for this thread.
+          ...(parsed.projectId !== undefined && parsed.workspaceRoot !== undefined
+            ? {
+                t3EnvironmentContext: {
+                  projectId: parsed.projectId,
+                  workspaceRoot: parsed.workspaceRoot,
+                },
+              }
+            : {}),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,

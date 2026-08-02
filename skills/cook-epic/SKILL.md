@@ -174,8 +174,12 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 
    Inside t3code, prefer its server-owned EpicRunner. It persists run state,
    survives client disconnects, and supports reattachment through the Epics UI
-   and `t3 epic` CLI. Use this terminal coordinator when the server-owned path
-   is unavailable or the user explicitly asks for `/cook-epic`.
+   and `t3 epic` CLI. See **Running inside t3code** below for how to detect
+   the server and hand the epic to it. When the `T3_*` env vars are present,
+   the server path is the default — invoking `/cook-epic` is not a reason to
+   bypass it. Use this terminal coordinator only when the server path is
+   unavailable, or when the user explicitly asks for the terminal/local
+   coordinator specifically (e.g. "run it locally, not through the server").
 
    **Exit 75 means another run already owns this epic** — a t3code server run or
    another terminal run holds the epic run lock. The runner prints one line of
@@ -219,6 +223,59 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    tail in `$RUN_DIR/worker-<child>.log`. Point the user there when anything
    was blocked. A run that ended with exit 75 dispatched nothing: report the
    holding run instead (see step 6) and stop there.
+
+## Running inside t3code
+
+When the skill executes inside a t3code agent session, the server injects
+`T3_SERVER_URL`, `T3_ENVIRONMENT_ID`, `T3_PROJECT_ID`, `T3_WORKSPACE_ROOT`,
+and `T3_SERVER_TOKEN` into the environment. Hand the epic to the server-owned
+EpicRunner instead of launching the terminal coordinator.
+
+**Detection.** `T3_SERVER_URL` unset → terminal `run.sh` coordinator. Set →
+probe `GET $T3_SERVER_URL/.well-known/t3/environment` (unauthenticated).
+Unreachable → terminal fallback, and the launch report must say why (the probe
+failed, not just that you fell back).
+
+**Launch.** When the probe answers:
+
+```bash
+curl -sS -X POST "$T3_SERVER_URL/api/epic-runs/launch" \
+  -H "Authorization: Bearer $T3_SERVER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"epicId\": \"<beads epic id>\", \"projectId\": \"$T3_PROJECT_ID\", \"cwd\": \"$T3_WORKSPACE_ROOT\"}"
+```
+
+**Response handling.**
+
+- `200` → server-owned run. Launch is idempotent: when a run is already
+  active for the epic, the server returns the existing run. Note that in the
+  report and start nothing else.
+- `400`/`401`/`403`/`404`/`409` → HARD STOP. Report the server's error. You
+  reached the server, so never fall back to the terminal coordinator — a
+  fallback would fork run ownership.
+- `500` or any other `5xx` → HARD STOP, same rule: the server was reached, so
+  never fall back. Report the error.
+- Network failure (connect refused, timeout, DNS) → terminal fallback,
+  reported with the reason.
+
+**Launch report template.** Always name the engine:
+
+- "server EpicRunner (ralph loop)" — include the run link
+  `$T3_SERVER_URL/epics/$T3_ENVIRONMENT_ID/<epicId>`, and say when the server
+  attached to an already-active run instead of starting a new one.
+- "terminal run.sh coordinator" — say why the server path was not used
+  (no `T3_SERVER_URL`, probe unreachable, or network failure).
+
+**Control commands** (all with `Authorization: Bearer $T3_SERVER_TOKEN`):
+
+- `GET $T3_SERVER_URL/api/epic-runs?status=running` — list active runs.
+- `GET $T3_SERVER_URL/api/epic-runs/<runId>` — run detail.
+- `POST $T3_SERVER_URL/api/epic-runs/<runId>/pause`
+- `POST $T3_SERVER_URL/api/epic-runs/<runId>/resume`
+- `POST $T3_SERVER_URL/api/epic-runs/<runId>/cancel`
+
+A `409` from a control command means an invalid state transition (for example,
+pausing a finished run). Report it; do not retry.
 
 ## How it works (what to tell the user when asked)
 

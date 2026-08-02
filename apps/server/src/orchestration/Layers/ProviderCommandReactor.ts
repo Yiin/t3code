@@ -512,6 +512,10 @@ const make = Effect.gen(function* () {
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
+        // Project context lets ProviderService build the T3_* environment
+        // injection for in-t3code agent sessions; omitted when the project is
+        // not resolvable.
+        ...(project ? { projectId: thread.projectId, workspaceRoot: project.workspaceRoot } : {}),
       });
 
     const bindSessionToThread = (session: ProviderSession) =>

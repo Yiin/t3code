@@ -42,6 +42,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { toT3EnvironmentEnv } from "../t3Environment.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -511,9 +512,16 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             : kimiSettings;
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          const t3EnvironmentEnv = input.t3Environment
+            ? toT3EnvironmentEnv(input.t3Environment)
+            : undefined;
+          const spawnEnvironment =
+            options?.environment !== undefined || t3EnvironmentEnv !== undefined
+              ? { ...options?.environment, ...t3EnvironmentEnv }
+              : undefined;
           const acp = yield* makeKimiAcpRuntime({
             kimiSettings: effectiveKimiSettings,
-            ...(options?.environment ? { environment: options.environment } : {}),
+            ...(spawnEnvironment ? { environment: spawnEnvironment } : {}),
             childProcessSpawner,
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),

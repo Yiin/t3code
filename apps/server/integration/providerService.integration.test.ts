@@ -23,6 +23,8 @@ import {
   type ProviderServiceShape,
 } from "../src/provider/Services/ProviderService.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
+import { EnvironmentAuth } from "../src/auth/EnvironmentAuth.ts";
+import { makeUnconfiguredEnvironmentAuth } from "../src/auth/environmentAuthTestStub.ts";
 import { AnalyticsService } from "../src/telemetry/Services/AnalyticsService.ts";
 import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../src/persistence/ProviderSessionRuntime.ts";
@@ -72,6 +74,9 @@ const makeIntegrationFixture = Effect.gen(function* () {
     ServerSettingsService.layerTest(DEFAULT_SERVER_SETTINGS),
     AnalyticsService.layerTest,
     Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
+    // T3_* injection is never exercised here: no start input carries
+    // `projectId`/`workspaceRoot`, so ProviderService never calls into it.
+    Layer.succeed(EnvironmentAuth, makeUnconfiguredEnvironmentAuth()),
   ).pipe(Layer.provide(SqlitePersistenceMemory));
 
   const layer = makeProviderServiceLive().pipe(Layer.provide(shared));

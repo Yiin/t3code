@@ -29,6 +29,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { toT3EnvironmentEnv } from "../t3Environment.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   ProviderAdapterProcessError,
@@ -1204,10 +1205,23 @@ export function makeOpenCodeAdapter(
               // The runtime binds the server's lifetime to the Scope.Scope
               // we provide below — closing `sessionScope` kills the child
               // process automatically. No manual `server.close()` needed.
+              // The server spawns the agent subprocesses, so the T3_* vars go
+              // on its environment (extendEnv is disabled once an explicit
+              // environment is passed, hence the process.env fallback).
+              const t3EnvironmentEnv = input.t3Environment
+                ? toT3EnvironmentEnv(input.t3Environment)
+                : undefined;
               const server = yield* openCodeRuntime.connectToOpenCodeServer({
                 binaryPath,
                 serverUrl,
-                ...(options?.environment ? { environment: options.environment } : {}),
+                ...(options?.environment !== undefined || t3EnvironmentEnv !== undefined
+                  ? {
+                      environment: {
+                        ...(options?.environment ?? process.env),
+                        ...t3EnvironmentEnv,
+                      },
+                    }
+                  : {}),
               });
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,

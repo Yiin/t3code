@@ -2,8 +2,10 @@ import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ApprovalRequestId,
+  EnvironmentId,
   EventId,
   IsoDateTime,
+  ProjectId,
   ProviderItemId,
   ThreadId,
   TurnId,
@@ -50,6 +52,20 @@ export const ProviderSession = Schema.Struct({
 });
 export type ProviderSession = typeof ProviderSession.Type;
 
+/**
+ * Server environment injected into agent spawns as `T3_*` env vars. Present
+ * only when the session runs inside a t3code server; absent means "not inside
+ * t3code / no injection".
+ */
+export const T3SessionEnvironment = Schema.Struct({
+  serverUrl: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+  workspaceRoot: TrimmedNonEmptyString,
+  token: TrimmedNonEmptyString,
+});
+export type T3SessionEnvironment = typeof T3SessionEnvironment.Type;
+
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
@@ -61,6 +77,12 @@ export const ProviderSessionStartInput = Schema.Struct({
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
   runtimeMode: RuntimeMode,
+  // Orchestration-supplied project context. ProviderService combines these with
+  // the per-thread MCP session to build `t3Environment`; both are required for
+  // injection to happen.
+  projectId: Schema.optional(ProjectId),
+  workspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  t3Environment: Schema.optional(T3SessionEnvironment),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 

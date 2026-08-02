@@ -6,7 +6,9 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
@@ -35,6 +37,7 @@ import * as Stream from "effect/Stream";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -286,6 +289,112 @@ validationLayer("CodexAdapterLive validation", (it) => {
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
       });
+    }),
+  );
+});
+
+const t3EnvironmentRuntimeFactory = makeRuntimeFactory();
+const t3EnvironmentLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        environment: { CUSTOM_FLAG: "custom" },
+        makeRuntime: t3EnvironmentRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+const testT3Environment = {
+  serverUrl: "http://127.0.0.1:3773",
+  environmentId: EnvironmentId.make("env-1"),
+  projectId: ProjectId.make("project-1"),
+  workspaceRoot: "/tmp/workspace",
+  token: "t3-token-1",
+} as const;
+
+t3EnvironmentLayer("CodexAdapterLive t3Environment injection", (it) => {
+  it.effect("merges T3_* vars and the MCP bearer token into the spawn environment", () => {
+    const threadId = asThreadId("thread-t3-env-mcp");
+    return Effect.gen(function* () {
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("env-1"),
+        threadId,
+        providerSessionId: "mcp-session-1",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:3773/mcp",
+        authorizationHeader: "Bearer mcp-token",
+      });
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        threadId,
+        runtimeMode: "full-access",
+        t3Environment: testT3Environment,
+      });
+
+      const options = t3EnvironmentRuntimeFactory.lastRuntime?.options;
+      NodeAssert.equal(options?.environment?.CUSTOM_FLAG, "custom");
+      NodeAssert.equal(options?.environment?.T3_MCP_BEARER_TOKEN, "mcp-token");
+      NodeAssert.equal(options?.environment?.T3_SERVER_URL, "http://127.0.0.1:3773");
+      NodeAssert.equal(options?.environment?.T3_ENVIRONMENT_ID, "env-1");
+      NodeAssert.equal(options?.environment?.T3_PROJECT_ID, "project-1");
+      NodeAssert.equal(options?.environment?.T3_WORKSPACE_ROOT, "/tmp/workspace");
+      NodeAssert.equal(options?.environment?.T3_SERVER_TOKEN, "t3-token-1");
+      NodeAssert.deepEqual(options?.appServerArgs, [
+        "-c",
+        "mcp_servers.t3-code.url=http://127.0.0.1:3773/mcp",
+        "-c",
+        'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+      ]);
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    );
+  });
+
+  it.effect("merges T3_* vars over options.environment when no MCP session exists", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-t3-env-no-mcp");
+      McpProviderSession.clearMcpProviderSession(threadId);
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        threadId,
+        runtimeMode: "full-access",
+        t3Environment: testT3Environment,
+      });
+
+      const options = t3EnvironmentRuntimeFactory.lastRuntime?.options;
+      NodeAssert.deepEqual(options?.environment, {
+        CUSTOM_FLAG: "custom",
+        T3_SERVER_URL: "http://127.0.0.1:3773",
+        T3_ENVIRONMENT_ID: "env-1",
+        T3_PROJECT_ID: "project-1",
+        T3_WORKSPACE_ROOT: "/tmp/workspace",
+        T3_SERVER_TOKEN: "t3-token-1",
+      });
+      NodeAssert.equal(options?.appServerArgs, undefined);
+    }),
+  );
+
+  it.effect("keeps the spawn environment untouched when t3Environment is absent", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-t3-env-absent");
+      McpProviderSession.clearMcpProviderSession(threadId);
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const options = t3EnvironmentRuntimeFactory.lastRuntime?.options;
+      NodeAssert.deepEqual(options?.environment, { CUSTOM_FLAG: "custom" });
+      NodeAssert.equal(options?.appServerArgs, undefined);
     }),
   );
 });
