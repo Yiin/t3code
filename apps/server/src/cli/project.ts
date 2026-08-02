@@ -226,7 +226,7 @@ const ProjectCliRuntimeLive = Layer.mergeAll(
   ),
 );
 
-const PROJECT_CLI_LIVE_SERVER_TIMEOUT = Duration.seconds(1);
+const PROJECT_CLI_LIVE_SERVER_TIMEOUT = Duration.seconds(10);
 const withProjectCliSessionToken = <A, E, R>(
   environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
   run: (token: string) => Effect.Effect<A, E, R>,
@@ -339,6 +339,23 @@ const fetchLiveOrchestrationSnapshot = (origin: string, bearerToken: string) =>
     Effect.mapError(projectCommandErrorFromLiveServerRequest),
   );
 
+// Cheap liveness probe for `tryResolveLiveProjectExecutionMode` below. It asks
+// the same question as `fetchLiveOrchestrationSnapshot` — "is a server alive
+// at this origin?" — via the shell snapshot instead of the full orchestration
+// read model (~165ms vs ~1642ms against a 355MB state.sqlite), and funnels
+// failures through the same `projectCommandErrorFromLiveServerRequest`, so
+// `shouldClearProjectRuntimeState` keeps working unchanged.
+const probeLiveOrchestrationServer = (origin: string, bearerToken: string) =>
+  Effect.gen(function* () {
+    const client = yield* makeLiveServerClient(origin);
+    yield* client.orchestration.shellSnapshot({
+      headers: { authorization: `Bearer ${bearerToken}` },
+    });
+  }).pipe(
+    withProjectCliLiveServerTimeout,
+    Effect.mapError(projectCommandErrorFromLiveServerRequest),
+  );
+
 const dispatchLiveOrchestrationCommand = (
   origin: string,
   bearerToken: string,
@@ -360,7 +377,7 @@ const getOfflineSnapshot = Effect.fn("getOfflineSnapshot")(function* () {
   return yield* projectionSnapshotQuery.getSnapshot();
 });
 
-const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecutionMode")(
+export const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecutionMode")(
   function* (
     environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
     config: ServerConfig.ServerConfig["Service"],
@@ -371,7 +388,7 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
     }
 
     const attempt = withProjectCliSessionToken(environmentAuth, (token) =>
-      fetchLiveOrchestrationSnapshot(runtimeState.value.origin, token).pipe(
+      probeLiveOrchestrationServer(runtimeState.value.origin, token).pipe(
         Effect.as({
           origin: runtimeState.value.origin,
         }),

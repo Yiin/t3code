@@ -1,14 +1,28 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import { EnvironmentInternalError } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import { HttpClientError } from "effect/unstable/http";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
+import { FetchHttpClient, HttpClientError } from "effect/unstable/http";
+
+import type * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import type * as ServerConfig from "../config.ts";
+import { persistServerRuntimeState } from "../serverRuntimeState.ts";
 
 import {
   ProjectLiveServerDeclaredResponseError,
   ProjectLiveServerRequestError,
   projectCommandErrorFromLiveServerRequest,
   shouldClearProjectRuntimeState,
+  tryResolveLiveProjectExecutionMode,
 } from "./project.ts";
 
 it("maps declared server failures into structural project command errors", () => {
@@ -74,3 +88,151 @@ it("clears runtime state only on a genuine transport failure", () => {
   });
   assert.isTrue(shouldClearProjectRuntimeState(failure));
 });
+
+// tryResolveLiveProjectExecutionMode -------------------------------------
+//
+// These pin the t3code-a2g fix end to end: the probe now calls the cheap
+// shell snapshot with a 10s budget, and only a genuine transport failure —
+// never a slow response — clears the persisted runtime state.
+
+const fakeAuth = {
+  issueSession: () => Effect.succeed({ sessionId: "session-1", token: "test-token" }),
+  revokeSession: () => Effect.succeed(true),
+} as unknown as EnvironmentAuth.EnvironmentAuth["Service"];
+
+const emptyShellSnapshotResponse = () =>
+  new Response(
+    JSON.stringify({
+      snapshotSequence: 0,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+
+const setUpRuntimeState = (origin: string) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3-project-live-mode-test-",
+    });
+    const statePath = path.join(root, "server-runtime.json");
+    yield* persistServerRuntimeState({
+      path: statePath,
+      state: {
+        version: 1,
+        pid: 123,
+        port: 4_972,
+        origin,
+        startedAt: "2026-08-02T00:00:00.000Z",
+      },
+    });
+    const config = { serverRuntimeStatePath: statePath } as ServerConfig.ServerConfig["Service"];
+    return { statePath, config };
+  });
+
+it.effect("reports no live mode and keeps the persisted runtime state when the probe hangs", () =>
+  Effect.gen(function* () {
+    const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
+    // Never resolves — the only way this can settle here is the timeout.
+    const fetchMock = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const layer = Layer.merge(
+      FetchHttpClient.layer,
+      Layer.succeed(FetchHttpClient.Fetch, fetchMock),
+    );
+
+    const fiber = yield* tryResolveLiveProjectExecutionMode(fakeAuth, config).pipe(
+      Effect.provide(layer),
+      Effect.forkScoped,
+    );
+    // NodeServices.layer builds several real Node-backed services before this
+    // fiber's effect reaches the HTTP call, so it can take more than one
+    // scheduler tick to get there. Advance virtual time in small steps,
+    // yielding between each, until the fiber actually settles.
+    for (let attempt = 0; attempt < 100 && fiber.pollUnsafe() === undefined; attempt++) {
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(Duration.millis(200));
+    }
+    const result = yield* Fiber.join(fiber);
+    const fileSystem = yield* FileSystem.FileSystem;
+
+    // The mutant this test kills: deleting the
+    // `if (shouldClearProjectRuntimeState(...))` guard at project.ts:390 and
+    // restoring an unconditional clear. That mutant still returns
+    // Option.none here, so the file-existence assertion — not the Option
+    // check alone — is what catches it.
+    assert.isTrue(Option.isNone(result));
+    assert.isTrue(yield* fileSystem.exists(statePath));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("clears the persisted runtime state on a genuine connection failure", () =>
+  Effect.gen(function* () {
+    const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
+    const fetchMock = (() =>
+      Promise.reject(new TypeError("fetch failed"))) as unknown as typeof fetch;
+    const layer = Layer.merge(
+      FetchHttpClient.layer,
+      Layer.succeed(FetchHttpClient.Fetch, fetchMock),
+    );
+
+    const result = yield* tryResolveLiveProjectExecutionMode(fakeAuth, config).pipe(
+      Effect.provide(layer),
+    );
+    const fileSystem = yield* FileSystem.FileSystem;
+
+    assert.isTrue(Option.isNone(result));
+    assert.isFalse(yield* fileSystem.exists(statePath));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "engages live mode via the cheap shell probe even when it outlasts the old 1s timeout",
+  () =>
+    Effect.gen(function* () {
+      const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
+      // A plain deferred Promise, resolved explicitly below — no real delay and
+      // no manual Effect runtime, just a response that doesn't arrive right away.
+      let resolveResponse!: (response: Response) => void;
+      const responsePromise = new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      });
+      // Record which endpoint the probe hits. Without this the test passes even
+      // if the probe reverts to the full `snapshot` call, because the mocked
+      // body decodes under both OrchestrationShellSnapshot and
+      // OrchestrationReadModel.
+      const requestedUrls: string[] = [];
+      const fetchMock = ((input: unknown) => {
+        requestedUrls.push(
+          typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? input),
+        );
+        return responsePromise;
+      }) as unknown as typeof fetch;
+      const layer = Layer.merge(
+        FetchHttpClient.layer,
+        Layer.succeed(FetchHttpClient.Fetch, fetchMock),
+      );
+
+      const fiber = yield* tryResolveLiveProjectExecutionMode(fakeAuth, config).pipe(
+        Effect.provide(layer),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      // Slower than the old 1s budget, comfortably inside the new 10s one.
+      yield* TestClock.adjust(Duration.seconds(3));
+      resolveResponse(emptyShellSnapshotResponse());
+      const result = yield* Fiber.join(fiber);
+      const fileSystem = yield* FileSystem.FileSystem;
+
+      assert.isTrue(Option.isSome(result));
+      assert.strictEqual(Option.getOrThrow(result).origin, "http://127.0.0.1:1");
+      assert.isTrue(yield* fileSystem.exists(statePath));
+      // The cheap shell endpoint, not the full read model — this is the fix.
+      assert.deepStrictEqual(
+        requestedUrls.map((url) => new URL(url).pathname),
+        ["/api/orchestration/shell"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
