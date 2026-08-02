@@ -337,7 +337,6 @@ it.effect("adds a project in live mode without ever loading the full read model"
       projects: [],
     });
 
-    assert.isFalse(requestedPathnames.includes("/api/orchestration/snapshot"));
     assert.deepStrictEqual(requestedPathnames, [
       // The liveness probe, then the snapshot the mutation resolves against.
       "/api/orchestration/shell",
@@ -373,7 +372,6 @@ it.effect("renames a project in live mode without ever loading the full read mod
       ],
     });
 
-    assert.isFalse(requestedPathnames.includes("/api/orchestration/snapshot"));
     assert.deepStrictEqual(requestedPathnames, [
       "/api/orchestration/shell",
       "/api/orchestration/shell",

@@ -4,6 +4,7 @@ import namespaceNodeImports from "./rules/namespace-node-imports.ts";
 import noGlobalProcessRuntime from "./rules/no-global-process-runtime.ts";
 import noInlineSchemaCompile from "./rules/no-inline-schema-compile.ts";
 import noManualEffectRuntimeInTests from "./rules/no-manual-effect-runtime-in-tests.ts";
+import noProductionProjectionSnapshot from "./rules/no-production-projection-snapshot.ts";
 
 export default definePlugin({
   meta: {
@@ -14,5 +15,6 @@ export default definePlugin({
     "no-global-process-runtime": noGlobalProcessRuntime,
     "no-inline-schema-compile": noInlineSchemaCompile,
     "no-manual-effect-runtime-in-tests": noManualEffectRuntimeInTests,
+    "no-production-projection-snapshot": noProductionProjectionSnapshot,
   },
 });

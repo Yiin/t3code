@@ -27,20 +27,6 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
 
     return handlers
       .handle(
-        "snapshot",
-        Effect.fn("environment.orchestration.snapshot")(function* (args) {
-          yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* projectionSnapshotQuery
-            .getSnapshot()
-            .pipe(
-              Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_snapshot_failed", cause),
-              ),
-            );
-        }),
-      )
-      .handle(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);

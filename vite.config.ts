@@ -115,6 +115,7 @@ export default defineConfig({
       "t3code/no-global-process-runtime": "error",
       "t3code/no-inline-schema-compile": "warn",
       "t3code/no-manual-effect-runtime-in-tests": "error",
+      "t3code/no-production-projection-snapshot": "error",
       "t3code/namespace-node-imports": "error",
     },
     options: {

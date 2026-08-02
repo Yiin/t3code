@@ -69,6 +69,21 @@ export interface ProjectionSnapshotQueryShape {
    *
    * Rehydrates from projection tables and derives snapshot sequence from
    * projector cursor state.
+   *
+   * TEST-ONLY. This method has no HTTP surface: `/api/orchestration/snapshot`
+   * was deleted because the read is unbounded. It loads every message,
+   * activity and checkpoint body for every thread in one transaction, so it
+   * grows without limit and holds the single write connection for its whole
+   * duration. One call measured 133 MB and 4 seconds, which stalls every
+   * writer on the server. It is retained only for tests and the integration
+   * harness, which assert on the fully hydrated read model.
+   *
+   * Do not call it from production code. Use `getShellSnapshot` for project
+   * and thread lists, `getThreadDetailSnapshot` for one thread's bodies, and
+   * `getCommandReadModel` for command-side aggregate state.
+   *
+   * `t3code/no-production-projection-snapshot` (oxlint-plugin-t3code) fails
+   * the lint on any call outside `*.test.ts` and `*.integration.ts`.
    */
   readonly getSnapshot: () => Effect.Effect<OrchestrationReadModel, ProjectionRepositoryError>;
 
