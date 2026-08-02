@@ -12,6 +12,8 @@ import {
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   ProjectScript,
+  THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -122,19 +124,6 @@ const ProjectIdLookupInput = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
-
-/**
- * How many of a thread's newest activities the thread-detail read returns.
- *
- * Reading every activity of a chatty thread is the most expensive query on the
- * snapshot path, and it runs inside the transaction that holds the only SQL
- * connection permit, so it blocks every writer for its whole duration. One
- * measured thread held 39,732 rows and 123 MB of `payload_json`.
- *
- * Request/response activities are always returned on top of this window — see
- * `listThreadActivityRowsByThread`.
- */
-export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
 
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
@@ -871,14 +860,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           SELECT activity_id
           FROM projection_thread_activities
           WHERE thread_id = ${threadId}
-            AND kind IN (
-              'approval.requested',
-              'approval.resolved',
-              'provider.approval.respond.failed',
-              'user-input.requested',
-              'user-input.resolved',
-              'provider.user-input.respond.failed'
-            )
+            AND ${sql.in("kind", THREAD_ACTIVITY_OPEN_REQUEST_KINDS)}
         )
         SELECT
           activity_id AS "activityId",

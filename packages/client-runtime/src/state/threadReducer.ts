@@ -1,6 +1,10 @@
 import { pipe } from "effect/Function";
 import * as Arr from "effect/Array";
 import * as O from "effect/Order";
+import {
+  THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
+} from "@t3tools/contracts";
 import type {
   MessageId,
   OrchestrationCheckpointSummary,
@@ -34,6 +38,39 @@ const activityOrder = O.combineAll<OrchestrationThreadActivity>([
   O.mapInput(O.String, (a) => a.createdAt),
   O.mapInput(O.String, (a) => a.id),
 ]);
+
+const openRequestKinds: ReadonlySet<string> = new Set(THREAD_ACTIVITY_OPEN_REQUEST_KINDS);
+
+/**
+ * Trim an ordered activity list to the same window the server's thread-detail
+ * read returns: the newest `THREAD_DETAIL_ACTIVITY_LIMIT` entries, plus every
+ * request/response activity however old.
+ *
+ * Without this a warm client that resumed by sequence grows without bound while
+ * a cold client that fetched a snapshot holds the capped list, so the same
+ * thread renders differently on two devices and the oversized thread may fail
+ * to cache at all. Dropping an open request instead would strand the agent —
+ * see `THREAD_ACTIVITY_OPEN_REQUEST_KINDS`.
+ *
+ * `activities` must already be sorted ascending by (sequence, createdAt, id);
+ * filtering keeps that order.
+ */
+function capActivities(activities: ReadonlyArray<OrchestrationThreadActivity>): {
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly droppedCount: number;
+} {
+  if (activities.length <= THREAD_DETAIL_ACTIVITY_LIMIT) {
+    return { activities, droppedCount: 0 };
+  }
+
+  const windowStart = activities.length - THREAD_DETAIL_ACTIVITY_LIMIT;
+  const kept = Arr.filter(
+    activities,
+    (activity, index) => index >= windowStart || openRequestKinds.has(activity.kind),
+  );
+
+  return { activities: kept, droppedCount: activities.length - kept.length };
+}
 
 /**
  * Apply a single orchestration event to an `OrchestrationThread`, returning
@@ -487,16 +524,28 @@ export function applyThreadDetailEvent(
 
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
-      const activities = pipe(
+      const merged = pipe(
         thread.activities,
         Arr.filter((activity) => activity.id !== event.payload.activity.id),
         Arr.append(event.payload.activity),
         Arr.sort(activityOrder),
       );
+      const { activities, droppedCount } = capActivities(merged);
 
       return {
         kind: "updated",
-        thread: { ...thread, activities, updatedAt: event.occurredAt },
+        thread: {
+          ...thread,
+          activities,
+          ...(droppedCount > 0
+            ? {
+                activitiesTruncated: {
+                  omittedCount: (thread.activitiesTruncated?.omittedCount ?? 0) + droppedCount,
+                },
+              }
+            : {}),
+          updatedAt: event.occurredAt,
+        },
       };
     }
 

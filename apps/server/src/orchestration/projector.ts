@@ -4,6 +4,7 @@ import {
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -712,7 +713,11 @@ export function projectEvent(
             payload.activity,
           ]
             .toSorted(compareThreadActivities)
-            .slice(-500);
+            // Same window the thread-detail read and the clients keep. Unlike
+            // those two this one does not pin open requests, so a very old
+            // unresolved request can fall out of hasOpenBlockingRequest — see
+            // t3code-l4u.
+            .slice(-THREAD_DETAIL_ACTIVITY_LIMIT);
 
           return {
             ...nextBase,

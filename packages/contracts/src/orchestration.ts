@@ -347,6 +347,41 @@ export const OrchestrationThreadActivityTruncation = Schema.Struct({
 export type OrchestrationThreadActivityTruncation =
   typeof OrchestrationThreadActivityTruncation.Type;
 
+/**
+ * How many of a thread's newest activities a client or the server keeps.
+ *
+ * Reading every activity of a chatty thread is the most expensive query on the
+ * snapshot path, and it runs inside the transaction that holds the only SQL
+ * connection permit, so it blocks every writer for its whole duration. One
+ * measured thread held 39,732 rows and 123 MB of payload. The client applies
+ * the same cap to live appends, so a warm client that resumed by sequence and
+ * a cold client that fetched a snapshot show the same window of the thread.
+ *
+ * Activities of a kind in `THREAD_ACTIVITY_OPEN_REQUEST_KINDS` are kept on top
+ * of this window, however old they are.
+ */
+export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+
+/**
+ * Activity kinds that a capped activity list must never drop.
+ *
+ * The sidebar badge comes from an independent SQL projection
+ * (pending_approval_count / pending_user_input_count) while the chat prompt is
+ * derived from the activity list. Drop an unresolved `approval.requested` and
+ * the sidebar says "waiting for approval" while the chat shows no prompt to
+ * answer — the agent stays blocked with no way out. The resolution and
+ * stale-failure kinds are pinned for the mirror bug: keep a request without
+ * its resolution and the prompt never goes away.
+ */
+export const THREAD_ACTIVITY_OPEN_REQUEST_KINDS = [
+  "approval.requested",
+  "approval.resolved",
+  "provider.approval.respond.failed",
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+] as const;
+
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
   "interrupted",

@@ -6,10 +6,11 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import type { OrchestrationThread } from "@t3tools/contracts";
+import type { OrchestrationThread, OrchestrationThreadActivity } from "@t3tools/contracts";
 
 import { applyThreadDetailEvent } from "./threadReducer.ts";
 
@@ -43,6 +44,37 @@ const baseThread: OrchestrationThread = {
   checkpoints: [],
   session: null,
 };
+
+/** A plain tool activity at `sequence`, the kind a chatty thread floods. */
+const fillerActivity = (sequence: number): OrchestrationThreadActivity => ({
+  id: EventId.make(`activity-${String(sequence).padStart(5, "0")}`),
+  tone: "tool",
+  kind: "command",
+  summary: `Ran command ${sequence}`,
+  payload: {},
+  turnId: TurnId.make("turn-1"),
+  sequence,
+  createdAt: "2026-04-01T11:00:00.000Z",
+});
+
+/** Feed activities through the reducer one live append at a time. */
+const appendActivities = (
+  thread: OrchestrationThread,
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): OrchestrationThread =>
+  activities.reduce((current, activity) => {
+    const result = applyThreadDetailEvent(current, {
+      ...baseEventFields,
+      sequence: activity.sequence ?? 0,
+      occurredAt: activity.createdAt,
+      aggregateKind: "thread",
+      aggregateId: ThreadId.make("thread-1"),
+      type: "thread.activity-appended",
+      payload: { threadId: ThreadId.make("thread-1"), activity },
+    });
+    expect(result.kind).toBe("updated");
+    return result.kind === "updated" ? result.thread : current;
+  }, thread);
 
 describe("applyThreadDetailEvent", () => {
   describe("project events", () => {
@@ -705,6 +737,74 @@ describe("applyThreadDetailEvent", () => {
       if (result.kind === "updated") {
         expect(result.thread.activitiesTruncated).toEqual({ omittedCount: 1200 });
       }
+    });
+
+    it("caps the list at the server's limit and pins an older open approval", () => {
+      // A warm client resumes by sequence and never re-fetches the snapshot, so
+      // without the cap it grows past what a cold client holds for the same
+      // thread. The open approval is pinned however old it gets: the prompt is
+      // derived from this list, and the sidebar badge is not.
+      const openApproval = {
+        id: EventId.make("activity-approval"),
+        tone: "approval" as const,
+        kind: "approval.requested",
+        summary: "Run `rm -rf /tmp/x`?",
+        payload: { requestId: "req-1", requestKind: "command" },
+        turnId: TurnId.make("turn-1"),
+        sequence: 0,
+        createdAt: "2026-04-01T11:00:00.000Z",
+      };
+      const fillers = Array.from({ length: THREAD_DETAIL_ACTIVITY_LIMIT }, (_, index) =>
+        fillerActivity(index + 1),
+      );
+
+      const thread = appendActivities(
+        { ...baseThread, activities: [openApproval, ...fillers] },
+        Array.from({ length: 600 }, (_, index) =>
+          fillerActivity(THREAD_DETAIL_ACTIVITY_LIMIT + 1 + index),
+        ),
+      );
+
+      // The window plus the one pinned approval.
+      expect(thread.activities).toHaveLength(THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+      expect(thread.activities[0]).toEqual(openApproval);
+      expect(thread.activities.at(-1)?.sequence).toBe(1100);
+      expect(
+        thread.activities.map((activity) => [activity.sequence, activity.createdAt, activity.id]),
+      ).toEqual(
+        [...thread.activities]
+          .toSorted(
+            (left, right) =>
+              (left.sequence ?? 0) - (right.sequence ?? 0) ||
+              left.createdAt.localeCompare(right.createdAt) ||
+              left.id.localeCompare(right.id),
+          )
+          .map((activity) => [activity.sequence, activity.createdAt, activity.id]),
+      );
+      // 1101 known activities, 501 kept.
+      expect(thread.activitiesTruncated).toEqual({ omittedCount: 600 });
+    });
+
+    it("adds what it trimmed to the count the server already omitted", () => {
+      const thread = appendActivities(
+        {
+          ...baseThread,
+          activitiesTruncated: { omittedCount: 1200 },
+          activities: Array.from({ length: THREAD_DETAIL_ACTIVITY_LIMIT }, (_, index) =>
+            fillerActivity(index),
+          ),
+        },
+        [fillerActivity(THREAD_DETAIL_ACTIVITY_LIMIT)],
+      );
+
+      expect(thread.activities).toHaveLength(THREAD_DETAIL_ACTIVITY_LIMIT);
+      expect(thread.activitiesTruncated).toEqual({ omittedCount: 1201 });
+    });
+
+    it("leaves the marker absent while the list fits under the limit", () => {
+      const thread = appendActivities(baseThread, [fillerActivity(1)]);
+
+      expect(thread.activitiesTruncated).toBeUndefined();
     });
   });
 

@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
   ThreadId,
   TurnId,
   ProviderInstanceId,
@@ -17,10 +18,7 @@ import type { SqlError } from "effect/unstable/sql/SqlError";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
-import {
-  OrchestrationProjectionSnapshotQueryLive,
-  THREAD_DETAIL_ACTIVITY_LIMIT,
-} from "./ProjectionSnapshotQuery.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
