@@ -1375,6 +1375,87 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       }),
   );
 
+  it.effect("reports how many activities the capped read left out", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(600);
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag !== "Some") {
+        return;
+      }
+      assert.deepEqual(threadDetail.value.activitiesTruncated, {
+        omittedCount: 600 - THREAD_DETAIL_ACTIVITY_LIMIT,
+      });
+    }),
+  );
+
+  it.effect("leaves the truncation marker absent when the whole history fits", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(THREAD_DETAIL_ACTIVITY_LIMIT);
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag !== "Some") {
+        return;
+      }
+      assert.equal(threadDetail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+      assert.equal(threadDetail.value.activitiesTruncated, undefined);
+    }),
+  );
+
+  it.effect("counts pinned request rows as returned, not omitted", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(600);
+      // One request row older than the newest-N window; the cap pins it, so the
+      // omitted count must not include it.
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        VALUES (
+          'activity-approval-open',
+          'thread-1',
+          NULL,
+          'approval',
+          'approval.requested',
+          'Approve rm -rf',
+          '{"requestId":"request-open","requestKind":"command","detail":"rm -rf ./build"}',
+          1,
+          '2026-04-01T00:00:10.000Z'
+        )
+      `;
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag !== "Some") {
+        return;
+      }
+      assert.equal(threadDetail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+      assert.deepEqual(threadDetail.value.activitiesTruncated, {
+        omittedCount: 600 - THREAD_DETAIL_ACTIVITY_LIMIT,
+      });
+    }),
+  );
+
   it.effect("caps a thread with no request activities to the newest N activities", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

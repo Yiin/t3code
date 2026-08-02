@@ -10,6 +10,7 @@ import type {
   OrchestrationProposedPlan,
   OrchestrationSession,
   OrchestrationThreadActivity,
+  OrchestrationThreadActivityTruncation,
   ScopedProjectRef,
   ScopedThreadRef,
   ServerConfig,
@@ -50,6 +51,9 @@ const EMPTY_MESSAGES_ATOM = Atom.make(EMPTY_MESSAGES).pipe(
 const EMPTY_ACTIVITIES_ATOM = Atom.make(EMPTY_ACTIVITIES).pipe(
   Atom.withLabel("web-thread-activities:empty"),
 );
+const EMPTY_ACTIVITIES_TRUNCATED_ATOM = Atom.make<OrchestrationThreadActivityTruncation | null>(
+  null,
+).pipe(Atom.withLabel("web-thread-activities-truncated:empty"));
 const EMPTY_PROPOSED_PLANS_ATOM = Atom.make(EMPTY_PROPOSED_PLANS).pipe(
   Atom.withLabel("web-thread-proposed-plans:empty"),
 );
@@ -160,6 +164,17 @@ export function useThreadActivities(
 ): ReadonlyArray<OrchestrationThreadActivity> {
   return useAtomValue(
     ref === null ? EMPTY_ACTIVITIES_ATOM : environmentThreadDetails.activitiesAtom(ref),
+  );
+}
+
+/** Present when the server returned only part of the thread's activity history. */
+export function useThreadActivitiesTruncated(
+  ref: ScopedThreadRef | null,
+): OrchestrationThreadActivityTruncation | null {
+  return useAtomValue(
+    ref === null
+      ? EMPTY_ACTIVITIES_TRUNCATED_ATOM
+      : environmentThreadDetails.activitiesTruncatedAtom(ref),
   );
 }
 

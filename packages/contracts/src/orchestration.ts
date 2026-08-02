@@ -331,6 +331,22 @@ export const OrchestrationThreadActivity = Schema.Struct({
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
+/**
+ * Present when the server returned only part of a thread's activity history.
+ *
+ * The thread-detail read caps how many activities it returns, and there is no
+ * pagination or cursor for activities anywhere. Without this marker the omission
+ * is invisible: scrolling up a long thread shows messages whose tool rows
+ * silently vanished. Absent means nothing was cut, so old servers and cached
+ * snapshots decode unchanged.
+ */
+export const OrchestrationThreadActivityTruncation = Schema.Struct({
+  /** How many of the thread's activities the server did not return. */
+  omittedCount: NonNegativeInt,
+});
+export type OrchestrationThreadActivityTruncation =
+  typeof OrchestrationThreadActivityTruncation.Type;
+
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
   "interrupted",
@@ -375,6 +391,7 @@ export const OrchestrationThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
+  activitiesTruncated: Schema.optional(OrchestrationThreadActivityTruncation),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
 });

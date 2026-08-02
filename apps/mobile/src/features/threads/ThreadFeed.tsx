@@ -822,6 +822,20 @@ function renderFeedEntry(
     return <WorkingTimelineRow startedAt={entry.createdAt} />;
   }
 
+  // Deliberately not a control: the server caps the activity read and has no
+  // pagination, so there is nothing to load.
+  if (entry.type === "activities-truncated") {
+    return (
+      <View className="mb-3 border-b border-neutral-200/80 px-2 pb-2 dark:border-white/[0.08]">
+        <Text className="font-t3-medium text-xs tabular-nums text-foreground-muted">
+          {entry.omittedCount === 1
+            ? "1 earlier work log entry is not shown."
+            : `${entry.omittedCount.toLocaleString()} earlier work log entries are not shown.`}
+        </Text>
+      </View>
+    );
+  }
+
   if (entry.type === "turn-fold") {
     return (
       <Pressable

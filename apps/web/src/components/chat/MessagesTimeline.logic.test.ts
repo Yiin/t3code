@@ -261,6 +261,62 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
+  const truncationTimelineEntries = [
+    {
+      id: "user-1-entry",
+      kind: "message" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      message: {
+        id: "user-1" as never,
+        role: "user" as const,
+        text: "Keep going",
+        turnId: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+        streaming: false,
+      },
+    },
+  ];
+
+  it("opens the transcript with a truncation notice when activities were omitted", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: truncationTimelineEntries,
+      activitiesTruncated: { omittedCount: 1200 },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows[0]).toEqual({
+      kind: "activities-truncated",
+      id: "activities-truncated",
+      createdAt: "2026-01-01T00:00:00Z",
+      omittedCount: 1200,
+    });
+    expect(rows.filter((row) => row.kind === "activities-truncated")).toHaveLength(1);
+  });
+
+  it("emits no truncation notice when nothing was omitted", () => {
+    const shared = {
+      timelineEntries: truncationTimelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    };
+
+    // Absent (an old server or a pre-marker cached snapshot), explicitly null,
+    // and a zero count all mean the same thing.
+    for (const rows of [
+      deriveMessagesTimelineRows(shared),
+      deriveMessagesTimelineRows({ ...shared, activitiesTruncated: null }),
+      deriveMessagesTimelineRows({ ...shared, activitiesTruncated: { omittedCount: 0 } }),
+    ]) {
+      expect(rows.some((row) => row.kind === "activities-truncated")).toBe(false);
+    }
+  });
+
   it("only enables assistant copy for the terminal assistant message in a turn", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [

@@ -172,6 +172,7 @@ function buildProps() {
     activeTurnInProgress: false,
     activeTurnStartedAt: null,
     listRef: createRef<LegendListRef | null>(),
+    activitiesTruncated: null,
     latestTurn: null,
     runningTurnId: null,
     turnDiffSummaryByAssistantMessageId: new Map(),

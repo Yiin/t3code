@@ -56,6 +56,35 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("opens the feed with a truncation notice when activities were omitted", () => {
+    const activity = makeActivity({
+      id: EventId.make("activity-newest"),
+      kind: "runtime.warning",
+      summary: "Runtime warning",
+      createdAt: "2026-04-01T00:00:02.000Z",
+      turnId: TurnId.make("turn-1"),
+      payload: { message: "Newest warning" },
+    });
+    const base = {
+      id: ThreadId.make("thread-1"),
+      projectId: ProjectId.make("project-1"),
+      title: "Chatty thread",
+      activities: [activity],
+    };
+
+    const truncatedFeed = buildThreadFeed(
+      makeThread({ ...base, activitiesTruncated: { omittedCount: 1200 } }),
+    );
+    expect(truncatedFeed[0]).toMatchObject({
+      type: "activities-truncated",
+      id: "activities-truncated",
+      omittedCount: 1200,
+    });
+
+    const wholeFeed = buildThreadFeed(makeThread(base));
+    expect(wholeFeed.some((entry) => entry.type === "activities-truncated")).toBe(false);
+  });
+
   it("keeps historic work entries attributed to their turns", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-1"),

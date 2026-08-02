@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type MessageId,
+  type OrchestrationThreadActivityTruncation,
   type ScopedThreadRef,
   type ServerProviderSkill,
   type TurnId,
@@ -163,6 +164,7 @@ interface MessagesTimelineProps {
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
+  activitiesTruncated: OrchestrationThreadActivityTruncation | null;
   latestTurn: TimelineLatestTurn | null;
   runningTurnId: TurnId | null;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
@@ -197,6 +199,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   listRef,
   timelineEntries,
+  activitiesTruncated,
   latestTurn,
   runningTurnId,
   turnDiffSummaryByAssistantMessageId,
@@ -302,6 +305,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () =>
       deriveMessagesTimelineRows({
         timelineEntries,
+        activitiesTruncated,
         latestTurn,
         runningTurnId,
         expandedTurnIds,
@@ -312,6 +316,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         revertTurnCountByUserMessageId,
       }),
     [
+      activitiesTruncated,
       timelineEntries,
       latestTurn,
       runningTurnId,
@@ -858,6 +863,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
+      {row.kind === "activities-truncated" ? <ActivitiesTruncatedTimelineRow row={row} /> : null}
     </div>
   );
 });
@@ -1083,6 +1089,26 @@ function ProposedPlanTimelineRow({
         cwd={ctx.markdownCwd}
         workspaceRoot={ctx.workspaceRoot}
       />
+    </div>
+  );
+}
+
+/**
+ * Says the work log starts mid-history. Deliberately not a control: the server
+ * caps the activity read and has no pagination, so there is nothing to load.
+ */
+function ActivitiesTruncatedTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "activities-truncated" }>;
+}) {
+  return (
+    <div className="mb-2 border-b border-border/50 pb-2 pl-1.5">
+      <p className="text-[11px] text-muted-foreground/70 tabular-nums">
+        {row.omittedCount === 1
+          ? "1 earlier work log entry is not shown."
+          : `${row.omittedCount.toLocaleString()} earlier work log entries are not shown.`}
+      </p>
     </div>
   );
 }

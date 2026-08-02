@@ -6,6 +6,7 @@ import type {
   OrchestrationSession,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  OrchestrationThreadActivityTruncation,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -134,6 +135,16 @@ export function createEnvironmentThreadDetailAtoms<E>(
     ),
   );
 
+  const threadActivitiesTruncatedAtomFamily = Atom.family((key: string) =>
+    Atom.make(
+      (get): OrchestrationThreadActivityTruncation | null =>
+        get(threadDetailAtomFamily(key))?.activitiesTruncated ?? null,
+    ).pipe(
+      Atom.setIdleTTL(THREAD_STATE_IDLE_TTL_MS),
+      Atom.withLabel(`environment-thread-activities-truncated:${key}`),
+    ),
+  );
+
   const threadProposedPlansAtomFamily = Atom.family((key: string) =>
     Atom.make(
       (get): ReadonlyArray<OrchestrationProposedPlan> =>
@@ -179,6 +190,8 @@ export function createEnvironmentThreadDetailAtoms<E>(
     errorAtom: (ref: ScopedThreadRef) => threadErrorAtomFamily(threadKey(ref)),
     messagesAtom: (ref: ScopedThreadRef) => threadMessagesAtomFamily(threadKey(ref)),
     activitiesAtom: (ref: ScopedThreadRef) => threadActivitiesAtomFamily(threadKey(ref)),
+    activitiesTruncatedAtom: (ref: ScopedThreadRef) =>
+      threadActivitiesTruncatedAtomFamily(threadKey(ref)),
     proposedPlansAtom: (ref: ScopedThreadRef) => threadProposedPlansAtomFamily(threadKey(ref)),
     checkpointsAtom: (ref: ScopedThreadRef) => threadCheckpointsAtomFamily(threadKey(ref)),
     sessionAtom: (ref: ScopedThreadRef) => threadSessionAtomFamily(threadKey(ref)),

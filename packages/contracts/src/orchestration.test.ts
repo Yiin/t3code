@@ -417,6 +417,41 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
   }),
 );
 
+it.effect("leaves the activity truncation marker absent for snapshots without one", () =>
+  Effect.gen(function* () {
+    const common = {
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Cached thread",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      session: null,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    };
+
+    // An old server or a cached snapshot written before the marker existed.
+    const withoutMarker = yield* decodeOrchestrationThread(common);
+    assert.strictEqual(withoutMarker.activitiesTruncated, undefined);
+
+    const withMarker = yield* decodeOrchestrationThread({
+      ...common,
+      activitiesTruncated: { omittedCount: 42 },
+    });
+    assert.deepStrictEqual(withMarker.activitiesTruncated, { omittedCount: 42 });
+  }),
+);
+
 it.effect("decodes thread archived and unarchived events", () =>
   Effect.gen(function* () {
     const archived = yield* decodeOrchestrationEvent({

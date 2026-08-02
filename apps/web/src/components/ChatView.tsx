@@ -200,6 +200,7 @@ import {
   useProject,
   useProjects,
   useThread,
+  useThreadActivitiesTruncated,
   useThreadProposedPlans,
   useThreadRefs,
 } from "../state/entities";
@@ -1506,6 +1507,7 @@ function ChatViewContent(props: ChatViewProps) {
     return scopeThreadRef(activeThread.environmentId, sourceThreadId);
   }, [activeLatestTurn?.sourceProposedPlan?.threadId, activeThread]);
   const sourceThreadProposedPlans = useThreadProposedPlans(sourcePlanThreadRef);
+  const activeThreadActivitiesTruncated = useThreadActivitiesTruncated(activeThreadRef);
   const threadPlanCatalog = useMemo<ThreadPlanCatalogEntry[]>(() => {
     if (!activeThread) {
       return [];
@@ -5566,6 +5568,7 @@ function ChatViewContent(props: ChatViewProps) {
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
+                activitiesTruncated={activeThreadActivitiesTruncated}
                 latestTurn={activeLatestTurn}
                 runningTurnId={
                   activeThread.session?.status === "running"

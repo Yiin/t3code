@@ -110,6 +110,9 @@ const ProjectionCountsRowSchema = Schema.Struct({
   projectCount: Schema.Number,
   threadCount: Schema.Number,
 });
+const ProjectionThreadActivityCountRowSchema = Schema.Struct({
+  activityCount: Schema.Number,
+});
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
 });
@@ -894,6 +897,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sequence ASC,
           created_at ASC,
           activity_id ASC
+      `,
+  });
+
+  // How many activities the thread actually holds, so the capped read above can
+  // report how many it left out. `COUNT(*)` never touches `payload_json`, which
+  // is 75-97% of this table's bytes, and it rides the
+  // `(thread_id, sequence, created_at, activity_id)` index.
+  const countThreadActivityRowsByThread = SqlSchema.findOne({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadActivityCountRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT COUNT(*) AS "activityCount"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
       `,
   });
 
@@ -1978,6 +1996,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         messageRows,
         proposedPlanRows,
         activityRows,
+        activityCountRow,
         checkpointRows,
         latestTurnRow,
         sessionRow,
@@ -2014,6 +2033,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
+        countThreadActivityRowsByThread({ threadId }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadDetailById:countActivities:query",
+              "ProjectionSnapshotQuery.getThreadDetailById:countActivities:decodeRow",
+            ),
+          ),
+        ),
         listCheckpointRowsByThread({ threadId }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
@@ -2043,6 +2070,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       if (Option.isNone(threadRow)) {
         return Option.none<OrchestrationThread>();
       }
+
+      // The capped read returns the newest window plus every pinned
+      // request/response row, so the omitted count is whatever the thread holds
+      // beyond what came back — not `total - THREAD_DETAIL_ACTIVITY_LIMIT`.
+      const omittedActivityCount = Math.max(
+        0,
+        activityCountRow.activityCount - activityRows.length,
+      );
 
       const thread = {
         id: threadRow.value.threadId,
@@ -2092,6 +2127,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           }
           return activity;
         }),
+        ...(omittedActivityCount > 0
+          ? { activitiesTruncated: { omittedCount: omittedActivityCount } }
+          : {}),
         checkpoints: checkpointRows.map((row) => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,

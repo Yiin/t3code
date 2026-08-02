@@ -127,7 +127,15 @@ export type ThreadFeedEntry =
       readonly turnId: TurnId;
       readonly label: string;
       readonly expanded: boolean;
+    }
+  | {
+      readonly type: "activities-truncated";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly omittedCount: number;
     };
+
+const ACTIVITIES_TRUNCATED_FEED_ID = "activities-truncated";
 
 export type ThreadFeedLatestTurn = Pick<
   OrchestrationLatestTurn,
@@ -1382,5 +1390,23 @@ export function buildThreadFeed(
     Order.Date,
   );
 
-  return groupAdjacentActivities(entries);
+  const feed = groupAdjacentActivities(entries);
+
+  // The server caps how many activities it returns and offers no way to fetch
+  // the rest, so say so at the top of the feed instead of letting the older
+  // tool rows disappear behind messages that survived.
+  const omittedCount = thread.activitiesTruncated?.omittedCount ?? 0;
+  if (omittedCount > 0) {
+    return [
+      {
+        type: "activities-truncated",
+        id: ACTIVITIES_TRUNCATED_FEED_ID,
+        createdAt: feed[0]?.createdAt ?? thread.createdAt,
+        omittedCount,
+      },
+      ...feed,
+    ];
+  }
+
+  return feed;
 }

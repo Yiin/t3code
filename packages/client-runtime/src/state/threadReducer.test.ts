@@ -672,6 +672,40 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.activities[0]?.id).toBe("activity-0");
       }
     });
+
+    it("keeps the activity truncation marker when a live activity arrives", () => {
+      // Live appends only add newer rows; the older ones the server left out
+      // are still missing, so the notice must not disappear.
+      const result = applyThreadDetailEvent(
+        { ...baseThread, activitiesTruncated: { omittedCount: 1200 } },
+        {
+          ...baseEventFields,
+          sequence: 14,
+          occurredAt: "2026-04-01T11:02:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("activity-live"),
+              tone: "tool",
+              kind: "command",
+              summary: "Ran one more command",
+              payload: {},
+              turnId: TurnId.make("turn-1"),
+              sequence: 900,
+              createdAt: "2026-04-01T11:02:00.000Z",
+            },
+          },
+        },
+      );
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.activitiesTruncated).toEqual({ omittedCount: 1200 });
+      }
+    });
   });
 
   describe("thread.turn-diff-completed", () => {

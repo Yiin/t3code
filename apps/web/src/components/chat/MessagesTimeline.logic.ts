@@ -7,7 +7,12 @@ import {
   type WorkLogEntry,
 } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
-import { type MessageId, type OrchestrationLatestTurn, type TurnId } from "@t3tools/contracts";
+import {
+  type MessageId,
+  type OrchestrationLatestTurn,
+  type OrchestrationThreadActivityTruncation,
+  type TurnId,
+} from "@t3tools/contracts";
 
 export const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
@@ -174,6 +179,12 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string;
       proposedPlan: ProposedPlan;
+    }
+  | {
+      kind: "activities-truncated";
+      id: string;
+      createdAt: string;
+      omittedCount: number;
     }
   | { kind: "working"; id: string; createdAt: string | null };
 
@@ -402,8 +413,11 @@ function deriveTurnFolds(input: {
   return foldsByAnchorEntryId;
 }
 
+const ACTIVITIES_TRUNCATED_ROW_ID = "activities-truncated";
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
+  activitiesTruncated?: OrchestrationThreadActivityTruncation | null;
   latestTurn?: TimelineLatestTurn | null;
   runningTurnId?: TurnId | null;
   expandedTurnIds?: ReadonlySet<TurnId>;
@@ -428,6 +442,19 @@ export function deriveMessagesTimelineRows(input: {
     latestTurn: input.latestTurn ?? null,
     unsettledTurnId,
   });
+  // The server caps how many activities it returns and offers no way to fetch
+  // the rest, so say so at the top of the transcript instead of letting the
+  // older tool rows disappear behind messages that survived.
+  const omittedActivityCount = input.activitiesTruncated?.omittedCount ?? 0;
+  if (omittedActivityCount > 0) {
+    nextRows.push({
+      kind: "activities-truncated",
+      id: ACTIVITIES_TRUNCATED_ROW_ID,
+      createdAt: input.timelineEntries[0]?.createdAt ?? "",
+      omittedCount: omittedActivityCount,
+    });
+  }
+
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorEntryId.values()) {
     if (!input.expandedTurnIds?.has(fold.turnId)) {
@@ -601,6 +628,11 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   switch (a.kind) {
     case "working":
       return a.createdAt === (b as typeof a).createdAt;
+
+    case "activities-truncated": {
+      const bt = b as typeof a;
+      return a.createdAt === bt.createdAt && a.omittedCount === bt.omittedCount;
+    }
 
     case "turn-fold": {
       const bf = b as typeof a;
