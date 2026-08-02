@@ -5,15 +5,23 @@ import {
   type OrchestrationSessionStatus,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
+import * as TxRef from "effect/TxRef";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
+import { OrchestrationProjectionStalledError } from "../Errors.ts";
+import {
+  orchestrationProjectionHealthy,
+  orchestrationProjectionLag,
+} from "../../observability/Metrics.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
@@ -69,6 +77,30 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
 
 type ProjectorName =
   (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
+
+// `readFromSequence`'s default page budget (1_000) is meant to bound a single
+// query, not a whole replay. Bootstrap and the live loop both need to drain
+// every event since the persisted cursor with no gap, so both pass this
+// instead of relying on the default.
+const UNBOUNDED_REPLAY_LIMIT = Number.MAX_SAFE_INTEGER;
+
+// A projector that keeps failing on the same event is retried this many
+// times, immediately, before the live loop halts. Bounded retry absorbs a
+// transient blip (a momentary sqlite busy error, for example) without
+// treating every failure as a poison event, or turning a genuinely poison
+// one into a long stall before the pipeline halts and releases its waiters.
+const PROJECTOR_RETRY_ATTEMPTS = 4;
+
+// How long `awaitProjectedSequence` will park before giving up and returning
+// a typed "timeout" failure instead of blocking forever. Chosen to be well
+// above normal projection latency but short enough that a caller degrading
+// to "stale, but marked so" is still a good user experience.
+const AWAIT_PROJECTED_SEQUENCE_TIMEOUT = Duration.seconds(5);
+
+interface ProjectionHealth {
+  readonly status: "running" | "halted";
+  readonly detail: string | null;
+}
 
 /**
  * Turn state to settle still-running turns with when their session leaves the
@@ -1531,6 +1563,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       },
     ];
 
+    // Guards against double-apply. `applyEventOrHalt` retries the *whole*
+    // `projectEvent` fan-out (every projector, in order) when any single
+    // projector fails, because a failed projector's own transaction rolled
+    // back and there is no cheaper way to resume mid-fan-out. Projectors
+    // earlier in the list that already committed for this event must not
+    // re-run on that retry — some are not idempotent (e.g. the
+    // threadMessages projector appends streamed text deltas rather than
+    // overwriting them). The persisted `lastAppliedSequence` is exactly the
+    // fact needed to tell "already committed for this event" apart from
+    // "needs to run": read it inside the same transaction as the apply so
+    // the check and the write are atomic, and skip the apply (and the
+    // upsert) entirely when the projector is already caught up to or past
+    // this event's sequence. This also makes replaying from an
+    // artificially-low or wrong cursor (e.g. `runLive`'s seed falling back
+    // to 0 on a transient read error) harmless instead of a silent
+    // duplicate-apply: every already-projected event becomes a no-op skip.
     const runProjectorForEvent = Effect.fn("runProjectorForEvent")(function* (
       projector: ProjectorDefinition,
       event: OrchestrationEvent,
@@ -1540,17 +1588,29 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         prunedThreadRelativePaths: new Map<string, Set<string>>(),
       };
 
-      yield* sql.withTransaction(
-        projector.apply(event, attachmentSideEffects).pipe(
-          Effect.flatMap(() =>
-            projectionStateRepository.upsert({
-              projector: projector.name,
-              lastAppliedSequence: event.sequence,
-              updatedAt: event.occurredAt,
-            }),
-          ),
+      const didApply = yield* sql.withTransaction(
+        projectionStateRepository.getByProjector({ projector: projector.name }).pipe(
+          Effect.flatMap((stateRow) => {
+            if (Option.isSome(stateRow) && stateRow.value.lastAppliedSequence >= event.sequence) {
+              return Effect.succeed(false);
+            }
+            return projector.apply(event, attachmentSideEffects).pipe(
+              Effect.flatMap(() =>
+                projectionStateRepository.upsert({
+                  projector: projector.name,
+                  lastAppliedSequence: event.sequence,
+                  updatedAt: event.occurredAt,
+                }),
+              ),
+              Effect.as(true),
+            );
+          }),
         ),
       );
+
+      if (!didApply) {
+        return;
+      }
 
       yield* runAttachmentSideEffects(attachmentSideEffects).pipe(
         Effect.catch((cause) =>
@@ -1574,6 +1634,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             Stream.runForEach(
               eventStore.readFromSequence(
                 Option.isSome(stateRow) ? stateRow.value.lastAppliedSequence : 0,
+                UNBOUNDED_REPLAY_LIMIT,
               ),
               (event) => runProjectorForEvent(projector, event),
             ),
@@ -1612,9 +1673,220 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       ),
     );
 
+    // --- Live loop state -----------------------------------------------
+    //
+    // `bootstrap` drains every projector to the event store's tail (see
+    // above) and is required to run to completion, sequentially, before
+    // `runLive` starts — the engine enforces that ordering by only forking
+    // `runLive` after `bootstrap` resolves. That is what keeps exactly one
+    // applier for any given event: `bootstrap` and the live loop never run
+    // concurrently, so `runAttachmentSideEffects` (ProjectionPipeline.ts,
+    // above) never races itself across a bootstrap/live handover.
+    //
+    // `appliedSequence` is the single source of truth `awaitProjectedSequence`
+    // waits on. Because `projectEvent` applies all projectors to one event
+    // (in the fixed order above) before moving to the next, "every projector
+    // has applied event N" and "the live loop has advanced its cursor past N"
+    // are the same fact — one ref suffices; no per-projector bookkeeping is
+    // needed for the wait signal.
+    const projectionHealth = yield* TxRef.make<ProjectionHealth>({
+      status: "running",
+      detail: null,
+    });
+    const appliedSequence = yield* TxRef.make(0);
+    const latestKnownAppended = yield* TxRef.make(0);
+
+    const notifyAppended: OrchestrationProjectionPipelineShape["notifyAppended"] = (sequence) =>
+      TxRef.update(latestKnownAppended, (current) => Math.max(current, sequence));
+
+    const awaitProjectedSequence: OrchestrationProjectionPipelineShape["awaitProjectedSequence"] = (
+      sequence,
+    ) =>
+      Effect.gen(function* () {
+        const insideTransaction = yield* Effect.serviceOption(sql.transactionService);
+        if (Option.isSome(insideTransaction)) {
+          return yield* Effect.die(
+            new Error(
+              "awaitProjectedSequence called from inside a sql.withTransaction block. This " +
+                "would deadlock: the sqlite client serializes every transaction on a single " +
+                "connection permit (NodeSqliteClient.ts), so a waiter parked here while holding " +
+                "that permit can never be woken because the live projection loop can never " +
+                "acquire the permit it needs to advance. Read the projected value after the " +
+                "transaction commits instead.",
+            ),
+          );
+        }
+
+        if (sequence <= 0) {
+          return;
+        }
+
+        yield* Effect.tx(
+          Effect.gen(function* () {
+            const health = yield* TxRef.get(projectionHealth);
+            if (health.status === "halted") {
+              return yield* new OrchestrationProjectionStalledError({
+                reason: "halted",
+                sequence,
+                detail: health.detail ?? "projection pipeline halted after a projector failure",
+              });
+            }
+            const applied = yield* TxRef.get(appliedSequence);
+            if (applied < sequence) {
+              return yield* Effect.txRetry;
+            }
+          }),
+        ).pipe(
+          Effect.timeout(AWAIT_PROJECTED_SEQUENCE_TIMEOUT),
+          Effect.catchTag("TimeoutError", () =>
+            Effect.fail(
+              new OrchestrationProjectionStalledError({
+                reason: "timeout",
+                sequence,
+                detail: `projection did not confirm sequence ${sequence} within ${Duration.toMillis(AWAIT_PROJECTED_SEQUENCE_TIMEOUT)}ms`,
+              }),
+            ),
+          ),
+        );
+      });
+
+    // Applies one event to every projector with bounded retry. On success,
+    // advances the shared cursor and reports lag. On exhausted retries, this
+    // is a poison event: halt the pipeline (never skip it, never keep
+    // retrying forever) and flip health so every current and future
+    // `awaitProjectedSequence` waiter fails fast instead of hanging — a
+    // silent permanent stall is exactly the incident this pipeline exists to
+    // prevent. Returns `true` to keep draining, `false` once halted.
+    const applyEventOrHalt = (event: OrchestrationEvent): Effect.Effect<boolean> =>
+      projectEvent(event).pipe(
+        // Bounded, not scheduled with backoff: a fixed number of immediate
+        // retries is enough to absorb a transient blip (e.g. a momentary
+        // sqlite busy error) without turning a genuinely poison event into a
+        // long stall before the pipeline halts and releases its waiters.
+        Effect.retry({ times: PROJECTOR_RETRY_ATTEMPTS }),
+        Effect.matchEffect({
+          onSuccess: () =>
+            Effect.gen(function* () {
+              yield* TxRef.set(appliedSequence, event.sequence);
+              const latest = yield* TxRef.get(latestKnownAppended);
+              yield* Metric.update(
+                orchestrationProjectionLag,
+                Math.max(0, latest - event.sequence),
+              );
+              return true;
+            }),
+          onFailure: (cause) =>
+            Effect.logError(
+              "orchestration projection pipeline halted: a projector failed on an event and exhausted its retries",
+              { sequence: event.sequence, eventType: event.type, cause },
+            ).pipe(
+              Effect.andThen(
+                TxRef.set(projectionHealth, {
+                  status: "halted",
+                  detail: `projector failed applying ${event.type} at sequence ${event.sequence}`,
+                }),
+              ),
+              Effect.andThen(Metric.update(orchestrationProjectionHealthy, 0)),
+              Effect.as(false),
+            ),
+        }),
+      );
+
+    // Drains from `appliedSequence` to whatever is currently in the event
+    // store, applying events one at a time so `awaitProjectedSequence`
+    // waiters can unblock as soon as their sequence is reached rather than
+    // only once the whole backlog is done. Stops early (without erroring)
+    // if a projector halts partway through.
+    const drainToTail = Effect.gen(function* () {
+      const cursor = yield* TxRef.get(appliedSequence);
+      yield* Stream.runForEachWhile(
+        eventStore.readFromSequence(cursor, UNBOUNDED_REPLAY_LIMIT),
+        applyEventOrHalt,
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(ServerConfig, serverConfig),
+        Effect.catch((error) =>
+          Effect.logError("orchestration projection live loop: read from event store failed", {
+            cause: error,
+          }),
+        ),
+      );
+    });
+
+    // Blocks until either a new append is known (via `notifyAppended`) past
+    // the current cursor, or a bounded fallback elapses — the fallback is
+    // defense-in-depth against a missed wake-up, not the primary signal, so
+    // it is long enough to be nearly free in the steady state.
+    const LIVE_LOOP_FALLBACK_POLL = Duration.seconds(2);
+    const awaitWork = Effect.gen(function* () {
+      const cursor = yield* TxRef.get(appliedSequence);
+      const latest = yield* TxRef.get(latestKnownAppended);
+      if (latest > cursor) {
+        return;
+      }
+      yield* Effect.tx(
+        Effect.gen(function* () {
+          const nextLatest = yield* TxRef.get(latestKnownAppended);
+          const nextCursor = yield* TxRef.get(appliedSequence);
+          if (nextLatest <= nextCursor) {
+            return yield* Effect.txRetry;
+          }
+        }),
+      ).pipe(Effect.timeoutOption(LIVE_LOOP_FALLBACK_POLL), Effect.asVoid);
+    });
+
+    const runLive: OrchestrationProjectionPipelineShape["runLive"] = Effect.gen(function* () {
+      // A transient read error here degrades to seeding from 0 rather than
+      // halting the whole pipeline over what is very likely a momentary
+      // blip. That degrade is safe, not just optimistic: `drainToTail` would
+      // then restream the *entire* event history through `projectEvent`,
+      // but `runProjectorForEvent`'s per-projector cursor-skip guard (above)
+      // makes every event a projector is already caught up on a no-op, so
+      // the replay is wasted work, not a double-apply.
+      const seedCursor = yield* projectionStateRepository
+        .minLastAppliedSequence()
+        .pipe(Effect.catchTag("PersistenceSqlError", () => Effect.succeed(null)));
+      const initialSequence = seedCursor ?? 0;
+      yield* TxRef.set(appliedSequence, initialSequence);
+      yield* TxRef.update(latestKnownAppended, (current) => Math.max(current, initialSequence));
+      yield* Metric.update(orchestrationProjectionHealthy, 1);
+
+      while (true) {
+        const health = yield* TxRef.get(projectionHealth);
+        if (health.status === "halted") {
+          return;
+        }
+        yield* drainToTail;
+        const healthAfterDrain = yield* TxRef.get(projectionHealth);
+        if (healthAfterDrain.status === "halted") {
+          return;
+        }
+        yield* awaitWork;
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError(
+          "orchestration projection pipeline halted: unexpected defect in the live loop",
+          { cause },
+        ).pipe(
+          Effect.andThen(
+            TxRef.set(projectionHealth, {
+              status: "halted",
+              detail: "unexpected defect in the projection live loop",
+            }),
+          ),
+          Effect.andThen(Metric.update(orchestrationProjectionHealthy, 0)),
+        ),
+      ),
+    );
+
     return {
       bootstrap,
       projectEvent,
+      runLive,
+      notifyAppended,
+      awaitProjectedSequence,
     } satisfies OrchestrationProjectionPipelineShape;
   },
 );

@@ -28,6 +28,7 @@ import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
@@ -38,6 +39,21 @@ import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+// The domain-event subscription in `start` only forwards these four event
+// types (see the `event.type !== ...` filter below); narrowing here lets
+// `awaitDomainEventProjected` read `event.payload.threadId` without an
+// unsound cast, since every variant in this subset carries a `threadId`.
+type CheckpointDomainEvent = Extract<
+  OrchestrationEvent,
+  {
+    type:
+      | "thread.turn-start-requested"
+      | "thread.message-sent"
+      | "thread.checkpoint-revert-requested"
+      | "thread.turn-diff-completed";
+  }
+>;
+
 type ReactorInput =
   | {
       readonly source: "runtime";
@@ -45,7 +61,7 @@ type ReactorInput =
     }
   | {
       readonly source: "domain";
-      readonly event: OrchestrationEvent;
+      readonly event: CheckpointDomainEvent;
     };
 
 function toTurnId(value: string | undefined): TurnId | null {
@@ -79,6 +95,7 @@ const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     randomUUID.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const orchestrationProjectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
@@ -737,7 +754,57 @@ const make = Effect.gen(function* () {
       );
   });
 
-  const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
+  // Before t3code-74g, projection ran inside the command's own transaction, so
+  // any domain event this reactor received off `streamDomainEvents` was
+  // guaranteed already projected. Projection is now asynchronous, so every
+  // handler below that reads `resolveThreadDetail` would otherwise race the
+  // projection fiber: a lost race can skip the placeholder-dedupe check or
+  // compute a wrong `nextTurnCount`, producing duplicate or misnumbered
+  // checkpoints. The domain event carries its own sequence, so wait for the
+  // projection pipeline to have applied it first. Degrades (logs and
+  // proceeds) on a bounded timeout or a halted pipeline rather than hanging
+  // this reactor's single worker fiber forever, matching ws.ts/EpicRunner.
+  const awaitDomainEventProjected = (event: CheckpointDomainEvent) =>
+    orchestrationProjectionPipeline.awaitProjectedSequence(event.sequence).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("checkpoint reactor: projection wait degraded", {
+          eventType: event.type,
+          threadId: event.payload.threadId,
+          sequence: event.sequence,
+          reason: error.reason,
+          detail: error.detail,
+        }),
+      ),
+    );
+
+  // Runtime events (`turn.started` / `turn.completed`) come from the provider
+  // adapter, not from the event store, so there is no domain-event sequence
+  // to wait on directly. Instead wait for the projection pipeline to catch
+  // up to whatever the engine has most recently committed at the moment this
+  // runtime event is processed — the same `engine.latestSequence` barrier
+  // EpicRunner's poll loop uses (EpicRunner.ts `awaitFreshProjection`). This
+  // is a looser bound than an exact sequence, but a runtime event by
+  // construction cannot be reacting to a domain event that has not yet been
+  // appended, so waiting for "latest appended" is always sufficient here.
+  const awaitLatestProjected = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const latestSequence = yield* orchestrationEngine.latestSequence;
+      yield* orchestrationProjectionPipeline.awaitProjectedSequence(latestSequence).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("checkpoint reactor: projection wait degraded", {
+            threadId,
+            sequence: latestSequence,
+            reason: error.reason,
+            detail: error.detail,
+          }),
+        ),
+      );
+    });
+
+  const processDomainEvent = Effect.fn("processDomainEvent")(function* (
+    event: CheckpointDomainEvent,
+  ) {
+    yield* awaitDomainEventProjected(event);
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
       return;
@@ -783,6 +850,7 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
+    yield* awaitLatestProjected(event.threadId);
     if (event.type === "turn.started") {
       yield* ensurePreTurnBaselineFromTurnStart(event);
       return;

@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 
 import type { OrchestrationDispatchError } from "../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "../../orchestration/Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   EpicRunStore,
@@ -508,6 +509,19 @@ function createHarness(input: {
       }),
     ),
     Layer.provide(engineLayer),
+    // t3code-74g: `awaitFreshProjection` calls this before every poll read.
+    // This harness's fake engine/snapshot layers above have no real lag to
+    // wait out, so "already projected" keeps every existing test's timing
+    // unchanged.
+    Layer.provide(
+      Layer.succeed(OrchestrationProjectionPipeline, {
+        bootstrap: Effect.void,
+        projectEvent: () => Effect.void,
+        runLive: Effect.void,
+        notifyAppended: () => Effect.void,
+        awaitProjectedSequence: () => Effect.void,
+      }),
+    ),
     Layer.provide(snapshotLayer),
     Layer.provide(processRunnerLayer),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),

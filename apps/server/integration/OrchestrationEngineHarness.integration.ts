@@ -260,7 +260,10 @@ export const makeOrchestrationIntegrationHarness = (
 
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
-      Layer.provide(OrchestrationProjectionPipelineLive),
+      // provideMerge (not provide): ProviderRuntimeIngestion and other
+      // runtime-services layers below read `OrchestrationProjectionPipeline`
+      // directly (t3code-74g), not just via the engine internally.
+      Layer.provideMerge(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     );

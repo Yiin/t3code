@@ -11,12 +11,17 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Metric from "effect/Metric";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { orchestrationProjectionHealthy } from "../../observability/Metrics.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import {
@@ -3377,7 +3382,10 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
 const engineLayer = it.layer(
   OrchestrationEngineLive.pipe(
     Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-    Layer.provide(OrchestrationProjectionPipelineLive),
+    // provideMerge (not provide): tests in this group read
+    // `OrchestrationProjectionPipeline` directly (to call
+    // `awaitProjectedSequence`), not just via the engine internally.
+    Layer.provideMerge(OrchestrationProjectionPipelineLive),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolver.layer),
@@ -3392,13 +3400,22 @@ const engineLayer = it.layer(
 );
 
 engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
-  it.effect("projects dispatched engine events immediately", () =>
+  // t3code-74g moved projection off the append transaction and onto the
+  // pipeline's own live loop (`runLive`, forked once at engine startup — see
+  // `OrchestrationEngine.ts`). `engine.dispatch` no longer guarantees the SQL
+  // projection is caught up when it returns, only that the event is
+  // persisted and the in-memory read model is updated — so a read
+  // immediately after `dispatch` is a race. `awaitProjectedSequence` is the
+  // barrier that restores read-after-write for tests (and real callers) that
+  // need it; this test was renamed from "...immediately" to reflect that.
+  it.effect("projects dispatched engine events once the projection pipeline catches up", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const sql = yield* SqlClient.SqlClient;
       const createdAt = "2026-01-01T00:00:00.000Z";
 
-      yield* engine.dispatch({
+      const result = yield* engine.dispatch({
         type: "project.create",
         commandId: CommandId.make("cmd-live-project"),
         projectId: ProjectId.make("project-live"),
@@ -3410,6 +3427,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         },
         createdAt,
       });
+      yield* projectionPipeline.awaitProjectedSequence(result.sequence);
 
       const projectRows = yield* sql<{ readonly title: string; readonly scriptsJson: string }>`
         SELECT
@@ -3433,6 +3451,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
   it.effect("projects persist updated scripts from project.meta.update", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const sql = yield* SqlClient.SqlClient;
       const createdAt = "2026-01-01T00:00:00.000Z";
 
@@ -3449,7 +3468,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         createdAt,
       });
 
-      yield* engine.dispatch({
+      const updateResult = yield* engine.dispatch({
         type: "project.meta.update",
         commandId: CommandId.make("cmd-scripts-project-update"),
         projectId: ProjectId.make("project-scripts"),
@@ -3467,6 +3486,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           model: "gpt-5",
         },
       });
+      yield* projectionPipeline.awaitProjectedSequence(updateResult.sequence);
 
       const projectRows = yield* sql<{
         readonly scriptsJson: string;
@@ -3488,3 +3508,370 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+// --- t3code-74g: the projection barrier, its deadlock guard, and its
+// failure/observability behaviour. -----------------------------------------
+
+// Each of these three gets its own fresh layer (own in-memory sqlite, own
+// pipeline service instance, own `runLive` TxRefs) rather than sharing one
+// `it.layer` group. `runLive`'s health/cursor state is meant to be seeded
+// exactly once per process lifetime (real startup only ever forks it once);
+// sharing a pipeline instance across tests — especially the poison-halt test
+// below, which deliberately drives it into "halted" — would leak that state
+// into whichever test ran next.
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-barrier-tx-guard-")))(
+  "OrchestrationProjectionPipeline live loop barrier — transaction guard",
+  (it) => {
+    it.effect(
+      "awaitProjectedSequence dies immediately when called from inside a sql.withTransaction block",
+      () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const sql = yield* SqlClient.SqlClient;
+
+          const exit = yield* Effect.exit(
+            sql.withTransaction(projectionPipeline.awaitProjectedSequence(1)),
+          );
+
+          assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) {
+            // A defect (die), not a typed failure: this must never be
+            // something a caller can quietly `catchAll` past, because the
+            // failure mode is a permanent deadlock, not a recoverable one.
+            assert.isTrue(Cause.hasDies(exit.cause));
+          }
+        }),
+    );
+  },
+);
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-barrier-own-write-")))(
+  "OrchestrationProjectionPipeline live loop barrier — read-after-write",
+  (it) => {
+    it.effect(
+      "a reader awaiting its own sequence sees its own write, even though the live loop applies it asynchronously",
+      () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const now = "2026-01-01T00:00:00.000Z";
+
+          yield* projectionPipeline.bootstrap;
+          yield* Effect.forkScoped(projectionPipeline.runLive);
+
+          const waiter = yield* Effect.forkChild(projectionPipeline.awaitProjectedSequence(1));
+          // Let the forked waiter actually start and park on `Effect.txRetry`
+          // — a plain yield is enough since parking is a suspend, not a
+          // timed sleep, so there is nothing to race against a wall clock.
+          yield* Effect.yieldNow;
+          assert.isUndefined(waiter.pollUnsafe());
+
+          const savedEvent = yield* eventStore.append({
+            type: "project.created",
+            eventId: EventId.make("evt-await-own-write"),
+            aggregateKind: "project",
+            aggregateId: ProjectId.make("project-await-own-write"),
+            occurredAt: now,
+            commandId: CommandId.make("cmd-await-own-write"),
+            causationEventId: null,
+            correlationId: CommandId.make("cmd-await-own-write"),
+            metadata: {},
+            payload: {
+              projectId: ProjectId.make("project-await-own-write"),
+              title: "Await Own Write",
+              workspaceRoot: "/tmp/project-await-own-write",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* projectionPipeline.notifyAppended(savedEvent.sequence);
+
+          yield* Fiber.join(waiter);
+
+          const rows = yield* sql<{ readonly projectId: string }>`
+          SELECT project_id AS "projectId" FROM projection_projects
+          WHERE project_id = 'project-await-own-write'
+        `;
+          assert.deepEqual(rows, [{ projectId: "project-await-own-write" }]);
+        }).pipe(Effect.scoped),
+    );
+  },
+);
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-barrier-poison-")))(
+  "OrchestrationProjectionPipeline live loop barrier — poison projector",
+  (it) => {
+    it.effect(
+      "a projector that keeps failing halts the live loop, fails every waiter, and flips the health metric",
+      () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const now = "2026-01-01T00:00:00.000Z";
+
+          yield* projectionPipeline.bootstrap;
+          yield* Effect.forkScoped(projectionPipeline.runLive);
+
+          // Simulate a poison event deterministically: break the one table
+          // the pending-approvals projector must query for an
+          // `approval.requested` activity, rather than injecting a fake
+          // projector — this exercises the real retry-then-halt path in
+          // `runLive`, not a test double standing in for it.
+          yield* sql`DROP TABLE projection_pending_approvals`;
+
+          const savedEvent = yield* eventStore.append({
+            type: "thread.activity-appended",
+            eventId: EventId.make("evt-poison-activity"),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make("thread-poison"),
+            occurredAt: now,
+            commandId: CommandId.make("cmd-poison-activity"),
+            causationEventId: null,
+            correlationId: CommandId.make("cmd-poison-activity"),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make("thread-poison"),
+              activity: {
+                id: EventId.make("activity-poison-requested"),
+                tone: "approval",
+                kind: "approval.requested",
+                summary: "Command approval requested",
+                payload: {
+                  requestId: "approval-request-poison-1",
+                  requestKind: "command",
+                },
+                turnId: null,
+                createdAt: now,
+              },
+            },
+          });
+          yield* projectionPipeline.notifyAppended(savedEvent.sequence);
+
+          const waiterBeforeHalt = yield* Effect.forkChild(
+            projectionPipeline.awaitProjectedSequence(savedEvent.sequence),
+          );
+          const waiterExit = yield* Effect.exit(Fiber.join(waiterBeforeHalt));
+          assert.isTrue(Exit.isFailure(waiterExit));
+          if (Exit.isFailure(waiterExit)) {
+            const error = Cause.squash(waiterExit.cause);
+            assert.isTrue(
+              typeof error === "object" &&
+                error !== null &&
+                "reason" in error &&
+                (error as { reason: unknown }).reason === "halted",
+            );
+          }
+
+          // A brand-new waiter, started after the halt, must fail
+          // immediately rather than hang — this is the "current and future
+          // waiters" half of the documented behaviour.
+          const waiterAfterHalt = yield* Effect.exit(
+            projectionPipeline.awaitProjectedSequence(savedEvent.sequence),
+          );
+          assert.isTrue(Exit.isFailure(waiterAfterHalt));
+
+          const healthyState = yield* Metric.value(orchestrationProjectionHealthy);
+          assert.strictEqual(healthyState.value, 0);
+        }).pipe(Effect.scoped),
+    );
+  },
+);
+
+it.layer(
+  Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-barrier-no-double-apply-")),
+)("OrchestrationProjectionPipeline live loop barrier — no double-apply on retry", (it) => {
+  it.effect(
+    "re-running projectEvent for an already-applied event does not re-run projectors that already committed it",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make("evt-no-double-apply-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-no-double-apply"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-no-double-apply-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-no-double-apply-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-no-double-apply"),
+            title: "Project No Double Apply",
+            workspaceRoot: "/tmp/project-no-double-apply",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-no-double-apply-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-no-double-apply"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-no-double-apply-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-no-double-apply-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-no-double-apply"),
+            projectId: ProjectId.make("project-no-double-apply"),
+            title: "Thread No Double Apply",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        // Applying both setup events via `bootstrap` leaves every projector's
+        // persisted cursor at sequence 2, so the message event below starts
+        // from a clean, fully-caught-up state.
+        yield* projectionPipeline.bootstrap;
+
+        // `thread.message-sent` with `streaming: true` is the projector this
+        // finding is about: `applyThreadMessagesProjection` appends the
+        // delta to the stored text rather than overwriting it, so applying
+        // the same event twice must be provably impossible once a projector
+        // has committed it.
+        const savedEvent = yield* eventStore.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-no-double-apply-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-no-double-apply"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-no-double-apply-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-no-double-apply-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-no-double-apply"),
+            messageId: MessageId.make("assistant-no-double-apply"),
+            role: "assistant",
+            text: "Hello",
+            turnId: null,
+            streaming: true,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        // First pass: every projector applies and commits the event.
+        yield* projectionPipeline.projectEvent(savedEvent);
+        // Second pass simulates `applyEventOrHalt`'s bounded retry re-running
+        // the whole fan-out from the top after some *other* projector failed
+        // transiently on this same event — every projector that already
+        // committed for this sequence must skip, not re-append.
+        yield* projectionPipeline.projectEvent(savedEvent);
+
+        const messageRows = yield* sql<{ readonly text: string }>`
+          SELECT text FROM projection_thread_messages
+          WHERE message_id = 'assistant-no-double-apply'
+        `;
+        assert.equal(messageRows.length, 1);
+        assert.equal(messageRows[0]?.text, "Hello");
+
+        const cursorRows = yield* sql<{ readonly lastAppliedSequence: number }>`
+          SELECT last_applied_sequence AS "lastAppliedSequence"
+          FROM projection_state
+          WHERE projector = ${ORCHESTRATION_PROJECTOR_NAMES.threadMessages}
+        `;
+        assert.deepEqual(cursorRows, [{ lastAppliedSequence: savedEvent.sequence }]);
+      }),
+  );
+});
+
+it.effect(
+  "projection resumes from the persisted cursor after a simulated restart, with no gap",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-projection-restart-",
+      });
+      const dbPath = path.join(baseDir, "userdata", "state.sqlite");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      const restartableLayer = OrchestrationProjectionPipelineLive.pipe(
+        Layer.provideMerge(OrchestrationEventStoreLive),
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+        Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
+      );
+
+      const projectEventFor = (index: number, occurredAt: string) => ({
+        type: "project.created" as const,
+        eventId: EventId.make(`evt-restart-${index}`),
+        aggregateKind: "project" as const,
+        aggregateId: ProjectId.make(`project-restart-${index}`),
+        occurredAt,
+        commandId: CommandId.make(`cmd-restart-${index}`),
+        causationEventId: null,
+        correlationId: CommandId.make(`cmd-restart-${index}`),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make(`project-restart-${index}`),
+          title: `Restart Project ${index}`,
+          workspaceRoot: `/tmp/project-restart-${index}`,
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+      });
+
+      // "Server run 1": append two events and let bootstrap fully catch up,
+      // then the process "restarts" (this Layer instance is torn down).
+      yield* Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        yield* eventStore.append(projectEventFor(1, now));
+        yield* eventStore.append(projectEventFor(2, now));
+        yield* projectionPipeline.bootstrap;
+      }).pipe(Effect.provide(restartableLayer), Effect.scoped);
+
+      // "Server run 2": a fresh pipeline instance, pointed at the same
+      // sqlite file, simulating a restart. Bootstrap must resume from the
+      // persisted cursor — not lose events 1-2, not re-apply them, and still
+      // pick up the event appended after the "restart".
+      yield* Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* eventStore.append(projectEventFor(3, now));
+        yield* projectionPipeline.bootstrap;
+
+        const rows = yield* sql<{ readonly projectId: string }>`
+          SELECT project_id AS "projectId" FROM projection_projects ORDER BY project_id
+        `;
+        assert.deepEqual(
+          rows.map((row) => row.projectId),
+          ["project-restart-1", "project-restart-2", "project-restart-3"],
+        );
+
+        const cursorRows = yield* sql<{ readonly lastAppliedSequence: number }>`
+          SELECT last_applied_sequence AS "lastAppliedSequence"
+          FROM projection_state
+          WHERE projector = ${ORCHESTRATION_PROJECTOR_NAMES.projects}
+        `;
+        assert.deepEqual(cursorRows, [{ lastAppliedSequence: 3 }]);
+      }).pipe(Effect.provide(restartableLayer), Effect.scoped);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);

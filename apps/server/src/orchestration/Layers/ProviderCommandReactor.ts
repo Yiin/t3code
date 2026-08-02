@@ -33,6 +33,7 @@ import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderCommandReactor,
@@ -195,6 +196,7 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const orchestrationProjectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
@@ -1048,6 +1050,31 @@ const make = Effect.gen(function* () {
     });
   });
 
+  // Before t3code-74g, projection ran inside the command's own transaction,
+  // so any domain event this reactor received off `streamDomainEvents` was
+  // guaranteed already projected. Projection is now asynchronous, so every
+  // handler below that reads projected state (`resolveThread`/`resolveProject`,
+  // transitively through `ensureSessionForThread` and the `process*`
+  // handlers) would otherwise race the projection fiber. A lost race here
+  // silently drops the turn/interrupt/approval/etc — the exact "no assistant
+  // replies" incident symptom. The event carries its own sequence, so wait
+  // for the projection pipeline to have applied it before doing anything
+  // else. On a bounded timeout or a halted pipeline this logs and proceeds
+  // anyway (degrade loudly, do not hang the reactor's single worker fiber
+  // forever), matching the ws.ts shell-refetch degradation.
+  const awaitEventProjected = (event: ProviderIntentEvent) =>
+    orchestrationProjectionPipeline.awaitProjectedSequence(event.sequence).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("provider command reactor: projection wait degraded", {
+          eventType: event.type,
+          threadId: event.payload.threadId,
+          sequence: event.sequence,
+          reason: error.reason,
+          detail: error.detail,
+        }),
+      ),
+    );
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
     event: ProviderIntentEvent,
   ) {
@@ -1059,6 +1086,7 @@ const make = Effect.gen(function* () {
     yield* increment(orchestrationEventsProcessedTotal, {
       eventType: event.type,
     });
+    yield* awaitEventProjected(event);
     switch (event.type) {
       case "thread.runtime-mode-set": {
         const thread = yield* resolveThread(event.payload.threadId);

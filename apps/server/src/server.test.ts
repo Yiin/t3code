@@ -81,6 +81,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
+import { OrchestrationProjectionPipeline } from "./orchestration/Services/ProjectionPipeline.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
@@ -727,13 +728,26 @@ const buildAppUnderTest = (options?: {
         ),
       ),
       Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          latestSequence: Effect.succeed(0),
-          ...options?.layers?.orchestrationEngine,
-        }),
+        Layer.mergeAll(
+          Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+            readEvents: () => Stream.empty,
+            dispatch: () => Effect.succeed({ sequence: 0 }),
+            streamDomainEvents: Stream.empty,
+            latestSequence: Effect.succeed(0),
+            ...options?.layers?.orchestrationEngine,
+          }),
+          // t3code-74g: `awaitProjectedSequence` is the only method these
+          // router tests exercise (via ws.ts's shell refetch and any runner
+          // paths under test) — the mocked orchestration engine above never
+          // really appends events, so treating "already projected" as the
+          // default keeps every existing test's timing unchanged. Merged
+          // into the same `Layer.provide` as the engine mock above rather
+          // than its own stage — this `.pipe()` chain is already at
+          // TypeScript's overload arity limit.
+          Layer.mock(OrchestrationProjectionPipeline)({
+            awaitProjectedSequence: () => Effect.void,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({

@@ -47,6 +47,7 @@ import {
 import { getOrCreateEnvironmentKeyPairFromSecretStore } from "../cloud/environmentKeys.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "../orchestration/Services/ProjectionPipeline.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 export class AgentAwarenessRelay extends Context.Service<
@@ -350,6 +351,7 @@ export const make = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const orchestrationProjectionPipeline = yield* OrchestrationProjectionPipeline;
   const crypto = yield* Crypto.Crypto;
   const cloudLinkKeyPair = yield* getOrCreateEnvironmentKeyPairFromSecretStore(secrets);
   const activeSnapshotPublishedRef = yield* Ref.make(false);
@@ -395,6 +397,23 @@ export const make = Effect.gen(function* () {
   // clears the deadline. Assigned after the worker exists.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
+
+  // publishThreadUnsafe is triggered directly off `streamDomainEvents` (see
+  // `start()` below) and reads the SQL projection in response — exactly the
+  // read-after-write trap t3code-74g's plan warns about. Since projection is
+  // now asynchronous, a read here can run before the projector has applied
+  // the very event that triggered it, so the read returns the previous
+  // snapshot. Without a barrier that stale read is indistinguishable from
+  // "nothing changed": the identity check below would skip the publish *and*
+  // clear the pending confirm deadline, and nothing ever re-triggers it — a
+  // remote awareness card would show the agent running forever. Record the
+  // triggering event's sequence per thread (monotonically; never popped, so
+  // a slow second event can't have its wait "consumed" by an earlier one)
+  // and await it before reading, mirroring `CheckpointReactor`'s
+  // `awaitDomainEventProjected`. Other callers of `publishThread` (the
+  // startup snapshot sweep) never populate this map, so they get `sequence
+  // 0` and no wait — they aren't reacting to a specific event.
+  const pendingProjectedSequenceByThread = new Map<ThreadId, number>();
 
   const publishThreadUnsafe = Effect.fn("publishThreadUnsafe")(function* (threadId: ThreadId) {
     const publishAgentActivity = yield* readPublishAgentActivityEnabled.pipe(
@@ -459,6 +478,21 @@ export const make = Effect.gen(function* () {
         });
       });
 
+    const requiredSequence = pendingProjectedSequenceByThread.get(threadId) ?? 0;
+    const isProjectionCaughtUp = yield* orchestrationProjectionPipeline
+      .awaitProjectedSequence(requiredSequence)
+      .pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning("agent activity publish: projection wait degraded", {
+            threadId,
+            sequence: requiredSequence,
+            reason: error.reason,
+            detail: error.detail,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+
     const thread = yield* snapshotQuery.getThreadShellById(threadId);
     const project = Option.isSome(thread)
       ? yield* snapshotQuery.getProjectShellById(thread.value.projectId)
@@ -471,7 +505,14 @@ export const make = Effect.gen(function* () {
     });
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
-    if (publishedStateByThread.get(threadId) === publishIdentity) {
+    // Only trust the identity-unchanged fast path when the read was known to
+    // be caught up: on a degraded wait the read may be stale, and treating a
+    // stale match as "unchanged" would clear the confirm deadline (see
+    // above) on data we don't trust. Falling through instead lets this call
+    // attempt a real publish with the best available snapshot; the dedupe
+    // map only gets updated below once a publish actually happens, so a
+    // later event (or the deferred confirm) can still correct it.
+    if (isProjectionCaughtUp && publishedStateByThread.get(threadId) === publishIdentity) {
       // The projection is back at (or never left) the last published state, so
       // any pending deferred confirmation is moot. Leaving the deadline in
       // place would let a much later transient null find it already expired
@@ -748,6 +789,10 @@ export const make = Effect.gen(function* () {
               },
             );
           }
+          pendingProjectedSequenceByThread.set(
+            threadId,
+            Math.max(pendingProjectedSequenceByThread.get(threadId) ?? 0, event.sequence),
+          );
           return Effect.logDebug("agent activity publishing queued thread publish", {
             eventType: event.type,
             threadId,

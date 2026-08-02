@@ -76,6 +76,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "./orchestration/Services/ProjectionPipeline.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   observeRpcEffect as instrumentRpcEffect,
@@ -428,6 +429,7 @@ const makeWsRpcLayer = (
       const currentSessionId = currentSession.sessionId;
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const orchestrationProjectionPipeline = yield* OrchestrationProjectionPipeline;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
@@ -736,15 +738,41 @@ const makeWsRpcLayer = (
           Effect.orElseSucceed(() => Option.none()),
         );
 
+      // Waits for the projection pipeline to have applied `sequence` before
+      // running a refetch, best-effort: on a bounded timeout or a halted
+      // pipeline (`OrchestrationProjectionStalledError`), this logs and lets
+      // the refetch run anyway rather than blocking the shell stream
+      // indefinitely — the read may then be stale by the (bounded) wait
+      // window, which is the documented degradation, not silent staleness.
+      const awaitProjectedBeforeRead = (
+        aggregateKind: "project" | "thread",
+        aggregateId: string,
+        sequence: number,
+      ): Effect.Effect<void, never, never> =>
+        orchestrationProjectionPipeline.awaitProjectedSequence(sequence).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("orchestration shell refetch: projection wait degraded", {
+              aggregateKind,
+              aggregateId,
+              sequence,
+              reason: error.reason,
+              detail: error.detail,
+            }),
+          ),
+        );
+
       const projectUpsertOrRemove = (
         projectId: ProjectId,
         sequence: number,
       ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> =>
-        retryShellProjectionRead(
-          "project",
-          projectId,
-          projectionSnapshotQuery.getProjectShellById(projectId),
-        ).pipe(
+        awaitProjectedBeforeRead("project", projectId, sequence).pipe(
+          Effect.andThen(() =>
+            retryShellProjectionRead(
+              "project",
+              projectId,
+              projectionSnapshotQuery.getProjectShellById(projectId),
+            ),
+          ),
           Effect.map(
             Option.flatMap((project) =>
               Option.match(project, {
@@ -771,19 +799,26 @@ const makeWsRpcLayer = (
       // coalescing correct: when a burst collapses a `thread.deleted`/`archived`
       // into a later refetchable event for the same thread, the refetch returns
       // `none` for the now-inactive row and this still tells the sidebar to drop
-      // it. A `thread-removed` the client does not have is a harmless no-op. The
-      // projection commits in the same transaction before the event publishes,
-      // so a `none` reliably means the thread is deleted or archived, not
-      // not-yet-persisted.
+      // it. A `thread-removed` the client does not have is a harmless no-op.
+      //
+      // Projection now runs off the append transaction (t3code-74g), so a
+      // `none` is no longer automatically "deleted, not just unpersisted" —
+      // `awaitProjectedBeforeRead` is what restores that guarantee, by
+      // waiting for this event's sequence to be projected (or degrading
+      // loudly, bounded, if the pipeline is lagging or halted) before this
+      // read runs.
       const threadUpsertOrRemove = (
         threadId: ThreadId,
         sequence: number,
       ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> =>
-        retryShellProjectionRead(
-          "thread",
-          threadId,
-          projectionSnapshotQuery.getThreadShellById(threadId),
-        ).pipe(
+        awaitProjectedBeforeRead("thread", threadId, sequence).pipe(
+          Effect.andThen(() =>
+            retryShellProjectionRead(
+              "thread",
+              threadId,
+              projectionSnapshotQuery.getThreadShellById(threadId),
+            ),
+          ),
           Effect.map(
             Option.flatMap((thread) =>
               Option.match(thread, {

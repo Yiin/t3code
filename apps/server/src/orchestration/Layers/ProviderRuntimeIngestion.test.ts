@@ -224,7 +224,10 @@ describe("ProviderRuntimeIngestion", () => {
     const provider = createProviderServiceHarness();
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-      Layer.provide(OrchestrationProjectionPipelineLive),
+      // provideMerge (not provide): ProviderRuntimeIngestion now reads
+      // `OrchestrationProjectionPipeline` directly (t3code-74g), not just via
+      // the engine internally.
+      Layer.provideMerge(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolver.layer),

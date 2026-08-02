@@ -27,6 +27,7 @@ import {
   orchestrationCommandAckDuration,
   orchestrationCommandsTotal,
   orchestrationCommandDuration,
+  orchestrationCommandQueueDepth,
 } from "../../observability/Metrics.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
@@ -49,6 +50,12 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
   OrchestrationCommandPreviouslyRejectedError,
 );
 const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvariantError);
+
+// A command whose transaction (append + in-memory projection + receipt
+// upsert) takes longer than this is worth a loud signal on its own — this is
+// the number from the production incident's evidence section, not projector
+// cost, since projection no longer runs in this transaction.
+const SLOW_COMMAND_WARN_THRESHOLD_MS = 250;
 
 interface CommandEnvelope {
   command: OrchestrationCommand;
@@ -110,6 +117,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       commandType: envelope.command.type,
       aggregateKind: aggregateRef.aggregateKind,
     } as const;
+    // Reads the event store, never the SQL projection — the command worker
+    // must never depend on the (now-asynchronous) projection being caught up
+    // to make forward progress. Keep it that way if this is ever touched
+    // again.
     const reconcileReadModelAfterDispatchFailure = Effect.gen(function* () {
       const persistedEvents = yield* Stream.runCollect(
         eventStore.readFromSequence(dispatchStartSequence),
@@ -174,8 +185,15 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
               for (const nextEvent of eventBases) {
                 const savedEvent = yield* eventStore.append(nextEvent);
+                // Projection into the SQL read models happens asynchronously,
+                // off this transaction, via the projection pipeline's live
+                // loop (`projectionPipeline.runLive`, forked once at engine
+                // startup — see below). Only the in-memory command read
+                // model — which the decider reads synchronously — is updated
+                // here, and it is O(1) per event. This is the whole point of
+                // t3code-74g: projection latency must never become command
+                // latency.
                 nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
-                yield* projectionPipeline.projectEvent(savedEvent);
                 committedEvents.push(savedEvent);
               }
 
@@ -213,6 +231,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           );
 
         commandReadModel = committedCommand.nextCommandReadModel;
+        // Wake the projection pipeline's live loop rather than let it poll —
+        // cheap, and safe to call even if nothing is waiting.
+        yield* projectionPipeline.notifyAppended(committedCommand.lastSequence);
         for (const [index, event] of committedCommand.committedEvents.entries()) {
           yield* PubSub.publish(eventPubSub, event);
           if (index === 0) {
@@ -238,12 +259,16 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             : Cause.hasInterruptsOnly(exit.cause)
               ? "interrupt"
               : "failure";
+          const commandDurationMs = Math.max(
+            0,
+            (yield* Clock.currentTimeMillis) - processingStartedAtMs,
+          );
           yield* Metric.update(
             Metric.withAttributes(
               orchestrationCommandDuration,
               metricAttributes(baseMetricAttributes),
             ),
-            Duration.millis(Math.max(0, (yield* Clock.currentTimeMillis) - processingStartedAtMs)),
+            Duration.millis(commandDurationMs),
           );
           yield* Metric.update(
             Metric.withAttributes(
@@ -255,6 +280,15 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             ),
             1,
           );
+          if (commandDurationMs > SLOW_COMMAND_WARN_THRESHOLD_MS) {
+            yield* Effect.logWarning("orchestration command exceeded slow-command threshold", {
+              commandType: envelope.command.type,
+              aggregateKind: aggregateRef.aggregateKind,
+              aggregateId: aggregateRef.aggregateId,
+              durationMs: commandDurationMs,
+              outcome,
+            });
+          }
 
           if (Exit.isSuccess(exit)) {
             yield* Deferred.succeed(envelope.result, exit.value);
@@ -297,10 +331,33 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     );
   };
 
+  // `bootstrap` must run to completion — sequentially, not as a background
+  // fiber — before the decider's in-memory read model is seeded and before
+  // any command can be dispatched. Seeding from a partially-applied SQL
+  // projection would make the decider believe existing projects/threads
+  // don't exist, producing duplicate aggregates and bogus invariant errors
+  // baked permanently into the event log. This ordering is the fix for that
+  // failure mode, not an incidental side effect of it.
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
 
-  const worker = Effect.forever(Queue.take(commandQueue).pipe(Effect.flatMap(processEnvelope)));
+  // The live projection loop takes over exactly where `bootstrap` left the
+  // persisted cursor — same process, no gap, and (because `bootstrap` has
+  // already returned) never running concurrently with it. It is forked
+  // before the command worker starts so there is no window where appended
+  // events have no reader.
+  yield* Effect.forkScoped(projectionPipeline.runLive);
+
+  const worker = Effect.forever(
+    Queue.take(commandQueue).pipe(
+      Effect.tap(() =>
+        Effect.flatMap(Queue.size(commandQueue), (depth) =>
+          Metric.update(orchestrationCommandQueueDepth, depth),
+        ),
+      ),
+      Effect.flatMap(processEnvelope),
+    ),
+  );
   yield* Effect.forkScoped(worker);
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),

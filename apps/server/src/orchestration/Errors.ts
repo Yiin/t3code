@@ -66,6 +66,35 @@ export class OrchestrationProjectorDecodeError extends Schema.TaggedErrorClass<O
   }
 }
 
+/**
+ * Raised by `awaitProjectedSequence` when a caller cannot be handed a
+ * guarantee that its sequence has been projected.
+ *
+ * `reason: "timeout"` means the wait exceeded its bound while the projection
+ * pipeline is (as far as known) still making progress — callers should treat
+ * this as "serve what we have, mark the response degraded" rather than fail
+ * the request.
+ *
+ * `reason: "halted"` means the projection pipeline's live loop has
+ * permanently stopped after a projector failed and exhausted its retries.
+ * Every past, present, and future waiter fails with this reason until the
+ * process restarts — callers should degrade the same way as "timeout" but
+ * may want to log louder, since this does not self-heal.
+ */
+export class OrchestrationProjectionStalledError extends Schema.TaggedErrorClass<OrchestrationProjectionStalledError>()(
+  "OrchestrationProjectionStalledError",
+  {
+    reason: Schema.Literals(["timeout", "halted"]),
+    sequence: Schema.Number,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Projection did not confirm sequence ${this.sequence} (${this.reason}): ${this.detail}`;
+  }
+}
+
 export class OrchestrationListenerCallbackError extends Schema.TaggedErrorClass<OrchestrationListenerCallbackError>()(
   "OrchestrationListenerCallbackError",
   {

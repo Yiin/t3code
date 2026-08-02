@@ -345,7 +345,10 @@ describe("ProviderCommandReactor", () => {
 
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-      Layer.provide(OrchestrationProjectionPipelineLive),
+      // provideMerge (not provide): ProviderCommandReactor now reads
+      // `OrchestrationProjectionPipeline` directly (t3code-74g), not just via
+      // the engine internally.
+      Layer.provideMerge(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolver.layer),
@@ -1398,7 +1401,15 @@ describe("ProviderCommandReactor", () => {
       resumeCursor: { opaque: "resume-1" },
     });
 
-    const readModel = await harness.readModel();
+    // Projection now runs on a separate fiber (t3code-74g), so the session
+    // update the reactor dispatched after `sendTurn` may not be projected
+    // yet at this point — poll instead of asserting on the first read.
+    let readModel = await harness.readModel();
+    await waitFor(async () => {
+      readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return thread?.session?.providerInstanceId === ProviderInstanceId.make("codex_work");
+    });
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
   });
@@ -2367,7 +2378,15 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.stopSession.mock.calls.length === 1);
-    const readModel = await harness.readModel();
+    // Projection now runs on a separate fiber (t3code-74g): the "stopped"
+    // session state the reactor dispatches after calling `stopSession` may
+    // not be projected yet at this point — poll instead of asserting once.
+    let readModel = await harness.readModel();
+    await waitFor(async () => {
+      readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return thread?.session?.status === "stopped";
+    });
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session).not.toBeNull();
     expect(thread?.session?.status).toBe("stopped");

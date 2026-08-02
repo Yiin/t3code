@@ -35,6 +35,20 @@ export const orchestrationCommandAckDuration = Metric.timer(
   },
 );
 
+export const orchestrationCommandQueueDepth = Metric.gauge("t3_orchestration_command_queue_depth", {
+  description: "Number of commands waiting in the orchestration command queue.",
+});
+
+export const orchestrationProjectionLag = Metric.gauge("t3_orchestration_projection_lag", {
+  description:
+    "Events appended but not yet applied by every projector (latest appended sequence minus the lowest applied cursor).",
+});
+
+export const orchestrationProjectionHealthy = Metric.gauge("t3_orchestration_projection_healthy", {
+  description:
+    "1 while the projection live loop is running normally, 0 once it has halted after a projector failure.",
+});
+
 export const orchestrationEventsProcessedTotal = Metric.counter(
   "t3_orchestration_events_processed_total",
   {

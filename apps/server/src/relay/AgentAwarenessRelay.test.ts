@@ -37,6 +37,10 @@ import {
   type OrchestrationEngineShape,
 } from "../orchestration/Services/OrchestrationEngine.ts";
 import {
+  OrchestrationProjectionPipeline,
+  type OrchestrationProjectionPipelineShape,
+} from "../orchestration/Services/ProjectionPipeline.ts";
+import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -61,6 +65,13 @@ const state: RelayAgentActivityState = {
 };
 
 const encodeSecret = (value: string): Uint8Array => new TextEncoder().encode(value);
+
+// Every publish read in these tests is meant to run immediately, so the
+// projection barrier this stub stands in for should never actually block —
+// it always reports "already caught up".
+const noopProjectionPipeline = {
+  awaitProjectedSequence: () => Effect.void,
+} as unknown as OrchestrationProjectionPipelineShape;
 
 function makeMemorySecretStore() {
   const values = new Map<string, Uint8Array>();
@@ -572,6 +583,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
           }),
           Layer.succeed(OrchestrationEngineService, orchestrationEngine),
           Layer.succeed(ProjectionSnapshotQuery, snapshotQuery),
+          Layer.succeed(OrchestrationProjectionPipeline, noopProjectionPipeline),
         );
 
         yield* Effect.gen(function* () {
@@ -737,6 +749,7 @@ describe.sequential("signRelayAgentActivityPublishProof", () => {
             getThreadShellById: () => Effect.succeed(Option.some(thread)),
             getProjectShellById: () => Effect.succeed(Option.some(project)),
           } as unknown as ProjectionSnapshotQueryShape),
+          Layer.succeed(OrchestrationProjectionPipeline, noopProjectionPipeline),
         );
 
         yield* Effect.gen(function* () {

@@ -24,6 +24,7 @@ import * as Stream from "effect/Stream";
 
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "../../orchestration/Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   EpicRunStore,
@@ -163,6 +164,7 @@ export interface EpicRunnerLiveOptions {
 const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
   Effect.gen(function* () {
     const engine = yield* OrchestrationEngineService;
+    const projectionPipeline = yield* OrchestrationProjectionPipeline;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const store = yield* EpicRunStore;
     const processRunner = yield* ProcessRunner.ProcessRunner;
@@ -575,12 +577,44 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    // Waits for the projection pipeline to have caught up to whatever the
+    // engine has most recently committed, before a poll read. Degrades
+    // (log and read anyway) on a bounded timeout or a halted pipeline rather
+    // than blocking the run loop indefinitely — see
+    // `OrchestrationProjectionStalledError`.
+    //
+    // This is what a poll-based wait needs since t3code-74g: projection is
+    // no longer applied in the same transaction as the append, so a read
+    // immediately after a dispatch (or immediately after observing a prior
+    // poll's state) can otherwise land on a stale row and either loop forever
+    // waiting for a turn that already ended, or — worse, per
+    // `readSettledFinalMessage` below — see two stale-but-equal reads and
+    // decide "settled" on a message that has not actually finished streaming.
+    const awaitFreshProjection = (threadId: ThreadId) =>
+      Effect.gen(function* () {
+        const latestSequence = yield* engine.latestSequence;
+        yield* projectionPipeline.awaitProjectedSequence(latestSequence).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("epic.runner.projection-wait-degraded", {
+              threadId,
+              sequence: latestSequence,
+              reason: error.reason,
+              detail: error.detail,
+            }),
+          ),
+        );
+      });
+
     const readThreadShell = (threadId: ThreadId) =>
-      projectionSnapshotQuery.getThreadShellById(threadId).pipe(
-        Effect.map(Option.getOrUndefined),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("epic.runner.shell-read-failed", { threadId, cause }).pipe(
-            Effect.as(undefined),
+      awaitFreshProjection(threadId).pipe(
+        Effect.andThen(() =>
+          projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+            Effect.map(Option.getOrUndefined),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("epic.runner.shell-read-failed", { threadId, cause }).pipe(
+                Effect.as(undefined),
+              ),
+            ),
           ),
         ),
       );
@@ -595,9 +629,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * underlying `Stream.fromPubSub` (`OrchestrationEngine.ts:326-331`) eagerly,
      * so a fast turn can publish its entire lifecycle into a subscription that
      * does not exist yet — and the iteration then hangs until its multi-hour
-     * timeout. Polling has no such window: projections are committed in the
-     * same transaction as the append (`OrchestrationEngine.ts:170-180`), so
-     * every read is consistent and no signal can be missed. At iteration
+     * timeout. Polling has no such window in practice: `readThreadShell`
+     * awaits the projection pipeline up to the engine's latest committed
+     * sequence before every read (`awaitFreshProjection`, bounded — see
+     * t3code-74g), so a read either reflects everything dispatched so far or
+     * degrades loudly instead of silently missing a signal. At iteration
      * timescales the added latency is irrelevant, and the read is the cheap
      * shell row, not the full thread.
      *
@@ -658,11 +694,15 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      */
     const readSettledFinalMessage = (threadId: ThreadId) =>
       Effect.gen(function* () {
-        const read = projectionSnapshotQuery.getThreadDetailSnapshot(threadId).pipe(
-          Effect.map(Option.getOrUndefined),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("epic.runner.snapshot-read-failed", { threadId, cause }).pipe(
-              Effect.as(undefined),
+        const read = awaitFreshProjection(threadId).pipe(
+          Effect.andThen(() =>
+            projectionSnapshotQuery.getThreadDetailSnapshot(threadId).pipe(
+              Effect.map(Option.getOrUndefined),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("epic.runner.snapshot-read-failed", { threadId, cause }).pipe(
+                  Effect.as(undefined),
+                ),
+              ),
             ),
           ),
         );

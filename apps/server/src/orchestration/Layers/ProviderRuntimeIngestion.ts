@@ -36,6 +36,7 @@ import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionT
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderRuntimeIngestionService,
@@ -736,8 +737,67 @@ export function runtimeEventToActivities(
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
-  const orchestrationEngine = yield* OrchestrationEngineService;
+  const orchestrationEngineService = yield* OrchestrationEngineService;
+  const orchestrationProjectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+
+  // This fiber both dispatches commands for a thread and, while processing
+  // later runtime events for that same thread, reads the projected state
+  // those commands produced (`resolveThreadShell` / `resolveThreadDetail`
+  // below). Since t3code-74g, projection is asynchronous, so a read right
+  // after a dispatch is not guaranteed fresh — there is no event sequence
+  // "in hand" at a plain read site the way there is right after a dispatch.
+  // Tracking the highest sequence this fiber has dispatched per thread, and
+  // waiting for the projection pipeline to catch up to it before the next
+  // read for that thread, restores read-after-write for exactly the
+  // consumer this bead's plan review named. `orchestrationEngine` shadows
+  // the raw service so every existing internal `.dispatch(...)` call site
+  // gets tracked without individually touching each of them.
+  const threadDispatchHighWaterMark = new Map<string, number>();
+  const recordThreadDispatchSequence = (threadId: string, sequence: number) => {
+    const previous = threadDispatchHighWaterMark.get(threadId) ?? 0;
+    if (sequence > previous) {
+      threadDispatchHighWaterMark.set(threadId, sequence);
+    }
+  };
+  const orchestrationEngine: typeof orchestrationEngineService = {
+    readEvents: orchestrationEngineService.readEvents,
+    latestSequence: orchestrationEngineService.latestSequence,
+    // A plain property copy would freeze this at whatever subscription
+    // existed at construction time — `streamDomainEvents` is a getter
+    // precisely so every access mints a fresh PubSub subscription
+    // (OrchestrationEngine.ts). Redeclare it as a getter here too.
+    get streamDomainEvents() {
+      return orchestrationEngineService.streamDomainEvents;
+    },
+    dispatch: (command) =>
+      orchestrationEngineService.dispatch(command).pipe(
+        Effect.tap((result) => {
+          const threadId = "threadId" in command ? command.threadId : undefined;
+          if (threadId !== undefined) {
+            recordThreadDispatchSequence(threadId, result.sequence);
+          }
+          return Effect.void;
+        }),
+      ),
+  };
+  const awaitThreadProjected = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const target = threadDispatchHighWaterMark.get(threadId) ?? 0;
+      if (target === 0) {
+        return;
+      }
+      yield* orchestrationProjectionPipeline.awaitProjectedSequence(target).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("provider-runtime-ingestion.projection-wait-degraded", {
+            threadId,
+            sequence: target,
+            reason: error.reason,
+            detail: error.detail,
+          }),
+        ),
+      );
+    });
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
@@ -932,12 +992,14 @@ const make = Effect.gen(function* () {
     );
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
+    yield* awaitThreadProjected(threadId);
     return yield* projectionSnapshotQuery
       .getThreadDetailById(threadId)
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
   const resolveThreadShell = Effect.fn("resolveThreadShell")(function* (threadId: ThreadId) {
+    yield* awaitThreadProjected(threadId);
     return yield* projectionSnapshotQuery
       .getThreadShellById(threadId)
       .pipe(Effect.map(Option.getOrUndefined));

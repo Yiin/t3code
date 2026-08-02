@@ -54,6 +54,13 @@ async function createOrchestrationSystem() {
       Layer.provide(OrchestrationProjectionPipelineLive),
     ),
     OrchestrationProjectionSnapshotQueryLive,
+    // `readModel` below reads `OrchestrationProjectionPipeline` directly to
+    // await the SQL projection catching up before reading it (t3code-74g
+    // moved projection off the command transaction and onto this pipeline's
+    // own live loop) — exposed here as its own mergeAll member (Effect
+    // memoizes it, so this shares the same instance the engine above uses
+    // rather than constructing a second one).
+    OrchestrationProjectionPipelineLive,
   ).pipe(
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -65,9 +72,22 @@ async function createOrchestrationSystem() {
   const runtime = ManagedRuntime.make(orchestrationLayer);
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+  const projectionPipeline = await runtime.runPromise(
+    Effect.service(OrchestrationProjectionPipeline),
+  );
   return {
     engine,
-    readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
+    // Waits for the projection pipeline to catch up to the engine's latest
+    // committed sequence before reading the SQL snapshot — without this, a
+    // read right after `dispatch` races the live loop (t3code-74g).
+    readModel: () =>
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const latestSequence = yield* engine.latestSequence;
+          yield* projectionPipeline.awaitProjectedSequence(latestSequence);
+          return yield* snapshotQuery.getSnapshot();
+        }),
+      ),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
   };
@@ -209,6 +229,9 @@ describe("OrchestrationEngine", () => {
         Layer.succeed(OrchestrationProjectionPipeline, {
           bootstrap: Effect.void,
           projectEvent: () => Effect.void,
+          runLive: Effect.void,
+          notifyAppended: () => Effect.void,
+          awaitProjectedSequence: () => Effect.void,
         } satisfies OrchestrationProjectionPipelineShape),
       ),
       Layer.provide(Layer.succeed(OrchestrationEventStore, eventStore)),
@@ -868,36 +891,66 @@ describe("OrchestrationEngine", () => {
     await runtime.dispose();
   });
 
-  it("rolls back all events for a multi-event command when projection fails mid-dispatch", async () => {
-    let shouldFailRequestedProjection = true;
-    const flakyProjectionPipeline: OrchestrationProjectionPipelineShape = {
-      bootstrap: Effect.void,
-      projectEvent: (event) => {
-        if (
-          shouldFailRequestedProjection &&
-          event.commandId === CommandId.make("cmd-turn-start-atomic") &&
-          event.type === "thread.turn-start-requested"
-        ) {
-          shouldFailRequestedProjection = false;
-          return Effect.fail(
-            new PersistenceSqlError({
-              operation: "test.projection",
-              detail: "projection failed",
-            }),
-          );
-        }
-        return Effect.void;
-      },
-    };
+  // t3code-74g moved projection out of the command transaction. The two
+  // tests this replaces ("rolls back all events for a multi-event command
+  // when projection fails mid-dispatch" and "reconciles command state when
+  // append persists but projection fails") encoded the *old* guarantee that
+  // a projection failure fails the command and rolls back its events —
+  // `OrchestrationEngine.ts` no longer calls `projectionPipeline.projectEvent`
+  // from inside the transaction at all, so that premise no longer holds.
+  // They are replaced below with:
+  //  - the same multi-event-atomicity regression, now triggered by an append
+  //    failure (still the only thing besides the receipt upsert and the
+  //    in-memory read model left inside the transaction);
+  //  - a new test asserting the actual point of this bead: dispatch succeeds
+  //    and events persist even when the projection pipeline cannot make any
+  //    progress at all.
+  it("rolls back all events for a multi-event command when a later append fails", async () => {
+    let shouldFailSecondAppendForCommand = true;
+
+    // Wraps the *real* SQL-backed event store rather than faking one in
+    // memory: the point of this test is that the enclosing
+    // `sql.withTransaction` still rolls back every event in a multi-event
+    // command, and a plain in-memory fake store has no transaction to roll
+    // back — the first (real) append below happens inside the same open
+    // transaction as the second, so failing the second still undoes it.
+    const flakyEventStoreLayer = Layer.effect(
+      OrchestrationEventStore,
+      Effect.gen(function* () {
+        const realStore = yield* OrchestrationEventStore;
+        const append: OrchestrationEventStoreShape["append"] = (event) => {
+          if (
+            shouldFailSecondAppendForCommand &&
+            event.commandId === CommandId.make("cmd-turn-start-atomic") &&
+            event.type === "thread.turn-start-requested"
+          ) {
+            shouldFailSecondAppendForCommand = false;
+            return Effect.fail(
+              new PersistenceSqlError({
+                operation: "test.append",
+                detail: "append failed",
+              }),
+            );
+          }
+          return realStore.append(event);
+        };
+        return { ...realStore, append } satisfies OrchestrationEventStoreShape;
+      }),
+    ).pipe(Layer.provide(OrchestrationEventStoreLive));
 
     const runtime = ManagedRuntime.make(
       OrchestrationEngineLive.pipe(
         Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-        Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, flakyProjectionPipeline)),
-        Layer.provide(OrchestrationEventStoreLive),
+        Layer.provide(OrchestrationProjectionPipelineLive),
+        Layer.provide(flakyEventStoreLayer),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
         Layer.provide(SqlitePersistenceMemory),
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), {
+            prefix: "t3-orchestration-engine-append-failure-test-",
+          }),
+        ),
         Layer.provide(NodeServices.layer),
       ),
     );
@@ -953,7 +1006,7 @@ describe("OrchestrationEngine", () => {
     };
 
     await expect(runtime.runPromise(engine.dispatch(turnStartCommand))).rejects.toThrow(
-      "projection failed",
+      "append failed",
     );
 
     const eventsAfterFailure = await runtime.runPromise(
@@ -987,57 +1040,28 @@ describe("OrchestrationEngine", () => {
     await runtime.dispose();
   });
 
-  it("reconciles command state when append persists but projection fails", async () => {
-    type StoredEvent =
-      ReturnType<OrchestrationEventStoreShape["append"]> extends Effect.Effect<infer A, any, any>
-        ? A
-        : never;
-    const events: StoredEvent[] = [];
-    let nextSequence = 1;
-
-    const nonTransactionalStore: OrchestrationEventStoreShape = {
-      append(event) {
-        const savedEvent = {
-          ...event,
-          sequence: nextSequence,
-        } as StoredEvent;
-        nextSequence += 1;
-        events.push(savedEvent);
-        return Effect.succeed(savedEvent);
-      },
-      readFromSequence(sequenceExclusive) {
-        return Stream.fromIterable(events.filter((event) => event.sequence > sequenceExclusive));
-      },
-      readAll() {
-        return Stream.fromIterable(events);
-      },
-    };
-
-    let shouldFailProjection = true;
-    const flakyProjectionPipeline: OrchestrationProjectionPipelineShape = {
+  it("accepts commands and persists their events even when the projection pipeline cannot make progress", async () => {
+    // Simulates the worst case from the production incident: a projector
+    // that never returns. Before t3code-74g this would have hung every
+    // command in the process, because `projectEvent` ran inside the append
+    // transaction. It must not affect dispatch at all now.
+    let projectEventCallCount = 0;
+    const stalledProjectionPipeline: OrchestrationProjectionPipelineShape = {
       bootstrap: Effect.void,
-      projectEvent: (event) => {
-        if (
-          shouldFailProjection &&
-          event.commandId === CommandId.make("cmd-thread-archive-sync-fail")
-        ) {
-          shouldFailProjection = false;
-          return Effect.fail(
-            new PersistenceSqlError({
-              operation: "test.projection",
-              detail: "projection failed",
-            }),
-          );
-        }
-        return Effect.void;
+      projectEvent: () => {
+        projectEventCallCount += 1;
+        return Effect.never;
       },
+      runLive: Effect.never,
+      notifyAppended: () => Effect.void,
+      awaitProjectedSequence: () => Effect.void,
     };
 
     const runtime = ManagedRuntime.make(
       OrchestrationEngineLive.pipe(
         Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-        Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, flakyProjectionPipeline)),
-        Layer.provide(Layer.succeed(OrchestrationEventStore, nonTransactionalStore)),
+        Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, stalledProjectionPipeline)),
+        Layer.provide(OrchestrationEventStoreLive),
         Layer.provide(OrchestrationCommandReceiptRepositoryLive),
         Layer.provide(RepositoryIdentityResolver.layer),
         Layer.provide(SqlitePersistenceMemory),
@@ -1050,10 +1074,10 @@ describe("OrchestrationEngine", () => {
     await runtime.runPromise(
       engine.dispatch({
         type: "project.create",
-        commandId: CommandId.make("cmd-project-sync-create"),
-        projectId: asProjectId("project-sync"),
-        title: "Sync Project",
-        workspaceRoot: "/tmp/project-sync",
+        commandId: CommandId.make("cmd-project-stalled-create"),
+        projectId: asProjectId("project-stalled"),
+        title: "Stalled Project",
+        workspaceRoot: "/tmp/project-stalled",
         defaultModelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5-codex",
@@ -1061,13 +1085,13 @@ describe("OrchestrationEngine", () => {
         createdAt,
       }),
     );
-    await runtime.runPromise(
+    const result = await runtime.runPromise(
       engine.dispatch({
         type: "thread.create",
-        commandId: CommandId.make("cmd-thread-sync-create"),
-        threadId: ThreadId.make("thread-sync"),
-        projectId: asProjectId("project-sync"),
-        title: "sync-before",
+        commandId: CommandId.make("cmd-thread-stalled-create"),
+        threadId: ThreadId.make("thread-stalled"),
+        projectId: asProjectId("project-stalled"),
+        title: "stalled",
         modelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5-codex",
@@ -1080,25 +1104,16 @@ describe("OrchestrationEngine", () => {
       }),
     );
 
-    await expect(
-      runtime.runPromise(
-        engine.dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make("cmd-thread-archive-sync-fail"),
-          threadId: ThreadId.make("thread-sync"),
-        }),
+    expect(result.sequence).toBe(2);
+    const events = await runtime.runPromise(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
       ),
-    ).rejects.toThrow("projection failed");
-
-    await expect(
-      runtime.runPromise(
-        engine.dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make("cmd-thread-archive-sync-retry"),
-          threadId: ThreadId.make("thread-sync"),
-        }),
-      ),
-    ).rejects.toThrow("already archived");
+    );
+    expect(events.map((event) => event.type)).toEqual(["project.created", "thread.created"]);
+    // The command worker never calls `projectEvent` — only a live loop would,
+    // and this stub's `runLive` never drives one, so this must stay zero.
+    expect(projectEventCallCount).toBe(0);
 
     await runtime.dispose();
   });
@@ -1188,6 +1203,34 @@ describe("OrchestrationEngine", () => {
         }),
       ),
     ).rejects.toThrow("already exists");
+
+    await system.dispose();
+  });
+
+  it("reports command queue depth as a gauge metric", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-queue-depth-create"),
+        projectId: asProjectId("project-queue-depth"),
+        title: "Queue Depth Project",
+        workspaceRoot: "/tmp/project-queue-depth",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+
+    const snapshots = await system.run(Metric.snapshot);
+    expect(
+      snapshots.some((snapshot) => snapshot.id === "t3_orchestration_command_queue_depth"),
+    ).toBe(true);
 
     await system.dispose();
   });
