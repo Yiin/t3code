@@ -877,6 +877,11 @@ const make = Effect.gen(function* () {
   //   processRuntimeEvent runs on (via a synthetic "tool-update-flush" input)
   //   instead of dispatching directly, so it never races the main
   //   processing loop over the pending/last-dispatch caches.
+  //
+  // One path does not flush: on layer-scope teardown (server shutdown) the
+  // forked timers are interrupted and anything still pending is dropped. The
+  // last dispatched detail survives in the projection, and the process is
+  // exiting, so this is accepted rather than worked around.
   const dispatchOrCoalesceToolUpdate = (
     threadId: ThreadId,
     itemId: RuntimeItemId,
@@ -890,6 +895,12 @@ const make = Effect.gen(function* () {
       const elapsed = now - lastDispatchedAt;
 
       if (elapsed >= TOOL_UPDATE_THROTTLE_WINDOW_MILLIS) {
+        // Drop anything still pending for this key: this activity is a newer
+        // snapshot of the same tool call, so the pending one is stale. Without
+        // this, a timer whose flush enqueue lands after this dispatch would
+        // re-dispatch the older activity, and the projector's last-write-wins
+        // on activity id would leave the row permanently showing stale detail.
+        yield* Cache.invalidate(pendingToolUpdateByThrottleKey, key);
         yield* Cache.set(lastToolUpdateDispatchAtByThrottleKey, key, now);
         yield* dispatchToolUpdateActivity({ threadId, event, activity });
         return;
