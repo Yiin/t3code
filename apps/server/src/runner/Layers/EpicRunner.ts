@@ -81,6 +81,14 @@ const decodeIssueTitle = Schema.decodeUnknownOption(
     ]),
   ),
 );
+const decodeIssueStatus = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Struct({ status: Schema.String }),
+      Schema.Array(Schema.Struct({ status: Schema.String })),
+    ]),
+  ),
+);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -412,6 +420,68 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           }),
         );
 
+    /**
+     * Best-effort: un-claim a child issue the loop's own exit just stranded.
+     *
+     * An iteration's agent claims its child itself (`bd update <id> --claim`,
+     * per `EPIC_RUN_ITERATION_PROMPT`) and is expected to close it before the
+     * turn ends. When the *run* instead exits without that happening —
+     * exhausted retries, a no-commit gutter, an error, a cancel, a lost lease
+     * on restart — the child is left `in_progress` with no worker attached.
+     * `bd ready` filters on status, not assignee, so a phantom `in_progress`
+     * claim silently stalls the epic until someone notices and clears it by
+     * hand. This is the general fix: check the child's *current* status and
+     * only reopen it if the claim is still standing, so the happy path (the
+     * agent already closed it) and a legitimate handoff to another run are
+     * both untouched.
+     *
+     * Never fails the caller: this runs from terminal paths (finalizers,
+     * restart bookkeeping) that have nowhere useful to send an error.
+     */
+    const releaseClaimedChild = (cwd: string, issueId: string): Effect.Effect<void> =>
+      processRunner.run({ command: "bd", args: ["show", issueId, "--json"], cwd }).pipe(
+        Effect.flatMap((shown) => {
+          if (shown.code !== 0) return Effect.void;
+          const decoded = decodeIssueStatus(shown.stdout);
+          if (Option.isNone(decoded)) return Effect.void;
+          const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
+          if (value?.status !== "in_progress") return Effect.void;
+          return processRunner
+            .run({
+              command: "bd",
+              args: ["update", issueId, "--status", "open", "--assignee", ""],
+              cwd,
+            })
+            .pipe(Effect.asVoid);
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.release-claimed-child-failed", { cwd, issueId, cause }),
+        ),
+      );
+
+    /**
+     * Look up the run's most recent iteration and release its child via
+     * {@link releaseClaimedChild}. The lone finalizer this runner needs — every
+     * terminal exit funnels through one loop, and one restart bookkeeping path
+     * that never reaches the loop at all — rather than a release call
+     * scattered across each of the outcomes that can strand a claim.
+     */
+    const releaseStrandedChild = (runId: EpicRunId): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const run = yield* store.getRun({ runId });
+        if (Option.isNone(run)) return;
+        const latest = yield* store.getLatestIteration({ runId });
+        if (Option.isNone(latest) || latest.value.issueId === null) return;
+        yield* releaseClaimedChild(run.value.cwd, latest.value.issueId);
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.release-stranded-child-lookup-failed", {
+            runId,
+            cause,
+          }),
+        ),
+      );
+
     const releaseLease = (runId: EpicRunId) => {
       const lease = leases.get(runId);
       if (lease === undefined) return Effect.void;
@@ -571,9 +641,20 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * still-streaming row — empty, on ACP providers whose text exists only as
      * deltas. Waiting for two consecutive identical reads closes that gap.
      *
-     * Bounded: a provider that never stops rewriting the message would
-     * otherwise hold the loop here forever, so after `MAX_SETTLE_READS` the
-     * last read is used as-is and classification decides what it means.
+     * An absent message (`resolveFinalAssistantMessage` returning `null`) is
+     * never treated as settled on its own: it means the assistant row hasn't
+     * projected yet, not that the turn produced none, so `null === null` across
+     * two reads must keep polling rather than return early. A genuinely
+     * message-less completed turn is indistinguishable from this in-flight gap
+     * until the bound below is exhausted — that is the correct, if slower,
+     * outcome, since guessing wrong here silently drops the rest of the epic's
+     * backlog (`classifyIteration` treats a spurious `null` as a protocol
+     * error, and three of those trip `maxConsecutiveFailures`).
+     *
+     * Bounded: a provider that never stops rewriting the message — or one
+     * whose turn truly ends with no assistant row — would otherwise hold the
+     * loop here forever, so after `MAX_SETTLE_READS` the last read is used
+     * as-is and classification decides what it means.
      */
     const readSettledFinalMessage = (threadId: ThreadId) =>
       Effect.gen(function* () {
@@ -593,8 +674,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           const previousMessage = resolveFinalAssistantMessage(previous?.thread);
           const currentMessage = resolveFinalAssistantMessage(current?.thread);
           if (
-            previousMessage?.text === currentMessage?.text &&
-            previousMessage?.streaming === currentMessage?.streaming
+            currentMessage !== null &&
+            previousMessage?.text === currentMessage.text &&
+            previousMessage?.streaming === currentMessage.streaming
           ) {
             return current;
           }
@@ -922,7 +1004,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             Effect.flatMap(() => markRunFailed(runId, String(defect))),
           ),
         ),
-        Effect.ensuring(releaseLease(runId)),
+        // Fires on every terminal exit — normal completion, exhausted
+        // failures, the no-commit gutter, an unhandled error/defect, and
+        // interruption (cancel) — so this single finalizer is enough to
+        // un-strand whatever child the run last claimed, without a release
+        // call scattered across each of those outcomes.
+        Effect.ensuring(Effect.andThen(releaseLease(runId), releaseStrandedChild(runId))),
       );
 
     const forkLoop = (runId: EpicRunId) =>
@@ -1158,6 +1245,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               lastError: error.message,
               updatedAt: yield* nowIso,
             });
+            // This run's loop never gets a chance to fork, so its finalizer
+            // never runs either — release its last claimed child here, or a
+            // lost lease strands it exactly like the failure path this fixes.
+            yield* releaseStrandedChild(run.runId);
             continue;
           }
           yield* Effect.gen(function* () {
@@ -1192,6 +1283,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   finishedAt: abandonedAt,
                 })
                 .pipe(Effect.mapError(storeError("updateIteration")));
+              // The abandoned iteration's child is claimed with nothing left
+              // to finish it; release it so `bd ready` can resurface it once
+              // the resumed loop below reaches its next selectReadyChild.
+              if (latest.value.issueId !== null) {
+                yield* releaseClaimedChild(run.cwd, latest.value.issueId);
+              }
             }
             yield* forkLoop(run.runId);
           }).pipe(releaseLeaseOnFailure(run.runId));

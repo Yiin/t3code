@@ -59,6 +59,15 @@ interface ScriptedIteration {
   readonly streaming?: boolean;
   /** Leave the turn hanging so the iteration has to be cancelled or time out. */
   readonly stall?: boolean;
+  /**
+   * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
+   * that report no assistant message before the scripted one appears —
+   * models the real race where the turn-end signal projects before the
+   * assistant message is finalized (`ProviderRuntimeIngestion.ts:1435` vs.
+   * `:1637`). Requires `text` to be non-null: it delays the message, it
+   * doesn't fabricate one.
+   */
+  readonly messageSettleDelayReads?: number;
 }
 
 const waitFor = (predicate: () => boolean) =>
@@ -203,12 +212,21 @@ function createHarness(input: {
   readonly upsertDelayMs?: number;
   readonly readyOutput?: string;
   readonly onEpicRunPublish?: (run: import("@t3tools/contracts").EpicRun) => Effect.Effect<void>;
+  /**
+   * Seeds `bd show <id> --json`'s status for specific issue ids, and lets
+   * `releaseClaimedChild`'s `bd update <id> --status open` calls be observed
+   * flipping it. Ids not listed here fall through to the generic `bd`
+   * response below (which `decodeIssueStatus` cannot parse as a status, so
+   * `releaseClaimedChild` treats them as unknown and leaves them alone).
+   */
+  readonly childStatuses?: Record<string, string>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs);
   for (const run of input.seedRuns ?? []) {
     store.runs.set(run.runId, run);
   }
   store.iterations.push(...(input.seedIterations ?? []));
+  const childStatuses = new Map(Object.entries(input.childStatuses ?? {}));
 
   const dispatched: OrchestrationCommand[] = [];
   const details = new Map<string, OrchestrationThread>();
@@ -224,6 +242,10 @@ function createHarness(input: {
   let sequence = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
   const heldLocks = new Set<string>();
+  // Remaining `getThreadDetailSnapshot` reads, per thread, that must report no
+  // assistant message before the real one is revealed — see
+  // `ScriptedIteration.messageSettleDelayReads`.
+  const messageSettleDelayReads = new Map<string, number>();
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -257,6 +279,9 @@ function createHarness(input: {
           streaming: scripted.streaming ?? false,
         }),
       );
+      if (scripted.messageSettleDelayReads !== undefined) {
+        messageSettleDelayReads.set(threadId, scripted.messageSettleDelayReads);
+      }
       shells.set(threadId, {
         latestTurn: scripted.turnState ?? "completed",
         session: scripted.sessionStatus ?? "ready",
@@ -355,9 +380,27 @@ function createHarness(input: {
     getThreadDetailSnapshot: (threadId) =>
       Effect.sync(() => {
         const thread = details.get(threadId);
-        return thread === undefined
-          ? Option.none()
-          : Option.some({ snapshotSequence: sequence, thread });
+        if (thread === undefined) {
+          return Option.none();
+        }
+        const remainingDelay = messageSettleDelayReads.get(threadId) ?? 0;
+        if (remainingDelay > 0) {
+          messageSettleDelayReads.set(threadId, remainingDelay - 1);
+          // Report the turn as message-less on this read, exactly like the
+          // real projector before the assistant row has finalized.
+          return Option.some({
+            snapshotSequence: sequence,
+            thread: {
+              ...thread,
+              messages: [],
+              latestTurn:
+                thread.latestTurn === null
+                  ? null
+                  : { ...thread.latestTurn, assistantMessageId: null },
+            },
+          });
+        }
+        return Option.some({ snapshotSequence: sequence, thread });
       }),
   });
 
@@ -365,6 +408,36 @@ function createHarness(input: {
     run: (request: ProcessRunner.ProcessRunInput) =>
       Effect.sync(() => {
         processRequests.push(request);
+        const subcommand = request.args[0];
+        const issueId = request.args[1];
+        if (
+          request.command === "bd" &&
+          subcommand === "show" &&
+          issueId !== undefined &&
+          childStatuses.has(issueId)
+        ) {
+          return {
+            stdout: `[{"status":"${childStatuses.get(issueId)}"}]`,
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
+        if (
+          request.command === "bd" &&
+          subcommand === "update" &&
+          issueId !== undefined &&
+          childStatuses.has(issueId) &&
+          request.args.includes("--status")
+        ) {
+          const statusIndex = request.args.indexOf("--status");
+          const newStatus = request.args[statusIndex + 1];
+          if (newStatus !== undefined) {
+            childStatuses.set(issueId, newStatus);
+          }
+        }
         return {
           stdout:
             request.command === "bd"
@@ -454,6 +527,7 @@ function createHarness(input: {
     turnsStarted: () => turnsStarted,
     activeLockCount: () => heldLocks.size,
     processRequests,
+    childStatus: (issueId: string) => childStatuses.get(issueId),
     commands: dispatched,
     commandsOfType: <T extends OrchestrationCommand["type"]>(type: T) =>
       dispatched.filter(
@@ -644,6 +718,53 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live(
+    "classifies an iteration done when the assistant message settles after the turn ends",
+    () => {
+      // The turn is reported `completed` before the assistant message has
+      // projected — the exact race `readSettledFinalMessage` must survive
+      // rather than mistaking the absent message for a settled, empty one.
+      const harness = createHarness({
+        script: [
+          {
+            text: 'did the work\nRALPH_MSG: {"summary":"settled late","why":"race"}',
+            head: "head-1",
+            messageSettleDelayReads: 2,
+          },
+        ],
+        options: { iterationTimeoutMs: 60_000 },
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "completed");
+
+        assert.strictEqual(harness.store.iterations[0]?.summary, "settled late");
+        assert.strictEqual(harness.store.iterations[0]?.why, "race");
+        assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+
+        yield* runner.cancelRun({ runId: run.runId });
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.live("classifies a genuinely message-less completed turn as a protocol error", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", turnState: "completed" }],
+      options: { maxConsecutiveFailures: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      const failed = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(failed.lastError, "turn completed without an assistant message");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("returns the same active run for sequential duplicate starts", () => {
     const harness = createHarness({
       script: [{ text: null, head: "head-0", stall: true }],
@@ -802,6 +923,73 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("releases the stranded child left in_progress when a run exhausts its retries", () => {
+    const failing = {
+      text: null,
+      head: "head-0",
+      turnState: "error",
+      sessionStatus: "error",
+    } as const;
+    const harness = createHarness({
+      script: [failing, failing, failing],
+      childStatuses: { "child-3": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      yield* waitFor(() =>
+        harness.processRequests.some(
+          (request) =>
+            request.command === "bd" &&
+            request.args[0] === "update" &&
+            request.args[1] === "child-3",
+        ),
+      );
+
+      const updateRequest = harness.processRequests.find(
+        (request) => request.command === "bd" && request.args[0] === "update",
+      )!;
+      assert.deepStrictEqual(updateRequest.args, [
+        "update",
+        "child-3",
+        "--status",
+        "open",
+        "--assignee",
+        "",
+      ]);
+      assert.strictEqual(harness.childStatus("child-3"), "open");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not touch a child that was already closed when the run failed", () => {
+    const failing = {
+      text: null,
+      head: "head-0",
+      turnState: "error",
+      sessionStatus: "error",
+    } as const;
+    const harness = createHarness({
+      script: [failing, failing, failing],
+      childStatuses: { "child-3": "closed" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      // Nothing to wait *for* — the assertion is that the release is a no-op —
+      // so give the finalizer a beat to run and confirm it stayed quiet.
+      yield* settle;
+
+      assert.isFalse(
+        harness.processRequests.some(
+          (request) => request.command === "bd" && request.args[0] === "update",
+        ),
+      );
+      assert.strictEqual(harness.childStatus("child-3"), "closed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("stops a run that keeps producing no commits", () => {
     const harness = createHarness({
       script: [
@@ -906,6 +1094,10 @@ describe("EpicRunner", () => {
           finishedAt: null,
         },
       ],
+      // The provider subprocess died with the server, so the child it had
+      // claimed is still `in_progress` — reconciling the abandoned iteration
+      // must release it, or `bd ready` can never resurface it.
+      childStatuses: { "child-0": "in_progress" },
     });
 
     return Effect.gen(function* () {
@@ -915,6 +1107,19 @@ describe("EpicRunner", () => {
 
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
       assert.strictEqual(harness.store.iterations[0]?.summary, "abandoned by server restart");
+      assert.strictEqual(harness.childStatus("child-0"), "open");
+      const releaseRequest = harness.processRequests.find(
+        (request) =>
+          request.command === "bd" && request.args[0] === "update" && request.args[1] === "child-0",
+      )!;
+      assert.deepStrictEqual(releaseRequest.args, [
+        "update",
+        "child-0",
+        "--status",
+        "open",
+        "--assignee",
+        "",
+      ]);
       const staleThreadId = harness.store.iterations[0]!.threadId;
       const interruptIndex = harness.commands.findIndex(
         (command) => command.type === "thread.turn.interrupt" && command.threadId === staleThreadId,
@@ -930,6 +1135,70 @@ describe("EpicRunner", () => {
       assert.isAbove(nextCreateIndex, stopIndex);
       // The resumed loop picks up at the next index, not the abandoned one.
       assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("releases a stranded child when a restart cannot reacquire the run's lease", () => {
+    // This run's loop never gets a chance to fork — the lease acquisition
+    // itself fails — so its finalizer never runs. The lease-failure branch in
+    // `start` has to release the run's last claimed child on its own.
+    const runId = "run-lease-failure";
+    const staleRun: EpicRun = {
+      runId: runId as EpicRun["runId"],
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      modelSelection,
+      runtimeMode: "full-access",
+      status: "running",
+      maxIterations: 10,
+      iterationsCompleted: 1,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      seedRuns: [staleRun],
+      seedIterations: [
+        {
+          runId: staleRun.runId,
+          iterationIndex: 0,
+          threadId: ThreadId.make(`epic-run-${runId}-0`),
+          issueId: "child-0",
+          turnStatus: "completed",
+          summary: "done",
+          why: null,
+          startedAt: NOW,
+          finishedAt: NOW,
+        },
+      ],
+      childStatuses: { "child-0": "in_progress" },
+      lockAcquireError: new EpicRunLockError("lease store unavailable"),
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+      yield* waitFor(() => harness.childStatus("child-0") === "open");
+
+      const releaseRequest = harness.processRequests.find(
+        (request) =>
+          request.command === "bd" && request.args[0] === "update" && request.args[1] === "child-0",
+      )!;
+      assert.deepStrictEqual(releaseRequest.args, [
+        "update",
+        "child-0",
+        "--status",
+        "open",
+        "--assignee",
+        "",
+      ]);
     }).pipe(Effect.provide(harness.layer));
   });
 
