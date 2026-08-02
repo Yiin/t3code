@@ -112,6 +112,15 @@ const readPersistedSnapshot = (baseDir: string) =>
     }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
   });
 
+const readPersistedShellSnapshot = (baseDir: string) =>
+  Effect.gen(function* () {
+    const config = yield* makeCliTestServerConfig(baseDir);
+    return yield* Effect.gen(function* () {
+      const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      return yield* projectionSnapshotQuery.getShellSnapshot();
+    }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+  });
+
 const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
@@ -212,7 +221,7 @@ const withRawEpicCliServer = <A, E, R>(input: {
                   recentIterations: [],
                 };
                 const payload =
-                  request.url === "/api/orchestration/snapshot"
+                  request.url === "/api/orchestration/shell"
                     ? input.snapshot
                     : request.url === "/api/epic-runs" && request.method === "GET"
                       ? []
@@ -427,7 +436,10 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         "--base-dir",
         baseDir,
       ]);
-      const snapshot = yield* readPersistedSnapshot(baseDir);
+      // The epic CLI resolves its project from the shell snapshot, so the raw
+      // stub below has to serve that shape — a full read model does not decode
+      // as one (its threads carry no `hasPendingApprovals`).
+      const snapshot = yield* readPersistedShellSnapshot(baseDir);
       const project = snapshot.projects.find(
         (candidate) => candidate.workspaceRoot === workspaceRoot,
       );

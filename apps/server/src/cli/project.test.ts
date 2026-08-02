@@ -13,13 +13,18 @@ import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import { FetchHttpClient, HttpClientError } from "effect/unstable/http";
 
+import * as NetService from "@t3tools/shared/Net";
+import * as TestConsole from "effect/testing/TestConsole";
+import { Command } from "effect/unstable/cli";
+
 import type * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
-import type * as ServerConfig from "../config.ts";
+import * as ServerConfig from "../config.ts";
 import { persistServerRuntimeState } from "../serverRuntimeState.ts";
 
 import {
   ProjectLiveServerDeclaredResponseError,
   ProjectLiveServerRequestError,
+  projectCommand,
   projectCommandErrorFromLiveServerRequest,
   shouldClearProjectRuntimeState,
   tryResolveLiveProjectExecutionMode,
@@ -235,4 +240,144 @@ it.effect(
         ["/api/orchestration/shell"],
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// The mutation path, not just the probe (t3code-zac.3) ---------------------
+//
+// `project add` used to load the whole orchestration read model just to check
+// whether a project already claimed the workspace root — 4s and 133MB against
+// a real state.sqlite. It reads the shell snapshot now. As with the probe test
+// above, the assertion has to be on the request URL: the stub body decodes
+// under both OrchestrationShellSnapshot and OrchestrationReadModel, so a
+// body-shape assertion would pass even if the full snapshot came back.
+
+const requestPathname = (input: unknown): string => {
+  const raw =
+    typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? input);
+  return new URL(raw).pathname;
+};
+
+// The wire shape of `OrchestrationProjectShell`, spelled out so the stub body
+// stays free of `unknown` (which the `preferSchemaOverJson` diagnostic rejects).
+type StubProjectShell = {
+  readonly id: string;
+  readonly title: string;
+  readonly workspaceRoot: string;
+  readonly defaultModelSelection: null;
+  readonly scripts: ReadonlyArray<never>;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+const runProjectCliWithStubbedServer = (input: {
+  readonly args: ReadonlyArray<string>;
+  readonly requestedPathnames: Array<string>;
+  readonly projects: ReadonlyArray<StubProjectShell>;
+}) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3-project-live-mutation-test-",
+    });
+    const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, undefined, {
+      baseDirIsExplicit: true,
+    });
+    yield* ServerConfig.ensureServerDirectories(derivedPaths);
+    yield* persistServerRuntimeState({
+      path: derivedPaths.serverRuntimeStatePath,
+      state: {
+        version: 1,
+        pid: 123,
+        port: 4_972,
+        origin: "http://127.0.0.1:4972",
+        startedAt: "2026-08-02T00:00:00.000Z",
+      },
+    });
+
+    // @effect-diagnostics-next-line preferSchemaOverJson:off - Stub wire body for a fake server.
+    const shellSnapshotBody = JSON.stringify({
+      snapshotSequence: 0,
+      projects: input.projects,
+      threads: [],
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    });
+    const fetchMock = ((request: unknown) => {
+      const pathname = requestPathname(request);
+      input.requestedPathnames.push(pathname);
+      const body =
+        pathname === "/api/orchestration/dispatch"
+          ? JSON.stringify({ sequence: 1 })
+          : shellSnapshotBody;
+      return Promise.resolve(
+        new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    }) as unknown as typeof fetch;
+
+    return yield* Command.runWith(projectCommand, { version: "0.0.0" })([
+      ...input.args,
+      "--base-dir",
+      baseDir,
+    ]).pipe(Effect.provideService(FetchHttpClient.Fetch, fetchMock));
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer, TestConsole.layer)),
+  );
+
+it.effect("adds a project in live mode without ever loading the full read model", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3-project-live-mutation-workspace-",
+    });
+    const requestedPathnames: Array<string> = [];
+
+    yield* runProjectCliWithStubbedServer({
+      args: ["add", workspaceRoot, "--title", "Live Project"],
+      requestedPathnames,
+      projects: [],
+    });
+
+    assert.isFalse(requestedPathnames.includes("/api/orchestration/snapshot"));
+    assert.deepStrictEqual(requestedPathnames, [
+      // The liveness probe, then the snapshot the mutation resolves against.
+      "/api/orchestration/shell",
+      "/api/orchestration/shell",
+      "/api/orchestration/dispatch",
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("renames a project in live mode without ever loading the full read model", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3-project-live-rename-workspace-",
+    });
+    const requestedPathnames: Array<string> = [];
+
+    // Rename resolves the target through `findActiveProjectTarget`, which now
+    // reads `OrchestrationProjectShell` rows — a shape with no `deletedAt`.
+    yield* runProjectCliWithStubbedServer({
+      args: ["rename", workspaceRoot, "Renamed Project"],
+      requestedPathnames,
+      projects: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          title: "Live Project",
+          workspaceRoot,
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-08-02T00:00:00.000Z",
+          updatedAt: "2026-08-02T00:00:00.000Z",
+        },
+      ],
+    });
+
+    assert.isFalse(requestedPathnames.includes("/api/orchestration/snapshot"));
+    assert.deepStrictEqual(requestedPathnames, [
+      "/api/orchestration/shell",
+      "/api/orchestration/shell",
+      "/api/orchestration/dispatch",
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
