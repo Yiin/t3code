@@ -269,6 +269,54 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
       : toPersistenceSqlError(sqlOperation)(cause);
 }
 
+/**
+ * `SqlSchema.findAll` fuses the statement and the row decode into one effect,
+ * so a trace can only show their sum. This rebuilds the same pipeline — encode
+ * the request, run the statement, decode the rows — with a span around each
+ * half, so a read's SQL time and its decode time are each readable straight off
+ * a span, with no subtracting one duration from another. That matters because
+ * these reads run inside a transaction, and a transaction holds the single
+ * connection permit for its whole duration, decode included.
+ *
+ * The caller passes the same operation name it would otherwise pass to
+ * `toPersistenceSqlOrDecodeError`, and this applies that mapping too, so a span
+ * and the error the same step would raise can never drift apart.
+ *
+ * Only the reads whose decode is big enough to measure use this. The other
+ * `SqlSchema.findAll` call sites stay as they are.
+ */
+const tracedFindAll = <Req extends Schema.Top, Res extends Schema.Top, E, R>(options: {
+  readonly Request: Req;
+  readonly Result: Res;
+  readonly execute: (request: Req["Encoded"]) => Effect.Effect<ReadonlyArray<unknown>, E, R>;
+}) => {
+  const encodeRequest = Schema.encodeEffect(options.Request);
+  const decodeRows = Schema.decodeUnknownEffect(Schema.mutable(Schema.Array(options.Result)));
+  return (
+    request: Req["Type"],
+    operation: string,
+  ): Effect.Effect<
+    Array<Res["Type"]>,
+    ProjectionRepositoryError,
+    Req["EncodingServices"] | Res["DecodingServices"] | R
+  > =>
+    encodeRequest(request).pipe(
+      Effect.flatMap(options.execute),
+      Effect.tap((rows) => Effect.annotateCurrentSpan("db.rows", rows.length)),
+      Effect.withSpan(`${operation}:query`),
+      Effect.flatMap((rows) =>
+        decodeRows(rows).pipe(
+          Effect.withSpan(`${operation}:decodeRows`, {
+            attributes: { "db.rows": rows.length },
+          }),
+        ),
+      ),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(`${operation}:query`, `${operation}:decodeRows`),
+      ),
+    );
+};
+
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -458,7 +506,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const listThreadActivityRows = SqlSchema.findAll({
+  const listThreadActivityRows = tracedFindAll({
     Request: Schema.Void,
     Result: ProjectionThreadActivityDbRowSchema,
     execute: () =>
@@ -784,7 +832,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const listThreadMessageRowsByThread = SqlSchema.findAll({
+  const listThreadMessageRowsByThread = tracedFindAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadMessageDbRowSchema,
     execute: ({ threadId }) =>
@@ -839,7 +887,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   //
   // The two CTEs select `activity_id` only so the dedupe never compares
   // `payload_json`, which is 75-97% of this table's bytes.
-  const listThreadActivityRowsByThread = SqlSchema.findAll({
+  const listThreadActivityRowsByThread = tracedFindAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
     execute: ({ threadId }) =>
@@ -943,7 +991,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const listCheckpointRowsByThread = SqlSchema.findAll({
+  const listCheckpointRowsByThread = tracedFindAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionCheckpointDbRowSchema,
     execute: ({ threadId }) =>
@@ -1032,13 +1080,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listThreadActivityRows(undefined).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getSnapshot:listThreadActivities:query",
-                "ProjectionSnapshotQuery.getSnapshot:listThreadActivities:decodeRows",
-              ),
-            ),
+          listThreadActivityRows(
+            undefined,
+            "ProjectionSnapshotQuery.getSnapshot:listThreadActivities",
           ),
           listThreadSessionRows(undefined).pipe(
             Effect.mapError(
@@ -1858,13 +1902,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<ProjectionThreadCheckpointContext>();
       }
 
-      const checkpointRows = yield* listCheckpointRowsByThread({ threadId }).pipe(
-        Effect.mapError(
-          toPersistenceSqlOrDecodeError(
-            "ProjectionSnapshotQuery.getThreadCheckpointContext:listCheckpoints:query",
-            "ProjectionSnapshotQuery.getThreadCheckpointContext:listCheckpoints:decodeRows",
-          ),
-        ),
+      const checkpointRows = yield* listCheckpointRowsByThread(
+        { threadId },
+        "ProjectionSnapshotQuery.getThreadCheckpointContext:listCheckpoints",
       );
 
       return Option.some({
@@ -1991,13 +2031,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        listThreadMessageRowsByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:listMessages:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:listMessages:decodeRows",
-            ),
-          ),
+        listThreadMessageRowsByThread(
+          { threadId },
+          "ProjectionSnapshotQuery.getThreadDetailById:listMessages",
         ),
         listThreadProposedPlanRowsByThread({ threadId }).pipe(
           Effect.mapError(
@@ -2007,13 +2043,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        listThreadActivityRowsByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:listActivities:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:listActivities:decodeRows",
-            ),
-          ),
+        listThreadActivityRowsByThread(
+          { threadId },
+          "ProjectionSnapshotQuery.getThreadDetailById:listActivities",
         ),
         countThreadActivityRowsByThread({ threadId }).pipe(
           Effect.mapError(
@@ -2023,13 +2055,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
-        listCheckpointRowsByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints:decodeRows",
-            ),
-          ),
+        listCheckpointRowsByThread(
+          { threadId },
+          "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints",
         ),
         getLatestTurnRowByThread({ threadId }).pipe(
           Effect.mapError(

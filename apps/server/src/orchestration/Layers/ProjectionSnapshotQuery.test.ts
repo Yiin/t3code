@@ -12,6 +12,8 @@ import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { SqlError } from "effect/unstable/sql/SqlError";
 
@@ -1550,6 +1552,128 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         snapshot.value.thread.activities.map((activity) => activity.sequence),
         [101, 102, 103],
       );
+    }),
+  );
+
+  // A thread-detail read holds the single connection permit for its whole
+  // transaction, decode included, so the trace has to price the query and the
+  // decode separately. These spans are what makes that readable without
+  // subtracting one span's duration from another's.
+  it.effect("times the query and the row decode of each heavy thread-detail read", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* insertFillerActivities(3);
+      yield* setProjectionStateSequence(103);
+
+      // Distinct row counts per read, so a span that reported another read's
+      // count would fail rather than coincide.
+      for (const messageId of ["message-1", "message-2"]) {
+        yield* sql`
+          INSERT INTO projection_thread_messages (
+            message_id,
+            thread_id,
+            turn_id,
+            role,
+            text,
+            correlation_json,
+            is_streaming,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            ${messageId},
+            'thread-1',
+            NULL,
+            'user',
+            'hello',
+            NULL,
+            0,
+            '2026-04-01T00:00:20.000Z',
+            '2026-04-01T00:00:20.000Z'
+          )
+        `;
+      }
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          source_proposed_plan_thread_id,
+          source_proposed_plan_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES (
+          'thread-1',
+          'turn-1',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          'completed',
+          '2026-04-01T00:00:30.000Z',
+          '2026-04-01T00:00:30.000Z',
+          '2026-04-01T00:00:31.000Z',
+          1,
+          'checkpoint-1',
+          'ready',
+          '[]'
+        )
+      `;
+
+      const spans: Array<Tracer.Span> = [];
+      const collectingTracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          spans.push(span);
+          return span;
+        },
+      });
+
+      const snapshot = yield* snapshotQuery
+        .getThreadDetailSnapshot(ThreadId.make("thread-1"))
+        .pipe(Effect.withTracer(collectingTracer));
+      assert.equal(snapshot._tag, "Some");
+
+      const spanNamed = (name: string) => {
+        const matches = spans.filter((span) => span.name === name);
+        assert.equal(matches.length, 1, `expected exactly one ${name} span`);
+        return matches[0]!;
+      };
+
+      const expectedRowCounts = {
+        "ProjectionSnapshotQuery.getThreadDetailById:listMessages": 2,
+        "ProjectionSnapshotQuery.getThreadDetailById:listActivities": 3,
+        "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints": 1,
+      };
+
+      for (const [operation, rowCount] of Object.entries(expectedRowCounts)) {
+        const querySpan = spanNamed(`${operation}:query`);
+        const decodeSpan = spanNamed(`${operation}:decodeRows`);
+
+        assert.equal(querySpan.attributes.get("db.rows"), rowCount);
+        assert.equal(decodeSpan.attributes.get("db.rows"), rowCount);
+
+        // Siblings, not nested: the decode span's duration is the decode cost
+        // on its own, with nothing to subtract out of it.
+        assert.notEqual(decodeSpan.parent.pipe(Option.getOrUndefined)?.spanId, querySpan.spanId);
+        assert.equal(
+          decodeSpan.parent.pipe(Option.getOrUndefined)?.spanId,
+          querySpan.parent.pipe(Option.getOrUndefined)?.spanId,
+        );
+      }
     }),
   );
 
