@@ -270,28 +270,80 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 }
 
 /**
- * `SqlSchema.findAll` fuses the statement and the row decode into one effect,
- * so a trace can only show their sum. This rebuilds the same pipeline — encode
- * the request, run the statement, decode the rows — with a span around each
- * half, so a read's SQL time and its decode time are each readable straight off
- * a span, with no subtracting one duration from another. That matters because
- * these reads run inside a transaction, and a transaction holds the single
- * connection permit for its whole duration, decode included.
+ * The query half of a traced read: encode the request, run the statement, hand
+ * back the rows undecoded.
+ *
+ * Kept separate from the decode half so a caller can run this inside
+ * `sql.withTransaction` and {@link tracedDecodeRows} after it. A transaction
+ * holds the single connection permit for its whole duration, so every
+ * millisecond of decode left inside it is a millisecond every writer waits.
  *
  * The caller passes the same operation name it would otherwise pass to
  * `toPersistenceSqlOrDecodeError`, and this applies that mapping too, so a span
  * and the error the same step would raise can never drift apart.
+ */
+const tracedFindAllRaw = <Req extends Schema.Top, E, R>(options: {
+  readonly Request: Req;
+  readonly execute: (request: Req["Encoded"]) => Effect.Effect<ReadonlyArray<unknown>, E, R>;
+}) => {
+  const encodeRequest = Schema.encodeEffect(options.Request);
+  return (
+    request: Req["Type"],
+    operation: string,
+  ): Effect.Effect<
+    ReadonlyArray<unknown>,
+    ProjectionRepositoryError,
+    Req["EncodingServices"] | R
+  > =>
+    encodeRequest(request).pipe(
+      Effect.flatMap(options.execute),
+      Effect.tap((rows) => Effect.annotateCurrentSpan("db.rows", rows.length)),
+      Effect.withSpan(`${operation}:query`),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(`${operation}:query`, `${operation}:decodeRows`),
+      ),
+    );
+};
+
+/**
+ * The decode half of a traced read.
  *
- * Only the reads whose decode is big enough to measure use this. The other
- * `SqlSchema.findAll` call sites stay as they are.
+ * Safe to run after the transaction that produced `rows` has committed:
+ * `NodeSqliteClient` reads through `statement.all()`, so every row is fully
+ * materialised before this sees it and no cursor depends on the open
+ * transaction. A decode failure after COMMIT fails the effect, so no
+ * half-assembled value can escape.
+ */
+const tracedDecodeRows = <Res extends Schema.Top>(Result: Res) => {
+  const decodeRows = Schema.decodeUnknownEffect(Schema.mutable(Schema.Array(Result)));
+  return (
+    rows: ReadonlyArray<unknown>,
+    operation: string,
+  ): Effect.Effect<Array<Res["Type"]>, ProjectionRepositoryError, Res["DecodingServices"]> =>
+    decodeRows(rows).pipe(
+      Effect.withSpan(`${operation}:decodeRows`, {
+        attributes: { "db.rows": rows.length },
+      }),
+      Effect.mapError(toPersistenceDecodeError(`${operation}:decodeRows`)),
+    );
+};
+
+/**
+ * `SqlSchema.findAll` fuses the statement and the row decode into one effect,
+ * so a trace can only show their sum. This runs the two halves above back to
+ * back instead, so a read's SQL time and its decode time are each readable
+ * straight off a span, with no subtracting one duration from another.
+ *
+ * Reads whose decode must leave the transaction call the two halves separately.
+ * This is for the ones whose decode stays where it is.
  */
 const tracedFindAll = <Req extends Schema.Top, Res extends Schema.Top, E, R>(options: {
   readonly Request: Req;
   readonly Result: Res;
   readonly execute: (request: Req["Encoded"]) => Effect.Effect<ReadonlyArray<unknown>, E, R>;
 }) => {
-  const encodeRequest = Schema.encodeEffect(options.Request);
-  const decodeRows = Schema.decodeUnknownEffect(Schema.mutable(Schema.Array(options.Result)));
+  const fetchRows = tracedFindAllRaw(options);
+  const decodeRows = tracedDecodeRows(options.Result);
   return (
     request: Req["Type"],
     operation: string,
@@ -299,23 +351,28 @@ const tracedFindAll = <Req extends Schema.Top, Res extends Schema.Top, E, R>(opt
     Array<Res["Type"]>,
     ProjectionRepositoryError,
     Req["EncodingServices"] | Res["DecodingServices"] | R
-  > =>
-    encodeRequest(request).pipe(
-      Effect.flatMap(options.execute),
-      Effect.tap((rows) => Effect.annotateCurrentSpan("db.rows", rows.length)),
-      Effect.withSpan(`${operation}:query`),
-      Effect.flatMap((rows) =>
-        decodeRows(rows).pipe(
-          Effect.withSpan(`${operation}:decodeRows`, {
-            attributes: { "db.rows": rows.length },
-          }),
-        ),
-      ),
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(`${operation}:query`, `${operation}:decodeRows`),
-      ),
-    );
+  > => fetchRows(request, operation).pipe(Effect.flatMap((rows) => decodeRows(rows, operation)));
 };
+
+/**
+ * Operation names for the thread-detail reads.
+ *
+ * The query and the decode of one read now happen in two different places, and
+ * both name their span and their error from the same constant, so the halves of
+ * a read cannot end up labelled differently. They keep the
+ * `getThreadDetailById` prefix on both entry points, as they did when
+ * `getThreadDetailSnapshot` reached these reads through that method.
+ */
+const THREAD_DETAIL_GET_THREAD = "ProjectionSnapshotQuery.getThreadDetailById:getThread";
+const THREAD_DETAIL_LIST_MESSAGES = "ProjectionSnapshotQuery.getThreadDetailById:listMessages";
+const THREAD_DETAIL_LIST_ACTIVITIES = "ProjectionSnapshotQuery.getThreadDetailById:listActivities";
+const THREAD_DETAIL_LIST_CHECKPOINTS =
+  "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints";
+
+const decodeThreadRow = Schema.decodeUnknownEffect(ProjectionThreadDbRowSchema);
+const decodeThreadMessageRows = tracedDecodeRows(ProjectionThreadMessageDbRowSchema);
+const decodeThreadActivityRows = tracedDecodeRows(ProjectionThreadActivityDbRowSchema);
+const decodeCheckpointRows = tracedDecodeRows(ProjectionCheckpointDbRowSchema);
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -799,9 +856,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const getActiveThreadRowById = SqlSchema.findOneOption({
+  // Reads the row undecoded, for the same reason as `tracedFindAllRaw`: the
+  // caller decodes it with `decodeThreadRow` after the transaction has
+  // committed, so the connection permit is not held for the decode.
+  const getActiveThreadRawRowById = SqlSchema.findOneOption({
     Request: ThreadIdLookupInput,
-    Result: ProjectionThreadDbRowSchema,
+    Result: Schema.Unknown,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -832,9 +892,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const listThreadMessageRowsByThread = tracedFindAll({
+  const listThreadMessageRawRowsByThread = tracedFindAllRaw({
     Request: ThreadIdLookupInput,
-    Result: ProjectionThreadMessageDbRowSchema,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -887,9 +946,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   //
   // The two CTEs select `activity_id` only so the dedupe never compares
   // `payload_json`, which is 75-97% of this table's bytes.
-  const listThreadActivityRowsByThread = tracedFindAll({
+  const listThreadActivityRawRowsByThread = tracedFindAllRaw({
     Request: ThreadIdLookupInput,
-    Result: ProjectionThreadActivityDbRowSchema,
     execute: ({ threadId }) =>
       sql`
         WITH newest_activity_ids AS (
@@ -991,9 +1049,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const listCheckpointRowsByThread = tracedFindAll({
+  const listCheckpointRawRowsByThread = tracedFindAllRaw({
     Request: ThreadIdLookupInput,
-    Result: ProjectionCheckpointDbRowSchema,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -1902,10 +1959,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<ProjectionThreadCheckpointContext>();
       }
 
-      const checkpointRows = yield* listCheckpointRowsByThread(
+      const checkpointOperation =
+        "ProjectionSnapshotQuery.getThreadCheckpointContext:listCheckpoints";
+      const checkpointRows = yield* listCheckpointRawRowsByThread(
         { threadId },
-        "ProjectionSnapshotQuery.getThreadCheckpointContext:listCheckpoints",
-      );
+        checkpointOperation,
+      ).pipe(Effect.flatMap((rows) => decodeCheckpointRows(rows, checkpointOperation)));
 
       return Option.some({
         threadId: threadRow.value.threadId,
@@ -1957,8 +2016,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
     Effect.gen(function* () {
-      const [threadRow, latestTurnRow, sessionRow] = yield* Effect.all([
-        getActiveThreadRowById({ threadId }).pipe(
+      const [threadRawRow, latestTurnRow, sessionRow] = yield* Effect.all([
+        getActiveThreadRawRowById({ threadId }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadShellById:getThread:query",
@@ -1984,102 +2043,130 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       ]);
 
-      if (Option.isNone(threadRow)) {
+      if (Option.isNone(threadRawRow)) {
         return Option.none<OrchestrationThreadShell>();
       }
+      const threadRow = yield* decodeThreadRow(threadRawRow.value).pipe(
+        Effect.mapError(
+          toPersistenceDecodeError(
+            "ProjectionSnapshotQuery.getThreadShellById:getThread:decodeRow",
+          ),
+        ),
+      );
 
       return Option.some({
-        id: threadRow.value.threadId,
-        projectId: threadRow.value.projectId,
-        title: threadRow.value.title,
-        modelSelection: threadRow.value.modelSelection,
-        runtimeMode: threadRow.value.runtimeMode,
-        interactionMode: threadRow.value.interactionMode,
-        branch: threadRow.value.branch,
-        worktreePath: threadRow.value.worktreePath,
+        id: threadRow.threadId,
+        projectId: threadRow.projectId,
+        title: threadRow.title,
+        modelSelection: threadRow.modelSelection,
+        runtimeMode: threadRow.runtimeMode,
+        interactionMode: threadRow.interactionMode,
+        branch: threadRow.branch,
+        worktreePath: threadRow.worktreePath,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
-        createdAt: threadRow.value.createdAt,
-        updatedAt: threadRow.value.updatedAt,
-        archivedAt: threadRow.value.archivedAt,
-        settledOverride: threadRow.value.settledOverride,
-        settledAt: threadRow.value.settledAt,
+        createdAt: threadRow.createdAt,
+        updatedAt: threadRow.updatedAt,
+        archivedAt: threadRow.archivedAt,
+        settledOverride: threadRow.settledOverride,
+        settledAt: threadRow.settledAt,
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
-        latestUserMessageAt: threadRow.value.latestUserMessageAt,
-        hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
-        hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
-        hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
+        latestUserMessageAt: threadRow.latestUserMessageAt,
+        hasPendingApprovals: threadRow.pendingApprovalCount > 0,
+        hasPendingUserInput: threadRow.pendingUserInputCount > 0,
+        hasActionableProposedPlan: threadRow.hasActionableProposedPlan > 0,
       } satisfies OrchestrationThreadShell);
     });
 
-  const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
+  /**
+   * The SQL half of a thread-detail read: every statement it needs, and not one
+   * byte of decoding.
+   *
+   * Split out from {@link assembleThreadDetail} so `getThreadDetailSnapshot` can
+   * hold the connection permit for the statements alone. The four heavy reads
+   * come back undecoded; the four constant-size ones (plans, the activity count,
+   * the latest turn, the session) still decode here, because their cost does not
+   * grow with the thread.
+   */
+  const fetchThreadDetailRows = (threadId: ThreadId) =>
+    Effect.all([
+      getActiveThreadRawRowById({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            `${THREAD_DETAIL_GET_THREAD}:query`,
+            `${THREAD_DETAIL_GET_THREAD}:decodeRow`,
+          ),
+        ),
+      ),
+      listThreadMessageRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_MESSAGES),
+      listThreadProposedPlanRowsByThread({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadDetailById:listPlans:query",
+            "ProjectionSnapshotQuery.getThreadDetailById:listPlans:decodeRows",
+          ),
+        ),
+      ),
+      listThreadActivityRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_ACTIVITIES),
+      countThreadActivityRowsByThread({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadDetailById:countActivities:query",
+            "ProjectionSnapshotQuery.getThreadDetailById:countActivities:decodeRow",
+          ),
+        ),
+      ),
+      listCheckpointRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_CHECKPOINTS),
+      getLatestTurnRowByThread({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadDetailById:getLatestTurn:query",
+            "ProjectionSnapshotQuery.getThreadDetailById:getLatestTurn:decodeRow",
+          ),
+        ),
+      ),
+      getThreadSessionRowByThread({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadDetailById:getSession:query",
+            "ProjectionSnapshotQuery.getThreadDetailById:getSession:decodeRow",
+          ),
+        ),
+      ),
+    ]);
+
+  type ThreadDetailRows = Effect.Success<ReturnType<typeof fetchThreadDetailRows>>;
+
+  /**
+   * The decode-and-map half of a thread-detail read. Runs on rows that are
+   * already fully materialised, so it is safe outside the transaction that read
+   * them, and a failure here fails the whole effect rather than escaping as a
+   * half-assembled thread.
+   */
+  const assembleThreadDetail = (rows: ThreadDetailRows) =>
     Effect.gen(function* () {
       const [
-        threadRow,
-        messageRows,
+        threadRawRow,
+        messageRawRows,
         proposedPlanRows,
-        activityRows,
+        activityRawRows,
         activityCountRow,
-        checkpointRows,
+        checkpointRawRows,
         latestTurnRow,
         sessionRow,
-      ] = yield* Effect.all([
-        getActiveThreadRowById({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:getThread:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:getThread:decodeRow",
-            ),
-          ),
-        ),
-        listThreadMessageRowsByThread(
-          { threadId },
-          "ProjectionSnapshotQuery.getThreadDetailById:listMessages",
-        ),
-        listThreadProposedPlanRowsByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:listPlans:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:listPlans:decodeRows",
-            ),
-          ),
-        ),
-        listThreadActivityRowsByThread(
-          { threadId },
-          "ProjectionSnapshotQuery.getThreadDetailById:listActivities",
-        ),
-        countThreadActivityRowsByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:countActivities:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:countActivities:decodeRow",
-            ),
-          ),
-        ),
-        listCheckpointRowsByThread(
-          { threadId },
-          "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints",
-        ),
-        getLatestTurnRowByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:getLatestTurn:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:getLatestTurn:decodeRow",
-            ),
-          ),
-        ),
-        getThreadSessionRowByThread({ threadId }).pipe(
-          Effect.mapError(
-            toPersistenceSqlOrDecodeError(
-              "ProjectionSnapshotQuery.getThreadDetailById:getSession:query",
-              "ProjectionSnapshotQuery.getThreadDetailById:getSession:decodeRow",
-            ),
-          ),
-        ),
-      ]);
+      ] = rows;
 
-      if (Option.isNone(threadRow)) {
+      if (Option.isNone(threadRawRow)) {
         return Option.none<OrchestrationThread>();
       }
+
+      const [threadRow, messageRows, activityRows, checkpointRows] = yield* Effect.all([
+        decodeThreadRow(threadRawRow.value).pipe(
+          Effect.mapError(toPersistenceDecodeError(`${THREAD_DETAIL_GET_THREAD}:decodeRow`)),
+        ),
+        decodeThreadMessageRows(messageRawRows, THREAD_DETAIL_LIST_MESSAGES),
+        decodeThreadActivityRows(activityRawRows, THREAD_DETAIL_LIST_ACTIVITIES),
+        decodeCheckpointRows(checkpointRawRows, THREAD_DETAIL_LIST_CHECKPOINTS),
+      ]);
 
       // The capped read returns the newest window plus every pinned
       // request/response row, so the omitted count is whatever the thread holds
@@ -2090,20 +2177,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       );
 
       const thread = {
-        id: threadRow.value.threadId,
-        projectId: threadRow.value.projectId,
-        title: threadRow.value.title,
-        modelSelection: threadRow.value.modelSelection,
-        runtimeMode: threadRow.value.runtimeMode,
-        interactionMode: threadRow.value.interactionMode,
-        branch: threadRow.value.branch,
-        worktreePath: threadRow.value.worktreePath,
+        id: threadRow.threadId,
+        projectId: threadRow.projectId,
+        title: threadRow.title,
+        modelSelection: threadRow.modelSelection,
+        runtimeMode: threadRow.runtimeMode,
+        interactionMode: threadRow.interactionMode,
+        branch: threadRow.branch,
+        worktreePath: threadRow.worktreePath,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
-        createdAt: threadRow.value.createdAt,
-        updatedAt: threadRow.value.updatedAt,
-        archivedAt: threadRow.value.archivedAt,
-        settledOverride: threadRow.value.settledOverride,
-        settledAt: threadRow.value.settledAt,
+        createdAt: threadRow.createdAt,
+        updatedAt: threadRow.updatedAt,
+        archivedAt: threadRow.archivedAt,
+        settledOverride: threadRow.settledOverride,
+        settledAt: threadRow.settledAt,
         deletedAt: null,
         messages: messageRows.map((row) => {
           const message = {
@@ -2161,34 +2248,45 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       );
     });
 
+  // Opens no transaction, exactly as before: its statements each take and
+  // release the connection permit on their own, and its decode never holds one.
+  // `getThreadDetailSnapshot` needs a transaction and so builds its own from the
+  // same two halves.
+  const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
+    fetchThreadDetailRows(threadId).pipe(Effect.flatMap(assembleThreadDetail));
+
   const getThreadDetailSnapshot: ProjectionSnapshotQueryShape["getThreadDetailSnapshot"] = (
     threadId,
   ) =>
-    // Read the thread detail and the snapshot sequence within a single
+    // Read the thread rows and the snapshot sequence within a single
     // transaction so the sequence is consistent with the returned state; a
     // projector update landing between two separate reads could otherwise return
     // a sequence ahead of the thread detail, causing the client to resume from
     // too far and drop events.
-    sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const thread = yield* getThreadDetailById(threadId);
-          if (Option.isNone(thread)) {
-            return Option.none<OrchestrationThreadDetailSnapshot>();
-          }
-          const { snapshotSequence } = yield* getSnapshotSequence();
-          return Option.some({ snapshotSequence, thread: thread.value });
-        }),
-      )
-      .pipe(
-        Effect.mapError((error) =>
-          isPersistenceError(error)
-            ? error
-            : toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailSnapshot:transaction")(
-                error,
-              ),
+    //
+    // Only the statements go inside. The transaction holds the one connection
+    // permit for its whole duration, so decoding the rows in here would block
+    // every writer for the decode too — and on a long thread the decode is a
+    // third of the cost. `statement.all()` materialises every row before COMMIT,
+    // so nothing the assembly reads depends on the transaction still being open.
+    sql.withTransaction(Effect.all([fetchThreadDetailRows(threadId), getSnapshotSequence()])).pipe(
+      Effect.flatMap(([rows, { snapshotSequence }]) =>
+        assembleThreadDetail(rows).pipe(
+          Effect.map(
+            Option.map(
+              (thread): OrchestrationThreadDetailSnapshot => ({ snapshotSequence, thread }),
+            ),
+          ),
         ),
-      );
+      ),
+      Effect.mapError((error) =>
+        isPersistenceError(error)
+          ? error
+          : toPersistenceSqlError("ProjectionSnapshotQuery.getThreadDetailSnapshot:transaction")(
+              error,
+            ),
+      ),
+    );
 
   return {
     getCommandReadModel,

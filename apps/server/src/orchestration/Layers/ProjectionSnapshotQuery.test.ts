@@ -1659,6 +1659,9 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints": 1,
       };
 
+      const transactionSpan = spanNamed("sql.transaction");
+      const parentIdOf = (span: Tracer.Span) => span.parent.pipe(Option.getOrUndefined)?.spanId;
+
       for (const [operation, rowCount] of Object.entries(expectedRowCounts)) {
         const querySpan = spanNamed(`${operation}:query`);
         const decodeSpan = spanNamed(`${operation}:decodeRows`);
@@ -1668,12 +1671,30 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
         // Siblings, not nested: the decode span's duration is the decode cost
         // on its own, with nothing to subtract out of it.
-        assert.notEqual(decodeSpan.parent.pipe(Option.getOrUndefined)?.spanId, querySpan.spanId);
-        assert.equal(
-          decodeSpan.parent.pipe(Option.getOrUndefined)?.spanId,
-          querySpan.parent.pipe(Option.getOrUndefined)?.spanId,
-        );
+        assert.notEqual(parentIdOf(decodeSpan), querySpan.spanId);
+
+        // The statement runs inside the transaction and the decode runs after
+        // it. The transaction holds the single connection permit for its whole
+        // duration, so a decode that drifted back inside would block every
+        // writer for its own cost as well as the query's.
+        assert.equal(parentIdOf(querySpan), transactionSpan.spanId);
+        assert.equal(parentIdOf(decodeSpan), parentIdOf(transactionSpan));
+        assert.notEqual(parentIdOf(decodeSpan), transactionSpan.spanId);
       }
+
+      // Nothing but statements is left in the permit-holding window. Named
+      // rather than counted, so a read added to the transaction later shows up
+      // here as a failure instead of passing unnoticed.
+      const transactionChildNames = spans
+        .filter((span) => parentIdOf(span) === transactionSpan.spanId)
+        .map((span) => span.name)
+        .toSorted();
+      assert.deepStrictEqual(
+        transactionChildNames.filter((name) => name !== "sql.execute"),
+        Object.keys(expectedRowCounts)
+          .map((operation) => `${operation}:query`)
+          .toSorted(),
+      );
     }),
   );
 
