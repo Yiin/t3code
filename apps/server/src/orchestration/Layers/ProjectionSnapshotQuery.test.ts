@@ -16,7 +16,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
-import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import {
+  OrchestrationProjectionSnapshotQueryLive,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
+} from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
@@ -24,6 +27,114 @@ const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
+
+/** Bare project + thread rows for the activity-cap tests, with no activities. */
+const seedActivityCapFixture = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+
+  yield* sql`DELETE FROM projection_projects`;
+  yield* sql`DELETE FROM projection_threads`;
+  yield* sql`DELETE FROM projection_thread_activities`;
+  yield* sql`DELETE FROM projection_state`;
+
+  yield* sql`
+    INSERT INTO projection_projects (
+      project_id,
+      title,
+      workspace_root,
+      default_model_selection_json,
+      scripts_json,
+      created_at,
+      updated_at,
+      deleted_at
+    )
+    VALUES (
+      'project-1',
+      'Project 1',
+      '/tmp/project-1',
+      '{"provider":"codex","model":"gpt-5-codex"}',
+      '[]',
+      '2026-04-01T00:00:00.000Z',
+      '2026-04-01T00:00:01.000Z',
+      NULL
+    )
+  `;
+
+  yield* sql`
+    INSERT INTO projection_threads (
+      thread_id,
+      project_id,
+      title,
+      model_selection_json,
+      runtime_mode,
+      interaction_mode,
+      branch,
+      worktree_path,
+      latest_turn_id,
+      latest_user_message_at,
+      pending_approval_count,
+      pending_user_input_count,
+      has_actionable_proposed_plan,
+      created_at,
+      updated_at,
+      deleted_at
+    )
+    VALUES (
+      'thread-1',
+      'project-1',
+      'Thread 1',
+      '{"provider":"codex","model":"gpt-5-codex"}',
+      'full-access',
+      'default',
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      1,
+      1,
+      0,
+      '2026-04-01T00:00:02.000Z',
+      '2026-04-01T00:00:03.000Z',
+      NULL
+    )
+  `;
+});
+
+/** Inserts `count` ordinary activities at sequences 101..100+count. */
+const insertFillerActivities = (count: number) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`
+      INSERT INTO projection_thread_activities (
+        activity_id,
+        thread_id,
+        turn_id,
+        tone,
+        kind,
+        summary,
+        payload_json,
+        sequence,
+        created_at
+      )
+      WITH RECURSIVE filler(n) AS (
+        SELECT 1
+        UNION ALL
+        SELECT n + 1 FROM filler WHERE n < ${count}
+      )
+      SELECT
+        'activity-filler-' || printf('%04d', n),
+        'thread-1',
+        NULL,
+        'info',
+        'runtime.note',
+        'filler ' || n,
+        '{"source":"filler"}',
+        100 + n,
+        '2026-04-01T00:01:00.000Z'
+      FROM filler
+    `;
+  });
 
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -1128,6 +1239,158 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           createdAt: "2026-04-01T00:00:04.000Z",
         },
       ]);
+    }),
+  );
+
+  it.effect(
+    "keeps unresolved approval and user-input requests that fall outside the newest-N activity window",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* seedActivityCapFixture;
+
+        // Sequences 1-6 are the request rows; the 600 fillers start at 101, so
+        // every request row is older than the newest-N window.
+        yield* insertFillerActivities(600);
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            sequence,
+            created_at
+          )
+          VALUES
+            (
+              'activity-approval-open',
+              'thread-1',
+              NULL,
+              'approval',
+              'approval.requested',
+              'Approve rm -rf',
+              '{"requestId":"request-open","requestKind":"command","detail":"rm -rf ./build"}',
+              1,
+              '2026-04-01T00:00:10.000Z'
+            ),
+            (
+              'activity-approval-answered-requested',
+              'thread-1',
+              NULL,
+              'approval',
+              'approval.requested',
+              'Approve ls',
+              '{"requestId":"request-answered","requestKind":"command","detail":"ls"}',
+              2,
+              '2026-04-01T00:00:11.000Z'
+            ),
+            (
+              'activity-approval-answered-resolved',
+              'thread-1',
+              NULL,
+              'info',
+              'approval.resolved',
+              'Approved ls',
+              '{"requestId":"request-answered","decision":"approved"}',
+              3,
+              '2026-04-01T00:00:12.000Z'
+            ),
+            (
+              'activity-user-input-open',
+              'thread-1',
+              NULL,
+              'approval',
+              'user-input.requested',
+              'Pick a branch',
+              '{"requestId":"input-open","questions":[{"id":"branch","header":"Branch","question":"Which branch?","options":[{"label":"main","description":"the default branch"}]}]}',
+              4,
+              '2026-04-01T00:00:13.000Z'
+            ),
+            (
+              'activity-user-input-answered-requested',
+              'thread-1',
+              NULL,
+              'approval',
+              'user-input.requested',
+              'Pick a remote',
+              '{"requestId":"input-answered","questions":[{"id":"remote","header":"Remote","question":"Which remote?","options":[{"label":"origin","description":"the default remote"}]}]}',
+              5,
+              '2026-04-01T00:00:14.000Z'
+            ),
+            (
+              'activity-user-input-answered-resolved',
+              'thread-1',
+              NULL,
+              'info',
+              'user-input.resolved',
+              'Answered remote',
+              '{"requestId":"input-answered"}',
+              6,
+              '2026-04-01T00:00:15.000Z'
+            )
+        `;
+
+        const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+        assert.equal(threadDetail._tag, "Some");
+        if (threadDetail._tag !== "Some") {
+          return;
+        }
+        const activities = threadDetail.value.activities;
+
+        // Newest-N fillers plus all six pinned request rows.
+        assert.equal(activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 6);
+
+        const ids = activities.map((activity) => activity.id);
+        assert.equal(new Set(ids).size, ids.length);
+        assert.deepEqual(
+          ids.filter((id) => !id.startsWith("activity-filler-")),
+          [
+            asEventId("activity-approval-open"),
+            asEventId("activity-approval-answered-requested"),
+            asEventId("activity-approval-answered-resolved"),
+            asEventId("activity-user-input-open"),
+            asEventId("activity-user-input-answered-requested"),
+            asEventId("activity-user-input-answered-resolved"),
+          ],
+        );
+
+        // The window itself is still the newest N, and the whole list is still
+        // ascending — the client reducer re-sorts by the same key.
+        const fillerSequences = activities
+          .filter((activity) => activity.id.startsWith("activity-filler-"))
+          .map((activity) => activity.sequence ?? -1);
+        assert.equal(fillerSequences.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+        assert.equal(fillerSequences[0], 201);
+        assert.equal(fillerSequences[fillerSequences.length - 1], 700);
+        const sequences = activities.map((activity) => activity.sequence ?? -1);
+        assert.deepEqual(
+          sequences,
+          sequences.toSorted((left, right) => left - right),
+        );
+      }),
+  );
+
+  it.effect("caps a thread with no request activities to the newest N activities", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedActivityCapFixture;
+      yield* insertFillerActivities(600);
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag !== "Some") {
+        return;
+      }
+      const sequences = threadDetail.value.activities.map((activity) => activity.sequence ?? -1);
+      assert.equal(sequences.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+      assert.equal(sequences[0], 201);
+      assert.equal(sequences[sequences.length - 1], 700);
     }),
   );
 

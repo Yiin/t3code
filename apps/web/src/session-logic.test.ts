@@ -175,6 +175,49 @@ describe("derivePendingApprovals", () => {
 
     expect(derivePendingApprovals(activities)).toEqual([]);
   });
+
+  // The server caps thread-detail activity reads to a newest-N window but pins
+  // every request/response row on top of it, because the sidebar badge comes
+  // from a separate SQL projection. Lose the request row here and the sidebar
+  // says "waiting for approval" while the chat has no prompt to answer. See
+  // apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts
+  // listThreadActivityRowsByThread.
+  it("finds an open approval that the server pinned outside the newest-N window", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-pinned",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Command approval requested",
+        tone: "approval",
+        sequence: 1,
+        payload: {
+          requestId: "req-pinned",
+          requestKind: "command",
+          detail: "rm -rf ./build",
+        },
+      }),
+      // The window itself: everything between the request and now was dropped,
+      // so the newest rows carry far higher sequences.
+      ...Array.from({ length: 500 }, (_unused, index) =>
+        makeActivity({
+          id: `activity-window-${index}`,
+          createdAt: "2026-02-23T01:00:00.000Z",
+          kind: "tool.completed",
+          sequence: 201 + index,
+        }),
+      ),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-pinned",
+        requestKind: "command",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        detail: "rm -rf ./build",
+      },
+    ]);
+  });
 });
 
 describe("derivePendingUserInputs", () => {

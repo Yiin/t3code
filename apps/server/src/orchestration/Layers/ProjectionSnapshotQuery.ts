@@ -119,6 +119,20 @@ const ProjectIdLookupInput = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+
+/**
+ * How many of a thread's newest activities the thread-detail read returns.
+ *
+ * Reading every activity of a chatty thread is the most expensive query on the
+ * snapshot path, and it runs inside the transaction that holds the only SQL
+ * connection permit, so it blocks every writer for its whole duration. One
+ * measured thread held 39,732 rows and 123 MB of `payload_json`.
+ *
+ * Request/response activities are always returned on top of this window — see
+ * `listThreadActivityRowsByThread`.
+ */
+export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
   threadId: ThreadId,
@@ -820,11 +834,49 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // Reads the newest `THREAD_DETAIL_ACTIVITY_LIMIT` activities, plus every
+  // request/response activity for the thread regardless of how old it is.
+  //
+  // The window alone is not safe. The sidebar badge comes from an independent
+  // SQL projection (pending_approval_count / pending_user_input_count), while
+  // the chat prompt is derived from this activity list. Drop an unresolved
+  // `approval.requested` and the sidebar says "waiting for approval" while the
+  // chat shows no prompt to answer — the agent stays blocked with no way out.
+  // The resolution and stale-failure kinds are pinned for the mirror bug: keep
+  // a request without its resolution and the prompt never goes away.
+  //
+  // The two CTEs select `activity_id` only so the dedupe never compares
+  // `payload_json`, which is 75-97% of this table's bytes.
   const listThreadActivityRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
     execute: ({ threadId }) =>
       sql`
+        WITH newest_activity_ids AS (
+          SELECT activity_id
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+          ORDER BY
+            sequence DESC,
+            created_at DESC,
+            activity_id DESC
+          LIMIT ${THREAD_DETAIL_ACTIVITY_LIMIT}
+        ),
+        selected_activity_ids AS (
+          SELECT activity_id FROM newest_activity_ids
+          UNION
+          SELECT activity_id
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+            AND kind IN (
+              'approval.requested',
+              'approval.resolved',
+              'provider.approval.respond.failed',
+              'user-input.requested',
+              'user-input.resolved',
+              'provider.user-input.respond.failed'
+            )
+        )
         SELECT
           activity_id AS "activityId",
           thread_id AS "threadId",
@@ -837,6 +889,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at AS "createdAt"
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
+          AND activity_id IN (SELECT activity_id FROM selected_activity_ids)
         ORDER BY
           sequence ASC,
           created_at ASC,
