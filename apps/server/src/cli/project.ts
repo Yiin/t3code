@@ -7,6 +7,7 @@ import {
   ProjectId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -186,6 +187,25 @@ export function projectCommandErrorFromLiveServerRequest(cause: unknown): Projec
 
   return new ProjectLiveServerRequestError({ operation: "callLiveServer", cause });
 }
+
+// `fetchLiveOrchestrationSnapshot` funnels every failure through
+// `projectCommandErrorFromLiveServerRequest` above, so by the time a failure
+// reaches here it is always a `ProjectCommandError`, not the raw cause — only
+// `ProjectLiveServerRequestError` wraps the "no response" catch-all case, and
+// its original cause is preserved on `.cause`.
+const isProjectLiveServerRequestError = Schema.is(ProjectLiveServerRequestError);
+
+export const shouldClearProjectRuntimeState = (cause: unknown): boolean => {
+  if (!isProjectLiveServerRequestError(cause)) return false;
+  const rawCause = cause.cause;
+  // A slow-but-alive server times out; that is not evidence the server is
+  // gone, so never delete the persisted runtime state for it.
+  if (Cause.isTimeoutError(rawCause)) return false;
+  // Only a genuine transport failure (e.g. connection refused, DNS failure) —
+  // an `HttpClientError` with no response, because the request never reached
+  // a server — means the origin is actually dead.
+  return HttpClientError.isHttpClientError(rawCause) && rawCause.response === undefined;
+};
 
 const projectCommandUuid = Crypto.Crypto.pipe(
   Effect.flatMap((crypto) => crypto.randomUUIDv4),
@@ -367,7 +387,9 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       origin: runtimeState.value.origin,
       cause: attempted.failure,
     });
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    if (shouldClearProjectRuntimeState(attempted.failure)) {
+      yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
+    }
     return Option.none<{ readonly origin: string }>();
   },
 );

@@ -6,10 +6,11 @@ import {
   EpicRunId,
   type EpicRun,
   type EpicRunInput,
-  type OrchestrationReadModel,
+  type OrchestrationShellSnapshot,
   PositiveInt,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -32,7 +33,7 @@ import {
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
-const EPIC_CLI_PROBE_TIMEOUT = Duration.seconds(1);
+const EPIC_CLI_PROBE_TIMEOUT = Duration.seconds(10);
 const EPIC_CLI_WATCH_INTERVAL = Duration.seconds(1);
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 const encodeJsonOutput = Schema.encodeSync(Schema.UnknownFromJsonString);
@@ -62,11 +63,15 @@ const makeClient = (origin: string) =>
 const bearerHeaders = (token: string) => ({ authorization: `Bearer ${token}` });
 
 export const shouldClearEpicRuntimeState = (cause: unknown): boolean => {
-  if (isEnvironmentHttpCommonError(cause)) return false;
-  if (HttpClientError.isHttpClientError(cause) && cause.response !== undefined) {
-    return false;
-  }
-  return true;
+  // A slow-but-alive server times out; that is not evidence the server is gone,
+  // so never delete the persisted runtime state for it.
+  if (Cause.isTimeoutError(cause)) return false;
+  // Only a genuine transport failure (e.g. connection refused, DNS failure) —
+  // an `HttpClientError` with no response, because the request never reached a
+  // server — means the origin is actually dead. Declared errors and HTTP
+  // responses with an undeclared status both mean *something* answered, so
+  // they don't count either.
+  return HttpClientError.isHttpClientError(cause) && cause.response === undefined;
 };
 
 export const epicCliHttpError = (cause: unknown): EpicCliError => {
@@ -94,10 +99,11 @@ export const epicCliHttpError = (cause: unknown): EpicCliError => {
 const mapLiveError = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, EpicCliError, R> =>
   effect.pipe(Effect.mapError(epicCliHttpError));
 
-export const findEpicProject = (snapshot: OrchestrationReadModel, normalizedCwd: string) =>
-  snapshot.projects.find(
-    (project) => project.deletedAt === null && project.workspaceRoot === normalizedCwd,
-  );
+export const findEpicProject = (snapshot: OrchestrationShellSnapshot, normalizedCwd: string) =>
+  // The shell snapshot only ever contains active projects — getShellSnapshot
+  // drops deleted rows while assembling the response (the project row query
+  // itself has no deleted_at clause) — so there is no `deletedAt` to check.
+  snapshot.projects.find((project) => project.workspaceRoot === normalizedCwd);
 
 export const isEpicRunTerminal = (run: Pick<EpicRun, "status">): boolean =>
   run.status === "done" || run.status === "failed" || run.status === "cancelled";
@@ -136,7 +142,7 @@ const withEpicSession = <A, E, R>(
     (session) => auth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
   );
 
-const discoverLiveServer = Effect.fn("discoverEpicLiveServer")(function* (
+export const discoverLiveServer = Effect.fn("discoverEpicLiveServer")(function* (
   auth: EnvironmentAuth.EnvironmentAuth["Service"],
   config: ServerConfig.ServerConfig["Service"],
 ) {
@@ -146,7 +152,7 @@ const discoverLiveServer = Effect.fn("discoverEpicLiveServer")(function* (
   const probe = withEpicSession(auth, (token) =>
     Effect.gen(function* () {
       const client = yield* makeClient(state.value.origin);
-      return yield* client.orchestration.snapshot({
+      return yield* client.orchestration.shellSnapshot({
         headers: bearerHeaders(token),
       });
     }).pipe(Effect.timeout(EPIC_CLI_PROBE_TIMEOUT)),
@@ -171,7 +177,7 @@ const runEpicCommand = <A, E>(
     readonly auth: EnvironmentAuth.EnvironmentAuth["Service"];
     readonly client: Effect.Success<ReturnType<typeof makeClient>>;
     readonly token: string;
-    readonly snapshot: OrchestrationReadModel;
+    readonly snapshot: OrchestrationShellSnapshot;
   }) => Effect.Effect<A, E, FileSystem.FileSystem | Path.Path | WorkspacePaths.WorkspacePaths>,
 ) =>
   Effect.gen(function* () {
