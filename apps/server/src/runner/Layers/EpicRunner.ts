@@ -954,7 +954,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
         // The iteration thread is genuinely finished, so it is *settled* and the
         // session teardown flows through the settle path like every other
-        // settle (`orchestration/Layers/ThreadSettleReactor.ts`) instead of the
+        // settle (`orchestration/Layers/ThreadTeardownReactor.ts`) instead of the
         // runner reaching for the provider directly. The reaper
         // (`provider/Layers/ProviderSessionReaper.ts`) stays a backstop, not the
         // mechanism: an unattended run must not accumulate one idle provider

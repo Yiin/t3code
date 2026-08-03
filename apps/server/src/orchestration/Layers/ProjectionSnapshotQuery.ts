@@ -2182,6 +2182,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       } satisfies OrchestrationThreadShell);
     });
 
+  // `projection_thread_sessions` has no archived_at column, so this read works
+  // for an archived thread just as well as for an active one. That is the point:
+  // teardown triggered by `thread.archived` has no other way to see the session.
+  const getThreadSessionById: ProjectionSnapshotQueryShape["getThreadSessionById"] = (threadId) =>
+    getThreadSessionRowByThread({ threadId }).pipe(
+      Effect.map(Option.map(mapSessionRow)),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadSessionById:query",
+          "ProjectionSnapshotQuery.getThreadSessionById:decodeRow",
+        ),
+      ),
+      Effect.withSpan("ProjectionSnapshotQuery.getThreadSessionById"),
+    );
+
   const listAutoSettleCandidates: ProjectionSnapshotQueryShape["listAutoSettleCandidates"] = (
     input,
   ) =>
@@ -2419,6 +2434,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,
+    getThreadSessionById,
     listAutoSettleCandidates,
     getThreadDetailById,
     getThreadDetailSnapshot,

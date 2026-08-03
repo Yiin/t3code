@@ -223,6 +223,12 @@ describe("ProviderSessionReaper", () => {
                 ? Option.some(input.readModel.threads.find((thread) => thread.id === threadId)!)
                 : Option.none(),
             ),
+          getThreadSessionById: (threadId) =>
+            Effect.succeed(
+              Option.fromNullishOr(
+                input.readModel.threads.find((thread) => thread.id === threadId)?.session,
+              ),
+            ),
           listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshot: () => Effect.die("unused"),

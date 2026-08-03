@@ -9,7 +9,7 @@ import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
-import { ThreadSettleReactor } from "../Services/ThreadSettleReactor.ts";
+import { ThreadTeardownReactor } from "../Services/ThreadTeardownReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
@@ -66,7 +66,7 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
-          Layer.succeed(ThreadSettleReactor, {
+          Layer.succeed(ThreadTeardownReactor, {
             start: () => {
               started.push("thread-settle-reactor");
               return Effect.void;

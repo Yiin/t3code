@@ -12,6 +12,7 @@ import type {
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
+  OrchestrationSession,
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
@@ -187,6 +188,20 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadShellById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * Read a single thread's projected provider session, whatever the thread's
+   * archived or settled state.
+   *
+   * `getThreadShellById` filters archived threads out, so a caller that reacts
+   * to `thread.archived` cannot use it to decide whether the thread still has a
+   * live session — by the time the event lands the shell is already gone. The
+   * session row carries no archive column, so this read answers "is there
+   * something to stop?" for active and archived threads alike.
+   */
+  readonly getThreadSessionById: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<OrchestrationSession>, ProjectionRepositoryError>;
 
   /**
    * List the threads an auto-settle sweep may settle.

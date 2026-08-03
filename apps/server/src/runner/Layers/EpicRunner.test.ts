@@ -450,6 +450,22 @@ function createHarness(input: {
           hasActionableProposedPlan: false,
         });
       }),
+    getThreadSessionById: (threadId) =>
+      Effect.sync(() => {
+        const shell = shells.get(threadId);
+        if (shell === undefined) {
+          return Option.none();
+        }
+        return Option.some({
+          threadId,
+          status: shell.session,
+          providerName: "codex",
+          runtimeMode: "full-access" as const,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW,
+        });
+      }),
     listAutoSettleCandidates: () => Effect.succeed([]),
     getThreadDetailById: () => Effect.die("unused"),
     getThreadDetailSnapshot: (threadId) =>
