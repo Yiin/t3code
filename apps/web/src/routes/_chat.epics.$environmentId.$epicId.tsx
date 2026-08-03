@@ -14,9 +14,11 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   CheckIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   CircleDashedIcon,
   LoaderIcon,
+  PauseIcon,
   PlayIcon,
   SquareIcon,
 } from "lucide-react";
@@ -31,10 +33,20 @@ import {
 } from "../epics.logic";
 import {
   currentEpicRunIssue,
+  epicRunHistory,
+  epicRunIterationCountLabel,
+  epicRunIterationDuration,
   epicRunUiState,
+  epicRuntimeModeLabel,
   formatEpicRunElapsed,
+  isTerminalEpicRunStatus,
   shouldStickToBottom,
+  type EpicRunHistory,
+  type EpicRunPendingAction,
 } from "../epicRun.logic";
+import { resolveEpicRunStatusPill } from "../components/Sidebar.logic";
+import { formatRelativeTimeLabel } from "../timestampFormat";
+import { cn } from "../lib/utils";
 import { epicsEnvironment } from "../state/epics";
 import { useProjects } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
@@ -78,12 +90,72 @@ function useElapsed(startedAt: string | null, endedAt: string | null) {
   return startedAt ? formatEpicRunElapsed(startedAt, now) : "0:00";
 }
 
+/** Ticks once a second only while something on screen is still running. */
+function useNowMs(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+function EpicRunPill(props: { readonly run: EpicRun }) {
+  const pill = resolveEpicRunStatusPill(props.run.status);
+  if (pill === null) return null;
+  return (
+    <span className={cn("inline-flex items-center gap-1.5 text-sm font-medium", pill.colorClass)}>
+      <span
+        className={cn(
+          "size-2 rounded-full",
+          pill.dotClass,
+          pill.pulse && "animate-status-pulse motion-reduce:animate-none",
+        )}
+        aria-hidden="true"
+      />
+      {pill.label}
+    </span>
+  );
+}
+
+/**
+ * How the run was configured, plus a way back to the thread that launched it.
+ * All of it already rides the contract and none of it was on screen.
+ */
+function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId: string }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <span className="font-mono">{props.run.modelSelection.model}</span>
+      <span aria-hidden="true">·</span>
+      <span>{epicRuntimeModeLabel(props.run.runtimeMode)}</span>
+      {props.run.originThreadId ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <Link
+            to="/$environmentId/$threadId"
+            params={{
+              environmentId: props.environmentId,
+              threadId: props.run.originThreadId,
+            }}
+            className="text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Launched from thread
+          </Link>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function EpicRunLog(props: {
   readonly run: EpicRun;
   readonly environmentId: string;
   readonly cwd: string;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const now = useNowMs(props.run.recentIterations.some((entry) => entry.finishedAt === null));
   const followRef = useRef(true);
   useLayoutEffect(() => {
     const viewport = rootRef.current?.querySelector<HTMLElement>(
@@ -117,6 +189,7 @@ function EpicRunLog(props: {
                     <span className="font-mono">{iteration.issueId}</span>
                   ) : null}
                   <span>{iteration.turnStatus}</span>
+                  <span className="tabular-nums">{epicRunIterationDuration(iteration, now)}</span>
                 </div>
                 {iteration.summary ? (
                   <ChatMarkdown
@@ -154,34 +227,84 @@ function EpicRunLog(props: {
   );
 }
 
+/**
+ * One earlier run, collapsed to a line. Expanding mounts its log; collapsing
+ * unmounts it, so Tab order matches what is on screen.
+ */
+function EpicRunHistoryEntry(props: {
+  readonly run: EpicRun;
+  readonly environmentId: string;
+  readonly cwd: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const endedAt = formatRelativeTimeLabel(props.run.updatedAt);
+  return (
+    <div className="min-w-0 rounded-xl border border-border">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        className="flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-xl px-4 py-3 text-left hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+      >
+        <ChevronRightIcon
+          className={cn(
+            "size-4 shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none",
+            expanded && "rotate-90",
+          )}
+          aria-hidden="true"
+        />
+        <EpicRunPill run={props.run} />
+        <span className="text-sm text-muted-foreground">
+          {epicRunIterationCountLabel(props.run.iterationsCompleted)}
+        </span>
+        <span className="tabular-nums text-sm text-muted-foreground">
+          {formatEpicRunElapsed(props.run.createdAt, Date.parse(props.run.updatedAt))}
+        </span>
+        {endedAt ? <span className="text-sm text-muted-foreground">ended {endedAt}</span> : null}
+      </button>
+      {expanded ? (
+        <div className="min-w-0 space-y-3 border-t border-border p-4">
+          <EpicRunMetaLine run={props.run} environmentId={props.environmentId} />
+          {props.run.lastError ? (
+            <p className="rounded-lg bg-destructive/8 p-3 text-sm text-destructive-foreground">
+              {props.run.lastError}
+            </p>
+          ) : null}
+          <EpicRunLog run={props.run} environmentId={props.environmentId} cwd={props.cwd} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function EpicRunSection(props: {
   readonly environmentId: string;
   readonly epicId: string;
   readonly source: DetailSource;
   readonly issues: ReadonlyArray<BeadsIssueSummary>;
-  readonly run: EpicRun | null;
+  readonly history: EpicRunHistory;
 }) {
   const launchRun = useAtomCommand(epicsEnvironment.launchRun, { reportFailure: false });
+  const pauseRun = useAtomCommand(epicsEnvironment.pauseRun, { reportFailure: false });
+  const resumeRun = useAtomCommand(epicsEnvironment.resumeRun, { reportFailure: false });
   const stopRun = useAtomCommand(epicsEnvironment.stopRun, { reportFailure: false });
-  const [pending, setPending] = useState<"starting" | "stopping" | null>(null);
-  const state = epicRunUiState(props.run, pending);
-  const terminal = props.run !== null && ["done", "failed", "cancelled"].includes(props.run.status);
-  const elapsed = useElapsed(
-    props.run?.createdAt ?? null,
-    terminal ? (props.run?.updatedAt ?? null) : null,
-  );
-  const current = props.run ? currentEpicRunIssue(props.run, props.issues) : null;
+  const [pending, setPending] = useState<EpicRunPendingAction | null>(null);
+  const run = props.history.latest;
+  const state = epicRunUiState(run, pending);
+  const terminal = run !== null && isTerminalEpicRunStatus(run.status);
+  const elapsed = useElapsed(run?.createdAt ?? null, terminal ? (run?.updatedAt ?? null) : null);
+  const current = run ? currentEpicRunIssue(run, props.issues) : null;
 
   useEffect(() => {
-    if (pending === "starting" && props.run !== null) setPending(null);
-    if (
-      pending === "stopping" &&
-      props.run !== null &&
-      ["done", "failed", "cancelled"].includes(props.run.status)
-    ) {
+    if (pending === "starting" && run !== null) setPending(null);
+    if (pending === "stopping" && run !== null && isTerminalEpicRunStatus(run.status)) {
       setPending(null);
     }
-  }, [pending, props.run]);
+    // Pause and resume clear as soon as the run leaves the state they acted
+    // on, including when it ends underneath them.
+    if (pending === "pausing" && run?.status !== "running") setPending(null);
+    if (pending === "resuming" && run?.status !== "paused") setPending(null);
+  }, [pending, run]);
 
   const reportFailure = (title: string, result: AtomCommandResult<unknown, unknown>) => {
     if (isAtomCommandInterrupted(result)) return;
@@ -212,15 +335,41 @@ function EpicRunSection(props: {
     });
   };
   const stop = () => {
-    if (!props.run || state === "stopping") return;
+    if (!run || state === "stopping") return;
     setPending("stopping");
     void stopRun({
       environmentId: props.environmentId as EnvironmentId,
-      input: { runId: props.run.runId },
+      input: { runId: run.runId },
     }).then((result) => {
       if (result._tag === "Success") return;
       setPending(null);
       reportFailure("Could not stop run", result);
+    });
+  };
+  // Pause and resume are reversible, so they act on click with no dialog. A
+  // stale button loses the race as a typed 409, which lands as a toast.
+  const pause = () => {
+    if (!run || state !== "running" || pending !== null) return;
+    setPending("pausing");
+    void pauseRun({
+      environmentId: props.environmentId as EnvironmentId,
+      input: { runId: run.runId },
+    }).then((result) => {
+      if (result._tag === "Success") return;
+      setPending(null);
+      reportFailure("Could not pause run", result);
+    });
+  };
+  const resume = () => {
+    if (!run || state !== "paused" || pending !== null) return;
+    setPending("resuming");
+    void resumeRun({
+      environmentId: props.environmentId as EnvironmentId,
+      input: { runId: run.runId },
+    }).then((result) => {
+      if (result._tag === "Success") return;
+      setPending(null);
+      reportFailure("Could not resume run", result);
     });
   };
 
@@ -245,21 +394,22 @@ function EpicRunSection(props: {
           <LoaderIcon className="size-4 animate-spin motion-reduce:animate-none" />
           Starting run…
         </div>
-      ) : props.run ? (
+      ) : run ? (
         <div className="min-w-0 space-y-4 rounded-xl border border-border p-4">
           <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                {state === "running" || state === "stopping" ? (
-                  <span
-                    className="size-2 animate-status-pulse rounded-full bg-success motion-reduce:animate-none"
-                    aria-hidden="true"
-                  />
-                ) : null}
-                <span className="capitalize">{state}</span>
+                {state === "stopping" ? (
+                  <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                    <LoaderIcon className="size-3.5 animate-spin motion-reduce:animate-none" />
+                    Stopping
+                  </span>
+                ) : (
+                  <EpicRunPill run={run} />
+                )}
                 <span className="text-muted-foreground">
-                  Iteration {Math.min(props.run.iterationsCompleted + 1, props.run.maxIterations)}{" "}
-                  of {props.run.maxIterations}
+                  Iteration {Math.min(run.iterationsCompleted + 1, run.maxIterations)} of{" "}
+                  {run.maxIterations}
                 </span>
                 <span className="tabular-nums text-muted-foreground">{elapsed}</span>
               </div>
@@ -273,56 +423,105 @@ function EpicRunSection(props: {
                 </Link>
               ) : null}
             </div>
-            {state === "running" || state === "stopping" ? (
-              <AlertDialog>
-                <AlertDialogTrigger
-                  render={
-                    <Button
-                      className="min-h-11"
-                      variant="destructive-outline"
-                      disabled={state === "stopping"}
-                    />
-                  }
-                >
-                  {state === "stopping" ? (
-                    <LoaderIcon className="animate-spin motion-reduce:animate-none" />
-                  ) : (
-                    <SquareIcon />
-                  )}
-                  {state === "stopping" ? "Stopping…" : "Stop run"}
-                </AlertDialogTrigger>
-                <AlertDialogPopup>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Stop this run?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      The current orchestration turn will be interrupted.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogClose render={<Button variant="outline" />}>
-                      Keep running
-                    </AlertDialogClose>
-                    <AlertDialogClose render={<Button variant="destructive" onClick={stop} />}>
-                      Stop run
-                    </AlertDialogClose>
-                  </AlertDialogFooter>
-                </AlertDialogPopup>
-              </AlertDialog>
+            {state === "running" || state === "paused" || state === "stopping" ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {state === "paused" ? (
+                  <Button
+                    className="min-h-11"
+                    variant="outline"
+                    disabled={pending !== null}
+                    onClick={resume}
+                  >
+                    {pending === "resuming" ? (
+                      <LoaderIcon className="animate-spin motion-reduce:animate-none" />
+                    ) : (
+                      <PlayIcon />
+                    )}
+                    {pending === "resuming" ? "Resuming…" : "Resume run"}
+                  </Button>
+                ) : null}
+                {state === "running" ? (
+                  <Button
+                    className="min-h-11"
+                    variant="outline"
+                    disabled={pending !== null}
+                    onClick={pause}
+                  >
+                    {pending === "pausing" ? (
+                      <LoaderIcon className="animate-spin motion-reduce:animate-none" />
+                    ) : (
+                      <PauseIcon />
+                    )}
+                    {pending === "pausing" ? "Pausing…" : "Pause run"}
+                  </Button>
+                ) : null}
+                <AlertDialog>
+                  <AlertDialogTrigger
+                    render={
+                      <Button
+                        className="min-h-11"
+                        variant="destructive-outline"
+                        disabled={state === "stopping"}
+                      />
+                    }
+                  >
+                    {state === "stopping" ? (
+                      <LoaderIcon className="animate-spin motion-reduce:animate-none" />
+                    ) : (
+                      <SquareIcon />
+                    )}
+                    {state === "stopping" ? "Stopping…" : "Stop run"}
+                  </AlertDialogTrigger>
+                  <AlertDialogPopup>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Stop this run?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        The current orchestration turn is interrupted and cannot be resumed.
+                        Completed iterations and their threads are kept.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogClose render={<Button variant="outline" />}>
+                        Keep running
+                      </AlertDialogClose>
+                      <AlertDialogClose render={<Button variant="destructive" onClick={stop} />}>
+                        Stop run
+                      </AlertDialogClose>
+                    </AlertDialogFooter>
+                  </AlertDialogPopup>
+                </AlertDialog>
+              </div>
             ) : null}
           </div>
-          {props.run.lastError ? (
+          <EpicRunMetaLine run={run} environmentId={props.environmentId} />
+          {run.lastError ? (
             <p
               className="rounded-lg bg-destructive/8 p-3 text-sm text-destructive-foreground"
               role="alert"
             >
-              {props.run.lastError}
+              {run.lastError}
             </p>
           ) : null}
           <EpicRunLog
-            run={props.run}
+            run={run}
             environmentId={props.environmentId}
             cwd={props.source.workspaceRoot}
           />
+        </div>
+      ) : null}
+      {props.history.prior.length > 0 ? (
+        <div className="mt-4 min-w-0 space-y-2">
+          <h3 className="text-sm font-medium text-muted-foreground">
+            Earlier runs ({props.history.prior.length})
+          </h3>
+          {props.history.prior.map((prior) => (
+            <EpicRunHistoryEntry
+              key={prior.runId}
+              run={prior}
+              environmentId={props.environmentId}
+              cwd={props.source.workspaceRoot}
+            />
+          ))}
         </div>
       ) : null}
     </section>
@@ -390,17 +589,21 @@ function EpicDetailRouteView() {
   );
   const pending = sources.some((source) => results.get(source.projectId)?.pending !== false);
   const children = match ? epicChildren(epicId, match.snapshot.issues) : [];
-  const runQuery = useEnvironmentQuery(
-    match
-      ? epicsEnvironment.run({
-          environmentId: environmentId as EnvironmentId,
-          input: {
-            epicId,
-            projectId: match.project.projectId,
-            cwd: match.project.workspaceRoot,
-          },
-        })
-      : null,
+  // One subscription for every run in the environment, narrowed to this epic
+  // below — the per-epic `run` atom only ever surfaced the latest one, which is
+  // what made a page of five runs look like a page of one.
+  const runsQuery = useEnvironmentQuery(
+    epicsEnvironment.allRuns({ environmentId: environmentId as EnvironmentId, input: {} }),
+  );
+  const runs = runsQuery.data;
+  const projectId = match?.project.projectId ?? null;
+  const workspaceRoot = match?.project.workspaceRoot ?? null;
+  const history = useMemo<EpicRunHistory>(
+    () =>
+      projectId === null || workspaceRoot === null
+        ? { latest: null, prior: [] }
+        : epicRunHistory(runs ?? [], { epicId, projectId, cwd: workspaceRoot }),
+    [epicId, projectId, runs, workspaceRoot],
   );
 
   return (
@@ -442,7 +645,7 @@ function EpicDetailRouteView() {
                     const done = issue.status === "closed" || issue.status === "done";
                     const blocked = issue.blockedBy.length > 0 || issue.status === "blocked";
                     const Icon = done ? CheckIcon : blocked ? CircleAlertIcon : CircleDashedIcon;
-                    const threadId = latestEpicThreadId(runQuery.data, issue.id);
+                    const threadId = latestEpicThreadId(history.latest, issue.id);
                     const content = (
                       <>
                         <span
@@ -491,7 +694,7 @@ function EpicDetailRouteView() {
                 epicId={epicId}
                 source={match.project}
                 issues={match.snapshot.issues}
-                run={runQuery.data}
+                history={history}
               />
             </>
           ) : (

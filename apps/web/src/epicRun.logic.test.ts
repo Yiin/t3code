@@ -3,12 +3,32 @@ import { ThreadId, type BeadsIssueSummary, type EpicRun } from "@t3tools/contrac
 
 import {
   currentEpicRunIssue,
+  epicRunHistory,
+  epicRunIterationCountLabel,
+  epicRunIterationDuration,
   epicRunUiState,
+  epicRuntimeModeLabel,
   formatEpicRunElapsed,
+  isTerminalEpicRunStatus,
   shouldStickToBottom,
 } from "./epicRun.logic";
 
 const run = (status: EpicRun["status"]) => ({ status }) as EpicRun;
+const historyRun = (overrides: {
+  readonly runId: string;
+  readonly epicId?: string;
+  readonly projectId?: string;
+  readonly cwd?: string;
+  readonly updatedAt?: string;
+}): EpicRun =>
+  ({
+    epicId: "epic-1",
+    projectId: "project-1",
+    cwd: "/repo",
+    status: "done",
+    updatedAt: "2026-07-29T00:00:00.000Z",
+    ...overrides,
+  }) as unknown as EpicRun;
 const iteration = (
   overrides: Partial<EpicRun["recentIterations"][number]>,
 ): EpicRun["recentIterations"][number] =>
@@ -28,14 +48,30 @@ describe("epic run presentation", () => {
   it.each([
     [null, null, "idle"],
     [null, "starting", "starting"],
+    [null, "stopping", "idle"],
     [run("running"), null, "running"],
-    [run("paused"), null, "running"],
+    [run("paused"), null, "paused"],
     [run("running"), "stopping", "stopping"],
+    [run("paused"), "stopping", "stopping"],
     [run("done"), "stopping", "stopped"],
+    [run("cancelled"), "stopping", "stopped"],
     [run("cancelled"), null, "stopped"],
     [run("failed"), null, "failed"],
+    // Pausing and resuming are in flight on the button, not on the run.
+    [run("running"), "pausing", "running"],
+    [run("paused"), "resuming", "paused"],
   ] as const)("maps run and pending state to %s", (value, pending, expected) => {
     expect(epicRunUiState(value, pending)).toBe(expected);
+  });
+
+  it.each([
+    ["done", true],
+    ["failed", true],
+    ["cancelled", true],
+    ["running", false],
+    ["paused", false],
+  ] as const)("treats %s as terminal=%s", (status, expected) => {
+    expect(isTerminalEpicRunStatus(status)).toBe(expected);
   });
 
   it("auto-follows only while the viewport is near the bottom", () => {
@@ -51,6 +87,70 @@ describe("epic run presentation", () => {
     expect(
       formatEpicRunElapsed("2026-07-29T00:00:00.000Z", Date.parse("2026-07-29T01:02:03Z")),
     ).toBe("1:02:03");
+    expect(formatEpicRunElapsed("not-a-date", Date.parse("2026-07-29T01:02:03Z"))).toBe("0:00");
+  });
+
+  it("times a settled iteration by its own clock and a running one by now", () => {
+    expect(
+      epicRunIterationDuration(
+        { startedAt: "2026-07-29T00:00:00.000Z", finishedAt: "2026-07-29T00:02:30.000Z" },
+        Date.parse("2026-07-29T09:00:00.000Z"),
+      ),
+    ).toBe("2:30");
+    expect(
+      epicRunIterationDuration(
+        { startedAt: "2026-07-29T00:00:00.000Z", finishedAt: null },
+        Date.parse("2026-07-29T00:00:45.000Z"),
+      ),
+    ).toBe("0:45");
+  });
+
+  it("labels iteration counts", () => {
+    expect(epicRunIterationCountLabel(0)).toBe("0 iterations");
+    expect(epicRunIterationCountLabel(1)).toBe("1 iteration");
+    expect(epicRunIterationCountLabel(5)).toBe("5 iterations");
+  });
+
+  it("labels runtime modes", () => {
+    expect(epicRuntimeModeLabel("approval-required")).toBe("Supervised");
+    expect(epicRuntimeModeLabel("full-access")).toBe("Full access");
+  });
+});
+
+describe("epic run history", () => {
+  const identity = { epicId: "epic-1", projectId: "project-1", cwd: "/repo" };
+
+  it("puts the newest run first and keeps the rest as history", () => {
+    const oldest = historyRun({ runId: "run-a", updatedAt: "2026-07-29T00:00:00.000Z" });
+    const middle = historyRun({ runId: "run-b", updatedAt: "2026-07-29T01:00:00.000Z" });
+    const newest = historyRun({ runId: "run-c", updatedAt: "2026-07-29T02:00:00.000Z" });
+
+    expect(epicRunHistory([middle, oldest, newest], identity)).toEqual({
+      latest: newest,
+      prior: [middle, oldest],
+    });
+  });
+
+  it("breaks an updatedAt tie on runId, matching the list-page pill", () => {
+    const lower = historyRun({ runId: "run-a" });
+    const higher = historyRun({ runId: "run-b" });
+
+    expect(epicRunHistory([lower, higher], identity).latest).toBe(higher);
+  });
+
+  it("ignores runs from another epic, project, or workspace", () => {
+    const mine = historyRun({ runId: "run-mine" });
+    const others = [
+      historyRun({ runId: "run-other-epic", epicId: "epic-2" }),
+      historyRun({ runId: "run-other-project", projectId: "project-2" }),
+      historyRun({ runId: "run-other-cwd", cwd: "/other-repo" }),
+    ];
+
+    expect(epicRunHistory([...others, mine], identity)).toEqual({ latest: mine, prior: [] });
+  });
+
+  it("reports no runs at all", () => {
+    expect(epicRunHistory([], identity)).toEqual({ latest: null, prior: [] });
   });
 
   it("selects a running issue over a newer settled iteration", () => {
