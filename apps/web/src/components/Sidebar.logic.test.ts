@@ -759,6 +759,7 @@ describe("groupEpicRunIterationThreads", () => {
     runId,
     epicId: "t3code-ypi",
     status: "running" as const,
+    originThreadId: null,
     threadRefs: [
       {
         threadId: epicRunIterationThreadId({ runId, iterationIndex: 0 }),
@@ -863,6 +864,82 @@ describe("groupEpicRunIterationThreads", () => {
       ["plain"],
       [iterationThread(0).id, iterationThread(1).id],
     ]);
+  });
+
+  const nodeIds = (nodes: ReturnType<typeof groupEpicRunIterationThreads<{ id: string }>>) =>
+    nodes.map((node) => (node.kind === "thread" ? node.thread.id : `group:${node.runId}`));
+
+  it("nests a run under the thread that launched it, out of its own slot", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [iterationThread(1), thread("newer-thread"), thread("launcher"), iterationThread(0)],
+      runs: [{ ...run, originThreadId: "launcher" }],
+    });
+
+    expect(nodeIds(nodes)).toEqual(["newer-thread", "launcher", `group:${runId}`]);
+    expect(nodes.at(-1)).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
+
+  it("keeps an Epics-page launch at project level", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [iterationThread(0), thread("launcher")],
+      runs: [run],
+    });
+
+    expect(nodeIds(nodes)).toEqual([`group:${runId}`, "launcher"]);
+    expect(nodes[0]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: null });
+  });
+
+  // Deleted, archived, filtered out, in another project: whatever took the
+  // launcher off the list, the run stays visible at project level.
+  it("detaches to project level when the origin thread is not in the list", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [iterationThread(0), thread("other-thread")],
+      runs: [{ ...run, originThreadId: "archived-launcher" }],
+    });
+
+    expect(nodeIds(nodes)).toEqual([`group:${runId}`, "other-thread"]);
+    expect(nodes[0]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: null });
+  });
+
+  // Two levels only: a run launched from inside another run's iteration would
+  // otherwise put a group under a group.
+  it("refuses to nest under an iteration thread", () => {
+    const innerRunId = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+    const nodes = groupEpicRunIterationThreads({
+      threads: [
+        iterationThread(0),
+        thread(epicRunIterationThreadId({ runId: innerRunId, iterationIndex: 0 })),
+      ],
+      runs: [
+        run,
+        {
+          ...run,
+          runId: innerRunId,
+          originThreadId: iterationThread(0).id,
+          threadRefs: [],
+        },
+      ],
+    });
+
+    expect(nodeIds(nodes)).toEqual([`group:${runId}`, `group:${innerRunId}`]);
+    expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: null });
+  });
+
+  it("stacks two runs launched from the same thread under it, in list order", () => {
+    const secondRunId = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+    const nodes = groupEpicRunIterationThreads({
+      threads: [
+        thread(epicRunIterationThreadId({ runId: secondRunId, iterationIndex: 0 })),
+        iterationThread(0),
+        thread("launcher"),
+      ],
+      runs: [
+        { ...run, originThreadId: "launcher" },
+        { ...run, runId: secondRunId, originThreadId: "launcher", threadRefs: [] },
+      ],
+    });
+
+    expect(nodeIds(nodes)).toEqual(["launcher", `group:${secondRunId}`, `group:${runId}`]);
   });
 });
 

@@ -767,6 +767,9 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
 const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
   group: SidebarEpicRunGroup<EnvironmentThreadShell>;
   expanded: boolean;
+  /** The run was launched from the thread above it, so it renders as a child
+      of that row and its iterations indent one step further. */
+  nested: boolean;
   routeThreadKey: string | null;
   onToggle: (runId: string, expanded: boolean) => void;
   onOpenRun: (group: SidebarEpicRunGroup<EnvironmentThreadShell>) => void;
@@ -811,7 +814,10 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
           tabIndex={0}
           data-testid={`sidebar-v2-epic-run-group-${group.runId}`}
           title={rowTooltip}
-          className="group/v2-run relative flex h-9 w-full cursor-pointer items-center gap-1.5 overflow-hidden rounded-md px-1.5 text-left outline-none select-none hover:bg-sidebar-row-hover"
+          className={cn(
+            "group/v2-run relative flex h-9 cursor-pointer items-center gap-1.5 overflow-hidden rounded-md px-1.5 text-left outline-none select-none hover:bg-sidebar-row-hover",
+            props.nested ? "ml-6" : "w-full",
+          )}
           onClick={handleOpen}
           onKeyDown={handleKeyDown}
         >
@@ -865,6 +871,7 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
                 scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
               )}
               iteration={iteration}
+              nested={props.nested}
               isActive={
                 props.routeThreadKey ===
                 scopedThreadKey(scopeThreadRef(iteration.thread.environmentId, iteration.thread.id))
@@ -880,6 +887,9 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
 
 const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(props: {
   iteration: SidebarEpicRunGroup<EnvironmentThreadShell>["iterations"][number];
+  /** The group is itself nested under its origin thread, so the iteration
+      keeps the same step below the group row it had at project level. */
+  nested: boolean;
   isActive: boolean;
   onClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
   onActivate: (threadRef: ScopedThreadRef) => void;
@@ -910,7 +920,8 @@ const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(
         tabIndex={0}
         data-testid="sidebar-v2-epic-run-iteration"
         className={cn(
-          "group/v2-iteration relative ml-6 flex h-8 cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none",
+          "group/v2-iteration relative flex h-8 cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none",
+          props.nested ? "ml-12" : "ml-6",
           props.isActive
             ? "bg-sidebar-row-active text-sidebar-foreground dark:inset-ring-1 dark:inset-ring-white/5"
             : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
@@ -1270,6 +1281,23 @@ export default function SidebarV2() {
   );
   const settledThreadKeysRef = useRef(settledThreadKeys);
   settledThreadKeysRef.current = settledThreadKeys;
+
+  // The "Settled" divider marks one boundary, so it is placed by index rather
+  // than by "this row is settled and the one above was not". A run group nested
+  // under its origin thread can land on the far side of that thread's own
+  // classification — a live run under a settled launcher, or the reverse — and
+  // a per-row rule would then paint two Settled headings.
+  const settledDividerIndex = useMemo(() => {
+    let sawCard = false;
+    for (const [index, node] of threadNodes.entries()) {
+      if (!isSettledSidebarNode(node, settledThreadKeys)) {
+        sawCard = true;
+        continue;
+      }
+      if (sawCard) return index;
+    }
+    return -1;
+  }, [settledThreadKeys, threadNodes]);
 
   const jumpLabelByKey = useMemo(() => {
     const mapping = new Map<string, string>();
@@ -1897,18 +1925,15 @@ export default function SidebarV2() {
           >
             <ul ref={attachListAutoAnimateRef} role="list" className="flex flex-col gap-px">
               {threadNodes.flatMap((node, nodeIndex) => {
-                const previousNode = nodeIndex > 0 ? threadNodes[nodeIndex - 1] : null;
-                const previousWasCard =
-                  previousNode != null && !isSettledSidebarNode(previousNode, settledThreadKeys);
+                // A run row is always full-height chrome, so it opens the
+                // settled block the same way a card does.
+                const showSettledDivider = nodeIndex === settledDividerIndex;
                 if (node.kind === "epic-run") {
-                  // A run row is always full-height chrome, so it opens the
-                  // settled block the same way a card does.
-                  const showRunSettledGap =
-                    isSettledSidebarNode(node, settledThreadKeys) && previousWasCard;
                   const runRow = (
                     <SidebarV2EpicRunGroupRow
                       key={`epic-run:${node.runId}`}
                       group={node}
+                      nested={node.nestedUnderThreadId !== null}
                       expanded={resolveEpicRunGroupExpanded({
                         status: node.status,
                         override: epicRunGroupExpandedByRunId[node.runId],
@@ -1925,7 +1950,7 @@ export default function SidebarV2() {
                       onIterationActivate={navigateToThread}
                     />
                   );
-                  return showRunSettledGap ? [settledDivider, runRow] : [runRow];
+                  return showSettledDivider ? [settledDivider, runRow] : [runRow];
                 }
                 const thread = node.thread;
                 const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
@@ -1935,7 +1960,6 @@ export default function SidebarV2() {
                 // (or the auto rules) actually settling work, not from the
                 // sidebar second-guessing what still matters.
                 const isCard = !isSettledRow;
-                const showSettledGap = !isCard && previousWasCard;
                 const row = (
                   <SidebarV2Row
                     // Keyed per variant on purpose: when a thread settles, the
@@ -1978,7 +2002,7 @@ export default function SidebarV2() {
                     onChangeRequestState={handleChangeRequestState}
                   />
                 );
-                if (!showSettledGap) return [row];
+                if (!showSettledDivider) return [row];
                 return [settledDivider, row];
               })}
               {hiddenSettledCount > 0 ? (

@@ -503,6 +503,13 @@ export type SidebarEpicRunGroup<T> = {
   /** `null` when the run is not in `runs` yet — grouping never waits on it. */
   readonly epicId: string | null;
   readonly status: EpicRunStatus | null;
+  /**
+   * The thread row this group renders directly beneath, indented one level;
+   * `null` means project level. Already resolved: it is only set when the
+   * origin thread is in the list the caller passed, so a deleted, archived or
+   * filtered-out launcher detaches the group instead of hiding it.
+   */
+  readonly nestedUnderThreadId: string | null;
   /** Ascending by iteration index, so 'iteration 1' renders first. */
   readonly iterations: readonly SidebarEpicRunIteration<T>[];
 };
@@ -524,6 +531,8 @@ export type SidebarEpicRunSummary = {
   readonly runId: string;
   readonly epicId: string;
   readonly status: EpicRunStatus;
+  /** The thread the run was launched from; `null` for an Epics-page launch. */
+  readonly originThreadId: string | null;
   readonly threadRefs: ReadonlyArray<{
     readonly threadId: string;
     readonly issueId: string;
@@ -536,6 +545,7 @@ type MutableSidebarEpicRunGroup<T> = {
   runId: string;
   epicId: string | null;
   status: EpicRunStatus | null;
+  nestedUnderThreadId: string | null;
   iterations: Array<SidebarEpicRunIteration<T>>;
 };
 
@@ -549,6 +559,13 @@ type MutableSidebarEpicRunGroup<T> = {
  * read model only supplies the labels. The group takes the list slot of its
  * first-listed iteration, which in a recency-ordered list is the newest one, so
  * the surrounding order is preserved whichever way the caller sorted.
+ *
+ * A run launched from a thread moves out of that slot and renders directly
+ * beneath its launcher instead (`nestedUnderThreadId`). The tree is two levels
+ * deep and stays there: a run whose launcher is missing from `threads` — an
+ * Epics-page launch, a deleted or archived thread, a filtered-out one — or
+ * whose launcher is itself an iteration keeps its own project-level slot. A
+ * live run must never become invisible because its launcher was tidied away.
  */
 export function groupEpicRunIterationThreads<T extends { readonly id: string }>(input: {
   threads: readonly T[];
@@ -591,6 +608,7 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
       runId: parsed.runId,
       epicId: run?.epicId ?? null,
       status: run?.status ?? null,
+      nestedUnderThreadId: null,
       iterations: [iteration],
     };
     groupsByRunId.set(parsed.runId, group);
@@ -601,7 +619,42 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
     group.iterations.sort((left, right) => left.iterationIndex - right.iterationIndex);
   }
 
-  return nodes;
+  const groupsByOriginThreadId = new Map<string, Array<MutableSidebarEpicRunGroup<T>>>();
+  const threadIds = new Set(input.threads.map((thread) => thread.id));
+  for (const group of groupsByRunId.values()) {
+    const originThreadId = runsById.get(group.runId)?.originThreadId ?? null;
+    // No launcher on screen means no row to hang under, so the group keeps its
+    // own slot. An iteration as launcher would make a third level, which this
+    // tree does not have.
+    if (originThreadId === null || !threadIds.has(originThreadId)) continue;
+    if (parseEpicRunIterationThreadId(originThreadId) !== null) continue;
+    group.nestedUnderThreadId = originThreadId;
+    const siblings = groupsByOriginThreadId.get(originThreadId);
+    if (siblings === undefined) {
+      groupsByOriginThreadId.set(originThreadId, [group]);
+      continue;
+    }
+    siblings.push(group);
+  }
+
+  if (groupsByOriginThreadId.size === 0) return nodes;
+
+  // Nested groups leave their own slot and follow their launcher's row. Their
+  // relative order is the one the first pass produced, so two runs from the
+  // same thread stay sorted the way the caller sorted their iterations.
+  const orderedNodes: Array<SidebarThreadNode<T>> = [];
+  for (const node of nodes) {
+    if (node.kind === "epic-run") {
+      if (node.nestedUnderThreadId === null) orderedNodes.push(node);
+      continue;
+    }
+    orderedNodes.push(node);
+    for (const group of groupsByOriginThreadId.get(node.thread.id) ?? []) {
+      orderedNodes.push(group);
+    }
+  }
+
+  return orderedNodes;
 }
 
 /**

@@ -968,6 +968,9 @@ interface SidebarProjectThreadListProps {
 const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
   group: SidebarEpicRunGroup<SidebarThreadSummary>;
   expanded: boolean;
+  /** The run was launched from the thread above it, so it renders as a child
+      of that row and its iterations indent one step further. */
+  nested: boolean;
   activeRouteThreadKey: string | null;
   orderedProjectThreadKeys: readonly string[];
   onToggle: (runId: string, expanded: boolean) => void;
@@ -1014,7 +1017,9 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
           size="sm"
           data-testid={`epic-run-group-${group.runId}`}
           title={rowTooltip}
-          className={`${resolveThreadRowClassName({ isActive: false, isSelected: false })} relative isolate`}
+          className={`${resolveThreadRowClassName({ isActive: false, isSelected: false })} relative isolate ${
+            props.nested ? "pl-6" : ""
+          }`}
           onClick={handleOpen}
           onKeyDown={handleKeyDown}
         >
@@ -1064,6 +1069,7 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
               <SidebarEpicRunIterationRow
                 key={threadKey}
                 iteration={iteration}
+                nested={props.nested}
                 isActive={props.activeRouteThreadKey === threadKey}
                 orderedProjectThreadKeys={props.orderedProjectThreadKeys}
                 handleThreadClick={props.handleThreadClick}
@@ -1078,6 +1084,9 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
 
 const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(props: {
   iteration: SidebarEpicRunGroup<SidebarThreadSummary>["iterations"][number];
+  /** The group is itself nested under its origin thread, so the iteration
+      keeps the same step below the group row it had at project level. */
+  nested: boolean;
   isActive: boolean;
   orderedProjectThreadKeys: readonly string[];
   handleThreadClick: SidebarProjectThreadListProps["handleThreadClick"];
@@ -1115,7 +1124,7 @@ const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(prop
         className={`${resolveThreadRowClassName({
           isActive: props.isActive,
           isSelected: false,
-        })} relative isolate pl-6`}
+        })} relative isolate ${props.nested ? "pl-10" : "pl-6"}`}
         onClick={handleClick}
         onKeyDown={handleKeyDown}
       >
@@ -1191,6 +1200,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
               <SidebarEpicRunGroupRow
                 key={`epic-run:${node.runId}`}
                 group={node}
+                nested={node.nestedUnderThreadId !== null}
                 expanded={resolveEpicRunGroupExpanded({
                   status: node.status,
                   override: props.epicRunGroupExpandedByRunId[node.runId],
