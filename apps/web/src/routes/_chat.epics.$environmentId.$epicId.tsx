@@ -26,6 +26,7 @@ import {
   epicChildren,
   epicStatusLabel,
   latestEpicThreadId,
+  selectEpicDetail,
   uniqueEpicProjectSources,
 } from "../epics.logic";
 import {
@@ -353,23 +354,20 @@ function EpicDetailRouteView() {
   const { environmentId, epicId } = Route.useParams();
   const { project: requestedProjectId } = Route.useSearch();
   const projects = useProjects();
-  const sources = useMemo(() => {
-    const matches = uniqueEpicProjectSources(
-      projects
-        .filter((project) => project.environmentId === environmentId)
-        .map((project) => ({
-          environmentId: project.environmentId,
-          workspaceRoot: project.workspaceRoot,
-          projectId: project.id,
-          projectTitle: project.title,
-        })),
-    );
-    return requestedProjectId
-      ? [...matches].sort((a, b) =>
-          a.projectId === requestedProjectId ? -1 : b.projectId === requestedProjectId ? 1 : 0,
-        )
-      : matches;
-  }, [environmentId, projects, requestedProjectId]);
+  const sources = useMemo(
+    () =>
+      uniqueEpicProjectSources(
+        projects
+          .filter((project) => project.environmentId === environmentId)
+          .map((project) => ({
+            environmentId: project.environmentId,
+            workspaceRoot: project.workspaceRoot,
+            projectId: project.id,
+            projectTitle: project.title,
+          })),
+      ),
+    [environmentId, projects],
+  );
   const [results, setResults] = useState<
     ReadonlyMap<string, { readonly data: BeadsStatusResult | null; readonly pending: boolean }>
   >(() => new Map());
@@ -385,14 +383,11 @@ function EpicDetailRouteView() {
     },
     [],
   );
-  const match = sources
-    .map((source) => {
-      const data = results.get(source.projectId)?.data;
-      const snapshot = data?._tag === "available" ? data : null;
-      const epic = snapshot?.epics.find((candidate) => candidate.id === epicId) ?? null;
-      return epic && snapshot ? { source, snapshot, epic } : null;
-    })
-    .find((entry) => entry !== null);
+  const match = selectEpicDetail(
+    sources.map((project) => ({ project, result: results.get(project.projectId)?.data ?? null })),
+    epicId,
+    requestedProjectId,
+  );
   const pending = sources.some((source) => results.get(source.projectId)?.pending !== false);
   const children = match ? epicChildren(epicId, match.snapshot.issues) : [];
   const runQuery = useEnvironmentQuery(
@@ -401,8 +396,8 @@ function EpicDetailRouteView() {
           environmentId: environmentId as EnvironmentId,
           input: {
             epicId,
-            projectId: match.source.projectId,
-            cwd: match.source.workspaceRoot,
+            projectId: match.project.projectId,
+            cwd: match.project.workspaceRoot,
           },
         })
       : null,
@@ -434,7 +429,7 @@ function EpicDetailRouteView() {
                 <div className="font-mono text-xs text-muted-foreground">{match.epic.id}</div>
                 <h1 className="mt-2 text-2xl font-semibold">{match.epic.title}</h1>
                 <div className="mt-2 text-sm text-muted-foreground">
-                  {match.source.projectTitle} · {epicStatusLabel(match.epic.status)}
+                  {match.project.projectTitle} · {epicStatusLabel(match.epic.status)}
                 </div>
               </div>
               <div className="overflow-hidden rounded-xl border border-border">
@@ -494,7 +489,7 @@ function EpicDetailRouteView() {
               <EpicRunSection
                 environmentId={environmentId}
                 epicId={epicId}
-                source={match.source}
+                source={match.project}
                 issues={match.snapshot.issues}
                 run={runQuery.data}
               />

@@ -78,12 +78,23 @@ export function latestEpicThreadId(run: EpicRun | null, issueId: string): string
   );
 }
 
+/**
+ * One beads snapshot is fetched per (environment, workspace) pair, so that pair
+ * is the key everything about a project source is stored under.
+ */
+export function epicSourceKey(source: {
+  readonly environmentId: string;
+  readonly workspaceRoot: string;
+}): string {
+  return `${source.environmentId}\0${source.workspaceRoot}`;
+}
+
 export function uniqueEpicProjectSources(
   projects: ReadonlyArray<EpicProjectSource>,
 ): ReadonlyArray<EpicProjectSource> {
   const seen = new Set<string>();
   return projects.filter((project) => {
-    const key = `${project.environmentId}\0${project.workspaceRoot}`;
+    const key = epicSourceKey(project);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -115,9 +126,10 @@ export function selectEpicDetail(
     return left.project.projectId.localeCompare(right.project.projectId);
   });
   for (const source of ordered) {
-    if (source.result?._tag !== "available") continue;
-    const epic = source.result.epics.find((candidate) => candidate.id === epicId);
-    if (epic) return { ...source, epic };
+    const snapshot = source.result?._tag === "available" ? source.result : null;
+    if (snapshot === null) continue;
+    const epic = snapshot.epics.find((candidate) => candidate.id === epicId);
+    if (epic) return { project: source.project, snapshot, epic };
   }
   return null;
 }

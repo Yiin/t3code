@@ -4,8 +4,10 @@ import { AlertCircleIcon, LayersIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  availableEpicGroups,
   epicCounts,
   epicPresentationStatus,
+  epicSourceKey,
   epicStatusLabel,
   uniqueEpicProjectSources,
   type EpicProjectSource,
@@ -79,7 +81,7 @@ function ProjectEpicQuery({
       input: { workspaceRoot: source.workspaceRoot },
     }),
   );
-  const key = `${source.environmentId}\0${source.workspaceRoot}`;
+  const key = epicSourceKey(source);
   useEffect(
     () => onResult(key, query.data, query.isPending, query.error),
     [key, onResult, query.data, query.error, query.isPending],
@@ -142,15 +144,15 @@ export function EpicsRouteView() {
     },
     [],
   );
-  const groups = sources.flatMap((source) => {
-    const result = results.get(`${source.environmentId}\0${source.workspaceRoot}`)?.data;
-    return result?._tag === "available" && result.epics.length > 0 ? [{ source, result }] : [];
-  });
-  const pending = sources.some(
-    (source) => results.get(`${source.environmentId}\0${source.workspaceRoot}`)?.pending !== false,
+  const groups = availableEpicGroups(
+    sources.map((project) => ({
+      project,
+      result: results.get(epicSourceKey(project))?.data ?? null,
+    })),
   );
+  const pending = sources.some((source) => results.get(epicSourceKey(source))?.pending !== false);
   const failedSources = sources.filter((source) => {
-    const value = results.get(`${source.environmentId}\0${source.workspaceRoot}`);
+    const value = results.get(epicSourceKey(source));
     return value?.error != null || value?.data?._tag === "unavailable";
   });
   const allFailed = sources.length > 0 && failedSources.length === sources.length && !pending;
@@ -164,11 +166,7 @@ export function EpicsRouteView() {
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
       {sources.map((source) => (
-        <ProjectEpicQuery
-          key={`${source.environmentId}\0${source.workspaceRoot}`}
-          source={source}
-          onResult={onResult}
-        />
+        <ProjectEpicQuery key={epicSourceKey(source)} source={source} onResult={onResult} />
       ))}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8 sm:px-8">
         <div className="mx-auto max-w-4xl">
@@ -210,13 +208,13 @@ export function EpicsRouteView() {
                   Some projects could not load their epics.
                 </div>
               ) : null}
-              {groups.map(({ source, result }) => (
-                <section key={`${source.environmentId}\0${source.workspaceRoot}`}>
+              {groups.map(({ project: source, snapshot }) => (
+                <section key={epicSourceKey(source)}>
                   <h2 className="mb-3 text-sm font-medium text-muted-foreground">
                     {source.projectTitle}
                   </h2>
                   <div className="overflow-hidden rounded-xl border border-border">
-                    {result.epics.map((epic) => {
+                    {snapshot.epics.map((epic) => {
                       const counts = epicCounts(epic);
                       return (
                         <Link
