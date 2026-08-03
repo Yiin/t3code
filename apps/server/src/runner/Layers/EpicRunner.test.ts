@@ -19,7 +19,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
-import type { OrchestrationDispatchError } from "../../orchestration/Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  type OrchestrationDispatchError,
+} from "../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -277,6 +280,12 @@ function createHarness(input: {
    * `releaseClaimedChild` treats them as unknown and leaves them alone).
    */
   readonly childStatuses?: Record<string, string>;
+  /**
+   * Command types the stub engine refuses, the way the real decider refuses a
+   * `thread.settle` for a thread whose session is still `starting`/`running`.
+   * The command is still recorded, so a test can assert it was attempted.
+   */
+  readonly refuseCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs);
   for (const run of input.seedRuns ?? []) {
@@ -356,6 +365,12 @@ function createHarness(input: {
     ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
       Effect.gen(function* () {
         dispatched.push(command);
+        if (input.refuseCommandTypes?.includes(command.type) === true) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "refused by test harness",
+          });
+        }
         if (command.type === "thread.turn.start") {
           // Forked so `dispatch` returns before the turn resolves, the way the
           // real engine behaves.
@@ -1095,7 +1110,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("stops each iteration's session instead of leaving it to the reaper", () => {
+  it.live("settles each finished iteration thread instead of leaving it to the reaper", () => {
     const harness = createHarness({
       script: [
         { text: "work", head: "head-1" },
@@ -1107,12 +1122,50 @@ describe("EpicRunner", () => {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
 
-      const stops = harness.commandsOfType("thread.session.stop");
-      assert.strictEqual(stops.length, 2);
+      const settles = harness.commandsOfType("thread.settle");
+      assert.strictEqual(settles.length, 2);
       assert.deepStrictEqual(
-        stops.map((command) => command.threadId),
+        settles.map((command) => command.threadId),
         harness.commandsOfType("thread.create").map((command) => command.threadId),
       );
+      // Teardown is the settle reactor's job now, so a healthy run never
+      // reaches for the provider itself.
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("falls back to stopping the session when the settle is refused", () => {
+    const harness = createHarness({
+      script: [
+        { text: "work", head: "head-1" },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      refuseCommandTypes: ["thread.settle"],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const settles = harness.commandsOfType("thread.settle");
+      const stops = harness.commandsOfType("thread.session.stop");
+      assert.strictEqual(settles.length, 2);
+      // One stop per refused settle, for the same thread: the refusal must not
+      // leave the iteration's provider subprocess resident.
+      assert.deepStrictEqual(
+        stops.map((command) => command.threadId),
+        settles.map((command) => command.threadId),
+      );
+      for (const settle of settles) {
+        const settleIndex = harness.commands.indexOf(settle);
+        const stopIndex = harness.commands.findIndex(
+          (command) =>
+            command.type === "thread.session.stop" && command.threadId === settle.threadId,
+        );
+        assert.isAbove(stopIndex, settleIndex);
+      }
+      // A refused settle is ordinary traffic, not a run failure.
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "done");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1281,6 +1334,14 @@ describe("EpicRunner", () => {
       const interrupts = harness.commandsOfType("thread.turn.interrupt");
       assert.strictEqual(interrupts.length, 1);
       assert.strictEqual(interrupts[0]?.threadId, harness.store.iterations[0]?.threadId);
+      // A cancelled thread is abandoned mid-turn, not finished, so it keeps the
+      // interrupt + session.stop pair. Settling it would claim the iteration
+      // ran to completion.
+      const stops = harness.commandsOfType("thread.session.stop");
+      assert.strictEqual(stops.length, 1);
+      assert.strictEqual(stops[0]?.threadId, harness.store.iterations[0]?.threadId);
+      assert.isAbove(harness.commands.indexOf(stops[0]!), harness.commands.indexOf(interrupts[0]!));
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       // The abandoned iteration is closed out rather than left `running` forever.
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
 
@@ -1386,6 +1447,13 @@ describe("EpicRunner", () => {
       assert.isAtLeast(interruptIndex, 0);
       assert.isAbove(stopIndex, interruptIndex);
       assert.isAbove(nextCreateIndex, stopIndex);
+      // Same reasoning as the cancel path: the thread the dead server left
+      // behind is abandoned, so it is stopped rather than settled.
+      assert.isTrue(
+        harness
+          .commandsOfType("thread.settle")
+          .every((command) => command.threadId !== staleThreadId),
+      );
       // The resumed loop picks up at the next index, not the abandoned one.
       assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
     }).pipe(Effect.provide(harness.layer));

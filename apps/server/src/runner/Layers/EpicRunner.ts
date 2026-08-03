@@ -952,15 +952,41 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
         const finishedAt = yield* nowIso;
 
-        // Stop the session now instead of leaving it to the 30-minute reaper
-        // (`provider/Layers/ProviderSessionReaper.ts:16`): an unattended run
-        // would otherwise accumulate one idle provider subprocess per iteration.
-        yield* dispatchBestEffort("epic.runner.session-stop-failed", {
-          type: "thread.session.stop",
-          commandId: yield* commandId("session-stop"),
+        // The iteration thread is genuinely finished, so it is *settled* and the
+        // session teardown flows through the settle path like every other
+        // settle (`orchestration/Layers/ThreadSettleReactor.ts`) instead of the
+        // runner reaching for the provider directly. The reaper
+        // (`provider/Layers/ProviderSessionReaper.ts`) stays a backstop, not the
+        // mechanism: an unattended run must not accumulate one idle provider
+        // subprocess per iteration while it waits for a sweep.
+        //
+        // The stop fallback is mandatory, not belt-and-braces. The decider
+        // refuses a settle while the session is still `starting`/`running`
+        // (`orchestration/decider.ts`), which is exactly where the timeout path
+        // above leaves it after dispatching `thread.turn.interrupt`. A refused
+        // settle with no fallback would leave the subprocess resident.
+        yield* dispatchCommand({
+          type: "thread.settle",
+          commandId: yield* commandId("settle"),
           threadId,
-          createdAt: finishedAt,
-        });
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.gen(function* () {
+              yield* Effect.logInfo("epic.runner.settle-refused", {
+                runId: run.runId,
+                iterationIndex: input.iterationIndex,
+                threadId,
+                detail: error.message,
+              });
+              yield* dispatchBestEffort("epic.runner.session-stop-failed", {
+                type: "thread.session.stop",
+                commandId: yield* commandId("session-stop"),
+                threadId,
+                createdAt: finishedAt,
+              });
+            }),
+          ),
+        );
 
         const iterationStatus: EpicRunIterationStatus =
           outcome.kind === "backlog-empty" ||
