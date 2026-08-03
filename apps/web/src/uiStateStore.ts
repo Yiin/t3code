@@ -26,6 +26,7 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
+  epicRunGroupExpandedByRunId?: Record<string, boolean>;
 }
 
 export interface UiProjectState {
@@ -37,6 +38,12 @@ export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
   threadChangedFilesExpandedById: Record<string, Record<string, boolean>>;
   epicsLastVisitedAt: string | null;
+  /**
+   * Explicit sidebar expand/collapse per epic run, keyed by run id. Only rows
+   * the user actually toggled land here — the rest follow the status default
+   * (see `resolveEpicRunGroupExpanded`), so this does not grow with every run.
+   */
+  epicRunGroupExpandedByRunId: Record<string, boolean>;
 }
 
 export interface UiEndpointState {
@@ -51,6 +58,7 @@ const initialState: UiState = {
   threadLastVisitedAtById: {},
   epicsLastVisitedAt: null,
   threadChangedFilesExpandedById: {},
+  epicRunGroupExpandedByRunId: {},
   defaultAdvertisedEndpointKey: null,
 };
 
@@ -135,6 +143,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     threadChangedFilesExpandedById: sanitizePersistedThreadChangedFilesExpanded(
       parsed.threadChangedFilesExpandedById,
     ),
+    epicRunGroupExpandedByRunId: sanitizeBooleanRecord(parsed.epicRunGroupExpandedByRunId),
     defaultAdvertisedEndpointKey:
       typeof parsed.defaultAdvertisedEndpointKey === "string" &&
       parsed.defaultAdvertisedEndpointKey.length > 0
@@ -220,6 +229,7 @@ export function persistState(state: UiState): void {
         ...(state.epicsLastVisitedAt ? { epicsLastVisitedAt: state.epicsLastVisitedAt } : {}),
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         threadChangedFilesExpandedById,
+        epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -340,6 +350,19 @@ export function setThreadChangedFilesExpanded(
   };
 }
 
+export function setEpicRunGroupExpanded(state: UiState, runId: string, expanded: boolean): UiState {
+  if (runId.length === 0 || state.epicRunGroupExpandedByRunId[runId] === expanded) {
+    return state;
+  }
+  return {
+    ...state,
+    epicRunGroupExpandedByRunId: {
+      ...state.epicRunGroupExpandedByRunId,
+      [runId]: expanded,
+    },
+  };
+}
+
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
   const nextKey = key && key.length > 0 ? key : null;
   if (state.defaultAdvertisedEndpointKey === nextKey) {
@@ -433,6 +456,7 @@ interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
+  setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -451,6 +475,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
   setThreadChangedFilesExpanded: (threadId, turnId, expanded) =>
     set((state) => setThreadChangedFilesExpanded(state, threadId, turnId, expanded)),
+  setEpicRunGroupExpanded: (runId, expanded) =>
+    set((state) => setEpicRunGroupExpanded(state, runId, expanded)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setProjectExpanded: (projectIds, expanded) =>

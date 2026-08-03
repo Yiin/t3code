@@ -511,6 +511,13 @@ export type SidebarThreadNode<T> =
   | { readonly kind: "thread"; readonly thread: T }
   | SidebarEpicRunGroup<T>;
 
+/** Every thread a node stands for: itself, or the run's iterations. */
+export function sidebarNodeThreads<T>(node: SidebarThreadNode<T>): readonly T[] {
+  return node.kind === "thread"
+    ? [node.thread]
+    : node.iterations.map((iteration) => iteration.thread);
+}
+
 /** The slice of `EpicRun` the sidebar needs; the caller feeds it from the
     existing `allRuns` subscription. */
 export type SidebarEpicRunSummary = {
@@ -595,6 +602,99 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
   }
 
   return nodes;
+}
+
+/**
+ * A run's status as the sidebar paints it. Deliberately NOT a
+ * `ThreadStatusPill`: this describes the whole run, so it must never enter the
+ * per-thread status roll-up (`resolveProjectStatusIndicator`) that keys off
+ * that union of labels.
+ */
+export type EpicRunStatusPill = {
+  readonly label: string;
+  readonly colorClass: string;
+  readonly dotClass: string;
+  readonly pulse: boolean;
+};
+
+/** `null` only while the run read model is still loading. */
+export function resolveEpicRunStatusPill(status: EpicRunStatus | null): EpicRunStatusPill | null {
+  switch (status) {
+    case null:
+      return null;
+    // Same hues as the thread pills above, so a live run reads the same green
+    // on its group row as "Run active" does on the iteration inside it.
+    case "running":
+      return { label: "Running", colorClass: "text-success", dotClass: "bg-success", pulse: true };
+    case "paused":
+      return {
+        label: "Paused",
+        colorClass: "text-amber-600 dark:text-amber-300/90",
+        dotClass: "bg-amber-500 dark:bg-amber-300/90",
+        pulse: false,
+      };
+    case "done":
+      return {
+        label: "Done",
+        colorClass: "text-emerald-600 dark:text-emerald-300/90",
+        dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
+        pulse: false,
+      };
+    case "failed":
+      return {
+        label: "Failed",
+        colorClass: "text-red-600 dark:text-red-300/90",
+        dotClass: "bg-red-500 dark:bg-red-300/90",
+        pulse: false,
+      };
+    case "cancelled":
+      return {
+        label: "Cancelled",
+        colorClass: "text-muted-foreground/80",
+        dotClass: "bg-muted-foreground/70",
+        pulse: false,
+      };
+  }
+}
+
+/**
+ * Open while the run is live, closed once it ends — a finished run is history
+ * and should occupy one row. An explicit user toggle for that run always wins,
+ * including after the run ends, so a group you opened to read does not snap
+ * shut under you when the last iteration lands.
+ *
+ * `forceExpanded` outranks even that: the group holds the thread the user is
+ * currently on, and a row must never hide the chat on screen.
+ */
+export function resolveEpicRunGroupExpanded(input: {
+  status: EpicRunStatus | null;
+  override?: boolean | undefined;
+  forceExpanded?: boolean | undefined;
+}): boolean {
+  if (input.forceExpanded === true) return true;
+  return input.override ?? input.status === "running";
+}
+
+/** The run's epic id, or a neutral label until the read model supplies one. */
+export function epicRunGroupTitle(input: { epicId: string | null }): string {
+  return input.epicId ?? "Epic run";
+}
+
+export function epicRunIterationCountLabel(count: number): string {
+  return `${count} iteration${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * `iteration 3 · t3code-ypi.2`. Iteration numbers are 1-based for humans (the
+ * runner titles its threads the same way); the issue id is dropped while the
+ * run read model has not arrived, rather than rendering a dangling separator.
+ */
+export function epicRunIterationLabel(input: {
+  iterationIndex: number;
+  issueId: string | null;
+}): string {
+  const ordinal = `iteration ${input.iterationIndex + 1}`;
+  return input.issueId === null ? ordinal : `${ordinal} · ${input.issueId}`;
 }
 
 export function resolveThreadStatusPill(input: {

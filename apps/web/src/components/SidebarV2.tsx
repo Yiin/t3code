@@ -7,10 +7,11 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, EpicRun, ScopedThreadRef } from "@t3tools/contracts";
 import {
   CheckIcon,
   ChevronDownIcon,
+  ChevronRightIcon,
   CircleCheckIcon,
   CircleDashedIcon,
   CircleAlertIcon,
@@ -78,12 +79,21 @@ import { formatRelativeTimeLabel } from "../timestampFormat";
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import {
+  epicRunGroupTitle,
+  epicRunIterationCountLabel,
+  epicRunIterationLabel,
   firstValidTimestampMs,
+  groupEpicRunIterationThreads,
   hasUnseenCompletion,
   isTrailingDoubleClick,
   resolveAdjacentThreadId,
+  resolveEpicRunGroupExpanded,
+  resolveEpicRunStatusPill,
   resolveSidebarV2Status,
+  sidebarNodeThreads,
   sortThreadsForSidebarV2,
+  type SidebarEpicRunGroup,
+  type SidebarThreadNode,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import { prStatusIndicator, resolveThreadPr } from "./ThreadStatusIndicators";
@@ -749,6 +759,210 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   );
 });
 
+/**
+ * One row for a whole epic run, with its iterations folded inside. A run of 50
+ * iterations otherwise pushes 50 near-identical rows into the list. The row
+ * itself opens the run's epic detail page — the iterations are the chats.
+ */
+const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
+  group: SidebarEpicRunGroup<EnvironmentThreadShell>;
+  expanded: boolean;
+  routeThreadKey: string | null;
+  onToggle: (runId: string, expanded: boolean) => void;
+  onOpenRun: (group: SidebarEpicRunGroup<EnvironmentThreadShell>) => void;
+  onIterationClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
+  onIterationActivate: (threadRef: ScopedThreadRef) => void;
+}) {
+  const { expanded, group, onIterationActivate, onIterationClick, onOpenRun, onToggle } = props;
+  const statusPill = resolveEpicRunStatusPill(group.status);
+  const countLabel = epicRunIterationCountLabel(group.iterations.length);
+  // The epic id is the row's identity and gets every pixel left over, so the
+  // count rides the layers icon as a bare number and the full wording (plus a
+  // truncated epic id) lives in the row tooltip.
+  const rowTooltip = [epicRunGroupTitle(group), countLabel, statusPill?.label]
+    .filter((part) => part !== undefined)
+    .join(" · ");
+  const handleOpen = useCallback(() => onOpenRun(group), [group, onOpenRun]);
+  const handleToggle = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onToggle(group.runId, !expanded);
+    },
+    [expanded, group.runId, onToggle],
+  );
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      onOpenRun(group);
+    },
+    [group, onOpenRun],
+  );
+
+  return (
+    <>
+      {/* Selection-safe: hitting the chevron toggles the group, it must not
+          clear a multi-selection. Opening the run clears it explicitly. */}
+      <li data-epic-run-group-row data-thread-selection-safe className="list-none py-0.5">
+        <div
+          role="button"
+          tabIndex={0}
+          data-testid={`sidebar-v2-epic-run-group-${group.runId}`}
+          title={rowTooltip}
+          className="group/v2-run relative flex h-9 w-full cursor-pointer items-center gap-1.5 overflow-hidden rounded-md px-1.5 text-left outline-none select-none hover:bg-sidebar-row-hover"
+          onClick={handleOpen}
+          onKeyDown={handleKeyDown}
+        >
+          <button
+            type="button"
+            aria-label={expanded ? "Collapse run iterations" : "Expand run iterations"}
+            aria-expanded={expanded}
+            onClick={handleToggle}
+            className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/70 hover:bg-sidebar-row-hover hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <ChevronRightIcon
+              aria-hidden
+              className={cn("size-3.5 transition-transform", expanded && "rotate-90")}
+            />
+          </button>
+          <span
+            aria-label={countLabel}
+            className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/70"
+          >
+            <LayersIcon aria-hidden className="size-4" />
+            <span className="tabular-nums text-xs">{group.iterations.length}</span>
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/90">
+            {epicRunGroupTitle(group)}
+          </span>
+          {statusPill ? (
+            <span
+              role="status"
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 text-xs font-medium",
+                statusPill.colorClass,
+              )}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "size-1.5 rounded-full",
+                  statusPill.dotClass,
+                  statusPill.pulse && "animate-status-pulse motion-reduce:animate-none",
+                )}
+              />
+              {statusPill.label}
+            </span>
+          ) : null}
+        </div>
+      </li>
+      {expanded
+        ? group.iterations.map((iteration) => (
+            <SidebarV2EpicRunIterationRow
+              key={scopedThreadKey(
+                scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
+              )}
+              iteration={iteration}
+              isActive={
+                props.routeThreadKey ===
+                scopedThreadKey(scopeThreadRef(iteration.thread.environmentId, iteration.thread.id))
+              }
+              onClick={onIterationClick}
+              onActivate={onIterationActivate}
+            />
+          ))
+        : null}
+    </>
+  );
+});
+
+const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(props: {
+  iteration: SidebarEpicRunGroup<EnvironmentThreadShell>["iterations"][number];
+  isActive: boolean;
+  onClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
+  onActivate: (threadRef: ScopedThreadRef) => void;
+}) {
+  const { iteration, onActivate, onClick } = props;
+  const threadRef = useMemo(
+    () => scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
+    [iteration.thread.environmentId, iteration.thread.id],
+  );
+  const handleClick = useCallback(
+    (event: ReactMouseEvent) => onClick(event, threadRef),
+    [onClick, threadRef],
+  );
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      onActivate(threadRef);
+    },
+    [onActivate, threadRef],
+  );
+
+  return (
+    <li data-thread-item className="list-none">
+      <div
+        role="button"
+        tabIndex={0}
+        data-testid="sidebar-v2-epic-run-iteration"
+        className={cn(
+          "group/v2-iteration relative ml-6 flex h-8 cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none",
+          props.isActive
+            ? "bg-sidebar-row-active text-sidebar-foreground dark:inset-ring-1 dark:inset-ring-white/5"
+            : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+        )}
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
+      >
+        <span className="min-w-0 flex-1 truncate text-xs">{epicRunIterationLabel(iteration)}</span>
+      </div>
+    </li>
+  );
+});
+
+/** One `allRuns` subscription per environment, lifted into the list: the group
+    rows need every run at once, not one row's worth. */
+function SidebarV2EpicRunsQuery(props: {
+  environmentId: EnvironmentId;
+  onRuns: (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => void;
+}) {
+  const query = useEnvironmentQuery(
+    epicsEnvironment.allRuns({ environmentId: props.environmentId, input: {} }),
+  );
+  useEffect(() => {
+    props.onRuns(props.environmentId, query.data);
+  }, [props.environmentId, props.onRuns, query.data]);
+  return null;
+}
+
+/** A run node is settled only when every iteration in it is: the run is one
+    unit, and one live iteration keeps the whole group out of the tail. */
+function isSettledSidebarNode(
+  node: SidebarThreadNode<EnvironmentThreadShell>,
+  settledThreadKeys: ReadonlySet<string>,
+): boolean {
+  return sidebarNodeThreads(node).every((thread) =>
+    settledThreadKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+  );
+}
+
+// The divider is its own keyed list item (not part of the first settled row):
+// it keeps one stable DOM node at the boundary, so settling a thread slides it
+// instead of teleporting it along with whichever row happens to be first in the
+// tail — and row heights stay independent of neighbor classification.
+const settledDivider = (
+  <li key="settled-divider" aria-hidden data-thread-selection-safe className="list-none">
+    <div className="mb-1 mt-3 flex items-center gap-2 px-2.5">
+      <span className="text-xs font-medium text-muted-foreground/50">Settled</span>
+      <span className="h-px flex-1 bg-sidebar-border/60" />
+    </div>
+  </li>
+);
+
 function latestTurnDiff(
   thread: SidebarThreadSummary,
 ): { insertions: number; deletions: number } | null {
@@ -965,6 +1179,53 @@ export default function SidebarV2() {
   const orderedThreads = useMemo(
     () => [...activeThreads, ...visibleSettledThreads],
     [activeThreads, visibleSettledThreads],
+  );
+  // Runs are collected per environment (one subscription each) and flattened:
+  // run ids are unique across environments, and grouping keys off the run id.
+  const [epicRunsByEnvironment, setEpicRunsByEnvironment] = useState<
+    ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>
+  >(() => new Map());
+  const handleEpicRuns = useCallback(
+    (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => {
+      setEpicRunsByEnvironment((current) => {
+        if (current.get(environmentId) === runs) return current;
+        const next = new Map(current);
+        next.set(environmentId, runs);
+        return next;
+      });
+    },
+    [],
+  );
+  const epicRuns = useMemo(
+    () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
+    [epicRunsByEnvironment],
+  );
+  // The rendered list: iteration threads folded into one node per run, every
+  // other thread left exactly where the sort put it.
+  const threadNodes = useMemo(
+    () => groupEpicRunIterationThreads({ threads: orderedThreads, runs: epicRuns }),
+    [epicRuns, orderedThreads],
+  );
+  const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
+  const setEpicRunGroupExpanded = useUiStateStore((state) => state.setEpicRunGroupExpanded);
+  const openEpicRun = useCallback(
+    (group: SidebarEpicRunGroup<EnvironmentThreadShell>) => {
+      clearSelection();
+      if (isMobile) setOpenMobile(false);
+      // Before the run read model lands there is no epic id to route to, so the
+      // row still does something useful: the Epics index lists the run.
+      const first = group.iterations[0];
+      if (group.epicId === null || first === undefined) {
+        void router.navigate({ to: "/epics" });
+        return;
+      }
+      void router.navigate({
+        to: "/epics/$environmentId/$epicId",
+        params: { environmentId: first.thread.environmentId, epicId: group.epicId },
+        search: { project: first.thread.projectId },
+      });
+    },
+    [clearSelection, isMobile, router, setOpenMobile],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -1476,6 +1737,13 @@ export default function SidebarV2() {
     shortcutLabelForCommand(keybindings, "chat.new");
   return (
     <>
+      {environments.map((environment) => (
+        <SidebarV2EpicRunsQuery
+          key={environment.environmentId}
+          environmentId={environment.environmentId}
+          onRuns={handleEpicRuns}
+        />
+      ))}
       <SidebarChromeHeader isElectron={isElectron} />
       <SidebarContent className="gap-0">
         <SidebarGroup className="px-2 pb-2 pt-3">
@@ -1628,7 +1896,38 @@ export default function SidebarV2() {
             timeout={400}
           >
             <ul ref={attachListAutoAnimateRef} role="list" className="flex flex-col gap-px">
-              {orderedThreads.flatMap((thread, threadIndex) => {
+              {threadNodes.flatMap((node, nodeIndex) => {
+                const previousNode = nodeIndex > 0 ? threadNodes[nodeIndex - 1] : null;
+                const previousWasCard =
+                  previousNode != null && !isSettledSidebarNode(previousNode, settledThreadKeys);
+                if (node.kind === "epic-run") {
+                  // A run row is always full-height chrome, so it opens the
+                  // settled block the same way a card does.
+                  const showRunSettledGap =
+                    isSettledSidebarNode(node, settledThreadKeys) && previousWasCard;
+                  const runRow = (
+                    <SidebarV2EpicRunGroupRow
+                      key={`epic-run:${node.runId}`}
+                      group={node}
+                      expanded={resolveEpicRunGroupExpanded({
+                        status: node.status,
+                        override: epicRunGroupExpandedByRunId[node.runId],
+                        forceExpanded: sidebarNodeThreads(node).some(
+                          (thread) =>
+                            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
+                            routeThreadKey,
+                        ),
+                      })}
+                      routeThreadKey={routeThreadKey}
+                      onToggle={setEpicRunGroupExpanded}
+                      onOpenRun={openEpicRun}
+                      onIterationClick={handleThreadClick}
+                      onIterationActivate={navigateToThread}
+                    />
+                  );
+                  return showRunSettledGap ? [settledDivider, runRow] : [runRow];
+                }
+                const thread = node.thread;
                 const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
                 const isSettledRow = settledThreadKeys.has(threadKey);
                 // Settled is the ONLY thing that collapses a row: every
@@ -1636,14 +1935,6 @@ export default function SidebarV2() {
                 // (or the auto rules) actually settling work, not from the
                 // sidebar second-guessing what still matters.
                 const isCard = !isSettledRow;
-                const previousThread = threadIndex > 0 ? orderedThreads[threadIndex - 1] : null;
-                const previousWasCard =
-                  previousThread != null &&
-                  !settledThreadKeys.has(
-                    scopedThreadKey(
-                      scopeThreadRef(previousThread.environmentId, previousThread.id),
-                    ),
-                  );
                 const showSettledGap = !isCard && previousWasCard;
                 const row = (
                   <SidebarV2Row
@@ -1688,25 +1979,7 @@ export default function SidebarV2() {
                   />
                 );
                 if (!showSettledGap) return [row];
-                // The divider is its own keyed list item (not part of the first
-                // settled row): it keeps one stable DOM node at the boundary,
-                // so settling a thread slides it instead of teleporting it
-                // along with whichever row happens to be first in the tail —
-                // and row heights stay independent of neighbor classification.
-                return [
-                  <li
-                    key="settled-divider"
-                    aria-hidden
-                    data-thread-selection-safe
-                    className="list-none"
-                  >
-                    <div className="mb-1 mt-3 flex items-center gap-2 px-2.5">
-                      <span className="text-xs font-medium text-muted-foreground/50">Settled</span>
-                      <span className="h-px flex-1 bg-sidebar-border/60" />
-                    </div>
-                  </li>,
-                  row,
-                ];
+                return [settledDivider, row];
               })}
               {hiddenSettledCount > 0 ? (
                 <li className="list-none">

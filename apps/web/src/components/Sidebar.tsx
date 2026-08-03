@@ -187,11 +187,20 @@ import { openCommandPalette } from "../commandPaletteBus";
 import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
+  epicRunGroupTitle,
+  epicRunIterationCountLabel,
+  epicRunIterationLabel,
   getSidebarThreadIdsToPrewarm,
+  groupEpicRunIterationThreads,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
   isTrailingDoubleClick,
+  resolveEpicRunGroupExpanded,
+  resolveEpicRunStatusPill,
   resolveProjectStatusIndicator,
+  sidebarNodeThreads as nodeThreads,
+  type SidebarEpicRunGroup,
+  type SidebarThreadNode,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
   resolveThreadRowClassName,
@@ -904,7 +913,12 @@ interface SidebarProjectThreadListProps {
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
   orderedProjectThreadKeys: readonly string[];
-  renderedThreads: readonly SidebarThreadSummary[];
+  /** Iteration threads already folded into run groups (see
+      `groupEpicRunIterationThreads`); a plain thread is its own node. */
+  renderedNodes: ReadonlyArray<SidebarThreadNode<SidebarThreadSummary>>;
+  epicRunGroupExpandedByRunId: Readonly<Record<string, boolean>>;
+  setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
+  openEpicRun: (group: SidebarEpicRunGroup<SidebarThreadSummary>) => void;
   showEmptyThreadState: boolean;
   shouldShowThreadPanel: boolean;
   isThreadListExpanded: boolean;
@@ -946,6 +960,173 @@ interface SidebarProjectThreadListProps {
   collapseThreadListForProject: (projectKey: string) => void;
 }
 
+/**
+ * One row for a whole epic run, with its iterations folded inside. A run of 50
+ * iterations otherwise pushes 50 near-identical rows under the project. The row
+ * opens the run's epic detail page — the iterations are the chats.
+ */
+const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
+  group: SidebarEpicRunGroup<SidebarThreadSummary>;
+  expanded: boolean;
+  activeRouteThreadKey: string | null;
+  orderedProjectThreadKeys: readonly string[];
+  onToggle: (runId: string, expanded: boolean) => void;
+  onOpenRun: (group: SidebarEpicRunGroup<SidebarThreadSummary>) => void;
+  handleThreadClick: SidebarProjectThreadListProps["handleThreadClick"];
+  navigateToThread: (threadRef: ScopedThreadRef) => void;
+}) {
+  const { expanded, group, onOpenRun, onToggle } = props;
+  const statusPill = resolveEpicRunStatusPill(group.status);
+  const countLabel = epicRunIterationCountLabel(group.iterations.length);
+  // The epic id is the row's identity and gets every pixel left over, so the
+  // count rides the layers icon as a bare number and the full wording (plus a
+  // truncated epic id) lives in the row tooltip.
+  const rowTooltip = [epicRunGroupTitle(group), countLabel, statusPill?.label]
+    .filter((part) => part !== undefined)
+    .join(" · ");
+  const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
+  const handleOpen = useCallback(() => onOpenRun(group), [group, onOpenRun]);
+  const handleToggle = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onToggle(group.runId, !expanded);
+    },
+    [expanded, group.runId, onToggle],
+  );
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      onOpenRun(group);
+    },
+    [group, onOpenRun],
+  );
+
+  return (
+    <>
+      {/* Selection-safe: hitting the chevron toggles the group, it must not
+          clear a multi-selection. Opening the run clears it explicitly. */}
+      <SidebarMenuSubItem className="w-full" data-epic-run-group-row data-thread-selection-safe>
+        <SidebarMenuSubButton
+          render={rowButtonRender}
+          size="sm"
+          data-testid={`epic-run-group-${group.runId}`}
+          title={rowTooltip}
+          className={`${resolveThreadRowClassName({ isActive: false, isSelected: false })} relative isolate`}
+          onClick={handleOpen}
+          onKeyDown={handleKeyDown}
+        >
+          <button
+            type="button"
+            aria-label={expanded ? "Collapse run iterations" : "Expand run iterations"}
+            aria-expanded={expanded}
+            onClick={handleToggle}
+            className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/70 outline-hidden hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <ChevronRightIcon
+              aria-hidden
+              className={`size-3 transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+          </button>
+          <span
+            aria-label={countLabel}
+            className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/70"
+          >
+            <LayersIcon aria-hidden className="size-3" />
+            <span className="text-[10px] tabular-nums">{group.iterations.length}</span>
+          </span>
+          <span className="min-w-0 flex-1 truncate text-xs">{epicRunGroupTitle(group)}</span>
+          {statusPill ? (
+            <span
+              role="status"
+              aria-label={statusPill.label}
+              className={`inline-flex shrink-0 items-center gap-1 text-[10px] ${statusPill.colorClass}`}
+            >
+              <span
+                aria-hidden
+                className={`size-1.5 rounded-full ${statusPill.dotClass} ${
+                  statusPill.pulse ? "animate-status-pulse" : ""
+                } motion-reduce:animate-none`}
+              />
+              {statusPill.label}
+            </span>
+          ) : null}
+        </SidebarMenuSubButton>
+      </SidebarMenuSubItem>
+      {expanded
+        ? group.iterations.map((iteration) => {
+            const threadKey = scopedThreadKey(
+              scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
+            );
+            return (
+              <SidebarEpicRunIterationRow
+                key={threadKey}
+                iteration={iteration}
+                isActive={props.activeRouteThreadKey === threadKey}
+                orderedProjectThreadKeys={props.orderedProjectThreadKeys}
+                handleThreadClick={props.handleThreadClick}
+                navigateToThread={props.navigateToThread}
+              />
+            );
+          })
+        : null}
+    </>
+  );
+});
+
+const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(props: {
+  iteration: SidebarEpicRunGroup<SidebarThreadSummary>["iterations"][number];
+  isActive: boolean;
+  orderedProjectThreadKeys: readonly string[];
+  handleThreadClick: SidebarProjectThreadListProps["handleThreadClick"];
+  navigateToThread: (threadRef: ScopedThreadRef) => void;
+}) {
+  const { handleThreadClick, iteration, navigateToThread, orderedProjectThreadKeys } = props;
+  const threadRef = useMemo(
+    () => scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
+    [iteration.thread.environmentId, iteration.thread.id],
+  );
+  const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
+  const handleClick = useCallback(
+    (event: React.MouseEvent) => {
+      handleThreadClick(event, threadRef, orderedProjectThreadKeys);
+    },
+    [handleThreadClick, orderedProjectThreadKeys, threadRef],
+  );
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      if (event.target !== event.currentTarget) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      navigateToThread(threadRef);
+    },
+    [navigateToThread, threadRef],
+  );
+
+  return (
+    <SidebarMenuSubItem className="w-full" data-thread-item>
+      <SidebarMenuSubButton
+        render={rowButtonRender}
+        size="sm"
+        isActive={props.isActive}
+        data-testid={`epic-run-iteration-${iteration.thread.id}`}
+        className={`${resolveThreadRowClassName({
+          isActive: props.isActive,
+          isSelected: false,
+        })} relative isolate pl-6`}
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
+      >
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground/80">
+          {epicRunIterationLabel(iteration)}
+        </span>
+      </SidebarMenuSubButton>
+    </SidebarMenuSubItem>
+  );
+});
+
 const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
   props: SidebarProjectThreadListProps,
 ) {
@@ -955,7 +1136,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     hasOverflowingThreads,
     hiddenThreadStatus,
     orderedProjectThreadKeys,
-    renderedThreads,
+    renderedNodes,
     showEmptyThreadState,
     shouldShowThreadPanel,
     isThreadListExpanded,
@@ -1004,7 +1185,31 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         </SidebarMenuSubItem>
       ) : null}
       {shouldShowThreadPanel &&
-        renderedThreads.map((thread) => {
+        renderedNodes.map((node) => {
+          if (node.kind === "epic-run") {
+            return (
+              <SidebarEpicRunGroupRow
+                key={`epic-run:${node.runId}`}
+                group={node}
+                expanded={resolveEpicRunGroupExpanded({
+                  status: node.status,
+                  override: props.epicRunGroupExpandedByRunId[node.runId],
+                  forceExpanded: nodeThreads(node).some(
+                    (thread) =>
+                      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
+                      activeRouteThreadKey,
+                  ),
+                })}
+                activeRouteThreadKey={activeRouteThreadKey}
+                orderedProjectThreadKeys={orderedProjectThreadKeys}
+                onToggle={props.setEpicRunGroupExpanded}
+                onOpenRun={props.openEpicRun}
+                handleThreadClick={handleThreadClick}
+                navigateToThread={navigateToThread}
+              />
+            );
+          }
+          const thread = node.thread;
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
             <SidebarThreadRow
@@ -1335,10 +1540,45 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     );
   }, [activeRouteThreadKey, projectExpanded, visibleProjectThreads]);
 
+  // Iteration threads fold into one node per run BEFORE the preview limit is
+  // applied: a 50-iteration run must cost one row of the project's preview
+  // budget, not fill it and push every real thread behind "Show more".
+  const epicRuns = useMemo(
+    () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
+    [epicRunsByEnvironment],
+  );
+  const projectThreadNodes = useMemo(
+    () => groupEpicRunIterationThreads({ threads: visibleProjectThreads, runs: epicRuns }),
+    [epicRuns, visibleProjectThreads],
+  );
+  const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
+  const setEpicRunGroupExpanded = useUiStateStore((state) => state.setEpicRunGroupExpanded);
+  const openEpicRun = useCallback(
+    (group: SidebarEpicRunGroup<SidebarThreadSummary>) => {
+      clearSelection();
+      if (isMobile) {
+        setOpenMobile(false);
+      }
+      // Before the run read model lands there is no epic id to route to, so the
+      // row still does something useful: the Epics index lists the run.
+      const first = group.iterations[0];
+      if (group.epicId === null || first === undefined) {
+        void router.navigate({ to: "/epics" });
+        return;
+      }
+      void router.navigate({
+        to: "/epics/$environmentId/$epicId",
+        params: { environmentId: first.thread.environmentId, epicId: group.epicId },
+        search: { project: first.thread.projectId },
+      });
+    },
+    [clearSelection, isMobile, router, setOpenMobile],
+  );
+
   const {
     hasOverflowingThreads,
     hiddenThreadStatus,
-    renderedThreads,
+    renderedNodes,
     showEmptyThreadState,
     shouldShowThreadPanel,
   } = useMemo(() => {
@@ -1363,31 +1603,36 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         },
       });
     };
-    const hasOverflowingThreads = visibleProjectThreads.length > sidebarThreadPreviewCount;
-    const previewThreads =
+    const hasOverflowingThreads = projectThreadNodes.length > sidebarThreadPreviewCount;
+    const previewNodes =
       isThreadListExpanded || !hasOverflowingThreads
-        ? visibleProjectThreads
-        : visibleProjectThreads.slice(0, sidebarThreadPreviewCount);
-    const visibleThreadKeys = new Set(
-      [...previewThreads, ...(pinnedCollapsedThread ? [pinnedCollapsedThread] : [])].map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
+        ? projectThreadNodes
+        : projectThreadNodes.slice(0, sidebarThreadPreviewCount);
+    // The collapsed project keeps only the active row visible. When that row is
+    // an iteration, its whole run node stands in for it — a bare iteration row
+    // with no group above it would read as an orphan.
+    const pinnedCollapsedNode =
+      pinnedCollapsedThread === null
+        ? null
+        : (projectThreadNodes.find((node) =>
+            nodeThreads(node).some((thread) => thread.id === pinnedCollapsedThread.id),
+          ) ?? null);
+    const renderedNodes = pinnedCollapsedNode ? [pinnedCollapsedNode] : previewNodes;
+    const renderedThreadKeys = new Set(
+      renderedNodes
+        .flatMap((node) => nodeThreads(node))
+        .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
     );
-    const renderedThreads = pinnedCollapsedThread
-      ? [pinnedCollapsedThread]
-      : visibleProjectThreads.filter((thread) =>
-          visibleThreadKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
-        );
     const hiddenThreads = visibleProjectThreads.filter(
       (thread) =>
-        !visibleThreadKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+        !renderedThreadKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
     );
     return {
       hasOverflowingThreads,
       hiddenThreadStatus: resolveProjectStatusIndicator(
         hiddenThreads.map((thread) => resolveProjectThreadStatus(thread)),
       ),
-      renderedThreads,
+      renderedNodes,
       showEmptyThreadState: projectExpanded && visibleProjectThreads.length === 0,
       shouldShowThreadPanel: projectExpanded || pinnedCollapsedThread !== null,
     };
@@ -1396,6 +1641,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isThreadListExpanded,
     pinnedCollapsedThread,
     projectExpanded,
+    projectThreadNodes,
     projectThreads,
     sidebarThreadPreviewCount,
     threadLastVisitedAts,
@@ -2414,7 +2660,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
         orderedProjectThreadKeys={orderedProjectThreadKeys}
-        renderedThreads={renderedThreads}
+        renderedNodes={renderedNodes}
+        epicRunGroupExpandedByRunId={epicRunGroupExpandedByRunId}
+        setEpicRunGroupExpanded={setEpicRunGroupExpanded}
+        openEpicRun={openEpicRun}
         showEmptyThreadState={showEmptyThreadState}
         shouldShowThreadPanel={shouldShowThreadPanel}
         isThreadListExpanded={isThreadListExpanded}

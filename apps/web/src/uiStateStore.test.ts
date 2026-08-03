@@ -13,6 +13,7 @@ import {
   reorderProjects,
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
+  setEpicRunGroupExpanded,
   setProjectExpanded,
   setThreadChangedFilesExpanded,
   type UiState,
@@ -25,6 +26,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     epicsLastVisitedAt: null,
+    epicRunGroupExpandedByRunId: {},
     defaultAdvertisedEndpointKey: null,
     ...overrides,
   };
@@ -140,6 +142,25 @@ describe("uiStateStore pure functions", () => {
     ).toEqual({});
   });
 
+  it("stores an epic run group toggle per run, and survives a round trip", () => {
+    const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+    // Both directions are recorded: the status default flips when the run ends,
+    // so "keep this one open" needs an entry just as much as "close it".
+    const collapsed = setEpicRunGroupExpanded(makeUiState(), runId, false);
+    expect(collapsed.epicRunGroupExpandedByRunId).toEqual({ [runId]: false });
+    expect(setEpicRunGroupExpanded(collapsed, runId, false)).toBe(collapsed);
+    expect(setEpicRunGroupExpanded(collapsed, runId, true).epicRunGroupExpandedByRunId).toEqual({
+      [runId]: true,
+    });
+    expect(setEpicRunGroupExpanded(makeUiState(), "", true).epicRunGroupExpandedByRunId).toEqual(
+      {},
+    );
+    expect(
+      parsePersistedState({ epicRunGroupExpandedByRunId: { [runId]: false, "": true } })
+        .epicRunGroupExpandedByRunId,
+    ).toEqual({ [runId]: false });
+  });
+
   it("stores the endpoint preference by stable key", () => {
     const next = setDefaultAdvertisedEndpointKey(makeUiState(), "desktop-core:lan:http");
 
@@ -174,6 +195,7 @@ describe("parsePersistedState", () => {
 
     expect(parsed).toEqual({
       epicsLastVisitedAt: null,
+      epicRunGroupExpandedByRunId: {},
       projectExpandedById: {
         logical: false,
       },
@@ -271,6 +293,7 @@ describe("uiStateStore persistence", () => {
           "turn-2": true,
         },
       },
+      epicRunGroupExpandedByRunId: { "run-1": true },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
     });
 
@@ -293,6 +316,7 @@ describe("uiStateStore persistence", () => {
           "turn-1": false,
         },
       },
+      epicRunGroupExpandedByRunId: { "run-1": true },
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,

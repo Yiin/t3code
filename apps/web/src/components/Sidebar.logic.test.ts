@@ -3,6 +3,9 @@ import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
+  epicRunGroupTitle,
+  epicRunIterationCountLabel,
+  epicRunIterationLabel,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
   groupEpicRunIterationThreads,
@@ -14,6 +17,8 @@ import {
   isContextMenuPointerDown,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
+  resolveEpicRunGroupExpanded,
+  resolveEpicRunStatusPill,
   resolveProjectStatusIndicator,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
@@ -22,6 +27,7 @@ import {
   resolveSidebarV2Status,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  sidebarNodeThreads,
   sortThreadsForSidebarV2,
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
@@ -845,6 +851,69 @@ describe("groupEpicRunIterationThreads", () => {
     });
 
     expect(nodes.every((node) => node.kind === "thread")).toBe(true);
+  });
+
+  it("reports the threads a node stands for", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [thread("plain"), iterationThread(0), iterationThread(1)],
+      runs: [run],
+    });
+
+    expect(nodes.map((node) => sidebarNodeThreads(node).map((entry) => entry.id))).toEqual([
+      ["plain"],
+      [iterationThread(0).id, iterationThread(1).id],
+    ]);
+  });
+});
+
+describe("epic run group row rendering decisions", () => {
+  it("expands a running run and collapses one that ended", () => {
+    expect(resolveEpicRunGroupExpanded({ status: "running" })).toBe(true);
+    expect(resolveEpicRunGroupExpanded({ status: "done" })).toBe(false);
+    expect(resolveEpicRunGroupExpanded({ status: "failed" })).toBe(false);
+    // No run read model yet: nothing says the run is live, so stay collapsed.
+    expect(resolveEpicRunGroupExpanded({ status: null })).toBe(false);
+  });
+
+  // The user's toggle outlives the run: a group opened to read must not snap
+  // shut when the last iteration lands and the status default flips.
+  it("lets an explicit toggle override the status default either way", () => {
+    expect(resolveEpicRunGroupExpanded({ status: "running", override: false })).toBe(false);
+    expect(resolveEpicRunGroupExpanded({ status: "done", override: true })).toBe(true);
+  });
+
+  // Collapsing the group you are reading inside would hide the open chat.
+  it("forces the group holding the active thread open, toggle or not", () => {
+    expect(
+      resolveEpicRunGroupExpanded({ status: "done", override: false, forceExpanded: true }),
+    ).toBe(true);
+  });
+
+  it("labels the run by epic id, falling back before the read model arrives", () => {
+    expect(epicRunGroupTitle({ epicId: "t3code-ypi" })).toBe("t3code-ypi");
+    expect(epicRunGroupTitle({ epicId: null })).toBe("Epic run");
+  });
+
+  it("counts iterations in singular and plural", () => {
+    expect(epicRunIterationCountLabel(1)).toBe("1 iteration");
+    expect(epicRunIterationCountLabel(50)).toBe("50 iterations");
+  });
+
+  // 1-based for humans, matching the runner's own thread titles.
+  it("labels an iteration by its 1-based number and issue", () => {
+    expect(epicRunIterationLabel({ iterationIndex: 2, issueId: "t3code-ypi.2" })).toBe(
+      "iteration 3 · t3code-ypi.2",
+    );
+    expect(epicRunIterationLabel({ iterationIndex: 0, issueId: null })).toBe("iteration 1");
+  });
+
+  it("has a status pill for every run status, and none before the run loads", () => {
+    for (const status of ["running", "paused", "done", "failed", "cancelled"] as const) {
+      expect(resolveEpicRunStatusPill(status)?.label.length).toBeGreaterThan(0);
+    }
+    expect(resolveEpicRunStatusPill("running")?.pulse).toBe(true);
+    expect(resolveEpicRunStatusPill("done")?.pulse).toBe(false);
+    expect(resolveEpicRunStatusPill(null)).toBeNull();
   });
 });
 
