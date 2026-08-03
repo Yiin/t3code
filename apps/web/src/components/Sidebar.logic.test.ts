@@ -4,9 +4,11 @@ import {
   buildMultiSelectThreadContextMenuItems,
   createEpicRunGroupExpandedResolver,
   createThreadJumpHintVisibilityController,
+  epicRunGroupRowLabel,
   epicRunGroupTitle,
   epicRunIterationCountLabel,
   epicRunIterationLabel,
+  epicRunIterationRowLabel,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
   groupEpicRunIterationThreads,
@@ -29,6 +31,8 @@ import {
   resolveSidebarV2Status,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  sidebarEpicRunBeadsSources,
+  sidebarEpicRunTitlesByRunId,
   sidebarNodeThreads,
   sidebarRenderedThreadIds,
   sidebarTraversalThreadIds,
@@ -762,6 +766,7 @@ describe("groupEpicRunIterationThreads", () => {
   const run = {
     runId,
     epicId: "t3code-ypi",
+    cwd: "/repo",
     status: "running" as const,
     originThreadId: null,
     threadRefs: [
@@ -802,8 +807,18 @@ describe("groupEpicRunIterationThreads", () => {
       status: "running",
     });
     expect(group?.kind === "epic-run" ? group.iterations : []).toEqual([
-      { iterationIndex: 0, issueId: "t3code-ypi.1", thread: iterationThread(0) },
-      { iterationIndex: 1, issueId: "t3code-ypi.2", thread: iterationThread(1) },
+      {
+        iterationIndex: 0,
+        issueId: "t3code-ypi.1",
+        issueTitle: null,
+        thread: iterationThread(0),
+      },
+      {
+        iterationIndex: 1,
+        issueId: "t3code-ypi.2",
+        issueTitle: null,
+        thread: iterationThread(1),
+      },
     ]);
   });
 
@@ -998,6 +1013,157 @@ describe("epic run group row rendering decisions", () => {
   });
 });
 
+// A bare `proga-webapp-0iy` row says only which project is busy. These helpers
+// are what turn it into 'Rebuild the epics page' with the key underneath.
+describe("epic run rows carry human titles", () => {
+  const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+  const run = {
+    runId,
+    epicId: "t3code-ypi",
+    cwd: "/repo",
+    status: "running" as const,
+    originThreadId: null,
+    threadRefs: [
+      {
+        threadId: epicRunIterationThreadId({ runId, iterationIndex: 0 }),
+        issueId: "t3code-ypi.1",
+        iterationIndex: 0,
+      },
+    ],
+  };
+  const snapshot = (
+    epics: ReadonlyArray<{ id: string; title: string }>,
+    issues: ReadonlyArray<{ id: string; title: string }> = [],
+  ) => ({ _tag: "available", epics, issues }) as never;
+
+  it("subscribes once per workspace that has a run, not once per project", () => {
+    const sources = sidebarEpicRunBeadsSources(
+      new Map([
+        ["env-a", [run, { ...run, runId: "run-2" }, { ...run, runId: "run-3", cwd: "/other" }]],
+        ["env-b", [{ ...run, runId: "run-4" }]],
+        ["env-c", null],
+      ]),
+    );
+
+    expect(sources).toEqual([
+      { environmentId: "env-a", workspaceRoot: "/repo" },
+      { environmentId: "env-a", workspaceRoot: "/other" },
+      { environmentId: "env-b", workspaceRoot: "/repo" },
+    ]);
+  });
+
+  // A bd id is only unique inside one workspace, so two checkouts with the same
+  // id must not swap titles.
+  it("joins each run to the snapshot of the workspace it ran in", () => {
+    const titles = sidebarEpicRunTitlesByRunId({
+      runsByEnvironment: new Map([["env-a", [run, { ...run, runId: "run-2", cwd: "/other" }]]]),
+      snapshots: [
+        {
+          environmentId: "env-a",
+          workspaceRoot: "/repo",
+          result: snapshot(
+            [{ id: "t3code-ypi", title: "Rebuild the epics page" }],
+            [{ id: "t3code-ypi.1", title: "Widen the run projection" }],
+          ),
+        },
+        {
+          environmentId: "env-a",
+          workspaceRoot: "/other",
+          result: snapshot([{ id: "t3code-ypi", title: "A different epic entirely" }]),
+        },
+      ],
+    });
+
+    expect(titles.get(runId)?.epicTitle).toBe("Rebuild the epics page");
+    expect(titles.get(runId)?.issueTitleById.get("t3code-ypi.1")).toBe("Widen the run projection");
+    expect(titles.get("run-2")?.epicTitle).toBe("A different epic entirely");
+  });
+
+  it("has no titles while a snapshot is loading or unavailable", () => {
+    const titles = sidebarEpicRunTitlesByRunId({
+      runsByEnvironment: new Map([["env-a", [run]]]),
+      snapshots: [
+        { environmentId: "env-a", workspaceRoot: "/repo", result: null },
+        {
+          environmentId: "env-a",
+          workspaceRoot: "/repo",
+          result: { _tag: "unavailable" } as never,
+        },
+      ],
+    });
+
+    expect(titles.size).toBe(0);
+  });
+
+  it("puts the titles on the group and its iterations", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [{ id: epicRunIterationThreadId({ runId, iterationIndex: 0 }) }],
+      runs: [run],
+      titlesByRunId: new Map([
+        [
+          runId,
+          {
+            epicTitle: "Rebuild the epics page",
+            issueTitleById: new Map([["t3code-ypi.1", "Widen the run projection"]]),
+          },
+        ],
+      ]),
+    });
+
+    expect(nodes[0]).toMatchObject({
+      kind: "epic-run",
+      epicTitle: "Rebuild the epics page",
+      iterations: [{ issueTitle: "Widen the run projection" }],
+    });
+  });
+
+  it("leaves the titles null when no snapshot was passed", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [{ id: epicRunIterationThreadId({ runId, iterationIndex: 0 }) }],
+      runs: [run],
+    });
+
+    expect(nodes[0]).toMatchObject({
+      kind: "epic-run",
+      epicTitle: null,
+      iterations: [{ issueTitle: null }],
+    });
+  });
+
+  it("leads with the title and drops the key beneath it", () => {
+    expect(
+      epicRunGroupRowLabel({ epicId: "t3code-ypi", epicTitle: "Rebuild the epics page" }),
+    ).toEqual({ primary: "Rebuild the epics page", secondary: "t3code-ypi" });
+    expect(
+      epicRunIterationRowLabel({
+        iterationIndex: 0,
+        issueId: "t3code-ypi.1",
+        issueTitle: "Widen the run projection",
+      }),
+    ).toEqual({ primary: "Widen the run projection", secondary: "iteration 1 · t3code-ypi.1" });
+  });
+
+  // No snapshot yet, or a title that is blank: the key takes the primary line
+  // on its own. A blank primary line would read as a broken row.
+  it("falls back to the key alone, never to a blank line", () => {
+    expect(epicRunGroupRowLabel({ epicId: "t3code-ypi", epicTitle: null })).toEqual({
+      primary: "t3code-ypi",
+      secondary: null,
+    });
+    expect(epicRunGroupRowLabel({ epicId: "t3code-ypi", epicTitle: "   " })).toEqual({
+      primary: "t3code-ypi",
+      secondary: null,
+    });
+    expect(epicRunGroupRowLabel({ epicId: null, epicTitle: null })).toEqual({
+      primary: "Epic run",
+      secondary: null,
+    });
+    expect(
+      epicRunIterationRowLabel({ iterationIndex: 2, issueId: "t3code-ypi.3", issueTitle: null }),
+    ).toEqual({ primary: "iteration 3 · t3code-ypi.3", secondary: null });
+  });
+});
+
 describe("keyboard and prewarm reach into collapsed run groups", () => {
   const runId = "5b8f2c10-3d47-4e9a-9c25-71af6b0d8e43";
   const otherRunId = "9d1c4a72-6e30-4b58-8a17-2f5be9c03d61";
@@ -1007,6 +1173,7 @@ describe("keyboard and prewarm reach into collapsed run groups", () => {
   const endedRun = {
     runId,
     epicId: "t3code-ypi",
+    cwd: "/repo",
     status: "done" as const,
     originThreadId: null,
     threadRefs: [0, 1, 2].map((iterationIndex) => ({
@@ -1135,6 +1302,7 @@ describe("resolveRenderedSidebarThreadNodes", () => {
   const run = {
     runId,
     epicId: "t3code-ypi",
+    cwd: "/repo",
     status: "done" as const,
     originThreadId: null,
     threadRefs: [],

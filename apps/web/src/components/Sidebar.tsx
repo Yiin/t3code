@@ -44,6 +44,7 @@ import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-
 import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  type BeadsStatusResult,
   type ContextMenuItem,
   DEFAULT_SERVER_SETTINGS,
   type EnvironmentId,
@@ -188,9 +189,9 @@ import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
   createEpicRunGroupExpandedResolver,
-  epicRunGroupTitle,
+  epicRunGroupRowLabel,
   epicRunIterationCountLabel,
-  epicRunIterationLabel,
+  epicRunIterationRowLabel,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -198,10 +199,14 @@ import {
   resolveEpicRunStatusPill,
   resolveProjectStatusIndicator,
   resolveRenderedSidebarThreadNodes,
+  sidebarEpicRunBeadsSources,
+  sidebarEpicRunTitlesByRunId,
   sidebarNodeThreads as nodeThreads,
   sidebarRenderedThreadIds,
   sidebarTraversalThreadIds,
+  type SidebarBeadsSnapshot,
   type SidebarEpicRunGroup,
+  type SidebarEpicRunTitles,
   type SidebarThreadNode,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
@@ -988,11 +993,11 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
   const { expanded, group, onOpenRun, onToggle } = props;
   const statusPill = resolveEpicRunStatusPill(group.status);
   const countLabel = epicRunIterationCountLabel(group.iterations.length);
-  // The epic id is the row's identity and gets every pixel left over, so the
-  // count rides the layers icon as a bare number and the full wording (plus a
-  // truncated epic id) lives in the row tooltip.
-  const rowTooltip = [epicRunGroupTitle(group), countLabel, statusPill?.label]
-    .filter((part) => part !== undefined)
+  const rowLabel = epicRunGroupRowLabel(group);
+  // Every row in this sidebar is one hard-height line, so the epic id moves
+  // into the tooltip instead of onto a second line; the title takes the row.
+  const rowTooltip = [rowLabel.primary, rowLabel.secondary, countLabel, statusPill?.label]
+    .filter((part) => part !== undefined && part !== null)
     .join(" · ");
   const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
   const handleOpen = useCallback(() => onOpenRun(group), [group, onOpenRun]);
@@ -1049,7 +1054,7 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
             <LayersIcon aria-hidden className="size-3" />
             <span className="text-[10px] tabular-nums">{group.iterations.length}</span>
           </span>
-          <span className="min-w-0 flex-1 truncate text-xs">{epicRunGroupTitle(group)}</span>
+          <span className="min-w-0 flex-1 truncate text-xs">{rowLabel.primary}</span>
           {statusPill ? (
             <span
               role="status"
@@ -1100,6 +1105,12 @@ const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(prop
   navigateToThread: (threadRef: ScopedThreadRef) => void;
 }) {
   const { handleThreadClick, iteration, navigateToThread, orderedProjectThreadKeys } = props;
+  const rowLabel = epicRunIterationRowLabel(iteration);
+  // One hard-height line per row here too, so the 'iteration N · id' line lives
+  // in the tooltip and the issue title takes the row.
+  const rowTooltip = [rowLabel.primary, rowLabel.secondary]
+    .filter((part) => part !== null)
+    .join(" · ");
   const threadRef = useMemo(
     () => scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
     [iteration.thread.environmentId, iteration.thread.id],
@@ -1128,6 +1139,7 @@ const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(prop
         size="sm"
         isActive={props.isActive}
         data-testid={`epic-run-iteration-${iteration.thread.id}`}
+        title={rowTooltip}
         className={`${resolveThreadRowClassName({
           isActive: props.isActive,
           isSelected: false,
@@ -1136,7 +1148,7 @@ const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(prop
         onKeyDown={handleKeyDown}
       >
         <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground/80">
-          {epicRunIterationLabel(iteration)}
+          {rowLabel.primary}
         </span>
       </SidebarMenuSubButton>
     </SidebarMenuSubItem>
@@ -1301,11 +1313,38 @@ function SidebarProjectRunsQuery(props: {
   return null;
 }
 
+/** One beads snapshot per workspace that has a run — the same headless query
+    the Epics page uses, and the only place epic and issue titles come from. */
+function SidebarBeadsQuery(props: {
+  environmentId: string;
+  workspaceRoot: string;
+  onSnapshot: (
+    environmentId: string,
+    workspaceRoot: string,
+    result: BeadsStatusResult | null,
+  ) => void;
+}) {
+  const query = useEnvironmentQuery(
+    epicsEnvironment.list({
+      environmentId: props.environmentId as EnvironmentId,
+      input: { workspaceRoot: props.workspaceRoot },
+    }),
+  );
+  const { environmentId, onSnapshot, workspaceRoot } = props;
+  useEffect(() => {
+    onSnapshot(environmentId, workspaceRoot, query.data);
+  }, [environmentId, onSnapshot, query.data, workspaceRoot]);
+  return null;
+}
+
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
   /** Epic runs per environment, subscribed once at the sidebar root: the root
       needs them to fold iteration threads the same way this panel does. */
   epicRunsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>;
+  /** Human epic and issue titles per run, joined at the root from the beads
+      snapshots of the workspaces those runs ran in. */
+  epicRunTitlesByRunId: ReadonlyMap<string, SidebarEpicRunTitles>;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
   newThreadShortcutLabel: string | null;
@@ -1327,6 +1366,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     project,
     epicRunsByEnvironment,
+    epicRunTitlesByRunId,
     isThreadListExpanded,
     activeRouteThreadKey,
     newThreadShortcutLabel,
@@ -1609,6 +1649,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     const { hasOverflowingThreads, nodes: renderedNodes } = resolveRenderedSidebarThreadNodes({
       threads: visibleProjectThreads,
       runs: epicRuns,
+      titlesByRunId: epicRunTitlesByRunId,
       previewCount: sidebarThreadPreviewCount,
       isThreadListExpanded,
       pinnedThreadId: pinnedCollapsedThread?.id ?? null,
@@ -1645,6 +1686,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   }, [
     epicRuns,
     epicRunsByEnvironment,
+    epicRunTitlesByRunId,
     isEpicRunGroupExpanded,
     isThreadListExpanded,
     pinnedCollapsedThread,
@@ -3111,6 +3153,8 @@ interface SidebarProjectsContentProps {
   sortedProjects: readonly SidebarProjectSnapshot[];
   /** Subscribed once at the root and handed down; see `SidebarProjectItemProps`. */
   epicRunsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>;
+  /** Joined once at the root and handed down; see `SidebarProjectItemProps`. */
+  epicRunTitlesByRunId: ReadonlyMap<string, SidebarEpicRunTitles>;
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
@@ -3153,6 +3197,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     deleteThread,
     sortedProjects,
     epicRunsByEnvironment,
+    epicRunTitlesByRunId,
     expandedThreadListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
@@ -3298,6 +3343,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         project={project}
                         epicRunsByEnvironment={epicRunsByEnvironment}
+                        epicRunTitlesByRunId={epicRunTitlesByRunId}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3331,6 +3377,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 project={project}
                 epicRunsByEnvironment={epicRunsByEnvironment}
+                epicRunTitlesByRunId={epicRunTitlesByRunId}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3442,6 +3489,38 @@ export default function Sidebar() {
   const epicRuns = useMemo(
     () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
     [epicRunsByEnvironment],
+  );
+  // Beads snapshots are the only source of human titles, and only workspaces
+  // that actually have a run are worth subscribing to — so the source list
+  // follows the runs rather than the project list.
+  const beadsSources = useMemo(
+    () => sidebarEpicRunBeadsSources(epicRunsByEnvironment),
+    [epicRunsByEnvironment],
+  );
+  const [beadsSnapshots, setBeadsSnapshots] = useState<ReadonlyArray<SidebarBeadsSnapshot>>([]);
+  const handleBeadsSnapshot = useCallback(
+    (environmentId: string, workspaceRoot: string, result: BeadsStatusResult | null) => {
+      setBeadsSnapshots((current) => {
+        const index = current.findIndex(
+          (snapshot) =>
+            snapshot.environmentId === environmentId && snapshot.workspaceRoot === workspaceRoot,
+        );
+        if (index >= 0 && current[index]?.result === result) return current;
+        const next = [...current];
+        if (index >= 0) next[index] = { environmentId, workspaceRoot, result };
+        else next.push({ environmentId, workspaceRoot, result });
+        return next;
+      });
+    },
+    [],
+  );
+  const epicRunTitlesByRunId = useMemo(
+    () =>
+      sidebarEpicRunTitlesByRunId({
+        runsByEnvironment: epicRunsByEnvironment,
+        snapshots: beadsSnapshots,
+      }),
+    [beadsSnapshots, epicRunsByEnvironment],
   );
   const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -4013,6 +4092,14 @@ export default function Sidebar() {
           onRuns={handleEpicRuns}
         />
       ))}
+      {beadsSources.map((source) => (
+        <SidebarBeadsQuery
+          key={`${source.environmentId} ${source.workspaceRoot}`}
+          environmentId={source.environmentId}
+          workspaceRoot={source.workspaceRoot}
+          onSnapshot={handleBeadsSnapshot}
+        />
+      ))}
       <SidebarChromeHeader isElectron={isElectron} />
 
       {isOnSettings ? (
@@ -4042,6 +4129,7 @@ export default function Sidebar() {
             deleteThread={deleteThread}
             sortedProjects={sortedProjects}
             epicRunsByEnvironment={epicRunsByEnvironment}
+            epicRunTitlesByRunId={epicRunTitlesByRunId}
             expandedThreadListsByProject={expandedThreadListsByProject}
             activeRouteProjectKey={activeRouteProjectKey}
             routeThreadKey={routeThreadKey}

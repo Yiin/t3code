@@ -7,7 +7,12 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, EpicRun, ScopedThreadRef } from "@t3tools/contracts";
+import type {
+  BeadsStatusResult,
+  EnvironmentId,
+  EpicRun,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -80,9 +85,9 @@ import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import {
   createEpicRunGroupExpandedResolver,
-  epicRunGroupTitle,
+  epicRunGroupRowLabel,
   epicRunIterationCountLabel,
-  epicRunIterationLabel,
+  epicRunIterationRowLabel,
   firstValidTimestampMs,
   groupEpicRunIterationThreads,
   hasUnseenCompletion,
@@ -90,10 +95,13 @@ import {
   resolveAdjacentThreadId,
   resolveEpicRunStatusPill,
   resolveSidebarV2Status,
+  sidebarEpicRunBeadsSources,
+  sidebarEpicRunTitlesByRunId,
   sidebarNodeThreads,
   sidebarRenderedThreadIds,
   sidebarTraversalThreadIds,
   sortThreadsForSidebarV2,
+  type SidebarBeadsSnapshot,
   type SidebarEpicRunGroup,
   type SidebarThreadNode,
 } from "./Sidebar.logic";
@@ -781,11 +789,12 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
   const { expanded, group, onIterationActivate, onIterationClick, onOpenRun, onToggle } = props;
   const statusPill = resolveEpicRunStatusPill(group.status);
   const countLabel = epicRunIterationCountLabel(group.iterations.length);
-  // The epic id is the row's identity and gets every pixel left over, so the
-  // count rides the layers icon as a bare number and the full wording (plus a
-  // truncated epic id) lives in the row tooltip.
-  const rowTooltip = [epicRunGroupTitle(group), countLabel, statusPill?.label]
-    .filter((part) => part !== undefined)
+  const rowLabel = epicRunGroupRowLabel(group);
+  // The title is the row's identity and gets every pixel left over, so the
+  // count rides the layers icon as a bare number and the full wording (plus the
+  // epic id, which the row truncates) lives in the row tooltip.
+  const rowTooltip = [rowLabel.primary, rowLabel.secondary, countLabel, statusPill?.label]
+    .filter((part) => part !== undefined && part !== null)
     .join(" · ");
   const handleOpen = useCallback(() => onOpenRun(group), [group, onOpenRun]);
   const handleToggle = useCallback(
@@ -817,7 +826,9 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
           data-testid={`sidebar-v2-epic-run-group-${group.runId}`}
           title={rowTooltip}
           className={cn(
-            "group/v2-run relative flex h-9 cursor-pointer items-center gap-1.5 overflow-hidden rounded-md px-1.5 text-left outline-none select-none hover:bg-sidebar-row-hover",
+            // Fixed height, sized for both lines: the id-only fallback centres
+            // in the same box, so the snapshot landing never nudges the list.
+            "group/v2-run relative flex h-11 cursor-pointer items-center gap-1.5 overflow-hidden rounded-md px-1.5 text-left outline-none select-none hover:bg-sidebar-row-hover",
             props.nested ? "ml-6" : "w-full",
           )}
           onClick={handleOpen}
@@ -842,8 +853,15 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
             <LayersIcon aria-hidden className="size-4" />
             <span className="tabular-nums text-xs">{group.iterations.length}</span>
           </span>
-          <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/90">
-            {epicRunGroupTitle(group)}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium text-foreground/90">
+              {rowLabel.primary}
+            </span>
+            {rowLabel.secondary ? (
+              <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground/75">
+                {rowLabel.secondary}
+              </span>
+            ) : null}
           </span>
           {statusPill ? (
             <span
@@ -897,6 +915,10 @@ const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(
   onActivate: (threadRef: ScopedThreadRef) => void;
 }) {
   const { iteration, onActivate, onClick } = props;
+  const rowLabel = epicRunIterationRowLabel(iteration);
+  const rowTooltip = [rowLabel.primary, rowLabel.secondary]
+    .filter((part) => part !== null)
+    .join(" · ");
   const threadRef = useMemo(
     () => scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
     [iteration.thread.environmentId, iteration.thread.id],
@@ -921,8 +943,11 @@ const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(
         role="button"
         tabIndex={0}
         data-testid="sidebar-v2-epic-run-iteration"
+        title={rowTooltip}
         className={cn(
-          "group/v2-iteration relative flex h-8 cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none",
+          // Fixed height, sized for both lines: the label-only fallback centres
+          // in the same box, so the snapshot landing never nudges the list.
+          "group/v2-iteration relative flex h-10 cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2 text-left outline-none select-none",
           props.nested ? "ml-12" : "ml-6",
           props.isActive
             ? "bg-sidebar-row-active text-sidebar-foreground dark:inset-ring-1 dark:inset-ring-white/5"
@@ -931,7 +956,14 @@ const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(
         onClick={handleClick}
         onKeyDown={handleKeyDown}
       >
-        <span className="min-w-0 flex-1 truncate text-xs">{epicRunIterationLabel(iteration)}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs">{rowLabel.primary}</span>
+          {rowLabel.secondary ? (
+            <span className="mt-0.5 block truncate font-mono text-[11px] text-muted-foreground/75">
+              {rowLabel.secondary}
+            </span>
+          ) : null}
+        </span>
       </div>
     </li>
   );
@@ -949,6 +981,30 @@ function SidebarV2EpicRunsQuery(props: {
   useEffect(() => {
     props.onRuns(props.environmentId, query.data);
   }, [props.environmentId, props.onRuns, query.data]);
+  return null;
+}
+
+/** One beads snapshot per workspace that has a run — the same headless query
+    the Epics page uses, and the only place epic and issue titles come from. */
+function SidebarV2BeadsQuery(props: {
+  environmentId: string;
+  workspaceRoot: string;
+  onSnapshot: (
+    environmentId: string,
+    workspaceRoot: string,
+    result: BeadsStatusResult | null,
+  ) => void;
+}) {
+  const query = useEnvironmentQuery(
+    epicsEnvironment.list({
+      environmentId: props.environmentId as EnvironmentId,
+      input: { workspaceRoot: props.workspaceRoot },
+    }),
+  );
+  const { environmentId, onSnapshot, workspaceRoot } = props;
+  useEffect(() => {
+    onSnapshot(environmentId, workspaceRoot, query.data);
+  }, [environmentId, onSnapshot, query.data, workspaceRoot]);
   return null;
 }
 
@@ -1213,11 +1269,48 @@ export default function SidebarV2() {
     () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
     [epicRunsByEnvironment],
   );
+  // Beads snapshots are the only source of human titles, and only workspaces
+  // that actually have a run are worth subscribing to — so the source list
+  // follows the runs rather than the project list.
+  const beadsSources = useMemo(
+    () => sidebarEpicRunBeadsSources(epicRunsByEnvironment),
+    [epicRunsByEnvironment],
+  );
+  const [beadsSnapshots, setBeadsSnapshots] = useState<ReadonlyArray<SidebarBeadsSnapshot>>([]);
+  const handleBeadsSnapshot = useCallback(
+    (environmentId: string, workspaceRoot: string, result: BeadsStatusResult | null) => {
+      setBeadsSnapshots((current) => {
+        const index = current.findIndex(
+          (snapshot) =>
+            snapshot.environmentId === environmentId && snapshot.workspaceRoot === workspaceRoot,
+        );
+        if (index >= 0 && current[index]?.result === result) return current;
+        const next = [...current];
+        if (index >= 0) next[index] = { environmentId, workspaceRoot, result };
+        else next.push({ environmentId, workspaceRoot, result });
+        return next;
+      });
+    },
+    [],
+  );
+  const epicRunTitlesByRunId = useMemo(
+    () =>
+      sidebarEpicRunTitlesByRunId({
+        runsByEnvironment: epicRunsByEnvironment,
+        snapshots: beadsSnapshots,
+      }),
+    [beadsSnapshots, epicRunsByEnvironment],
+  );
   // The rendered list: iteration threads folded into one node per run, every
   // other thread left exactly where the sort put it.
   const threadNodes = useMemo(
-    () => groupEpicRunIterationThreads({ threads: orderedThreads, runs: epicRuns }),
-    [epicRuns, orderedThreads],
+    () =>
+      groupEpicRunIterationThreads({
+        threads: orderedThreads,
+        runs: epicRuns,
+        titlesByRunId: epicRunTitlesByRunId,
+      }),
+    [epicRunTitlesByRunId, epicRuns, orderedThreads],
   );
   const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
   const setEpicRunGroupExpanded = useUiStateStore((state) => state.setEpicRunGroupExpanded);
@@ -1812,6 +1905,14 @@ export default function SidebarV2() {
           key={environment.environmentId}
           environmentId={environment.environmentId}
           onRuns={handleEpicRuns}
+        />
+      ))}
+      {beadsSources.map((source) => (
+        <SidebarV2BeadsQuery
+          key={`${source.environmentId} ${source.workspaceRoot}`}
+          environmentId={source.environmentId}
+          workspaceRoot={source.workspaceRoot}
+          onSnapshot={handleBeadsSnapshot}
         />
       ))}
       <SidebarChromeHeader isElectron={isElectron} />
