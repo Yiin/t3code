@@ -27,6 +27,7 @@ export interface PersistedUiState {
   defaultAdvertisedEndpointKey?: string | null;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   epicRunGroupExpandedByRunId?: Record<string, boolean>;
+  plannedEpicBannerDismissedByIdentity?: Record<string, boolean>;
 }
 
 export interface UiProjectState {
@@ -44,6 +45,15 @@ export interface UiThreadState {
    * (see `resolveEpicRunGroupExpanded`), so this does not grow with every run.
    */
   epicRunGroupExpandedByRunId: Record<string, boolean>;
+  /**
+   * Planned-epic composer notices the user dismissed, keyed by
+   * `plannedEpicIdentity` (`environmentId:projectId:epicId`). Only dismissals
+   * land here — an absent key means the notice is still showing. The notice is
+   * derived from the thread's `T3_EPIC_PLAN` marker, which never leaves the
+   * message history, so this is the only thing that can suppress it once a run
+   * has finished.
+   */
+  plannedEpicBannerDismissedByIdentity: Record<string, boolean>;
 }
 
 export interface UiEndpointState {
@@ -59,6 +69,7 @@ const initialState: UiState = {
   epicsLastVisitedAt: null,
   threadChangedFilesExpandedById: {},
   epicRunGroupExpandedByRunId: {},
+  plannedEpicBannerDismissedByIdentity: {},
   defaultAdvertisedEndpointKey: null,
 };
 
@@ -89,6 +100,12 @@ function sanitizeBooleanRecord(value: unknown): Record<string, boolean> {
     Object.entries(value).filter(
       (entry): entry is [string, boolean] => entry[0].length > 0 && typeof entry[1] === "boolean",
     ),
+  );
+}
+
+function sanitizeDismissedRecord(value: unknown): Record<string, boolean> {
+  return Object.fromEntries(
+    Object.entries(sanitizeBooleanRecord(value)).filter(([, dismissed]) => dismissed),
   );
 }
 
@@ -144,6 +161,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       parsed.threadChangedFilesExpandedById,
     ),
     epicRunGroupExpandedByRunId: sanitizeBooleanRecord(parsed.epicRunGroupExpandedByRunId),
+    plannedEpicBannerDismissedByIdentity: sanitizeDismissedRecord(
+      parsed.plannedEpicBannerDismissedByIdentity,
+    ),
     defaultAdvertisedEndpointKey:
       typeof parsed.defaultAdvertisedEndpointKey === "string" &&
       parsed.defaultAdvertisedEndpointKey.length > 0
@@ -230,6 +250,7 @@ export function persistState(state: UiState): void {
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         threadChangedFilesExpandedById,
         epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
+        plannedEpicBannerDismissedByIdentity: state.plannedEpicBannerDismissedByIdentity,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -363,6 +384,27 @@ export function setEpicRunGroupExpanded(state: UiState, runId: string, expanded:
   };
 }
 
+export function setPlannedEpicBannerDismissed(
+  state: UiState,
+  identity: string,
+  dismissed: boolean,
+): UiState {
+  const current = state.plannedEpicBannerDismissedByIdentity[identity] ?? false;
+  if (identity.length === 0 || current === dismissed) {
+    return state;
+  }
+  const plannedEpicBannerDismissedByIdentity = { ...state.plannedEpicBannerDismissedByIdentity };
+  if (dismissed) {
+    plannedEpicBannerDismissedByIdentity[identity] = true;
+  } else {
+    delete plannedEpicBannerDismissedByIdentity[identity];
+  }
+  return {
+    ...state,
+    plannedEpicBannerDismissedByIdentity,
+  };
+}
+
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
   const nextKey = key && key.length > 0 ? key : null;
   if (state.defaultAdvertisedEndpointKey === nextKey) {
@@ -457,6 +499,7 @@ interface UiStateStore extends UiState {
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
+  setPlannedEpicBannerDismissed: (identity: string, dismissed: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -477,6 +520,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setThreadChangedFilesExpanded(state, threadId, turnId, expanded)),
   setEpicRunGroupExpanded: (runId, expanded) =>
     set((state) => setEpicRunGroupExpanded(state, runId, expanded)),
+  setPlannedEpicBannerDismissed: (identity, dismissed) =>
+    set((state) => setPlannedEpicBannerDismissed(state, identity, dismissed)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setProjectExpanded: (projectIds, expanded) =>

@@ -14,6 +14,7 @@ import {
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
   setEpicRunGroupExpanded,
+  setPlannedEpicBannerDismissed,
   setProjectExpanded,
   setThreadChangedFilesExpanded,
   type UiState,
@@ -27,6 +28,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadChangedFilesExpandedById: {},
     epicsLastVisitedAt: null,
     epicRunGroupExpandedByRunId: {},
+    plannedEpicBannerDismissedByIdentity: {},
     defaultAdvertisedEndpointKey: null,
     ...overrides,
   };
@@ -161,6 +163,35 @@ describe("uiStateStore pure functions", () => {
     ).toEqual({ [runId]: false });
   });
 
+  it("records only dismissed planned-epic notices, one identity at a time", () => {
+    const dismissedKey = "env-1:project-1:t3code-abc";
+    const otherKey = "env-1:project-1:t3code-xyz";
+    const dismissed = setPlannedEpicBannerDismissed(makeUiState(), dismissedKey, true);
+
+    expect(dismissed.plannedEpicBannerDismissedByIdentity).toEqual({ [dismissedKey]: true });
+    // A second planned epic in the same thread keeps showing its own notice.
+    expect(dismissed.plannedEpicBannerDismissedByIdentity[otherKey]).toBeUndefined();
+    expect(setPlannedEpicBannerDismissed(dismissed, dismissedKey, true)).toBe(dismissed);
+    expect(setPlannedEpicBannerDismissed(makeUiState(), dismissedKey, false)).toEqual(
+      makeUiState(),
+    );
+    expect(setPlannedEpicBannerDismissed(makeUiState(), "", true)).toEqual(makeUiState());
+    // Undismissing drops the key rather than storing `false`.
+    expect(
+      setPlannedEpicBannerDismissed(dismissed, dismissedKey, false)
+        .plannedEpicBannerDismissedByIdentity,
+    ).toEqual({});
+    expect(
+      parsePersistedState({
+        plannedEpicBannerDismissedByIdentity: {
+          [dismissedKey]: true,
+          [otherKey]: false,
+          "": true,
+        },
+      }).plannedEpicBannerDismissedByIdentity,
+    ).toEqual({ [dismissedKey]: true });
+  });
+
   it("stores the endpoint preference by stable key", () => {
     const next = setDefaultAdvertisedEndpointKey(makeUiState(), "desktop-core:lan:http");
 
@@ -196,6 +227,7 @@ describe("parsePersistedState", () => {
     expect(parsed).toEqual({
       epicsLastVisitedAt: null,
       epicRunGroupExpandedByRunId: {},
+      plannedEpicBannerDismissedByIdentity: {},
       projectExpandedById: {
         logical: false,
       },
@@ -294,6 +326,7 @@ describe("uiStateStore persistence", () => {
         },
       },
       epicRunGroupExpandedByRunId: { "run-1": true },
+      plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
     });
 
@@ -317,6 +350,7 @@ describe("uiStateStore persistence", () => {
         },
       },
       epicRunGroupExpandedByRunId: { "run-1": true },
+      plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,

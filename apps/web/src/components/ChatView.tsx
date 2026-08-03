@@ -1447,6 +1447,15 @@ function ChatViewContent(props: ChatViewProps) {
     [activeThread],
   );
   const [pendingPlannedEpicKey, setPendingPlannedEpicKey] = useState<string | null>(null);
+  const plannedEpicDismissKey = plannedEpic ? plannedEpicIdentity(plannedEpic) : null;
+  const plannedEpicDismissed = useUiStateStore((store) =>
+    plannedEpicDismissKey === null
+      ? false
+      : (store.plannedEpicBannerDismissedByIdentity[plannedEpicDismissKey] ?? false),
+  );
+  const setPlannedEpicBannerDismissed = useUiStateStore(
+    (store) => store.setPlannedEpicBannerDismissed,
+  );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
@@ -1845,7 +1854,7 @@ function ChatViewContent(props: ChatViewProps) {
         ),
       });
     }
-    if (plannedEpic && !activeEpicRun) {
+    if (plannedEpic && !activeEpicRun && !plannedEpicDismissed) {
       const plannedEpicKey = plannedEpicIdentity(plannedEpic);
       const epicRoute = plannedEpicRoute(plannedEpic);
       const isLaunching = pendingPlannedEpicKey === plannedEpicKey;
@@ -1888,6 +1897,8 @@ function ChatViewContent(props: ChatViewProps) {
             </Button>
           </>
         ),
+        dismissLabel: "Dismiss planned epic notice",
+        onDismiss: () => setPlannedEpicBannerDismissed(plannedEpicKey, true),
       });
     }
     if (activeEnvironmentUnavailableState) {
@@ -1969,6 +1980,8 @@ function ChatViewContent(props: ChatViewProps) {
     launchEpicRun,
     pendingPlannedEpicKey,
     plannedEpic,
+    plannedEpicDismissed,
+    setPlannedEpicBannerDismissed,
     activeEnvironmentUnavailableState,
     environmentId,
     handleReconnectActiveEnvironment,
