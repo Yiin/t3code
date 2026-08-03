@@ -63,11 +63,20 @@ interface ScriptedIteration {
    * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
    * that report no assistant message before the scripted one appears —
    * models the real race where the turn-end signal projects before the
-   * assistant message is finalized (`ProviderRuntimeIngestion.ts:1435` vs.
-   * `:1637`). Requires `text` to be non-null: it delays the message, it
+   * assistant message is finalized (`ProviderRuntimeIngestion.ts:1666`
+   * dispatches the session-set first). Requires `text` to be non-null: it delays the message, it
    * doesn't fabricate one.
    */
   readonly messageSettleDelayReads?: number;
+  /**
+   * Report `latestTurn: null` on the thread detail even though the turn has
+   * settled, modelling the window in which the settling transaction has nulled
+   * `threads.latest_turn_id` (`ProjectionPipeline.ts:757-771`) and the
+   * checkpoint reactor has not yet restored it. The shell still reports the
+   * settled turn, because `awaitTurnEnd` reads the shell and must still finish.
+   * Classification then has only the session status to go on.
+   */
+  readonly detailTurnPointerNull?: boolean;
 }
 
 const waitFor = (predicate: () => boolean) =>
@@ -86,6 +95,13 @@ const makeThreadDetail = (input: {
   readonly turnState: ProjectionThreadTurnStatus;
   readonly text: string | null;
   readonly streaming: boolean;
+  /**
+   * Report `latestTurn: null` while still reporting the session, modelling the
+   * real window in which `threads.latest_turn_id` has been nulled by the
+   * settling transaction and not yet restored by the checkpoint reactor.
+   */
+  readonly latestTurnPointerNull?: boolean;
+  readonly sessionStatus?: OrchestrationSessionStatus;
 }): OrchestrationThread => {
   const messageId = MessageId.make(`${input.threadId}-assistant`);
   return {
@@ -97,14 +113,16 @@ const makeThreadDetail = (input: {
     interactionMode: "default",
     branch: null,
     worktreePath: null,
-    latestTurn: {
-      turnId: input.turnId,
-      state: input.turnState,
-      requestedAt: NOW,
-      startedAt: NOW,
-      completedAt: NOW,
-      assistantMessageId: input.text === null ? null : messageId,
-    },
+    latestTurn: input.latestTurnPointerNull
+      ? null
+      : {
+          turnId: input.turnId,
+          state: input.turnState,
+          requestedAt: NOW,
+          startedAt: NOW,
+          completedAt: NOW,
+          assistantMessageId: input.text === null ? null : messageId,
+        },
     createdAt: NOW,
     updatedAt: NOW,
     archivedAt: null,
@@ -128,7 +146,18 @@ const makeThreadDetail = (input: {
     proposedPlans: [],
     activities: [],
     checkpoints: [],
-    session: null,
+    session:
+      input.sessionStatus === undefined
+        ? null
+        : {
+            threadId: input.threadId,
+            status: input.sessionStatus,
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: NOW,
+          },
   };
 };
 
@@ -277,6 +306,8 @@ function createHarness(input: {
           turnState: scripted.turnState ?? "completed",
           text: scripted.text,
           streaming: scripted.streaming ?? false,
+          latestTurnPointerNull: scripted.detailTurnPointerNull ?? false,
+          sessionStatus: scripted.sessionStatus ?? "ready",
         }),
       );
       if (scripted.messageSettleDelayReads !== undefined) {
@@ -791,6 +822,64 @@ describe("EpicRunner", () => {
 
       const failed = harness.store.runs.get(run.runId)!;
       assert.strictEqual(failed.lastError, "turn completed without an assistant message");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live(
+    "classifies a settled iteration done when the turn pointer has not been restored yet",
+    () => {
+      // Regression for t3code-pxv. The settling transaction nulls
+      // `threads.latest_turn_id`, and only the checkpoint reactor restores it —
+      // after git work that can be slow or fail outright. Every read in between
+      // sees `latestTurn: null`, which is indistinguishable from "never ran"
+      // unless classification falls back to the session status the projector
+      // settled the turn from.
+      const harness = createHarness({
+        script: [
+          {
+            text: 'did the work\nRALPH_MSG: {"summary":"landed","why":"pointer lagged"}',
+            head: "head-1",
+            detailTurnPointerNull: true,
+          },
+        ],
+        options: { iterationTimeoutMs: 60_000 },
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "completed");
+
+        assert.strictEqual(harness.store.iterations[0]?.summary, "landed");
+        assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+        assert.strictEqual(harness.store.runs.get(run.runId)?.lastError, null);
+
+        yield* runner.cancelRun({ runId: run.runId });
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.live("still reports an interrupted turn as an error when the turn pointer is missing", () => {
+    // The session-status fallback must not launder every missing pointer into
+    // "completed": a session that stopped mid-turn still has to fail.
+    const harness = createHarness({
+      script: [
+        {
+          text: 'partial\nRALPH_MSG: {"summary":"nope","why":"nope"}',
+          head: "head-1",
+          detailTurnPointerNull: true,
+          sessionStatus: "stopped",
+        },
+      ],
+      options: { maxConsecutiveFailures: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(harness.store.runs.get(run.runId)?.lastError, "turn was interrupted");
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
     }).pipe(Effect.provide(harness.layer));
   });

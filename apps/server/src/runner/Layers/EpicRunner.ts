@@ -94,27 +94,43 @@ const decodeIssueStatus = Schema.decodeUnknownOption(
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 /**
- * Whether a session status settles the turn.
+ * The turn state a session status implies, or null while the session is
+ * (re)starting or running and turns must stay unsettled.
  *
  * Mirrors `settledTurnStateForSessionStatus`
- * (`orchestration/Layers/ProjectionPipeline.ts:78-94`) exactly. It is not
- * simply `status !== "running"`, and the difference matters: a fresh thread's
- * session is `"starting"` before its turn begins, which under that looser test
- * would end the turn before the agent had said a word.
+ * (`orchestration/Layers/ProjectionPipeline.ts:78-94`) exactly, because the
+ * projector settles a thread's running turns from this same status in the same
+ * transaction that writes it. That shared origin is what makes this a safe
+ * stand-in when the turn row cannot be read (see `classifyFromProjection`).
  */
-const isTurnEndSessionStatus = (status: OrchestrationSessionStatus): boolean => {
+const settledTurnStateFromSessionStatus = (
+  status: OrchestrationSessionStatus,
+): "completed" | "interrupted" | "error" | null => {
   switch (status) {
     case "idle":
     case "ready":
+      return "completed";
     case "error":
+      return "error";
     case "interrupted":
     case "stopped":
-      return true;
+      return "interrupted";
     case "starting":
     case "running":
-      return false;
+      return null;
   }
 };
+
+/**
+ * Whether a session status settles the turn.
+ *
+ * Derived from `settledTurnStateFromSessionStatus` so the two cannot drift. It
+ * is not simply `status !== "running"`, and the difference matters: a fresh
+ * thread's session is `"starting"` before its turn begins, which under that
+ * looser test would end the turn before the agent had said a word.
+ */
+const isTurnEndSessionStatus = (status: OrchestrationSessionStatus): boolean =>
+  settledTurnStateFromSessionStatus(status) !== null;
 
 /**
  * The assistant message an iteration's verdict is read from.
@@ -654,8 +670,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * Read the turn's final assistant message once it has stopped changing.
      *
      * The turn-end signal is not the read point: ingestion dispatches
-     * `thread.session-set` at `ProviderRuntimeIngestion.ts:1435` but only
-     * finalizes assistant messages at `:1637`, so reading immediately returns a
+     * `thread.session.set` (`ProviderRuntimeIngestion.ts:1666`) before it
+     * finalizes the turn's assistant messages, so reading immediately returns a
      * still-streaming row — empty, on ACP providers whose text exists only as
      * deltas. Waiting for two consecutive identical reads closes that gap.
      *
@@ -720,8 +736,27 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           ? undefined
           : yield* readSettledFinalMessage(input.threadId);
 
+        // `latestTurn` resolves through an inner join on
+        // `threads.latest_turn_id` (`ProjectionSnapshotQuery.ts:1122-1130`), and
+        // the same transaction that settles the turn nulls that pointer
+        // (`ProjectionPipeline.ts:757-771`). The pointer is only restored later,
+        // by `thread.turn-diff-completed` after the CheckpointReactor has
+        // captured a git checkpoint and diffed it — seconds of work unrelated to
+        // the turn, and skipped entirely when that capture fails. So a settled
+        // turn routinely reads back as `null` here, which
+        // `classifyIteration` cannot distinguish from "never ran".
+        //
+        // The session row is the reliable stand-in: the projector writes it in
+        // the same transaction it settles the turn with, from this exact
+        // mapping, so it can never disagree with the turn row that eventually
+        // reappears.
+        const sessionStatus = snapshot?.thread.session?.status ?? null;
+        const turnState =
+          snapshot?.thread.latestTurn?.state ??
+          (sessionStatus === null ? null : settledTurnStateFromSessionStatus(sessionStatus));
+
         return classifyIteration({
-          turnState: snapshot?.thread.latestTurn?.state ?? null,
+          turnState,
           finalMessage: resolveFinalAssistantMessage(snapshot?.thread),
           committed,
           timedOut: input.timedOut,
