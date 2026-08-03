@@ -728,6 +728,118 @@ export function resolveEpicRunGroupExpanded(input: {
   return input.override ?? input.status === "running";
 }
 
+/**
+ * The one expansion rule, shared by the group row and by every list derived
+ * from the rows on screen (numbered jump shortcuts, prewarm, range select).
+ * Reading expansion twice from two hand-rolled copies is how a jump number ends
+ * up pointing at a row nobody can see.
+ */
+export function createEpicRunGroupExpandedResolver<T>(input: {
+  expandedByRunId: Readonly<Record<string, boolean>>;
+  /** The thread the route is on; its group is always expanded. */
+  activeThreadKey: string | null;
+  getThreadKey: (thread: T) => string;
+}): (group: SidebarEpicRunGroup<T>) => boolean {
+  const { activeThreadKey, expandedByRunId, getThreadKey } = input;
+  return (group) =>
+    resolveEpicRunGroupExpanded({
+      status: group.status,
+      override: expandedByRunId[group.runId],
+      forceExpanded:
+        activeThreadKey !== null &&
+        group.iterations.some((iteration) => getThreadKey(iteration.thread) === activeThreadKey),
+    });
+}
+
+/**
+ * The thread rows the sidebar paints, in paint order: a thread node is one row,
+ * and a run group contributes its iterations only while it is expanded.
+ *
+ * Numbered jump shortcuts, the prewarm budget and range select all key off this
+ * list, so they stay aligned with the screen. A collapsed 50-iteration run must
+ * cost one row, not swallow all nine jump numbers and the whole prewarm budget
+ * on rows nobody can see.
+ */
+export function sidebarRenderedThreadIds<T, TId>(input: {
+  nodes: readonly SidebarThreadNode<T>[];
+  getThreadId: (thread: T) => TId;
+  isEpicRunGroupExpanded: (group: SidebarEpicRunGroup<T>) => boolean;
+}): TId[] {
+  const { getThreadId, isEpicRunGroupExpanded, nodes } = input;
+  return nodes.flatMap((node) => {
+    if (node.kind === "thread") return [getThreadId(node.thread)];
+    if (!isEpicRunGroupExpanded(node)) return [];
+    return node.iterations.map((iteration) => getThreadId(iteration.thread));
+  });
+}
+
+/**
+ * Every thread the previous/next-thread shortcuts step through, in the same
+ * paint order — including the iterations of a COLLAPSED group.
+ *
+ * The decision: traversal steps into a collapsed run instead of skipping it. A
+ * group row is not a thread, so skipping would leave a finished run's
+ * iterations with no keyboard route to them at all. Stepping in is safe because
+ * the group holding the active thread force-expands
+ * (`createEpicRunGroupExpandedResolver`), so the row the user lands on is on
+ * screen by the time they get there.
+ *
+ * Rows hidden by anything other than collapse — a project's preview limit, a
+ * collapsed project — stay out: the caller passes only the nodes it renders.
+ */
+export function sidebarTraversalThreadIds<T, TId>(input: {
+  nodes: readonly SidebarThreadNode<T>[];
+  getThreadId: (thread: T) => TId;
+}): TId[] {
+  return sidebarRenderedThreadIds({ ...input, isEpicRunGroupExpanded: () => true });
+}
+
+/**
+ * The nodes one project panel renders: iteration threads folded into run
+ * groups, the preview limit applied to NODES so a long run costs one row of the
+ * budget, and a collapsed project reduced to the node standing for the active
+ * row.
+ *
+ * The panel and the sidebar root both call this. The root needs the same list
+ * to number jump shortcuts and pick prewarm targets, and when it re-derived
+ * that list by hand the two drifted — the root counted 50 iterations against a
+ * preview limit the panel spent on one group row.
+ */
+export function resolveRenderedSidebarThreadNodes<T extends { readonly id: string }>(input: {
+  /** Already sorted and archive-filtered, exactly as the panel lists them. */
+  threads: readonly T[];
+  runs?: readonly SidebarEpicRunSummary[] | undefined;
+  previewCount: number;
+  isThreadListExpanded: boolean;
+  /** The one row a collapsed project keeps; `null` while the project is open. */
+  pinnedThreadId: string | null;
+}): {
+  nodes: Array<SidebarThreadNode<T>>;
+  hasOverflowingThreads: boolean;
+} {
+  const nodes = groupEpicRunIterationThreads({ threads: input.threads, runs: input.runs });
+  const hasOverflowingThreads = nodes.length > input.previewCount;
+
+  if (input.pinnedThreadId !== null) {
+    // A collapsed project keeps only the active row. When that row is an
+    // iteration, its whole run node stands in for it: a bare iteration row with
+    // no group above it would read as an orphan.
+    const pinnedThreadId = input.pinnedThreadId;
+    const pinnedNode = nodes.find((node) =>
+      sidebarNodeThreads(node).some((thread) => thread.id === pinnedThreadId),
+    );
+    return { nodes: pinnedNode ? [pinnedNode] : [], hasOverflowingThreads };
+  }
+
+  return {
+    nodes:
+      input.isThreadListExpanded || !hasOverflowingThreads
+        ? nodes
+        : nodes.slice(0, input.previewCount),
+    hasOverflowingThreads,
+  };
+}
+
 /** The run's epic id, or a neutral label until the read model supplies one. */
 export function epicRunGroupTitle(input: { epicId: string | null }): string {
   return input.epicId ?? "Epic run";

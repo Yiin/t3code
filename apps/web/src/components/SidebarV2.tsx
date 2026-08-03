@@ -79,6 +79,7 @@ import { formatRelativeTimeLabel } from "../timestampFormat";
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import {
+  createEpicRunGroupExpandedResolver,
   epicRunGroupTitle,
   epicRunIterationCountLabel,
   epicRunIterationLabel,
@@ -87,10 +88,11 @@ import {
   hasUnseenCompletion,
   isTrailingDoubleClick,
   resolveAdjacentThreadId,
-  resolveEpicRunGroupExpanded,
   resolveEpicRunStatusPill,
   resolveSidebarV2Status,
   sidebarNodeThreads,
+  sidebarRenderedThreadIds,
+  sidebarTraversalThreadIds,
   sortThreadsForSidebarV2,
   type SidebarEpicRunGroup,
   type SidebarThreadNode,
@@ -1245,12 +1247,47 @@ export default function SidebarV2() {
       ),
     [orderedThreads],
   );
+  const threadKeyOf = useCallback(
+    (thread: EnvironmentThreadShell) =>
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+    [],
+  );
+  const isEpicRunGroupExpanded = useMemo(
+    () =>
+      createEpicRunGroupExpandedResolver<EnvironmentThreadShell>({
+        expandedByRunId: epicRunGroupExpandedByRunId,
+        activeThreadKey: routeThreadKey,
+        getThreadKey: threadKeyOf,
+      }),
+    [epicRunGroupExpandedByRunId, routeThreadKey, threadKeyOf],
+  );
+  // The rows on screen, in paint order: a collapsed run contributes none of its
+  // iterations. Numbered jump shortcuts and range select read this, so neither
+  // spends itself on rows nobody can see.
+  const visibleThreadKeys = useMemo(
+    () =>
+      sidebarRenderedThreadIds({
+        nodes: threadNodes,
+        getThreadId: threadKeyOf,
+        isEpicRunGroupExpanded,
+      }),
+    [isEpicRunGroupExpanded, threadKeyOf, threadNodes],
+  );
+  // Same order, plus the iterations of collapsed groups: previous/next steps
+  // into a folded run rather than skipping past it, and landing there expands
+  // the group.
+  const traversalThreadKeys = useMemo(
+    () => sidebarTraversalThreadIds({ nodes: threadNodes, getThreadId: threadKeyOf }),
+    [threadKeyOf, threadNodes],
+  );
   // Rows call back into the click handler without carrying the ordered list as
   // a prop — a fresh array identity per shell update would defeat every row's
   // memoization. The ref keeps shift-range-select working against the list as
   // rendered at click time.
   const orderedThreadKeysRef = useRef(orderedThreadKeys);
   orderedThreadKeysRef.current = orderedThreadKeys;
+  const visibleThreadKeysRef = useRef(visibleThreadKeys);
+  visibleThreadKeysRef.current = visibleThreadKeys;
   const threadByKey = useMemo(
     () =>
       new Map(
@@ -1301,14 +1338,14 @@ export default function SidebarV2() {
 
   const jumpLabelByKey = useMemo(() => {
     const mapping = new Map<string, string>();
-    for (const [index, threadKey] of orderedThreadKeys.entries()) {
+    for (const [index, threadKey] of visibleThreadKeys.entries()) {
       const jumpCommand = threadJumpCommandForIndex(index);
       if (!jumpCommand) break;
       const label = shortcutLabelForCommand(keybindings, jumpCommand);
       if (label) mapping.set(threadKey, label);
     }
     return mapping;
-  }, [keybindings, orderedThreadKeys]);
+  }, [keybindings, visibleThreadKeys]);
   const [showJumpHints, setShowJumpHints] = useState(false);
 
   // Settled threads are live shells, so opening one is plain navigation:
@@ -1379,7 +1416,9 @@ export default function SidebarV2() {
       }
       if (event.shiftKey) {
         event.preventDefault();
-        rangeSelectTo(threadKey, orderedThreadKeysRef.current);
+        // Paint order, visible rows only: a range that swept a collapsed run's
+        // iterations would hand a bulk archive rows the user cannot see.
+        rangeSelectTo(threadKey, visibleThreadKeysRef.current);
         return;
       }
       if (isTrailingDoubleClick(event.detail)) {
@@ -1697,7 +1736,7 @@ export default function SidebarV2() {
       if (traversalDirection !== null) {
         navigateToThreadKey(
           resolveAdjacentThreadId({
-            threadIds: orderedThreadKeys,
+            threadIds: traversalThreadKeys,
             currentThreadId: routeThreadKey,
             direction: traversalDirection,
           }),
@@ -1706,17 +1745,20 @@ export default function SidebarV2() {
       }
       const jumpIndex = threadJumpIndexFromCommand(command ?? "");
       if (jumpIndex === null) return;
-      navigateToThreadKey(orderedThreadKeys[jumpIndex] ?? null);
+      // Numbered jumps address the badges on screen, so they read the visible
+      // list — the same list `jumpLabelByKey` numbers.
+      navigateToThreadKey(visibleThreadKeys[jumpIndex] ?? null);
     };
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [
     keybindings,
     navigateToThread,
-    orderedThreadKeys,
     routeTerminalOpen,
     routeThreadKey,
     threadByKey,
+    traversalThreadKeys,
+    visibleThreadKeys,
   ]);
 
   // Same predicate as v1: hints show only while the held modifiers exactly
@@ -1934,15 +1976,7 @@ export default function SidebarV2() {
                       key={`epic-run:${node.runId}`}
                       group={node}
                       nested={node.nestedUnderThreadId !== null}
-                      expanded={resolveEpicRunGroupExpanded({
-                        status: node.status,
-                        override: epicRunGroupExpandedByRunId[node.runId],
-                        forceExpanded: sidebarNodeThreads(node).some(
-                          (thread) =>
-                            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
-                            routeThreadKey,
-                        ),
-                      })}
+                      expanded={isEpicRunGroupExpanded(node)}
                       routeThreadKey={routeThreadKey}
                       onToggle={setEpicRunGroupExpanded}
                       onOpenRun={openEpicRun}

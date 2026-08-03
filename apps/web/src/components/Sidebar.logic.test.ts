@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
+  createEpicRunGroupExpandedResolver,
   createThreadJumpHintVisibilityController,
   epicRunGroupTitle,
   epicRunIterationCountLabel,
@@ -20,6 +21,7 @@ import {
   resolveEpicRunGroupExpanded,
   resolveEpicRunStatusPill,
   resolveProjectStatusIndicator,
+  resolveRenderedSidebarThreadNodes,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
   resolveSidebarStageBadgeLabel,
@@ -28,6 +30,8 @@ import {
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
   sidebarNodeThreads,
+  sidebarRenderedThreadIds,
+  sidebarTraversalThreadIds,
   sortThreadsForSidebarV2,
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
@@ -991,6 +995,204 @@ describe("epic run group row rendering decisions", () => {
     expect(resolveEpicRunStatusPill("running")?.pulse).toBe(true);
     expect(resolveEpicRunStatusPill("done")?.pulse).toBe(false);
     expect(resolveEpicRunStatusPill(null)).toBeNull();
+  });
+});
+
+describe("keyboard and prewarm reach into collapsed run groups", () => {
+  const runId = "5b8f2c10-3d47-4e9a-9c25-71af6b0d8e43";
+  const otherRunId = "9d1c4a72-6e30-4b58-8a17-2f5be9c03d61";
+  const iterationThreadId = (index: number, id = runId) =>
+    epicRunIterationThreadId({ runId: id, iterationIndex: index });
+  const thread = (id: string) => ({ id });
+  const endedRun = {
+    runId,
+    epicId: "t3code-ypi",
+    status: "done" as const,
+    originThreadId: null,
+    threadRefs: [0, 1, 2].map((iterationIndex) => ({
+      threadId: iterationThreadId(iterationIndex),
+      issueId: `t3code-ypi.${iterationIndex + 1}`,
+      iterationIndex,
+    })),
+  };
+  const threads = [
+    thread("chat-newest"),
+    thread(iterationThreadId(0)),
+    thread(iterationThreadId(1)),
+    thread(iterationThreadId(2)),
+    thread("chat-older"),
+  ];
+  const nodes = groupEpicRunIterationThreads({ threads, runs: [endedRun] });
+  const getThreadId = (item: { id: string }) => item.id;
+  const collapsed = () => false;
+
+  it("paints one row for a collapsed run and one per iteration when expanded", () => {
+    expect(
+      sidebarRenderedThreadIds({ nodes, getThreadId, isEpicRunGroupExpanded: collapsed }),
+    ).toEqual(["chat-newest", "chat-older"]);
+    expect(
+      sidebarRenderedThreadIds({ nodes, getThreadId, isEpicRunGroupExpanded: () => true }),
+    ).toEqual([
+      "chat-newest",
+      iterationThreadId(0),
+      iterationThreadId(1),
+      iterationThreadId(2),
+      "chat-older",
+    ]);
+  });
+
+  // The decision: previous/next steps INTO a folded run. A group row is not a
+  // thread, so skipping it would leave a finished run's iterations with no
+  // keyboard route at all.
+  it("steps arrow traversal through a collapsed run's iterations, in paint order", () => {
+    const traversal = sidebarTraversalThreadIds({ nodes, getThreadId });
+    expect(traversal).toEqual([
+      "chat-newest",
+      iterationThreadId(0),
+      iterationThreadId(1),
+      iterationThreadId(2),
+      "chat-older",
+    ]);
+
+    expect(
+      resolveAdjacentThreadId({
+        threadIds: traversal,
+        currentThreadId: "chat-newest",
+        direction: "next",
+      }),
+    ).toBe(iterationThreadId(0));
+    expect(
+      resolveAdjacentThreadId({
+        threadIds: traversal,
+        currentThreadId: "chat-older",
+        direction: "previous",
+      }),
+    ).toBe(iterationThreadId(2));
+  });
+
+  // Search (the command palette) navigates straight to an iteration thread.
+  // Force-expand is what makes that match visible instead of landing the user
+  // on a row folded inside a collapsed group.
+  it("force-expands the group holding the active thread, so a search match is on screen", () => {
+    const isEpicRunGroupExpanded = createEpicRunGroupExpandedResolver<{ id: string }>({
+      expandedByRunId: {},
+      activeThreadKey: iterationThreadId(1),
+      getThreadKey: getThreadId,
+    });
+
+    expect(sidebarRenderedThreadIds({ nodes, getThreadId, isEpicRunGroupExpanded })).toEqual([
+      "chat-newest",
+      iterationThreadId(0),
+      iterationThreadId(1),
+      iterationThreadId(2),
+      "chat-older",
+    ]);
+  });
+
+  it("keeps the status default and the explicit toggle when no group holds the active thread", () => {
+    const runningGroup = groupEpicRunIterationThreads({
+      threads: [thread(iterationThreadId(0, otherRunId))],
+      runs: [{ ...endedRun, runId: otherRunId, status: "running", threadRefs: [] }],
+    })[0];
+    const isEpicRunGroupExpanded = createEpicRunGroupExpandedResolver<{ id: string }>({
+      expandedByRunId: { [runId]: true },
+      activeThreadKey: "chat-newest",
+      getThreadKey: getThreadId,
+    });
+
+    // Running: open by default. Ended but toggled open: stays open.
+    expect(runningGroup?.kind === "epic-run" && isEpicRunGroupExpanded(runningGroup)).toBe(true);
+    expect(sidebarRenderedThreadIds({ nodes, getThreadId, isEpicRunGroupExpanded }).length).toBe(5);
+  });
+
+  // A collapsed 50-iteration run used to eat the whole prewarm budget on rows
+  // nobody can see, and all nine jump numbers with it.
+  it("spends prewarm and jump numbers on the rows on screen", () => {
+    const longRun = {
+      ...endedRun,
+      threadRefs: [],
+    };
+    const manyIterations = [
+      thread("chat-newest"),
+      ...Array.from({ length: 50 }, (_, index) => thread(iterationThreadId(index))),
+      thread("chat-older"),
+    ];
+    const visible = sidebarRenderedThreadIds({
+      nodes: groupEpicRunIterationThreads({ threads: manyIterations, runs: [longRun] }),
+      getThreadId,
+      isEpicRunGroupExpanded: collapsed,
+    });
+
+    expect(visible).toEqual(["chat-newest", "chat-older"]);
+    expect(getSidebarThreadIdsToPrewarm(visible)).toEqual(["chat-newest", "chat-older"]);
+  });
+});
+
+describe("resolveRenderedSidebarThreadNodes", () => {
+  const runId = "3f6b9d24-8c15-4a70-b3e8-5d297fa10c6b";
+  const iterationThreadId = (index: number) =>
+    epicRunIterationThreadId({ runId, iterationIndex: index });
+  const run = {
+    runId,
+    epicId: "t3code-ypi",
+    status: "done" as const,
+    originThreadId: null,
+    threadRefs: [],
+  };
+  const threads = [
+    { id: "chat-1" },
+    { id: iterationThreadId(0) },
+    { id: iterationThreadId(1) },
+    { id: iterationThreadId(2) },
+    { id: "chat-2" },
+    { id: "chat-3" },
+  ];
+
+  // The whole point of folding before the limit: a long run costs one row of
+  // the preview budget, not the entire budget.
+  it("spends one preview slot on a run, whatever its iteration count", () => {
+    const { hasOverflowingThreads, nodes } = resolveRenderedSidebarThreadNodes({
+      threads,
+      runs: [run],
+      previewCount: 3,
+      isThreadListExpanded: false,
+      pinnedThreadId: null,
+    });
+
+    expect(hasOverflowingThreads).toBe(true);
+    expect(nodes.map((node) => (node.kind === "thread" ? node.thread.id : node.runId))).toEqual([
+      "chat-1",
+      runId,
+      "chat-2",
+    ]);
+  });
+
+  it("drops the limit once the thread list is expanded", () => {
+    const { nodes } = resolveRenderedSidebarThreadNodes({
+      threads,
+      runs: [run],
+      previewCount: 3,
+      isThreadListExpanded: true,
+      pinnedThreadId: null,
+    });
+
+    expect(nodes).toHaveLength(4);
+  });
+
+  // A collapsed project keeps the active row. When that row is an iteration,
+  // the whole run node stands in for it: a bare iteration row with no group
+  // above it would read as an orphan.
+  it("keeps the run node when a collapsed project pins an iteration", () => {
+    const { nodes } = resolveRenderedSidebarThreadNodes({
+      threads,
+      runs: [run],
+      previewCount: 3,
+      isThreadListExpanded: false,
+      pinnedThreadId: iterationThreadId(1),
+    });
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({ kind: "epic-run", runId });
   });
 });
 

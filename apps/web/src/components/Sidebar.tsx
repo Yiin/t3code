@@ -187,18 +187,20 @@ import { openCommandPalette } from "../commandPaletteBus";
 import {
   archiveSelectedThreadEntries,
   buildMultiSelectThreadContextMenuItems,
+  createEpicRunGroupExpandedResolver,
   epicRunGroupTitle,
   epicRunIterationCountLabel,
   epicRunIterationLabel,
   getSidebarThreadIdsToPrewarm,
-  groupEpicRunIterationThreads,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
   isTrailingDoubleClick,
-  resolveEpicRunGroupExpanded,
   resolveEpicRunStatusPill,
   resolveProjectStatusIndicator,
+  resolveRenderedSidebarThreadNodes,
   sidebarNodeThreads as nodeThreads,
+  sidebarRenderedThreadIds,
+  sidebarTraversalThreadIds,
   type SidebarEpicRunGroup,
   type SidebarThreadNode,
   resolveSidebarNewThreadSeedContext,
@@ -912,11 +914,16 @@ interface SidebarProjectThreadListProps {
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
+  /** Range-select order: the rows this panel paints, top to bottom. A collapsed
+      run's iterations are not in it — shift-clicking past a folded run must not
+      pull 50 invisible threads into a bulk archive. */
   orderedProjectThreadKeys: readonly string[];
   /** Iteration threads already folded into run groups (see
       `groupEpicRunIterationThreads`); a plain thread is its own node. */
   renderedNodes: ReadonlyArray<SidebarThreadNode<SidebarThreadSummary>>;
-  epicRunGroupExpandedByRunId: Readonly<Record<string, boolean>>;
+  /** The shared expansion rule, built once per panel so the row and the
+      derived key lists cannot disagree (`createEpicRunGroupExpandedResolver`). */
+  isEpicRunGroupExpanded: (group: SidebarEpicRunGroup<SidebarThreadSummary>) => boolean;
   setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
   openEpicRun: (group: SidebarEpicRunGroup<SidebarThreadSummary>) => void;
   showEmptyThreadState: boolean;
@@ -1201,15 +1208,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 key={`epic-run:${node.runId}`}
                 group={node}
                 nested={node.nestedUnderThreadId !== null}
-                expanded={resolveEpicRunGroupExpanded({
-                  status: node.status,
-                  override: props.epicRunGroupExpandedByRunId[node.runId],
-                  forceExpanded: nodeThreads(node).some(
-                    (thread) =>
-                      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
-                      activeRouteThreadKey,
-                  ),
-                })}
+                expanded={props.isEpicRunGroupExpanded(node)}
                 activeRouteThreadKey={activeRouteThreadKey}
                 orderedProjectThreadKeys={orderedProjectThreadKeys}
                 onToggle={props.setEpicRunGroupExpanded}
@@ -1304,6 +1303,9 @@ function SidebarProjectRunsQuery(props: {
 
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
+  /** Epic runs per environment, subscribed once at the sidebar root: the root
+      needs them to fold iteration threads the same way this panel does. */
+  epicRunsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
   newThreadShortcutLabel: string | null;
@@ -1324,6 +1326,7 @@ interface SidebarProjectItemProps {
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
     project,
+    epicRunsByEnvironment,
     isThreadListExpanded,
     activeRouteThreadKey,
     newThreadShortcutLabel,
@@ -1431,20 +1434,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
   const projectThreads = sidebarThreads;
-  const [epicRunsByEnvironment, setEpicRunsByEnvironment] = useState<
-    ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>
-  >(() => new Map());
-  const handleEpicRuns = useCallback(
-    (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => {
-      setEpicRunsByEnvironment((current) => {
-        if (current.get(environmentId) === runs) return current;
-        const next = new Map(current);
-        next.set(environmentId, runs);
-        return next;
-      });
-    },
-    [],
-  );
   const projectPreferenceKeys = useMemo(() => projectExpansionPreferenceKeys(project), [project]);
   const projectExpanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, projectPreferenceKeys),
@@ -1500,7 +1489,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     return counts;
   }, [memberProjectByScopedKey, project.memberProjects, projectThreads]);
 
-  const { projectStatus, visibleProjectThreads, orderedProjectThreadKeys } = useMemo(() => {
+  const { projectStatus, visibleProjectThreads } = useMemo(() => {
     const lastVisitedAtByThreadKey = new Map(
       projectThreads.map((thread, index) => [
         scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
@@ -1530,9 +1519,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       visibleProjectThreads.map((thread) => resolveProjectThreadStatus(thread)),
     );
     return {
-      orderedProjectThreadKeys: visibleProjectThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
       projectStatus,
       visibleProjectThreads,
     };
@@ -1550,19 +1536,21 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     );
   }, [activeRouteThreadKey, projectExpanded, visibleProjectThreads]);
 
-  // Iteration threads fold into one node per run BEFORE the preview limit is
-  // applied: a 50-iteration run must cost one row of the project's preview
-  // budget, not fill it and push every real thread behind "Show more".
   const epicRuns = useMemo(
     () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
     [epicRunsByEnvironment],
   );
-  const projectThreadNodes = useMemo(
-    () => groupEpicRunIterationThreads({ threads: visibleProjectThreads, runs: epicRuns }),
-    [epicRuns, visibleProjectThreads],
-  );
   const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
   const setEpicRunGroupExpanded = useUiStateStore((state) => state.setEpicRunGroupExpanded);
+  const isEpicRunGroupExpanded = useMemo(
+    () =>
+      createEpicRunGroupExpandedResolver<SidebarThreadSummary>({
+        expandedByRunId: epicRunGroupExpandedByRunId,
+        activeThreadKey: activeRouteThreadKey,
+        getThreadKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      }),
+    [activeRouteThreadKey, epicRunGroupExpandedByRunId],
+  );
   const openEpicRun = useCallback(
     (group: SidebarEpicRunGroup<SidebarThreadSummary>) => {
       clearSelection();
@@ -1589,6 +1577,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     hasOverflowingThreads,
     hiddenThreadStatus,
     renderedNodes,
+    renderedProjectThreadKeys,
     showEmptyThreadState,
     shouldShowThreadPanel,
   } = useMemo(() => {
@@ -1613,21 +1602,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         },
       });
     };
-    const hasOverflowingThreads = projectThreadNodes.length > sidebarThreadPreviewCount;
-    const previewNodes =
-      isThreadListExpanded || !hasOverflowingThreads
-        ? projectThreadNodes
-        : projectThreadNodes.slice(0, sidebarThreadPreviewCount);
-    // The collapsed project keeps only the active row visible. When that row is
-    // an iteration, its whole run node stands in for it — a bare iteration row
-    // with no group above it would read as an orphan.
-    const pinnedCollapsedNode =
-      pinnedCollapsedThread === null
-        ? null
-        : (projectThreadNodes.find((node) =>
-            nodeThreads(node).some((thread) => thread.id === pinnedCollapsedThread.id),
-          ) ?? null);
-    const renderedNodes = pinnedCollapsedNode ? [pinnedCollapsedNode] : previewNodes;
+    // Iteration threads fold into one node per run BEFORE the preview limit is
+    // applied: a 50-iteration run must cost one row of the project's preview
+    // budget, not fill it and push every real thread behind "Show more". The
+    // sidebar root derives its shortcut and prewarm lists from the same helper.
+    const { hasOverflowingThreads, nodes: renderedNodes } = resolveRenderedSidebarThreadNodes({
+      threads: visibleProjectThreads,
+      runs: epicRuns,
+      previewCount: sidebarThreadPreviewCount,
+      isThreadListExpanded,
+      pinnedThreadId: pinnedCollapsedThread?.id ?? null,
+    });
+    // A rendered group's iterations count as shown even while it is collapsed:
+    // the group row carries the run's own status pill, so the project header
+    // must not also flag them as hidden work.
     const renderedThreadKeys = new Set(
       renderedNodes
         .flatMap((node) => nodeThreads(node))
@@ -1643,15 +1631,24 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         hiddenThreads.map((thread) => resolveProjectThreadStatus(thread)),
       ),
       renderedNodes,
+      // Range select walks the rows on screen, so a collapsed run's iterations
+      // are out: shift-clicking past a folded run must not sweep 50 invisible
+      // threads into a bulk archive.
+      renderedProjectThreadKeys: sidebarRenderedThreadIds({
+        nodes: renderedNodes,
+        isEpicRunGroupExpanded,
+        getThreadId: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      }),
       showEmptyThreadState: projectExpanded && visibleProjectThreads.length === 0,
       shouldShowThreadPanel: projectExpanded || pinnedCollapsedThread !== null,
     };
   }, [
+    epicRuns,
     epicRunsByEnvironment,
+    isEpicRunGroupExpanded,
     isThreadListExpanded,
     pinnedCollapsedThread,
     projectExpanded,
-    projectThreadNodes,
     projectThreads,
     sidebarThreadPreviewCount,
     threadLastVisitedAts,
@@ -2549,15 +2546,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
   return (
     <>
-      {[...new Set(project.memberProjects.map((member) => member.environmentId))].map(
-        (environmentId) => (
-          <SidebarProjectRunsQuery
-            key={environmentId}
-            environmentId={environmentId}
-            onRuns={handleEpicRuns}
-          />
-        ),
-      )}
       <div className="group/project-header relative">
         <SidebarMenuButton
           ref={isManualProjectSorting ? dragHandleProps?.setActivatorNodeRef : undefined}
@@ -2669,9 +2657,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
-        orderedProjectThreadKeys={orderedProjectThreadKeys}
+        orderedProjectThreadKeys={renderedProjectThreadKeys}
         renderedNodes={renderedNodes}
-        epicRunGroupExpandedByRunId={epicRunGroupExpandedByRunId}
+        isEpicRunGroupExpanded={isEpicRunGroupExpanded}
         setEpicRunGroupExpanded={setEpicRunGroupExpanded}
         openEpicRun={openEpicRun}
         showEmptyThreadState={showEmptyThreadState}
@@ -3121,6 +3109,8 @@ interface SidebarProjectsContentProps {
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
+  /** Subscribed once at the root and handed down; see `SidebarProjectItemProps`. */
+  epicRunsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>;
   expandedThreadListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
@@ -3162,6 +3152,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     archiveThread,
     deleteThread,
     sortedProjects,
+    epicRunsByEnvironment,
     expandedThreadListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
@@ -3306,6 +3297,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     {(dragHandleProps) => (
                       <SidebarProjectItem
                         project={project}
+                        epicRunsByEnvironment={epicRunsByEnvironment}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3338,6 +3330,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarProjectListRow
                 key={project.projectKey}
                 project={project}
+                epicRunsByEnvironment={epicRunsByEnvironment}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3428,6 +3421,29 @@ export default function Sidebar() {
   const platform = navigator.platform;
   const shortcutModifiers = useShortcutModifierState();
   const { environments } = useEnvironments();
+  // One runs subscription per environment for the whole sidebar. The root needs
+  // the runs itself — jump numbers, prewarm and traversal all key off the folded
+  // row list — and every project panel used to subscribe again for the same
+  // environments.
+  const [epicRunsByEnvironment, setEpicRunsByEnvironment] = useState<
+    ReadonlyMap<EnvironmentId, ReadonlyArray<EpicRun> | null>
+  >(() => new Map());
+  const handleEpicRuns = useCallback(
+    (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => {
+      setEpicRunsByEnvironment((current) => {
+        if (current.get(environmentId) === runs) return current;
+        const next = new Map(current);
+        next.set(environmentId, runs);
+        return next;
+      });
+    },
+    [],
+  );
+  const epicRuns = useMemo(
+    () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
+    [epicRunsByEnvironment],
+  );
+  const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentLabelById = useMemo(
     () =>
@@ -3685,53 +3701,61 @@ export default function Sidebar() {
     visibleThreads,
   ]);
   const isManualProjectSorting = sidebarProjectSortOrder === "manual";
-  const visibleSidebarThreadKeys = useMemo(
-    () =>
-      sortedProjects.flatMap((project) => {
-        const projectThreads = sortThreads(
-          (threadsByProjectKey.get(project.projectKey) ?? []).filter(
-            (thread) => thread.archivedAt === null,
-          ),
-          sidebarThreadSortOrder,
-        );
-        const projectExpanded = resolveProjectExpanded(
-          projectExpandedById,
-          projectExpansionPreferenceKeys(project),
-        );
-        const activeThreadKey = routeThreadKey ?? undefined;
-        const pinnedCollapsedThread =
-          !projectExpanded && activeThreadKey
-            ? (projectThreads.find(
-                (thread) =>
-                  scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
-                  activeThreadKey,
-              ) ?? null)
-            : null;
-        const shouldShowThreadPanel = projectExpanded || pinnedCollapsedThread !== null;
-        if (!shouldShowThreadPanel) {
-          return [];
-        }
-        const isThreadListExpanded = expandedThreadListsByProject.has(project.projectKey);
-        const hasOverflowingThreads = projectThreads.length > sidebarThreadPreviewCount;
-        const previewThreads =
-          isThreadListExpanded || !hasOverflowingThreads
-            ? projectThreads
-            : projectThreads.slice(0, sidebarThreadPreviewCount);
-        const renderedThreads = pinnedCollapsedThread ? [pinnedCollapsedThread] : previewThreads;
-        return renderedThreads.map((thread) =>
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        );
-      }),
-    [
-      sidebarThreadSortOrder,
-      sidebarThreadPreviewCount,
-      expandedThreadListsByProject,
-      projectExpandedById,
-      routeThreadKey,
-      sortedProjects,
-      threadsByProjectKey,
-    ],
-  );
+  // Two lists over the same rendered rows, in paint order:
+  //  • visible — the rows on screen. Numbered jump shortcuts and prewarm use
+  //    it, so neither is spent on a collapsed run's hidden iterations.
+  //  • traversal — the same rows plus the iterations of collapsed groups, which
+  //    the previous/next shortcuts step into. Landing on one force-expands its
+  //    group, so the row is on screen when the user arrives.
+  const { traversalSidebarThreadKeys, visibleSidebarThreadKeys } = useMemo(() => {
+    const traversal: string[] = [];
+    const visible: string[] = [];
+    const getThreadId = (thread: SidebarThreadSummary) =>
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    const isEpicRunGroupExpanded = createEpicRunGroupExpandedResolver<SidebarThreadSummary>({
+      expandedByRunId: epicRunGroupExpandedByRunId,
+      activeThreadKey: routeThreadKey,
+      getThreadKey: getThreadId,
+    });
+    for (const project of sortedProjects) {
+      const projectThreads = sortThreads(
+        (threadsByProjectKey.get(project.projectKey) ?? []).filter(
+          (thread) => thread.archivedAt === null,
+        ),
+        sidebarThreadSortOrder,
+      );
+      const projectExpanded = resolveProjectExpanded(
+        projectExpandedById,
+        projectExpansionPreferenceKeys(project),
+      );
+      const pinnedCollapsedThread =
+        !projectExpanded && routeThreadKey !== null
+          ? (projectThreads.find((thread) => getThreadId(thread) === routeThreadKey) ?? null)
+          : null;
+      const shouldShowThreadPanel = projectExpanded || pinnedCollapsedThread !== null;
+      if (!shouldShowThreadPanel) continue;
+      const { nodes } = resolveRenderedSidebarThreadNodes({
+        threads: projectThreads,
+        runs: epicRuns,
+        previewCount: sidebarThreadPreviewCount,
+        isThreadListExpanded: expandedThreadListsByProject.has(project.projectKey),
+        pinnedThreadId: pinnedCollapsedThread?.id ?? null,
+      });
+      traversal.push(...sidebarTraversalThreadIds({ nodes, getThreadId }));
+      visible.push(...sidebarRenderedThreadIds({ nodes, getThreadId, isEpicRunGroupExpanded }));
+    }
+    return { traversalSidebarThreadKeys: traversal, visibleSidebarThreadKeys: visible };
+  }, [
+    epicRunGroupExpandedByRunId,
+    epicRuns,
+    sidebarThreadSortOrder,
+    sidebarThreadPreviewCount,
+    expandedThreadListsByProject,
+    projectExpandedById,
+    routeThreadKey,
+    sortedProjects,
+    threadsByProjectKey,
+  ]);
   const threadJumpCommandByKey = useMemo(() => {
     const mapping = new Map<string, NonNullable<ReturnType<typeof threadJumpCommandForIndex>>>();
     for (const [visibleThreadIndex, threadKey] of visibleSidebarThreadKeys.entries()) {
@@ -3774,7 +3798,7 @@ export default function Sidebar() {
   const visibleThreadJumpLabelByKey = showThreadJumpHints
     ? threadJumpLabelByKey
     : EMPTY_THREAD_JUMP_LABELS;
-  const orderedSidebarThreadKeys = visibleSidebarThreadKeys;
+  const orderedSidebarThreadKeys = traversalSidebarThreadKeys;
   const prewarmedSidebarThreadKeys = useMemo(
     () => getSidebarThreadIdsToPrewarm(visibleSidebarThreadKeys),
     [visibleSidebarThreadKeys],
@@ -3982,6 +4006,13 @@ export default function Sidebar() {
       {prewarmedSidebarThreadRefs.map((threadRef) => (
         <SidebarThreadDetailPrewarmer key={scopedThreadKey(threadRef)} threadRef={threadRef} />
       ))}
+      {environments.map((environment) => (
+        <SidebarProjectRunsQuery
+          key={environment.environmentId}
+          environmentId={environment.environmentId}
+          onRuns={handleEpicRuns}
+        />
+      ))}
       <SidebarChromeHeader isElectron={isElectron} />
 
       {isOnSettings ? (
@@ -4010,6 +4041,7 @@ export default function Sidebar() {
             archiveThread={archiveThread}
             deleteThread={deleteThread}
             sortedProjects={sortedProjects}
+            epicRunsByEnvironment={epicRunsByEnvironment}
             expandedThreadListsByProject={expandedThreadListsByProject}
             activeRouteProjectKey={activeRouteProjectKey}
             routeThreadKey={routeThreadKey}
