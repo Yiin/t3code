@@ -25,6 +25,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -37,6 +38,7 @@ import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { HttpServer } from "effect/unstable/http";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
@@ -64,6 +66,8 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../../auth/environmentAuthTestStub.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -383,6 +387,134 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
     assert.equal(Exit.isSuccess(closeExit), true);
     assert.equal(codex.stopAll.mock.calls.length, 1);
   }),
+);
+
+// Teardown regression net (t3code-f90.8): server shutdown is one of the
+// triggers that must keep working. The finalizer runs `runStopAll`, and the
+// three things it owns are the adapter stop, every binding landing on
+// `"stopped"`, and the MCP credentials going away.
+const mcpShutdownHttpServer = HttpServer.HttpServer.of({
+  address: { _tag: "TcpAddress", hostname: "127.0.0.1", port: 43_123 },
+  serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+});
+
+const mcpShutdownEnvironment = ServerEnvironment.ServerEnvironment.of({
+  getEnvironmentId: Effect.succeed(EnvironmentId.make("env-shutdown")),
+  getDescriptor: Effect.die("unused"),
+});
+
+it.effect("ProviderServiceLive stops every session and revokes MCP access on shutdown", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      makeAdapterRegistryMock({
+        [CODEX_DRIVER]: codex.adapter,
+        [CLAUDE_AGENT_DRIVER]: claude.adapter,
+      }),
+    );
+    const persistenceLayer = SqlitePersistenceMemory;
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(persistenceLayer),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+
+    // The directory and the MCP registry live in the outer scope so they can be
+    // read after the provider service's own scope — and therefore its
+    // finalizer — has closed.
+    const outerScope = yield* Scope.make();
+    const outerServices = yield* Layer.build(
+      Layer.mergeAll(
+        directoryLayer,
+        McpSessionRegistry.layer.pipe(
+          Layer.provide(Layer.succeed(HttpServer.HttpServer, mcpShutdownHttpServer)),
+          Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, mcpShutdownEnvironment)),
+          Layer.provide(NodeServices.layer),
+        ),
+        NodeServices.layer,
+      ),
+    ).pipe(Scope.provide(outerScope));
+
+    const directory = Context.get(outerServices, ProviderSessionDirectory.ProviderSessionDirectory);
+    const mcpRegistry = Context.get(outerServices, McpSessionRegistry.McpSessionRegistry);
+
+    const codexThreadId = asThreadId("thread-shutdown-codex");
+    const claudeThreadId = asThreadId("thread-shutdown-claude");
+
+    const providerScope = yield* Scope.make();
+    const providerServices = yield* Layer.build(
+      makeProviderServiceLiveForTest().pipe(
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(Layer.succeedContext(outerServices)),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      ),
+    ).pipe(Scope.provide(providerScope));
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(codexThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: codexThreadId,
+        cwd: "/tmp/project-shutdown-codex",
+        runtimeMode: "full-access",
+      });
+      yield* provider.startSession(claudeThreadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId: claudeThreadId,
+        cwd: "/tmp/project-shutdown-claude",
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(providerServices));
+
+    const runningBindings = yield* directory.listBindings();
+    assert.deepEqual(
+      runningBindings.map((binding) => binding.status),
+      ["running", "running"],
+    );
+
+    // Starting a session issues the thread's MCP credential, so read the token
+    // the service itself minted rather than planting one.
+    const mcpConfig = McpProviderSession.readMcpProviderSession(codexThreadId);
+    assert.equal(mcpConfig !== undefined, true);
+    const mcpToken = (mcpConfig?.authorizationHeader ?? "").replace(/^Bearer\s+/, "");
+    assert.equal(
+      yield* Effect.map(mcpRegistry.resolve(mcpToken), (scope) => scope !== undefined),
+      true,
+    );
+
+    const closeExit = yield* Scope.close(providerScope, Exit.void).pipe(Effect.exit);
+    assert.equal(Exit.isSuccess(closeExit), true);
+
+    assert.equal(codex.stopAll.mock.calls.length, 1);
+    assert.equal(claude.stopAll.mock.calls.length, 1);
+
+    const stoppedBindings = yield* directory.listBindings();
+    assert.equal(stoppedBindings.length, 2);
+    assert.deepEqual(
+      stoppedBindings.map((binding) => binding.status),
+      ["stopped", "stopped"],
+    );
+    assert.equal(yield* mcpRegistry.resolve(mcpToken), undefined);
+    assert.equal(McpProviderSession.readMcpProviderSession(codexThreadId), undefined);
+
+    yield* Scope.close(outerScope, Exit.void);
+  }).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        McpProviderSession.clearAllMcpProviderSessions();
+      }),
+    ),
+  ),
 );
 
 function makeEnvironmentAuthDouble() {
@@ -1316,6 +1448,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
   it.effect("stops stale sessions in other providers after a successful replacement start", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
       const threadId = asThreadId("thread-provider-replacement");
 
       const codexSession = yield* provider.startSession(threadId, {
@@ -1348,6 +1481,19 @@ routing.layer("ProviderServiceLive routing", (it) => {
           .filter((session) => session.threadId === threadId)
           .map((session) => session.provider),
         ["claudeAgent"],
+      );
+
+      // Divergence pinned by t3code-f90.8: the stale stop goes straight to the
+      // adapter, so it never writes a `"stopped"` binding the way
+      // `ProviderService.stopSession` does. The thread's single binding is
+      // rebound to the replacement instead. This asserts today's behaviour, not
+      // a preference — a future change that routes the stale stop through
+      // `stopSession` will land a `"stopped"` row and break this.
+      const bindings = yield* directory.listBindings();
+      const threadBindings = bindings.filter((binding) => binding.threadId === threadId);
+      assert.deepEqual(
+        threadBindings.map((binding) => `${binding.provider}:${binding.status}`),
+        ["claudeAgent:running"],
       );
     }),
   );

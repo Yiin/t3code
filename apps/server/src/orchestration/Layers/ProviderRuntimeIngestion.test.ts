@@ -361,6 +361,80 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
+  // Teardown regression net (t3code-f90.8): a dead provider must tear the
+  // session down, and a finished turn must not. The contrast is the point —
+  // conflating the two is what made the original report claim that every turn
+  // end killed the session.
+  it("stops the session on session.exited but only readies it on turn.completed", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-keepalive"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId: asTurnId("turn-keepalive-1"),
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === "turn-keepalive-1",
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-keepalive"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId: asTurnId("turn-keepalive-1"),
+      payload: { state: "completed" },
+    });
+
+    const readied = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === null && thread.session?.status !== "running",
+    );
+    // A completed turn releases the turn pointer and leaves the session alive.
+    expect(readied.session?.status).toBe("ready");
+    expect(readied.session?.lastError).toBeNull();
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-before-exit"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId: asTurnId("turn-keepalive-2"),
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === "turn-keepalive-2",
+    );
+
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-kills-session"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+    });
+
+    // A dead provider stops the session even mid-turn, and clears the pointer
+    // so the reaper's active-turn guard cannot keep the binding immortal.
+    const stopped = await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "stopped",
+    );
+    expect(stopped.session?.status).toBe("stopped");
+    expect(stopped.session?.activeTurnId).toBeNull();
+  });
+
   it("applies provider session.state.changed transitions directly", async () => {
     const harness = await createHarness();
     const waitingAt = "2026-01-01T00:00:00.000Z";
