@@ -4,10 +4,12 @@ import { ThreadId, type BeadsIssueSummary, type EpicRun } from "@t3tools/contrac
 import {
   currentEpicRunIssue,
   epicRunHistory,
+  epicRunHistoryHasRun,
   epicRunIterationCountLabel,
   epicRunIterationDuration,
   epicRunUiState,
   epicRuntimeModeLabel,
+  epicStartControl,
   formatEpicRunElapsed,
   isTerminalEpicRunStatus,
   shouldStickToBottom,
@@ -60,8 +62,32 @@ describe("epic run presentation", () => {
     // Pausing and resuming are in flight on the button, not on the run.
     [run("running"), "pausing", "running"],
     [run("paused"), "resuming", "paused"],
+    // Repeating a terminal run is a start, not a state of the old run.
+    [run("done"), "starting", "starting"],
+    [run("failed"), "starting", "starting"],
+    [run("cancelled"), "starting", "starting"],
+    // A live run cannot be started over, so a stray pending start is ignored.
+    [run("running"), "starting", "running"],
+    [run("paused"), "starting", "paused"],
   ] as const)("maps run and pending state to %s", (value, pending, expected) => {
     expect(epicRunUiState(value, pending)).toBe(expected);
+  });
+
+  it.each([
+    [null, "idle", { label: "Start run", busy: false }],
+    // Every terminal run keeps a way to run the epic again.
+    [run("done"), "stopped", { label: "Start new run", busy: false }],
+    [run("cancelled"), "stopped", { label: "Start new run", busy: false }],
+    [run("failed"), "failed", { label: "Start new run", busy: false }],
+    // A repeat holds the control in place; a first run uses the placeholder.
+    [run("done"), "starting", { label: "Starting…", busy: true }],
+    [null, "starting", null],
+    // Nothing to start while a run can still move on its own.
+    [run("running"), "running", null],
+    [run("paused"), "paused", null],
+    [run("running"), "stopping", null],
+  ] as const)("resolves the start control for %s in state %s", (value, state, expected) => {
+    expect(epicStartControl(value, state)).toEqual(expected);
   });
 
   it.each([
@@ -151,6 +177,19 @@ describe("epic run history", () => {
 
   it("reports no runs at all", () => {
     expect(epicRunHistory([], identity)).toEqual({ latest: null, prior: [] });
+  });
+
+  it("finds an acknowledged run anywhere in the history, latest or earlier", () => {
+    const older = historyRun({ runId: "run-a", updatedAt: "2026-07-29T00:00:00.000Z" });
+    const newest = historyRun({ runId: "run-b", updatedAt: "2026-07-29T02:00:00.000Z" });
+    const history = epicRunHistory([older, newest], identity);
+
+    expect(epicRunHistoryHasRun(history, "run-b")).toBe(true);
+    // A launch can answer with an already-active earlier run, so a pending
+    // start must still resolve on that one.
+    expect(epicRunHistoryHasRun(history, "run-a")).toBe(true);
+    expect(epicRunHistoryHasRun(history, "run-c")).toBe(false);
+    expect(epicRunHistoryHasRun({ latest: null, prior: [] }, "run-a")).toBe(false);
   });
 
   it("selects a running issue over a newer settled iteration", () => {

@@ -34,7 +34,11 @@ export function epicRunUiState(
   run: EpicRun | null,
   pending: EpicRunPendingAction | null,
 ): EpicRunUiState {
-  if (pending === "starting" && run === null) return "starting";
+  // A start is in flight either from a never-run epic or from a terminal one —
+  // repeating a finished run is a start too, not a state of the old run.
+  if (pending === "starting" && (run === null || isTerminalEpicRunStatus(run.status))) {
+    return "starting";
+  }
   if (pending === "stopping" && run !== null && !isTerminalEpicRunStatus(run.status)) {
     return "stopping";
   }
@@ -45,6 +49,33 @@ export function epicRunUiState(
   if (run.status === "paused") return "paused";
   if (run.status === "failed") return "failed";
   return "stopped";
+}
+
+export interface EpicStartControl {
+  readonly label: string;
+  /** A start the server has not acknowledged yet — the control cannot fire. */
+  readonly busy: boolean;
+}
+
+/**
+ * The start control for the run header, or null when starting is impossible.
+ *
+ * A terminal run can be repeated: `EpicRunStatus` has no path out of
+ * done/failed/cancelled, so a new run is the only way to run the epic again,
+ * and without this the epic could be started exactly once from the browser.
+ * A live run (running, paused, stopping) offers no start — pause, resume, and
+ * stop are the controls that apply there.
+ */
+export function epicStartControl(
+  run: EpicRun | null,
+  state: EpicRunUiState,
+): EpicStartControl | null {
+  if (state === "idle") return { label: "Start run", busy: false };
+  if (state === "stopped" || state === "failed") return { label: "Start new run", busy: false };
+  // A never-run epic shows the standalone "Starting run…" placeholder instead,
+  // so only a repeat needs the control to stay put and go busy.
+  if (state === "starting" && run !== null) return { label: "Starting…", busy: true };
+  return null;
 }
 
 export interface EpicRunHistory {
@@ -69,6 +100,16 @@ export function epicRunHistory(
     return left.runId < right.runId ? 1 : -1;
   });
   return { latest: ordered[0] ?? null, prior: ordered.slice(1) };
+}
+
+/**
+ * Has the run the server acknowledged reached the client's history yet? A
+ * launch answers with the run it started — or with an already-active run it
+ * found instead — so the pending start clears on that exact run appearing,
+ * never on "some run exists" (which is already true for a repeat).
+ */
+export function epicRunHistoryHasRun(history: EpicRunHistory, runId: string): boolean {
+  return history.latest?.runId === runId || history.prior.some((run) => run.runId === runId);
 }
 
 export function epicRunIterationCountLabel(count: number): string {

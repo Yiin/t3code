@@ -34,10 +34,12 @@ import {
 import {
   currentEpicRunIssue,
   epicRunHistory,
+  epicRunHistoryHasRun,
   epicRunIterationCountLabel,
   epicRunIterationDuration,
   epicRunUiState,
   epicRuntimeModeLabel,
+  epicStartControl,
   formatEpicRunElapsed,
   isTerminalEpicRunStatus,
   shouldStickToBottom,
@@ -289,14 +291,26 @@ function EpicRunSection(props: {
   const resumeRun = useAtomCommand(epicsEnvironment.resumeRun, { reportFailure: false });
   const stopRun = useAtomCommand(epicsEnvironment.stopRun, { reportFailure: false });
   const [pending, setPending] = useState<EpicRunPendingAction | null>(null);
+  // The run a launch answered with, awaited so a repeat's pending start clears
+  // on the new run arriving rather than on the old terminal one still being there.
+  const [startedRunId, setStartedRunId] = useState<string | null>(null);
   const run = props.history.latest;
   const state = epicRunUiState(run, pending);
+  const startControl = epicStartControl(run, state);
   const terminal = run !== null && isTerminalEpicRunStatus(run.status);
   const elapsed = useElapsed(run?.createdAt ?? null, terminal ? (run?.updatedAt ?? null) : null);
   const current = run ? currentEpicRunIssue(run, props.issues) : null;
+  const history = props.history;
 
   useEffect(() => {
-    if (pending === "starting" && run !== null) setPending(null);
+    if (
+      pending === "starting" &&
+      startedRunId !== null &&
+      epicRunHistoryHasRun(history, startedRunId)
+    ) {
+      setPending(null);
+      setStartedRunId(null);
+    }
     if (pending === "stopping" && run !== null && isTerminalEpicRunStatus(run.status)) {
       setPending(null);
     }
@@ -304,7 +318,7 @@ function EpicRunSection(props: {
     // on, including when it ends underneath them.
     if (pending === "pausing" && run?.status !== "running") setPending(null);
     if (pending === "resuming" && run?.status !== "paused") setPending(null);
-  }, [pending, run]);
+  }, [history, pending, run, startedRunId]);
 
   const reportFailure = (title: string, result: AtomCommandResult<unknown, unknown>) => {
     if (isAtomCommandInterrupted(result)) return;
@@ -319,8 +333,9 @@ function EpicRunSection(props: {
     );
   };
   const start = () => {
-    if (state !== "idle") return;
+    if (startControl === null || startControl.busy) return;
     setPending("starting");
+    setStartedRunId(null);
     void launchRun({
       environmentId: props.environmentId as EnvironmentId,
       input: {
@@ -329,7 +344,10 @@ function EpicRunSection(props: {
         cwd: props.source.workspaceRoot,
       },
     }).then((result) => {
-      if (result._tag === "Success") return;
+      if (result._tag === "Success") {
+        setStartedRunId(result.value.runId);
+        return;
+      }
       setPending(null);
       reportFailure("Could not start run", result);
     });
@@ -382,14 +400,18 @@ function EpicRunSection(props: {
         <h2 id="run-heading" className="text-lg font-semibold">
           Run
         </h2>
-        {state === "idle" ? (
-          <Button size="xl" disabled={pending !== null} onClick={start}>
-            <PlayIcon />
-            Start run
+        {startControl ? (
+          <Button size="xl" disabled={startControl.busy} onClick={start}>
+            {startControl.busy ? (
+              <LoaderIcon className="animate-spin motion-reduce:animate-none" />
+            ) : (
+              <PlayIcon />
+            )}
+            {startControl.label}
           </Button>
         ) : null}
       </div>
-      {state === "starting" ? (
+      {state === "starting" && run === null ? (
         <div className="flex min-h-20 items-center gap-2 rounded-xl border px-4 text-sm">
           <LoaderIcon className="size-4 animate-spin motion-reduce:animate-none" />
           Starting run…
