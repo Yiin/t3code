@@ -147,6 +147,29 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings idle auto-settle window", () => {
+  it("defaults to three days for configs written before the setting existed", () => {
+    expect(decodeServerSettings({}).threadAutoSettleAfterDays).toBe(3);
+  });
+
+  it("accepts null as the disabled window", () => {
+    expect(
+      decodeServerSettings({ threadAutoSettleAfterDays: null }).threadAutoSettleAfterDays,
+    ).toBe(null);
+    expect(
+      decodeServerSettingsPatch({ threadAutoSettleAfterDays: null }).threadAutoSettleAfterDays,
+    ).toBe(null);
+  });
+
+  it("rejects a window outside one to ninety days", () => {
+    expect(() => decodeServerSettings({ threadAutoSettleAfterDays: 0 })).toThrow();
+    expect(() => decodeServerSettings({ threadAutoSettleAfterDays: 91 })).toThrow();
+    expect(decodeServerSettings({ threadAutoSettleAfterDays: 90 }).threadAutoSettleAfterDays).toBe(
+      90,
+    );
+  });
+});
+
 describe("ServerSettings skills root", () => {
   it("defaults to a resolved path and accepts patches", () => {
     const settings = decodeServerSettings({});

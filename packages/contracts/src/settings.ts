@@ -423,6 +423,22 @@ const runtimeHomeDirectory = (
 export const DEFAULT_SKILLS_ROOT =
   runtimeHomeDirectory?.startsWith("/") === true ? `${runtimeHomeDirectory}/.agents/skills` : "";
 
+// The idle auto-settle window, in days. Same semantics as the per-device
+// `sidebarAutoSettleAfterDays` it replaces — `null` disables auto-settle, any
+// other value is a whole-day window — but this one lives on the server,
+// because the sweeper that acts on it runs there and no client may be
+// connected when a thread goes idle.
+export const MIN_THREAD_AUTO_SETTLE_AFTER_DAYS = 1;
+export const MAX_THREAD_AUTO_SETTLE_AFTER_DAYS = 90;
+export const ThreadAutoSettleAfterDays = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_AUTO_SETTLE_AFTER_DAYS,
+    maximum: MAX_THREAD_AUTO_SETTLE_AFTER_DAYS,
+  }),
+);
+export type ThreadAutoSettleAfterDays = typeof ThreadAutoSettleAfterDays.Type;
+export const DEFAULT_THREAD_AUTO_SETTLE_AFTER_DAYS: ThreadAutoSettleAfterDays = 3;
+
 export const ServerSettings = Schema.Struct({
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -436,6 +452,9 @@ export const ServerSettings = Schema.Struct({
   ),
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  threadAutoSettleAfterDays: Schema.NullOr(ThreadAutoSettleAfterDays).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_AUTO_SETTLE_AFTER_DAYS)),
   ),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   skillsRoot: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SKILLS_ROOT))),
@@ -577,6 +596,7 @@ export const ServerSettingsPatch = Schema.Struct({
   automaticGitFetchInterval: Schema.optionalKey(Schema.DurationFromMillis),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
+  threadAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(ThreadAutoSettleAfterDays)),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
   skillsRoot: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),

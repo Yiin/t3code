@@ -147,6 +147,15 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   latestCheckpointTurnCount: Schema.NullOr(NonNegativeInt),
   toCheckpointRef: Schema.NullOr(CheckpointRef),
 });
+const AutoSettleCandidateLookupInput = Schema.Struct({
+  idleBefore: IsoDateTime,
+  limit: NonNegativeInt,
+});
+const ProjectionAutoSettleCandidateRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  lastActivityAt: IsoDateTime,
+});
 
 const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -1127,6 +1136,51 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND threads.deleted_at IS NULL
           AND threads.archived_at IS NULL
         LIMIT 1
+      `,
+  });
+
+  // `MAX(a, b, ...)` with more than one argument is SQLite's scalar max, not
+  // the aggregate, so this needs no GROUP BY. Every argument is coalesced to
+  // the empty string because scalar MAX returns NULL if any argument is NULL,
+  // and '' sorts below every ISO timestamp — so an all-NULL row yields '',
+  // which the outer WHERE rejects. Comparing timestamps as text matches the
+  // rest of this module (see `maxIso`).
+  const listAutoSettleCandidateRows = SqlSchema.findAll({
+    Request: AutoSettleCandidateLookupInput,
+    Result: ProjectionAutoSettleCandidateRowSchema,
+    execute: ({ idleBefore, limit }) =>
+      sql`
+        SELECT
+          "threadId",
+          "projectId",
+          "lastActivityAt"
+        FROM (
+          SELECT
+            threads.thread_id AS "threadId",
+            threads.project_id AS "projectId",
+            MAX(
+              COALESCE(threads.latest_user_message_at, ''),
+              COALESCE(turns.requested_at, ''),
+              COALESCE(turns.started_at, ''),
+              COALESCE(turns.completed_at, '')
+            ) AS "lastActivityAt"
+          FROM projection_threads threads
+          LEFT JOIN projection_thread_sessions sessions
+            ON sessions.thread_id = threads.thread_id
+          LEFT JOIN projection_turns turns
+            ON turns.thread_id = threads.thread_id
+            AND turns.turn_id = threads.latest_turn_id
+          WHERE threads.deleted_at IS NULL
+            AND threads.archived_at IS NULL
+            AND threads.settled_override IS NULL
+            AND threads.pending_approval_count = 0
+            AND threads.pending_user_input_count = 0
+            AND (sessions.status IS NULL OR sessions.status NOT IN ('starting', 'running'))
+        )
+        WHERE "lastActivityAt" <> ''
+          AND "lastActivityAt" < ${idleBefore}
+        ORDER BY "lastActivityAt" ASC, "threadId" ASC
+        LIMIT ${limit}
       `,
   });
 
@@ -2113,6 +2167,19 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       } satisfies OrchestrationThreadShell);
     });
 
+  const listAutoSettleCandidates: ProjectionSnapshotQueryShape["listAutoSettleCandidates"] = (
+    input,
+  ) =>
+    listAutoSettleCandidateRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listAutoSettleCandidates:query",
+          "ProjectionSnapshotQuery.listAutoSettleCandidates:decodeRows",
+        ),
+      ),
+      Effect.withSpan("ProjectionSnapshotQuery.listAutoSettleCandidates"),
+    );
+
   /**
    * The SQL half of a thread-detail read: every statement it needs, and not one
    * byte of decoding.
@@ -2337,6 +2404,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,
+    listAutoSettleCandidates,
     getThreadDetailById,
     getThreadDetailSnapshot,
   } satisfies ProjectionSnapshotQueryShape;

@@ -435,6 +435,7 @@ function createHarness(input: {
           hasActionableProposedPlan: false,
         });
       }),
+    listAutoSettleCandidates: () => Effect.succeed([]),
     getThreadDetailById: () => Effect.die("unused"),
     getThreadDetailSnapshot: (threadId) =>
       Effect.sync(() => {

@@ -42,6 +42,20 @@ export interface ProjectionThreadCheckpointContext {
   readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
 }
 
+/**
+ * One thread the idle auto-settle sweeper may settle.
+ *
+ * Deliberately not an `OrchestrationThreadShell`: every reason to refuse a
+ * settle is already applied in SQL, so the sweeper needs nothing but the id to
+ * dispatch on and the activity timestamp to log. Returning a shell would mean
+ * hydrating a session and a latest turn the caller never reads.
+ */
+export interface ProjectionAutoSettleCandidate {
+  readonly threadId: ThreadId;
+  readonly projectId: ProjectId;
+  readonly lastActivityAt: string;
+}
+
 export interface ProjectionFullThreadDiffContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
@@ -166,6 +180,29 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadShellById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * List the threads an idle auto-settle sweep may settle.
+   *
+   * Every blocker the settled partition applies is applied here in SQL, so a
+   * returned row is already a settle candidate: not deleted, not archived, no
+   * settled override (neither the "settled" the runner or a user already set
+   * nor the "active" pin that means keep it), no pending approval or
+   * user-input request, no starting/running session, and a last activity
+   * timestamp — the newest of the latest user message and the latest turn's
+   * requested/started/completed times — that exists and predates
+   * `idleBefore`. A thread with no activity at all is never a candidate.
+   *
+   * The decider still adjudicates each settle: this narrows the sweep, it does
+   * not replace the command's guards.
+   *
+   * @param limit - Maximum rows to return, so one sweep of a long-neglected
+   *   database cannot dispatch unboundedly many commands.
+   */
+  readonly listAutoSettleCandidates: (input: {
+    readonly idleBefore: string;
+    readonly limit: number;
+  }) => Effect.Effect<ReadonlyArray<ProjectionAutoSettleCandidate>, ProjectionRepositoryError>;
 
   /**
    * Read a single active thread detail snapshot by id.

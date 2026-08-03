@@ -137,6 +137,175 @@ const insertFillerActivities = (count: number) =>
     `;
   });
 
+/**
+ * Timestamps for the auto-settle candidate reads. The window is three days
+ * wide, so `AUTO_SETTLE_STALE` sits one millisecond outside it and
+ * `AUTO_SETTLE_FRESH` well inside it — the same boundary the client rule's
+ * truth table uses.
+ */
+const AUTO_SETTLE_CUTOFF = "2026-04-07T00:00:00.000Z";
+const AUTO_SETTLE_FRESH = "2026-04-09T00:00:00.000Z";
+const AUTO_SETTLE_STALE = "2026-04-06T23:59:59.999Z";
+
+interface AutoSettleThreadFixture {
+  readonly threadId: string;
+  readonly settledOverride: "settled" | "active" | null;
+  /** The latest turn's `requestedAt`, or no turn at all when null. */
+  readonly activityAt: string | null;
+  readonly sessionStatus: "starting" | "running" | "ready" | null;
+  readonly pending: "approval" | "user-input" | null;
+  readonly archived?: boolean;
+  readonly deleted?: boolean;
+  readonly latestUserMessageAt?: string | null;
+}
+
+/** One project plus a thread (and optional session and latest turn) per fixture. */
+const seedAutoSettleFixtures = (fixtures: ReadonlyArray<AutoSettleThreadFixture>) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`DELETE FROM projection_projects`;
+    yield* sql`DELETE FROM projection_threads`;
+    yield* sql`DELETE FROM projection_thread_sessions`;
+    yield* sql`DELETE FROM projection_turns`;
+
+    yield* sql`
+      INSERT INTO projection_projects (
+        project_id,
+        title,
+        workspace_root,
+        default_model_selection_json,
+        scripts_json,
+        created_at,
+        updated_at,
+        deleted_at
+      )
+      VALUES (
+        'project-auto-settle',
+        'Auto Settle',
+        '/tmp/project-auto-settle',
+        '{"provider":"codex","model":"gpt-5-codex"}',
+        '[]',
+        '2026-04-01T00:00:00.000Z',
+        '2026-04-01T00:00:00.000Z',
+        NULL
+      )
+    `;
+
+    for (const fixture of fixtures) {
+      const turnId = fixture.activityAt === null ? null : `turn-${fixture.threadId}`;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          archived_at,
+          settled_override,
+          settled_at,
+          deleted_at
+        )
+        VALUES (
+          ${fixture.threadId},
+          'project-auto-settle',
+          ${`Thread ${fixture.threadId}`},
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          ${turnId},
+          ${fixture.latestUserMessageAt ?? null},
+          ${fixture.pending === "approval" ? 1 : 0},
+          ${fixture.pending === "user-input" ? 1 : 0},
+          0,
+          '2026-04-01T00:00:00.000Z',
+          '2026-04-01T00:00:00.000Z',
+          ${fixture.archived === true ? "2026-04-02T00:00:00.000Z" : null},
+          ${fixture.settledOverride},
+          ${fixture.settledOverride === "settled" ? "2026-04-02T00:00:00.000Z" : null},
+          ${fixture.deleted === true ? "2026-04-02T00:00:00.000Z" : null}
+        )
+      `;
+
+      if (fixture.sessionStatus !== null) {
+        yield* sql`
+          INSERT INTO projection_thread_sessions (
+            thread_id,
+            status,
+            provider_name,
+            provider_session_id,
+            provider_thread_id,
+            runtime_mode,
+            active_turn_id,
+            last_error,
+            updated_at
+          )
+          VALUES (
+            ${fixture.threadId},
+            ${fixture.sessionStatus},
+            'codex',
+            NULL,
+            NULL,
+            'full-access',
+            NULL,
+            NULL,
+            '2026-04-02T00:00:00.000Z'
+          )
+        `;
+      }
+
+      if (turnId !== null) {
+        yield* sql`
+          INSERT INTO projection_turns (
+            thread_id,
+            turn_id,
+            pending_message_id,
+            source_proposed_plan_thread_id,
+            source_proposed_plan_id,
+            assistant_message_id,
+            state,
+            requested_at,
+            started_at,
+            completed_at,
+            checkpoint_turn_count,
+            checkpoint_ref,
+            checkpoint_status,
+            checkpoint_files_json
+          )
+          VALUES (
+            ${fixture.threadId},
+            ${turnId},
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            'completed',
+            ${fixture.activityAt},
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            '[]'
+          )
+        `;
+      }
+    }
+  });
+
 /** Sets every projector's applied sequence to `sequence`. */
 const setProjectionStateSequence = (sequence: number) =>
   Effect.gen(function* () {
@@ -2438,6 +2607,161 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       // 104 — the snapshot above was consistent, not merely early.
       const afterSnapshot = yield* snapshotQuery.getSnapshotSequence();
       assert.equal(afterSnapshot.snapshotSequence, 104);
+    }),
+  );
+
+  // The server rule that replaces the client's idle auto-settle must agree
+  // with it row for row, so this walks the same truth table
+  // (packages/client-runtime/src/state/threadSettled.test.ts) minus the PR
+  // dimension, which this query deliberately does not decide.
+  it.effect("returns only the threads the settled partition lets an idle sweep settle", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      const truthTable = (["settled", "active", null] as const).flatMap((settledOverride) =>
+        [AUTO_SETTLE_FRESH, AUTO_SETTLE_STALE, null].flatMap((activityAt) =>
+          (["starting", "running", "ready", null] as const).flatMap((sessionStatus) =>
+            (["approval", "user-input", null] as const).map((pending, pendingIndex) => ({
+              settledOverride,
+              activityAt,
+              sessionStatus,
+              pending,
+              key: `${settledOverride}-${activityAt}-${sessionStatus}-${pendingIndex}`,
+              // A candidate iff nothing blocks: no override in either
+              // direction, idle past the cutoff, no live-or-waking session,
+              // and no request waiting on the user.
+              expected:
+                settledOverride === null &&
+                activityAt === AUTO_SETTLE_STALE &&
+                sessionStatus !== "starting" &&
+                sessionStatus !== "running" &&
+                pending === null,
+            })),
+          ),
+        ),
+      );
+
+      const fixtures = truthTable.map((row, index) => ({
+        threadId: `thread-auto-settle-${index}`,
+        settledOverride: row.settledOverride,
+        activityAt: row.activityAt,
+        sessionStatus: row.sessionStatus,
+        pending: row.pending,
+      }));
+      // Archived and deleted threads are gone from the sidebar and from the
+      // sweep, whatever their activity says.
+      const excludedByTombstone = [
+        {
+          threadId: "thread-auto-settle-archived",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: null,
+          pending: null,
+          archived: true,
+        },
+        {
+          threadId: "thread-auto-settle-deleted",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: null,
+          pending: null,
+          deleted: true,
+        },
+      ] as const satisfies ReadonlyArray<AutoSettleThreadFixture>;
+
+      yield* seedAutoSettleFixtures([...fixtures, ...excludedByTombstone]);
+
+      const candidates = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: AUTO_SETTLE_CUTOFF,
+        limit: 1_000,
+      });
+
+      const expectedThreadIds = truthTable
+        .map((row, index) => (row.expected ? `thread-auto-settle-${index}` : null))
+        .filter((threadId): threadId is string => threadId !== null)
+        .toSorted();
+      assert.deepEqual(
+        candidates.map((candidate) => candidate.threadId).toSorted(),
+        expectedThreadIds,
+      );
+      // A non-empty expectation, so a query that returns nothing at all cannot
+      // pass this by matching an empty list.
+      assert.isAtLeast(expectedThreadIds.length, 2);
+      assert.deepEqual(
+        [...new Set(candidates.map((candidate) => candidate.projectId))],
+        [ProjectId.make("project-auto-settle")],
+      );
+    }),
+  );
+
+  it.effect("dates a candidate by its newest user message or latest-turn timestamp", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedAutoSettleFixtures([
+        // Turn timestamps are stale but the user message is not: the thread is
+        // active, exactly as `threadLastActivityAt` maxes the four candidates.
+        {
+          threadId: "thread-activity-message-fresh",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: null,
+          pending: null,
+          latestUserMessageAt: AUTO_SETTLE_FRESH,
+        },
+        // The mirror image: an old message, an idle turn, so it is a candidate
+        // dated by the newer of the two.
+        {
+          threadId: "thread-activity-both-stale",
+          settledOverride: null,
+          activityAt: "2026-04-05T00:00:00.000Z",
+          sessionStatus: null,
+          pending: null,
+          latestUserMessageAt: AUTO_SETTLE_STALE,
+        },
+        // No turn, only a message.
+        {
+          threadId: "thread-activity-message-only",
+          settledOverride: null,
+          activityAt: null,
+          sessionStatus: null,
+          pending: null,
+          latestUserMessageAt: "2026-04-04T00:00:00.000Z",
+        },
+        // No activity at all is never a candidate — the client rule returns
+        // false for a null last activity rather than treating epoch zero as
+        // infinitely idle.
+        {
+          threadId: "thread-activity-none",
+          settledOverride: null,
+          activityAt: null,
+          sessionStatus: null,
+          pending: null,
+        },
+      ]);
+
+      const candidates = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: AUTO_SETTLE_CUTOFF,
+        limit: 1_000,
+      });
+
+      // Oldest first, so a limited sweep settles the most neglected threads.
+      assert.deepEqual(
+        candidates.map((candidate) => [candidate.threadId, candidate.lastActivityAt]),
+        [
+          [ThreadId.make("thread-activity-message-only"), "2026-04-04T00:00:00.000Z"],
+          [ThreadId.make("thread-activity-both-stale"), AUTO_SETTLE_STALE],
+        ],
+      );
+
+      const limited = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: AUTO_SETTLE_CUTOFF,
+        limit: 1,
+      });
+      assert.deepEqual(
+        limited.map((candidate) => candidate.threadId),
+        [ThreadId.make("thread-activity-message-only")],
+      );
     }),
   );
 });
