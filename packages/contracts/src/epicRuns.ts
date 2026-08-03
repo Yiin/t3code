@@ -124,10 +124,37 @@ export const EpicRunRef = Schema.Struct({
 });
 export type EpicRunRef = typeof EpicRunRef.Type;
 
+/**
+ * How a run listing is ordered.
+ *
+ * `createdAt-asc` is the default because the runner's restart read depends on
+ * it: it lists `running` rows and resumes them in the order they were created.
+ * `updatedAt-desc` is what a recency-first UI wants, and is the only order a
+ * `limit` is meaningful with.
+ */
+export const EpicRunListOrder = Schema.Literals(["createdAt-asc", "updatedAt-desc"]);
+export type EpicRunListOrder = typeof EpicRunListOrder.Type;
+
 export const ListEpicRunsInput = Schema.Struct({
   status: Schema.optional(EpicRunStatus),
+  /** Omitted means every matching run, which is what every caller did before. */
+  limit: Schema.optional(PositiveInt),
+  orderBy: Schema.optional(EpicRunListOrder),
 });
 export type ListEpicRunsInput = typeof ListEpicRunsInput.Type;
+
+/**
+ * `ListEpicRunsInput` for a no-body HTTP endpoint, where every field arrives as
+ * a query string. Same decoded shape — only `limit` needs the string codec.
+ */
+export const ListEpicRunsQuery = Schema.Struct({
+  status: Schema.optional(EpicRunStatus),
+  limit: Schema.optional(
+    Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  ),
+  orderBy: Schema.optional(EpicRunListOrder),
+});
+export type ListEpicRunsQuery = typeof ListEpicRunsQuery.Type;
 
 export const EpicRunEvent = Schema.Struct({
   version: Schema.Literal(1),

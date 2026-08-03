@@ -15,11 +15,12 @@ import {
 import {
   EpicRun,
   EpicRunIteration,
-  EpicRunStatus,
   EpicRunStore,
   GetEpicRunInput,
   GetLatestEpicRunIterationInput,
   ListEpicRunIterationsInput,
+  ListEpicRunsInput,
+  ListRecentEpicRunIterationsInput,
   UpdateEpicRunIterationInput,
   type EpicRunStoreShape,
 } from "../Services/EpicRuns.ts";
@@ -28,10 +29,6 @@ const EpicRunDbRow = EpicRun.mapFields(
   Struct.assign({ modelSelection: Schema.fromJsonString(ModelSelection) }),
 );
 type EpicRunDbRow = typeof EpicRunDbRow.Type;
-
-const ListEpicRunsByStatusRequest = Schema.Struct({
-  status: EpicRunStatus,
-});
 
 /**
  * Discriminate a schema failure from a SQL failure so both members of
@@ -119,88 +116,55 @@ const makeEpicRunStore = Effect.gen(function* () {
       `,
   });
 
+  const epicRunColumns = sql.literal(`
+    run_id AS "runId",
+    epic_id AS "epicId",
+    project_id AS "projectId",
+    cwd,
+    prompt,
+    model_selection_json AS "modelSelection",
+    runtime_mode AS "runtimeMode",
+    origin_thread_id AS "originThreadId",
+    status,
+    max_iterations AS "maxIterations",
+    iterations_completed AS "iterationsCompleted",
+    current_thread_id AS "currentThreadId",
+    current_turn_started_at AS "currentTurnStartedAt",
+    consecutive_failures AS "consecutiveFailures",
+    last_error AS "lastError",
+    created_at AS "createdAt",
+    updated_at AS "updatedAt"
+  `);
+
   const getEpicRunRow = SqlSchema.findOneOption({
     Request: GetEpicRunInput,
     Result: EpicRunDbRow,
     execute: ({ runId }) =>
       sql`
-        SELECT
-          run_id AS "runId",
-          epic_id AS "epicId",
-          project_id AS "projectId",
-          cwd,
-          prompt,
-          model_selection_json AS "modelSelection",
-          runtime_mode AS "runtimeMode",
-          origin_thread_id AS "originThreadId",
-          status,
-          max_iterations AS "maxIterations",
-          iterations_completed AS "iterationsCompleted",
-          current_thread_id AS "currentThreadId",
-          current_turn_started_at AS "currentTurnStartedAt",
-          consecutive_failures AS "consecutiveFailures",
-          last_error AS "lastError",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
+        SELECT ${epicRunColumns}
         FROM epic_runs
         WHERE run_id = ${runId}
       `,
   });
 
-  const listEpicRunRows = SqlSchema.findAll({
-    Request: Schema.Void,
-    Result: EpicRunDbRow,
-    execute: () =>
-      sql`
-        SELECT
-          run_id AS "runId",
-          epic_id AS "epicId",
-          project_id AS "projectId",
-          cwd,
-          prompt,
-          model_selection_json AS "modelSelection",
-          runtime_mode AS "runtimeMode",
-          origin_thread_id AS "originThreadId",
-          status,
-          max_iterations AS "maxIterations",
-          iterations_completed AS "iterationsCompleted",
-          current_thread_id AS "currentThreadId",
-          current_turn_started_at AS "currentTurnStartedAt",
-          consecutive_failures AS "consecutiveFailures",
-          last_error AS "lastError",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
-        FROM epic_runs
-        ORDER BY created_at ASC, run_id ASC
-      `,
-  });
+  // Ordering and the limit are structure, not values, so they are literal
+  // fragments chosen from a closed set rather than bound parameters. `status`
+  // and `limit` stay bound.
+  const epicRunOrderClause = (orderBy: ListEpicRunsInput["orderBy"]) =>
+    orderBy === "updatedAt-desc"
+      ? sql.literal(`ORDER BY updated_at DESC, run_id DESC`)
+      : sql.literal(`ORDER BY created_at ASC, run_id ASC`);
 
-  const listEpicRunRowsByStatus = SqlSchema.findAll({
-    Request: ListEpicRunsByStatusRequest,
+  const listEpicRunRows = SqlSchema.findAll({
+    Request: ListEpicRunsInput,
     Result: EpicRunDbRow,
-    execute: ({ status }) =>
+    execute: ({ status, limit, orderBy }) =>
       sql`
-        SELECT
-          run_id AS "runId",
-          epic_id AS "epicId",
-          project_id AS "projectId",
-          cwd,
-          prompt,
-          model_selection_json AS "modelSelection",
-          runtime_mode AS "runtimeMode",
-          origin_thread_id AS "originThreadId",
-          status,
-          max_iterations AS "maxIterations",
-          iterations_completed AS "iterationsCompleted",
-          current_thread_id AS "currentThreadId",
-          current_turn_started_at AS "currentTurnStartedAt",
-          consecutive_failures AS "consecutiveFailures",
-          last_error AS "lastError",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
+        SELECT ${epicRunColumns}
         FROM epic_runs
-        WHERE status = ${status}
-        ORDER BY created_at ASC, run_id ASC
+        ${status === undefined ? sql.literal("") : sql`WHERE status = ${status}`}
+        ${epicRunOrderClause(orderBy)}
+        ${limit === undefined ? sql.literal("") : sql`LIMIT ${limit}`}
       `,
   });
 
@@ -248,24 +212,55 @@ const makeEpicRunStore = Effect.gen(function* () {
       `,
   });
 
+  const iterationColumns = sql.literal(`
+    run_id AS "runId",
+    iteration_index AS "iterationIndex",
+    thread_id AS "threadId",
+    issue_id AS "issueId",
+    turn_status AS "turnStatus",
+    summary,
+    why,
+    started_at AS "startedAt",
+    finished_at AS "finishedAt"
+  `);
+
   const listEpicRunIterationRows = SqlSchema.findAll({
     Request: ListEpicRunIterationsInput,
     Result: EpicRunIteration,
     execute: ({ runId }) =>
       sql`
-        SELECT
-          run_id AS "runId",
-          iteration_index AS "iterationIndex",
-          thread_id AS "threadId",
-          issue_id AS "issueId",
-          turn_status AS "turnStatus",
-          summary,
-          why,
-          started_at AS "startedAt",
-          finished_at AS "finishedAt"
+        SELECT ${iterationColumns}
         FROM epic_run_iterations
         WHERE run_id = ${runId}
         ORDER BY iteration_index ASC
+      `,
+  });
+
+  /**
+   * One query for many runs, capped per run by a window function so a run with
+   * a thousand iterations cannot dominate the result set.
+   *
+   * `run_id IN (...)` binds one parameter per id, so the caller must keep the
+   * batch under SQLite's variable limit — `listRuns` bounds it via `limit`.
+   */
+  const listRecentEpicRunIterationRows = SqlSchema.findAll({
+    Request: ListRecentEpicRunIterationsInput,
+    Result: EpicRunIteration,
+    execute: ({ runIds, limitPerRun }) =>
+      sql`
+        SELECT ${iterationColumns}
+        FROM (
+          SELECT
+            *,
+            ROW_NUMBER() OVER (
+              PARTITION BY run_id
+              ORDER BY iteration_index DESC
+            ) AS recency_rank
+          FROM epic_run_iterations
+          WHERE ${sql.in("run_id", runIds)}
+        )
+        WHERE recency_rank <= ${limitPerRun}
+        ORDER BY run_id ASC, iteration_index ASC
       `,
   });
 
@@ -274,16 +269,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     Result: EpicRunIteration,
     execute: ({ runId }) =>
       sql`
-        SELECT
-          run_id AS "runId",
-          iteration_index AS "iterationIndex",
-          thread_id AS "threadId",
-          issue_id AS "issueId",
-          turn_status AS "turnStatus",
-          summary,
-          why,
-          started_at AS "startedAt",
-          finished_at AS "finishedAt"
+        SELECT ${iterationColumns}
         FROM epic_run_iterations
         WHERE run_id = ${runId}
         ORDER BY iteration_index DESC
@@ -315,10 +301,7 @@ const makeEpicRunStore = Effect.gen(function* () {
   // dropped: a silently skipped `running` row is a run that never resumes and
   // never reports why.
   const listRuns: EpicRunStoreShape["listRuns"] = (input) =>
-    (input.status === undefined
-      ? listEpicRunRows(undefined)
-      : listEpicRunRowsByStatus({ status: input.status })
-    ).pipe(
+    listEpicRunRows(input).pipe(
       Effect.mapError(
         toEpicRunStoreError("EpicRunStore.listRuns:query", "EpicRunStore.listRuns:decodeRows"),
       ),
@@ -357,6 +340,18 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const listRecentIterationsForRuns: EpicRunStoreShape["listRecentIterationsForRuns"] = (input) =>
+    input.runIds.length === 0
+      ? Effect.succeed([])
+      : listRecentEpicRunIterationRows(input).pipe(
+          Effect.mapError(
+            toEpicRunStoreError(
+              "EpicRunStore.listRecentIterationsForRuns:query",
+              "EpicRunStore.listRecentIterationsForRuns:decodeRows",
+            ),
+          ),
+        );
+
   const getLatestIteration: EpicRunStoreShape["getLatestIteration"] = (input) =>
     getLatestEpicRunIterationRow(input).pipe(
       Effect.mapError(
@@ -375,6 +370,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     appendIteration,
     updateIteration,
     listIterations,
+    listRecentIterationsForRuns,
     getLatestIteration,
   } satisfies EpicRunStoreShape;
 });

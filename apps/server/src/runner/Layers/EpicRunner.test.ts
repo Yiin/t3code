@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   MessageId,
+  EpicRunId,
   EpicRunPreflightError,
   ProjectId,
   ProviderInstanceId,
@@ -169,6 +170,8 @@ const makeThreadDetail = (input: {
 const makeMemoryStore = (upsertDelayMs = 0) => {
   const runs = new Map<string, EpicRun>();
   const iterations: EpicRunIteration[] = [];
+  /** Counted so a test can prove a listing does not fan out per run. */
+  const iterationReadCounts = { perRun: 0, batched: 0 };
 
   const shape: EpicRunStoreShape = {
     upsertRun: (run) => {
@@ -184,10 +187,19 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
         const run = runs.get(runId);
         return run === undefined ? Option.none() : Option.some(run);
       }),
-    listRuns: ({ status }) =>
-      Effect.sync(() =>
-        [...runs.values()].filter((run) => status === undefined || run.status === status),
-      ),
+    listRuns: ({ status, limit, orderBy }) =>
+      Effect.sync(() => {
+        const matching = [...runs.values()]
+          .filter((run) => status === undefined || run.status === status)
+          .sort((left, right) =>
+            orderBy === "updatedAt-desc"
+              ? right.updatedAt.localeCompare(left.updatedAt) ||
+                right.runId.localeCompare(left.runId)
+              : left.createdAt.localeCompare(right.createdAt) ||
+                left.runId.localeCompare(right.runId),
+          );
+        return limit === undefined ? matching : matching.slice(0, limit);
+      }),
     appendIteration: (iteration) =>
       Effect.sync(() => {
         iterations.push(iteration);
@@ -211,7 +223,23 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
         };
       }),
     listIterations: ({ runId }) =>
-      Effect.sync(() => iterations.filter((iteration) => iteration.runId === runId)),
+      Effect.sync(() => {
+        iterationReadCounts.perRun += 1;
+        return iterations.filter((iteration) => iteration.runId === runId);
+      }),
+    listRecentIterationsForRuns: ({ runIds, limitPerRun }) =>
+      Effect.sync(() => {
+        iterationReadCounts.batched += 1;
+        const wanted = new Set<string>(runIds);
+        return [...wanted]
+          .sort((left, right) => left.localeCompare(right))
+          .flatMap((runId) =>
+            iterations
+              .filter((iteration) => iteration.runId === runId)
+              .sort((left, right) => left.iterationIndex - right.iterationIndex)
+              .slice(-limitPerRun),
+          );
+      }),
     getLatestIteration: ({ runId }) =>
       Effect.sync(() => {
         const forRun = iterations.filter((iteration) => iteration.runId === runId);
@@ -219,7 +247,7 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
       }),
   };
 
-  return { shape, runs, iterations };
+  return { shape, runs, iterations, iterationReadCounts };
 };
 
 function createHarness(input: {
@@ -703,6 +731,78 @@ describe("EpicRunner", () => {
         listed.threadRefs.map((reference) => reference.iterationIndex),
         Array.from({ length: 25 }, (_, offset) => offset + 5),
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("enriches a whole listing with one iteration read, ordered and bounded", () => {
+    // Terminal so nothing here is resumed; the listing is what is under test.
+    const seedRun = (runId: string, createdAt: string, updatedAt: string): EpicRun => ({
+      runId: EpicRunId.make(runId),
+      epicId: "epic-list",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "done",
+      maxIterations: 10,
+      iterationsCompleted: 2,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      lastError: null,
+      createdAt,
+      updatedAt,
+    });
+    const seedRuns = [
+      seedRun("run-list-old", "2026-07-27T00:00:01.000Z", "2026-07-27T01:00:00.000Z"),
+      seedRun("run-list-new", "2026-07-27T00:00:02.000Z", "2026-07-27T03:00:00.000Z"),
+      seedRun("run-list-mid", "2026-07-27T00:00:03.000Z", "2026-07-27T02:00:00.000Z"),
+    ];
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      seedRuns,
+      seedIterations: seedRuns.flatMap((run, runOffset) =>
+        Array.from({ length: 2 }, (_unused, iterationIndex) => ({
+          runId: run.runId,
+          iterationIndex,
+          threadId: ThreadId.make(`thread-${run.runId}-${iterationIndex}`),
+          issueId: `child-${runOffset}-${iterationIndex}`,
+          turnStatus: "completed" as const,
+          summary: null,
+          why: null,
+          startedAt: NOW,
+          finishedAt: NOW,
+        })),
+      ),
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+
+      const listed = yield* runner.listRuns();
+      assert.deepStrictEqual(
+        listed.map((run) => run.runId),
+        ["run-list-old", "run-list-new", "run-list-mid"],
+      );
+      // Three runs, one iteration read: the whole point of the batch.
+      assert.deepStrictEqual(harness.store.iterationReadCounts, { perRun: 0, batched: 1 });
+      assert.deepStrictEqual(
+        listed.map((run) => run.recentIterations.length),
+        [2, 2, 2],
+      );
+      assert.deepStrictEqual(
+        listed[0]?.threadRefs.map((reference) => reference.threadId),
+        ["thread-run-list-old-0", "thread-run-list-old-1"],
+      );
+
+      const recent = yield* runner.listRuns({ orderBy: "updatedAt-desc", limit: 2 });
+      assert.deepStrictEqual(
+        recent.map((run) => run.runId),
+        ["run-list-new", "run-list-mid"],
+      );
+      assert.deepStrictEqual(harness.store.iterationReadCounts, { perRun: 0, batched: 2 });
     }).pipe(Effect.provide(harness.layer));
   });
 

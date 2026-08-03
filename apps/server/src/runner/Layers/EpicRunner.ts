@@ -31,6 +31,7 @@ import { ProjectionSnapshotQuery } from "../../orchestration/Services/Projection
 import {
   EpicRunStore,
   type EpicRun,
+  type EpicRunIteration as EpicRunIterationRow,
   type EpicRunIterationStatus,
 } from "../../persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
@@ -67,6 +68,30 @@ const GIT_HEAD_TIMEOUT_MS = 15_000;
 const MAX_SETTLE_READS = 20;
 const ACTIVE_RUN_RETRY_ATTEMPTS = 20;
 const ACTIVE_RUN_RETRY_DELAY_MS = 5;
+
+/**
+ * Assemble the public run read model from a row plus its already-capped
+ * iterations. Pure, so the single-run and batched list paths cannot drift.
+ */
+const buildTransportRun = (
+  run: EpicRun,
+  recentIterations: ReadonlyArray<EpicRunIterationRow>,
+): TransportEpicRun => ({
+  ...run,
+  recentIterations,
+  threadRefs: recentIterations.flatMap((iteration) =>
+    iteration.issueId === null
+      ? []
+      : [
+          {
+            issueId: iteration.issueId,
+            threadId: iteration.threadId,
+            iterationIndex: iteration.iterationIndex,
+          },
+        ],
+  ),
+});
+
 const ReadyChildren = Schema.fromJsonString(
   Schema.Array(
     Schema.Struct({
@@ -295,22 +320,31 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       const iterations = yield* store
         .listIterations({ runId: run.runId })
         .pipe(Effect.mapError(storeError("listIterations")));
-      const recentIterations = iterations.slice(-RECENT_ITERATIONS_LIMIT);
-      return {
-        ...run,
-        recentIterations,
-        threadRefs: recentIterations.flatMap((iteration) =>
-          iteration.issueId === null
-            ? []
-            : [
-                {
-                  issueId: iteration.issueId,
-                  threadId: iteration.threadId,
-                  iterationIndex: iteration.iterationIndex,
-                },
-              ],
-        ),
-      } satisfies TransportEpicRun;
+      return buildTransportRun(run, iterations.slice(-RECENT_ITERATIONS_LIMIT));
+    });
+
+    /**
+     * Enrich a whole listing with ONE iteration query, not one per run.
+     *
+     * `listRecentIterationsForRuns` already caps each run at
+     * `RECENT_ITERATIONS_LIMIT`, so the grouping here does no slicing of its
+     * own; a run with no iterations is absent from the batch and gets an empty
+     * array.
+     */
+    const enrichRuns = Effect.fn("EpicRunner.enrichRuns")(function* (runs: ReadonlyArray<EpicRun>) {
+      const iterations = yield* store
+        .listRecentIterationsForRuns({
+          runIds: runs.map((run) => run.runId),
+          limitPerRun: RECENT_ITERATIONS_LIMIT,
+        })
+        .pipe(Effect.mapError(storeError("listRecentIterationsForRuns")));
+      const byRunId = new Map<EpicRunId, Array<EpicRunIterationRow>>();
+      for (const iteration of iterations) {
+        const bucket = byRunId.get(iteration.runId);
+        if (bucket === undefined) byRunId.set(iteration.runId, [iteration]);
+        else bucket.push(iteration);
+      }
+      return runs.map((run) => buildTransportRun(run, byRunId.get(run.runId) ?? []));
     });
 
     const findActiveRun = Effect.fn("EpicRunner.findActiveRun")(function* (input: {
@@ -1374,10 +1408,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       });
 
     const listRuns: EpicRunnerShape["listRuns"] = (input) =>
-      store.listRuns(input?.status === undefined ? {} : { status: input.status }).pipe(
-        Effect.mapError(storeError("listRuns")),
-        Effect.flatMap((runs) => Effect.forEach(runs, enrichRun)),
-      );
+      store
+        .listRuns(input ?? {})
+        .pipe(Effect.mapError(storeError("listRuns")), Effect.flatMap(enrichRuns));
 
     const getRun: EpicRunnerShape["getRun"] = ({ runId }) =>
       store.getRun({ runId }).pipe(

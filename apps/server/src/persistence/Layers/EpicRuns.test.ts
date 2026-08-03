@@ -149,6 +149,164 @@ describe("EpicRunStore", () => {
         all.map((run) => run.runId),
         ["run-running", "run-paused", "run-done"],
       );
+
+      // The restart read path is the reason `createdAt-asc` is the default;
+      // naming it explicitly must not change anything.
+      const explicitDefault = yield* store.listRuns({ orderBy: "createdAt-asc" });
+      assert.deepStrictEqual(
+        explicitDefault.map((run) => run.runId),
+        ["run-running", "run-paused", "run-done"],
+      );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  it.effect("orders by recency and bounds the listing on request", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+
+      // `run-old` was created LAST but touched FIRST, so creation order and
+      // recency order disagree — otherwise the assertion proves nothing.
+      yield* store.upsertRun(
+        makeRun({
+          runId: EpicRunId.make("run-newest"),
+          createdAt: "2026-07-27T00:00:01.000Z",
+          updatedAt: "2026-07-27T03:00:00.000Z",
+        }),
+      );
+      yield* store.upsertRun(
+        makeRun({
+          runId: EpicRunId.make("run-middle"),
+          status: "done",
+          createdAt: "2026-07-27T00:00:02.000Z",
+          updatedAt: "2026-07-27T02:00:00.000Z",
+        }),
+      );
+      yield* store.upsertRun(
+        makeRun({
+          runId: EpicRunId.make("run-old"),
+          createdAt: "2026-07-27T00:00:03.000Z",
+          updatedAt: "2026-07-27T01:00:00.000Z",
+        }),
+      );
+
+      const recent = yield* store.listRuns({ orderBy: "updatedAt-desc" });
+      assert.deepStrictEqual(
+        recent.map((run) => run.runId),
+        ["run-newest", "run-middle", "run-old"],
+      );
+
+      const bounded = yield* store.listRuns({ orderBy: "updatedAt-desc", limit: 2 });
+      assert.deepStrictEqual(
+        bounded.map((run) => run.runId),
+        ["run-newest", "run-middle"],
+      );
+
+      // A limit composes with the status filter rather than being applied first.
+      const boundedRunning = yield* store.listRuns({
+        status: "running",
+        orderBy: "updatedAt-desc",
+        limit: 1,
+      });
+      assert.deepStrictEqual(
+        boundedRunning.map((run) => run.runId),
+        ["run-newest"],
+      );
+
+      const boundedCreation = yield* store.listRuns({ limit: 1 });
+      assert.deepStrictEqual(
+        boundedCreation.map((run) => run.runId),
+        ["run-newest"],
+      );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  // Runs written in the same second are the normal case for a launch loop, so
+  // the tie-break has to be total or a `limit` would cut a different row each
+  // time the same page is read.
+  it.effect("tie-breaks equal timestamps on run id in the ordering's direction", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+
+      for (const runId of ["run-b", "run-c", "run-a"]) {
+        yield* store.upsertRun(
+          makeRun({
+            runId: EpicRunId.make(runId),
+            createdAt: "2026-07-27T00:00:00.000Z",
+            updatedAt: "2026-07-27T00:00:00.000Z",
+          }),
+        );
+      }
+
+      const byCreation = yield* store.listRuns({ orderBy: "createdAt-asc" });
+      assert.deepStrictEqual(
+        byCreation.map((run) => run.runId),
+        ["run-a", "run-b", "run-c"],
+      );
+
+      const byRecency = yield* store.listRuns({ orderBy: "updatedAt-desc" });
+      assert.deepStrictEqual(
+        byRecency.map((run) => run.runId),
+        ["run-c", "run-b", "run-a"],
+      );
+
+      const boundedByRecency = yield* store.listRuns({ orderBy: "updatedAt-desc", limit: 2 });
+      assert.deepStrictEqual(
+        boundedByRecency.map((run) => run.runId),
+        ["run-c", "run-b"],
+      );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  it.effect("reads the newest iterations of many runs in one query", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+
+      const runIds = [
+        EpicRunId.make("run-batch-a"),
+        EpicRunId.make("run-batch-b"),
+        EpicRunId.make("run-batch-empty"),
+      ];
+      for (const runId of runIds) {
+        yield* store.upsertRun(makeRun({ runId }));
+      }
+      yield* store.upsertRun(makeRun({ runId: EpicRunId.make("run-batch-excluded") }));
+
+      const appendIterations = (runId: string, count: number) =>
+        Effect.forEach(
+          Array.from({ length: count }, (_unused, index) => index),
+          (iterationIndex) =>
+            store.appendIteration({
+              runId: EpicRunId.make(runId),
+              iterationIndex,
+              threadId: ThreadId.make(`thread-${runId}-${iterationIndex}`),
+              issueId: `issue-${iterationIndex}`,
+              turnStatus: "completed",
+              summary: null,
+              why: null,
+              startedAt: "2026-07-27T00:00:00.000Z",
+              finishedAt: "2026-07-27T00:05:00.000Z",
+            }),
+          { discard: true },
+        );
+
+      yield* appendIterations("run-batch-a", 4);
+      yield* appendIterations("run-batch-b", 1);
+      yield* appendIterations("run-batch-excluded", 2);
+
+      const batched = yield* store.listRecentIterationsForRuns({
+        runIds,
+        limitPerRun: 2,
+      });
+      // Capped per run, newest kept, and returned ascending so a caller can
+      // group by walking once. The run with no iterations is simply absent, and
+      // a run outside the batch never appears.
+      assert.deepStrictEqual(
+        batched.map((iteration) => `${iteration.runId}#${iteration.iterationIndex}`),
+        ["run-batch-a#2", "run-batch-a#3", "run-batch-b#0"],
+      );
+
+      const empty = yield* store.listRecentIterationsForRuns({ runIds: [], limitPerRun: 2 });
+      assert.deepStrictEqual(empty, []);
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

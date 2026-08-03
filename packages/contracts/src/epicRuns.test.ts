@@ -10,6 +10,8 @@ import {
   EpicRunnerDispatchError,
   EpicRunnerStoreError,
   epicRunIterationThreadId,
+  ListEpicRunsInput,
+  ListEpicRunsQuery,
   parseEpicRunIterationThreadId,
 } from "./epicRuns.ts";
 import {
@@ -142,5 +144,34 @@ describe("EpicRun contracts", () => {
         detail: "provider unavailable",
       }).detail,
     ).toBe("provider unavailable");
+  });
+
+  it("keeps the run-listing bound optional and decodes it from a query string", () => {
+    const decodeInput = Schema.decodeUnknownSync(ListEpicRunsInput);
+    const decodeQuery = Schema.decodeUnknownSync(ListEpicRunsQuery);
+
+    // Every caller before this change sent `{}`, and it must still mean
+    // "everything, oldest first" — the runner's restart read depends on it.
+    expect(decodeInput({})).toEqual({});
+    expect(decodeInput({ status: "running", limit: 50, orderBy: "updatedAt-desc" })).toEqual({
+      status: "running",
+      limit: 50,
+      orderBy: "updatedAt-desc",
+    });
+    expect(() => decodeInput({ limit: 0 })).toThrow();
+    expect(() => decodeInput({ limit: 2.5 })).toThrow();
+    expect(() => decodeInput({ orderBy: "createdAt-desc" })).toThrow();
+
+    // A GET carries `limit` as text; the decoded value must be a number so the
+    // SQL LIMIT does not bind a string.
+    expect(decodeQuery({ status: "running", limit: "50", orderBy: "updatedAt-desc" })).toEqual({
+      status: "running",
+      limit: 50,
+      orderBy: "updatedAt-desc",
+    });
+    expect(decodeQuery({})).toEqual({});
+    expect(() => decodeQuery({ limit: "0" })).toThrow();
+    expect(() => decodeQuery({ limit: "2.5" })).toThrow();
+    expect(() => decodeQuery({ limit: "many" })).toThrow();
   });
 });

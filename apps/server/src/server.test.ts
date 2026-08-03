@@ -7507,6 +7507,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         withWsRpcClient(wsUrl, (client) =>
           Effect.all([
             client[WS_METHODS.epicRunList]({}),
+            client[WS_METHODS.epicRunList]({ orderBy: "updatedAt-desc", limit: 50 }),
             client[WS_METHODS.epicRunPause]({ runId: run.runId }),
             client[WS_METHODS.epicRunResume]({ runId: run.runId }),
             client[WS_METHODS.epicRunCancel]({ runId: run.runId }),
@@ -7514,9 +7515,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(wsResults[0][0]?.runId, run.runId);
-      assert.equal(wsResults[1].status, "paused");
-      assert.equal(wsResults[2].status, "running");
-      assert.equal(wsResults[3].status, "cancelled");
+      assert.equal(wsResults[1][0]?.runId, run.runId);
+      // The recency bound reaches the runner over WS too, not just over HTTP.
+      assert.deepEqual(
+        runnerCalls.filter(({ method }) => method === "list").map(({ input }) => input),
+        [{}, { orderBy: "updatedAt-desc", limit: 50 }],
+      );
+      assert.equal(wsResults[2].status, "paused");
+      assert.equal(wsResults[3].status, "running");
+      assert.equal(wsResults[4].status, "cancelled");
 
       const event = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
@@ -7550,6 +7557,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         body: yield* HttpBody.json(launchInput),
       });
       const list = yield* HttpClient.get("/api/epic-runs?status=running", { headers: { cookie } });
+      // `limit` crosses the wire as a query string; the runner must receive a
+      // number, or the SQL LIMIT would bind a string.
+      const bounded = yield* HttpClient.get(
+        "/api/epic-runs?status=running&orderBy=updatedAt-desc&limit=25",
+        { headers: { cookie } },
+      );
       const get = yield* HttpClient.get(`/api/epic-runs/${run.runId}`, { headers: { cookie } });
       const pause = yield* HttpClient.post(`/api/epic-runs/${run.runId}/pause`, {
         headers: { cookie },
@@ -7563,6 +7576,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(start.status, 200);
       assert.equal(launch.status, 200);
       assert.equal(list.status, 200);
+      assert.equal(bounded.status, 200);
       assert.equal(get.status, 200);
       assert.equal(pause.status, 200);
       assert.equal(resume.status, 200);
@@ -7579,7 +7593,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(((yield* cancel.json) as { readonly status: string }).status, "cancelled");
       assert.deepEqual(
         runnerCalls.map(({ method }) => method),
-        ["start", "launch", "list", "get", "pause", "resume", "cancel"],
+        ["start", "launch", "list", "list", "get", "pause", "resume", "cancel"],
       );
       assert.deepEqual(runnerCalls[1], { method: "launch", input: launchInput });
       assert.deepInclude(runnerCalls[0]?.input as object, {
@@ -7587,7 +7601,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         runtimeMode: "full-access",
       });
       assert.deepEqual(runnerCalls[2]?.input, { status: "running" });
-      for (const call of runnerCalls.slice(3)) {
+      assert.deepEqual(runnerCalls[3]?.input, {
+        status: "running",
+        orderBy: "updatedAt-desc",
+        limit: 25,
+      });
+      for (const call of runnerCalls.slice(4)) {
         assert.equal((call.input as { readonly runId: string }).runId, run.runId);
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

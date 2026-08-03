@@ -30,8 +30,8 @@ import {
   EpicRun,
   EpicRunInput,
   EpicRunRef,
-  EpicRunStatus,
   LaunchEpicRunInput,
+  ListEpicRunsQuery,
 } from "./epicRuns.ts";
 import {
   ClientOrchestrationCommand,
@@ -526,7 +526,7 @@ export class EnvironmentEpicRunsHttpApi extends HttpApiGroup.make("epicRuns")
   .add(
     HttpApiEndpoint.get("list", "/api/epic-runs", {
       headers: OptionalBearerHeaders,
-      payload: { status: Schema.optional(EpicRunStatus) },
+      payload: ListEpicRunsQuery.fields,
       success: Schema.Array(EpicRun),
       error: EnvironmentEpicRunReadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),

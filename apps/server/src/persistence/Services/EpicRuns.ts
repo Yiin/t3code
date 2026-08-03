@@ -29,6 +29,7 @@ import {
   type EpicRunStatus as EpicRunStatusType,
   IsoDateTime,
   NonNegativeInt,
+  PositiveInt,
   ThreadId,
   EpicRunRef,
   type EpicRunRef as EpicRunRefType,
@@ -86,6 +87,12 @@ export const ListEpicRunIterationsInput = Schema.Struct({
 });
 export type ListEpicRunIterationsInput = typeof ListEpicRunIterationsInput.Type;
 
+export const ListRecentEpicRunIterationsInput = Schema.Struct({
+  runIds: Schema.Array(EpicRunId),
+  limitPerRun: PositiveInt,
+});
+export type ListRecentEpicRunIterationsInput = typeof ListRecentEpicRunIterationsInput.Type;
+
 export const GetLatestEpicRunIterationInput = Schema.Struct({
   runId: EpicRunId,
 });
@@ -118,10 +125,13 @@ export interface EpicRunStoreShape {
   ) => Effect.Effect<Option.Option<EpicRun>, EpicRunStoreError>;
 
   /**
-   * List epic runs, optionally narrowed to one status.
+   * List epic runs, optionally narrowed to one status, ordered, and bounded.
    *
-   * Returned in deterministic creation order. On restart the runner lists the
-   * `running` rows to decide what to resume.
+   * Defaults to ascending creation order because the runner's restart read
+   * depends on it: it lists the `running` rows and resumes them in the order
+   * they were created. `orderBy: "updatedAt-desc"` is the recency order a UI
+   * wants; both orders tie-break on `run_id` so a `limit` cuts the same rows
+   * every time.
    */
   readonly listRuns: (
     input: ListEpicRunsInput,
@@ -155,6 +165,18 @@ export interface EpicRunStoreShape {
    */
   readonly listIterations: (
     input: ListEpicRunIterationsInput,
+  ) => Effect.Effect<ReadonlyArray<EpicRunIteration>, EpicRunStoreError>;
+
+  /**
+   * The newest `limitPerRun` iterations of every requested run, in one query.
+   *
+   * This exists so listing N runs costs one iteration query instead of N. Rows
+   * come back ordered by `(runId, iterationIndex)` ascending, so a caller can
+   * group them by walking the array once; a run with no iterations is simply
+   * absent. An empty `runIds` short-circuits without touching SQL.
+   */
+  readonly listRecentIterationsForRuns: (
+    input: ListRecentEpicRunIterationsInput,
   ) => Effect.Effect<ReadonlyArray<EpicRunIteration>, EpicRunStoreError>;
 
   /**
