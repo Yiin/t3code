@@ -1,6 +1,6 @@
 import * as React from "react";
 import { parseEpicRunIterationThreadId } from "@t3tools/contracts";
-import type { ContextMenuItem, EpicRunStatus } from "@t3tools/contracts";
+import type { BeadsStatusResult, ContextMenuItem, EpicRunStatus } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
   getThreadSortTimestamp,
@@ -10,6 +10,7 @@ import {
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
+import { epicSourceKey } from "../epics.logic";
 import { isLatestTurnSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
 
@@ -494,6 +495,8 @@ export type SidebarEpicRunIteration<T> = {
   readonly iterationIndex: number;
   /** The bd issue the iteration cooked; `null` until the run read model loads. */
   readonly issueId: string | null;
+  /** The issue's human title; `null` until the beads snapshot loads. */
+  readonly issueTitle: string | null;
   readonly thread: T;
 };
 
@@ -502,6 +505,8 @@ export type SidebarEpicRunGroup<T> = {
   readonly runId: string;
   /** `null` when the run is not in `runs` yet — grouping never waits on it. */
   readonly epicId: string | null;
+  /** The epic's human title; `null` until the beads snapshot loads. */
+  readonly epicTitle: string | null;
   readonly status: EpicRunStatus | null;
   /**
    * The thread row this group renders directly beneath, indented one level;
@@ -530,6 +535,10 @@ export function sidebarNodeThreads<T>(node: SidebarThreadNode<T>): readonly T[] 
 export type SidebarEpicRunSummary = {
   readonly runId: string;
   readonly epicId: string;
+  /** The workspace the run ran in — half the beads snapshot key, the other
+      half being the environment it was read from. Without it a run cannot be
+      joined to the snapshot that holds its titles. */
+  readonly cwd: string;
   readonly status: EpicRunStatus;
   /** The thread the run was launched from; `null` for an Epics-page launch. */
   readonly originThreadId: string | null;
@@ -540,10 +549,96 @@ export type SidebarEpicRunSummary = {
   }>;
 };
 
+/**
+ * One beads snapshot the sidebar subscribed to, tagged with the source it was
+ * read from. `result` is `null` while that subscription is still loading.
+ */
+export type SidebarBeadsSnapshot = {
+  readonly environmentId: string;
+  readonly workspaceRoot: string;
+  readonly result: BeadsStatusResult | null;
+};
+
+/** The human titles one run's rows need: its epic's, and each child issue's. */
+export type SidebarEpicRunTitles = {
+  readonly epicTitle: string | null;
+  readonly issueTitleById: ReadonlyMap<string, string>;
+};
+
+/**
+ * The (environment, workspace) pairs whose beads snapshot the sidebar needs —
+ * one per workspace that actually has a run, not one per project. Runs come in
+ * keyed by environment because that is the only place the environment id
+ * survives: an `EpicRun` carries a `cwd` but no environment.
+ */
+export function sidebarEpicRunBeadsSources(
+  runsByEnvironment: ReadonlyMap<string, readonly SidebarEpicRunSummary[] | null>,
+): ReadonlyArray<{ readonly environmentId: string; readonly workspaceRoot: string }> {
+  const seen = new Set<string>();
+  const sources: Array<{ environmentId: string; workspaceRoot: string }> = [];
+  for (const [environmentId, runs] of runsByEnvironment) {
+    for (const run of runs ?? []) {
+      const source = { environmentId, workspaceRoot: run.cwd };
+      const key = epicSourceKey(source);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      sources.push(source);
+    }
+  }
+  return sources;
+}
+
+/**
+ * Joins runs onto the snapshots of the workspaces they ran in, so a row can
+ * read its own titles without knowing that beads exists. A bd id is only unique
+ * inside one workspace, so the join always goes through the source key and
+ * never through the id alone. An empty title counts as no title: the row falls
+ * back to the id rather than painting a blank line.
+ */
+export function sidebarEpicRunTitlesByRunId(input: {
+  runsByEnvironment: ReadonlyMap<string, readonly SidebarEpicRunSummary[] | null>;
+  snapshots: readonly SidebarBeadsSnapshot[];
+}): ReadonlyMap<string, SidebarEpicRunTitles> {
+  const titlesBySource = new Map<string, Map<string, string>>();
+  for (const snapshot of input.snapshots) {
+    if (snapshot.result?._tag !== "available") continue;
+    const key = epicSourceKey(snapshot);
+    const titles = titlesBySource.get(key) ?? new Map<string, string>();
+    // Epics first, issues second: an epic that is also listed as an issue keeps
+    // one title either way, and neither list is authoritative over the other.
+    for (const epic of snapshot.result.epics) titles.set(epic.id, epic.title.trim());
+    for (const issue of snapshot.result.issues) titles.set(issue.id, issue.title.trim());
+    titlesBySource.set(key, titles);
+  }
+
+  const byRunId = new Map<string, SidebarEpicRunTitles>();
+  if (titlesBySource.size === 0) return byRunId;
+
+  for (const [environmentId, runs] of input.runsByEnvironment) {
+    for (const run of runs ?? []) {
+      const titles = titlesBySource.get(epicSourceKey({ environmentId, workspaceRoot: run.cwd }));
+      if (titles === undefined) continue;
+      const issueTitleById = new Map<string, string>();
+      for (const ref of run.threadRefs) {
+        const issueTitle = titles.get(ref.issueId);
+        if (issueTitle !== undefined && issueTitle !== "")
+          issueTitleById.set(ref.issueId, issueTitle);
+      }
+      const epicTitle = titles.get(run.epicId);
+      byRunId.set(run.runId, {
+        epicTitle: epicTitle === undefined || epicTitle === "" ? null : epicTitle,
+        issueTitleById,
+      });
+    }
+  }
+  return byRunId;
+}
+
 type MutableSidebarEpicRunGroup<T> = {
   kind: "epic-run";
   runId: string;
   epicId: string | null;
+  epicTitle: string | null;
   status: EpicRunStatus | null;
   nestedUnderThreadId: string | null;
   iterations: Array<SidebarEpicRunIteration<T>>;
@@ -570,6 +665,9 @@ type MutableSidebarEpicRunGroup<T> = {
 export function groupEpicRunIterationThreads<T extends { readonly id: string }>(input: {
   threads: readonly T[];
   runs?: readonly SidebarEpicRunSummary[] | undefined;
+  /** Human titles per run, from `sidebarEpicRunTitlesByRunId`. Optional for the
+      same reason `runs` is: grouping never waits on a read model. */
+  titlesByRunId?: ReadonlyMap<string, SidebarEpicRunTitles> | undefined;
 }): Array<SidebarThreadNode<T>> {
   const issueIdByThreadId = new Map<string, string>();
   const runsById = new Map<string, SidebarEpicRunSummary>();
@@ -590,9 +688,12 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
       continue;
     }
 
+    const titles = input.titlesByRunId?.get(parsed.runId);
+    const issueId = issueIdByThreadId.get(thread.id) ?? null;
     const iteration: SidebarEpicRunIteration<T> = {
       iterationIndex: parsed.iterationIndex,
-      issueId: issueIdByThreadId.get(thread.id) ?? null,
+      issueId,
+      issueTitle: (issueId === null ? null : titles?.issueTitleById.get(issueId)) ?? null,
       thread,
     };
 
@@ -607,6 +708,7 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
       kind: "epic-run",
       runId: parsed.runId,
       epicId: run?.epicId ?? null,
+      epicTitle: titles?.epicTitle ?? null,
       status: run?.status ?? null,
       nestedUnderThreadId: null,
       iterations: [iteration],
@@ -809,6 +911,7 @@ export function resolveRenderedSidebarThreadNodes<T extends { readonly id: strin
   /** Already sorted and archive-filtered, exactly as the panel lists them. */
   threads: readonly T[];
   runs?: readonly SidebarEpicRunSummary[] | undefined;
+  titlesByRunId?: ReadonlyMap<string, SidebarEpicRunTitles> | undefined;
   previewCount: number;
   isThreadListExpanded: boolean;
   /** The one row a collapsed project keeps; `null` while the project is open. */
@@ -817,7 +920,11 @@ export function resolveRenderedSidebarThreadNodes<T extends { readonly id: strin
   nodes: Array<SidebarThreadNode<T>>;
   hasOverflowingThreads: boolean;
 } {
-  const nodes = groupEpicRunIterationThreads({ threads: input.threads, runs: input.runs });
+  const nodes = groupEpicRunIterationThreads({
+    threads: input.threads,
+    runs: input.runs,
+    titlesByRunId: input.titlesByRunId,
+  });
   const hasOverflowingThreads = nodes.length > input.previewCount;
 
   if (input.pinnedThreadId !== null) {
@@ -860,6 +967,38 @@ export function epicRunIterationLabel(input: {
 }): string {
   const ordinal = `iteration ${input.iterationIndex + 1}`;
   return input.issueId === null ? ordinal : `${ordinal} · ${input.issueId}`;
+}
+
+/**
+ * A two-line epic row: what the work is called, with the key beneath it. A raw
+ * `proga-webapp-0iy` says only which project is busy, so the title leads.
+ *
+ * `secondary` is `null` while no title has arrived, and then the row shows the
+ * key alone as its primary line — never a blank primary line.
+ */
+export type SidebarEpicRowLabel = {
+  readonly primary: string;
+  readonly secondary: string | null;
+};
+
+export function epicRunGroupRowLabel(input: {
+  epicId: string | null;
+  epicTitle: string | null;
+}): SidebarEpicRowLabel {
+  const title = input.epicTitle?.trim() ?? "";
+  return title === ""
+    ? { primary: epicRunGroupTitle(input), secondary: null }
+    : { primary: title, secondary: input.epicId };
+}
+
+export function epicRunIterationRowLabel(input: {
+  iterationIndex: number;
+  issueId: string | null;
+  issueTitle: string | null;
+}): SidebarEpicRowLabel {
+  const label = epicRunIterationLabel(input);
+  const title = input.issueTitle?.trim() ?? "";
+  return title === "" ? { primary: label, secondary: null } : { primary: title, secondary: label };
 }
 
 export function resolveThreadStatusPill(input: {
