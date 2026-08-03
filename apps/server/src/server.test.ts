@@ -80,7 +80,10 @@ import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
-import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationListenerCallbackError,
+} from "./orchestration/Errors.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
@@ -5156,6 +5159,216 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(diffPreview.sources[0]?.diff, "dirty-diff");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // A provider session's cwd is its thread's worktree, so removing the worktree
+  // while the session is resident deletes the tree under a live subprocess.
+  const worktreeRemovalLayers = (input: {
+    readonly effects: Array<string>;
+    readonly threads: ReadonlyArray<OrchestrationThreadShell>;
+    readonly getThreadShellById: () => Effect.Effect<Option.Option<OrchestrationThreadShell>>;
+    readonly dispatch?: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"];
+  }) => ({
+    vcsDriver: {
+      isInsideWorkTree: () => Effect.succeed(true),
+    },
+    gitVcsDriver: {
+      removeWorktree: (removal: { readonly path: string }) =>
+        Effect.sync(() => {
+          input.effects.push(`git.removeWorktree:${removal.path}`);
+        }),
+    },
+    vcsStatusBroadcaster: {
+      refreshStatus: () =>
+        Effect.succeed({
+          isRepo: true,
+          hasPrimaryRemote: true,
+          isDefaultRef: true,
+          refName: "main",
+          hasWorkingTreeChanges: false,
+          workingTree: { files: [], insertions: 0, deletions: 0 },
+          hasUpstream: true,
+          aheadCount: 0,
+          behindCount: 0,
+          pr: null,
+        }),
+    },
+    orchestrationEngine: {
+      dispatch:
+        input.dispatch ??
+        ((command: OrchestrationCommand) =>
+          Effect.sync(() => {
+            input.effects.push(`dispatch:${command.type}`);
+            return { sequence: 1 };
+          })),
+    },
+    projectionSnapshotQuery: {
+      getShellSnapshot: () =>
+        Effect.succeed({
+          snapshotSequence: 1,
+          projects: [],
+          threads: input.threads,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      getThreadShellById: input.getThreadShellById,
+    },
+  });
+
+  const makeWorktreeBoundThreadShell = (input: {
+    readonly threadId: ThreadId;
+    readonly worktreePath: string;
+    readonly sessionStatus: "ready" | "stopped";
+  }) =>
+    makeDefaultOrchestrationThreadShell({
+      id: input.threadId,
+      worktreePath: input.worktreePath,
+      session: {
+        threadId: input.threadId,
+        status: input.sessionStatus,
+        providerName: "claudeAgent",
+        runtimeMode: "full-access",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+
+  it.effect("stops a worktree-bound provider session before removing the worktree", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-worktree-bound");
+      const worktreePath = "/tmp/wt-bound";
+      const effects: string[] = [];
+      let sessionStopped = false;
+
+      yield* buildAppUnderTest({
+        layers: worktreeRemovalLayers({
+          effects,
+          threads: [
+            makeWorktreeBoundThreadShell({ threadId, worktreePath, sessionStatus: "ready" }),
+          ],
+          dispatch: (command) =>
+            Effect.sync(() => {
+              effects.push(`dispatch:${command.type}`);
+              if (command.type === "thread.session.stop") {
+                sessionStopped = true;
+              }
+              return { sequence: 1 };
+            }),
+          getThreadShellById: () =>
+            Effect.sync(() => {
+              effects.push(`query:session:${sessionStopped ? "stopped" : "ready"}`);
+              return Option.some(
+                makeWorktreeBoundThreadShell({
+                  threadId,
+                  worktreePath,
+                  sessionStatus: sessionStopped ? "stopped" : "ready",
+                }),
+              );
+            }),
+        }),
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.vcsRemoveWorktree]({ cwd: "/tmp/repo", path: worktreePath }),
+        ),
+      );
+
+      assert.deepEqual(effects, [
+        "dispatch:thread.session.stop",
+        "query:session:stopped",
+        `git.removeWorktree:${worktreePath}`,
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("removes a worktree directly when no thread holds a live session in it", () =>
+    Effect.gen(function* () {
+      const worktreePath = "/tmp/wt-free";
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: worktreeRemovalLayers({
+          effects,
+          threads: [
+            makeWorktreeBoundThreadShell({
+              threadId: ThreadId.make("thread-worktree-stopped"),
+              worktreePath,
+              sessionStatus: "stopped",
+            }),
+            makeWorktreeBoundThreadShell({
+              threadId: ThreadId.make("thread-other-worktree"),
+              worktreePath: "/tmp/wt-elsewhere",
+              sessionStatus: "ready",
+            }),
+          ],
+          getThreadShellById: () =>
+            Effect.sync(() => {
+              effects.push("query:session");
+              return Option.none();
+            }),
+        }),
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.vcsRemoveWorktree]({ cwd: "/tmp/repo", path: worktreePath }),
+        ),
+      );
+
+      assert.deepEqual(effects, [`git.removeWorktree:${worktreePath}`]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("removes the worktree even when stopping its bound session fails", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-worktree-stop-fails");
+      const worktreePath = "/tmp/wt-stuck";
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: worktreeRemovalLayers({
+          effects,
+          threads: [
+            makeWorktreeBoundThreadShell({ threadId, worktreePath, sessionStatus: "ready" }),
+          ],
+          dispatch: (command) =>
+            Effect.sync(() => {
+              effects.push(`dispatch:${command.type}`);
+            }).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: "session stop rejected",
+                  }),
+                ),
+              ),
+            ),
+          getThreadShellById: () =>
+            Effect.sync(() => {
+              effects.push("query:session");
+              return Option.some(
+                makeWorktreeBoundThreadShell({ threadId, worktreePath, sessionStatus: "ready" }),
+              );
+            }),
+        }),
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.vcsRemoveWorktree]({ cwd: "/tmp/repo", path: worktreePath }),
+        ),
+      );
+
+      assert.deepEqual(effects, [
+        "dispatch:thread.session.stop",
+        `git.removeWorktree:${worktreePath}`,
+      ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

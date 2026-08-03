@@ -3,10 +3,13 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
@@ -102,6 +105,7 @@ import * as EpicRunner from "./runner/Services/EpicRunner.ts";
 import type { EpicRunnerError } from "./runner/Errors.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
+import { selectThreadsBoundToWorktree } from "./vcs/worktreeBoundSessions.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
@@ -130,6 +134,15 @@ import * as RelayClient from "@t3tools/shared/relayClient";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+/**
+ * How long `vcs.removeWorktree` waits for a worktree-bound provider session to
+ * report stopped before it removes the worktree anyway. A stuck session must
+ * not make a worktree unremovable, so this bound is a backstop, not a promise —
+ * it matches the 15s timeout on the `git worktree remove` command itself.
+ */
+const WORKTREE_SESSION_STOP_TIMEOUT = Duration.seconds(15);
+const WORKTREE_SESSION_STOP_POLL_INTERVAL = Duration.millis(50);
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
@@ -427,6 +440,8 @@ const makeWsRpcLayer = (
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const crypto = yield* Crypto.Crypto;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -1160,6 +1175,80 @@ const makeWsRpcLayer = (
         vcsStatusBroadcaster
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
+
+      // A provider session runs with its thread's worktree as the subprocess
+      // cwd, so a resident session pins the directory: `git worktree remove`
+      // either fails or, with `--force`, deletes the tree under a live agent.
+      // Stop those sessions first and wait for the projected session to report
+      // stopped — the provider command reactor writes that only after
+      // `ProviderService.stopSession` returns, so it is the signal that the
+      // subprocess is gone.
+      const waitForSessionStopped = (threadId: ThreadId) =>
+        projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+          Effect.map(
+            Option.match({
+              onNone: () => false,
+              onSome: (thread) => thread.session !== null && thread.session.status !== "stopped",
+            }),
+          ),
+          Effect.repeat({
+            while: (running) => running,
+            schedule: Schedule.spaced(WORKTREE_SESSION_STOP_POLL_INTERVAL),
+          }),
+          Effect.timeout(WORKTREE_SESSION_STOP_TIMEOUT),
+          Effect.asVoid,
+        );
+
+      // A stop that fails or never confirms must not make the worktree
+      // unremovable: log it and let the removal proceed, exactly like the
+      // archive path above.
+      const stopSessionForWorktreeRemoval = (threadId: ThreadId, worktreePath: string) =>
+        Effect.gen(function* () {
+          const stopCommand = yield* normalizeDispatchCommand({
+            type: "thread.session.stop",
+            commandId: yield* serverCommandId("session-stop-for-worktree-removal"),
+            threadId,
+            createdAt: yield* nowIso,
+          });
+
+          yield* dispatchNormalizedCommand(stopCommand);
+          yield* waitForSessionStopped(threadId);
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to stop provider session before worktree removal", {
+              threadId,
+              worktreePath,
+              cause,
+            }),
+          ),
+        );
+
+      const stopSessionsBoundToWorktree = Effect.fn("stopSessionsBoundToWorktree")(function* (
+        worktreePath: string,
+      ) {
+        const snapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+        const boundThreadIds = yield* selectThreadsBoundToWorktree(fileSystem, path, {
+          worktreePath,
+          threads: snapshot.threads,
+          projects: snapshot.projects,
+        });
+
+        yield* Effect.forEach(
+          boundThreadIds,
+          (threadId) => stopSessionForWorktreeRemoval(threadId, worktreePath),
+          { concurrency: "unbounded", discard: true },
+        );
+      });
+
+      const releaseWorktreeBeforeRemoval = (worktreePath: string) =>
+        stopSessionsBoundToWorktree(worktreePath).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to release provider sessions before worktree removal", {
+              worktreePath,
+              cause,
+            }),
+          ),
+        );
 
       return WsRpcGroup.of({
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
@@ -1950,7 +2039,10 @@ const makeWsRpcLayer = (
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsRemoveWorktree,
-            gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            releaseWorktreeBeforeRemoval(input.path).pipe(
+              Effect.andThen(gitWorkflow.removeWorktree(input)),
+              Effect.tap(() => refreshGitStatus(input.cwd)),
+            ),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.vcsCreateRef]: (input) =>

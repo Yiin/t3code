@@ -29,6 +29,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { isSameDirectory } from "../../workspace/directoryPaths.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
@@ -135,14 +136,10 @@ export function isOpenCodeNotFound(cause: unknown): boolean {
 }
 
 /**
- * Whether two directory spellings name the same location. Raw string
- * equality misreads a trailing slash, `.`/`..` segment, or symlinked cwd
- * (macOS `/tmp` → `/private/tmp`) as a cwd change, needlessly forking the
- * session on every resume. Lexically equal paths short-circuit; otherwise
- * both sides go through `realPath`, each falling back to its lexical form
- * on failure (deleted directory, external-server path) — so the probe can
- * only widen matches, never split them. Takes the services as arguments so
- * adapter methods stay service-free. Exported for unit testing.
+ * Whether two directory spellings name the same location, so a cwd that only
+ * looks different does not needlessly fork the session on every resume. Thin
+ * alias over the shared `isSameDirectory` probe; kept as a named export for
+ * this file's tests and call sites.
  */
 export function isSameOpenCodeDirectory(
   fileSystem: FileSystem.FileSystem,
@@ -150,18 +147,7 @@ export function isSameOpenCodeDirectory(
   left: string,
   right: string,
 ): Effect.Effect<boolean> {
-  const lexicalLeft = path.resolve(left);
-  const lexicalRight = path.resolve(right);
-  if (lexicalLeft === lexicalRight) {
-    return Effect.succeed(true);
-  }
-  const canonicalize = (lexical: string) =>
-    fileSystem.realPath(lexical).pipe(Effect.orElseSucceed(() => lexical));
-  return Effect.zipWith(
-    canonicalize(lexicalLeft),
-    canonicalize(lexicalRight),
-    (canonicalLeft, canonicalRight) => canonicalLeft === canonicalRight,
-  );
+  return isSameDirectory(fileSystem, path, left, right);
 }
 
 interface OpenCodeTurnSnapshot {
