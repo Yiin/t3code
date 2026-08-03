@@ -256,6 +256,14 @@ export function createEpicsEnvironmentAtoms<R, E>(
       label: "environment-data:epics:launch-run",
       tag: WS_METHODS.epicRunLaunch,
     }),
+    pauseRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:epics:pause-run",
+      tag: WS_METHODS.epicRunPause,
+    }),
+    resumeRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:epics:resume-run",
+      tag: WS_METHODS.epicRunResume,
+    }),
     stopRun: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:epics:stop-run",
       tag: WS_METHODS.epicRunCancel,

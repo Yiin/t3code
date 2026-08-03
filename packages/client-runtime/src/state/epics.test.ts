@@ -1,5 +1,13 @@
-import { EnvironmentId, EpicRun, EpicRunnerStoreError, WS_METHODS } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  EpicRun,
+  EpicRunId,
+  EpicRunnerStoreError,
+  EpicRunStateError,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -9,7 +17,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom, AtomRegistry } from "effect/unstable/reactivity";
 import * as RpcClientError from "effect/unstable/rpc/RpcClientError";
 
 import {
@@ -17,7 +25,7 @@ import {
   PrimaryConnectionTarget,
   type PreparedConnection,
 } from "../connection/model.ts";
-import type { EnvironmentRegistry } from "../connection/registry.ts";
+import { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
@@ -43,20 +51,25 @@ function run(
   epicId: string,
   updatedAt: string,
   iterationsCompleted = 0,
-  identity: { readonly projectId?: string; readonly cwd?: string } = {},
+  overrides: {
+    readonly projectId?: string;
+    readonly cwd?: string;
+    readonly status?: EpicRun["status"];
+  } = {},
 ): EpicRun {
   return decodeRun({
     runId,
     epicId,
-    projectId: identity.projectId ?? "project-1",
-    cwd: identity.cwd ?? "/repo",
+    projectId: overrides.projectId ?? "project-1",
+    cwd: overrides.cwd ?? "/repo",
     prompt: "Cook one child.",
     modelSelection: {
       provider: "codex",
       model: "gpt-5",
     },
     runtimeMode: "full-access",
-    status: "running",
+    originThreadId: null,
+    status: overrides.status ?? "running",
     maxIterations: 10,
     iterationsCompleted,
     currentThreadId: null,
@@ -103,6 +116,61 @@ function session<E>(
     probe: Effect.void,
     closed: Effect.never,
   };
+}
+
+type RunControlMethod = typeof WS_METHODS.epicRunPause | typeof WS_METHODS.epicRunResume;
+type RunControlCall = { readonly method: RunControlMethod; readonly input: unknown };
+
+function runControlSession(
+  responses: Partial<Record<RunControlMethod, Effect.Effect<EpicRun, EpicRunStateError>>>,
+  calls: Array<RunControlCall>,
+): RpcSession {
+  const client = Object.fromEntries(
+    Object.entries(responses).map(([method, response]) => [
+      method,
+      (input: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method: method as RunControlMethod, input });
+        }).pipe(Effect.andThen(response)),
+    ]),
+  ) as unknown as WsRpcProtocolClient;
+  return {
+    client,
+    initialConfig: Effect.never,
+    ready: Effect.void,
+    probe: Effect.void,
+    closed: Effect.never,
+  };
+}
+
+/**
+ * An atom runtime whose environment registry resolves every environment to one
+ * fake session, so a command can be driven end to end without a real connection.
+ */
+function runControlRuntime(rpcSession: RpcSession) {
+  const layer = Layer.effect(
+    EnvironmentRegistry,
+    Effect.gen(function* () {
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+        session: yield* SubscriptionRef.make(Option.some(rpcSession)),
+        prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+      return {
+        run: <A, E, R>(_environmentId: EnvironmentId, effect: Effect.Effect<A, E, R>) =>
+          Effect.provideService(
+            effect,
+            EnvironmentSupervisor.EnvironmentSupervisor,
+            supervisor,
+          ) as Effect.Effect<A, E, R>,
+      } as unknown as EnvironmentRegistry["Service"];
+    }),
+  );
+  return Atom.runtime(layer) as unknown as Atom.AtomRuntime<EnvironmentRegistry, never>;
 }
 
 function waitFor(ref: Ref.Ref<number>, expected: number) {
@@ -658,5 +726,83 @@ describe("createEpicsEnvironmentAtoms", () => {
     expect(latestRunAtom.label?.[0]).toContain("environment-data:epics:latest-run");
     expect(allRunsAtom.label?.[0]).toContain("environment-data:epics:all-runs");
     expect(threadRunAtom.label?.[0]).toContain("environment-data:epics:active-run-for-thread");
+  });
+
+  it("labels every run command distinctly", () => {
+    const runtime = Atom.runtime(Layer.empty) as unknown as Atom.AtomRuntime<
+      EnvironmentRegistry,
+      never
+    >;
+    const epics = createEpicsEnvironmentAtoms(runtime);
+
+    expect([
+      epics.startRun.label,
+      epics.launchRun.label,
+      epics.pauseRun.label,
+      epics.resumeRun.label,
+      epics.stopRun.label,
+    ]).toEqual([
+      "environment-data:epics:start-run",
+      "environment-data:epics:launch-run",
+      "environment-data:epics:pause-run",
+      "environment-data:epics:resume-run",
+      "environment-data:epics:stop-run",
+    ]);
+  });
+
+  it("sends pause and resume to their own RPCs and returns the updated run", async () => {
+    const paused = run("run-1", "epic-1", "2026-07-29T00:02:00.000Z", 1, { status: "paused" });
+    const resumed = run("run-1", "epic-1", "2026-07-29T00:03:00.000Z", 1);
+    const calls: Array<RunControlCall> = [];
+    const epics = createEpicsEnvironmentAtoms(
+      runControlRuntime(
+        runControlSession(
+          {
+            [WS_METHODS.epicRunPause]: Effect.succeed(paused),
+            [WS_METHODS.epicRunResume]: Effect.succeed(resumed),
+          },
+          calls,
+        ),
+      ),
+    );
+    const registry = AtomRegistry.make();
+    const target = { environmentId: ENVIRONMENT_ID, input: { runId: EpicRunId.make("run-1") } };
+
+    const pauseResult = await epics.pauseRun.run(registry, target);
+    const resumeResult = await epics.resumeRun.run(registry, target);
+
+    expect(pauseResult).toMatchObject({ _tag: "Success", value: paused });
+    expect(resumeResult).toMatchObject({ _tag: "Success", value: resumed });
+    expect(calls).toEqual([
+      { method: WS_METHODS.epicRunPause, input: { runId: "run-1" } },
+      { method: WS_METHODS.epicRunResume, input: { runId: "run-1" } },
+    ]);
+    registry.dispose();
+  });
+
+  it("surfaces a stale pause as a typed run-state failure instead of a defect", async () => {
+    const conflict = new EpicRunStateError({
+      runId: EpicRunId.make("run-1"),
+      detail: "Run run-1 is not running.",
+    });
+    const calls: Array<RunControlCall> = [];
+    const epics = createEpicsEnvironmentAtoms(
+      runControlRuntime(
+        runControlSession({ [WS_METHODS.epicRunPause]: Effect.fail(conflict) }, calls),
+      ),
+    );
+    const registry = AtomRegistry.make();
+
+    const result = await epics.pauseRun.run(registry, {
+      environmentId: ENVIRONMENT_ID,
+      input: { runId: EpicRunId.make("run-1") },
+    });
+
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") {
+      expect(Cause.hasDies(result.cause)).toBe(false);
+      expect(Cause.squash(result.cause)).toBe(conflict);
+    }
+    registry.dispose();
   });
 });
