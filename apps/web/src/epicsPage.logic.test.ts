@@ -11,6 +11,7 @@ import {
   epicRowKey,
   epicRowModel,
   epicRowModels,
+  epicSourceFailures,
   partialFailureEntries,
   sortEpicRowsByActivity,
   worstRunStatus,
@@ -280,5 +281,59 @@ describe("partial beads failures", () => {
       },
     ]);
     expect(beadsUnavailableLabel("bd-not-found")).toBe("bd not found");
+  });
+
+  it("names both an unavailable snapshot and a failed subscription", () => {
+    const broken: EpicProjectSource = {
+      environmentId: "env",
+      workspaceRoot: "/broken",
+      projectId: "broken",
+      projectTitle: "Broken",
+    };
+    const dropped: EpicProjectSource = {
+      environmentId: "env",
+      workspaceRoot: "/dropped",
+      projectId: "dropped",
+      projectTitle: "Dropped",
+    };
+    const failures = epicSourceFailures(
+      [source, broken, dropped],
+      new Map([
+        ["env\0/repo", { data: { _tag: "available" } as never, error: null }],
+        ["env\0/broken", { data: unavailable("/broken", "no-beads"), error: null }],
+        ["env\0/dropped", { data: null, error: "The environment request failed." }],
+      ]),
+    );
+    expect(failures).toEqual([
+      {
+        key: "env\0/broken",
+        project: broken,
+        label: "No beads database",
+        detail: "bd exited 1",
+      },
+      {
+        key: "env\0/dropped",
+        project: dropped,
+        label: "Could not be read",
+        detail: "The environment request failed.",
+      },
+    ]);
+  });
+
+  it("says nothing about sources that are merely still loading", () => {
+    expect(epicSourceFailures([source], new Map())).toEqual([]);
+    expect(
+      epicSourceFailures([source], new Map([["env\0/repo", { data: null, error: null }]])),
+    ).toEqual([]);
+  });
+
+  it("prefers the beads reason over a stale subscription error on the same source", () => {
+    const failures = epicSourceFailures(
+      [source],
+      new Map([["env\0/repo", { data: unavailable("/repo", "bd-not-found"), error: "boom" }]]),
+    );
+    expect(failures).toEqual([
+      { key: "env\0/repo", project: source, label: "bd not found", detail: "bd exited 1" },
+    ]);
   });
 });

@@ -299,3 +299,47 @@ export function beadsUnavailableLabel(reason: BeadsUnavailableReason): string {
       return "bd failed";
   }
 }
+
+/** What the page knows about one project source: its snapshot, or why it has none. */
+export interface EpicSourceResult {
+  readonly data: BeadsStatusResult | null;
+  readonly error: string | null;
+}
+
+export interface EpicSourceFailure {
+  readonly key: string;
+  readonly project: EpicProjectSource;
+  readonly label: string;
+  readonly detail: string | null;
+}
+
+const SUBSCRIPTION_FAILURE_LABEL = "Could not be read";
+
+/**
+ * Every project the list is missing, ready to be named in the warning strip.
+ * Covers both ways a source can go dark: beads answered `unavailable`, or the
+ * subscription itself failed. In a flat recency list an unnamed dead source
+ * makes its epics vanish from the middle of the list with no trace.
+ */
+export function epicSourceFailures(
+  sources: ReadonlyArray<EpicProjectSource>,
+  results: ReadonlyMap<string, EpicSourceResult | undefined>,
+): ReadonlyArray<EpicSourceFailure> {
+  const unavailable = new Map(
+    partialFailureEntries(
+      sources,
+      new Map([...results].map(([key, result]) => [key, result?.data ?? null])),
+    ).map((entry) => [entry.key, entry] as const),
+  );
+  return sources.flatMap((project) => {
+    const key = epicSourceKey(project);
+    const entry = unavailable.get(key);
+    if (entry !== undefined) {
+      return [{ key, project, label: beadsUnavailableLabel(entry.reason), detail: entry.detail }];
+    }
+    const error = results.get(key)?.error ?? null;
+    return error === null
+      ? []
+      : [{ key, project, label: SUBSCRIPTION_FAILURE_LABEL, detail: error }];
+  });
+}
