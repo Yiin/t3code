@@ -4,7 +4,9 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
   ThreadId,
+  type OrchestrationEvent,
   type OrchestrationReadModel,
   type OrchestrationSession,
   type OrchestrationThread,
@@ -14,6 +16,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { createEmptyReadModel, projectEvent } from "./projector.ts";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const SETTLED_AT = "2025-12-30T00:00:00.000Z";
@@ -289,6 +292,103 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
         ]),
       }).pipe(Effect.flip);
       expect(stillOpen._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
+  it.effect("keeps rejecting settle when the open request is older than the activity cap", () =>
+    Effect.gen(function* () {
+      // The command read model keeps only the newest THREAD_DETAIL_ACTIVITY_LIMIT
+      // activities per thread. Without pinning the request kinds, an approval
+      // buried under a window of chatter falls out and the thread settles while
+      // the shell's pending counts still say it is waiting — t3code-l4u.
+      const activityEvent = (
+        sequence: number,
+        activity: Record<string, unknown>,
+      ): OrchestrationEvent =>
+        ({
+          sequence,
+          eventId: EventId.make(`event-${sequence}`),
+          type: "thread.activity-appended",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          occurredAt: NOW,
+          commandId: CommandId.make(`cmd-activity-${sequence}`),
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: { threadId: ThreadId.make("thread-1"), activity },
+        }) as OrchestrationEvent;
+
+      const threadCreated = {
+        sequence: 1,
+        eventId: EventId.make("event-1"),
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: NOW,
+        commandId: CommandId.make("cmd-create"),
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          projectId: ProjectId.make("project-1"),
+          title: "Thread",
+          modelSelection: { provider: "codex", model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+      } as unknown as OrchestrationEvent;
+
+      const events: ReadonlyArray<OrchestrationEvent> = [
+        threadCreated,
+        activityEvent(2, {
+          id: EventId.make("activity-approval"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Run `rm -rf /tmp/x`?",
+          payload: { requestId: "req-1" },
+          turnId: null,
+          sequence: 1,
+          createdAt: NOW,
+        }),
+        ...Array.from({ length: THREAD_DETAIL_ACTIVITY_LIMIT + 100 }, (_, index) =>
+          activityEvent(index + 3, {
+            id: EventId.make(`activity-filler-${index}`),
+            tone: "tool",
+            kind: "tool.started",
+            summary: `Ran command ${index}`,
+            payload: {},
+            turnId: null,
+            sequence: index + 2,
+            createdAt: NOW,
+          }),
+        ),
+      ];
+
+      let projected = createEmptyReadModel(NOW);
+      for (const event of events) {
+        projected = yield* projectEvent(projected, event);
+      }
+      // The window, plus the one pinned approval.
+      const activities = projected.threads[0]?.activities ?? [];
+      expect(activities).toHaveLength(THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+      expect(activities[0]?.id).toBe("activity-approval");
+      expect(activities[1]?.id).toBe("activity-filler-100");
+      expect(activities.at(-1)?.id).toBe(`activity-filler-${THREAD_DETAIL_ACTIVITY_LIMIT + 99}`);
+
+      const blocked = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.settle",
+          commandId: CommandId.make("cmd-settle-buried-approval"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        readModel: makeReadModel(null, null, null, activities),
+      }).pipe(Effect.flip);
+      expect(blocked._tag).toBe("OrchestrationCommandInvariantError");
     }),
   );
 
