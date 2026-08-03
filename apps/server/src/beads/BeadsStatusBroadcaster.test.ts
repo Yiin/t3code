@@ -130,6 +130,46 @@ describe("parseBeadsIssues", () => {
 
     const claimedChild = issues.find((issue) => issue.id === "t3code-vst.15");
     assert.equal(claimedChild?.status, "in_progress");
+
+    // Parsed as instants, so recency is comparable rather than string-compared.
+    assert.equal(
+      claimedChild?.createdAt === null ? null : DateTime.formatIso(claimedChild!.createdAt!),
+      "2026-07-27T16:37:37.000Z",
+    );
+    assert.equal(
+      claimedChild?.updatedAt === null ? null : DateTime.formatIso(claimedChild!.updatedAt!),
+      "2026-07-27T18:23:49.000Z",
+    );
+  });
+
+  it("maps missing, unparseable, and zero timestamps to null", () => {
+    // bd writes created_at/updated_at as non-pointer Go time fields, so the case
+    // to survive is the zero time, not absence — but neither may throw.
+    const issues = BeadsStatusBroadcaster.parseBeadsIssues(
+      JSON.stringify([
+        { id: "absent" },
+        { id: "zero", created_at: "0001-01-01T00:00:00Z", updated_at: "0001-01-01T00:00:00Z" },
+        { id: "garbage", created_at: "not a date", updated_at: "" },
+        { id: "wrong-type", created_at: 1754200000, updated_at: { at: "now" } },
+        // Offset form, since the Z-suffixed second precision bd emits today is
+        // incidental and must not be relied on.
+        { id: "offset", created_at: "2026-08-03T09:23:04+03:00", updated_at: "2026-08-03T06:24Z" },
+      ]),
+    );
+    assert.isNotNull(issues);
+
+    const timestamps = issues.map((issue) => [
+      issue.id,
+      issue.createdAt === null ? null : DateTime.formatIso(issue.createdAt),
+      issue.updatedAt === null ? null : DateTime.formatIso(issue.updatedAt),
+    ]);
+    assert.deepStrictEqual(timestamps, [
+      ["absent", null, null],
+      ["zero", null, null],
+      ["garbage", null, null],
+      ["wrong-type", null, null],
+      ["offset", "2026-08-03T06:23:04.000Z", "2026-08-03T06:24:00.000Z"],
+    ]);
   });
 
   it("drops unusable entries and falls back for missing fields", () => {
@@ -154,6 +194,8 @@ describe("parseBeadsIssues", () => {
         assignee: null,
         parent: null,
         blockedBy: [],
+        createdAt: null,
+        updatedAt: null,
       },
       {
         id: "odd-priority",
@@ -164,6 +206,8 @@ describe("parseBeadsIssues", () => {
         assignee: null,
         parent: null,
         blockedBy: [],
+        createdAt: null,
+        updatedAt: null,
       },
     ]);
   });
@@ -175,6 +219,31 @@ describe("parseBeadsIssues", () => {
 });
 
 describe("summarizeBeadsStatus", () => {
+  /** Summarizes a `bd list --json` payload through the real parser. */
+  const summarizeEntries = (entries: ReadonlyArray<Record<string, unknown>>) => {
+    const issues = BeadsStatusBroadcaster.parseBeadsIssues(JSON.stringify(entries));
+    assert.isNotNull(issues);
+    const status = BeadsStatusBroadcaster.summarizeBeadsStatus({
+      workspaceRoot: "/repo",
+      issues,
+      readyIds: [],
+      lastTouchedId: null,
+      fetchedAt: DateTime.makeUnsafe("2026-08-03T12:00:00Z"),
+    });
+    assert.equal(status._tag, "available");
+    if (status._tag !== "available") throw new Error("unreachable");
+    return status;
+  };
+
+  const child = (id: string, parent: string, updatedAt: string, status = "open") => ({
+    id,
+    parent,
+    status,
+    issue_type: "task",
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: updatedAt,
+  });
+
   it("counts epic children by status and marks ready issues", () => {
     const issues = BeadsStatusBroadcaster.parseBeadsIssues(bdListFixture);
     assert.isNotNull(issues);
@@ -202,6 +271,72 @@ describe("summarizeBeadsStatus", () => {
     });
     assert.isTrue(status.issues.find((issue) => issue.id === "t3code-vst.15")?.isReady);
     assert.isFalse(status.issues.find((issue) => issue.id === "t3code-vst.11")?.isReady);
+
+    // Timestamps reach the wire as ISO strings.
+    assert.equal(
+      status.issues.find((issue) => issue.id === "t3code-vst.15")?.updatedAt,
+      "2026-07-27T18:23:49.000Z",
+    );
+    assert.equal(status.epics[0]?.createdAt, "2026-07-27T16:22:52.000Z");
+    assert.equal(status.epics[0]?.updatedAt, "2026-07-27T18:16:21.000Z");
+    // The epic issue itself last moved at 18:16:21, but child .15 moved at
+    // 18:23:49 — recency has to follow the child.
+    assert.equal(status.epics[0]?.lastActivityAt, "2026-07-27T18:23:49.000Z");
+  });
+
+  it("rolls direct children up into lastActivityAt, closed ones included", () => {
+    const status = summarizeEntries([
+      { id: "epic-1", issue_type: "epic", status: "open", updated_at: "2026-08-03T10:00:00Z" },
+      child("epic-1.1", "epic-1", "2026-08-03T11:00:00Z"),
+      // Closing a child is the event that matters most and it only moves the
+      // CHILD's updated_at, so a closed child must still count.
+      child("epic-1.2", "epic-1", "2026-08-03T12:00:00Z", "closed"),
+      // A sibling epic's child must not leak across.
+      { id: "epic-2", issue_type: "epic", status: "open", updated_at: "2026-08-03T09:00:00Z" },
+      child("epic-2.1", "epic-2", "2026-08-03T23:00:00Z"),
+      // Direct children only, matching childCounts: a subtask of a child does not
+      // count as epic activity.
+      child("epic-1.1.1", "epic-1.1", "2026-08-03T23:30:00Z"),
+    ]);
+
+    assert.deepStrictEqual(
+      status.epics.map((epic) => [epic.id, epic.lastActivityAt]),
+      [
+        ["epic-1", "2026-08-03T12:00:00.000Z"],
+        ["epic-2", "2026-08-03T23:00:00.000Z"],
+      ],
+    );
+  });
+
+  it("keeps the epic's own updatedAt when no child is newer", () => {
+    const status = summarizeEntries([
+      { id: "epic-1", issue_type: "epic", status: "open", updated_at: "2026-08-03T14:00:00Z" },
+      child("epic-1.1", "epic-1", "2026-08-03T11:00:00Z"),
+    ]);
+
+    assert.equal(status.epics[0]?.lastActivityAt, "2026-08-03T14:00:00.000Z");
+  });
+
+  it("reports null recency instead of throwing when bd gave no usable timestamps", () => {
+    const status = summarizeEntries([
+      { id: "epic-1", issue_type: "epic", status: "open" },
+      { id: "epic-1.1", parent: "epic-1", status: "open", updated_at: "0001-01-01T00:00:00Z" },
+    ]);
+
+    assert.deepStrictEqual(
+      status.epics.map((epic) => [epic.createdAt, epic.updatedAt, epic.lastActivityAt]),
+      [[null, null, null]],
+    );
+  });
+
+  it("falls back to a child's timestamp when the epic itself has none", () => {
+    const status = summarizeEntries([
+      { id: "epic-1", issue_type: "epic", status: "open" },
+      child("epic-1.1", "epic-1", "2026-08-03T11:00:00Z"),
+    ]);
+
+    assert.equal(status.epics[0]?.updatedAt, null);
+    assert.equal(status.epics[0]?.lastActivityAt, "2026-08-03T11:00:00.000Z");
   });
 });
 

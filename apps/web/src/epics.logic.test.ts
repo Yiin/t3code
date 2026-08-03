@@ -21,6 +21,9 @@ const epic: BeadsEpicSummary = {
     ready: 2,
     byStatus: { open: 2, blocked: 1, deferred: 1, closed: 2, done: 1 },
   },
+  createdAt: null,
+  updatedAt: null,
+  lastActivityAt: null,
 };
 
 describe("epics logic", () => {

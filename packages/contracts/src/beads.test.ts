@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { EpicRunPreflightError, EpicRunPreflightInput, EpicRunPreflightResult } from "./beads.ts";
+import {
+  BeadsEpicSummary,
+  BeadsIssueSummary,
+  EpicRunPreflightError,
+  EpicRunPreflightInput,
+  EpicRunPreflightResult,
+} from "./beads.ts";
 import { WS_METHODS, WsEpicRunPreflightRpc } from "./rpc.ts";
 
 const encodeInput = Schema.encodeSync(EpicRunPreflightInput);
@@ -9,6 +15,50 @@ const decodeInput = Schema.decodeUnknownSync(EpicRunPreflightInput);
 const encodeResult = Schema.encodeSync(EpicRunPreflightResult);
 const decodeResult = Schema.decodeUnknownSync(EpicRunPreflightResult);
 const decodeError = Schema.decodeUnknownSync(EpicRunPreflightError);
+const decodeIssue = Schema.decodeUnknownSync(BeadsIssueSummary);
+const decodeEpic = Schema.decodeUnknownSync(BeadsEpicSummary);
+const encodeEpic = Schema.encodeSync(BeadsEpicSummary);
+
+describe("beads timestamps", () => {
+  it("decodes a payload from a server that predates the timestamp fields", () => {
+    expect(
+      decodeIssue({
+        id: "t3code-j8s.2",
+        title: "Carry issue timestamps",
+        status: "open",
+        issueType: "task",
+        priority: 1,
+        assignee: null,
+        parent: "t3code-j8s",
+        blockedBy: [],
+        isReady: true,
+      }),
+    ).toMatchObject({ createdAt: null, updatedAt: null });
+
+    expect(
+      decodeEpic({
+        id: "t3code-j8s",
+        title: "Rethink the Epics page",
+        status: "open",
+        childCounts: { total: 13, ready: 1, byStatus: { open: 10, closed: 3 } },
+      }),
+    ).toMatchObject({ createdAt: null, updatedAt: null, lastActivityAt: null });
+  });
+
+  it("round-trips the recency the Epics page orders on", () => {
+    const epic = {
+      id: "t3code-j8s",
+      title: "Rethink the Epics page",
+      status: "open",
+      childCounts: { total: 1, ready: 0, byStatus: { closed: 1 } },
+      createdAt: "2026-08-03T06:00:00.000Z",
+      updatedAt: "2026-08-03T06:23:04.000Z",
+      lastActivityAt: "2026-08-03T09:41:12.000Z",
+    };
+
+    expect(decodeEpic(encodeEpic(epic))).toEqual(epic);
+  });
+});
 
 describe("EpicRunPreflightInput", () => {
   it("round-trips a typed preflight request", () => {

@@ -7,6 +7,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -88,6 +89,9 @@ export interface ParsedBeadsIssue {
   readonly assignee: string | null;
   readonly parent: string | null;
   readonly blockedBy: ReadonlyArray<string>;
+  /** Kept as instants, not strings: recency is compared, never string-compared. */
+  readonly createdAt: DateTime.Utc | null;
+  readonly updatedAt: DateTime.Utc | null;
 }
 
 interface BdFailure {
@@ -132,6 +136,23 @@ function readString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length === 0 ? null : trimmed;
+}
+
+/**
+ * bd writes `created_at`/`updated_at` as non-pointer Go time fields, so they are
+ * always present in `bd list --json` — the case to tolerate is the zero time
+ * (`0001-01-01T00:00:00Z`), not absence. Absent, unparseable, and zero all
+ * become `null`: a read model must not fail because a timestamp is unusable.
+ *
+ * The `Z`-suffixed second precision bd happens to emit is incidental, so this
+ * parses RFC3339 rather than trusting the string's shape.
+ */
+function readDateTime(value: unknown): DateTime.Utc | null {
+  const raw = readString(value);
+  if (raw === null) return null;
+  const parsed = DateTime.make(raw);
+  if (Option.isNone(parsed)) return null;
+  return DateTime.getPartUtc(parsed.value, "year") <= 1 ? null : parsed.value;
 }
 
 function readDependencyIds(value: unknown, dependencyType: string): ReadonlyArray<string> {
@@ -185,6 +206,8 @@ export function parseBeadsIssues(stdout: string): ReadonlyArray<ParsedBeadsIssue
       assignee: readString(record["assignee"]),
       parent: readString(record["parent"]) ?? parentDependencies[0] ?? null,
       blockedBy: readDependencyIds(record["dependencies"], "blocks"),
+      createdAt: readDateTime(record["created_at"]),
+      updatedAt: readDateTime(record["updated_at"]),
     });
   }
   return issues;
@@ -193,6 +216,30 @@ export function parseBeadsIssues(stdout: string): ReadonlyArray<ParsedBeadsIssue
 /** Reads the id `bd` recorded for its most recent write, when one exists. */
 export function parseLastTouchedId(contents: string): string | null {
   return readString(contents.split("\n")[0] ?? "");
+}
+
+const formatTimestamp = (value: DateTime.Utc | null): string | null =>
+  value === null ? null : DateTime.formatIso(value);
+
+/**
+ * The newest of the epic's own `updated_at` and its direct children's.
+ *
+ * Rolling the children up is required, not defensive: no child mutation moves an
+ * epic's own `updated_at` (verified against bd 1.1.2), so an epic whose children
+ * are landing one after another would otherwise read as untouched since the last
+ * time somebody edited the epic issue itself. Closed children count — they are
+ * the ones that just moved.
+ */
+function epicLastActivityAt(
+  epic: ParsedBeadsIssue,
+  issues: ReadonlyArray<ParsedBeadsIssue>,
+): DateTime.Utc | null {
+  let latest = epic.updatedAt;
+  for (const issue of issues) {
+    if (issue.parent !== epic.id || issue.updatedAt === null) continue;
+    latest = latest === null ? issue.updatedAt : DateTime.max(latest, issue.updatedAt);
+  }
+  return latest;
 }
 
 function summarizeEpicChildren(
@@ -222,14 +269,19 @@ export function summarizeBeadsStatus(input: {
   const issues: ReadonlyArray<BeadsIssueSummary> = input.issues.map((issue) => ({
     ...issue,
     isReady: readyIds.has(issue.id),
+    createdAt: formatTimestamp(issue.createdAt),
+    updatedAt: formatTimestamp(issue.updatedAt),
   }));
-  const epics: ReadonlyArray<BeadsEpicSummary> = issues
+  const epics: ReadonlyArray<BeadsEpicSummary> = input.issues
     .filter((issue) => issue.issueType === "epic")
     .map((epic) => ({
       id: epic.id,
       title: epic.title,
       status: epic.status,
       childCounts: summarizeEpicChildren(epic.id, issues),
+      createdAt: formatTimestamp(epic.createdAt),
+      updatedAt: formatTimestamp(epic.updatedAt),
+      lastActivityAt: formatTimestamp(epicLastActivityAt(epic, input.issues)),
     }));
 
   return {
@@ -255,6 +307,13 @@ function unavailable(
 /**
  * `fetchedAt` is deliberately excluded: a poll that observes unchanged beads
  * state must not wake every subscriber.
+ *
+ * The issue timestamps inside `epics`/`issues` ARE included, and that is safe
+ * for the same reason: bd moves `updated_at` only on a real mutation, and the
+ * reads this service issues move nothing, so an idle poll still fingerprints
+ * identically. It does mean any bd write now wakes subscribers even when it
+ * changed nothing else observable — intended, since that write is exactly what
+ * the recency ordering is built on.
  */
 function fingerprintStatus(status: BeadsStatusResult): string {
   return status._tag === "available"

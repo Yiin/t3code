@@ -18,13 +18,11 @@ import {
 import { resolveEpicRunStatusPill, type EpicRunStatusPill } from "./components/Sidebar.logic";
 
 /**
- * The epic as the page reads it. `lastActivityAt` is the beads-side recency
- * signal (t3code-j8s.2) and is optional on purpose: the comparator must work
- * before that field ships, so this module never blocks on it.
+ * The epic as the page reads it. The beads snapshot carries the recency signal
+ * itself (`lastActivityAt`, already rolled up over the epic's children), so this
+ * is the contract type unchanged — the alias only keeps the page's vocabulary.
  */
-export type EpicPageSummary = BeadsEpicSummary & {
-  readonly lastActivityAt?: string | null | undefined;
-};
+export type EpicPageSummary = BeadsEpicSummary;
 
 /**
  * Epic ids are unique only inside one beads DB, so two projects cloned from the
@@ -121,7 +119,7 @@ export function epicRowModel(
       counts: epicCounts(epic),
       statusLabel: epicStatusLabel(epic.status),
       tone: epicPresentationStatus(epic, null),
-      lastActivityAt: epic.lastActivityAt ?? null,
+      lastActivityAt: epic.lastActivityAt,
     },
     machinery: {
       runStatus: latestRun?.status ?? null,

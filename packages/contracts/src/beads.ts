@@ -1,5 +1,17 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+
+/**
+ * A timestamp `bd` reported, or `null` when it reported none we can use. bd
+ * emits `created_at`/`updated_at` as non-pointer Go time fields, so they are
+ * always present in the JSON but may hold the zero time; the server maps that,
+ * and anything unparseable, to `null`. The decoding default keeps a payload
+ * from a server that predates these fields decoding instead of throwing.
+ */
+const BeadsTimestamp = Schema.NullOr(IsoDateTime).pipe(
+  Schema.withDecodingDefault(Effect.succeed(null)),
+);
 
 export const BeadsStatusInput = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
@@ -22,6 +34,8 @@ export const BeadsIssueSummary = Schema.Struct({
   parent: Schema.NullOr(TrimmedNonEmptyString),
   blockedBy: Schema.Array(TrimmedNonEmptyString),
   isReady: Schema.Boolean,
+  createdAt: BeadsTimestamp,
+  updatedAt: BeadsTimestamp,
 });
 export type BeadsIssueSummary = typeof BeadsIssueSummary.Type;
 
@@ -38,6 +52,16 @@ export const BeadsEpicSummary = Schema.Struct({
   title: Schema.String,
   status: TrimmedNonEmptyString,
   childCounts: BeadsChildCounts,
+  createdAt: BeadsTimestamp,
+  updatedAt: BeadsTimestamp,
+  /**
+   * The newest of this epic's own `updatedAt` and its direct children's, so a
+   * client can order by recency without walking the issue list. An epic's own
+   * `updatedAt` moves only when the epic ISSUE changes — closing a child moves
+   * the CHILD's — so the epic's own value alone reads as stale while the epic is
+   * actively progressing.
+   */
+  lastActivityAt: BeadsTimestamp,
 });
 export type BeadsEpicSummary = typeof BeadsEpicSummary.Type;
 

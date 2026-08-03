@@ -30,6 +30,9 @@ function epic(overrides: Partial<EpicPageSummary> = {}): EpicPageSummary {
     title: "Rethink the Epics page",
     status: "open",
     childCounts: { total: 3, ready: 1, byStatus: { open: 2, closed: 1 } },
+    createdAt: null,
+    updatedAt: null,
+    lastActivityAt: null,
     ...overrides,
   };
 }
@@ -117,7 +120,7 @@ describe("epic recency ordering", () => {
     id: string,
     title: string,
     runs: ReadonlyArray<EpicRun>,
-    lastActivityAt?: string,
+    lastActivityAt: string | null = null,
   ) => epicRowModel(source, epic({ id, title, lastActivityAt }), runs);
 
   it("sorts run-bearing epics newest first", () => {
