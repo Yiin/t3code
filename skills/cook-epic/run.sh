@@ -38,7 +38,8 @@
 #   COOKEPIC_PERMISSION_MODE   auto or bypassPermissions           (default auto)
 #   COOKEPIC_MODEL             harness-native model override; unset on claude/ccx
 #                              means tiered defaults (sonnet workers, opus plans,
-#                              fable reviews); an explicit value pins every stage
+#                              fable reviews, opus when fable is out of quota);
+#                              an explicit value pins every stage
 #   COOKEPIC_BIN               selected harness binary override
 #   OPENCODE_BIN               OpenCode binary                     (default opencode)
 #   COOKEPIC_SPAWN_DELAY       seconds between dispatches          (default 2)
@@ -52,17 +53,22 @@
 #   COOKEPIC_PROCESS_START_TICKS_CMD test hook: receives pid; prints process start ticks
 #   COOKEPIC_DISABLE_SYSTEMD   test hook: 1 forces owned process-group fallback
 #   COOKEPIC_PUSH_CMD         test hook: receives repo then git push arguments
-#   COOKEPIC_SEQUENTIAL        1 = sequential mode: one worker at a time, directly
-#                              in the main checkout on the base branch (no worktrees,
-#                              no merge queue); the coordinator gates and pushes
-#                              after each child. For epics whose children entangle —
-#                              same-file clusters, cross-repo children, tight chains.
+#   COOKEPIC_SEQUENTIAL        1 = sequential mode (explicit operator opt-in): one
+#                              worker at a time, directly in the main checkout on
+#                              the base branch (no worktrees, no merge queue); the
+#                              coordinator gates and pushes after each child.
 #   COOKEPIC_SIBLINGS          space-separated sibling repos (relative to the
-#                              project root, e.g. "../proga-api") that sequential
-#                              children may also commit in; HEAD movement there
-#                              counts toward verification and gets pushed
+#                              project root, e.g. "../proga-api") that children may
+#                              also commit in. Parallel mode mirrors each sibling
+#                              into the worker's layout under
+#                              <run-dir>/layouts/<child>/ at its real relative
+#                              position and lands every touched repo as one gated
+#                              set; sequential mode commits in the real checkouts.
+#                              HEAD movement there counts toward verification and
+#                              gets pushed.
 #
 # Stop gracefully: touch <run-dir>/STOP  (stops new dispatches, drains in-flight)
+# Retune live:     echo N > <run-dir>/WORKERS  (worker cap re-read every tick)
 set -uo pipefail
 
 RUN_DIR="${1:?usage: run.sh <run-dir>}"
@@ -177,10 +183,12 @@ if git ls-files .beads | grep -qE '^\.beads/(dolt/|dolt-server\.|.*\.db$)'; then
   die 'the beads DATA dir is git-tracked; worktrees would fork the database' 'untrack the dolt data before running cook-epic'
 fi
 
-# Sequential workers commit directly in the main checkout and in any registered
-# sibling repos. Normalize sibling paths before storing them in effect baselines
-# or comparing them to `git worktree list` output, which is absolute.
+# Workers commit in the main checkout (sequential) or in per-child worktrees and
+# mirrored sibling worktrees (parallel). Normalize sibling paths before storing
+# them in effect baselines or comparing them to `git worktree list` output,
+# which is absolute.
 REPO="$(pwd -P)"
+REPO_BASENAME="${REPO##*/}"
 PUSH_ENABLED=0
 if [ "$NO_PUSH" = 1 ]; then
   : # Explicit local-only mode.
@@ -189,20 +197,51 @@ elif git remote get-url origin >/dev/null 2>&1; then
 else
   die 'push-enabled run requires an origin remote' 'add origin or set COOKEPIC_NO_PUSH=1 for local-only landing'
 fi
-if [ "$SEQUENTIAL" = 1 ]; then
+# Parallel runs with siblings mirror each worker into a run-scoped layout root
+# outside both repos, reproducing the siblings' real relative positions so
+# references like `../proga-api` resolve inside the sandbox.
+LAYOUT_MODE=0
+[ "$SEQUENTIAL" != 1 ] && [ "${#SIBLINGS[@]}" -gt 0 ] && LAYOUT_MODE=1
+LAYOUT_ROOT="$RUN_DIR/layouts"
+declare -A SIB_BRANCH=() SIB_REL=() SIB_INTEG_WT=() SIB_LAST_ACCEPTED=()
+if [ "${#SIBLINGS[@]}" -gt 0 ]; then
   canonical_siblings=()
+  declare -A layout_mirror_seen=()
   for s in "${SIBLINGS[@]}"; do
     s=$(realpath "$s" 2>/dev/null) \
       || die "sibling repo '$s' does not exist" 'COOKEPIC_SIBLINGS entries must be existing git repos relative to the project root'
     git -C "$s" rev-parse --git-dir >/dev/null 2>&1 \
       || die "sibling repo '$s' is not a git repository" 'COOKEPIC_SIBLINGS entries must be git repos relative to the project root'
-    git -C "$s" symbolic-ref --short HEAD >/dev/null 2>&1 \
+    SIB_BRANCH[$s]=$(git -C "$s" symbolic-ref --short HEAD 2>/dev/null) \
       || die "sibling repo '$s' is not on a branch" 'check out a branch there before launching'
+    git -C "$s" update-index --refresh -q >/dev/null 2>&1 || true
     git -C "$s" diff-index --quiet HEAD -- . ':(exclude).beads' 2>/dev/null \
-      || die "sibling repo '$s' has uncommitted changes" 'commit or stash there before launching; sequential workers commit on its branch'
+      || die "sibling repo '$s' has uncommitted changes" 'commit or stash there before launching; workers commit on its branch'
     if [ "$PUSH_ENABLED" -eq 1 ]; then
       git -C "$s" remote get-url origin >/dev/null 2>&1 \
         || die "sibling repo '$s' has no origin remote" 'add an origin remote or set COOKEPIC_NO_PUSH=1'
+    fi
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      rel=$(realpath --relative-to="$REPO" "$s" 2>/dev/null) \
+        || die "cannot compute the relative path from $REPO to sibling '$s'" 'siblings must be reachable by a relative path from the project root'
+      SIB_REL[$s]="$rel"
+      # Validate mirrorability against a symbolic probe root: the mirrored path
+      # must stay inside the layout and outside the main-repo worktree.
+      probe="/cook-epic-layout-probe"
+      mirrored=$(realpath -m "$probe/$REPO_BASENAME/$rel")
+      case "$mirrored" in
+        "$probe/$REPO_BASENAME"|"$probe/$REPO_BASENAME/"*)
+          die "sibling repo '$s' resolves inside the main repository; parallel layouts cannot mirror it" \
+            'move the sibling outside the project root or run with COOKEPIC_SEQUENTIAL=1' ;;
+        "$probe/"*) ;;
+        *)
+          die "sibling repo '$s' escapes the worker layout root (relative path '$rel' cannot be mirrored)" \
+            'place siblings beside the project root or run with COOKEPIC_SEQUENTIAL=1' ;;
+      esac
+      [ -z "${layout_mirror_seen[$mirrored]:-}" ] \
+        || die "sibling repos '$s' and '${layout_mirror_seen[$mirrored]}' mirror to the same layout path" \
+          'give the siblings distinct relative positions'
+      layout_mirror_seen[$mirrored]="$s"
     fi
     canonical_siblings+=("$s")
   done
@@ -217,7 +256,13 @@ SCOPE_ID="${SCOPE_ID%% *}"
 SCOPE_ID="${SCOPE_ID:0:24}"
 WORKTREE_ROOT="$REPO/.worktrees/cook-epic-$RUN_ID"
 INTEG_BRANCH="cook-epic-integration-$RUN_ID"
-INTEG_WT="$WORKTREE_ROOT/.integration"
+if [ "$LAYOUT_MODE" -eq 1 ]; then
+  # The integration layout mirrors the worker layouts, so the gate resolves
+  # relative sibling references against the sibling trial merges.
+  INTEG_WT="$LAYOUT_ROOT/.integration/$REPO_BASENAME"
+else
+  INTEG_WT="$WORKTREE_ROOT/.integration"
+fi
 
 # -------------------------------------------------------------- harness ----
 detect_ccx_environment() {
@@ -559,6 +604,7 @@ LAST_ACCEPTED_HEAD=$(git rev-parse HEAD)
 # one fails safely in the integration worktree first). .beads is excluded:
 # bd's own activity (interactions.jsonl etc.) dirties it constantly and is not
 # real work — repos whose bd init tracked those files must still be runnable.
+git update-index --refresh -q >/dev/null 2>&1 || true
 git diff-index --quiet HEAD -- . ':(exclude).beads' 2>/dev/null \
   || die 'working tree has uncommitted changes' 'commit or stash before launching; cook-epic merges into the base branch'
 [ -z "$(git status --porcelain)" ] || say 'WARNING: untracked files present — merges that add the same paths will stop for reconciliation'
@@ -592,23 +638,29 @@ else
   PUSH_VERIFY='branch committed locally (pushing is disabled this run)'
 fi
 
-# Sequential-mode sibling rule, injected into the sequential worker prompt.
+# Sibling rule injected into the worker prompt. Sequential mode names the real
+# checkouts; parallel layout mode builds a per-worker rule in spawn_worker,
+# because every worker's mirrored sibling paths differ.
 if [ "$SEQUENTIAL" = 1 ] && [ "${#SIBLINGS[@]}" -gt 0 ]; then
   SIBLING_RULE="This child may span sibling repositories: ${SIBLINGS[*]} (relative to the project root). You may read, write, build, and commit in them — commit on their current branch, never push; the coordinator pushes whatever moved after the gate. Say which repos gained commits in your close-out note."
+elif [ "$LAYOUT_MODE" -eq 1 ]; then
+  SIBLING_RULE='' # replaced per worker in spawn_worker
 else
   SIBLING_RULE='Work only in this repository.'
 fi
 
 # Model tiers for Claude-family workers: implementation sessions launch on
 # Sonnet (see spawn_worker), and the prompt tells them to raise planning to
-# Opus and reviews to Fable via subagent model overrides. An explicit
-# COOKEPIC_MODEL pins every stage to that one model instead.
+# Opus and reviews to Fable via subagent model overrides. Reviews fall back to
+# Opus when Fable is out of quota; the worker must not echo that limit error,
+# because reap_worker reads rate-limit wording in worker output as a provider
+# limit on the whole child. An explicit COOKEPIC_MODEL pins every stage instead.
 MODEL_TIER_RULE=''
 if { [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; } && [ -z "${COOKEPIC_MODEL:-}" ]; then
-  MODEL_TIER_RULE="Model tiers: your session runs on Sonnet — implement in it directly. When you dispatch a planning agent (a Plan or plan-composition subagent), pass model 'opus'; when you dispatch reviewer agents, pass model 'fable'. Mechanical work needs no subagents at all."
+  MODEL_TIER_RULE="Model tiers: your session runs on Sonnet — implement in it directly. When you dispatch a planning agent (a Plan or plan-composition subagent), pass model 'opus'; when you dispatch reviewer agents, pass model 'fable'. Mechanical work needs no subagents at all. If a 'fable' dispatch fails because the model is unavailable or its usage limit is exhausted, re-dispatch that same agent on model 'opus' and continue — never skip the review over a model limit. Report that fallback as 'reviews ran on opus' only: do NOT quote the limit error, the words 'rate limit', 'quota exceeded', 'overloaded', or the number 429 anywhere in your output, or the coordinator reads your whole child as provider rate-limited and requeues it."
 fi
 
-mkdir -p "$WORKTREE_ROOT"
+[ "$LAYOUT_MODE" -eq 1 ] || mkdir -p "$WORKTREE_ROOT"
 
 # ---------------------------------------------------- resource governance ----
 # The whole fleet — every worker, everything it spawns (builds, browsers), and
@@ -771,19 +823,49 @@ capture_worker() { # <artifact> <bytes> <rate marker> <cost path> <command...>
   return "$rc"
 }
 
-# Set up a worktree's untracked essentials. Beads access uses bd's native
-# redirect mechanism (.beads/redirect holds the relative path to the main
+# Untracked per-worktree essentials that apply to ANY repo in a layout:
+# node_modules symlink + dev env files, sourced from that repo's real checkout.
+setup_worktree_assets() { # <source repo> <worktree>
+  local src="$1" wt="$2" f
+  [ -e "$wt/node_modules" ] || [ ! -d "$src/node_modules" ] || ln -s "$src/node_modules" "$wt/node_modules"
+  for f in .env .env.local .env.development .env.development.local .env.test; do
+    [ -f "$src/$f" ] && [ ! -e "$wt/$f" ] && cp "$src/$f" "$wt/$f"
+  done
+  return 0
+}
+
+# Set up a MAIN-repo worktree's untracked essentials. Beads access uses bd's
+# native redirect mechanism (.beads/redirect holds the relative path to the main
 # checkout's .beads; it is gitignored, so it can never be committed or block a
 # merge) plus BEADS_DIR in the worker environment as an absolute-path backup.
+# Sibling worktrees get only setup_worktree_assets — siblings have no beads db.
 # $1 = worktree path
 setup_worktree() {
-  local wt="$1" f rel
+  local wt="$1" rel
   mkdir -p "$wt/.beads"
   rel=$(realpath --relative-to="$wt" "$REPO/.beads")
   printf '%s' "$rel" > "$wt/.beads/redirect"
-  [ -e "$wt/node_modules" ] || [ ! -d "$REPO/node_modules" ] || ln -s "$REPO/node_modules" "$wt/node_modules"
-  for f in .env .env.local .env.development .env.development.local .env.test; do
-    [ -f "$REPO/$f" ] && [ ! -e "$wt/$f" ] && cp "$REPO/$f" "$wt/$f"
+  setup_worktree_assets "$REPO" "$wt"
+}
+
+sibling_layout_wt() { # <layout root> <canonical sibling> -> mirrored worktree path
+  realpath -m "$1/$REPO_BASENAME/${SIB_REL[$2]}"
+}
+
+branch_ahead() { # <repo> <base ref> <branch> -> commits on branch not on base (0 when the branch is missing)
+  local n
+  git -C "$1" show-ref --verify --quiet "refs/heads/$3" || { printf '0\n'; return 0; }
+  n=$(git -C "$1" rev-list --count "$2..$3" 2>/dev/null) || n=0
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s\n' "$n"
+}
+
+delete_branch_everywhere() { # <branch> — best-effort local deletion in main + siblings
+  local s
+  git branch -D "$1" >>"$LOG" 2>&1 || true
+  [ "$LAYOUT_MODE" -eq 1 ] || return 0
+  for s in "${SIBLINGS[@]}"; do
+    git -C "$s" branch -D "$1" >>"$LOG" 2>&1 || true
   done
 }
 
@@ -798,9 +880,26 @@ if [ "$SEQUENTIAL" != 1 ]; then
   fi
   git show-ref --verify --quiet "refs/heads/$INTEG_BRANCH" \
     && die "integration branch already exists: $INTEG_BRANCH" 'that run directory may belong to another coordinator; reconcile it before retrying'
+  [ "$LAYOUT_MODE" -ne 1 ] || mkdir -p "$(dirname "$INTEG_WT")"
   git worktree add "$INTEG_WT" -b "$INTEG_BRANCH" "$BASE_BRANCH" >>"$LOG" 2>&1 \
     || die 'failed to create integration worktree' "see $LOG"
   setup_worktree "$INTEG_WT"
+  if [ "$LAYOUT_MODE" -eq 1 ]; then
+    # One integration worktree per sibling, mirrored beside the main one, so
+    # set trial-merges and the gate see the same relative structure as workers.
+    for s in "${SIBLINGS[@]}"; do
+      SIB_INTEG_WT[$s]=$(sibling_layout_wt "$LAYOUT_ROOT/.integration" "$s")
+      if git -C "$s" worktree list --porcelain | grep -Fxq "worktree ${SIB_INTEG_WT[$s]}"; then
+        die "sibling integration worktree already exists: ${SIB_INTEG_WT[$s]}" 'that run directory may belong to another coordinator; reconcile it before retrying'
+      fi
+      git -C "$s" show-ref --verify --quiet "refs/heads/$INTEG_BRANCH" \
+        && die "sibling integration branch already exists in $s: $INTEG_BRANCH" 'that run directory may belong to another coordinator; reconcile it before retrying'
+      mkdir -p "$(dirname "${SIB_INTEG_WT[$s]}")"
+      git -C "$s" worktree add "${SIB_INTEG_WT[$s]}" -b "$INTEG_BRANCH" "${SIB_BRANCH[$s]}" >>"$LOG" 2>&1 \
+        || die "failed to create sibling integration worktree for $s" "see $LOG"
+      setup_worktree_assets "$s" "${SIB_INTEG_WT[$s]}"
+    done
+  fi
 fi
 
 # ---------------------------------------------------------------- state ----
@@ -981,12 +1080,20 @@ repository_snapshot() { # <repo> <label> <hot|inspection>
 }
 
 repository_snapshots() { # <worker bookkeeping pid> <hot|inspection>
-  local root="$1" form="$2" output s index=0
+  local root="$1" form="$2" output s index=0 layout
   output=$(repository_snapshot "${PID2WT[$root]}" main "$form")
   if [ "$SEQUENTIAL" = 1 ]; then
     for s in "${SIBLINGS[@]}"; do
       index=$((index + 1))
       output+=$'\n'"$(repository_snapshot "$s" "sibling-$index" "$form")"
+      [ "${#output}" -lt "$REPO_EVIDENCE_BYTES" ] || break
+    done
+  elif [ "$LAYOUT_MODE" -eq 1 ] && [ "${PID2WT[$root]}" != "$REPO" ]; then
+    # Probe the worker's mirrored sibling worktrees, not the real checkouts.
+    layout="${PID2WT[$root]%/*}"
+    for s in "${SIBLINGS[@]}"; do
+      index=$((index + 1))
+      output+=$'\n'"$(repository_snapshot "$(sibling_layout_wt "$layout" "$s")" "sibling-$index" "$form")"
       [ "${#output}" -lt "$REPO_EVIDENCE_BYTES" ] || break
     done
   fi
@@ -1564,6 +1671,7 @@ spawn_worker() { # <child> <title>
   local child="$1" title="$2"
   WORKER_NUM=$((WORKER_NUM + 1))
   local worker="w$WORKER_NUM" branch wt offset prompt artifact bytes rate cost identity pid
+  local s swt layout=''
   offset=$((WORKER_NUM * 20))
 
   if [ "$SEQUENTIAL" = 1 ]; then
@@ -1577,17 +1685,42 @@ spawn_worker() { # <child> <title>
     else
       branch="epic/$child"
     fi
-    wt="$WORKTREE_ROOT/$child"
-    if [ -e "$wt" ] || git worktree list --porcelain | grep -Fxq "worktree $wt"; then
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      layout="$LAYOUT_ROOT/$child"
+      wt="$layout/$REPO_BASENAME"
+    else
+      wt="$WORKTREE_ROOT/$child"
+    fi
+    if [ -e "${layout:-$wt}" ] || git worktree list --porcelain | grep -Fxq "worktree $wt"; then
       say "refusing existing worker worktree for $child: $wt"
       return 1
     fi
+    [ -z "$layout" ] || mkdir -p "$layout"
     if git show-ref --verify --quiet "refs/heads/$branch"; then
       git worktree add "$wt" "$branch" >>"$LOG" 2>&1
     else
       git worktree add "$wt" -b "$branch" "$BASE_BRANCH" >>"$LOG" 2>&1
     fi || { say "worktree creation failed for $child"; return 1; }
     setup_worktree "$wt"
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      # Mirror every sibling beside the main worktree, on the same branch name
+      # (created from the sibling's current branch; reused on retry).
+      for s in "${SIBLINGS[@]}"; do
+        swt=$(sibling_layout_wt "$layout" "$s")
+        if [ -e "$swt" ] || git -C "$s" worktree list --porcelain | grep -Fxq "worktree $swt"; then
+          say "refusing existing sibling worktree for $child: $swt"
+          cleanup_worktree "$wt"
+          return 1
+        fi
+        mkdir -p "$(dirname "$swt")"
+        if git -C "$s" show-ref --verify --quiet "refs/heads/$branch"; then
+          git -C "$s" worktree add "$swt" "$branch" >>"$LOG" 2>&1
+        else
+          git -C "$s" worktree add "$swt" -b "$branch" "${SIB_BRANCH[$s]}" >>"$LOG" 2>&1
+        fi || { say "sibling worktree creation failed for $child in $s"; cleanup_worktree "$wt"; return 1; }
+        setup_worktree_assets "$s" "$swt"
+      done
+    fi
   fi
 
   if ! claim_child "$child" "$worker"; then
@@ -1620,6 +1753,18 @@ spawn_worker() { # <child> <title>
     [ -n "${FIRST_SIG[$child]:-}" ] || FIRST_SIG[$child]=$(tree_sig)
   fi
 
+  # Per-worker sibling rule: layout paths differ per child, so the injected
+  # text is built here. `local SIBLING_RULE="$SIBLING_RULE"` shadows the global
+  # with a copy; render_prompt sees the shadow through dynamic scoping.
+  local SIBLING_RULE="$SIBLING_RULE"
+  if [ "$LAYOUT_MODE" -eq 1 ] && [ -n "$layout" ]; then
+    local sib_paths='' real_paths=''
+    for s in "${SIBLINGS[@]}"; do
+      sib_paths="${sib_paths:+$sib_paths, }\`$(sibling_layout_wt "$layout" "$s")\` (mirror of \`${SIB_REL[$s]}\`)"
+      real_paths="${real_paths:+$real_paths, }\`$s\`"
+    done
+    SIBLING_RULE="This child may span sibling repositories. Your sandbox is the whole layout \`$layout\`: it holds your main-repo worktree plus one worktree per sibling at its real relative position — $sib_paths — so relative references like \`${SIB_REL[${SIBLINGS[0]}]}\` resolve from inside your main worktree. Every worktree in the layout is on branch \`$branch\`; commit only on \`$branch\` in whichever repos you touch. In sibling repos commit only and never push them — the coordinator trial-merges every repo you touched as one set, gates once, and lands them together. Never touch the real checkouts ($real_paths) or any other layout under \`$LAYOUT_ROOT\`. Say which repos gained commits in your close-out note."
+  fi
   prompt="$RUN_DIR/prompt-$child.md"
   render_prompt "$child" "$worker" "$branch" "$wt" "$offset" "$prompt"
   artifact="$RUN_DIR/worker-$child.log"
@@ -1631,6 +1776,7 @@ spawn_worker() { # <child> <title>
     export BEADS_ACTOR="$worker" BEADS_DIR="$REPO/.beads"
     export COOKEPIC_EPIC="$EPIC" COOKEPIC_CHILD="$child" COOKEPIC_WORKER="$worker"
     export COOKEPIC_BRANCH="$branch" COOKEPIC_WORKTREE="$wt" COOKEPIC_BASE="$BASE_BRANCH"
+    [ -z "$layout" ] || export COOKEPIC_LAYOUT="$layout"
     export COOKEPIC_PORT_OFFSET="$offset" COOKEPIC_GATE="$GATE" COOKEPIC_RUN_DIR="$RUN_DIR"
     # Deterministic scope name, so reap_finished can distinguish a finished
     # worker from a dead bookkeeping subshell, and stop_run_workers can reach it.
@@ -1706,10 +1852,30 @@ extract_cost() { # <artifact> <streamed cost path> -> prints cost or empty
 
 cleanup_worktree() { # <wt> — only coordinator-owned run-scoped paths are removable
   [ "$1" = "$REPO" ] && return 0  # sequential mode: the "worktree" IS the main checkout
-  if git worktree remove --force "$1" >>"$LOG" 2>&1; then
+  local wt="$1" layout s swt failed=0
+  if [ "$LAYOUT_MODE" -eq 1 ] && [[ "$wt" == "$LAYOUT_ROOT/"*"/$REPO_BASENAME" ]]; then
+    # A layout is one unit: remove every sibling worktree, the main worktree,
+    # then the layout directory. Branches survive for retries.
+    layout="${wt%/*}"
+    for s in "${SIBLINGS[@]}"; do
+      swt=$(sibling_layout_wt "$layout" "$s")
+      git -C "$s" worktree list --porcelain | grep -Fxq "worktree $swt" || continue
+      git -C "$s" worktree remove --force "$swt" >>"$LOG" 2>&1 || failed=1
+    done
+    if git worktree list --porcelain | grep -Fxq "worktree $wt"; then
+      git worktree remove --force "$wt" >>"$LOG" 2>&1 || failed=1
+    fi
+    if [ "$failed" -eq 0 ]; then
+      rm -rf "$layout" 2>/dev/null || true
+      return 0
+    fi
+    fatal_reconcile "could not remove coordinator layout $layout; refusing redispatch until operator reconciles"
+    return 1
+  fi
+  if git worktree remove --force "$wt" >>"$LOG" 2>&1; then
     return 0
   fi
-  fatal_reconcile "could not remove coordinator worktree $1; refusing redispatch until operator reconciles"
+  fatal_reconcile "could not remove coordinator worktree $wt; refusing redispatch until operator reconciles"
   return 1
 }
 
@@ -1758,6 +1924,11 @@ capture_untracked_baseline() { # <repo> <key>
 # baseline. Pre-existing untracked paths remain permitted, matching preflight.
 sequential_repo_dirty() { # <repo> <child-key>
   local repo="$1" key="$2" current baseline added
+  # Refresh stat info first: build steps may rewrite tracked files with
+  # identical bytes (regenerated codegen output), and an unrefreshed
+  # diff-index reports those as modified until any git status runs — a
+  # phantom that fails attempts against dirt that does not exist.
+  git -C "$repo" update-index --refresh -q >/dev/null 2>&1 || true
   if ! git -C "$repo" diff-index --quiet HEAD -- . ':(exclude).beads' 2>/dev/null; then
     say "dirty: $repo has uncommitted tracked changes: $(git -C "$repo" diff-index --name-only HEAD -- . ':(exclude).beads' 2>/dev/null | head -10 | paste -sd ' ' -)"
     return 0
@@ -1790,6 +1961,9 @@ capture_run_baselines() {
   LAST_ACCEPTED_HEAD=$RUN_BASE_HEAD
   for s in "${SIBLINGS[@]}"; do
     RUN_SIB_HEAD[$s]=$(git -C "$s" rev-parse HEAD)
+    # Parallel external-movement detection tracks the last head this run
+    # accepted per sibling; RUN_SIB_HEAD stays frozen for final reporting.
+    SIB_LAST_ACCEPTED[$s]=${RUN_SIB_HEAD[$s]}
   done
 }
 
@@ -1945,6 +2119,15 @@ reap_worker() { # <pid> <rc>
     return
   fi
 
+  # With mirrored sibling layouts, a child's effects can live in any repo of
+  # the set: count commits on this branch name across main + every sibling.
+  local total_commits="$commits" s
+  if [ "$LAYOUT_MODE" -eq 1 ]; then
+    for s in "${SIBLINGS[@]}"; do
+      total_commits=$((total_commits + $(branch_ahead "$s" "${SIB_BRANCH[$s]}" "$branch")))
+    done
+  fi
+
   # Research always needs a new bead comment, even if it also produced code.
   # Verified research with commits follows the normal landing queue; findings
   # without commits are delivered directly to beads.
@@ -1956,14 +2139,14 @@ reap_worker() { # <pid> <rc>
       cleanup_worktree "$wt"
       return
     fi
-    if [ "$commits" -eq 0 ]; then
+    if [ "$total_commits" -eq 0 ]; then
       mbox --arg child "$child" --arg worker "$worker" --argjson comments "$now_comments" \
         --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
         '{event:"researched",child:$child,worker:$worker,comments:$comments,cost:$cost,ts:$ts}'
       say "$child researched on $worker (findings in beads, no code) — nothing to merge"
       RESEARCHED=$((RESEARCHED + 1))
       cleanup_worktree "$wt"
-      git branch -D "$branch" >>"$LOG" 2>&1 || true
+      delete_branch_everywhere "$branch"
       return
     fi
   fi
@@ -1972,7 +2155,7 @@ reap_worker() { # <pid> <rc>
   # already exists (operator pre-commit, external/infra effects). Accept that
   # only with evidence: a new bead comment since dispatch. A bare close with no
   # commits and no comment still fails as unverifiable.
-  if [ "$status" = closed ] && ! is_research_child "$child" "$title" && [ "$commits" -eq 0 ]; then
+  if [ "$status" = closed ] && ! is_research_child "$child" "$title" && [ "$total_commits" -eq 0 ]; then
     local nc_comments
     nc_comments=$(comment_count_of "$child")
     if [ "$nc_comments" -gt "${PRECOMMENTS[$child]:-0}" ]; then
@@ -1982,18 +2165,25 @@ reap_worker() { # <pid> <rc>
       say "$child completed on $worker with no new commits (evidence in bead comment) — nothing to merge"
       MERGED=$((MERGED + 1))
       cleanup_worktree "$wt"
-      git branch -D "$branch" >>"$LOG" 2>&1 || true
+      delete_branch_everywhere "$branch"
       return
     fi
   fi
 
-  if [ "$status" = closed ] && [ "$commits" -gt 0 ]; then
-    local summary
+  if [ "$status" = closed ] && [ "$total_commits" -gt 0 ]; then
+    local summary sib_summary
     summary=$(git log --format='%s' "$BASE_BRANCH..$branch" 2>/dev/null | paste -sd ';' -)
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        [ "$(branch_ahead "$s" "${SIB_BRANCH[$s]}" "$branch")" -gt 0 ] || continue
+        sib_summary=$(git -C "$s" log --format='%s' "${SIB_BRANCH[$s]}..$branch" 2>/dev/null | paste -sd ';' -)
+        summary="${summary:+$summary; }[${s##*/}] $sib_summary"
+      done
+    fi
     mbox --arg child "$child" --arg worker "$worker" --arg branch "$branch" \
-      --arg summary "$summary" --argjson commits "$commits" --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
+      --arg summary "$summary" --argjson commits "$total_commits" --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
       '{event:"done",child:$child,worker:$worker,branch:$branch,summary:$summary,commits:$commits,cost:$cost,ts:$ts}'
-    say "$child done on $worker ($commits commits) — queued for merge"
+    say "$child done on $worker ($total_commits commits) — queued for merge"
     if [[ "$title" =~ ^Merge\ fix:\ land\ ([^ ]+) ]]; then
       # A repaired branch: re-enqueue the ORIGINAL child's merge.
       local orig
@@ -2009,7 +2199,7 @@ reap_worker() { # <pid> <rc>
   # Failure path (incl. closed-without-commits, timeout, gutter).
   local reason="${stopped_reason:-exited rc=$rc}"
   [ -z "$stopped_reason" ] && [ -n "$WORKER_TIMEOUT" ] && [ "$rc" -eq 124 ] && reason="timed out after ${WORKER_TIMEOUT}s"
-  if [ -z "$stopped_reason" ] && [ "$status" = closed ] && [ "$commits" -eq 0 ]; then
+  if [ -z "$stopped_reason" ] && [ "$status" = closed ] && [ "$total_commits" -eq 0 ]; then
     if is_research_child "$child" "$title"; then
       reason="closed without findings (no new bead comment)"
     else
@@ -2161,11 +2351,28 @@ reap_finished() {
 }
 
 # ---------------------------------------------------------------- merge ----
-park_branch() { # <child> <branch> <reason>
-  local child="$1" branch="$2" reason="$3" fix_id desc
-  desc="Branch \`$branch\` (child \`$child\`) failed to land on \`$BASE_BRANCH\`: $reason.
+park_branch() { # <child> <branch> <reason> — with siblings, parks the WHOLE branch set
+  local child="$1" branch="$2" reason="$3" fix_id desc s set_line=''
+  if [ "$LAYOUT_MODE" -eq 1 ]; then
+    [ "$(branch_ahead "$REPO" "$BASE_BRANCH" "$branch")" -eq 0 ] \
+      || set_line="- this repository (\`$REPO\`, base \`$BASE_BRANCH\`)"
+    for s in "${SIBLINGS[@]}"; do
+      [ "$(branch_ahead "$s" "${SIB_BRANCH[$s]}" "$branch")" -gt 0 ] || continue
+      set_line="${set_line:+$set_line
+}- sibling \`$s\` (base \`${SIB_BRANCH[$s]}\`)"
+    done
+  fi
+  if [ -n "$set_line" ]; then
+    desc="Branch \`$branch\` (child \`$child\`) failed to land: $reason. The branch set spans several repositories and lands all-or-nothing; the whole set is parked together:
+
+$set_line
+
+Repair procedure: you will be on branch \`$branch\` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into \`$branch\` and resolve conflicts"
+  else
+    desc="Branch \`$branch\` (child \`$child\`) failed to land on \`$BASE_BRANCH\`: $reason.
 
 Repair procedure: you will be on branch \`$branch\` in an isolated worktree. Merge \`$BASE_BRANCH\` into it, resolve conflicts"
+  fi
   if [ "$reason" = conflict ]; then
     desc="$desc, then run the project quality gates"
   else
@@ -2176,7 +2383,11 @@ Repair procedure: you will be on branch \`$branch\` in an isolated worktree. Mer
   else
     desc="$desc. Do not push (disabled this run). Close this issue and note the epic."
   fi
-  desc="$desc Do NOT merge into $BASE_BRANCH yourself."
+  if [ -n "$set_line" ]; then
+    desc="$desc Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes."
+  else
+    desc="$desc Do NOT merge into $BASE_BRANCH yourself."
+  fi
   fix_id=$(bd create "Merge fix: land $branch ($reason)" --type task --parent "$EPIC" -p 1 \
       -d "$desc" --json 2>>"$LOG" | jq -r 'if type=="array" then .[0] else . end | .id // empty')
   mkdir -p "$RUN_DIR/parked"
@@ -2190,12 +2401,22 @@ Repair procedure: you will be on branch \`$branch\` in an isolated worktree. Mer
 
 process_merges() {
   [ "${#MERGE_QUEUE[@]}" -gt 0 ] || return 0
+  local s
   if [ "$(git -C "$REPO" rev-parse HEAD)" != "$LAST_ACCEPTED_HEAD" ]; then
     fatal_reconcile "base branch $BASE_BRANCH moved externally; cannot trial-merge — operator must reconcile"
     return 1
   fi
+  if [ "$LAYOUT_MODE" -eq 1 ]; then
+    for s in "${SIBLINGS[@]}"; do
+      if [ "$(git -C "$s" rev-parse HEAD)" != "${SIB_LAST_ACCEPTED[$s]}" ]; then
+        fatal_reconcile "sibling $s branch ${SIB_BRANCH[$s]} moved externally; cannot trial-merge — operator must reconcile"
+        return 1
+      fi
+    done
+  fi
   local queue=("${MERGE_QUEUE[@]}")
-  local i entry child branch merge_commit
+  local i entry child branch merge_commit main_ahead total_ahead conflict repos_json head
+  local -A sib_ahead=()
 
   # Exclusive merge gate (bd 1.x merge slot). If another actor holds it,
   # keep the queue intact and retry next tick.
@@ -2209,24 +2430,76 @@ process_merges() {
     entry="${queue[$i]}"
     child="${entry%%|*}"; branch="${entry#*|}"
 
-    # The coordinator owns this integration worktree. Reset tracked state and
+    # Which repos does this branch set touch? Landing is all-or-nothing
+    # across the set: main plus every sibling with commits on this branch.
+    main_ahead=$(branch_ahead "$REPO" "$BASE_BRANCH" "$branch")
+    total_ahead="$main_ahead"
+    sib_ahead=()
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        sib_ahead[$s]=$(branch_ahead "$s" "${SIB_BRANCH[$s]}" "$branch")
+        total_ahead=$((total_ahead + ${sib_ahead[$s]}))
+      done
+    fi
+    if [ "$total_ahead" -eq 0 ]; then
+      say "nothing to land for $branch ($child) — dropping empty branch set"
+      unset "PARKED[$branch]"
+      delete_branch_everywhere "$branch"
+      continue
+    fi
+
+    # The coordinator owns these integration worktrees. Reset tracked state and
     # remove every untracked or ignored artifact before each trial merge.
     git -C "$INTEG_WT" reset --hard "$BASE_BRANCH" >>"$LOG" 2>&1
     git -C "$INTEG_WT" clean -fdx >>"$LOG" 2>&1
     setup_worktree "$INTEG_WT"
-    if ! git -C "$INTEG_WT" merge --no-ff "$branch" -m "cook-epic: merge $branch ($child)" >>"$LOG" 2>&1; then
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        git -C "${SIB_INTEG_WT[$s]}" reset --hard "${SIB_BRANCH[$s]}" >>"$LOG" 2>&1
+        git -C "${SIB_INTEG_WT[$s]}" clean -fdx >>"$LOG" 2>&1
+        setup_worktree_assets "$s" "${SIB_INTEG_WT[$s]}"
+      done
+    fi
+
+    # Trial-merge every repo in the set; ANY conflict parks the whole set.
+    conflict=0
+    if [ "$main_ahead" -gt 0 ] \
+       && ! git -C "$INTEG_WT" merge --no-ff "$branch" -m "cook-epic: merge $branch ($child)" >>"$LOG" 2>&1; then
       git -C "$INTEG_WT" merge --abort >>"$LOG" 2>&1
+      conflict=1
+    fi
+    if [ "$conflict" -eq 0 ] && [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        [ "${sib_ahead[$s]}" -gt 0 ] || continue
+        if ! git -C "${SIB_INTEG_WT[$s]}" merge --no-ff "$branch" -m "cook-epic: merge $branch ($child)" >>"$LOG" 2>&1; then
+          git -C "${SIB_INTEG_WT[$s]}" merge --abort >>"$LOG" 2>&1
+          conflict=1
+          break
+        fi
+      done
+    fi
+    if [ "$conflict" -eq 1 ]; then
       park_branch "$child" "$branch" conflict
       continue
     fi
+
+    # One gate for the whole set, run from the main integration worktree so
+    # relative sibling references resolve against the sibling trial merges.
     if [ -n "$GATE" ]; then
       if ! ( cd "$INTEG_WT" && fleet_run flock "$HEAVY_LOCK" bash -c "$GATE" ) >>"$LOG" 2>&1; then
         git -C "$INTEG_WT" reset --hard "$BASE_BRANCH" >>"$LOG" 2>&1
+        if [ "$LAYOUT_MODE" -eq 1 ]; then
+          for s in "${SIBLINGS[@]}"; do
+            git -C "${SIB_INTEG_WT[$s]}" reset --hard "${SIB_BRANCH[$s]}" >>"$LOG" 2>&1
+          done
+        fi
         park_branch "$child" "$branch" gate-failed
         continue
       fi
     fi
-    if ! git -C "$REPO" merge --ff-only "$INTEG_BRANCH" >>"$LOG" 2>&1; then
+
+    # Land: fast-forward every repo in the set, then push each.
+    if [ "$main_ahead" -gt 0 ] && ! git -C "$REPO" merge --ff-only "$INTEG_BRANCH" >>"$LOG" 2>&1; then
       MERGE_QUEUE=("${queue[@]:$i}")
       STOPPING=1; FATAL_STOP=1
       STOP_REASON="base branch $BASE_BRANCH moved externally; cannot fast-forward — operator must reconcile"
@@ -2234,28 +2507,69 @@ process_merges() {
       bd merge-slot release --holder "$HOLDER" >/dev/null 2>>"$LOG"
       return 1
     fi
-    if [ "$PUSH_ENABLED" -eq 1 ] && ! git -C "$REPO" push origin "$BASE_BRANCH" >>"$LOG" 2>&1; then
-      MERGE_QUEUE=("${queue[@]:$i}")
-      STOPPING=1; FATAL_STOP=1
-      STOP_REASON="push of $BASE_BRANCH rejected (remote moved?); operator must reconcile"
-      say "$STOP_REASON"
-      bd merge-slot release --holder "$HOLDER" >/dev/null 2>>"$LOG"
-      return 1
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        [ "${sib_ahead[$s]}" -gt 0 ] || continue
+        if ! git -C "$s" merge --ff-only "$INTEG_BRANCH" >>"$LOG" 2>&1; then
+          MERGE_QUEUE=("${queue[@]:$i}")
+          STOPPING=1; FATAL_STOP=1
+          STOP_REASON="sibling $s branch ${SIB_BRANCH[$s]} moved externally; cannot fast-forward — operator must reconcile"
+          say "$STOP_REASON"
+          bd merge-slot release --holder "$HOLDER" >/dev/null 2>>"$LOG"
+          return 1
+        fi
+      done
+    fi
+    if [ "$PUSH_ENABLED" -eq 1 ]; then
+      if [ "$main_ahead" -gt 0 ] && ! push_repo "$REPO" origin "$BASE_BRANCH" >>"$LOG" 2>&1; then
+        MERGE_QUEUE=("${queue[@]:$i}")
+        STOPPING=1; FATAL_STOP=1
+        STOP_REASON="push of $BASE_BRANCH rejected (remote moved?); operator must reconcile"
+        say "$STOP_REASON"
+        bd merge-slot release --holder "$HOLDER" >/dev/null 2>>"$LOG"
+        return 1
+      fi
+      if [ "$LAYOUT_MODE" -eq 1 ]; then
+        for s in "${SIBLINGS[@]}"; do
+          [ "${sib_ahead[$s]}" -gt 0 ] || continue
+          if ! push_repo "$s" origin "${SIB_BRANCH[$s]}" >>"$LOG" 2>&1; then
+            MERGE_QUEUE=("${queue[@]:$i}")
+            STOPPING=1; FATAL_STOP=1
+            STOP_REASON="push of sibling $s branch ${SIB_BRANCH[$s]} rejected (remote moved?); operator must reconcile"
+            say "$STOP_REASON"
+            bd merge-slot release --holder "$HOLDER" >/dev/null 2>>"$LOG"
+            return 1
+          fi
+        done
+      fi
     fi
     merge_commit=$(git -C "$REPO" rev-parse --short HEAD)
     LAST_ACCEPTED_HEAD=$(git -C "$REPO" rev-parse HEAD)
+    repos_json='[]'
+    [ "$main_ahead" -eq 0 ] || repos_json=$(jq -cn --arg repo "$REPO" --argjson commits "$main_ahead" --arg head "$LAST_ACCEPTED_HEAD" \
+      '[{repo:$repo,commits:$commits,head:$head}]')
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        head=$(git -C "$s" rev-parse HEAD)
+        SIB_LAST_ACCEPTED[$s]="$head"
+        [ "${sib_ahead[$s]}" -gt 0 ] || continue
+        repos_json=$(jq -cn --argjson repos "$repos_json" --arg repo "$s" --argjson commits "${sib_ahead[$s]}" --arg head "$head" \
+          '$repos + [{repo:$repo,commits:$commits,head:$head}]')
+      done
+    fi
     MERGED=$((MERGED + 1))
     unset "PARKED[$branch]"
     local merge_landing='gated, landed locally'
     [ "$VERIFIED" -eq 0 ] && merge_landing='landed unverified locally'
     [ "$PUSH_ENABLED" -eq 1 ] && merge_landing='gated, pushed, landed'
     [ "$PUSH_ENABLED" -eq 1 ] && [ "$VERIFIED" -eq 0 ] && merge_landing='pushed, landed unverified'
-    mbox --arg child "$child" --arg branch "$branch" --arg commit "$merge_commit" --arg landing "$merge_landing" --arg ts "$(date +%H:%M:%S)" \
-      '{event:"merged",child:$child,branch:$branch,commit:$commit,landing:$landing,ts:$ts}'
+    mbox --arg child "$child" --arg branch "$branch" --arg commit "$merge_commit" --arg landing "$merge_landing" \
+      --argjson repos "$repos_json" --arg ts "$(date +%H:%M:%S)" \
+      '{event:"merged",child:$child,branch:$branch,commit:$commit,landing:$landing,repositories:$repos,ts:$ts}'
     printf -- '- %s %s via `%s` (%s)\n' "$child" "$merge_landing" "$branch" "$merge_commit" >> "$SUMMARY"
     say "$merge_landing $branch ($child) into $BASE_BRANCH ($merge_commit)"
-    git branch -d "$branch" >>"$LOG" 2>&1 || true
-    [ "$PUSH_ENABLED" -eq 1 ] && git -C "$REPO" push origin --delete "$branch" >>"$LOG" 2>&1 || true
+    delete_branch_everywhere "$branch"
+    [ "$PUSH_ENABLED" -eq 1 ] && push_repo "$REPO" origin --delete "$branch" >>"$LOG" 2>&1 || true
   done
 
   bd merge-slot release --holder "$HOLDER" >/dev/null 2>>"$LOG"
@@ -2285,19 +2599,27 @@ dispatchable() { # <child>
 }
 
 finish() { # <reason>
-  local reason="$1" effects
+  local reason="$1" effects s
   stop_run_inspectors
   bd merge-slot release --holder "$HOLDER" >/dev/null 2>&1 || true
   if [ "$SEQUENTIAL" != 1 ]; then
     git worktree remove --force "$INTEG_WT" >>"$LOG" 2>&1 || true
     git branch -D "$INTEG_BRANCH" >>"$LOG" 2>&1 || true
-  else
-    capture_run_baselines
-    effects=$(repo_effects_json "$RUN_BASE_HEAD")
-    if [ "$effects" != '[]' ]; then
-      printf '\n## Repository landing effects\n' >> "$SUMMARY"
-      jq -r '.[] | "- `\(.repo)`: \(.commits) commits, \(.base[0:12]) → \(.head[0:12])"' <<< "$effects" >> "$SUMMARY"
+    if [ "$LAYOUT_MODE" -eq 1 ]; then
+      for s in "${SIBLINGS[@]}"; do
+        [ -n "${SIB_INTEG_WT[$s]:-}" ] || continue
+        git -C "$s" worktree remove --force "${SIB_INTEG_WT[$s]}" >>"$LOG" 2>&1 || true
+        git -C "$s" branch -D "$INTEG_BRANCH" >>"$LOG" 2>&1 || true
+      done
     fi
+  fi
+  # Per-repo landing effects are reported for every mode: sequential runs and
+  # parallel runs (with or without siblings) share the same baselines.
+  capture_run_baselines
+  effects=$(repo_effects_json "$RUN_BASE_HEAD")
+  if [ "$effects" != '[]' ]; then
+    printf '\n## Repository landing effects\n' >> "$SUMMARY"
+    jq -r '.[] | "- `\(.repo)`: \(.commits) commits, \(.base[0:12]) → \(.head[0:12])"' <<< "$effects" >> "$SUMMARY"
   fi
   mbox --arg reason "$reason" --argjson dispatched "$DISPATCHED" --argjson merged "$MERGED" --argjson researched "$RESEARCHED" \
     --argjson repositories "${effects:-[]}" --argjson cost "${TOTAL_COST:-0}" --argjson costTracked "$COST_SUPPORTED" --arg ts "$(date +%H:%M:%S)" \
@@ -2305,11 +2627,45 @@ finish() { # <reason>
   say "cook-epic finished: $reason (dispatched=$DISPATCHED merged=$MERGED researched=$RESEARCHED)"
 }
 
-say "cook-epic start: epic=$EPIC harness=$HARNESS mode=$([ "$SEQUENTIAL" = 1 ] && echo "sequential(siblings:${SIBLINGS[*]:-none})" || echo "parallel:$WORKERS") base=$BASE_BRANCH gate='${GATE:-none}' timeout=${WORKER_TIMEOUT:-none} idle-threshold=${IDLE_THRESHOLD}s inspector-timeout=${INSPECTOR_TIMEOUT}s attempts=$MAX_ATTEMPTS push=$PUSH_ENABLED cgroup=$([ "$SCOPE_OK" -eq 1 ] && echo "cook-epic.slice cpu=$CPU_WEIGHT io=$IO_WEIGHT mem-high=$MEMORY_HIGH" || echo nice-fallback)"
+# Live worker-cap control: an operator can widen or narrow a running pool by
+# writing a positive integer to $RUN_DIR/WORKERS; the loop re-reads it each
+# tick. Malformed content is ignored with one logged warning per change.
+# Sequential runs stay pinned to one worker.
+DYN_WORKERS_LAST=''
+reload_worker_cap() {
+  local raw cap
+  [ -f "$RUN_DIR/WORKERS" ] || return 0
+  raw=$(tr -d '[:space:]' < "$RUN_DIR/WORKERS" 2>/dev/null) || return 0
+  [ "$raw" != "$DYN_WORKERS_LAST" ] || return 0
+  DYN_WORKERS_LAST="$raw"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    cap="$raw"
+    [ "$cap" -ge 1 ] || cap=1
+    [ "$SEQUENTIAL" != 1 ] || cap=1
+    if [ "$cap" -ne "$WORKERS" ]; then
+      WORKERS="$cap"
+      say "worker cap set to $WORKERS from $RUN_DIR/WORKERS"
+      mbox --argjson workers "$WORKERS" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"worker-cap",workers:$workers,ts:$ts}'
+    fi
+  else
+    say "WARNING: ignoring malformed worker cap in $RUN_DIR/WORKERS: '$raw'"
+  fi
+}
+
+if [ "$SEQUENTIAL" = 1 ]; then
+  MODE_DESC="sequential(siblings:${SIBLINGS[*]:-none})"
+elif [ "$LAYOUT_MODE" -eq 1 ]; then
+  MODE_DESC="parallel:$WORKERS(siblings:${SIBLINGS[*]})"
+else
+  MODE_DESC="parallel:$WORKERS"
+fi
+say "cook-epic start: epic=$EPIC harness=$HARNESS mode=$MODE_DESC base=$BASE_BRANCH gate='${GATE:-none}' timeout=${WORKER_TIMEOUT:-none} idle-threshold=${IDLE_THRESHOLD}s inspector-timeout=${INSPECTOR_TIMEOUT}s attempts=$MAX_ATTEMPTS push=$PUSH_ENABLED cgroup=$([ "$SCOPE_OK" -eq 1 ] && echo "cook-epic.slice cpu=$CPU_WEIGHT io=$IO_WEIGHT mem-high=$MEMORY_HIGH" || echo nice-fallback)"
 
 TICK="$SUPERVISION_TICK"
 while true; do
   [ -e "$RUN_DIR/STOP" ] && [ "$STOPPING" -eq 0 ] && { STOPPING=1; STOP_REASON='STOP file'; say 'STOP file found — draining'; }
+  reload_worker_cap
 
   supervise_workers
   reap_finished

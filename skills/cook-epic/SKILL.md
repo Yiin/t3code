@@ -1,24 +1,38 @@
 ---
 name: cook-epic
-description: Execute a beads epic unattended with fresh-context workers — parallel across git worktrees when the children are independent, sequential on the base branch when they entangle (same-file clusters, cross-repo children, tight dependency chains). Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
+description: Execute a beads epic unattended with fresh-context workers. Parallel across git worktrees by default, following the dependency frontier as it narrows and widens on its own; sibling repos outside this checkout ride along in mirrored per-worker layouts. Sequential on the base branch is an explicit operator opt-in. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
 ---
 
-# cook-epic — epic executor (parallel or sequential)
+# cook-epic — epic executor
 
 Run all ready children of a beads epic with fresh-context workers through the
 `run.sh` beside this `SKILL.md`. Each worker is a new headless session of
 the current harness (kimi/claude/codex/opencode) with no conversation context; all
 coordination flows through beads (claims, notes, status) and git (commits,
-merges). Two execution shapes, picked per epic (step 2):
+merges).
 
-- **Parallel** (default for independent children): one worker per ready child,
-  each in its own git worktree on an `epic/<child>` branch, with a serialized
-  trial-merge queue landing branches on the base branch.
-- **Sequential** (for entangled children): one worker at a time, directly in
-  the main checkout on the base branch — like ralph, but with cook-epic's
-  claiming, retry budgets, per-child gate, and verify-by-effects. No
-  worktrees, no merge queue; the coordinator gates each child and pushes only
-  when push is enabled.
+**This is the only skill for running an epic.** It handles a chain, a wide
+frontier, and every mix of the two in one run — nobody has to predict the shape
+up front. Each tick, the coordinator fills `WORKERS - active` slots from the
+live `bd ready --parent <EPIC>` frontier: a chain phase runs one worker at a
+time, and the moment the graph fans out, the pool fills. Sequential mode is not
+"the option for sequential-looking epics" — it is a pure operator preference;
+cross-repo epics run in parallel too (step 2).
+
+- **Parallel** (default): one worker per ready child, each in its own git
+  worktree on an `epic/<child>` branch, with a serialized trial-merge queue
+  landing branches on the base branch. Concurrency is whatever the frontier
+  allows at that moment, capped by `COOKEPIC_WORKERS` (retunable live via
+  `$RUN_DIR/WORKERS`). With `COOKEPIC_SIBLINGS`, each worker gets a mirrored
+  layout under the run directory: its main-repo worktree plus one worktree per
+  sibling repo at its real relative position, all on `epic/<child>`, and
+  landing trial-merges, gates, and fast-forwards every touched repo as one set.
+- **Sequential**: one worker at a time, directly in the main checkout on the
+  base branch — like ralph, but with cook-epic's claiming, retry budgets,
+  per-child gate, and verify-by-effects. No worktrees, no merge queue; the
+  coordinator gates each child and pushes only when push is enabled. Note the
+  cost: `COOKEPIC_SEQUENTIAL` is fixed for the whole run, so a sequential run
+  stays one-wide even after the frontier fans out.
 
 ## When this fits
 
@@ -36,26 +50,26 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 1. **Parse the request.** The first argument after `/cook-epic` is the epic id.
    Map optional knobs:
 
-   | User says                                       | Environment variable                                                  | Default                                                                                                                  |
-   | ----------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                                                                                |
-   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                                                                                       |
-   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                                                                                      |
-   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                                                                                 |
-   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                                                                                    |
-   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                                           |
-   | "2h absolute limit per worker"                  | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                          | unset; no absolute timeout                                                                                               |
-   | "inspect after 45m idle"                        | `COOKEPIC_IDLE_THRESHOLD` (positive seconds)                          | 1800                                                                                                                     |
-   | "inspector limit 90s"                           | `COOKEPIC_INSPECTOR_TIMEOUT` (positive seconds)                       | 120                                                                                                                      |
-   | "retry failed inspections after 10m"            | `COOKEPIC_INSPECT_RETRY_DELAY` (positive seconds)                     | 300                                                                                                                      |
-   | "bound inspector delays to 2m through 1h"       | `COOKEPIC_INSPECT_MIN_DELAY` / `COOKEPIC_INSPECT_MAX_DELAY`           | 60 / 7200                                                                                                                |
-   | "give stopped workers 30s to exit"              | `COOKEPIC_STOP_GRACE` (positive seconds)                              | 15                                                                                                                       |
-   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                                                                                   |
-   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | claude/ccx: tiered (sonnet workers, opus plans, fable reviews); explicit value pins every stage; others: harness default |
-   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                                                                            |
-   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                                                                                       |
-   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                                                                                        |
-   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                                                                                    |
+   | User says                                       | Environment variable                                                  | Default                                                                                                                                       |
+   | ----------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                                                                                                     |
+   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                                                                                                            |
+   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                                                                                                           |
+   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                                                                                                      |
+   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                                                                                                         |
+   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                                                                |
+   | "2h absolute limit per worker"                  | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                          | unset; no absolute timeout                                                                                                                    |
+   | "inspect after 45m idle"                        | `COOKEPIC_IDLE_THRESHOLD` (positive seconds)                          | 1800                                                                                                                                          |
+   | "inspector limit 90s"                           | `COOKEPIC_INSPECTOR_TIMEOUT` (positive seconds)                       | 120                                                                                                                                           |
+   | "retry failed inspections after 10m"            | `COOKEPIC_INSPECT_RETRY_DELAY` (positive seconds)                     | 300                                                                                                                                           |
+   | "bound inspector delays to 2m through 1h"       | `COOKEPIC_INSPECT_MIN_DELAY` / `COOKEPIC_INSPECT_MAX_DELAY`           | 60 / 7200                                                                                                                                     |
+   | "give stopped workers 30s to exit"              | `COOKEPIC_STOP_GRACE` (positive seconds)                              | 15                                                                                                                                            |
+   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                                                                                                        |
+   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | claude/ccx: tiered (sonnet workers, opus plans, fable reviews falling back to opus); explicit value pins every stage; others: harness default |
+   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                                                                                                 |
+   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                                                                                                            |
+   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                                                                                                             |
+   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                                                                                                         |
 
    `COOKEPIC_NO_PUSH=1` disables every push: the coordinator fast-forwards the
    base branch locally after each gated merge but never pushes it, workers are
@@ -70,6 +84,12 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    `COOKEPIC_NO_PUSH=1` means local-only. Values such as `0`, `true`, or any
    other nonempty value fail preflight. Push mode requires `origin`; add it or
    explicitly set `COOKEPIC_NO_PUSH=1`.
+
+   `COOKEPIC_WORKERS` is only the starting cap. An operator can widen or
+   narrow a LIVE run without restarting it: write a positive integer to
+   `$RUN_DIR/WORKERS` and the coordinator re-reads it every tick (clamped to
+   at least 1; malformed content is ignored with one logged warning per
+   change; sequential runs stay pinned to one worker).
 
    `COOKEPIC_GATE` is required: workers only run cheap checks (typecheck,
    lint, targeted unit tests), so the gate is the only full verification. If
@@ -98,29 +118,37 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    Codex cannot enforce a no-tool inspector session. Codex inspections return
    `uncertain` without launching Codex.
 
-2. **Choose the execution shape.** Read the children
-   (`bd list --parent <EPIC> --all --flat --json`, plus `bd show` on a few)
-   and decide sequential vs parallel. An explicit user instruction
+2. **Choose the execution shape — parallel unless the user explicitly asks
+   for sequential.** Read the children (`bd list --parent <EPIC> --all --flat
+--json`, plus `bd show` on a few). An explicit user instruction
    ("sequential", "parallel 4") always wins. Otherwise:
 
-   **Choose sequential when any of these hold:**
-   - Any child references paths OUTSIDE the repo (sibling repos like
-     `../proga-api`) — worktree isolation breaks relative sibling paths, and
-     shared siblings can't be isolated. Collect them into
-     `COOKEPIC_SIBLINGS`.
-   - Most children cluster on the same one or two files — parallel workers
-     would just feed the trial-merge queue conflicts.
-   - The dependency graph is a near-chain (the ready frontier rarely exceeds
-     1–2 children) — parallelism never engages anyway.
-   - The children are small (one-file fixes) — worktree + merge overhead
-     exceeds the work.
+   **Parallel is the default, and it is the answer for every mixed-shape
+   epic.** Do not pre-judge the epic as "sequential work" because the ready
+   frontier starts narrow, because the graph looks chain-like, or because the
+   children are small. The dispatch loop already tracks the frontier tick by
+   tick: it runs one worker while the chain is one-wide, and fills the pool the
+   moment the graph fans out. Pinning sequential on those signals throws that
+   away for the whole run.
 
-   **Choose parallel when** children touch disjoint modules and the ready
-   frontier is wide (3+ genuinely independent children).
+   **Sibling repos do not force sequential.** When a child references paths
+   OUTSIDE the repo (sibling repos like `../proga-api`), collect them into
+   `COOKEPIC_SIBLINGS` — parallel mode mirrors each sibling into every
+   worker's layout under `$RUN_DIR/layouts/<child>/` at its real relative
+   position (all on `epic/<child>`), so `../proga-api` resolves inside the
+   sandbox, and landing trial-merges, gates, and lands every touched repo as
+   one all-or-nothing set. Sequential remains available as an explicit
+   operator preference (`COOKEPIC_SEQUENTIAL=1`) with its existing semantics.
+
+   **Same-file clustering is not a reason to go sequential.** Merge conflicts
+   are already handled: the branch parks and a `Merge fix:` child comes back
+   to the pool. If most children genuinely fight over one or two files, lower
+   `COOKEPIC_WORKERS` to 2 instead — the run still widens later when the work
+   spreads out.
 
    State your choice and the reason in the launch report. Sequential sets
-   `COOKEPIC_SEQUENTIAL=1` (and `COOKEPIC_SIBLINGS` when cross-repo);
-   parallel sets `COOKEPIC_WORKERS` (default 3).
+   `COOKEPIC_SEQUENTIAL=1`; parallel sets `COOKEPIC_WORKERS` (default 3);
+   `COOKEPIC_SIBLINGS` is valid in both modes.
 
 3. **Preflight** (all must hold; fix and report instead of launching otherwise):
    - You are at the project root: `.beads/` exists and there are no uncommitted
@@ -134,13 +162,17 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    - The beads data dir is not git-tracked (`git ls-files .beads` shows no
      dolt/db files) — run.sh exits fatally otherwise, since worktrees would
      fork the database.
-   - Sequential mode with `COOKEPIC_SIBLINGS`: each sibling is a git repo, on
-     a branch, with no uncommitted changes. The coordinator resolves every
+   - `COOKEPIC_SIBLINGS` (either mode): each sibling is a git repo, on a
+     branch, with no uncommitted changes. The coordinator resolves every
      configured sibling to a canonical absolute path before comparing worktrees
      or recording effects. When pushes are enabled, every sibling must also
-     have an `origin` remote (run.sh hard-stops otherwise).
+     have an `origin` remote (run.sh hard-stops otherwise). In parallel mode
+     each sibling must additionally be mirrorable: its path relative to the
+     project root must stay inside a per-worker layout root and outside the
+     main repo — a sibling that escapes the layout (e.g. resolves above it) or
+     nests inside the main repository fails preflight with a clear message.
    - Push-enabled runs require an `origin` remote in the main repository and
-     every sequential sibling, because the coordinator always pushes to
+     every sibling, because the coordinator always pushes to
      `origin <branch>`. A repository with only another remote must set
      `COOKEPIC_NO_PUSH=1` or add `origin`; it never silently becomes local-only.
    - If `git status` shows another agent's work, warn: cook-epic assumes
@@ -168,8 +200,8 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    ```
 
    Add only the optional variables the user requested (plus
-   `COOKEPIC_SEQUENTIAL` / `COOKEPIC_SIBLINGS` when step 2 chose sequential)
-   after `env`. In a plain interactive CLI, a non-detached launch is still fine
+   `COOKEPIC_SIBLINGS` when step 2 detected sibling repos, and
+   `COOKEPIC_SEQUENTIAL` when the user chose sequential) after `env`. In a plain interactive CLI, a non-detached launch is still fine
    when the user is watching it live.
 
    Inside t3code, prefer its server-owned EpicRunner. It persists run state,
@@ -285,6 +317,13 @@ pausing a finished run). Report it; do not retry.
 
 - **Dispatch**: each tick, `bd ready --parent <EPIC>` yields the dependency
   frontier; free worker slots are filled after an atomic `bd update --claim`.
+  Concurrency therefore tracks the graph on its own — one worker while the
+  frontier is one child wide, up to `COOKEPIC_WORKERS` once it fans out, and
+  back down again. An epic that starts as a chain and opens up mid-run needs no
+  mode change and no operator decision. The cap itself is live: writing a
+  positive integer to `$RUN_DIR/WORKERS` replaces it on the next tick (clamped
+  to at least 1; malformed content is ignored with one logged warning per
+  change).
   Retried children back off `10s·2^(n-1)` (cap 300s); rate-limited ones wait
   120s without consuming an attempt. `COOKEPIC_MAX_ATTEMPTS` (default 3)
   failed attempts → child is `blocked`.
@@ -314,13 +353,15 @@ pausing a finished run). Report it; do not retry.
   hash. With `COOKEPIC_NO_GATE=1`, successful children are **landed
   unverified** (and mailbox events carry `verified: false`); otherwise
   successful children are **gated, landed locally**.
+  In push mode the coordinator pushes every repository whose HEAD
   changed since that child's first dispatch, including commits made by an
   earlier retry attempt that a later retry only closes. Siblings are pushed as
   `origin <current-branch>` rather than through an upstream setting. A child
   that closes while leaving dirt still owns that state; after every gate the
   coordinator checks the main repository and each sibling again before it can
-  push or report success. Parallel mode does not
-  support siblings — cross-repo children are a reason to choose sequential.
+  push or report success. Siblings work in parallel mode too (mirrored
+  layouts, see Isolation and Landing) — sequential is an explicit operator
+  preference, and the mode stays fixed for the whole run.
 - **Isolation**: every worker gets a run-scoped
   `.worktrees/cook-epic-<run-id>/<child>` path on branch `epic/<child>`
   (created from the base branch, or the existing branch on retry). The
@@ -331,6 +372,13 @@ pausing a finished run). Report it; do not retry.
   copied (`.env`, `.env.local`, `.env.development[.local]`, `.env.test` —
   production/staging env files are not). Workers are prompt-bound to
   their worktree and branch, with per-worker port/DB/browser offsets.
+  With `COOKEPIC_SIBLINGS`, the worktree moves into a per-child layout at
+  `$RUN_DIR/layouts/<child>/` that also holds one worktree per sibling repo at
+  its real relative position (branch `epic/<child>` in each repo, created from
+  the sibling's current branch, reused on retry), so relative sibling
+  references resolve inside the sandbox. `node_modules` symlinks and dev env
+  files are provisioned per repo; the beads redirect exists only in the
+  main-repo worktree — siblings have no beads db.
 - **Landing**: completed branches queue for a serialized trial merge in an
   integration worktree → optional `COOKEPIC_GATE` → fast-forward the base
   branch → push. Before every trial merge, the coordinator resets and cleans
@@ -342,7 +390,16 @@ pausing a finished run). Report it; do not retry.
   rather than retrying queued merges during drain. Conflicts or red gates never
   touch the user's checkout: the branch is parked and a `Merge fix:` child is
   created under the epic, which the worker pool repairs like any other task;
-  its completion re-enqueues the merge.
+  its completion re-enqueues the merge. With `COOKEPIC_SIBLINGS`, landing is a
+  set operation: an integration layout mirrors the same relative structure,
+  every repo whose `epic/<child>` branch gained commits is trial-merged, the
+  gate runs once from the main repo's integration worktree (so relative
+  sibling references resolve against the sibling trial merges), and every repo
+  in the set fast-forwards and pushes together. If ANY repo conflicts or the
+  gate fails, ALL branches in the set park together behind ONE `Merge fix:`
+  child that names every parked branch and repo; its completion re-enqueues
+  the whole set. External movement of a sibling's branch mid-run is a
+  reconciliation stop, same as the main repo.
 - **Discovery**: the coordinator registers the epic as a bd 1.x **swarm**
   (`bd swarm create`), so `bd swarm status <EPIC>` shows live
   completed/active/ready state while a run is in flight.
@@ -449,14 +506,21 @@ landed.
   A plain background job dies with its parent session, and with it the
   supervision of any worker that survives in its own cgroup.
 - `bypassPermissions` is only appropriate for trusted, reversible work.
-- The coordinator owns all merges into the base branch. If the user (or
-  another agent) pushes to the base branch mid-run, the loop stops with a
-  reconciliation error rather than guessing.
+- The coordinator owns all merges into the base branch — and, with siblings,
+  into each sibling's base branch. If the user (or another agent) pushes to or
+  moves any of those branches mid-run, the loop stops with a reconciliation
+  error rather than guessing.
 - Budgets are soft: the cap stops NEW dispatches; in-flight workers finish.
   Cost is only tracked on claude/ccx; kimi, codex, and opencode workers report no spend.
 - Workers share one beads database and one `node_modules`. If a child adds a
   dependency, expect the integration gate to need an install — this is the
   known sharp edge; watch for it in parked merges.
+- Sibling sets land all-or-nothing: one red gate or one conflicting repo parks
+  EVERY branch in the set behind a single `Merge fix:` child, so a parked
+  cross-repo child holds back its work in every repo it touched until the fix
+  lands. That is deliberate — partial cross-repo landings are worse.
+- Failed attempts keep sibling `epic/<child>` branches too; a retry reuses
+  them, and empty ones are deleted at landing time.
 - Spec research children so the findings land in beads — a `bd comment` on the
   child plus, when it changes remaining work, the epic's "Context & architecture"
   — and title them `Research: …` (or label them `research`) so the coordinator
