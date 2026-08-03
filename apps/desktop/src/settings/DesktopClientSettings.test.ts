@@ -18,6 +18,7 @@ const clientSettings: ClientSettings = {
   confirmThreadDelete: false,
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
+  epicsGroupingMode: "project",
   favorites: [],
   providerModelPreferences: {},
   sidebarAutoSettleAfterDays: 3,

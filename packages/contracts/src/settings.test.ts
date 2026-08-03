@@ -52,6 +52,33 @@ describe("ClientSettings sidebar v2", () => {
   });
 });
 
+describe("ClientSettings epics grouping mode", () => {
+  it("defaults to the recency-first list", () => {
+    expect(decodeClientSettings({}).epicsGroupingMode).toBe("recency");
+  });
+
+  it("keeps the default when a stored blob predates the key", () => {
+    const decoded = decodeClientSettings({ wordWrap: false, sidebarV2Enabled: true });
+    expect(decoded.epicsGroupingMode).toBe("recency");
+    expect(decoded.wordWrap).toBe(false);
+  });
+
+  it("accepts both modes as a value and as a patch", () => {
+    expect(decodeClientSettings({ epicsGroupingMode: "project" }).epicsGroupingMode).toBe(
+      "project",
+    );
+    expect(decodeClientSettingsPatch({ epicsGroupingMode: "recency" }).epicsGroupingMode).toBe(
+      "recency",
+    );
+    expect(decodeClientSettingsPatch({}).epicsGroupingMode).toBeUndefined();
+  });
+
+  it("rejects an unknown mode", () => {
+    expect(() => decodeClientSettings({ epicsGroupingMode: "alphabetical" })).toThrow();
+    expect(() => decodeClientSettingsPatch({ epicsGroupingMode: "alphabetical" })).toThrow();
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults to an empty record so legacy configs without the key still decode", () => {
     expect(DEFAULT_SERVER_SETTINGS.providerInstances).toEqual({});

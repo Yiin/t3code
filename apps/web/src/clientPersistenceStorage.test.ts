@@ -70,6 +70,30 @@ describe("clientPersistenceStorage", () => {
     );
   });
 
+  it("round-trips the epics grouping mode", async () => {
+    getTestWindow();
+    const { readBrowserClientSettings, writeBrowserClientSettings } =
+      await import("./clientPersistenceStorage");
+
+    writeBrowserClientSettings({ ...DEFAULT_CLIENT_SETTINGS, epicsGroupingMode: "project" });
+
+    expect(readBrowserClientSettings()?.epicsGroupingMode).toBe("project");
+  });
+
+  it("keeps the rest of a stored blob that predates the epics grouping mode", async () => {
+    const testWindow = getTestWindow();
+    testWindow.localStorage.setItem(
+      "t3code:client-settings:v1",
+      JSON.stringify({ timestampFormat: "24-hour", sidebarProjectSortOrder: "manual" }),
+    );
+    const { readBrowserClientSettings } = await import("./clientPersistenceStorage");
+    const settings = readBrowserClientSettings();
+
+    expect(settings?.epicsGroupingMode).toBe("recency");
+    expect(settings?.timestampFormat).toBe("24-hour");
+    expect(settings?.sidebarProjectSortOrder).toBe("manual");
+  });
+
   it("defaults word wrap on and discards obsolete wrapping preferences", async () => {
     const testWindow = getTestWindow();
     testWindow.localStorage.setItem(

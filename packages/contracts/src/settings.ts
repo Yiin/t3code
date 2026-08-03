@@ -21,6 +21,12 @@ export const SidebarThreadSortOrder = Schema.Literals(["updated_at", "created_at
 export type SidebarThreadSortOrder = typeof SidebarThreadSortOrder.Type;
 export const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = "updated_at";
 
+// How the Epics page groups its rows. "recency" is the flat, most-recently-
+// active-first list; "project" keeps the per-project sections.
+export const EpicsGroupingMode = Schema.Literals(["project", "recency"]);
+export type EpicsGroupingMode = typeof EpicsGroupingMode.Type;
+export const DEFAULT_EPICS_GROUPING_MODE: EpicsGroupingMode = "recency";
+
 export const SidebarProjectGroupingMode = Schema.Literals([
   "repository",
   "repository_path",
@@ -57,6 +63,9 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  epicsGroupingMode: EpicsGroupingMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_EPICS_GROUPING_MODE)),
+  ),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -600,6 +609,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
+  epicsGroupingMode: Schema.optionalKey(EpicsGroupingMode),
   favorites: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({
