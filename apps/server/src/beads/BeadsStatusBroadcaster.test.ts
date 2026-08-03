@@ -223,6 +223,27 @@ describe("isTransientBdFailureDetail", () => {
   });
 });
 
+describe("makeChangeSignalPredicate", () => {
+  it.effect("accepts both bd signal files in every shape fs.watch reports", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const beadsDirectory = path.join("/repo", ".beads");
+      const isChangeSignal = BeadsStatusBroadcaster.makeChangeSignalPredicate(path, beadsDirectory);
+
+      // `bd create`/`bd update` write last-touched; `bd close` writes only
+      // interactions.jsonl.
+      assert.isTrue(isChangeSignal("last-touched"));
+      assert.isTrue(isChangeSignal("interactions.jsonl"));
+      assert.isTrue(isChangeSignal(path.join(beadsDirectory, "interactions.jsonl")));
+      assert.isTrue(isChangeSignal(path.join(beadsDirectory, "..", ".beads", "last-touched")));
+
+      assert.isFalse(isChangeSignal("issues.jsonl"));
+      assert.isFalse(isChangeSignal("metadata.json"));
+      assert.isFalse(isChangeSignal(path.join(beadsDirectory, "embeddeddolt", "last-touched")));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
 describe("BeadsStatusBroadcaster", () => {
   it.effect("reports repos without .beads as unavailable", () => {
     const run: ProcessRunner.ProcessRunner["Service"]["run"] = () =>
@@ -309,7 +330,7 @@ describe("BeadsStatusBroadcaster", () => {
       assert.equal(counts.listCalls, 3);
 
       // Unrelated files in .beads are not a change signal.
-      yield* fs.writeFileString(path.join(beadsDirectory, "interactions.jsonl"), "{}\n");
+      yield* fs.writeFileString(path.join(beadsDirectory, "issues.jsonl"), "{}\n");
       yield* Effect.sleep(Duration.millis(700));
       assert.equal(counts.listCalls, 3);
 
@@ -318,6 +339,75 @@ describe("BeadsStatusBroadcaster", () => {
       yield* fs.writeFileString(lastTouchedPath, "t3code-vst.4\n");
       yield* Effect.sleep(Duration.millis(700));
       assert.equal(counts.listCalls, 3);
+    }).pipe(Effect.provide(makeTestLayer(makeRecordingProcessRunner(counts))));
+  });
+
+  // `bd close` bumps an issue's updated_at but writes only
+  // `.beads/interactions.jsonl` — never `.beads/last-touched`. Closing a child
+  // is the single most important epic-progress event, so it must not wait for
+  // an unrelated bd write or a re-subscribe to reach the client.
+  it.live("refreshes when a close writes only interactions.jsonl", () => {
+    const state = { childStatus: "open" };
+    const counts: BdCallCounts = { listCalls: 0, readyCalls: 0 };
+    const run: ProcessRunner.ProcessRunner["Service"]["run"] = (input) =>
+      Effect.sync(() => {
+        if (input.args[0] === "ready") {
+          counts.readyCalls += 1;
+          return okOutput("[]");
+        }
+        counts.listCalls += 1;
+        return okOutput(oneEpicListOutput(state.childStatus));
+      });
+
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* prepareBeadsWorkspace();
+      const interactionsPath = path.join(workspaceRoot, ".beads", "interactions.jsonl");
+
+      const broadcaster = yield* BeadsStatusBroadcaster.BeadsStatusBroadcaster;
+      const scope = yield* Scope.make();
+      const sawClose = yield* Deferred.make<void>();
+      yield* Stream.runForEach(broadcaster.streamStatus({ workspaceRoot }), (status) =>
+        status._tag === "available" && status.epics[0]?.childCounts.byStatus["closed"] === 1
+          ? Deferred.succeed(sawClose, undefined).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkIn(scope));
+
+      yield* awaitListCalls(counts, 2);
+      state.childStatus = "closed";
+      yield* fs.writeFileString(interactionsPath, '{"kind":"field_change"}\n');
+
+      // Times out rather than resolving if the watch filter ignores the file.
+      const closed = yield* Deferred.await(sawClose).pipe(
+        Effect.timeoutOption(Duration.seconds(5)),
+      );
+      yield* Scope.close(scope, Exit.void);
+      assert.isTrue(Option.isSome(closed));
+    }).pipe(Effect.provide(makeTestLayer(run)));
+  });
+
+  // `bd reopen` writes neither signal file, so a healthy watcher is not enough.
+  it.live("polls as a backstop while the watcher is healthy, without churn", () => {
+    const counts: BdCallCounts = { listCalls: 0, readyCalls: 0 };
+
+    return Effect.gen(function* () {
+      const workspaceRoot = yield* prepareBeadsWorkspace();
+      const broadcaster = yield* BeadsStatusBroadcaster.BeadsStatusBroadcaster;
+      const scope = yield* Scope.make();
+      const observed = yield* Ref.make(0);
+      yield* Stream.runForEach(
+        broadcaster.streamStatus({ workspaceRoot }, { pollInterval: Duration.millis(80) }),
+        () => Ref.update(observed, (seen) => seen + 1),
+      ).pipe(Effect.forkIn(scope));
+
+      // Nothing writes to `.beads` here: only the poll can drive these reads.
+      yield* awaitListCalls(counts, 5);
+      yield* Scope.close(scope, Exit.void);
+
+      // The fingerprint gate still holds — the snapshot never changed, so the
+      // subscriber saw the initial event and nothing else.
+      assert.equal(yield* Ref.get(observed), 1);
     }).pipe(Effect.provide(makeTestLayer(makeRecordingProcessRunner(counts))));
   });
 

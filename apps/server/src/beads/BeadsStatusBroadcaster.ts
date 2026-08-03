@@ -28,11 +28,47 @@ import { ProcessRunner, type ProcessRunError } from "../processRunner.ts";
 const BEADS_DIRECTORY_NAME = ".beads";
 const BEADS_METADATA_FILE_NAME = "metadata.json";
 const BEADS_LAST_TOUCHED_FILE_NAME = "last-touched";
+const BEADS_INTERACTIONS_FILE_NAME = "interactions.jsonl";
+
+/**
+ * The `.beads` files a mutation writes, as far as we can watch for one. No
+ * single file covers every command: `bd create` and `bd update` write
+ * `last-touched`, `bd close` writes only `interactions.jsonl`, and `bd reopen`
+ * writes neither (that gap is what the poll backstop is for).
+ *
+ * Safe to watch because the reads this service issues — `bd list` and
+ * `bd ready` — write neither file, so a refresh cannot retrigger itself.
+ * `bd show` would (it rewrites `last-touched`), which is why it is never used.
+ */
+const BEADS_CHANGE_SIGNAL_FILE_NAMES: ReadonlyArray<string> = [
+  BEADS_LAST_TOUCHED_FILE_NAME,
+  BEADS_INTERACTIONS_FILE_NAME,
+];
 
 /** Coalesces the burst of watch events a single `bd` write produces. */
 export const BEADS_WATCH_DEBOUNCE = Duration.millis(300);
-/** Used only when `fs.watch` is unavailable (network mounts, watcher exhaustion). */
-export const BEADS_FALLBACK_POLL_INTERVAL = Duration.seconds(45);
+/**
+ * Backstop cadence, run alongside the watcher rather than only when `fs.watch`
+ * is unavailable (network mounts, watcher exhaustion). It is the only thing
+ * that catches a mutation bd signals through no file at all.
+ */
+export const BEADS_POLL_INTERVAL = Duration.seconds(45);
+
+/**
+ * `fs.watch` reports a path that may be a basename, a path relative to the
+ * watched directory, or an absolute path, depending on the platform.
+ */
+export function makeChangeSignalPredicate(
+  path: Path.Path,
+  beadsDirectory: string,
+): (eventPath: string) => boolean {
+  const resolvedSignalPaths = new Set(
+    BEADS_CHANGE_SIGNAL_FILE_NAMES.map((name) => path.resolve(path.join(beadsDirectory, name))),
+  );
+  return (eventPath) =>
+    BEADS_CHANGE_SIGNAL_FILE_NAMES.includes(eventPath) ||
+    resolvedSignalPaths.has(path.resolve(beadsDirectory, eventPath));
+}
 
 const BD_COMMAND = "bd";
 const BD_TIMEOUT = Duration.seconds(20);
@@ -257,7 +293,7 @@ function bdFailureFromProcessError(error: ProcessRunError): BdFailure {
 }
 
 interface StreamStatusOptions {
-  readonly fallbackPollInterval?: Duration.Duration;
+  readonly pollInterval?: Duration.Duration;
 }
 
 export class BeadsStatusBroadcaster extends Context.Service<
@@ -469,17 +505,21 @@ export const make = Effect.gen(function* () {
     return yield* refreshStatusCore(workspaceRoot);
   });
 
-  const makeWatchLoop = (workspaceRoot: string, fallbackPollInterval: Duration.Duration) =>
+  const makeWatchLoop = (workspaceRoot: string, pollInterval: Duration.Duration) =>
     Effect.gen(function* () {
       const beadsDirectory = path.join(workspaceRoot, BEADS_DIRECTORY_NAME);
-      const lastTouchedPath = path.join(beadsDirectory, BEADS_LAST_TOUCHED_FILE_NAME);
-      const lastTouchedPathResolved = path.resolve(lastTouchedPath);
+      const isChangeSignal = makeChangeSignalPredicate(path, beadsDirectory);
       const refreshSafely = refreshStatusCore(workspaceRoot).pipe(
         Effect.ignoreCause({ log: true }),
         Effect.asVoid,
       );
+      // A real periodic backstop, not a failure fallback. bd writes no signal
+      // file at all for some mutations (`bd reopen` touches neither), so a
+      // healthy watcher is not enough to keep a snapshot honest. Publishing is
+      // fingerprint-gated, so an unchanged snapshot still wakes nobody — the
+      // cost of an idle poll is the bd subprocess pair, not client churn.
       const pollLoop = refreshSafely.pipe(
-        Effect.delay(fallbackPollInterval),
+        Effect.delay(pollInterval),
         Effect.forever,
         Effect.asVoid,
       );
@@ -491,39 +531,39 @@ export const make = Effect.gen(function* () {
       // Publishing is fingerprint-gated, so an unchanged snapshot wakes nobody.
       yield* refreshSafely;
 
-      // Watch the directory rather than the file: `.beads/last-touched` may not
+      // Watch the directory rather than the files: the signal files may not
       // exist until bd's first write, and watching a missing path fails.
       const changes = fs.watch(beadsDirectory).pipe(
-        Stream.filter(
-          (event) =>
-            event.path === BEADS_LAST_TOUCHED_FILE_NAME ||
-            event.path === lastTouchedPath ||
-            path.resolve(beadsDirectory, event.path) === lastTouchedPathResolved,
-        ),
+        Stream.filter((event) => isChangeSignal(event.path)),
         Stream.debounce(BEADS_WATCH_DEBOUNCE),
       );
 
-      return yield* Stream.runForEach(changes, () => refreshSafely).pipe(
+      const watchLoop = Stream.runForEach(changes, () => refreshSafely).pipe(
         Effect.matchCauseEffect({
           onFailure: (cause) => {
             const interruptionReasons = cause.reasons.filter(Cause.isInterruptReason);
             if (interruptionReasons.length > 0) {
               return Effect.failCause(Cause.fromReasons<never>(interruptionReasons));
             }
-            return Effect.logWarning("Beads watch unavailable, falling back to polling", {
+            return Effect.logWarning("Beads watch unavailable, leaning on the poll backstop", {
               workspaceRootLength: workspaceRoot.length,
-              pollIntervalMs: Duration.toMillis(fallbackPollInterval),
-            }).pipe(Effect.andThen(pollLoop));
+              pollIntervalMs: Duration.toMillis(pollInterval),
+            }).pipe(Effect.andThen(Effect.never));
           },
-          // The watch stream should never end on its own; poll if it does.
-          onSuccess: () => pollLoop,
+          // The watch stream should never end on its own; the poll carries on.
+          onSuccess: () => Effect.never,
         }),
       );
+
+      return yield* Effect.all([pollLoop, watchLoop], {
+        concurrency: "unbounded",
+        discard: true,
+      });
     });
 
   const retainWatcher = Effect.fn("BeadsStatusBroadcaster.retainWatcher")(function* (
     workspaceRoot: string,
-    fallbackPollInterval: Duration.Duration,
+    pollInterval: Duration.Duration,
   ) {
     yield* SynchronizedRef.modifyEffect(watchersRef, (watchers) => {
       const existing = watchers.get(workspaceRoot);
@@ -536,7 +576,7 @@ export const make = Effect.gen(function* () {
         return Effect.succeed([undefined, nextWatchers] as const);
       }
 
-      return makeWatchLoop(workspaceRoot, fallbackPollInterval).pipe(
+      return makeWatchLoop(workspaceRoot, pollInterval).pipe(
         Effect.forkIn(broadcasterScope),
         Effect.map((fiber) => {
           const nextWatchers = new Map(watchers);
@@ -583,10 +623,7 @@ export const make = Effect.gen(function* () {
         // delivered twice rather than dropped.
         const subscription = yield* PubSub.subscribe(changesPubSub);
         const initial = yield* getOrLoadStatus(workspaceRoot);
-        yield* retainWatcher(
-          workspaceRoot,
-          options?.fallbackPollInterval ?? BEADS_FALLBACK_POLL_INTERVAL,
-        );
+        yield* retainWatcher(workspaceRoot, options?.pollInterval ?? BEADS_POLL_INTERVAL);
 
         const release = releaseWatcher(workspaceRoot).pipe(Effect.ignore, Effect.asVoid);
 
