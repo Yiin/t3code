@@ -229,6 +229,10 @@ export interface EpicGroupModel {
   readonly pill: EpicRunStatusPill | null;
   readonly activityAt: string | null;
   readonly runningCount: number;
+  readonly epicCount: number;
+  /** Ready children summed over the group, so a collapsed header still says
+      how much work is waiting inside it. */
+  readonly readyCount: number;
 }
 
 export function epicGroupModel(
@@ -254,7 +258,38 @@ export function epicGroupModel(
     pill: resolveEpicRunStatusPill(runStatus),
     activityAt,
     runningCount: ordered.filter((row) => row.machinery.runStatus === "running").length,
+    epicCount: ordered.length,
+    readyCount: ordered.reduce((total, row) => total + row.work.counts.ready, 0),
   };
+}
+
+/**
+ * Collapsing may hide rows, never state. A group is expanded until the user says
+ * otherwise, and only their own toggle closes it — no status collapses a group
+ * on its own, so nothing you were watching disappears while you read it.
+ */
+export function resolveEpicProjectGroupCollapsed(input: {
+  override?: boolean | undefined;
+}): boolean {
+  return input.override ?? false;
+}
+
+export function epicGroupCountLabel(epicCount: number): string {
+  return `${epicCount} ${epicCount === 1 ? "epic" : "epics"}`;
+}
+
+/**
+ * The id a group header's `aria-controls` points at. Group keys hold a NUL byte
+ * and a filesystem path, so every character outside the id-safe set is escaped
+ * to its code point rather than dropped — dropping would let two workspaces that
+ * differ only in punctuation claim the same id and cross-wire their headers.
+ */
+export function epicGroupListId(groupKey: string): string {
+  const escaped = groupKey.replaceAll(
+    /[^A-Za-z0-9-]/gu,
+    (char) => `_${char.codePointAt(0)?.toString(16) ?? ""}_`,
+  );
+  return `epics-project-group-${escaped}`;
 }
 
 export function epicGroupComparator(left: EpicGroupModel, right: EpicGroupModel): number {

@@ -6,6 +6,7 @@ import {
   beadsUnavailableLabel,
   epicActivityComparator,
   epicGroupComparator,
+  epicGroupCountLabel,
   epicGroupModel,
   epicRowActivityAt,
   epicRowKey,
@@ -13,6 +14,7 @@ import {
   epicRowModels,
   epicSourceFailures,
   partialFailureEntries,
+  resolveEpicProjectGroupCollapsed,
   sortEpicRowsByActivity,
   worstRunStatus,
   type EpicPageSummary,
@@ -245,6 +247,34 @@ describe("epic groups", () => {
     expect([quiet, busy].sort(epicGroupComparator).map((group) => group.project.projectId)).toEqual(
       ["project", "quiet"],
     );
+  });
+
+  it("sums the ready work a collapsed header has to speak for", () => {
+    const group = epicGroupModel(
+      source,
+      epicRowModels(
+        source,
+        [
+          epic({ id: "a", childCounts: { total: 4, ready: 3, byStatus: { open: 4 } } }),
+          epic({ id: "b", childCounts: { total: 2, ready: 2, byStatus: { open: 2 } } }),
+          epic({ id: "c", childCounts: { total: 1, ready: 0, byStatus: { closed: 1 } } }),
+        ],
+        [],
+      ),
+    );
+    expect(group.epicCount).toBe(3);
+    expect(group.readyCount).toBe(5);
+    expect(epicGroupModel(source, []).readyCount).toBe(0);
+    expect(epicGroupCountLabel(3)).toBe("3 epics");
+    expect(epicGroupCountLabel(1)).toBe("1 epic");
+    expect(epicGroupCountLabel(0)).toBe("0 epics");
+  });
+
+  it("expands a group until the user collapses it, and lets no status override that", () => {
+    expect(resolveEpicProjectGroupCollapsed({})).toBe(false);
+    expect(resolveEpicProjectGroupCollapsed({ override: undefined })).toBe(false);
+    expect(resolveEpicProjectGroupCollapsed({ override: true })).toBe(true);
+    expect(resolveEpicProjectGroupCollapsed({ override: false })).toBe(false);
   });
 });
 

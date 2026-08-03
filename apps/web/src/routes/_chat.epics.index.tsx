@@ -5,7 +5,7 @@ import type {
   EpicsGroupingMode,
 } from "@t3tools/contracts";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { AlertCircleIcon, LayersIcon, PlusIcon } from "lucide-react";
+import { AlertCircleIcon, ChevronRightIcon, LayersIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -15,10 +15,14 @@ import {
   type EpicProjectSource,
 } from "../epics.logic";
 import {
+  epicGroupCountLabel,
+  epicGroupListId,
   epicGroupModel,
   epicRowModels,
   epicSourceFailures,
+  resolveEpicProjectGroupCollapsed,
   sortEpicRowsByActivity,
+  type EpicGroupModel,
   type EpicRowModel,
   type EpicSourceResult,
 } from "../epicsPage.logic";
@@ -28,6 +32,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { epicsEnvironment } from "../state/epics";
 import { useProjects } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
+import { useUiStateStore } from "../uiStateStore";
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
@@ -183,16 +188,94 @@ function EpicRow({
 function EpicRowList({
   rows,
   showProject,
+  id,
 }: {
   readonly rows: ReadonlyArray<EpicRowModel>;
   readonly showProject: boolean;
+  readonly id?: string;
 }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-border">
+    <div id={id} className="overflow-hidden rounded-xl border border-border">
       {rows.map((row) => (
         <EpicRow key={row.key} row={row} showProject={showProject} />
       ))}
     </div>
+  );
+}
+
+/**
+ * A project group whose header carries everything the rows would have told you.
+ * Collapsing hides rows, so the loudest run in the group, its ready count and
+ * when it last moved all move up to the header — a group that is pulsing red
+ * inside must pulse on the line you can still see.
+ *
+ * The header is one real button: Enter and Space toggle it natively and focus
+ * stays where it was, so toggling never walks the user into the group. Collapsed
+ * rows unmount rather than hide, keeping Tab order and screen-reader row counts
+ * equal to what is on screen.
+ */
+export function EpicProjectGroupSection({
+  group,
+  collapsed,
+  onToggle,
+}: {
+  readonly group: EpicGroupModel;
+  readonly collapsed: boolean;
+  readonly onToggle: (groupKey: string, collapsed: boolean) => void;
+}) {
+  const listId = epicGroupListId(group.key);
+  const { pill } = group;
+  return (
+    <section>
+      {/* The toggle lives inside the heading so jumping by heading still finds
+          the project, and the heading itself is what you press to collapse it. */}
+      <h2 className="mb-3">
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          aria-controls={listId}
+          data-testid={`${listId}-toggle`}
+          onClick={() => onToggle(group.key, !collapsed)}
+          className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-sm text-muted-foreground hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ChevronRightIcon
+            aria-hidden
+            className={cn("size-3.5 shrink-0 transition-transform", !collapsed && "rotate-90")}
+          />
+          <span className="truncate font-medium text-foreground/90">
+            {group.project.projectTitle}
+          </span>
+          <span className="shrink-0 tabular-nums text-xs">
+            {epicGroupCountLabel(group.epicCount)}
+          </span>
+          {pill === null ? null : (
+            <span
+              className={cn(
+                "flex shrink-0 items-center gap-1 text-xs font-medium",
+                pill.colorClass,
+              )}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "size-1.5 rounded-full",
+                  pill.dotClass,
+                  pill.pulse && "animate-status-pulse motion-reduce:animate-none",
+                )}
+              />
+              {pill.label}
+            </span>
+          )}
+          <span className="ml-auto flex shrink-0 items-center gap-3 text-xs">
+            <span className="tabular-nums">{group.readyCount} ready</span>
+            {group.activityAt === null ? null : (
+              <span>{formatRelativeTimeLabel(group.activityAt)}</span>
+            )}
+          </span>
+        </button>
+      </h2>
+      {collapsed ? null : <EpicRowList id={listId} rows={group.rows} showProject={false} />}
+    </section>
   );
 }
 
@@ -201,6 +284,10 @@ export function EpicsRouteView() {
   const newThread = useHandleNewThread();
   const groupingMode = useClientSettings((settings) => settings.epicsGroupingMode);
   const updateSettings = useUpdateClientSettings();
+  /** Read, never written, when the mode changes: switching to Recent and back
+      must find the groups exactly as the user left them. */
+  const collapsedGroups = useUiStateStore((state) => state.epicsProjectGroupCollapsedByKey);
+  const setGroupCollapsed = useUiStateStore((state) => state.setEpicsProjectGroupCollapsed);
   const sources = useMemo(
     () =>
       uniqueEpicProjectSources(
@@ -355,12 +442,14 @@ export function EpicsRouteView() {
           ) : (
             <div className="space-y-8">
               {groups.map((group) => (
-                <section key={group.key}>
-                  <h2 className="mb-3 text-sm font-medium text-muted-foreground">
-                    {group.project.projectTitle}
-                  </h2>
-                  <EpicRowList rows={group.rows} showProject={false} />
-                </section>
+                <EpicProjectGroupSection
+                  key={group.key}
+                  group={group}
+                  collapsed={resolveEpicProjectGroupCollapsed({
+                    override: collapsedGroups[group.key],
+                  })}
+                  onToggle={setGroupCollapsed}
+                />
               ))}
             </div>
           )}
