@@ -1,18 +1,23 @@
 ---
 name: plan-epic
-description: Plan a large piece of work as a beads epic — investigate the subject in depth with a fan-out of agents, create the epic and its child issues, then write a self-contained handoff protocol into the epic itself so ralph/cook-it iterations run it end-to-end without a separate HANDOFF.md. Use when the user types /plan-epic, or asks to plan, scope, or break down an epic, feature, or large task into beads issues.
+description: Plan a large piece of work as a beads epic — investigate the subject in depth with a fan-out of agents, create the epic and its child issues, then write a self-contained handoff protocol into the epic itself so /cook-epic runs it end-to-end without a separate HANDOFF.md. Use when the user types /plan-epic, or asks to plan, scope, or break down an epic, feature, or large task into beads issues.
 user-invocable: true
 argument-hint: <subject to plan — a feature, refactor, migration, or prose goal>
 ---
 
 # plan-epic
 
-Turn a fuzzy goal into a **beads epic that runs itself**. The skill investigates the subject with parallel agents, decomposes it into ordered child issues, and — the point of it — embeds a **Handoff Protocol** in the epic bead so every fresh `ralph` iteration knows how to pick the next issue, `/cook-it` it, and update the epic's own state. The epic replaces the per-project `HANDOFF.md` file, so many epics can be in flight at once without a pile of handoff files to maintain.
+Turn a fuzzy goal into a **beads epic that runs itself**. The skill investigates the subject with parallel agents, decomposes it into ordered child issues, and — the point of it — embeds a **Handoff Protocol** in the epic bead so every fresh-context iteration knows how to pick the next issue, execute it, and update the epic's own state. The epic replaces the per-project `HANDOFF.md` file, so many epics can be in flight at once without a pile of handoff files to maintain.
+
+`/cook-epic <EPIC>` is the only runner this skill hands off to. It decides
+sequential versus parallel itself and re-reads the ready frontier every tick,
+so an epic that is a chain at the start and wide in the middle needs no
+decision from the user and no second command.
 
 ## When this fits
 
 - The work is bigger than one `/cook-it` task and wants breaking into several issues.
-- You'll run it later, unattended, with `/ralph` looping `/cook-it` over the backlog.
+- You'll run it later, unattended, with `/cook-epic` over the whole tree.
 - You want the plan, the state, and the "what next" instructions to live in one place that survives fresh-context iterations.
 
 Not this skill: a single bounded task (use `/cook-it` directly), or open-ended "what should we even do here?" exploration (discuss first, then plan).
@@ -208,8 +213,10 @@ bd update $EPIC --body-file - <<'EOF'
 is the shared brain — edit it when a decision changes how the REMAINING children
 should be built, so the next iteration inherits it.>
 
-## Handoff Protocol  — you are ONE iteration of an unattended ralph loop
-Do exactly one unit of work, update this epic, then stop.
+## Handoff Protocol  — you are ONE iteration picking its own next child
+This applies when something runs the epic id itself (`/cook-it <EPIC>`) rather
+than assigning you a child. Do exactly one unit of work, update this epic, then
+stop. If a coordinator assigned you a specific child, skip to "Worker mode".
 
 1. Orient: `bd show <EPIC> --long` (this doc + the append-only progress log in
    notes) and `bd ready --parent <EPIC> --json` for claimable children.
@@ -236,8 +243,12 @@ Do exactly one unit of work, update this epic, then stop.
 5. When `bd ready --parent <EPIC>` is empty AND no open children remain, the epic
    is done: `bd close <EPIC>` with a one-paragraph summary, then output RALPH_DONE.
 
-## Parallel mode — you are ONE worker of a concurrent cook-epic pool
-When this epic runs under `/cook-epic` instead of sequential ralph:
+## Worker mode — you are ONE worker dispatched by cook-epic
+When this epic runs under `/cook-epic`, the coordinator may be running you alone
+or alongside siblings; it decides that per tick and you never need to know which.
+Your worker prompt is the authority on WHERE you commit (your own
+`epic/<child-id>` branch in a worktree, or the base branch in the main checkout
+in sequential mode) — follow it over the branch wording below. Either way:
 - The coordinator assigns your child from `bd ready --parent <EPIC>` — work
   only it, never claim another. Notes are a pure append-only log: append your
   progress, never read the last note as a pointer.
@@ -284,56 +295,46 @@ Report first, in every case:
 - The epic id and the child tree (`bd list --parent $EPIC --pretty`).
 - Any decisions you made or open questions worth their eyes.
 
-Then either **launch the loop** or **hand over the command**, decided by what the user asked
+Then either **launch the run** or **hand over the command**, decided by what the user asked
 for. Nothing else about the plan changes between the two.
+
+**`/cook-epic <EPIC>` is the one and only way to run an epic.** Never offer
+`/ralph - /cook-it <EPIC>` as an alternative, and never editorialize about
+sequential versus parallel — that is cook-epic's decision, not the user's.
+cook-epic dispatches from the live `bd ready` frontier every tick, so it runs
+one worker while the graph is a chain and fills the pool the moment it fans
+out. An epic that is sequential at the start and parallel in the middle needs
+no choice from anyone. Do not describe an epic as "largely independent" or
+"better run sequentially" in the handoff; hand over the command and stop.
 
 **Launch it** when the request said to act on the plan, not just produce it — "/plan-epic X
 and run it", "…then start cooking", "plan and execute", "kick it off". Treat that as the
-authorization; don't ask again. Use the harness's native skill invocation when it provides
-one. If it provides no skill expansion, read the `ralph` skill body and follow it with
-`/cook-it <EPIC>` as the loop prompt. Then follow ralph's own reporting contract — relay each
-finished iteration, stay quiet in between.
-
-If the request asked for **parallel** execution ("in parallel", "swarm it", "several workers"),
-invoke the `cook-epic` skill with the epic id instead of ralph — it runs a pool of
-fresh-context workers over the ready frontier with isolated worktrees and
-coordinator-owned merges. Sequential ralph remains the default: it is the safer
-choice when children overlap heavily or the tree isn't clean.
+authorization; don't ask again. Invoke the `cook-epic` skill with the epic id, using the
+harness's native skill invocation when it provides one; otherwise read the `cook-epic` skill
+body and follow it. Then follow cook-epic's own reporting contract — relay each mailbox event
+line, stay quiet in between.
 
 Two things still stop you, even under an explicit "run it":
 
-- **A dirty working tree with someone else's changes.** Ralph assumes exclusive use of the
-  repo. Surface it and ask before launching.
+- **A dirty working tree with someone else's changes.** cook-epic assumes exclusive use of the
+  repo, and its preflight hard-stops on uncommitted tracked changes. Surface it and ask before
+  launching.
 - **No ready children** (`bd ready --parent $EPIC` is empty while open children remain). The
-  dependency graph is over-constrained — fix the ordering, don't start a loop that immediately
+  dependency graph is over-constrained — fix the ordering, don't start a run that immediately
   gutters.
 
-**Hand it over** when the user only asked to plan. Print and copy the form for the
-harness you're running in:
+**Hand it over** when the user only asked to plan. Print exactly one command, in
+the form the harness you're running in expands:
 
-| Harness capability        | Command                                                                   |
-| ------------------------- | ------------------------------------------------------------------------- |
-| Claude Code typed skills  | `/ralph - /cook-it <EPIC>`                                                |
-| Codex native skills       | `$ralph $cook-it <EPIC>`                                                  |
-| No native skill expansion | Paste the `ralph` skill body and use `/cook-it <EPIC>` as its loop prompt |
+| Harness capability        | Command                                        |
+| ------------------------- | ---------------------------------------------- |
+| Claude Code typed skills  | `/cook-epic <EPIC>`                            |
+| Codex native skills       | `$cook-epic <EPIC>`                            |
+| No native skill expansion | Paste the `cook-epic` skill body with `<EPIC>` |
 
-Offer the parallel alternative alongside when the children are largely independent:
-
-```
-/cook-epic <EPIC>
-```
-
-No prose needed in it: `/cook-it <epic-id>` detects `issue_type: epic` and runs one iteration
-of the Handoff Protocol above, and ralph's runner already appends the one-unit-of-work /
-commit / `RALPH_DONE` rules to every iteration's prompt.
-
-**Keep the `-` in the Claude Code typed form.** Claude Code _stacks_ skills typed back to back: `/ralph /cook-it <EPIC>`
-expands both, handing the trailing `<EPIC>` to each as `$ARGUMENTS`. Ralph would get a bare
-epic id as its loop prompt (not `/cook-it <EPIC>`), and cook-it would fire in the foreground
-at the same time. Expansion stops at the first token that isn't an inline skill, so the `-`
-keeps `/cook-it <EPIC>` intact as ralph's literal argument, and the leading dash is inert in
-the child's prompt. Codex's `$` form expands both mentions without that separator. Harnesses
-without native skill expansion must receive the skill body rather than a literal skill name.
+No prose belongs in it and no second option belongs beside it. cook-epic reads
+the epic, picks its own execution shape, and re-picks its concurrency every
+tick from the ready frontier.
 
 Put it on the clipboard too, picking the form that matches the harness you're running in
 (Claude Code → the `/` form, Codex → the `$` form). Best-effort: if there's no clipboard tool
@@ -343,8 +344,8 @@ running the snippet. The no-expansion fallback includes a skill body and cannot 
 by this short command, so skip clipboard copying for that mode and say so.
 
 ```bash
-HANDOFF_COMMAND="/ralph - /cook-it $EPIC" # Claude Code
-# HANDOFF_COMMAND="\$ralph \$cook-it $EPIC" # Codex
+HANDOFF_COMMAND="/cook-epic $EPIC" # Claude Code
+# HANDOFF_COMMAND="\$cook-epic $EPIC" # Codex
 for c in "wl-copy" "xclip -selection clipboard" "pbcopy"; do
   command -v ${c%% *} >/dev/null 2>&1 &&
     printf '%s' "$HANDOFF_COMMAND" | $c && echo "copied to clipboard" && break
@@ -354,11 +355,11 @@ done
 ## Why the handoff lives on the epic
 
 - **One source of truth per epic.** Goal, architecture, live state, and "what next" sit on the bead, not in a file that collides when several epics are active.
-- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so sequential ralph iterations never race a read-modify-write. The description holds the _stable_ doc; only the shared-brain Context section is edited, and only on a real decision change.
+- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so concurrent workers never race a read-modify-write. The description holds the _stable_ doc; only the shared-brain Context section is edited, and only on a real decision change.
 - **The last note is the pointer.** Instead of maintaining a mutable "Next up" block, each iteration ends its note with `Next: …`. The freshest instruction is always the last line of the log.
 
 ## Cautions
 
 - Keep the Handoff Protocol text stable across epics. If you improve it, improve it here in the skill so every future epic gets the better version, rather than hand-editing one epic.
 - Don't over-decompose. Children that are too fine create loop overhead; children that are too coarse choke `/cook-it`. One reviewable commit's worth of work each is the target.
-- Order with dependencies, not priorities alone — `ralph` claims by readiness, so a child that must come first has to _block_ the others, or it can be picked early; priorities only break ties within the ready frontier.
+- Order with dependencies, not priorities alone — cook-epic dispatches by readiness, so a child that must come first has to _block_ the others, or it can be picked early (and picked up in parallel with work it should have followed); priorities only break ties within the ready frontier. The dependency graph is the ONLY thing that makes cook-epic run children in order, and it is also what lets cook-epic widen automatically the moment order stops mattering. Encode real ordering, and nothing more — a spurious dependency serializes work that could have run concurrently.
