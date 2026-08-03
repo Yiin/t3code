@@ -8,6 +8,7 @@ import type {
 import { latestEpicRunForIdentity } from "@t3tools/client-runtime/state/epics";
 
 import {
+  availableEpicGroups,
   epicCounts,
   epicPresentationStatus,
   epicSourceKey,
@@ -75,6 +76,8 @@ export interface EpicRowModel {
 }
 
 const NO_RUNS_LABEL = "No runs";
+
+const NO_RUNS: ReadonlyArray<EpicRun> = Object.freeze([]);
 
 export function epicRunsForIdentity(
   runs: ReadonlyArray<EpicRun>,
@@ -292,12 +295,39 @@ export function epicGroupListId(groupKey: string): string {
   return `epics-project-group-${escaped}`;
 }
 
-export function epicGroupComparator(left: EpicGroupModel, right: EpicGroupModel): number {
-  const byRecency = compareRecencyDesc(left.activityAt, right.activityAt);
-  if (byRecency !== 0) return byRecency;
-  return (
-    left.project.projectTitle.localeCompare(right.project.projectTitle) ||
-    left.key.localeCompare(right.key)
+/**
+ * Every project that has epics to show, as one group each, IN PROJECT SOURCE
+ * ORDER — the same order the sidebar lists projects in (the server reads them
+ * `ORDER BY created_at ASC, project_id ASC`).
+ *
+ * Deliberately NOT sorted by recency. "By project" is the stable view: its
+ * headers are press targets, so a recency sort would slide a group out from
+ * under the pointer every time a run ticks. Recency lives in the flat "Recent"
+ * mode, which is what that mode is for. Rows INSIDE a group are still recency
+ * ordered by `epicGroupModel`.
+ *
+ * A project whose snapshot is missing or empty contributes no group; the warning
+ * strip names the missing ones via `epicSourceFailures`.
+ */
+export function epicGroupModels(input: {
+  readonly sources: ReadonlyArray<EpicProjectSource>;
+  readonly results: ReadonlyMap<string, EpicSourceResult | undefined>;
+  readonly runsByEnvironment: ReadonlyMap<string, ReadonlyArray<EpicRun>>;
+}): ReadonlyArray<EpicGroupModel> {
+  return availableEpicGroups(
+    input.sources.map((project) => ({
+      project,
+      result: input.results.get(epicSourceKey(project))?.data ?? null,
+    })),
+  ).map(({ project, snapshot }) =>
+    epicGroupModel(
+      project,
+      epicRowModels(
+        project,
+        snapshot.epics,
+        input.runsByEnvironment.get(project.environmentId) ?? NO_RUNS,
+      ),
+    ),
   );
 }
 

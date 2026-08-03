@@ -8,17 +8,11 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { AlertCircleIcon, ChevronRightIcon, LayersIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import {
-  availableEpicGroups,
-  epicSourceKey,
-  uniqueEpicProjectSources,
-  type EpicProjectSource,
-} from "../epics.logic";
+import { epicSourceKey, uniqueEpicProjectSources, type EpicProjectSource } from "../epics.logic";
 import {
   epicGroupCountLabel,
   epicGroupListId,
-  epicGroupModel,
-  epicRowModels,
+  epicGroupModels,
   epicSourceFailures,
   resolveEpicProjectGroupCollapsed,
   sortEpicRowsByActivity,
@@ -333,21 +327,7 @@ export function EpicsRouteView() {
     });
   }, []);
 
-  const groups = availableEpicGroups(
-    sources.map((project) => ({
-      project,
-      result: results.get(epicSourceKey(project))?.data ?? null,
-    })),
-  ).map(({ project, snapshot }) =>
-    epicGroupModel(
-      project,
-      epicRowModels(
-        project,
-        snapshot.epics,
-        runsByEnvironment.get(project.environmentId) ?? NO_RUNS,
-      ),
-    ),
-  );
+  const groups = epicGroupModels({ sources, results, runsByEnvironment });
   const recentRows = sortEpicRowsByActivity(groups.flatMap((group) => group.rows));
   const pending = sources.some((source) => results.get(epicSourceKey(source))?.pending !== false);
   const failures = epicSourceFailures(sources, results);

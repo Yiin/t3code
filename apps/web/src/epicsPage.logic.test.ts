@@ -5,9 +5,9 @@ import type { EpicProjectSource } from "./epics.logic";
 import {
   beadsUnavailableLabel,
   epicActivityComparator,
-  epicGroupComparator,
   epicGroupCountLabel,
   epicGroupModel,
+  epicGroupModels,
   epicRowActivityAt,
   epicRowKey,
   epicRowModel,
@@ -57,6 +57,9 @@ function run(overrides: RunOverrides = {}): EpicRun {
     ...overrides,
   } as unknown as EpicRun;
 }
+
+const available = (epics: ReadonlyArray<EpicPageSummary>): BeadsStatusResult =>
+  ({ _tag: "available", epics }) as never;
 
 describe("epics page rows", () => {
   it("keeps the work and machinery channels apart on the poison case", () => {
@@ -231,22 +234,69 @@ describe("epic groups", () => {
     expect(group.key).toBe("env\0/repo");
   });
 
-  it("orders groups by recency and sinks the ones with no activity", () => {
-    const quiet = epicGroupModel(
-      { ...source, projectId: "quiet", workspaceRoot: "/quiet", projectTitle: "Quiet" },
-      [],
-    );
-    const busy = epicGroupModel(
-      source,
-      epicRowModels(
-        source,
-        [epic({ id: "a" })],
-        [run({ epicId: "a", runId: "a", updatedAt: "2026-08-02T00:00:00.000Z" })],
-      ),
-    );
-    expect([quiet, busy].sort(epicGroupComparator).map((group) => group.project.projectId)).toEqual(
-      ["project", "quiet"],
-    );
+  it("keeps groups in project source order, however recently they ran", () => {
+    // By project is the STABLE view: its headers are press targets, so the more
+    // active project must not jump above the one listed before it.
+    const quiet = source;
+    const busy: EpicProjectSource = {
+      environmentId: "env",
+      workspaceRoot: "/busy",
+      projectId: "busy",
+      projectTitle: "Busy",
+    };
+    const groups = epicGroupModels({
+      sources: [quiet, busy],
+      results: new Map([
+        ["env\0/repo", { data: available([epic({ id: "a" })]), error: null }],
+        ["env\0/busy", { data: available([epic({ id: "b" })]), error: null }],
+      ]),
+      runsByEnvironment: new Map([
+        [
+          "env",
+          [
+            run({ epicId: "a", runId: "a", updatedAt: "2026-08-01T00:00:00.000Z" }),
+            run({
+              epicId: "b",
+              runId: "b",
+              cwd: "/busy",
+              projectId: "busy",
+              updatedAt: "2026-08-09T00:00:00.000Z",
+            }),
+          ],
+        ],
+      ]),
+    });
+    expect(groups.map((group) => group.project.projectId)).toEqual(["project", "busy"]);
+    expect(groups.map((group) => group.activityAt)).toEqual([
+      "2026-08-01T00:00:00.000Z",
+      "2026-08-09T00:00:00.000Z",
+    ]);
+  });
+
+  it("skips a source with no snapshot and one whose snapshot has no epics", () => {
+    const empty: EpicProjectSource = {
+      environmentId: "env",
+      workspaceRoot: "/empty",
+      projectId: "empty",
+      projectTitle: "Empty",
+    };
+    const loading: EpicProjectSource = {
+      environmentId: "env",
+      workspaceRoot: "/loading",
+      projectId: "loading",
+      projectTitle: "Loading",
+    };
+    const groups = epicGroupModels({
+      sources: [empty, loading, source],
+      results: new Map([
+        ["env\0/empty", { data: available([]), error: null }],
+        ["env\0/loading", { data: null, error: null }],
+        ["env\0/repo", { data: available([epic({ id: "a" })]), error: null }],
+      ]),
+      runsByEnvironment: new Map(),
+    });
+    expect(groups.map((group) => group.project.projectId)).toEqual(["project"]);
+    expect(groups[0]?.rows.map((row) => row.machinery.runCount)).toEqual([0]);
   });
 
   it("sums the ready work a collapsed header has to speak for", () => {
