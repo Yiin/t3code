@@ -1,6 +1,7 @@
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { epicSourceKey } from "./epics.logic";
 import {
   legacyProjectCwdPreferenceKey,
   markEpicsVisited,
@@ -14,6 +15,7 @@ import {
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
   setEpicRunGroupExpanded,
+  setEpicsProjectGroupCollapsed,
   setPlannedEpicBannerDismissed,
   setProjectExpanded,
   setThreadChangedFilesExpanded,
@@ -29,6 +31,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     epicsLastVisitedAt: null,
     epicRunGroupExpandedByRunId: {},
     plannedEpicBannerDismissedByIdentity: {},
+    epicsProjectGroupCollapsedByKey: {},
     defaultAdvertisedEndpointKey: null,
     ...overrides,
   };
@@ -192,6 +195,33 @@ describe("uiStateStore pure functions", () => {
     ).toEqual({ [dismissedKey]: true });
   });
 
+  it("stores an epics project-group toggle per (environment, workspace) source", () => {
+    const localKey = epicSourceKey({ environmentId: "env-local", workspaceRoot: "/repo/t3code" });
+    const remoteKey = epicSourceKey({ environmentId: "env-remote", workspaceRoot: "/repo/t3code" });
+    // Both directions are recorded, the same way the sidebar run group does it:
+    // the group default is computed, so "keep this one open" is a real choice.
+    const collapsed = setEpicsProjectGroupCollapsed(makeUiState(), localKey, true);
+
+    expect(collapsed.epicsProjectGroupCollapsedByKey).toEqual({ [localKey]: true });
+    // The same workspace on another environment is its own group.
+    expect(collapsed.epicsProjectGroupCollapsedByKey[remoteKey]).toBeUndefined();
+    expect(setEpicsProjectGroupCollapsed(collapsed, localKey, true)).toBe(collapsed);
+    expect(
+      setEpicsProjectGroupCollapsed(collapsed, localKey, false).epicsProjectGroupCollapsedByKey,
+    ).toEqual({ [localKey]: false });
+    expect(setEpicsProjectGroupCollapsed(makeUiState(), "", true)).toEqual(makeUiState());
+    expect(
+      parsePersistedState({
+        epicsProjectGroupCollapsedByKey: {
+          [localKey]: true,
+          [remoteKey]: false,
+          "": true,
+          junk: "yes" as unknown as boolean,
+        },
+      }).epicsProjectGroupCollapsedByKey,
+    ).toEqual({ [localKey]: true, [remoteKey]: false });
+  });
+
   it("stores the endpoint preference by stable key", () => {
     const next = setDefaultAdvertisedEndpointKey(makeUiState(), "desktop-core:lan:http");
 
@@ -228,6 +258,7 @@ describe("parsePersistedState", () => {
       epicsLastVisitedAt: null,
       epicRunGroupExpandedByRunId: {},
       plannedEpicBannerDismissedByIdentity: {},
+      epicsProjectGroupCollapsedByKey: {},
       projectExpandedById: {
         logical: false,
       },
@@ -327,6 +358,9 @@ describe("uiStateStore persistence", () => {
       },
       epicRunGroupExpandedByRunId: { "run-1": true },
       plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
+      epicsProjectGroupCollapsedByKey: {
+        [epicSourceKey({ environmentId: "env-local", workspaceRoot: "/repo/t3code" })]: true,
+      },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
     });
 
@@ -351,6 +385,9 @@ describe("uiStateStore persistence", () => {
       },
       epicRunGroupExpandedByRunId: { "run-1": true },
       plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
+      epicsProjectGroupCollapsedByKey: {
+        [epicSourceKey({ environmentId: "env-local", workspaceRoot: "/repo/t3code" })]: true,
+      },
     });
     expect(parsePersistedState(persisted)).toEqual({
       ...state,

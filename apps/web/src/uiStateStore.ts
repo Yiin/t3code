@@ -28,6 +28,7 @@ export interface PersistedUiState {
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   epicRunGroupExpandedByRunId?: Record<string, boolean>;
   plannedEpicBannerDismissedByIdentity?: Record<string, boolean>;
+  epicsProjectGroupCollapsedByKey?: Record<string, boolean>;
 }
 
 export interface UiProjectState {
@@ -54,6 +55,14 @@ export interface UiThreadState {
    * has finished.
    */
   plannedEpicBannerDismissedByIdentity: Record<string, boolean>;
+  /**
+   * Explicit collapse/expand per Epics-page project group, keyed by
+   * `epicSourceKey` (`${environmentId}\0${workspaceRoot}`) — the same
+   * (environment, workspace) pair one beads snapshot is fetched under. Only
+   * groups the user actually toggled land here; an absent key means the
+   * computed default (expanded), so this does not grow with every project.
+   */
+  epicsProjectGroupCollapsedByKey: Record<string, boolean>;
 }
 
 export interface UiEndpointState {
@@ -70,6 +79,7 @@ const initialState: UiState = {
   threadChangedFilesExpandedById: {},
   epicRunGroupExpandedByRunId: {},
   plannedEpicBannerDismissedByIdentity: {},
+  epicsProjectGroupCollapsedByKey: {},
   defaultAdvertisedEndpointKey: null,
 };
 
@@ -164,6 +174,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     plannedEpicBannerDismissedByIdentity: sanitizeDismissedRecord(
       parsed.plannedEpicBannerDismissedByIdentity,
     ),
+    epicsProjectGroupCollapsedByKey: sanitizeBooleanRecord(parsed.epicsProjectGroupCollapsedByKey),
     defaultAdvertisedEndpointKey:
       typeof parsed.defaultAdvertisedEndpointKey === "string" &&
       parsed.defaultAdvertisedEndpointKey.length > 0
@@ -251,6 +262,7 @@ export function persistState(state: UiState): void {
         threadChangedFilesExpandedById,
         epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
         plannedEpicBannerDismissedByIdentity: state.plannedEpicBannerDismissedByIdentity,
+        epicsProjectGroupCollapsedByKey: state.epicsProjectGroupCollapsedByKey,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -405,6 +417,23 @@ export function setPlannedEpicBannerDismissed(
   };
 }
 
+export function setEpicsProjectGroupCollapsed(
+  state: UiState,
+  sourceKey: string,
+  collapsed: boolean,
+): UiState {
+  if (sourceKey.length === 0 || state.epicsProjectGroupCollapsedByKey[sourceKey] === collapsed) {
+    return state;
+  }
+  return {
+    ...state,
+    epicsProjectGroupCollapsedByKey: {
+      ...state.epicsProjectGroupCollapsedByKey,
+      [sourceKey]: collapsed,
+    },
+  };
+}
+
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
   const nextKey = key && key.length > 0 ? key : null;
   if (state.defaultAdvertisedEndpointKey === nextKey) {
@@ -500,6 +529,7 @@ interface UiStateStore extends UiState {
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
   setPlannedEpicBannerDismissed: (identity: string, dismissed: boolean) => void;
+  setEpicsProjectGroupCollapsed: (sourceKey: string, collapsed: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -522,6 +552,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setEpicRunGroupExpanded(state, runId, expanded)),
   setPlannedEpicBannerDismissed: (identity, dismissed) =>
     set((state) => setPlannedEpicBannerDismissed(state, identity, dismissed)),
+  setEpicsProjectGroupCollapsed: (sourceKey, collapsed) =>
+    set((state) => setEpicsProjectGroupCollapsed(state, sourceKey, collapsed)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setProjectExpanded: (projectIds, expanded) =>
