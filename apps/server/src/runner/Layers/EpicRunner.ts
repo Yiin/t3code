@@ -16,11 +16,13 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
@@ -166,6 +168,23 @@ interface EpicRunLeaseHeld {
   readonly mappedError: EpicRunPreflightBlockedError;
 }
 
+/**
+ * What the loop does when it reaches an iteration boundary.
+ *
+ * Returned from *inside* the transition lock so the decision and the write it
+ * implies cannot be split by a concurrent pause or resume, while the wait a
+ * failed iteration owes stays outside the lock.
+ */
+type LoopBoundary =
+  | { readonly _tag: "stop" }
+  | { readonly _tag: "continue"; readonly delayMs: number };
+
+const LOOP_STOP: LoopBoundary = { _tag: "stop" };
+const LOOP_CONTINUE: LoopBoundary = { _tag: "continue", delayMs: 0 };
+
+/** How long a resume waits for a dying loop to release the run's own lock. */
+const LOOP_EXIT_WAIT_MS = 5_000;
+
 export interface EpicRunnerLiveOptions {
   readonly iterationTimeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -220,6 +239,25 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     // Scoped to the layer, so every loop is interrupted on server shutdown and
     // no run keeps dispatching turns into a tearing-down orchestration engine.
     const loops = yield* FiberMap.make<EpicRunId, void, never>();
+    /**
+     * Runs whose loop will still re-read their status at its next iteration
+     * boundary.
+     *
+     * `pauseRun` does not interrupt the turn in flight, so a paused run keeps a
+     * live loop — and its own lock — for the rest of that iteration. A resume
+     * landing in that window is handed to the live loop instead of relaunching,
+     * so it must be able to tell "still draining" from "already gone". The mark
+     * is dropped inside the same critical section that commits the loop to
+     * exiting, so it can never claim a loop that will not look again.
+     */
+    const liveLoops = new Set<EpicRunId>();
+    /**
+     * Serializes every run-status transition — the loop's own boundary writes
+     * included — so no writer can act on a status another writer has already
+     * replaced. Never held across an agent turn.
+     */
+    const transitions = yield* Semaphore.make(1);
+    const withTransition = transitions.withPermits(1);
 
     const storeError = (operation: string) => (cause: unknown) =>
       new EpicRunnerStoreError({ operation, cause });
@@ -929,22 +967,33 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         let noCommitStreak = 0;
 
         while (true) {
-          const run = yield* requireRun(runId);
-          if (run.status !== "running") {
-            yield* Effect.logInfo("epic.runner.loop-stopped", { runId, status: run.status });
-            return;
-          }
-          if (run.iterationsCompleted >= run.maxIterations) {
-            yield* saveRun({
-              ...run,
-              status: "done",
-              currentThreadId: null,
-              currentTurnStartedAt: null,
-              lastError: `max iterations (${run.maxIterations}) reached`,
-              updatedAt: yield* nowIso,
-            });
-            return;
-          }
+          const run = yield* withTransition(
+            Effect.gen(function* () {
+              const current = yield* requireRun(runId);
+              if (current.status !== "running") {
+                liveLoops.delete(runId);
+                yield* Effect.logInfo("epic.runner.loop-stopped", {
+                  runId,
+                  status: current.status,
+                });
+                return null;
+              }
+              if (current.iterationsCompleted >= current.maxIterations) {
+                liveLoops.delete(runId);
+                yield* saveRun({
+                  ...current,
+                  status: "done",
+                  currentThreadId: null,
+                  currentTurnStartedAt: null,
+                  lastError: `max iterations (${current.maxIterations}) reached`,
+                  updatedAt: yield* nowIso,
+                });
+                return null;
+              }
+              return current;
+            }),
+          );
+          if (run === null) return;
 
           const latest = yield* store
             .getLatestIteration({ runId })
@@ -953,77 +1002,89 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
           const outcome = yield* runIteration({ run, iterationIndex });
 
-          // Re-read rather than writing back the snapshot taken before the
-          // iteration: `pauseRun`/`cancelRun` may have changed the status while
-          // the turn was in flight, and building the post-iteration row from
-          // the stale copy would silently resurrect the run as `running`.
-          const currentRun = yield* requireRun(runId);
-          const settledRun = {
-            ...currentRun,
-            currentThreadId: null,
-            currentTurnStartedAt: null,
-            iterationsCompleted: currentRun.iterationsCompleted + 1,
-            updatedAt: yield* nowIso,
-          };
+          const boundary = yield* withTransition(
+            Effect.gen(function* () {
+              // Re-read rather than writing back the snapshot taken before the
+              // iteration: `pauseRun`/`cancelRun`/`resumeRun` may have changed the
+              // status while the turn was in flight, and building the
+              // post-iteration row from the stale copy would silently resurrect
+              // the run as `running` — or bury a resume that arrived while this
+              // iteration was draining.
+              const currentRun = yield* requireRun(runId);
+              const settledRun = {
+                ...currentRun,
+                currentThreadId: null,
+                currentTurnStartedAt: null,
+                iterationsCompleted: currentRun.iterationsCompleted + 1,
+                updatedAt: yield* nowIso,
+              };
 
-          if (currentRun.status !== "running") {
-            // Someone stopped the run mid-iteration. Record that the iteration
-            // happened, honour their status, and leave.
-            yield* saveRun(settledRun);
-            yield* Effect.logInfo("epic.runner.loop-stopped", {
-              runId,
-              status: currentRun.status,
-            });
-            return;
-          }
+              if (currentRun.status !== "running") {
+                // Someone stopped the run mid-iteration. Record that the iteration
+                // happened, honour their status, and leave.
+                liveLoops.delete(runId);
+                yield* saveRun(settledRun);
+                yield* Effect.logInfo("epic.runner.loop-stopped", {
+                  runId,
+                  status: currentRun.status,
+                });
+                return LOOP_STOP;
+              }
 
-          if (outcome.kind === "backlog-empty") {
-            yield* saveRun({
-              ...settledRun,
-              status: "done",
-              consecutiveFailures: 0,
-              lastError: null,
-            });
-            return;
-          }
+              if (outcome.kind === "backlog-empty") {
+                liveLoops.delete(runId);
+                yield* saveRun({
+                  ...settledRun,
+                  status: "done",
+                  consecutiveFailures: 0,
+                  lastError: null,
+                });
+                return LOOP_STOP;
+              }
 
-          if (outcome.kind === "done") {
-            noCommitStreak = 0;
-            yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });
-            continue;
-          }
+              if (outcome.kind === "done") {
+                noCommitStreak = 0;
+                yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });
+                return LOOP_CONTINUE;
+              }
 
-          if (outcome.kind === "no-commit") {
-            noCommitStreak += 1;
-            const gutter = noCommitStreak >= maxNoCommitStreak;
-            yield* saveRun({
-              ...settledRun,
-              ...(gutter
-                ? {
-                    status: "failed" as const,
-                    lastError: `gutter: ${noCommitStreak} iterations without a commit`,
-                  }
-                : { lastError: null }),
-              consecutiveFailures: 0,
-            });
-            if (gutter) {
-              return;
-            }
-            continue;
-          }
+              if (outcome.kind === "no-commit") {
+                noCommitStreak += 1;
+                const gutter = noCommitStreak >= maxNoCommitStreak;
+                if (gutter) liveLoops.delete(runId);
+                yield* saveRun({
+                  ...settledRun,
+                  ...(gutter
+                    ? {
+                        status: "failed" as const,
+                        lastError: `gutter: ${noCommitStreak} iterations without a commit`,
+                      }
+                    : { lastError: null }),
+                  consecutiveFailures: 0,
+                });
+                return gutter ? LOOP_STOP : LOOP_CONTINUE;
+              }
 
-          const consecutiveFailures = currentRun.consecutiveFailures + 1;
-          const exhausted = consecutiveFailures >= maxConsecutiveFailures;
-          yield* saveRun({
-            ...settledRun,
-            ...(exhausted ? { status: "failed" as const } : {}),
-            consecutiveFailures,
-            lastError: outcome.detail ?? outcome.kind,
-          });
-          if (exhausted) {
-            return;
-          }
-          yield* Effect.sleep(Duration.millis(backoffDelayMs(consecutiveFailures)));
+              const consecutiveFailures = currentRun.consecutiveFailures + 1;
+              const exhausted = consecutiveFailures >= maxConsecutiveFailures;
+              if (exhausted) liveLoops.delete(runId);
+              yield* saveRun({
+                ...settledRun,
+                ...(exhausted ? { status: "failed" as const } : {}),
+                consecutiveFailures,
+                lastError: outcome.detail ?? outcome.kind,
+              });
+              const retry: LoopBoundary = {
+                _tag: "continue",
+                delayMs: backoffDelayMs(consecutiveFailures),
+              };
+              return exhausted ? LOOP_STOP : retry;
+            }),
+          );
+          if (boundary._tag === "stop") return;
+          // Outside the lock on purpose: a backoff is a wait, and pause, resume
+          // and cancel must not queue behind it.
+          if (boundary.delayMs > 0) yield* Effect.sleep(Duration.millis(boundary.delayMs));
         }
       });
 
@@ -1066,11 +1127,45 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // interruption (cancel) — so this single finalizer is enough to
         // un-strand whatever child the run last claimed, without a release
         // call scattered across each of those outcomes.
-        Effect.ensuring(Effect.andThen(releaseLease(runId), releaseStrandedChild(runId))),
+        //
+        // Dropping the live mark here is only a backstop: a loop that reaches
+        // its own boundary drops it inside the critical section, before this
+        // runs. Interruption and defects never get there.
+        Effect.ensuring(
+          Effect.sync(() => liveLoops.delete(runId)).pipe(
+            Effect.andThen(releaseLease(runId)),
+            Effect.andThen(releaseStrandedChild(runId)),
+          ),
+        ),
       );
 
     const forkLoop = (runId: EpicRunId) =>
-      FiberMap.run(loops, runId, supervisedLoop(runId)).pipe(Effect.asVoid);
+      Effect.sync(() => liveLoops.add(runId)).pipe(
+        Effect.andThen(FiberMap.run(loops, runId, supervisedLoop(runId))),
+        Effect.asVoid,
+      );
+
+    /**
+     * Wait for a loop that has committed to exiting to actually be gone.
+     *
+     * The lock is released in the loop's finalizer, after its last boundary
+     * write, so a resume that relaunches the instant that write lands would
+     * acquire against the run's *own* held lock and fail with
+     * `run_in_progress`. Bounded, because a finalizer wedged on `bd` must not
+     * hold the resume open — the acquire that follows reports the held lock
+     * honestly instead.
+     */
+    const awaitLoopExit = (runId: EpicRunId) =>
+      FiberMap.get(loops, runId).pipe(
+        Effect.flatMap((fiber) =>
+          Option.isSome(fiber) ? Effect.asVoid(Fiber.await(fiber.value)) : Effect.void,
+        ),
+        Effect.timeout(Duration.millis(LOOP_EXIT_WAIT_MS)),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.loop-exit-wait-failed", { runId, cause }),
+        ),
+        Effect.asVoid,
+      );
 
     const startRun: EpicRunnerShape["startRun"] = (input: StartEpicRunInput) =>
       Effect.gen(function* () {
@@ -1159,45 +1254,66 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const pauseRun: EpicRunnerShape["pauseRun"] = ({ runId }) =>
       Effect.gen(function* () {
-        const run = yield* requireRun(runId);
-        if (run.status !== "running") {
-          return yield* new EpicRunStateError({
-            runId,
-            detail: `cannot pause a ${run.status} run`,
-          });
-        }
-        const paused: EpicRun = { ...run, status: "paused", updatedAt: yield* nowIso };
-        // No interrupt: the loop re-reads the run before each iteration and
-        // exits at that boundary, so the turn in flight finishes its unit of
-        // work rather than leaving the repo and backlog half-done.
-        yield* saveRun(paused);
+        const paused = yield* withTransition(
+          Effect.gen(function* () {
+            const run = yield* requireRun(runId);
+            if (run.status !== "running") {
+              return yield* new EpicRunStateError({
+                runId,
+                detail: `cannot pause a ${run.status} run`,
+              });
+            }
+            const next: EpicRun = { ...run, status: "paused", updatedAt: yield* nowIso };
+            // No interrupt: the loop re-reads the run before each iteration and
+            // exits at that boundary, so the turn in flight finishes its unit of
+            // work rather than leaving the repo and backlog half-done.
+            yield* saveRun(next);
+            return next;
+          }),
+        );
         return yield* enrichRun(paused);
       });
 
     const resumeRun: EpicRunnerShape["resumeRun"] = ({ runId }) =>
       Effect.gen(function* () {
-        const run = yield* requireRun(runId);
-        if (run.status !== "paused") {
-          return yield* new EpicRunStateError({
-            runId,
-            detail: `cannot resume a ${run.status} run`,
-          });
-        }
-        const resumed: EpicRun = {
-          ...run,
-          status: "running",
-          consecutiveFailures: 0,
-          lastError: null,
-          updatedAt: yield* nowIso,
-        };
-        yield* acquireLease(runId, { cwd: run.cwd, epicId: run.epicId }).pipe(
+        const handoff = yield* withTransition(
+          Effect.gen(function* () {
+            const run = yield* requireRun(runId);
+            if (run.status !== "paused") {
+              return yield* new EpicRunStateError({
+                runId,
+                detail: `cannot resume a ${run.status} run`,
+              });
+            }
+            const resumed: EpicRun = {
+              ...run,
+              status: "running",
+              consecutiveFailures: 0,
+              lastError: null,
+              updatedAt: yield* nowIso,
+            };
+            // A pause takes effect at the next iteration boundary, so the loop
+            // can still be draining the iteration that was in flight — holding
+            // this run's own lock for as long as an agent turn lasts.
+            // Relaunching there would run launch preflight against that lock
+            // and refuse the resume as `run_in_progress`. Flip the status
+            // instead and let the live loop pick it up when it looks again.
+            if (!liveLoops.has(runId)) return { run: resumed, relaunch: true } as const;
+            yield* saveRun(resumed);
+            return { run: resumed, relaunch: false } as const;
+          }),
+        );
+        if (!handoff.relaunch) return yield* enrichRun(handoff.run);
+
+        yield* awaitLoopExit(runId);
+        yield* acquireLease(runId, { cwd: handoff.run.cwd, epicId: handoff.run.epicId }).pipe(
           Effect.mapError((error) =>
             error._tag === "EpicRunLeaseHeld" ? error.mappedError : error,
           ),
         );
-        yield* saveRun(resumed).pipe(releaseLeaseOnFailure(runId));
+        yield* saveRun(handoff.run).pipe(releaseLeaseOnFailure(runId));
         yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
-        return yield* enrichRun(resumed);
+        return yield* enrichRun(handoff.run);
       });
 
     const cancelRun: EpicRunnerShape["cancelRun"] = ({ runId }) =>

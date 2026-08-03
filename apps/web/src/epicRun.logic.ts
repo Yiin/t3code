@@ -20,6 +20,7 @@ export type EpicRunUiState =
   | "idle"
   | "starting"
   | "running"
+  | "pausing"
   | "paused"
   | "stopping"
   | "stopped"
@@ -28,6 +29,22 @@ export type EpicRunUiState =
 /** A run that can no longer move on its own. `EpicRunStatus` has no path back. */
 export function isTerminalEpicRunStatus(status: EpicRunStatus): boolean {
   return status === "done" || status === "failed" || status === "cancelled";
+}
+
+/**
+ * A paused run that is still finishing the iteration it was paused during.
+ *
+ * The server takes a pause at the next iteration boundary and deliberately does
+ * not interrupt the turn (`EpicRunner.pauseRun`), so a run reads `paused` while
+ * an agent is still working — minutes of it. Only the label changes: resume is
+ * accepted throughout, because the server hands the run back to the loop that
+ * is still draining rather than relaunching it.
+ */
+export function isEpicRunPauseDraining(run: EpicRun): boolean {
+  return (
+    run.status === "paused" &&
+    run.recentIterations.some((iteration) => iteration.turnStatus === "running")
+  );
 }
 
 export function epicRunUiState(
@@ -45,8 +62,9 @@ export function epicRunUiState(
   if (run === null) return "idle";
   if (run.status === "running") return "running";
   // Paused is its own state: a paused run is not live, and the only control
-  // that helps is Resume.
-  if (run.status === "paused") return "paused";
+  // that helps is Resume. While the iteration it was paused during is still
+  // draining, say so — otherwise the run looks idle while an agent is working.
+  if (run.status === "paused") return isEpicRunPauseDraining(run) ? "pausing" : "paused";
   if (run.status === "failed") return "failed";
   return "stopped";
 }

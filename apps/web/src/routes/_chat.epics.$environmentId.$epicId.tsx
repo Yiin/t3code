@@ -379,7 +379,9 @@ function EpicRunSection(props: {
     });
   };
   const resume = () => {
-    if (!run || state !== "paused" || pending !== null) return;
+    // A pause still draining its iteration resumes too — the server hands the
+    // run back to the loop that is finishing it.
+    if (!run || (state !== "paused" && state !== "pausing") || pending !== null) return;
     setPending("resuming");
     void resumeRun({
       environmentId: props.environmentId as EnvironmentId,
@@ -421,10 +423,10 @@ function EpicRunSection(props: {
           <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                {state === "stopping" ? (
+                {state === "stopping" || state === "pausing" ? (
                   <span className="inline-flex items-center gap-1.5 text-muted-foreground">
                     <LoaderIcon className="size-3.5 animate-spin motion-reduce:animate-none" />
-                    Stopping
+                    {state === "stopping" ? "Stopping" : "Pausing"}
                   </span>
                 ) : (
                   <EpicRunPill run={run} />
@@ -445,9 +447,12 @@ function EpicRunSection(props: {
                 </Link>
               ) : null}
             </div>
-            {state === "running" || state === "paused" || state === "stopping" ? (
+            {state === "running" ||
+            state === "pausing" ||
+            state === "paused" ||
+            state === "stopping" ? (
               <div className="flex flex-wrap items-center gap-2">
-                {state === "paused" ? (
+                {state === "pausing" || state === "paused" ? (
                   <Button
                     className="min-h-11"
                     variant="outline"

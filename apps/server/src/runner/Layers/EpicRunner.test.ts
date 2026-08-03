@@ -1413,6 +1413,48 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("resumes a paused run while its iteration is still in flight", () => {
+    // The window the resume used to be refused in. `pauseRun` does not
+    // interrupt the turn, so the run keeps its own lock for the rest of that
+    // iteration — as long as an agent turn lasts — and a resume that relaunched
+    // there ran launch preflight against that lock and failed with
+    // `run_in_progress`. The live loop has to be handed the run instead.
+    let acquired = 0;
+    const harness = createHarness({
+      script: [
+        { text: "work", head: "head-1" },
+        // No new head: `RALPH_DONE` after a commit is a protocol violation.
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      // Wide enough that the pause and the resume both land inside the first
+      // iteration's settle window.
+      options: { quietPeriodMs: 300 },
+      onLockAcquire: () => {
+        acquired += 1;
+      },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.iterations.length === 1);
+      yield* runner.pauseRun({ runId: run.runId });
+      // Pinned: the iteration this resume has to survive really is still going.
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "running");
+
+      const resumed = yield* runner.resumeRun({ runId: run.runId });
+      assert.strictEqual(resumed.status, "running");
+
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations.length, 2);
+      assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
+      // One lease and one loop for the whole run: the resume was handed to the
+      // draining loop, not relaunched under a second lock.
+      assert.strictEqual(acquired, 1);
+      assert.strictEqual(harness.turnsStarted(), 2);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("publishes every run-state change on the hot stream", () => {
     const harness = createHarness({ script: [{ text: "RALPH_DONE", head: "head-0" }] });
 

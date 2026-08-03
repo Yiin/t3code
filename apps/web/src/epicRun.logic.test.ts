@@ -11,11 +11,13 @@ import {
   epicRuntimeModeLabel,
   epicStartControl,
   formatEpicRunElapsed,
+  isEpicRunPauseDraining,
   isTerminalEpicRunStatus,
   shouldStickToBottom,
 } from "./epicRun.logic";
 
-const run = (status: EpicRun["status"]) => ({ status }) as EpicRun;
+const run = (status: EpicRun["status"], recentIterations: EpicRun["recentIterations"] = []) =>
+  ({ status, recentIterations }) as EpicRun;
 const historyRun = (overrides: {
   readonly runId: string;
   readonly epicId?: string;
@@ -45,6 +47,8 @@ const iteration = (
     finishedAt: "2026-07-29T00:01:00.000Z",
     ...overrides,
   }) as EpicRun["recentIterations"][number];
+/** Paused, but the iteration it was paused during is still working. */
+const draining = run("paused", [iteration({ turnStatus: "running", finishedAt: null })]);
 
 describe("epic run presentation", () => {
   it.each([
@@ -53,6 +57,13 @@ describe("epic run presentation", () => {
     [null, "stopping", "idle"],
     [run("running"), null, "running"],
     [run("paused"), null, "paused"],
+    // A pause lands at the next iteration boundary, so a paused run whose turn
+    // is still in flight reads Pausing rather than looking idle.
+    [draining, null, "pausing"],
+    [run("paused", [iteration({})]), null, "paused"],
+    // Stopping outranks it: cancelling interrupts the same turn.
+    [draining, "stopping", "stopping"],
+    [draining, "resuming", "pausing"],
     [run("running"), "stopping", "stopping"],
     [run("paused"), "stopping", "stopping"],
     [run("done"), "stopping", "stopped"],
@@ -85,6 +96,7 @@ describe("epic run presentation", () => {
     // Nothing to start while a run can still move on its own.
     [run("running"), "running", null],
     [run("paused"), "paused", null],
+    [draining, "pausing", null],
     [run("running"), "stopping", null],
   ] as const)("resolves the start control for %s in state %s", (value, state, expected) => {
     expect(epicStartControl(value, state)).toEqual(expected);
@@ -98,6 +110,16 @@ describe("epic run presentation", () => {
     ["paused", false],
   ] as const)("treats %s as terminal=%s", (status, expected) => {
     expect(isTerminalEpicRunStatus(status)).toBe(expected);
+  });
+
+  it("reads a pause as draining only while an iteration is still running", () => {
+    expect(isEpicRunPauseDraining(draining)).toBe(true);
+    expect(isEpicRunPauseDraining(run("paused", [iteration({})]))).toBe(false);
+    expect(isEpicRunPauseDraining(run("paused"))).toBe(false);
+    // Only a paused run drains: a running one is simply running.
+    expect(isEpicRunPauseDraining(run("running", [iteration({ turnStatus: "running" })]))).toBe(
+      false,
+    );
   });
 
   it("auto-follows only while the viewport is near the bottom", () => {
