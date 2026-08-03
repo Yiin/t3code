@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  epicRunIterationThreadId,
   ProjectId,
   ThreadId,
   TurnId,
@@ -8,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -24,7 +26,10 @@ import { ProviderValidationError } from "../Errors.ts";
 import { ProviderSessionReaper } from "../Services/ProviderSessionReaper.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
-import { makeProviderSessionReaperLive } from "./ProviderSessionReaper.ts";
+import {
+  makeProviderSessionReaperLive,
+  type ProviderSessionReaperLiveOptions,
+} from "./ProviderSessionReaper.ts";
 
 const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -50,6 +55,11 @@ async function waitFor(
   return poll();
 }
 
+/** A `lastSeenAt` that is stale for a 1s threshold and fresh for a 60s one. */
+const idleForFiveSeconds = Effect.map(DateTime.now, (now) =>
+  DateTime.formatIso(DateTime.subtractDuration(now, Duration.seconds(5))),
+);
+
 const drainFibers = Effect.forEach(Array.from({ length: 10 }), () => Effect.yieldNow, {
   discard: true,
 });
@@ -59,6 +69,7 @@ const unsupported = () => Effect.die(new Error("Unsupported provider call in tes
 function makeReadModel(
   threads: ReadonlyArray<{
     readonly id: ThreadId;
+    readonly settledOverride?: "settled" | "active" | null;
     readonly session: {
       readonly threadId: ThreadId;
       readonly status: "starting" | "running" | "ready" | "interrupted" | "stopped" | "error";
@@ -100,7 +111,7 @@ function makeReadModel(
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
-      settledOverride: null,
+      settledOverride: thread.settledOverride ?? null,
       settledAt: null,
       latestUserMessageAt: null,
       hasPendingApprovals: false,
@@ -140,6 +151,7 @@ describe("ProviderSessionReaper", () => {
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
+    readonly reaperOptions?: ProviderSessionReaperLiveOptions;
   }) {
     const stoppedThreadIds = new Set<ThreadId>();
     const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
@@ -186,6 +198,7 @@ describe("ProviderSessionReaper", () => {
     const layer = makeProviderSessionReaperLive({
       inactivityThresholdMs: 1_000,
       sweepIntervalMs: 60_000,
+      ...input.reaperOptions,
     }).pipe(
       Layer.provideMerge(providerSessionDirectoryLayer),
       Layer.provideMerge(runtimeRepositoryLayer),
@@ -588,5 +601,152 @@ describe("ProviderSessionReaper", () => {
       defectThreadId,
       reapedThreadId,
     ]);
+  });
+
+  it("reaps an epic-run iteration thread on the short threshold while sparing a plain thread", async () => {
+    const interactiveThreadId = ThreadId.make("thread-reaper-interactive-backstop");
+    const iterationThreadId = ThreadId.make(
+      epicRunIterationThreadId({
+        runId: "0f1c9a4e-6b21-4a2c-9f31-7d0c5b8e2a10",
+        iterationIndex: 2,
+      }),
+    );
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: interactiveThreadId,
+          session: {
+            threadId: interactiveThreadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+        {
+          id: iterationThreadId,
+          session: {
+            threadId: iterationThreadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+      reaperOptions: {
+        interactiveIdleThresholdMs: 60_000,
+        epicRunIterationIdleThresholdMs: 1_000,
+        settledIdleThresholdMs: 1_000,
+        sweepIntervalMs: 60_000,
+      },
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+    const idleFiveSecondsAgo = await runtime!.runPromise(idleForFiveSeconds);
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: interactiveThreadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: idleFiveSecondsAgo,
+        resumeCursor: {
+          opaque: "resume-interactive-backstop",
+        },
+        runtimePayload: null,
+      }),
+    );
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: iterationThreadId,
+        providerName: "codex",
+        providerInstanceId: null,
+        adapterKey: "codex",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: idleFiveSecondsAgo,
+        resumeCursor: {
+          opaque: "resume-iteration-thread",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await runtime!.runPromise(drainFibers);
+
+    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+      iterationThreadId,
+    ]);
+    expect(harness.stoppedThreadIds.has(interactiveThreadId)).toBe(false);
+  });
+
+  it("reaps a settled thread on the short threshold", async () => {
+    const settledThreadId = ThreadId.make("thread-reaper-settled");
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: settledThreadId,
+          settledOverride: "settled",
+          session: {
+            threadId: settledThreadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+      reaperOptions: {
+        interactiveIdleThresholdMs: 60_000,
+        epicRunIterationIdleThresholdMs: 60_000,
+        settledIdleThresholdMs: 1_000,
+        sweepIntervalMs: 60_000,
+      },
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: settledThreadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        resumeCursor: {
+          opaque: "resume-settled",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+
+    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: settledThreadId });
   });
 });

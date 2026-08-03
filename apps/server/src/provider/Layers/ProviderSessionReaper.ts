@@ -6,6 +6,12 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  DEFAULT_SESSION_REAP_THRESHOLDS,
+  decideSessionReap,
+  minSessionReapThresholdMs,
+  type SessionReapThresholds,
+} from "../sessionReapPolicy.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   ProviderSessionReaper,
@@ -13,11 +19,14 @@ import {
 } from "../Services/ProviderSessionReaper.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 
-const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 export interface ProviderSessionReaperLiveOptions {
+  /** Back-compat shorthand: sets every per-kind threshold that is not set on its own. */
   readonly inactivityThresholdMs?: number;
+  readonly interactiveIdleThresholdMs?: number;
+  readonly epicRunIterationIdleThresholdMs?: number;
+  readonly settledIdleThresholdMs?: number;
   readonly sweepIntervalMs?: number;
 }
 
@@ -27,10 +36,24 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const directory = yield* ProviderSessionDirectory;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 
-    const inactivityThresholdMs = Math.max(
-      1,
-      options?.inactivityThresholdMs ?? DEFAULT_INACTIVITY_THRESHOLD_MS,
-    );
+    const thresholdMs = (override: number | undefined, fallback: number) =>
+      Math.max(1, override ?? options?.inactivityThresholdMs ?? fallback);
+
+    const thresholds: SessionReapThresholds = {
+      interactiveIdleThresholdMs: thresholdMs(
+        options?.interactiveIdleThresholdMs,
+        DEFAULT_SESSION_REAP_THRESHOLDS.interactiveIdleThresholdMs,
+      ),
+      epicRunIterationIdleThresholdMs: thresholdMs(
+        options?.epicRunIterationIdleThresholdMs,
+        DEFAULT_SESSION_REAP_THRESHOLDS.epicRunIterationIdleThresholdMs,
+      ),
+      settledIdleThresholdMs: thresholdMs(
+        options?.settledIdleThresholdMs,
+        DEFAULT_SESSION_REAP_THRESHOLDS.settledIdleThresholdMs,
+      ),
+    };
+    const shortestThresholdMs = minSessionReapThresholdMs(thresholds);
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
 
     const sweep = Effect.gen(function* () {
@@ -54,19 +77,33 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         }
 
         const idleDurationMs = now - lastSeenMs;
-        if (idleDurationMs < inactivityThresholdMs) {
+        // No threshold can fire below the shortest one, so a fresh session
+        // never costs a thread shell read.
+        if (idleDurationMs < shortestThresholdMs) {
           continue;
         }
 
         const thread = yield* projectionSnapshotQuery
           .getThreadShellById(binding.threadId)
           .pipe(Effect.map(Option.getOrUndefined));
-        if (thread?.session?.activeTurnId != null) {
-          yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
-            threadId: binding.threadId,
-            activeTurnId: thread.session.activeTurnId,
-            idleDurationMs,
-          });
+
+        const decision = decideSessionReap({
+          threadId: binding.threadId,
+          status: binding.status,
+          idleDurationMs,
+          settledOverride: thread?.settledOverride ?? null,
+          activeTurnId: thread?.session?.activeTurnId ?? null,
+          thresholds,
+        });
+
+        if (!decision.reap) {
+          if (decision.reason === "active_turn") {
+            yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
+              threadId: binding.threadId,
+              activeTurnId: thread?.session?.activeTurnId,
+              idleDurationMs,
+            });
+          }
           continue;
         }
 
@@ -76,7 +113,9 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
               threadId: binding.threadId,
               provider: binding.provider,
               idleDurationMs,
-              reason: "inactivity_threshold",
+              threadKind: decision.threadKind,
+              thresholdMs: decision.thresholdMs,
+              reason: decision.reason,
             }),
           ),
           Effect.as(true),
@@ -122,7 +161,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         );
 
         yield* Effect.logInfo("provider.session.reaper.started", {
-          inactivityThresholdMs,
+          ...thresholds,
           sweepIntervalMs,
         });
       });
