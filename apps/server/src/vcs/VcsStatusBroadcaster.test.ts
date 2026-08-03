@@ -130,6 +130,65 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(makeTestLayer(state)));
   });
 
+  it.effect("peeks at the cache without ever loading a status", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: remoteStatusWithPr,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+
+      // Nothing has loaded this cwd, so a peek reports exactly that and does
+      // no work — the sweeper that calls it is nobody's foreground request.
+      const cold = yield* broadcaster.peekStatus("/repo");
+      assert.equal(cold, null);
+      assert.equal(state.localStatusCalls, 0);
+      assert.equal(state.remoteStatusCalls, 0);
+
+      yield* broadcaster.getStatus({ cwd: "/repo" });
+      const warm = yield* broadcaster.peekStatus("/repo");
+
+      assert.deepStrictEqual(warm, {
+        local: baseLocalStatus,
+        remote: remoteStatusWithPr,
+      });
+      // Still one load each: the peek added nothing.
+      assert.equal(state.localStatusCalls, 1);
+      assert.equal(state.remoteStatusCalls, 1);
+      assert.equal(state.localInvalidationCalls, 0);
+      assert.equal(state.remoteInvalidationCalls, 0);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+
+  it.effect("peeks at a half-loaded cache without filling the missing half", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster.refreshLocalStatus("/repo");
+
+      const peeked = yield* broadcaster.peekStatus("/repo");
+
+      // The remote half is where a change request lives, and it is the half
+      // that costs a network call. A peek reports it missing rather than
+      // fetching it.
+      assert.deepStrictEqual(peeked, { local: baseLocalStatus, remote: null });
+      assert.equal(state.remoteStatusCalls, 0);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+
   it.effect("refreshes the cached snapshot after explicit invalidation", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,

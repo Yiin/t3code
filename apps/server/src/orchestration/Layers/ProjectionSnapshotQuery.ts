@@ -148,13 +148,16 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   toCheckpointRef: Schema.NullOr(CheckpointRef),
 });
 const AutoSettleCandidateLookupInput = Schema.Struct({
-  idleBefore: IsoDateTime,
+  idleBefore: Schema.NullOr(IsoDateTime),
   limit: NonNegativeInt,
 });
 const ProjectionAutoSettleCandidateRowSchema = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   lastActivityAt: IsoDateTime,
+  branch: Schema.NullOr(Schema.String),
+  worktreePath: Schema.NullOr(Schema.String),
+  workspaceRoot: Schema.String,
 });
 
 const REQUIRED_SNAPSHOT_PROJECTORS = [
@@ -1145,6 +1148,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // and '' sorts below every ISO timestamp — so an all-NULL row yields '',
   // which the outer WHERE rejects. Comparing timestamps as text matches the
   // rest of this module (see `maxIso`).
+  //
+  // A null `idleBefore` drops the age filter and nothing else, so the
+  // merged-PR sweep reads the same already-settleable partition as the idle
+  // sweep. The projects join is what gives that sweep a cwd to peek at.
   const listAutoSettleCandidateRows = SqlSchema.findAll({
     Request: AutoSettleCandidateLookupInput,
     Result: ProjectionAutoSettleCandidateRowSchema,
@@ -1153,11 +1160,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           "threadId",
           "projectId",
-          "lastActivityAt"
+          "lastActivityAt",
+          "branch",
+          "worktreePath",
+          "workspaceRoot"
         FROM (
           SELECT
             threads.thread_id AS "threadId",
             threads.project_id AS "projectId",
+            threads.branch AS "branch",
+            threads.worktree_path AS "worktreePath",
+            projects.workspace_root AS "workspaceRoot",
             MAX(
               COALESCE(threads.latest_user_message_at, ''),
               COALESCE(turns.requested_at, ''),
@@ -1165,6 +1178,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               COALESCE(turns.completed_at, '')
             ) AS "lastActivityAt"
           FROM projection_threads threads
+          INNER JOIN projection_projects projects
+            ON projects.project_id = threads.project_id
           LEFT JOIN projection_thread_sessions sessions
             ON sessions.thread_id = threads.thread_id
           LEFT JOIN projection_turns turns
@@ -1178,7 +1193,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND (sessions.status IS NULL OR sessions.status NOT IN ('starting', 'running'))
         )
         WHERE "lastActivityAt" <> ''
-          AND "lastActivityAt" < ${idleBefore}
+          AND (${idleBefore} IS NULL OR "lastActivityAt" < ${idleBefore})
         ORDER BY "lastActivityAt" ASC, "threadId" ASC
         LIMIT ${limit}
       `,

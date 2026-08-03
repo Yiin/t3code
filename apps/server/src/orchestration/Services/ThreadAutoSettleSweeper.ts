@@ -1,12 +1,13 @@
 /**
- * ThreadAutoSettleSweeper - Idle auto-settle sweeper service interface.
+ * ThreadAutoSettleSweeper - Auto-settle sweeper service interface.
  *
- * Owns a background loop that settles threads which have been idle past the
- * `threadAutoSettleAfterDays` server setting. Auto-settle used to be a
- * client-side display rule, so a thread could read as settled while the server
- * still held its provider session. Here it dispatches a real `thread.settle`
- * command, which means the settle reactor tears the session down and the
- * settled state survives with no client connected.
+ * Owns a background loop with two rules. It settles threads which have been
+ * idle past the `threadAutoSettleAfterDays` server setting, and it settles
+ * threads whose change request the VCS status cache already shows as merged.
+ * Both used to be client-side display rules, so a thread could read as settled
+ * while the server still held its provider session. Here they dispatch a real
+ * `thread.settle` command, which means the settle reactor tears the session
+ * down and the settled state survives with no client connected.
  *
  * @module ThreadAutoSettleSweeper
  */
@@ -19,7 +20,7 @@ import type * as Scope from "effect/Scope";
  */
 export interface ThreadAutoSettleSweeperShape {
   /**
-   * Start the periodic idle auto-settle sweep.
+   * Start the periodic auto-settle sweep.
    *
    * The returned effect must be run in a scope so the sweep fiber is finalized
    * on shutdown.

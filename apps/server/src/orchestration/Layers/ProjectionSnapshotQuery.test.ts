@@ -157,6 +157,8 @@ interface AutoSettleThreadFixture {
   readonly archived?: boolean;
   readonly deleted?: boolean;
   readonly latestUserMessageAt?: string | null;
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
 }
 
 /** One project plus a thread (and optional session and latest turn) per fixture. */
@@ -224,8 +226,8 @@ const seedAutoSettleFixtures = (fixtures: ReadonlyArray<AutoSettleThreadFixture>
           '{"provider":"codex","model":"gpt-5-codex"}',
           'full-access',
           'default',
-          NULL,
-          NULL,
+          ${fixture.branch ?? null},
+          ${fixture.worktreePath ?? null},
           ${turnId},
           ${fixture.latestUserMessageAt ?? null},
           ${fixture.pending === "approval" ? 1 : 0},
@@ -2690,6 +2692,86 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       assert.deepEqual(
         [...new Set(candidates.map((candidate) => candidate.projectId))],
         [ProjectId.make("project-auto-settle")],
+      );
+    }),
+  );
+
+  // The merged-PR sweep settles on what the VCS status cache already holds, so
+  // the same read has to hand it a cwd to peek at and the branch it must still
+  // be on — and, with no idle window of its own, every candidate whatever its
+  // age.
+  it.effect("returns the cwd parts a merged-PR sweep needs, and ignores age when asked", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedAutoSettleFixtures([
+        {
+          threadId: "thread-pr-worktree",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_FRESH,
+          sessionStatus: null,
+          pending: null,
+          branch: "feature/pr-settle",
+          worktreePath: "/tmp/worktree-pr-settle",
+        },
+        {
+          threadId: "thread-pr-shared-root",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: null,
+          pending: null,
+          branch: "feature/shared-root",
+        },
+        // Blocked for the merged-PR sweep for the same reason it is blocked for
+        // the idle one: an explicit keep-active pin is never auto-settled.
+        {
+          threadId: "thread-pr-pinned-active",
+          settledOverride: "active",
+          activityAt: AUTO_SETTLE_FRESH,
+          sessionStatus: null,
+          pending: null,
+          branch: "feature/pinned",
+          worktreePath: "/tmp/worktree-pinned",
+        },
+      ]);
+
+      const everyAge = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: null,
+        limit: 1_000,
+      });
+
+      assert.deepEqual(
+        everyAge.map((candidate) => [
+          candidate.threadId,
+          candidate.branch,
+          candidate.worktreePath,
+          candidate.workspaceRoot,
+        ]),
+        [
+          [
+            ThreadId.make("thread-pr-shared-root"),
+            "feature/shared-root",
+            null,
+            "/tmp/project-auto-settle",
+          ],
+          [
+            ThreadId.make("thread-pr-worktree"),
+            "feature/pr-settle",
+            "/tmp/worktree-pr-settle",
+            "/tmp/project-auto-settle",
+          ],
+        ],
+      );
+
+      // The idle cutoff still filters when one is given: null drops the age
+      // rule and nothing else.
+      const idleOnly = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: AUTO_SETTLE_CUTOFF,
+        limit: 1_000,
+      });
+      assert.deepEqual(
+        idleOnly.map((candidate) => candidate.threadId),
+        [ThreadId.make("thread-pr-shared-root")],
       );
     }),
   );

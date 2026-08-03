@@ -151,12 +151,34 @@ export function remoteRefreshFailureDelay(
   return Duration.max(configuredInterval, cappedBackoff);
 }
 
+/**
+ * The two halves of a cwd's VCS status as they stand in the cache right now.
+ *
+ * Either half is null when nothing has loaded it yet, and `remote` is also
+ * null when the loaded answer was "no remote status" — a peek deliberately
+ * cannot tell those apart, because neither one lets a caller act.
+ */
+export interface VcsStatusPeek {
+  readonly local: VcsStatusLocalResult | null;
+  readonly remote: VcsStatusRemoteResult | null;
+}
+
 export class VcsStatusBroadcaster extends Context.Service<
   VcsStatusBroadcaster,
   {
     readonly getStatus: (
       input: VcsStatusInput,
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+    /**
+     * Read what the cache already holds for a cwd, or null when it holds
+     * nothing.
+     *
+     * Never loads: no git subprocess, no source-control API call, no cache
+     * write. `getStatus` falls through to `workflow.remoteStatus` on a miss,
+     * which is real network work and the wrong thing to do on behalf of a
+     * background sweep that nobody is waiting on.
+     */
+    readonly peekStatus: (cwd: string) => Effect.Effect<VcsStatusPeek | null>;
     readonly refreshLocalStatus: (
       cwd: string,
     ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
@@ -334,6 +356,23 @@ export const make = Effect.gen(function* () {
       { concurrency: "unbounded" },
     );
     return yield* updateCachedStatus(cwd, local, remote);
+  });
+
+  const peekStatus: VcsStatusBroadcaster["Service"]["peekStatus"] = Effect.fn(
+    "VcsStatusBroadcaster.peekStatus",
+  )(function* (rawCwd) {
+    // The cache is keyed by the resolved path, so the peek has to resolve too
+    // or a symlinked worktree would miss every entry it owns. `normalizeCwd`
+    // is a `realpath` and falls back to the input, so this stays a read.
+    const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
+    const cached = yield* getCachedStatus(cwd);
+    if (cached === null) {
+      return null;
+    }
+    return {
+      local: cached.local?.value ?? null,
+      remote: cached.remote?.value ?? null,
+    };
   });
 
   const refreshLocalStatusCore = Effect.fn("VcsStatusBroadcaster.refreshLocalStatusCore")(
@@ -533,6 +572,7 @@ export const make = Effect.gen(function* () {
 
   return VcsStatusBroadcaster.of({
     getStatus,
+    peekStatus,
     refreshLocalStatus,
     refreshStatus,
     streamStatus,
