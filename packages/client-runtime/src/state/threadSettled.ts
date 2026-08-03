@@ -2,30 +2,6 @@ import type { OrchestrationThreadShell } from "@t3tools/contracts";
 
 export type ChangeRequestStateLike = "open" | "closed" | "merged";
 
-const DAY_MS = 24 * 60 * 60 * 1_000;
-
-export function threadLastActivityAt(shell: OrchestrationThreadShell): string | null {
-  const candidates = [
-    shell.latestUserMessageAt,
-    shell.latestTurn?.requestedAt,
-    shell.latestTurn?.startedAt,
-    shell.latestTurn?.completedAt,
-  ];
-  let latest: string | null = null;
-  let latestTimestamp = Number.NEGATIVE_INFINITY;
-
-  for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined) continue;
-    const timestamp = Date.parse(candidate);
-    if (timestamp > latestTimestamp) {
-      latest = candidate;
-      latestTimestamp = timestamp;
-    }
-  }
-
-  return latest;
-}
-
 /**
  * A queued turn start lives for at most this long: session adoption takes
  * seconds, so a user message still unadopted after the grace window is a
@@ -94,15 +70,20 @@ export function canSettle(
  * Settled resolution over the server-backed settled lifecycle. The explicit
  * user override (thread.settle / thread.unsettle commands, projected into
  * settledOverride + settledAt) wins in both directions; without one, a
- * thread auto-settles on a merged/closed PR or inactivity past the window.
+ * thread auto-settles on a merged/closed PR.
  * The server un-settles on real activity (user message, session start,
  * approval/user-input request), so an override never goes stale silently.
+ *
+ * Idle auto-settle is NOT here: the server sweeps idle threads and emits a
+ * real thread.settled event (settings key `threadAutoSettleAfterDays`), which
+ * arrives as `settledOverride === "settled"` below. A client-side twin of that
+ * rule could only drift — it would paint a thread settled while the server
+ * still holds its provider session open.
  */
 export function effectiveSettled(
   shell: OrchestrationThreadShell,
   options: {
     readonly now: string;
-    readonly autoSettleAfterDays: number | null;
     readonly changeRequestState?: ChangeRequestStateLike | null;
   },
 ): boolean {
@@ -129,19 +110,5 @@ export function effectiveSettled(
   // "active" is the explicit keep-active pin: it suppresses auto-settle
   // until real activity clears it server-side.
   if (shell.settledOverride === "active") return false;
-  if (options.changeRequestState === "merged" || options.changeRequestState === "closed") {
-    return true;
-  }
-  if (options.autoSettleAfterDays === null) return false;
-
-  const lastActivityAt = threadLastActivityAt(shell);
-  if (lastActivityAt === null) return false;
-
-  // threadLastActivityAt only returns candidates whose Date.parse beat
-  // -Infinity, so this parse is a real number; a malformed `now` yields NaN,
-  // the comparison is false, and the thread stays active (never a surprise
-  // auto-settle on bad input).
-  return (
-    Date.parse(lastActivityAt) < Date.parse(options.now) - options.autoSettleAfterDays * DAY_MS
-  );
+  return options.changeRequestState === "merged" || options.changeRequestState === "closed";
 }

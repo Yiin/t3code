@@ -44,16 +44,6 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
-export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
-export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
-export const SidebarAutoSettleAfterDays = Schema.Number.check(
-  Schema.isBetween({
-    minimum: MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-    maximum: MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-  }),
-);
-export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
-export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 3;
 
 export const ClientSettingsSchema = Schema.Struct({
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -91,9 +81,6 @@ export const ClientSettingsSchema = Schema.Struct({
       modelOrder: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
-  sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
-  ),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
   ),
@@ -423,11 +410,12 @@ const runtimeHomeDirectory = (
 export const DEFAULT_SKILLS_ROOT =
   runtimeHomeDirectory?.startsWith("/") === true ? `${runtimeHomeDirectory}/.agents/skills` : "";
 
-// The idle auto-settle window, in days. Same semantics as the per-device
-// `sidebarAutoSettleAfterDays` it replaces — `null` disables auto-settle, any
-// other value is a whole-day window — but this one lives on the server,
-// because the sweeper that acts on it runs there and no client may be
-// connected when a thread goes idle.
+// The idle auto-settle window, in days. `null` disables auto-settle, any
+// other value is a whole-day window. This lives on the server, and is the
+// only auto-settle window there is: the sweeper that acts on it runs there,
+// no client may be connected when a thread goes idle, and settling tears the
+// provider session down. It replaced a per-device client setting
+// (`sidebarAutoSettleAfterDays`, removed) that could only paint rows.
 export const MIN_THREAD_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_THREAD_AUTO_SETTLE_AFTER_DAYS = 90;
 export const ThreadAutoSettleAfterDays = Schema.Number.check(
@@ -651,7 +639,6 @@ export const ClientSettingsPatch = Schema.Struct({
       }),
     ),
   ),
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

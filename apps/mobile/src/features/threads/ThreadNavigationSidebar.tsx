@@ -371,19 +371,6 @@ function ThreadNavigationSidebarPane(
     () => setSettledVisibleCount((count) => count + THREAD_LIST_V2_SETTLED_PAGE_COUNT),
     [],
   );
-  // now ticks per minute so the inactivity auto-settle boundary is actually
-  // crossed while the pane stays open; without a clock dependency the
-  // partition memoizes a frozen "now".
-  const [nowMinute, setNowMinute] = useState(() => new Date().toISOString().slice(0, 16));
-  useEffect(() => {
-    if (!threadListV2Enabled) return;
-    // Refresh immediately on enable: the mount-time value can be hours old
-    // by the time the beta is switched on, which would misclassify the
-    // inactivity auto-settle boundary until the first tick.
-    setNowMinute(new Date().toISOString().slice(0, 16));
-    const id = setInterval(() => setNowMinute(new Date().toISOString().slice(0, 16)), 60_000);
-    return () => clearInterval(id);
-  }, [threadListV2Enabled]);
   // Threads on servers without the settlement capability never classify as
   // settled (the user could neither un-settle nor pin them).
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
@@ -412,11 +399,9 @@ function ThreadNavigationSidebarPane(
       changeRequestStateByKey,
       settlementEnvironmentIds,
       settledLimit: settledVisibleCount,
-      now: `${nowMinute}:00.000Z`,
     });
   }, [
     changeRequestStateByKey,
-    nowMinute,
     options.selectedEnvironmentId,
     props.searchQuery,
     settledVisibleCount,

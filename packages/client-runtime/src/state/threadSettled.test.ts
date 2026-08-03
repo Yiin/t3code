@@ -11,7 +11,6 @@ import {
   canSettle,
   effectiveSettled,
   hasQueuedTurnStart,
-  threadLastActivityAt,
   type ChangeRequestStateLike,
 } from "./threadSettled.ts";
 
@@ -70,27 +69,6 @@ function makeShell(input: {
   };
 }
 
-describe("threadLastActivityAt", () => {
-  it("returns the latest real user or turn activity and ignores thread/session updates", () => {
-    const shell = makeShell({ activityAt: null, sessionStatus: "running" });
-    const withActivity: OrchestrationThreadShell = {
-      ...shell,
-      latestUserMessageAt: "2026-04-04T00:00:00.000Z",
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        state: "completed",
-        requestedAt: "2026-04-03T00:00:00.000Z",
-        startedAt: "2026-04-05T00:00:00.000Z",
-        completedAt: "2026-04-06T00:00:00.000Z",
-        assistantMessageId: null,
-      },
-    };
-
-    expect(threadLastActivityAt(withActivity)).toBe("2026-04-06T00:00:00.000Z");
-    expect(threadLastActivityAt(shell)).toBeNull();
-  });
-});
-
 describe("effectiveSettled", () => {
   const overrideCases = [null, "settled", "active"] as const;
   const changeRequestStates = [undefined, "open", "merged"] as const;
@@ -114,14 +92,16 @@ describe("effectiveSettled", () => {
             pending,
             // Settled iff nothing blocks (pending work / live session) AND
             // the override says settled, or (with no override) a merged PR
-            // or staleness auto-settles. The "active" pin suppresses both
-            // auto signals.
+            // auto-settles. The "active" pin suppresses the PR signal.
+            //
+            // `inactivity` is deliberately a free dimension with no effect on
+            // the expectation: idle auto-settle is the server's, and a stale
+            // thread that the server has NOT settled must render as active.
             expected:
               pending === undefined &&
               !running &&
               (settledOverride === "settled" ||
-                (settledOverride === null &&
-                  (changeRequestState === "merged" || inactivity === "stale"))),
+                (settledOverride === null && changeRequestState === "merged")),
           })),
         ),
       ),
@@ -145,7 +125,6 @@ describe("effectiveSettled", () => {
       expect(
         effectiveSettled(shell, {
           now: NOW,
-          autoSettleAfterDays: 3,
           ...changeRequestOptions,
         }),
       ).toBe(expected);
@@ -157,7 +136,6 @@ describe("effectiveSettled", () => {
     expect(
       effectiveSettled(shell, {
         now: NOW,
-        autoSettleAfterDays: null,
         changeRequestState: "closed",
       }),
     ).toBe(true);
@@ -172,7 +150,6 @@ describe("effectiveSettled", () => {
     expect(
       effectiveSettled(shell, {
         now: NOW,
-        autoSettleAfterDays: 3,
         changeRequestState: "merged",
       }),
     ).toBe(false);
@@ -216,21 +193,29 @@ describe("effectiveSettled", () => {
       expect(
         effectiveSettled(shell, {
           now: transitionNow,
-          autoSettleAfterDays: 3,
           changeRequestState: "merged",
         }),
       ).toBe(false);
     }
   });
 
-  it("uses a strict inactivity boundary and honors a null threshold", () => {
-    const boundary = makeShell({
-      activityAt: "2026-04-07T00:00:00.000Z",
-    });
+  it("never settles on inactivity alone, however old the thread is", () => {
+    // Idle auto-settle lives on the server (ThreadAutoSettleSweeper), which
+    // emits a real thread.settled event and stops the provider session. A
+    // client that re-derived the rule would paint rows settled while their
+    // sessions are still alive — exactly the divergence this removal killed.
+    const ancient = makeShell({ activityAt: "2020-01-01T00:00:00.000Z" });
     const stale = makeShell({ activityAt: STALE });
+    const noActivity = makeShell({ activityAt: null });
 
-    expect(effectiveSettled(boundary, { now: NOW, autoSettleAfterDays: 3 })).toBe(false);
-    expect(effectiveSettled(stale, { now: NOW, autoSettleAfterDays: null })).toBe(false);
+    for (const shell of [ancient, stale, noActivity]) {
+      expect(effectiveSettled(shell, { now: NOW })).toBe(false);
+    }
+
+    // ...and the server's ruling on that same thread does settle it.
+    expect(
+      effectiveSettled({ ...ancient, settledOverride: "settled", settledAt: NOW }, { now: NOW }),
+    ).toBe(true);
   });
 });
 
@@ -334,7 +319,6 @@ describe("canSettle", () => {
     expect(
       effectiveSettled(queued, {
         now: justAfter,
-        autoSettleAfterDays: 3,
         changeRequestState: "merged",
       }),
     ).toBe(false);
@@ -344,10 +328,10 @@ describe("canSettle", () => {
 
   it("lets a server-accepted settle overrule the clock-derived queued blocker", () => {
     // The settle action ran with wall-clock `now` (past the grace window);
-    // the list partition re-evaluates with a minute-floored `now` that is
-    // still INSIDE the window. settledAt >= message time proves the server
-    // already adjudicated this exact message, so the row must not snap back
-    // to active until the coarser clock catches up.
+    // the list partition re-evaluates with an earlier `now` that is still
+    // INSIDE the window — a lagging or skewed clock, or an injected one.
+    // settledAt >= message time proves the server already adjudicated this
+    // exact message, so the row must not snap back to active meanwhile.
     const messageAt = "2026-04-09T12:00:00.000Z";
     const flooredNow = "2026-04-09T12:01:00.000Z";
     const base = makeShell({ settledOverride: "settled", activityAt: null });
@@ -357,9 +341,7 @@ describe("canSettle", () => {
       settledAt: "2026-04-09T12:02:10.000Z",
     };
     expect(hasQueuedTurnStart(settledAfterMessage, { now: flooredNow })).toBe(true);
-    expect(effectiveSettled(settledAfterMessage, { now: flooredNow, autoSettleAfterDays: 3 })).toBe(
-      true,
-    );
+    expect(effectiveSettled(settledAfterMessage, { now: flooredNow })).toBe(true);
 
     // A message NEWER than settledAt is genuinely new work: still blocked
     // until the server's auto-unsettle lands.
@@ -371,7 +353,6 @@ describe("canSettle", () => {
     expect(
       effectiveSettled(messageAfterSettle, {
         now: "2026-04-09T12:03:30.000Z",
-        autoSettleAfterDays: 3,
       }),
     ).toBe(false);
   });
@@ -385,6 +366,6 @@ describe("canSettle", () => {
       pending: "user-input",
     });
     expect(canSettle(blocked, { now: NOW })).toBe(false);
-    expect(effectiveSettled(blocked, { now: NOW, autoSettleAfterDays: 3 })).toBe(false);
+    expect(effectiveSettled(blocked, { now: NOW })).toBe(false);
   });
 });

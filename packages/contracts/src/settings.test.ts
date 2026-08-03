@@ -34,21 +34,26 @@ describe("ClientSettings word wrap", () => {
 });
 
 describe("ClientSettings sidebar v2", () => {
-  it("defaults the beta off with a three-day auto-settle threshold", () => {
-    const settings = decodeClientSettings({});
-    expect(settings.sidebarV2Enabled).toBe(false);
-    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
+  it("defaults the beta off", () => {
+    expect(decodeClientSettings({}).sidebarV2Enabled).toBe(false);
   });
 
-  it("allows auto-settle by inactivity to be disabled", () => {
-    expect(
-      decodeClientSettings({ sidebarAutoSettleAfterDays: null }).sidebarAutoSettleAfterDays,
-    ).toBeNull();
-  });
+  it("drops the retired per-device auto-settle key without disturbing the rest", () => {
+    // Auto-settle moved to the server (`threadAutoSettleAfterDays`). Stored
+    // blobs on disk still carry the old key, and decoding one must not reset
+    // every other setting to its default.
+    const decoded = decodeClientSettings({
+      sidebarAutoSettleAfterDays: 7,
+      sidebarV2Enabled: true,
+      wordWrap: false,
+    });
 
-  it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
-    expect(() => decodeClientSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
-    expect(() => decodeClientSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+    expect(decoded).not.toHaveProperty("sidebarAutoSettleAfterDays");
+    expect(decoded.sidebarV2Enabled).toBe(true);
+    expect(decoded.wordWrap).toBe(false);
+    // Even a value the old schema would have rejected must decode cleanly now.
+    expect(() => decodeClientSettings({ sidebarAutoSettleAfterDays: 0 })).not.toThrow();
+    expect(() => decodeClientSettingsPatch({ sidebarAutoSettleAfterDays: 0 })).not.toThrow();
   });
 });
 

@@ -1048,7 +1048,6 @@ export default function SidebarV2() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const autoSettleAfterDays = useClientSettings((s) => s.sidebarAutoSettleAfterDays);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const { settleThread, unsettleThread, deleteThread } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
@@ -1115,17 +1114,6 @@ export default function SidebarV2() {
     [projects],
   );
 
-  // now is quantized to the minute so effectiveSettled memoization doesn't
-  // churn on every render; auto-settle thresholds are day-granular anyway.
-  const [nowMinute, setNowMinute] = useState(() => new Date().toISOString().slice(0, 16));
-  useEffect(() => {
-    const id = window.setInterval(
-      () => setNowMinute(new Date().toISOString().slice(0, 16)),
-      60_000,
-    );
-    return () => window.clearInterval(id);
-  }, []);
-
   // PR states stream in per-row (rows own the VCS subscriptions); a merged or
   // closed PR auto-settles its thread on the next partition.
   const [changeRequestStateByKey, setChangeRequestStateByKey] = useState<
@@ -1179,7 +1167,11 @@ export default function SidebarV2() {
   // archive keeps its original "remove from sidebar" meaning.
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
   const { activeThreads, settledThreads } = useMemo(() => {
-    const now = `${nowMinute}:00.000Z`;
+    // Read live: `now` only feeds effectiveSettled's queued-turn grace window
+    // (2 minutes), and every input that can open or close that window — a new
+    // shell, a new PR state — already retriggers this memo. No ticker: idle
+    // auto-settle is the server's job now and arrives as settledOverride.
+    const now = new Date().toISOString();
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
@@ -1198,10 +1190,7 @@ export default function SidebarV2() {
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSettlement === true;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
       const changeRequestState = changeRequestStateByKey.get(threadKey) ?? null;
-      if (
-        supportsSettlement &&
-        effectiveSettled(thread, { now, autoSettleAfterDays, changeRequestState })
-      ) {
+      if (supportsSettlement && effectiveSettled(thread, { now, changeRequestState })) {
         settled.push(thread);
       } else {
         active.push(thread);
@@ -1215,14 +1204,7 @@ export default function SidebarV2() {
           firstValidTimestampMs(left.latestUserMessageAt, left.updatedAt),
       ),
     };
-  }, [
-    autoSettleAfterDays,
-    changeRequestStateByKey,
-    nowMinute,
-    scopedProject,
-    serverConfigs,
-    threads,
-  ]);
+  }, [changeRequestStateByKey, scopedProject, serverConfigs, threads]);
 
   // The settled tail renders in pages: history shouldn't dominate the
   // sidebar, and the common lookups are recent. Expansion resets when the

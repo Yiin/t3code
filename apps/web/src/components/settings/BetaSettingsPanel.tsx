@@ -1,13 +1,23 @@
+import {
+  DEFAULT_THREAD_AUTO_SETTLE_AFTER_DAYS,
+  MAX_THREAD_AUTO_SETTLE_AFTER_DAYS,
+  MIN_THREAD_AUTO_SETTLE_AFTER_DAYS,
+} from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
-import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
+import {
+  useClientSettings,
+  usePrimarySettings,
+  useUpdateClientSettings,
+  useUpdatePrimarySettings,
+} from "../../hooks/useSettings";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
-const AUTO_SETTLE_MIN_DAYS = 1;
-const AUTO_SETTLE_MAX_DAYS = 90;
-const AUTO_SETTLE_DEFAULT_DAYS = 3;
+const AUTO_SETTLE_MIN_DAYS = MIN_THREAD_AUTO_SETTLE_AFTER_DAYS;
+const AUTO_SETTLE_MAX_DAYS = MAX_THREAD_AUTO_SETTLE_AFTER_DAYS;
+const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_THREAD_AUTO_SETTLE_AFTER_DAYS;
 
 function AutoSettleDaysInput({
   value,
@@ -52,10 +62,15 @@ function AutoSettleDaysInput({
 
 export function BetaSettingsPanel() {
   const sidebarV2Enabled = useClientSettings((settings) => settings.sidebarV2Enabled);
-  const sidebarAutoSettleAfterDays = useClientSettings(
-    (settings) => settings.sidebarAutoSettleAfterDays,
+  const updateClientSettings = useUpdateClientSettings();
+  // Auto-settle is a server setting, not a per-device one: the server sweeps
+  // idle threads, emits a real thread.settled event, and stops the provider
+  // session. So it is NOT gated on the sidebar v2 beta — it governs every
+  // client of this server, including ones that never turn the beta on.
+  const threadAutoSettleAfterDays = usePrimarySettings(
+    (settings) => settings.threadAutoSettleAfterDays,
   );
-  const updateSettings = useUpdateClientSettings();
+  const updateServerSettings = useUpdatePrimarySettings();
 
   return (
     <SettingsPageContainer>
@@ -66,41 +81,41 @@ export function BetaSettingsPanel() {
           control={
             <Switch
               checked={sidebarV2Enabled}
-              onCheckedChange={(checked) => updateSettings({ sidebarV2Enabled: Boolean(checked) })}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ sidebarV2Enabled: Boolean(checked) })
+              }
               aria-label="Enable the sidebar v2 beta"
             />
           }
         />
-        {sidebarV2Enabled ? (
-          <>
-            <SettingsRow
-              title="Auto-settle inactive threads"
-              description="Threads with no activity for this long settle automatically. Threads on merged or closed PRs always settle."
-              control={
-                <Switch
-                  checked={sidebarAutoSettleAfterDays !== null}
-                  onCheckedChange={(checked) =>
-                    updateSettings({
-                      sidebarAutoSettleAfterDays: checked ? AUTO_SETTLE_DEFAULT_DAYS : null,
-                    })
-                  }
-                  aria-label="Auto-settle inactive threads"
-                />
+      </SettingsSection>
+      <SettingsSection title="Thread auto-settle">
+        <SettingsRow
+          title="Auto-settle inactive threads"
+          description="Threads with no activity for this long settle automatically, which also releases the provider session. This is a server setting: it applies to every client connected to this server."
+          control={
+            <Switch
+              checked={threadAutoSettleAfterDays !== null}
+              onCheckedChange={(checked) =>
+                updateServerSettings({
+                  threadAutoSettleAfterDays: checked ? AUTO_SETTLE_DEFAULT_DAYS : null,
+                })
               }
+              aria-label="Auto-settle inactive threads"
             />
-            {sidebarAutoSettleAfterDays !== null ? (
-              <SettingsRow
-                title="Days of inactivity before auto-settle"
-                description="Any new activity un-settles a thread automatically."
-                control={
-                  <AutoSettleDaysInput
-                    value={sidebarAutoSettleAfterDays}
-                    onCommit={(days) => updateSettings({ sidebarAutoSettleAfterDays: days })}
-                  />
-                }
+          }
+        />
+        {threadAutoSettleAfterDays !== null ? (
+          <SettingsRow
+            title="Days of inactivity before auto-settle"
+            description="Any new activity un-settles a thread automatically."
+            control={
+              <AutoSettleDaysInput
+                value={threadAutoSettleAfterDays}
+                onCommit={(days) => updateServerSettings({ threadAutoSettleAfterDays: days })}
               />
-            ) : null}
-          </>
+            }
+          />
         ) : null}
       </SettingsSection>
     </SettingsPageContainer>

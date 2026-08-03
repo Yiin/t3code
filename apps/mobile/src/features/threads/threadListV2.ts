@@ -88,9 +88,9 @@ export interface ThreadListV2Layout {
 
 /**
  * Partitions visible threads into the active card block (creation order) and
- * the settled recency tail, matching the web v2 list. `autoSettleAfterDays`
- * mirrors the web default of 3 — mobile has no client-settings sync yet, so
- * the default is fixed here rather than user-configurable.
+ * the settled recency tail, matching the web v2 list. Idle threads settle
+ * server-side, so nothing here needs an inactivity window: those threads
+ * arrive already carrying `settledOverride: "settled"`.
  */
 export function buildThreadListV2Items(input: {
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
@@ -106,14 +106,12 @@ export function buildThreadListV2Items(input: {
       other environments never classify as settled — the user could neither
       un-settle nor pin them. Absent = no gating (tests). */
   readonly settlementEnvironmentIds?: ReadonlySet<EnvironmentId>;
-  readonly autoSettleAfterDays?: number;
   /** Max settled rows to render; the rest are counted, not built. */
   readonly settledLimit?: number;
   /** Injectable for tests; defaults to now. */
   readonly now?: string;
 }): ThreadListV2Layout {
   const now = input.now ?? new Date().toISOString();
-  const autoSettleAfterDays = input.autoSettleAfterDays ?? 3;
   const query = input.searchQuery.trim().toLocaleLowerCase();
 
   const active: EnvironmentThreadShell[] = [];
@@ -133,10 +131,7 @@ export function buildThreadListV2Items(input: {
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const changeRequestState =
       input.changeRequestStateByKey?.get(`${thread.environmentId}:${thread.id}`) ?? null;
-    if (
-      supportsSettlement &&
-      effectiveSettled(thread, { now, autoSettleAfterDays, changeRequestState })
-    ) {
+    if (supportsSettlement && effectiveSettled(thread, { now, changeRequestState })) {
       settled.push(thread);
     } else {
       active.push(thread);
