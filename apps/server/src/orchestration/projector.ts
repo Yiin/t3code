@@ -4,6 +4,7 @@ import {
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
   THREAD_DETAIL_ACTIVITY_LIMIT,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -179,6 +180,35 @@ function compareThreadActivities(
   }
 
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+const openRequestKinds: ReadonlySet<string> = new Set(THREAD_ACTIVITY_OPEN_REQUEST_KINDS);
+
+/**
+ * Trim a sorted activity list to the same window the thread-detail read and the
+ * clients keep: the newest `THREAD_DETAIL_ACTIVITY_LIMIT` entries, plus every
+ * request/response activity however old.
+ *
+ * The decider derives `hasOpenBlockingRequest` from this list. A plain newest-N
+ * slice drops an unresolved `approval.requested` once that many activities land
+ * after it, so the thread settles while the shell's pending counts still say it
+ * is waiting on you. The resolution and stale-failure kinds are pinned for the
+ * mirror bug — see `THREAD_ACTIVITY_OPEN_REQUEST_KINDS`.
+ *
+ * `activities` must already be sorted by `compareThreadActivities`; filtering
+ * keeps that order.
+ */
+function capThreadActivities(
+  activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
+): ReadonlyArray<OrchestrationThread["activities"][number]> {
+  if (activities.length <= THREAD_DETAIL_ACTIVITY_LIMIT) {
+    return activities;
+  }
+
+  const windowStart = activities.length - THREAD_DETAIL_ACTIVITY_LIMIT;
+  return activities.filter(
+    (activity, index) => index >= windowStart || openRequestKinds.has(activity.kind),
+  );
 }
 
 export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
@@ -708,16 +738,12 @@ export function projectEvent(
             return nextBase;
           }
 
-          const activities = [
-            ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
-            payload.activity,
-          ]
-            .toSorted(compareThreadActivities)
-            // Same window the thread-detail read and the clients keep. Unlike
-            // those two this one does not pin open requests, so a very old
-            // unresolved request can fall out of hasOpenBlockingRequest — see
-            // t3code-l4u.
-            .slice(-THREAD_DETAIL_ACTIVITY_LIMIT);
+          const activities = capThreadActivities(
+            [
+              ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
+              payload.activity,
+            ].toSorted(compareThreadActivities),
+          );
 
           return {
             ...nextBase,
