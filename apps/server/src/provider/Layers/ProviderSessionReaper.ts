@@ -27,6 +27,13 @@ export interface ProviderSessionReaperLiveOptions {
   readonly interactiveIdleThresholdMs?: number;
   readonly epicRunIterationIdleThresholdMs?: number;
   readonly settledIdleThresholdMs?: number;
+  /**
+   * How long the active-turn skip may hold a session before the turn counts as
+   * dead. Deliberately not covered by `inactivityThresholdMs`: the shorthand
+   * means "idle threshold", and folding the cap into it would turn every short
+   * test threshold into an instant kill for in-flight turns.
+   */
+  readonly activeTurnSkipCapMs?: number;
   readonly sweepIntervalMs?: number;
 }
 
@@ -51,6 +58,10 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       settledIdleThresholdMs: thresholdMs(
         options?.settledIdleThresholdMs,
         DEFAULT_SESSION_REAP_THRESHOLDS.settledIdleThresholdMs,
+      ),
+      activeTurnSkipCapMs: Math.max(
+        1,
+        options?.activeTurnSkipCapMs ?? DEFAULT_SESSION_REAP_THRESHOLDS.activeTurnSkipCapMs,
       ),
     };
     const shortestThresholdMs = minSessionReapThresholdMs(thresholds);
@@ -105,6 +116,18 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
             });
           }
           continue;
+        }
+
+        if (decision.reason === "stale_active_turn") {
+          // The turn pointer outlived the cap, so the turn is dead and nothing
+          // upstream cleared it. Worth a warning: the reap is correct, but the
+          // stale pointer it papers over is a bug somewhere else.
+          yield* Effect.logWarning("provider.session.reaper.stale-active-turn", {
+            threadId: binding.threadId,
+            activeTurnId: thread?.session?.activeTurnId,
+            idleDurationMs,
+            activeTurnSkipCapMs: decision.thresholdMs,
+          });
         }
 
         const reaped = yield* providerService.stopSession({ threadId: binding.threadId }).pipe(

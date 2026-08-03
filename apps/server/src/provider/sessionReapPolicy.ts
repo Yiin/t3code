@@ -21,16 +21,31 @@ export const DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
  */
 export const DEFAULT_SETTLED_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
 
+/**
+ * Upper bound on the active-turn skip. The skip is what lets a three-hour
+ * render survive any idle threshold, but a turn that dies with `activeTurnId`
+ * still set would otherwise make its session immortal — and every leaked
+ * session pins a subprocess and a git worktree.
+ *
+ * 24 hours because idle age for an in-flight turn is "time since the turn was
+ * submitted": `binding.lastSeenAt` is refreshed only on session start, session
+ * recovery and sendTurn, never by streaming output. So the cap permits a single
+ * turn a full day of wall-clock work and bounds the leak at a day.
+ */
+export const DEFAULT_ACTIVE_TURN_SKIP_CAP_MS = 24 * 60 * 60 * 1000;
+
 export interface SessionReapThresholds {
   readonly interactiveIdleThresholdMs: number;
   readonly epicRunIterationIdleThresholdMs: number;
   readonly settledIdleThresholdMs: number;
+  readonly activeTurnSkipCapMs: number;
 }
 
 export const DEFAULT_SESSION_REAP_THRESHOLDS: SessionReapThresholds = {
   interactiveIdleThresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
   epicRunIterationIdleThresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
   settledIdleThresholdMs: DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
+  activeTurnSkipCapMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
 };
 
 export type SessionReapThreadKind = "interactive" | "epic-run-iteration";
@@ -40,8 +55,10 @@ export type SessionReapReason =
   | "session_stopped"
   /** Keep: the session has not been idle long enough for its threshold. */
   | "within_idle_threshold"
-  /** Keep: a turn is still attached to the thread. */
+  /** Keep: a turn is still attached to the thread and is inside the skip cap. */
   | "active_turn"
+  /** Reap: a turn is still attached, but it outlived the skip cap, so it is dead. */
+  | "stale_active_turn"
   /** Reap: idle past the interactive backstop. */
   | "interactive_idle_threshold"
   /** Reap: idle past the epic-runner iteration backstop. */
@@ -82,8 +99,8 @@ export const sessionReapThreadKind = (threadId: string): SessionReapThreadKind =
 
 /**
  * The smallest idle age that can reap anything. A caller can skip the thread
- * shell read below this, because the chosen threshold is always one of the
- * three and so can never be smaller.
+ * shell read below this, because every value a decision compares the idle age
+ * against is one of these four and so can never be smaller.
  */
 export const minSessionReapThresholdMs = (
   thresholds: SessionReapThresholds = DEFAULT_SESSION_REAP_THRESHOLDS,
@@ -92,6 +109,7 @@ export const minSessionReapThresholdMs = (
     thresholds.interactiveIdleThresholdMs,
     thresholds.epicRunIterationIdleThresholdMs,
     thresholds.settledIdleThresholdMs,
+    thresholds.activeTurnSkipCapMs,
   );
 
 /**
@@ -130,12 +148,17 @@ export const decideSessionReap = (input: SessionReapInput): SessionReapDecision 
     return { reap: false, reason: "session_stopped", threadKind, thresholdMs };
   }
 
-  if (input.idleDurationMs < thresholdMs) {
-    return { reap: false, reason: "within_idle_threshold", threadKind, thresholdMs };
+  // Before the idle compare, because the cap can be shorter than the kind's
+  // threshold — a 25-hour-old turn on a 36-hour interactive thread is stale.
+  if (input.activeTurnId !== null) {
+    const capMs = thresholds.activeTurnSkipCapMs;
+    return input.idleDurationMs < capMs
+      ? { reap: false, reason: "active_turn", threadKind, thresholdMs: capMs }
+      : { reap: true, reason: "stale_active_turn", threadKind, thresholdMs: capMs };
   }
 
-  if (input.activeTurnId !== null) {
-    return { reap: false, reason: "active_turn", threadKind, thresholdMs };
+  if (input.idleDurationMs < thresholdMs) {
+    return { reap: false, reason: "within_idle_threshold", threadKind, thresholdMs };
   }
 
   return { reap: true, reason, threadKind, thresholdMs };

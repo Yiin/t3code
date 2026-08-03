@@ -2,6 +2,7 @@ import { epicRunIterationThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
   DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
   DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
   DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
@@ -17,6 +18,13 @@ const ITERATION_THREAD_ID = epicRunIterationThreadId({
   runId: "0f1c9a4e-6b21-4a2c-9f31-7d0c5b8e2a10",
   iterationIndex: 3,
 });
+
+const INJECTED_THRESHOLDS = {
+  interactiveIdleThresholdMs: 10_000,
+  epicRunIterationIdleThresholdMs: 1_000,
+  settledIdleThresholdMs: 500,
+  activeTurnSkipCapMs: 2_000,
+} as const;
 
 const decide = (overrides: Partial<SessionReapInput>): SessionReapDecision =>
   decideSessionReap({
@@ -155,39 +163,135 @@ describe("decideSessionReap", () => {
       thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
     },
     {
-      name: "keeps a stale session that still has an active turn",
+      name: "keeps a session running a three-hour render inside one turn",
       input: {
         activeTurnId: "turn-still-running",
-        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+        idleDurationMs: 3 * 60 * 60 * 1000,
       },
       reap: false,
       reason: "active_turn",
       threadKind: "interactive",
-      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
     },
     {
-      name: "keeps a stale settled session that still has an active turn",
+      name: "keeps a session whose turn is just under the 24-hour skip cap",
+      input: {
+        activeTurnId: "turn-still-running",
+        idleDurationMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS - 1,
+      },
+      reap: false,
+      reason: "active_turn",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "reaps a session whose turn outlived the 24-hour skip cap",
+      input: {
+        activeTurnId: "turn-that-died",
+        idleDurationMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+      },
+      reap: true,
+      reason: "stale_active_turn",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "reaps an immortal session that is idle far past every threshold",
+      input: {
+        activeTurnId: "turn-that-died",
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+      },
+      reap: true,
+      reason: "stale_active_turn",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "keeps a settled session whose turn is inside the skip cap",
       input: {
         settledOverride: "settled",
         activeTurnId: "turn-still-running",
-        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+        idleDurationMs: 3 * 60 * 60 * 1000,
       },
       reap: false,
       reason: "active_turn",
       threadKind: "interactive",
-      thresholdMs: DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
     },
     {
-      name: "keeps a stale iteration session that still has an active turn",
+      name: "reaps a settled session whose turn outlived the skip cap",
+      input: {
+        settledOverride: "settled",
+        activeTurnId: "turn-that-died",
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+      },
+      reap: true,
+      reason: "stale_active_turn",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "keeps an iteration session whose turn is inside the skip cap",
       input: {
         threadId: ITERATION_THREAD_ID,
         activeTurnId: "turn-still-running",
-        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+        idleDurationMs: 3 * 60 * 60 * 1000,
       },
       reap: false,
       reason: "active_turn",
       threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "reaps an iteration session whose turn outlived the skip cap",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        activeTurnId: "turn-that-died",
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+      },
+      reap: true,
+      reason: "stale_active_turn",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "keeps a turnless interactive session at the same three-hour age",
+      input: { idleDurationMs: 3 * 60 * 60 * 1000 },
+      reap: false,
+      reason: "within_idle_threshold",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "keeps a turnless interactive session at the same 24-hour age",
+      input: { idleDurationMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS },
+      reap: false,
+      reason: "within_idle_threshold",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "reaps a turnless iteration session at the same 24-hour age",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+      },
+      reap: true,
+      reason: "epic_run_iteration_idle_threshold",
+      threadKind: "epic-run-iteration",
       thresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "keeps a stopped binding even when its turn pointer is stale",
+      input: {
+        status: "stopped",
+        activeTurnId: "turn-that-died",
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+      },
+      reap: false,
+      reason: "session_stopped",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
     },
     {
       name: "keeps a session whose last-seen timestamp is in the future",
@@ -213,11 +317,7 @@ describe("decideSessionReap", () => {
   it("honours injected thresholds instead of the defaults", () => {
     expect(
       decide({
-        thresholds: {
-          interactiveIdleThresholdMs: 10_000,
-          epicRunIterationIdleThresholdMs: 1_000,
-          settledIdleThresholdMs: 500,
-        },
+        thresholds: INJECTED_THRESHOLDS,
         idleDurationMs: 5_000,
       }),
     ).toEqual({
@@ -230,11 +330,7 @@ describe("decideSessionReap", () => {
     expect(
       decide({
         threadId: ITERATION_THREAD_ID,
-        thresholds: {
-          interactiveIdleThresholdMs: 10_000,
-          epicRunIterationIdleThresholdMs: 1_000,
-          settledIdleThresholdMs: 500,
-        },
+        thresholds: INJECTED_THRESHOLDS,
         idleDurationMs: 5_000,
       }),
     ).toEqual({
@@ -244,33 +340,81 @@ describe("decideSessionReap", () => {
       thresholdMs: 1_000,
     });
   });
+
+  it("honours an injected active-turn skip cap so tests do not wait a day", () => {
+    expect(
+      decide({
+        thresholds: INJECTED_THRESHOLDS,
+        activeTurnId: "turn-still-running",
+        idleDurationMs: 1_999,
+      }),
+    ).toEqual({
+      reap: false,
+      reason: "active_turn",
+      threadKind: "interactive",
+      thresholdMs: 2_000,
+    });
+
+    expect(
+      decide({
+        thresholds: INJECTED_THRESHOLDS,
+        activeTurnId: "turn-that-died",
+        idleDurationMs: 2_000,
+      }),
+    ).toEqual({
+      reap: true,
+      reason: "stale_active_turn",
+      threadKind: "interactive",
+      thresholdMs: 2_000,
+    });
+  });
+
+  it("caps the skip below the interactive backstop, not above it", () => {
+    // The cap is shorter than the 36-hour interactive threshold, so the active
+    // turn must be judged before the idle compare or it never fires.
+    const decision = decide({
+      activeTurnId: "turn-that-died",
+      idleDurationMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS + 1,
+    });
+
+    expect(DEFAULT_ACTIVE_TURN_SKIP_CAP_MS).toBeLessThan(DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS);
+    expect(decision.reap).toBe(true);
+  });
 });
 
 describe("minSessionReapThresholdMs", () => {
-  it("is the shortest of the three thresholds", () => {
+  it("is the shortest of the four thresholds", () => {
     expect(minSessionReapThresholdMs()).toBe(DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS);
+    expect(minSessionReapThresholdMs(INJECTED_THRESHOLDS)).toBe(500);
+  });
+
+  it("counts the active-turn skip cap when the cap is the shortest", () => {
     expect(
       minSessionReapThresholdMs({
         interactiveIdleThresholdMs: 10_000,
         epicRunIterationIdleThresholdMs: 1_000,
         settledIdleThresholdMs: 500,
+        activeTurnSkipCapMs: 100,
       }),
-    ).toBe(500);
+    ).toBe(100);
   });
 
   it("never exceeds the threshold any single decision can use", () => {
-    const thresholds = {
-      interactiveIdleThresholdMs: 10_000,
-      epicRunIterationIdleThresholdMs: 1_000,
-      settledIdleThresholdMs: 500,
-    } as const;
-    const minimum = minSessionReapThresholdMs(thresholds);
+    const minimum = minSessionReapThresholdMs(INJECTED_THRESHOLDS);
 
     for (const threadId of [INTERACTIVE_THREAD_ID, ITERATION_THREAD_ID]) {
       for (const settledOverride of ["settled", "active", null] as const) {
-        expect(
-          decide({ threadId, settledOverride, thresholds, idleDurationMs: minimum - 1 }).reap,
-        ).toBe(false);
+        for (const activeTurnId of ["turn-still-running", null]) {
+          expect(
+            decide({
+              threadId,
+              settledOverride,
+              activeTurnId,
+              thresholds: INJECTED_THRESHOLDS,
+              idleDurationMs: minimum - 1,
+            }).reap,
+          ).toBe(false);
+        }
       }
     }
   });
