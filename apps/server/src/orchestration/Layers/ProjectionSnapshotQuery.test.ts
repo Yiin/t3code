@@ -1,4 +1,5 @@
 import {
+  applySubagentActivity,
   CheckpointRef,
   EventId,
   MessageId,
@@ -7,6 +8,8 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  type OrchestrationThreadActivity,
+  type OrchestrationThreadSubagent,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -36,6 +39,7 @@ const seedActivityCapFixture = Effect.gen(function* () {
   yield* sql`DELETE FROM projection_projects`;
   yield* sql`DELETE FROM projection_threads`;
   yield* sql`DELETE FROM projection_thread_activities`;
+  yield* sql`DELETE FROM projection_thread_subagents`;
   yield* sql`DELETE FROM projection_state`;
 
   yield* sql`
@@ -444,6 +448,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       yield* sql`DELETE FROM projection_projects`;
       yield* sql`DELETE FROM projection_state`;
       yield* sql`DELETE FROM projection_thread_proposed_plans`;
+      yield* sql`DELETE FROM projection_thread_subagents`;
       yield* sql`DELETE FROM projection_turns`;
 
       yield* sql`
@@ -605,6 +610,55 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       `;
 
       yield* sql`
+        INSERT INTO projection_thread_subagents (
+          subagent_id,
+          thread_id,
+          turn_id,
+          agent_type,
+          description,
+          status,
+          last_progress_summary,
+          last_tool_name,
+          usage_json,
+          spawned_by_item_id,
+          started_at,
+          updated_at,
+          completed_at
+        )
+        VALUES
+          (
+            'task-2',
+            'thread-1',
+            'turn-1',
+            NULL,
+            NULL,
+            'completed',
+            'Done',
+            NULL,
+            '{"totalTokens":42}',
+            NULL,
+            '2026-02-24T00:00:04.500Z',
+            '2026-02-24T00:00:05.500Z',
+            '2026-02-24T00:00:05.500Z'
+          ),
+          (
+            'task-1',
+            'thread-1',
+            'turn-1',
+            'Explore',
+            'Scan the repo',
+            'running',
+            'Reading files',
+            'Read',
+            NULL,
+            'toolu-1',
+            '2026-02-24T00:00:05.000Z',
+            '2026-02-24T00:00:06.000Z',
+            NULL
+          )
+      `;
+
+      yield* sql`
         INSERT INTO projection_turns (
           thread_id,
           turn_id,
@@ -743,7 +797,31 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               updatedAt: "2026-02-24T00:00:05.500Z",
             },
           ],
-          subagents: [],
+          subagents: [
+            {
+              subagentId: "task-2",
+              turnId: asTurnId("turn-1"),
+              status: "completed",
+              lastProgressSummary: "Done",
+              usage: { totalTokens: 42 },
+              startedAt: "2026-02-24T00:00:04.500Z",
+              updatedAt: "2026-02-24T00:00:05.500Z",
+              completedAt: "2026-02-24T00:00:05.500Z",
+            },
+            {
+              subagentId: "task-1",
+              turnId: asTurnId("turn-1"),
+              agentType: "Explore",
+              description: "Scan the repo",
+              status: "running",
+              lastProgressSummary: "Reading files",
+              lastToolName: "Read",
+              spawnedByItemId: "toolu-1",
+              startedAt: "2026-02-24T00:00:05.000Z",
+              updatedAt: "2026-02-24T00:00:06.000Z",
+              completedAt: null,
+            },
+          ],
           activities: [
             {
               id: asEventId("activity-1"),
@@ -846,7 +924,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasPendingApprovals: true,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
-          activeSubagentCount: 0,
+          activeSubagentCount: 1,
         },
       ]);
 
@@ -855,6 +933,181 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       if (threadDetail._tag === "Some") {
         assert.deepEqual(threadDetail.value, snapshot.threads[0]);
       }
+
+      // The live shell-row refetch (ws.ts) must agree with the bulk shell
+      // snapshot on the running count.
+      const threadShell = yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-1"));
+      assert.equal(threadShell._tag, "Some");
+      if (threadShell._tag === "Some") {
+        assert.equal(threadShell.value.activeSubagentCount, 1);
+      }
+    }),
+  );
+
+  // The acceptance contract for thread.subagents: a client that connects
+  // mid-run hydrates from the snapshot, a client connected the whole time
+  // folded every task.* activity itself, and both must hold the same rows.
+  // The SQL projector persists via the same shared fold (covered by the
+  // projection pipeline tests), so what this pins down is the snapshot read
+  // path: rows come back exactly as folded, and replaying the snapshot's own
+  // activities — or fresh live ones — over them cannot make the views drift.
+  it.effect("thread detail subagents converge with a live fold over the same activities", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      yield* setProjectionStateSequence(103);
+
+      const startedActivity: OrchestrationThreadActivity = {
+        id: asEventId("activity-task-started"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Subagent started",
+        payload: {
+          taskId: "task-1",
+          detail: "Scan the repo",
+          subagentType: "Explore",
+          toolUseId: "toolu-1",
+        },
+        turnId: asTurnId("turn-1"),
+        sequence: 101,
+        createdAt: "2026-04-01T00:00:10.000Z",
+      };
+      const progressActivity: OrchestrationThreadActivity = {
+        id: asEventId("activity-task-progress"),
+        tone: "info",
+        kind: "task.progress",
+        summary: "Subagent progress",
+        payload: {
+          taskId: "task-1",
+          summary: "Reading files",
+          lastToolName: "Read",
+        },
+        turnId: asTurnId("turn-1"),
+        sequence: 102,
+        createdAt: "2026-04-01T00:00:11.000Z",
+      };
+      const snapshotActivities = [startedActivity, progressActivity];
+
+      for (const activity of snapshotActivities) {
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            sequence,
+            created_at
+          )
+          VALUES (
+            ${activity.id},
+            'thread-1',
+            ${activity.turnId},
+            ${activity.tone},
+            ${activity.kind},
+            ${activity.summary},
+            ${
+              // @effect-diagnostics-next-line preferSchemaOverJson:off
+              JSON.stringify(activity.payload)
+            },
+            ${activity.sequence ?? null},
+            ${activity.createdAt}
+          )
+        `;
+      }
+
+      // What the SQL projector would have persisted: the same shared fold,
+      // one row per subagent.
+      const foldedRows = snapshotActivities.reduce<ReadonlyArray<OrchestrationThreadSubagent>>(
+        applySubagentActivity,
+        [],
+      );
+      for (const row of foldedRows) {
+        yield* sql`
+          INSERT INTO projection_thread_subagents (
+            subagent_id,
+            thread_id,
+            turn_id,
+            agent_type,
+            description,
+            status,
+            last_progress_summary,
+            last_tool_name,
+            usage_json,
+            spawned_by_item_id,
+            started_at,
+            updated_at,
+            completed_at
+          )
+          VALUES (
+            ${row.subagentId},
+            'thread-1',
+            ${row.turnId},
+            ${row.agentType ?? null},
+            ${row.description ?? null},
+            ${row.status},
+            ${row.lastProgressSummary ?? null},
+            ${row.lastToolName ?? null},
+            ${
+              // @effect-diagnostics-next-line preferSchemaOverJson:off
+              row.usage !== undefined ? JSON.stringify(row.usage) : null
+            },
+            ${row.spawnedByItemId ?? null},
+            ${row.startedAt},
+            ${row.updatedAt},
+            ${row.completedAt}
+          )
+        `;
+      }
+
+      const snapshot = yield* snapshotQuery.getThreadDetailSnapshot(ThreadId.make("thread-1"));
+      assert.equal(snapshot._tag, "Some");
+      if (snapshot._tag !== "Some") {
+        return;
+      }
+
+      // Mid-run client: the snapshot carries the folded rows verbatim.
+      assert.deepEqual(snapshot.value.thread.subagents, foldedRows);
+
+      // Reconnect replay: re-applying the snapshot's own activities over the
+      // snapshot rows is a no-op, so an overlap between snapshot and event
+      // resume cannot corrupt the rows.
+      const replayed = snapshot.value.thread.activities.reduce(
+        applySubagentActivity,
+        snapshot.value.thread.subagents,
+      );
+      assert.deepEqual(replayed, foldedRows);
+
+      // Live tail: folding a fresh task.completed over the snapshot rows
+      // lands on the same state as a client that folded every activity from
+      // the start.
+      const completedActivity: OrchestrationThreadActivity = {
+        id: asEventId("activity-task-completed"),
+        tone: "info",
+        kind: "task.completed",
+        summary: "Subagent completed",
+        payload: {
+          taskId: "task-1",
+          status: "completed",
+          summary: "Found 3 call sites",
+        },
+        turnId: asTurnId("turn-1"),
+        sequence: 103,
+        createdAt: "2026-04-01T00:00:12.000Z",
+      };
+      const snapshotThenLive = applySubagentActivity(
+        snapshot.value.thread.subagents,
+        completedActivity,
+      );
+      const foldedFromStart = [...snapshotActivities, completedActivity].reduce<
+        ReadonlyArray<OrchestrationThreadSubagent>
+      >(applySubagentActivity, []);
+      assert.deepEqual(snapshotThenLive, foldedFromStart);
+      assert.equal(snapshotThenLive[0]?.status, "completed");
     }),
   );
 
@@ -2042,6 +2295,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         "ProjectionSnapshotQuery.getThreadDetailById:listMessages": 2,
         "ProjectionSnapshotQuery.getThreadDetailById:listActivities": 3,
         "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints": 1,
+        "ProjectionSnapshotQuery.getThreadDetailById:listSubagents": 0,
       };
 
       const transactionSpan = spanNamed("sql.transaction");

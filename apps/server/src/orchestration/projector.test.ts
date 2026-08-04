@@ -6,6 +6,7 @@ import {
   ThreadId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
+import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -94,6 +95,7 @@ describe("orchestration projector", () => {
         deletedAt: null,
         messages: [],
         proposedPlans: [],
+        subagents: [],
         activities: [],
         checkpoints: [],
         session: null,
@@ -712,6 +714,175 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1]);
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
   });
+
+  effectIt.effect("folds task.* activities into thread.subagents and clears them on revert", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-02-23T11:00:00.000Z";
+      const model = createEmptyReadModel(createdAt);
+
+      const afterCreate = yield* projectEvent(
+        model,
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5.3-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      );
+
+      const taskEvents: ReadonlyArray<OrchestrationEvent> = [
+        makeEvent({
+          sequence: 2,
+          type: "thread.activity-appended",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T11:00:01.000Z",
+          commandId: null,
+          payload: {
+            threadId: "thread-1",
+            activity: {
+              id: "activity-task-started",
+              tone: "info",
+              kind: "task.started",
+              summary: "Subagent started",
+              payload: {
+                taskId: "task-1",
+                detail: "Scan the repo",
+                subagentType: "Explore",
+                toolUseId: "toolu-1",
+              },
+              turnId: "turn-1",
+              createdAt: "2026-02-23T11:00:01.000Z",
+            },
+          },
+        }),
+        makeEvent({
+          sequence: 3,
+          type: "thread.activity-appended",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T11:00:02.000Z",
+          commandId: null,
+          payload: {
+            threadId: "thread-1",
+            activity: {
+              id: "activity-task-progress",
+              tone: "info",
+              kind: "task.progress",
+              summary: "Subagent progress",
+              payload: {
+                taskId: "task-1",
+                summary: "Reading files",
+                lastToolName: "Read",
+              },
+              turnId: "turn-1",
+              createdAt: "2026-02-23T11:00:02.000Z",
+            },
+          },
+        }),
+      ];
+
+      let afterProgress = afterCreate;
+      for (const event of taskEvents) {
+        afterProgress = yield* projectEvent(afterProgress, event);
+      }
+
+      expect(afterProgress.threads[0]?.subagents).toEqual([
+        {
+          subagentId: "task-1",
+          turnId: "turn-1",
+          agentType: "Explore",
+          description: "Scan the repo",
+          status: "running",
+          lastProgressSummary: "Reading files",
+          lastToolName: "Read",
+          spawnedByItemId: "toolu-1",
+          startedAt: "2026-02-23T11:00:01.000Z",
+          updatedAt: "2026-02-23T11:00:02.000Z",
+          completedAt: null,
+        },
+      ]);
+
+      const afterCompleted = yield* projectEvent(
+        afterProgress,
+        makeEvent({
+          sequence: 4,
+          type: "thread.activity-appended",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T11:00:03.000Z",
+          commandId: null,
+          payload: {
+            threadId: "thread-1",
+            activity: {
+              id: "activity-task-completed",
+              tone: "info",
+              kind: "task.completed",
+              summary: "Subagent completed",
+              payload: {
+                taskId: "task-1",
+                status: "completed",
+                summary: "Found 3 call sites",
+              },
+              turnId: "turn-1",
+              createdAt: "2026-02-23T11:00:03.000Z",
+            },
+          },
+        }),
+      );
+
+      expect(afterCompleted.threads[0]?.subagents).toEqual([
+        {
+          subagentId: "task-1",
+          turnId: "turn-1",
+          agentType: "Explore",
+          description: "Scan the repo",
+          status: "completed",
+          lastProgressSummary: "Found 3 call sites",
+          lastToolName: "Read",
+          spawnedByItemId: "toolu-1",
+          startedAt: "2026-02-23T11:00:01.000Z",
+          updatedAt: "2026-02-23T11:00:03.000Z",
+          completedAt: "2026-02-23T11:00:03.000Z",
+        },
+      ]);
+
+      const afterRevert = yield* projectEvent(
+        afterCompleted,
+        makeEvent({
+          sequence: 5,
+          type: "thread.reverted",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T11:00:04.000Z",
+          commandId: "cmd-revert",
+          payload: {
+            threadId: "thread-1",
+            turnCount: 0,
+          },
+        }),
+      );
+
+      // Mirrors the SQL projector: revert deletes every subagent row.
+      expect(afterRevert.threads[0]?.subagents).toEqual([]);
+    }),
+  );
 
   it("does not fallback-retain messages tied to removed turn IDs", async () => {
     const createdAt = "2026-02-26T12:00:00.000Z";

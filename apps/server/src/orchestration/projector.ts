@@ -1,5 +1,6 @@
 import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
 import {
+  applySubagentActivity,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
@@ -718,6 +719,9 @@ export function projectEvent(
               messages,
               proposedPlans,
               activities,
+              // Mirrors the SQL projector, which deletes every subagent row on
+              // thread.reverted rather than trimming by retained turn.
+              subagents: [],
               latestTurn,
               updatedAt: event.occurredAt,
             }),
@@ -744,11 +748,16 @@ export function projectEvent(
               payload.activity,
             ].toSorted(compareThreadActivities),
           );
+          // The same shared fold the SQL projector and the client reducer run,
+          // so `thread.subagents` survives the activity cap above: a `task.*`
+          // activity can fall out of the window while its folded row stays.
+          const subagents = applySubagentActivity(thread.subagents, payload.activity);
 
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
+              ...(subagents !== thread.subagents ? { subagents } : {}),
               updatedAt: event.occurredAt,
             }),
           };

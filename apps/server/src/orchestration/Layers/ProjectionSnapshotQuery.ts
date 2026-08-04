@@ -14,6 +14,7 @@ import {
   ProjectScript,
   THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
   THREAD_DETAIL_ACTIVITY_LIMIT,
+  TrimmedNonEmptyString,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -24,6 +25,7 @@ import {
   type OrchestrationSession,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  type OrchestrationThreadSubagent,
   ModelSelection,
   ProjectId,
   ThreadId,
@@ -51,6 +53,7 @@ import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionT
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
+import { ProjectionThreadSubagent } from "../../persistence/Services/ProjectionThreadSubagents.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
@@ -91,6 +94,18 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   }),
 );
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
+// Same NullOr mapping the repository layer uses: nullable TEXT columns come
+// back as SQL NULL, which the mapper below folds into absent optional fields.
+const ProjectionThreadSubagentDbRowSchema = ProjectionThreadSubagent.mapFields(
+  Struct.assign({
+    agentType: Schema.NullOr(TrimmedNonEmptyString),
+    description: Schema.NullOr(TrimmedNonEmptyString),
+    lastProgressSummary: Schema.NullOr(TrimmedNonEmptyString),
+    lastToolName: Schema.NullOr(TrimmedNonEmptyString),
+    usage: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
+    spawnedByItemId: Schema.NullOr(TrimmedNonEmptyString),
+  }),
+);
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
     files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
@@ -114,6 +129,13 @@ const ProjectionCountsRowSchema = Schema.Struct({
 });
 const ProjectionThreadActivityCountRowSchema = Schema.Struct({
   activityCount: Schema.Number,
+});
+const ProjectionRunningSubagentCountRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  activeSubagentCount: Schema.Number,
+});
+const ProjectionThreadRunningSubagentCountRowSchema = Schema.Struct({
+  activeSubagentCount: Schema.Number,
 });
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
@@ -241,6 +263,29 @@ function mapSessionRow(
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
     updatedAt: row.updatedAt,
+  };
+}
+
+// Same shape the projection pipeline's `toThreadSubagentReadModel` produces:
+// the persistence-only `threadId` stays off the read model, and SQL NULLs
+// become absent optional fields so the row matches what the shared
+// `applySubagentActivity` fold would have built.
+function mapThreadSubagentRow(
+  row: Schema.Schema.Type<typeof ProjectionThreadSubagentDbRowSchema>,
+): OrchestrationThreadSubagent {
+  return {
+    subagentId: row.subagentId,
+    turnId: row.turnId,
+    ...(row.agentType !== null ? { agentType: row.agentType } : {}),
+    ...(row.description !== null ? { description: row.description } : {}),
+    status: row.status,
+    ...(row.lastProgressSummary !== null ? { lastProgressSummary: row.lastProgressSummary } : {}),
+    ...(row.lastToolName !== null ? { lastToolName: row.lastToolName } : {}),
+    ...(row.usage !== null ? { usage: row.usage } : {}),
+    ...(row.spawnedByItemId !== null ? { spawnedByItemId: row.spawnedByItemId } : {}),
+    startedAt: row.startedAt,
+    updatedAt: row.updatedAt,
+    completedAt: row.completedAt,
   };
 }
 
@@ -380,11 +425,13 @@ const THREAD_DETAIL_LIST_MESSAGES = "ProjectionSnapshotQuery.getThreadDetailById
 const THREAD_DETAIL_LIST_ACTIVITIES = "ProjectionSnapshotQuery.getThreadDetailById:listActivities";
 const THREAD_DETAIL_LIST_CHECKPOINTS =
   "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints";
+const THREAD_DETAIL_LIST_SUBAGENTS = "ProjectionSnapshotQuery.getThreadDetailById:listSubagents";
 
 const decodeThreadRow = Schema.decodeUnknownEffect(ProjectionThreadDbRowSchema);
 const decodeThreadMessageRows = tracedDecodeRows(ProjectionThreadMessageDbRowSchema);
 const decodeThreadActivityRows = tracedDecodeRows(ProjectionThreadActivityDbRowSchema);
 const decodeCheckpointRows = tracedDecodeRows(ProjectionCheckpointDbRowSchema);
+const decodeThreadSubagentRows = tracedDecodeRows(ProjectionThreadSubagentDbRowSchema);
 
 /**
  * Operation names for the bulk-snapshot reads: one name per read, not one per
@@ -743,6 +790,83 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE threads.deleted_at IS NULL
           AND threads.archived_at IS NOT NULL
         ORDER BY sessions.thread_id ASC
+      `,
+  });
+
+  const listThreadSubagentRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadSubagentDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          subagent_id AS "subagentId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          agent_type AS "agentType",
+          description,
+          status,
+          last_progress_summary AS "lastProgressSummary",
+          last_tool_name AS "lastToolName",
+          usage_json AS "usage",
+          spawned_by_item_id AS "spawnedByItemId",
+          started_at AS "startedAt",
+          updated_at AS "updatedAt",
+          completed_at AS "completedAt"
+        FROM projection_thread_subagents
+        ORDER BY thread_id ASC, started_at ASC, subagent_id ASC
+      `,
+  });
+
+  const listThreadSubagentRawRowsByThread = tracedFindAllRaw({
+    Request: ThreadIdLookupInput,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          subagent_id AS "subagentId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          agent_type AS "agentType",
+          description,
+          status,
+          last_progress_summary AS "lastProgressSummary",
+          last_tool_name AS "lastToolName",
+          usage_json AS "usage",
+          spawned_by_item_id AS "spawnedByItemId",
+          started_at AS "startedAt",
+          updated_at AS "updatedAt",
+          completed_at AS "completedAt"
+        FROM projection_thread_subagents
+        WHERE thread_id = ${threadId}
+        ORDER BY started_at ASC, subagent_id ASC
+      `,
+  });
+
+  // One row per thread that still has a running subagent, so the decode cost
+  // inside the shell transactions is bounded by concurrent subagent use, not
+  // by workspace size. Rides idx_projection_thread_subagents_thread_status.
+  const listRunningSubagentCountRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionRunningSubagentCountRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          COUNT(*) AS "activeSubagentCount"
+        FROM projection_thread_subagents
+        WHERE status = 'running'
+        GROUP BY thread_id
+      `,
+  });
+
+  const countRunningSubagentRowsByThread = SqlSchema.findOne({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadRunningSubagentCountRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT COUNT(*) AS "activeSubagentCount"
+        FROM projection_thread_subagents
+        WHERE thread_id = ${threadId}
+          AND status = 'running'
       `,
   });
 
@@ -1291,6 +1415,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             undefined,
             "ProjectionSnapshotQuery.getSnapshot:listThreadActivities",
           ),
+          listThreadSubagentRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getSnapshot:listThreadSubagents:query",
+                "ProjectionSnapshotQuery.getSnapshot:listThreadSubagents:decodeRows",
+              ),
+            ),
+          ),
           listThreadSessionRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -1333,6 +1465,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             messageRows,
             proposedPlanRows,
             activityRows,
+            subagentRows,
             sessionRows,
             checkpointRows,
             latestTurnRows,
@@ -1342,6 +1475,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               const messagesByThread = new Map<string, Array<OrchestrationMessage>>();
               const proposedPlansByThread = new Map<string, Array<OrchestrationProposedPlan>>();
               const activitiesByThread = new Map<string, Array<OrchestrationThreadActivity>>();
+              const subagentsByThread = new Map<string, Array<OrchestrationThreadSubagent>>();
               const checkpointsByThread = new Map<string, Array<OrchestrationCheckpointSummary>>();
               const sessionsByThread = new Map<string, OrchestrationSession>();
               const latestTurnByThread = new Map<string, OrchestrationLatestTurn>();
@@ -1404,6 +1538,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   createdAt: row.createdAt,
                 });
                 activitiesByThread.set(row.threadId, threadActivities);
+              }
+
+              for (const row of subagentRows) {
+                updatedAt = maxIso(updatedAt, row.updatedAt);
+                const threadSubagents = subagentsByThread.get(row.threadId) ?? [];
+                threadSubagents.push(mapThreadSubagentRow(row));
+                subagentsByThread.set(row.threadId, threadSubagents);
               }
 
               for (const row of checkpointRows) {
@@ -1508,9 +1649,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
-                // Populated once the projection_thread_subagents table lands
-                // (t3code-09a.7); until then threads decode with the default.
-                subagents: [],
+                subagents: subagentsByThread.get(row.threadId) ?? [],
                 activities: activitiesByThread.get(row.threadId) ?? [],
                 checkpoints: checkpointsByThread.get(row.threadId) ?? [],
                 session: sessionsByThread.get(row.threadId) ?? null,
@@ -1703,6 +1842,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
+                  // Deliberately empty, like messages and activities: the
+                  // decider never reads subagents, and every command dispatch
+                  // waits on this read.
                   subagents: [],
                   activities: [],
                   checkpoints: [],
@@ -1735,6 +1877,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           listActiveThreadRawRows(undefined, SHELL_SNAPSHOT_READS.threads),
           listActiveThreadSessionRawRows(undefined, SHELL_SNAPSHOT_READS.sessions),
           listActiveLatestTurnRawRows(undefined, SHELL_SNAPSHOT_READS.latestTurns),
+          listRunningSubagentCountRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getShellSnapshot:listRunningSubagentCounts:query",
+                "ProjectionSnapshotQuery.getShellSnapshot:listRunningSubagentCounts:decodeRows",
+              ),
+            ),
+          ),
           listProjectionStateRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -1747,7 +1897,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       )
       .pipe(
         Effect.flatMap(
-          ([projectRawRows, threadRawRows, sessionRawRows, latestTurnRawRows, stateRows]) =>
+          ([
+            projectRawRows,
+            threadRawRows,
+            sessionRawRows,
+            latestTurnRawRows,
+            subagentCountRows,
+            stateRows,
+          ]) =>
             Effect.gen(function* () {
               const [projectRows, threadRows, sessionRows, latestTurnRows] = yield* Effect.all([
                 decodeProjectRows(projectRawRows, SHELL_SNAPSHOT_READS.projects),
@@ -1787,6 +1944,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               const sessionByThread = new Map(
                 sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
               );
+              const activeSubagentCountByThread = new Map(
+                subagentCountRows.map((row) => [row.threadId, row.activeSubagentCount] as const),
+              );
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -1819,8 +1979,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                         hasPendingApprovals: row.pendingApprovalCount > 0,
                         hasPendingUserInput: row.pendingUserInputCount > 0,
                         hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
-                        // Wired to a real projection count in t3code-09a.7.
-                        activeSubagentCount: 0,
+                        activeSubagentCount: activeSubagentCountByThread.get(row.threadId) ?? 0,
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
                 ),
@@ -1853,6 +2012,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           listArchivedThreadRawRows(undefined, ARCHIVED_SHELL_SNAPSHOT_READS.threads),
           listArchivedThreadSessionRawRows(undefined, ARCHIVED_SHELL_SNAPSHOT_READS.sessions),
           listArchivedLatestTurnRawRows(undefined, ARCHIVED_SHELL_SNAPSHOT_READS.latestTurns),
+          listRunningSubagentCountRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getArchivedShellSnapshot:listRunningSubagentCounts:query",
+                "ProjectionSnapshotQuery.getArchivedShellSnapshot:listRunningSubagentCounts:decodeRows",
+              ),
+            ),
+          ),
           listProjectionStateRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -1865,7 +2032,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       )
       .pipe(
         Effect.flatMap(
-          ([projectRawRows, threadRawRows, sessionRawRows, latestTurnRawRows, stateRows]) =>
+          ([
+            projectRawRows,
+            threadRawRows,
+            sessionRawRows,
+            latestTurnRawRows,
+            subagentCountRows,
+            stateRows,
+          ]) =>
             Effect.gen(function* () {
               const [projectRows, threadRows, sessionRows, latestTurnRows] = yield* Effect.all([
                 decodeProjectRows(projectRawRows, ARCHIVED_SHELL_SNAPSHOT_READS.projects),
@@ -1907,6 +2081,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               const sessionByThread = new Map(
                 sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
               );
+              const activeSubagentCountByThread = new Map(
+                subagentCountRows.map((row) => [row.threadId, row.activeSubagentCount] as const),
+              );
 
               const snapshot = {
                 snapshotSequence: computeSnapshotSequence(stateRows),
@@ -1938,7 +2115,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     hasPendingApprovals: row.pendingApprovalCount > 0,
                     hasPendingUserInput: row.pendingUserInputCount > 0,
                     hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
-                    activeSubagentCount: 0,
+                    activeSubagentCount: activeSubagentCountByThread.get(row.threadId) ?? 0,
                   }),
                 ),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
@@ -2128,7 +2305,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
     Effect.gen(function* () {
-      const [threadRawRow, latestTurnRow, sessionRow] = yield* Effect.all([
+      const [threadRawRow, latestTurnRow, sessionRow, subagentCountRow] = yield* Effect.all([
         getActiveThreadRawRowById({ threadId }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
@@ -2150,6 +2327,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadShellById:getSession:query",
               "ProjectionSnapshotQuery.getThreadShellById:getSession:decodeRow",
+            ),
+          ),
+        ),
+        countRunningSubagentRowsByThread({ threadId }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadShellById:countRunningSubagents:query",
+              "ProjectionSnapshotQuery.getThreadShellById:countRunningSubagents:decodeRow",
             ),
           ),
         ),
@@ -2186,7 +2371,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         hasPendingApprovals: threadRow.pendingApprovalCount > 0,
         hasPendingUserInput: threadRow.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.hasActionableProposedPlan > 0,
-        activeSubagentCount: 0,
+        activeSubagentCount: subagentCountRow.activeSubagentCount,
       } satisfies OrchestrationThreadShell);
     });
 
@@ -2256,6 +2441,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         ),
       ),
+      listThreadSubagentRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_SUBAGENTS),
       listCheckpointRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_CHECKPOINTS),
       getLatestTurnRowByThread({ threadId }).pipe(
         Effect.mapError(
@@ -2291,6 +2477,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         proposedPlanRows,
         activityRawRows,
         activityCountRow,
+        subagentRawRows,
         checkpointRawRows,
         latestTurnRow,
         sessionRow,
@@ -2300,14 +2487,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<OrchestrationThread>();
       }
 
-      const [threadRow, messageRows, activityRows, checkpointRows] = yield* Effect.all([
-        decodeThreadRow(threadRawRow.value).pipe(
-          Effect.mapError(toPersistenceDecodeError(`${THREAD_DETAIL_GET_THREAD}:decodeRow`)),
-        ),
-        decodeThreadMessageRows(messageRawRows, THREAD_DETAIL_LIST_MESSAGES),
-        decodeThreadActivityRows(activityRawRows, THREAD_DETAIL_LIST_ACTIVITIES),
-        decodeCheckpointRows(checkpointRawRows, THREAD_DETAIL_LIST_CHECKPOINTS),
-      ]);
+      const [threadRow, messageRows, activityRows, subagentRows, checkpointRows] =
+        yield* Effect.all([
+          decodeThreadRow(threadRawRow.value).pipe(
+            Effect.mapError(toPersistenceDecodeError(`${THREAD_DETAIL_GET_THREAD}:decodeRow`)),
+          ),
+          decodeThreadMessageRows(messageRawRows, THREAD_DETAIL_LIST_MESSAGES),
+          decodeThreadActivityRows(activityRawRows, THREAD_DETAIL_LIST_ACTIVITIES),
+          decodeThreadSubagentRows(subagentRawRows, THREAD_DETAIL_LIST_SUBAGENTS),
+          decodeCheckpointRows(checkpointRawRows, THREAD_DETAIL_LIST_CHECKPOINTS),
+        ]);
 
       // The capped read returns the newest window plus every pinned
       // request/response row, so the omitted count is whatever the thread holds
@@ -2350,6 +2539,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           );
         }),
         proposedPlans: proposedPlanRows.map(mapProposedPlanRow),
+        subagents: subagentRows.map(mapThreadSubagentRow),
         activities: activityRows.map((row) => {
           const activity = {
             id: row.activityId,
