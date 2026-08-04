@@ -176,6 +176,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "user-input.resolved",
   "task.started",
   "task.progress",
+  "task.updated",
   "task.completed",
   "hook.started",
   "hook.progress",
@@ -226,6 +227,7 @@ const UserInputRequestedType = Schema.Literal("user-input.requested");
 const UserInputResolvedType = Schema.Literal("user-input.resolved");
 const TaskStartedType = Schema.Literal("task.started");
 const TaskProgressType = Schema.Literal("task.progress");
+const TaskUpdatedType = Schema.Literal("task.updated");
 const TaskCompletedType = Schema.Literal("task.completed");
 const HookStartedType = Schema.Literal("hook.started");
 const HookProgressType = Schema.Literal("hook.progress");
@@ -407,6 +409,10 @@ export const ItemLifecyclePayload = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyStringSchema),
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   data: Schema.optional(Schema.Unknown),
+  // Set when the item ran inside a subagent: parentToolUseId is the Task
+  // tool_use id of the spawning collab_agent_tool_call.
+  parentToolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  subagentType: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;
 
@@ -463,6 +469,12 @@ const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
+  // Subagent linkage: toolUseId is the Task tool_use id of the spawning
+  // collab_agent_tool_call item (the join key; taskId is a separate id).
+  toolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  subagentType: Schema.optional(TrimmedNonEmptyStringSchema),
+  prompt: Schema.optional(TrimmedNonEmptyStringSchema),
+  skipTranscript: Schema.optional(Schema.Boolean),
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
@@ -472,14 +484,42 @@ const TaskProgressPayload = Schema.Struct({
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  toolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  subagentType: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
+
+const RuntimeTaskUpdateStatus = Schema.Literals([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "killed",
+  "paused",
+]);
+export type RuntimeTaskUpdateStatus = typeof RuntimeTaskUpdateStatus.Type;
+
+// Mirrors a subset of SDKTaskUpdatedMessage's wire-safe patch (end_time and
+// total_paused_ms are dropped): only the fields that changed are present;
+// clients merge into their local task state.
+const TaskUpdatedPayload = Schema.Struct({
+  taskId: RuntimeTaskId,
+  patch: Schema.Struct({
+    status: Schema.optional(RuntimeTaskUpdateStatus),
+    description: Schema.optional(TrimmedNonEmptyStringSchema),
+    isBackgrounded: Schema.optional(Schema.Boolean),
+    error: Schema.optional(TrimmedNonEmptyStringSchema),
+  }),
+});
+export type TaskUpdatedPayload = typeof TaskUpdatedPayload.Type;
 
 const TaskCompletedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
+  toolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  outputFile: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;
 
@@ -513,6 +553,10 @@ const ToolProgressPayload = Schema.Struct({
   toolName: Schema.optional(TrimmedNonEmptyStringSchema),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   elapsedSeconds: Schema.optional(Schema.Number),
+  // Set when the tool ran inside a subagent: parentToolUseId is the spawning
+  // Task tool_use id, taskId the subagent's runtime task.
+  parentToolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  taskId: Schema.optional(RuntimeTaskId),
 });
 export type ToolProgressPayload = typeof ToolProgressPayload.Type;
 
@@ -835,6 +879,13 @@ const ProviderRuntimeTaskProgressEvent = Schema.Struct({
 });
 export type ProviderRuntimeTaskProgressEvent = typeof ProviderRuntimeTaskProgressEvent.Type;
 
+const ProviderRuntimeTaskUpdatedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: TaskUpdatedType,
+  payload: TaskUpdatedPayload,
+});
+export type ProviderRuntimeTaskUpdatedEvent = typeof ProviderRuntimeTaskUpdatedEvent.Type;
+
 const ProviderRuntimeTaskCompletedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: TaskCompletedType,
@@ -995,6 +1046,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeUserInputResolvedEvent,
   ProviderRuntimeTaskStartedEvent,
   ProviderRuntimeTaskProgressEvent,
+  ProviderRuntimeTaskUpdatedEvent,
   ProviderRuntimeTaskCompletedEvent,
   ProviderRuntimeHookStartedEvent,
   ProviderRuntimeHookProgressEvent,

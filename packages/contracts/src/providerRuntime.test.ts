@@ -157,6 +157,188 @@ describe("ProviderRuntimeEvent", () => {
     ).toThrow();
   });
 
+  it("decodes task.started with subagent linkage fields", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "task.started",
+      eventId: "event-task-started-1",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:05.000Z",
+      threadId: "thread-1",
+      payload: {
+        taskId: "task-1",
+        description: "Explore the codebase",
+        taskType: "subagent",
+        toolUseId: "toolu_spawn_1",
+        subagentType: "Explore",
+        prompt: "Find all usages of applySubagentActivity",
+        skipTranscript: true,
+      },
+    });
+
+    expect(parsed.type).toBe("task.started");
+    if (parsed.type !== "task.started") {
+      throw new Error("expected task.started");
+    }
+    expect(parsed.payload.toolUseId).toBe("toolu_spawn_1");
+    expect(parsed.payload.subagentType).toBe("Explore");
+    expect(parsed.payload.skipTranscript).toBe(true);
+  });
+
+  it("decodes task.started without subagent linkage fields (back-compat)", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "task.started",
+      eventId: "event-task-started-2",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:05.000Z",
+      threadId: "thread-1",
+      payload: {
+        taskId: "task-1",
+      },
+    });
+
+    expect(parsed.type).toBe("task.started");
+    if (parsed.type !== "task.started") {
+      throw new Error("expected task.started");
+    }
+    expect(parsed.payload.toolUseId).toBeUndefined();
+  });
+
+  it("decodes task.progress with subagent linkage fields", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "task.progress",
+      eventId: "event-task-progress-1",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:06.000Z",
+      threadId: "thread-1",
+      payload: {
+        taskId: "task-1",
+        description: "Reading files",
+        toolUseId: "toolu_spawn_1",
+        subagentType: "Explore",
+      },
+    });
+
+    expect(parsed.type).toBe("task.progress");
+    if (parsed.type !== "task.progress") {
+      throw new Error("expected task.progress");
+    }
+    expect(parsed.payload.toolUseId).toBe("toolu_spawn_1");
+    expect(parsed.payload.subagentType).toBe("Explore");
+  });
+
+  it("decodes task.updated with a partial state patch", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "task.updated",
+      eventId: "event-task-updated-1",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:07.000Z",
+      threadId: "thread-1",
+      payload: {
+        taskId: "task-1",
+        patch: {
+          status: "running",
+          isBackgrounded: true,
+        },
+      },
+    });
+
+    expect(parsed.type).toBe("task.updated");
+    if (parsed.type !== "task.updated") {
+      throw new Error("expected task.updated");
+    }
+    expect(parsed.payload.patch.status).toBe("running");
+    expect(parsed.payload.patch.isBackgrounded).toBe(true);
+    expect(parsed.payload.patch.description).toBeUndefined();
+  });
+
+  it("rejects task.updated with an unknown patch status", () => {
+    expect(() =>
+      decodeRuntimeEvent({
+        type: "task.updated",
+        eventId: "event-task-updated-2",
+        provider: "claudeAgent",
+        createdAt: "2026-02-28T00:00:07.000Z",
+        threadId: "thread-1",
+        payload: {
+          taskId: "task-1",
+          patch: { status: "exploded" },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("decodes task.completed with toolUseId and outputFile", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "task.completed",
+      eventId: "event-task-completed-1",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:08.000Z",
+      threadId: "thread-1",
+      payload: {
+        taskId: "task-1",
+        status: "completed",
+        summary: "Found 3 usages",
+        toolUseId: "toolu_spawn_1",
+        outputFile: "/tmp/agent-output.md",
+      },
+    });
+
+    expect(parsed.type).toBe("task.completed");
+    if (parsed.type !== "task.completed") {
+      throw new Error("expected task.completed");
+    }
+    expect(parsed.payload.toolUseId).toBe("toolu_spawn_1");
+    expect(parsed.payload.outputFile).toBe("/tmp/agent-output.md");
+  });
+
+  it("decodes tool.progress with subagent parent linkage", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "tool.progress",
+      eventId: "event-tool-progress-1",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:09.000Z",
+      threadId: "thread-1",
+      payload: {
+        toolUseId: "toolu_child_1",
+        toolName: "Read",
+        elapsedSeconds: 1.5,
+        parentToolUseId: "toolu_spawn_1",
+        taskId: "task-1",
+      },
+    });
+
+    expect(parsed.type).toBe("tool.progress");
+    if (parsed.type !== "tool.progress") {
+      throw new Error("expected tool.progress");
+    }
+    expect(parsed.payload.parentToolUseId).toBe("toolu_spawn_1");
+    expect(parsed.payload.taskId).toBe("task-1");
+  });
+
+  it("decodes item lifecycle events with subagent attribution", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "item.started",
+      eventId: "event-item-started-1",
+      provider: "claudeAgent",
+      createdAt: "2026-02-28T00:00:10.000Z",
+      threadId: "thread-1",
+      itemId: "item-1",
+      payload: {
+        itemType: "command_execution",
+        status: "inProgress",
+        parentToolUseId: "toolu_spawn_1",
+        subagentType: "Explore",
+      },
+    });
+
+    expect(parsed.type).toBe("item.started");
+    if (parsed.type !== "item.started") {
+      throw new Error("expected item.started");
+    }
+    expect(parsed.payload.parentToolUseId).toBe("toolu_spawn_1");
+    expect(parsed.payload.subagentType).toBe("Explore");
+  });
+
   it("decodes normalized thread token usage snapshots", () => {
     const parsed = decodeRuntimeEvent({
       type: "thread.token-usage.updated",
