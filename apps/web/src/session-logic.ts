@@ -939,6 +939,8 @@ export interface SubagentGroup {
   /** Tool rows that ran inside this subagent (via `parentToolUseId`); empty when linkage is absent. */
   children: WorkLogEntry[];
   resultText: string | null;
+  /** The Task tool input prompt; shown as a fallback when no children/result exist yet. */
+  prompt: string | null;
 }
 
 /**
@@ -1021,6 +1023,7 @@ function toSubagentGroup(
     completedAt: readModel?.completedAt ?? null,
     children: toolCallId !== null ? (childrenByParent.get(toolCallId) ?? []) : [],
     resultText: extractSubagentResultText(data?.result),
+    prompt: asTrimmedString(input?.prompt),
   };
 }
 
@@ -1111,6 +1114,7 @@ function mergeSubagentGroups(first: SubagentGroup, second: SubagentGroup): Subag
     status: second.status !== "running" ? second.status : first.status,
     completedAt: second.completedAt ?? first.completedAt,
     resultText: second.resultText ?? first.resultText,
+    prompt: second.prompt ?? first.prompt,
   };
 }
 

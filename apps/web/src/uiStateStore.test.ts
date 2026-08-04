@@ -19,6 +19,7 @@ import {
   setPlannedEpicBannerDismissed,
   setProjectExpanded,
   setThreadChangedFilesExpanded,
+  setThreadSubagentExpanded,
   type UiState,
 } from "./uiStateStore";
 
@@ -28,6 +29,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
+    threadSubagentExpandedById: {},
     epicsLastVisitedAt: null,
     epicRunGroupExpandedByRunId: {},
     plannedEpicBannerDismissedByIdentity: {},
@@ -147,6 +149,43 @@ describe("uiStateStore pure functions", () => {
     ).toEqual({});
   });
 
+  it("stores only expanded subagent cards, dropping keys on collapse", () => {
+    const threadKey = "environment:thread-1";
+    const expanded = setThreadSubagentExpanded(makeUiState(), threadKey, "toolu_task", true);
+
+    expect(expanded.threadSubagentExpandedById).toEqual({
+      [threadKey]: {
+        toolu_task: true,
+      },
+    });
+    expect(setThreadSubagentExpanded(expanded, threadKey, "toolu_task", true)).toBe(expanded);
+    expect(
+      setThreadSubagentExpanded(expanded, threadKey, "toolu_task", false)
+        .threadSubagentExpandedById,
+    ).toEqual({});
+    expect(setThreadSubagentExpanded(makeUiState(), threadKey, "toolu_task", false)).toEqual(
+      makeUiState(),
+    );
+    expect(setThreadSubagentExpanded(makeUiState(), "", "toolu_task", true)).toEqual(makeUiState());
+    expect(setThreadSubagentExpanded(makeUiState(), threadKey, "", true)).toEqual(makeUiState());
+    expect(
+      parsePersistedState({
+        threadSubagentExpandedById: {
+          [threadKey]: {
+            toolu_task: true,
+            toolu_stale: false,
+            "": true,
+          },
+          "": { toolu_other: true },
+        },
+      }).threadSubagentExpandedById,
+    ).toEqual({
+      [threadKey]: {
+        toolu_task: true,
+      },
+    });
+  });
+
   it("stores an epic run group toggle per run, and survives a round trip", () => {
     const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
     // Both directions are recorded: the status default flips when the run ends,
@@ -256,6 +295,7 @@ describe("parsePersistedState", () => {
 
     expect(parsed).toEqual({
       epicsLastVisitedAt: null,
+      threadSubagentExpandedById: {},
       epicRunGroupExpandedByRunId: {},
       plannedEpicBannerDismissedByIdentity: {},
       epicsProjectGroupCollapsedByKey: {},
@@ -383,6 +423,7 @@ describe("uiStateStore persistence", () => {
           "turn-1": false,
         },
       },
+      threadSubagentExpandedById: {},
       epicRunGroupExpandedByRunId: { "run-1": true },
       plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
       epicsProjectGroupCollapsedByKey: {

@@ -1811,6 +1811,7 @@ describe("deriveSubagentGroups", () => {
     expect(group?.resultText).toBe("Found 3 usages");
     expect(group?.children.map((child) => child.id)).toEqual(["child-complete"]);
     expect(group?.completedAt).toBeNull();
+    expect(group?.prompt).toBe("Find every usage of deriveWorkLogEntries");
   });
 
   it("still produces a group with empty children when linkage fields are absent", () => {
@@ -1846,6 +1847,7 @@ describe("deriveSubagentGroups", () => {
     expect(groups[0]?.children).toEqual([]);
     expect(groups[0]?.name).toBe("Explore");
     expect(groups[0]?.status).toBe("running");
+    expect(groups[0]?.prompt).toBe("Find every usage of deriveWorkLogEntries");
   });
 
   it("marks the group failed when the tool result is an error", () => {

@@ -89,6 +89,7 @@ import {
   type TimelineLatestTurn,
 } from "./MessagesTimeline.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
+import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   deriveDisplayedUserMessageState,
@@ -142,6 +143,7 @@ interface TimelineRowSharedState {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
+  onToggleSubagentExpanded: (subagentKey: string, anchorElement?: HTMLElement) => void;
 }
 
 interface TimelineRowActivityState {
@@ -275,6 +277,38 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }
     },
     [listRef],
+  );
+
+  // Same flushSync + scroll-delta compensation as onToggleWorkGroup, but the
+  // expansion state lives in useUiStateStore (per routeThreadKey + subagent
+  // key) so re-opening a thread keeps its cards open.
+  const onToggleSubagentExpanded = useCallback(
+    (subagentKey: string, anchorElement?: HTMLElement) => {
+      const anchorBottomBeforeToggle = anchorElement?.getBoundingClientRect().bottom ?? null;
+
+      const store = useUiStateStore.getState();
+      const currentlyExpanded =
+        store.threadSubagentExpandedById[routeThreadKey]?.[subagentKey] ?? false;
+      flushSync(() => {
+        store.setThreadSubagentExpanded(routeThreadKey, subagentKey, !currentlyExpanded);
+      });
+
+      if (anchorBottomBeforeToggle === null || !anchorElement) {
+        return;
+      }
+
+      const delta = anchorElement.getBoundingClientRect().bottom - anchorBottomBeforeToggle;
+      if (Math.abs(delta) < 0.5) {
+        return;
+      }
+
+      const list = listRef.current;
+      const currentScroll = list?.getState?.().scroll;
+      if (list && typeof currentScroll === "number") {
+        list.scrollToOffset({ offset: currentScroll + delta, animated: false });
+      }
+    },
+    [listRef, routeThreadKey],
   );
 
   // An in-session interrupt leaves its turn expanded so the user keeps their
@@ -442,6 +476,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onToggleSubagentExpanded,
     }),
     [
       timestampFormat,
@@ -456,6 +491,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onToggleSubagentExpanded,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1267,14 +1303,31 @@ function WorkGroupToggleTimelineRow({
 /**
  * Wraps the memoized SubagentCard with context reads: the card itself stays
  * presentational, and the newest child tool row renders through the same
- * SimpleWorkEntryRow used by flat work rows.
+ * SimpleWorkEntryRow used by flat work rows. Expansion state is persisted in
+ * useUiStateStore per routeThreadKey + subagent key, and the toggle routes
+ * through ctx.onToggleSubagentExpanded for LegendList scroll compensation.
  */
 const SubagentTimelineRow = memo(function SubagentTimelineRow({
   row,
 }: {
   row: Extract<TimelineRow, { kind: "subagent" }>;
 }) {
-  const { workspaceRoot } = use(TimelineRowCtx);
+  const ctx = use(TimelineRowCtx);
+  const { workspaceRoot, routeThreadKey, onToggleSubagentExpanded } = ctx;
+  const subagentKey = row.group.toolCallId ?? row.group.entryId;
+  const expanded = useUiStateStore(
+    (store) => store.threadSubagentExpandedById[routeThreadKey]?.[subagentKey] ?? false,
+  );
+  const onToggleExpanded = useCallback(
+    (headerElement?: HTMLElement) => {
+      // Anchor on the header itself, NOT the enclosing timeline row: the row's
+      // bottom grows by the expansion height, so compensating against it would
+      // scroll the viewport by exactly that growth. The header keeps its size,
+      // so its delta captures only genuine list shifts.
+      onToggleSubagentExpanded(subagentKey, headerElement);
+    },
+    [onToggleSubagentExpanded, subagentKey],
+  );
   const newestChild = row.group.status === "running" ? row.group.children.at(-1) : undefined;
 
   return (
@@ -1285,9 +1338,71 @@ const SubagentTimelineRow = memo(function SubagentTimelineRow({
           <SimpleWorkEntryRow workEntry={newestChild} workspaceRoot={workspaceRoot} />
         ) : undefined
       }
+      expanded={expanded}
+      onToggleExpanded={onToggleExpanded}
+      expandedBody={expanded ? <SubagentExpandedBody group={row.group} /> : undefined}
     />
   );
 });
+
+/**
+ * Expanded detail for a SubagentCard: every child tool row in a scroll-capped
+ * area, the final result as rendered markdown with a copy button, and the
+ * spawn prompt as a fallback when neither exists yet.
+ */
+function SubagentExpandedBody({ group }: { group: SubagentGroup }) {
+  const ctx = use(TimelineRowCtx);
+  const childCount = group.children.length;
+
+  return (
+    <div className="space-y-2">
+      {childCount > 0 ? (
+        <div>
+          {/* The activity feed this list derives from is capped server-side
+              (THREAD_DETAIL_ACTIVITY_LIMIT) — say how many rows are shown,
+              never claim the list is complete. */}
+          <p className="px-0.5 pb-0.5 font-medium text-[11px] text-muted-foreground/65">
+            {childCount === 1 ? "1 tool call shown" : `${childCount} tool calls shown`}
+          </p>
+          <ScrollArea className="max-h-80">
+            <div className="space-y-px pe-2">
+              {group.children.map((workEntry) => (
+                <SimpleWorkEntryRow
+                  key={workEntry.id}
+                  workEntry={workEntry}
+                  workspaceRoot={ctx.workspaceRoot}
+                />
+              ))}
+            </div>
+          </ScrollArea>
+        </div>
+      ) : null}
+      {group.resultText !== null ? (
+        <div>
+          <div className="flex items-center justify-between gap-2 px-0.5 pb-0.5">
+            <p className="font-medium text-[11px] text-muted-foreground/65">Result</p>
+            <MessageCopyButton text={group.resultText} size="icon-xs" variant="ghost" />
+          </div>
+          <div className="border-s border-border/45 ps-3 text-sm">
+            <ChatMarkdown
+              text={group.resultText}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+            />
+          </div>
+        </div>
+      ) : null}
+      {childCount === 0 && group.resultText === null && group.prompt !== null ? (
+        <div className="border-s border-border/45 ps-3 pt-0.5">
+          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+            {group.prompt}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /** Subscribes directly to the UI state store for expand/collapse state,
  *  so toggling re-renders only this component — not the entire list. */

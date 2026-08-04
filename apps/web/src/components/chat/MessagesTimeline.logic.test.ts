@@ -1029,6 +1029,7 @@ describe("deriveMessagesTimelineRows", () => {
       completedAt: null,
       children: [childEntry],
       resultText: null,
+      prompt: null,
     };
 
     const rows = deriveMessagesTimelineRows({
@@ -1105,6 +1106,7 @@ describe("deriveMessagesTimelineRows", () => {
       completedAt: "2026-01-01T00:00:04Z",
       children: [childEntry],
       resultText: null,
+      prompt: null,
     };
 
     const rows = deriveMessagesTimelineRows({
@@ -1171,6 +1173,7 @@ describe("deriveMessagesTimelineRows", () => {
       completedAt: null,
       children: [],
       resultText: "done",
+      prompt: null,
     };
 
     const rows = deriveMessagesTimelineRows({

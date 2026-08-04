@@ -26,6 +26,7 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
+  threadSubagentExpandedById?: Record<string, Record<string, boolean>>;
   epicRunGroupExpandedByRunId?: Record<string, boolean>;
   plannedEpicBannerDismissedByIdentity?: Record<string, boolean>;
   epicsProjectGroupCollapsedByKey?: Record<string, boolean>;
@@ -39,6 +40,13 @@ export interface UiProjectState {
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
   threadChangedFilesExpandedById: Record<string, Record<string, boolean>>;
+  /**
+   * Expanded subagent cards per thread, keyed by routeThreadKey → subagent key
+   * (the Task tool_use id, or the timeline entry id when the provider gave
+   * none). Cards default collapsed, so only explicit expansions (`true`) land
+   * here and re-opening a thread keeps its cards open.
+   */
+  threadSubagentExpandedById: Record<string, Record<string, boolean>>;
   epicsLastVisitedAt: string | null;
   /**
    * Explicit sidebar expand/collapse per epic run, keyed by run id. Only rows
@@ -77,6 +85,7 @@ const initialState: UiState = {
   threadLastVisitedAtById: {},
   epicsLastVisitedAt: null,
   threadChangedFilesExpandedById: {},
+  threadSubagentExpandedById: {},
   epicRunGroupExpandedByRunId: {},
   plannedEpicBannerDismissedByIdentity: {},
   epicsProjectGroupCollapsedByKey: {},
@@ -170,6 +179,9 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     threadChangedFilesExpandedById: sanitizePersistedThreadChangedFilesExpanded(
       parsed.threadChangedFilesExpandedById,
     ),
+    threadSubagentExpandedById: sanitizePersistedThreadSubagentExpanded(
+      parsed.threadSubagentExpandedById,
+    ),
     epicRunGroupExpandedByRunId: sanitizeBooleanRecord(parsed.epicRunGroupExpandedByRunId),
     plannedEpicBannerDismissedByIdentity: sanitizeDismissedRecord(
       parsed.plannedEpicBannerDismissedByIdentity,
@@ -233,6 +245,34 @@ function sanitizePersistedThreadChangedFilesExpanded(
   return nextState;
 }
 
+function sanitizePersistedThreadSubagentExpanded(
+  value: PersistedUiState["threadSubagentExpandedById"],
+): Record<string, Record<string, boolean>> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const nextState: Record<string, Record<string, boolean>> = {};
+  for (const [threadId, subagents] of Object.entries(value)) {
+    if (!threadId || !subagents || typeof subagents !== "object") {
+      continue;
+    }
+
+    const nextSubagents: Record<string, boolean> = {};
+    for (const [subagentKey, expanded] of Object.entries(subagents)) {
+      if (subagentKey && expanded === true) {
+        nextSubagents[subagentKey] = true;
+      }
+    }
+
+    if (Object.keys(nextSubagents).length > 0) {
+      nextState[threadId] = nextSubagents;
+    }
+  }
+
+  return nextState;
+}
+
 export function persistState(state: UiState): void {
   if (typeof window === "undefined") {
     return;
@@ -260,6 +300,7 @@ export function persistState(state: UiState): void {
         ...(state.epicsLastVisitedAt ? { epicsLastVisitedAt: state.epicsLastVisitedAt } : {}),
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         threadChangedFilesExpandedById,
+        threadSubagentExpandedById: state.threadSubagentExpandedById,
         epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
         plannedEpicBannerDismissedByIdentity: state.plannedEpicBannerDismissedByIdentity,
         epicsProjectGroupCollapsedByKey: state.epicsProjectGroupCollapsedByKey,
@@ -378,6 +419,57 @@ export function setThreadChangedFilesExpanded(
       [threadId]: {
         ...currentThreadState,
         [turnId]: false,
+      },
+    },
+  };
+}
+
+export function setThreadSubagentExpanded(
+  state: UiState,
+  threadId: string,
+  subagentKey: string,
+  expanded: boolean,
+): UiState {
+  if (threadId.length === 0 || subagentKey.length === 0) {
+    return state;
+  }
+  const currentThreadState = state.threadSubagentExpandedById[threadId] ?? {};
+  const currentExpanded = currentThreadState[subagentKey] ?? false;
+  if (currentExpanded === expanded) {
+    return state;
+  }
+
+  // Collapsed is the default — drop the key (and the thread record when empty)
+  // instead of storing `false`, so the persisted map only grows with explicit
+  // expansions.
+  if (!expanded) {
+    const nextThreadState = { ...currentThreadState };
+    delete nextThreadState[subagentKey];
+    if (Object.keys(nextThreadState).length === 0) {
+      const nextState = { ...state.threadSubagentExpandedById };
+      delete nextState[threadId];
+      return {
+        ...state,
+        threadSubagentExpandedById: nextState,
+      };
+    }
+
+    return {
+      ...state,
+      threadSubagentExpandedById: {
+        ...state.threadSubagentExpandedById,
+        [threadId]: nextThreadState,
+      },
+    };
+  }
+
+  return {
+    ...state,
+    threadSubagentExpandedById: {
+      ...state.threadSubagentExpandedById,
+      [threadId]: {
+        ...currentThreadState,
+        [subagentKey]: true,
       },
     },
   };
@@ -527,6 +619,7 @@ interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
+  setThreadSubagentExpanded: (threadId: string, subagentKey: string, expanded: boolean) => void;
   setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
   setPlannedEpicBannerDismissed: (identity: string, dismissed: boolean) => void;
   setEpicsProjectGroupCollapsed: (sourceKey: string, collapsed: boolean) => void;
@@ -548,6 +641,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
   setThreadChangedFilesExpanded: (threadId, turnId, expanded) =>
     set((state) => setThreadChangedFilesExpanded(state, threadId, turnId, expanded)),
+  setThreadSubagentExpanded: (threadId, subagentKey, expanded) =>
+    set((state) => setThreadSubagentExpanded(state, threadId, subagentKey, expanded)),
   setEpicRunGroupExpanded: (runId, expanded) =>
     set((state) => setEpicRunGroupExpanded(state, runId, expanded)),
   setPlannedEpicBannerDismissed: (identity, dismissed) =>

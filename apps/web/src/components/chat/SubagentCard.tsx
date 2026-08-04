@@ -1,5 +1,5 @@
-import { memo, useEffect, useRef, type ReactNode } from "react";
-import { BotIcon, CheckIcon, MinusIcon, XIcon } from "lucide-react";
+import { memo, useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
+import { BotIcon, CheckIcon, ChevronDownIcon, MinusIcon, XIcon } from "lucide-react";
 import { formatDuration, formatElapsed, type SubagentGroup } from "../../session-logic";
 import { cn } from "~/lib/utils";
 
@@ -7,7 +7,9 @@ import { cn } from "~/lib/utils";
  * Inline card for one ad-hoc subagent (Agent/Task spawn) in the messages
  * timeline, replacing the flat `collab_agent_tool_call` tool row. Purely
  * presentational: the timeline row wrapper owns context reads and passes the
- * newest child tool row through `liveActivity`.
+ * newest child tool row through `liveActivity`, the expansion detail through
+ * `expandedBody`, and expansion state/toggling through `expanded` /
+ * `onToggleExpanded` (so scroll compensation stays with the list owner).
  *
  * The group's status is authoritative — a "stopped" group renders as stopped
  * and deliberately skips the settled-neutral-to-check coercion plain work
@@ -16,23 +18,53 @@ import { cn } from "~/lib/utils";
 export const SubagentCard = memo(function SubagentCard({
   group,
   liveActivity,
+  expanded = false,
+  onToggleExpanded,
+  expandedBody,
 }: {
   group: SubagentGroup;
   liveActivity?: ReactNode;
+  expanded?: boolean;
+  onToggleExpanded?: (anchorElement?: HTMLElement) => void;
+  expandedBody?: ReactNode;
 }) {
   const toolCount = group.children.length;
   // Old servers / providers without child linkage yield 0 children — hide the
   // count instead of claiming "0 tools".
   const toolCountLabel = toolCount === 0 ? null : toolCount === 1 ? "1 tool" : `${toolCount} tools`;
-  const resultPreview = group.status === "completed" ? firstNonEmptyLine(group.resultText) : null;
+  const resultPreview =
+    group.status === "completed" && !expanded ? firstNonEmptyLine(group.resultText) : null;
   const isFailed = group.status === "failed";
+  const canToggle = onToggleExpanded !== undefined;
+  const headerToggleProps = canToggle
+    ? {
+        role: "button" as const,
+        tabIndex: 0 as const,
+        "aria-expanded": expanded,
+        "aria-label": `${capitalizeSubagentName(group.name)} subagent details`,
+        onClick: (e: React.MouseEvent<HTMLDivElement>) => onToggleExpanded(e.currentTarget),
+        onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggleExpanded(e.currentTarget);
+          }
+        },
+      }
+    : {};
 
   return (
     <div
       className="rounded-2xl border border-input bg-background p-3 shadow-xs/5 not-dark:bg-clip-padding dark:bg-input/32"
       data-subagent-status={group.status}
     >
-      <div className="flex items-center gap-1.5">
+      <div
+        className={cn(
+          "flex items-center gap-1.5",
+          canToggle &&
+            "-m-1 cursor-pointer select-none rounded-md p-1 transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+        )}
+        {...headerToggleProps}
+      >
         <span
           className={cn(
             "flex size-5 shrink-0 items-center justify-center",
@@ -94,14 +126,26 @@ export const SubagentCard = memo(function SubagentCard({
               </span>
             </>
           )}
+          {canToggle ? (
+            <span className="inline-flex size-4 items-center justify-center">
+              <ChevronDownIcon
+                className={cn(
+                  "block size-3 shrink-0 opacity-70 transition-transform duration-200",
+                  expanded && "rotate-180",
+                )}
+                aria-hidden
+              />
+            </span>
+          ) : null}
         </div>
       </div>
-      {liveActivity ? <div className="mt-1 ps-6">{liveActivity}</div> : null}
+      {liveActivity && !expanded ? <div className="mt-1 ps-6">{liveActivity}</div> : null}
       {resultPreview ? (
         <p className="mt-1 truncate ps-6.5 text-[11px] leading-5 text-muted-foreground/65">
           {resultPreview}
         </p>
       ) : null}
+      {expanded && expandedBody ? <div className="mt-2 ps-1.5">{expandedBody}</div> : null}
     </div>
   );
 });
