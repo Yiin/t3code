@@ -1405,6 +1405,382 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  // Captured 2026-08-04 spend-limit incident text: the SDK delivered it both
+  // as the success-subtype result text and as a synthetic assistant message.
+  const SPEND_LIMIT_TEXT =
+    "You've hit your org's monthly spend limit. To continue using Claude, ask your admin to increase the limit.";
+
+  const startFailureScoringTurn = Effect.fnUntraced(function* (adapter: ClaudeAdapterShape) {
+    const runtimeEventsFiber = yield* Stream.takeUntil(
+      adapter.streamEvents,
+      (event) => event.type === "turn.completed",
+    ).pipe(Stream.runCollect, Effect.forkChild);
+
+    const session = yield* adapter.startSession({
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+    const turn = yield* adapter.sendTurn({
+      threadId: session.threadId,
+      input: "hello",
+      attachments: [],
+    });
+
+    return { runtimeEventsFiber, turn };
+  });
+
+  it.effect("scores an api-error result with subtype success as a failed turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        terminal_reason: "api_error",
+        api_error_status: 429,
+        result: SPEND_LIMIT_TEXT,
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-spend-limit",
+        uuid: "result-spend-limit",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.message.includes("monthly spend limit"), true);
+      }
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.equal(turnCompleted.payload.errorMessage?.includes("monthly spend limit"), true);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "fails the turn when a tagged assistant provider error precedes a success result",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+        harness.query.emit({
+          type: "assistant",
+          session_id: "sdk-session-billing",
+          uuid: "assistant-billing-1",
+          parent_tool_use_id: null,
+          error: "billing_error",
+          message: {
+            id: "assistant-message-billing-1",
+            model: "",
+            content: [{ type: "text", text: SPEND_LIMIT_TEXT }],
+          },
+        } as unknown as SDKMessage);
+
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "",
+          num_turns: 1,
+          stop_reason: null,
+          session_id: "sdk-session-billing",
+          uuid: "result-billing-1",
+        } as unknown as SDKMessage);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+        const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+        assert.equal(runtimeError?.type, "runtime.error");
+        if (runtimeError?.type === "runtime.error") {
+          assert.equal(runtimeError.payload.message, SPEND_LIMIT_TEXT);
+          assert.deepEqual(runtimeError.payload.detail, { errorTag: "billing_error" });
+        }
+
+        const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+        assert.equal(turnCompleted?.type, "turn.completed");
+        if (turnCompleted?.type === "turn.completed") {
+          assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+          assert.equal(turnCompleted.payload.state, "failed");
+          assert.equal(turnCompleted.payload.errorMessage, SPEND_LIMIT_TEXT);
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("fails the turn on a success result with is_error alone", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: "API Error: 500",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-is-error",
+        uuid: "result-is-error",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.equal(turnCompleted.payload.errorMessage, "API Error: 500");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("surfaces synthetic api-error assistant messages as runtime errors, not text", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-synthetic",
+        uuid: "assistant-synthetic-1",
+        parent_tool_use_id: null,
+        error: "rate_limit",
+        is_api_error_message: true,
+        message: {
+          id: "assistant-synthetic-message-1",
+          model: "",
+          content: [{ type: "text", text: SPEND_LIMIT_TEXT }],
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        terminal_reason: "api_error",
+        api_error_status: 429,
+        result: SPEND_LIMIT_TEXT,
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-synthetic",
+        uuid: "result-synthetic-1",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.message, SPEND_LIMIT_TEXT);
+        assert.deepEqual(runtimeError.payload.detail, {
+          errorTag: "rate_limit",
+          isApiErrorMessage: true,
+        });
+      }
+
+      // The synthetic error prose must not surface as assistant output.
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "content.delta"),
+        false,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "item.completed" && event.payload.itemType === "assistant_message",
+        ),
+        false,
+      );
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "failed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("catches untagged provider-error assistant text via the pattern fallback", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-untagged",
+        uuid: "assistant-untagged-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-untagged-1",
+          model: "",
+          content: [{ type: "text", text: SPEND_LIMIT_TEXT }],
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-untagged",
+        uuid: "result-untagged-1",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.message, SPEND_LIMIT_TEXT);
+      }
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.equal(turnCompleted.payload.errorMessage, SPEND_LIMIT_TEXT);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "emits runtime errors for auth failures and rejected rate limits without failing the turn",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+        harness.query.emit({
+          type: "auth_status",
+          isAuthenticating: false,
+          output: [],
+          error: "OAuth token expired",
+          session_id: "sdk-session-auth",
+          uuid: "auth-status-1",
+        } as unknown as SDKMessage);
+
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "rejected",
+            overageDisabledReason: "out_of_credits",
+          },
+          session_id: "sdk-session-auth",
+          uuid: "rate-limit-1",
+        } as unknown as SDKMessage);
+
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: "done",
+          num_turns: 1,
+          stop_reason: null,
+          session_id: "sdk-session-auth",
+          uuid: "result-auth-1",
+        } as unknown as SDKMessage);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+        const errorMessages = runtimeEvents.flatMap((event) =>
+          event.type === "runtime.error" ? [event.payload.message] : [],
+        );
+        assert.deepEqual(errorMessages, [
+          "Claude authentication error: OAuth token expired",
+          "Claude rate limit rejected the request (out_of_credits).",
+        ]);
+
+        // Telemetry-only failures never fail the turn on their own; the turn
+        // fails only when its result carries the failure.
+        const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+        assert.equal(turnCompleted?.type, "turn.completed");
+        if (turnCompleted?.type === "turn.completed") {
+          assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+          assert.equal(turnCompleted.payload.state, "completed");
+          assert.equal(turnCompleted.payload.errorMessage, undefined);
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("keeps plain successful turns unaffected by failure scoring", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        api_error_status: null,
+        terminal_reason: "completed",
+        result: "All done.",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-plain",
+        uuid: "result-plain-1",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "runtime.error"),
+        false,
+      );
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "completed");
+        assert.equal(turnCompleted.payload.errorMessage, undefined);
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("closes the session when the Claude stream aborts after a turn starts", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

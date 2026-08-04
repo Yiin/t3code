@@ -247,6 +247,12 @@ interface ClaudeSessionContext {
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  /**
+   * Provider/API error observed mid-turn (tagged assistant error message or
+   * matched error text); forces the turn's result to score as failed and
+   * supplies the errorMessage when the result carries none.
+   */
+  lastProviderError: { readonly tag: string; readonly message: string } | undefined;
   stopped: boolean;
 }
 
@@ -347,6 +353,43 @@ function resultErrorsText(result: SDKResultMessage): string {
   return "errors" in result && Array.isArray(result.errors)
     ? result.errors.join(" ").toLowerCase()
     : "";
+}
+
+// Fallback for provider-error assistant text from older CLIs that lack the
+// structured tag — SDKAssistantMessageError on SDKAssistantMessage.error is
+// the preferred signal. Keep this list small and exact.
+const CLAUDE_PROVIDER_ERROR_TEXT_PATTERNS: ReadonlyArray<string> = [
+  "hit your org's monthly spend limit",
+  "usage limit reached",
+  "credit balance",
+];
+
+function matchesClaudeProviderErrorText(text: string): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+  const normalized = text.toLowerCase();
+  return CLAUDE_PROVIDER_ERROR_TEXT_PATTERNS.some((pattern) => normalized.includes(pattern));
+}
+
+const CLAUDE_FAILED_TERMINAL_REASONS: ReadonlySet<string> = new Set([
+  "api_error",
+  "blocking_limit",
+  "model_error",
+]);
+
+function resultFailureSignal(result: SDKResultMessage): boolean {
+  if (result.is_error === true) {
+    return true;
+  }
+  // Read terminal_reason as a plain string: the incident value "api_error"
+  // arrives on the wire but is absent from the SDK's TerminalReason union.
+  const terminalReason = (result as { terminal_reason?: unknown }).terminal_reason;
+  if (typeof terminalReason === "string" && CLAUDE_FAILED_TERMINAL_REASONS.has(terminalReason)) {
+    return true;
+  }
+  const apiErrorStatus = (result as { api_error_status?: unknown }).api_error_status;
+  return typeof apiErrorStatus === "number";
 }
 
 function isInterruptedResult(result: SDKResultMessage): boolean {
@@ -1040,9 +1083,17 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
   return buildUserMessage({ sdkContent });
 });
 
-function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
+function turnStatusFromResult(
+  result: SDKResultMessage,
+  options?: { readonly hasProviderError?: boolean },
+): ProviderRuntimeTurnStatus {
   if (result.subtype === "success") {
-    return "completed";
+    // "success" only means the SDK loop ended without throwing: api errors
+    // (spend limit, auth, overload) still arrive with subtype "success" and
+    // must score as failed turns.
+    return resultFailureSignal(result) || options?.hasProviderError === true
+      ? "failed"
+      : "completed";
   }
 
   const errors = resultErrorsText(result);
@@ -1929,6 +1980,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     errorMessage?: string,
     result?: SDKResultMessage,
   ) {
+    // The provider error only spans a single turn: callers have already
+    // folded it into status/errorMessage by this point.
+    context.lastProviderError = undefined;
+
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     if (resultContextWindow !== undefined) {
       context.lastKnownContextWindow = resultContextWindow;
@@ -2790,6 +2845,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    // Provider/API failures surface as assistant messages: tagged with
+    // `error` (SDKAssistantMessageError), flagged `is_api_error_message`
+    // (synthetic CLI error prose), or — from older CLIs — untagged text
+    // matching a known error pattern. Record them so the turn's result
+    // scores as failed even when it reports subtype "success".
+    const providerErrorTag = message.error;
+    const isApiErrorMessage =
+      (message as { is_api_error_message?: unknown }).is_api_error_message === true;
+    const assistantText = extractAssistantTextBlocks(message).join("\n").trim();
+    const matchesErrorPattern =
+      providerErrorTag === undefined &&
+      !isApiErrorMessage &&
+      matchesClaudeProviderErrorText(assistantText);
+    if (providerErrorTag !== undefined || isApiErrorMessage || matchesErrorPattern) {
+      const tag = providerErrorTag ?? "unknown";
+      const errorText = assistantText.length > 0 ? assistantText : `Claude provider error: ${tag}`;
+      context.lastProviderError = { tag, message: errorText };
+      yield* emitRuntimeError(context, errorText, {
+        errorTag: tag,
+        ...(isApiErrorMessage ? { isApiErrorMessage: true } : {}),
+      });
+      if (isApiErrorMessage) {
+        // Synthetic error prose is not model output: surface it only as the
+        // runtime.error above, never as assistant text.
+        context.lastAssistantUuid = message.uuid;
+        yield* updateResumeCursor(context);
+        return;
+      }
+    }
+
     // Auto-start a synthetic turn for assistant messages that arrive without
     // an active turn (e.g., background agent responses between user prompts).
     if (!context.turnState) {
@@ -2878,8 +2963,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const status = turnStatusFromResult(message);
-    const errorMessage = message.subtype === "success" ? undefined : message.errors[0];
+    const status = turnStatusFromResult(message, {
+      hasProviderError: context.lastProviderError !== undefined,
+    });
+
+    // Failed success-subtype results (api errors) carry their error text in
+    // `result`; error subtypes carry it in `errors`.
+    let errorMessage = message.subtype === "success" ? undefined : message.errors[0];
+    if (status === "failed" && errorMessage === undefined) {
+      const resultText =
+        message.subtype === "success" && typeof message.result === "string"
+          ? message.result.trim()
+          : "";
+      errorMessage =
+        (resultText.length > 0 ? resultText : undefined) ?? context.lastProviderError?.message;
+    }
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -3250,6 +3348,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(message.error ? { error: message.error } : {}),
         },
       });
+      // Escalate auth failures to runtime.error so they reach the work log;
+      // the turn itself only fails when its result carries the failure.
+      if (message.error) {
+        yield* emitRuntimeError(context, `Claude authentication error: ${message.error}`);
+      }
       return;
     }
 
@@ -3261,6 +3364,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           rateLimits: message,
         },
       });
+      const rateLimitInfo = (
+        message as { rate_limit_info?: { status?: string; overageDisabledReason?: string } }
+      ).rate_limit_info;
+      if (rateLimitInfo?.status === "rejected") {
+        const reason = rateLimitInfo.overageDisabledReason;
+        yield* emitRuntimeError(
+          context,
+          `Claude rate limit rejected the request${reason ? ` (${reason})` : ""}.`,
+          rateLimitInfo,
+        );
+      }
       return;
     }
   });
@@ -4003,6 +4117,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
+        lastProviderError: undefined,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
