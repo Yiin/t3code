@@ -66,6 +66,13 @@
 #                              set; sequential mode commits in the real checkouts.
 #                              HEAD movement there counts toward verification and
 #                              gets pushed.
+#   COOKEPIC_ORIENTATION_FILE  path, relative to the repo root, of the
+#                              orientation card injected into every worker
+#                              prompt at dispatch. Default candidates (first
+#                              match wins): docs/agent-orientation.md, then
+#                              AGENTS.md. When neither exists (or the override
+#                              path doesn't), workers get the literal line
+#                              "(no orientation card in this repo)".
 #
 # Stop gracefully: touch <run-dir>/STOP  (stops new dispatches, drains in-flight)
 # Retune live:     echo N > <run-dir>/WORKERS  (worker cap re-read every tick)
@@ -138,6 +145,7 @@ DISABLE_SYSTEMD="${COOKEPIC_DISABLE_SYSTEMD:-0}"
 RATE_LIMIT_BACKOFF="${COOKEPIC_RATE_LIMIT_BACKOFF:-120}"
 NO_PUSH="${COOKEPIC_NO_PUSH:-}"
 SEQUENTIAL="${COOKEPIC_SEQUENTIAL:-0}"
+ORIENTATION_FILE="${COOKEPIC_ORIENTATION_FILE:-}"
 SIBLINGS=()
 for s in ${COOKEPIC_SIBLINGS:-}; do SIBLINGS+=("$s"); done
 if [ "$SEQUENTIAL" = 1 ]; then
@@ -1657,6 +1665,22 @@ render_prompt() { # <child> <worker> <branch> <wt> <offset> <outfile>
       "$TEMPLATE" > "$6"
 }
 
+# render_prompt's sed pass is single-line-only (it substitutes with `s|@X@|...|g`,
+# which breaks on multi-line values and literal `|` characters). Multi-line
+# blocks (epic description, orientation card) splice in as a second pass: a
+# line that is EXACTLY the marker gets replaced by the content file's lines
+# verbatim, with no regex/pipe interpretation of that content.
+splice_marker() { # <file> <marker> <content-file>
+  awk -v marker="$2" -v contentfile="$3" '
+    $0 == marker {
+      while ((getline line < contentfile) > 0) print line
+      close(contentfile)
+      next
+    }
+    { print }
+  ' "$1" > "$1.splice" && mv "$1.splice" "$1"
+}
+
 is_research_child() { # <child> <title> -> 0 when findings-in-beads is the deliverable
   [[ "$2" =~ ^Research: ]] && return 0
   bd label list "$1" 2>/dev/null | grep -qiE '^[[:space:]]*-[[:space:]]*research$'
@@ -1765,8 +1789,37 @@ spawn_worker() { # <child> <title>
     done
     SIBLING_RULE="This child may span sibling repositories. Your sandbox is the whole layout \`$layout\`: it holds your main-repo worktree plus one worktree per sibling at its real relative position — $sib_paths — so relative references like \`${SIB_REL[${SIBLINGS[0]}]}\` resolve from inside your main worktree. Every worktree in the layout is on branch \`$branch\`; commit only on \`$branch\` in whichever repos you touch. In sibling repos commit only and never push them — the coordinator trial-merges every repo you touched as one set, gates once, and lands them together. Never touch the real checkouts ($real_paths) or any other layout under \`$LAYOUT_ROOT\`. Say which repos gained commits in your close-out note."
   fi
+  # Epic context and orientation card are resolved fresh on every dispatch
+  # (the preflight EPIC_JSON goes stale mid-run) and spliced in after
+  # render_prompt, never through its single-line sed pass.
+  local epic_json epic_context ctx_file orientation_path orient_file oc
+  epic_json="$(bd show "$EPIC" --json 2>/dev/null)"
+  epic_context="$(jq -r 'if type=="array" then .[0] else . end | .description // empty' <<< "$epic_json" 2>/dev/null)"
+  [ -n "$epic_context" ] || epic_context='(epic description unavailable)'
+  ctx_file="$RUN_DIR/ctx-$child.md"
+  printf '%s\n' "$epic_context" > "$ctx_file"
+
+  local -a orientation_candidates=()
+  if [ -n "$ORIENTATION_FILE" ]; then
+    orientation_candidates=("$ORIENTATION_FILE")
+  else
+    orientation_candidates=(docs/agent-orientation.md AGENTS.md)
+  fi
+  orientation_path=''
+  for oc in "${orientation_candidates[@]}"; do
+    if [ -f "$wt/$oc" ]; then orientation_path="$wt/$oc"; break; fi
+  done
+  orient_file="$RUN_DIR/orient-$child.md"
+  if [ -n "$orientation_path" ]; then
+    cp "$orientation_path" "$orient_file"
+  else
+    printf '(no orientation card in this repo)\n' > "$orient_file"
+  fi
+
   prompt="$RUN_DIR/prompt-$child.md"
   render_prompt "$child" "$worker" "$branch" "$wt" "$offset" "$prompt"
+  splice_marker "$prompt" '@EPIC_CONTEXT@' "$ctx_file"
+  splice_marker "$prompt" '@ORIENTATION_CARD@' "$orient_file"
   artifact="$RUN_DIR/worker-$child.log"
   bytes="$artifact.bytes"; rate="$artifact.rate-limit"; cost="$artifact.cost"; identity="$RUN_DIR/worker-$worker.owned"
   : > "$artifact"; printf '0\n' > "$bytes"; rm -f "$rate" "$cost" "$identity"

@@ -70,6 +70,7 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                                                                                                            |
    | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                                                                                                             |
    | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                                                                                                         |
+   | "orientation card at docs/foo.md"               | `COOKEPIC_ORIENTATION_FILE` (path relative to repo root)              | `docs/agent-orientation.md`, then `AGENTS.md`, first match wins                                                                               |
 
    `COOKEPIC_NO_PUSH=1` disables every push: the coordinator fast-forwards the
    base branch locally after each gated merge but never pushes it, workers are
@@ -84,6 +85,14 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    `COOKEPIC_NO_PUSH=1` means local-only. Values such as `0`, `true`, or any
    other nonempty value fail preflight. Push mode requires `origin`; add it or
    explicitly set `COOKEPIC_NO_PUSH=1`.
+
+   Every worker prompt gets the epic's Goal + Context & architecture and the
+   orientation card injected verbatim at dispatch time — workers no longer
+   need to `bd show` the epic themselves for orientation. The orientation
+   card is read fresh per dispatch from `docs/agent-orientation.md`, falling
+   back to `AGENTS.md`, or the single path in `COOKEPIC_ORIENTATION_FILE` when
+   set; if none of those exist, workers get the literal line "(no orientation
+   card in this repo)".
 
    `COOKEPIC_WORKERS` is only the starting cap. An operator can widen or
    narrow a LIVE run without restarting it: write a positive integer to
