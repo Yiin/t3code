@@ -76,6 +76,7 @@ import {
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
 } from "@t3tools/contracts/settings";
+import { isTerminalEpicRunStatus } from "../epicRun.logic";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { isElectron } from "../env";
@@ -989,8 +990,9 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
   onOpenRun: (group: SidebarEpicRunGroup<SidebarThreadSummary>) => void;
   handleThreadClick: SidebarProjectThreadListProps["handleThreadClick"];
   navigateToThread: (threadRef: ScopedThreadRef) => void;
+  attemptArchiveThread: SidebarProjectThreadListProps["attemptArchiveThread"];
 }) {
-  const { expanded, group, onOpenRun, onToggle } = props;
+  const { attemptArchiveThread, expanded, group, onOpenRun, onToggle } = props;
   const statusPill = resolveEpicRunStatusPill(group.status);
   const countLabel = epicRunIterationCountLabel(group.iterations.length);
   const rowLabel = epicRunGroupRowLabel(group);
@@ -1018,12 +1020,58 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
     },
     [group, onOpenRun],
   );
+  const stopPropagationOnPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+    },
+    [],
+  );
+  // Archiving the group archives every iteration thread, so the run leaves the
+  // sidebar even when it has no launcher row to tidy away with. Terminal runs
+  // only: a live run must never lose its sidebar presence, and a `null` status
+  // (run read model still loading) is treated as live for the same reason.
+  const archivable = group.status !== null && isTerminalEpicRunStatus(group.status);
+  const [confirmingArchive, setConfirmingArchive] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const clearConfirmingArchive = useCallback(() => setConfirmingArchive(false), []);
+  const handleStartArchiveConfirmation = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfirmingArchive(true);
+    },
+    [],
+  );
+  const handleConfirmArchiveClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfirmingArchive(false);
+      setArchiving(true);
+      void (async () => {
+        // Sequential: each archive may navigate the active route to a draft,
+        // and racing those navigations against each other loses the last one.
+        for (const iteration of group.iterations) {
+          await attemptArchiveThread(
+            scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
+          );
+        }
+        setArchiving(false);
+      })();
+    },
+    [attemptArchiveThread, group.iterations],
+  );
 
   return (
     <>
       {/* Selection-safe: hitting the chevron toggles the group, it must not
           clear a multi-selection. Opening the run clears it explicitly. */}
-      <SidebarMenuSubItem className="w-full" data-epic-run-group-row data-thread-selection-safe>
+      <SidebarMenuSubItem
+        className="w-full"
+        data-epic-run-group-row
+        data-thread-selection-safe
+        onMouseLeave={clearConfirmingArchive}
+      >
         <SidebarMenuSubButton
           render={rowButtonRender}
           size="sm"
@@ -1059,7 +1107,15 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
             <span
               role="status"
               aria-label={statusPill.label}
-              className={`inline-flex shrink-0 items-center gap-1 text-[10px] ${statusPill.colorClass}`}
+              className={`inline-flex shrink-0 items-center gap-1 text-[10px] ${statusPill.colorClass} ${
+                // The archive button overlays the pill's spot, so the pill
+                // yields exactly the way a thread row's meta column does.
+                confirmingArchive
+                  ? "pointer-events-none opacity-0"
+                  : archivable && !archiving
+                    ? "pointer-events-none transition-opacity duration-150 max-sm:pr-6 group-hover/menu-sub-item:opacity-0 group-focus-within/menu-sub-item:opacity-0"
+                    : ""
+              }`}
             >
               <span
                 aria-hidden
@@ -1069,6 +1125,37 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
               />
               {statusPill.label}
             </span>
+          ) : null}
+          {archivable && !archiving ? (
+            confirmingArchive ? (
+              <button
+                type="button"
+                data-thread-selection-safe
+                data-testid={`epic-run-archive-confirm-${group.runId}`}
+                aria-label={`Confirm archive run ${rowLabel.primary}`}
+                className="absolute top-1/2 right-1 inline-flex h-5 -translate-y-1/2 cursor-pointer items-center rounded-md bg-destructive/12 px-2 text-[10px] font-medium text-destructive transition-colors hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-destructive/40"
+                onPointerDown={stopPropagationOnPointerDown}
+                onClick={handleConfirmArchiveClick}
+              >
+                Confirm
+              </button>
+            ) : (
+              /* Always two-step, unlike single-thread archive: one click here
+                 puts away every iteration thread of the run at once. */
+              <div className="pointer-events-none absolute top-1/2 right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/menu-sub-item:pointer-events-auto group-hover/menu-sub-item:opacity-100 group-focus-within/menu-sub-item:pointer-events-auto group-focus-within/menu-sub-item:opacity-100">
+                <button
+                  type="button"
+                  data-thread-selection-safe
+                  data-testid={`epic-run-archive-${group.runId}`}
+                  aria-label={`Archive run ${rowLabel.primary}`}
+                  className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
+                  onPointerDown={stopPropagationOnPointerDown}
+                  onClick={handleStartArchiveConfirmation}
+                >
+                  <ArchiveIcon className="size-3.5" />
+                </button>
+              </div>
+            )
           ) : null}
         </SidebarMenuSubButton>
       </SidebarMenuSubItem>
@@ -1227,6 +1314,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 onOpenRun={props.openEpicRun}
                 handleThreadClick={handleThreadClick}
                 navigateToThread={navigateToThread}
+                attemptArchiveThread={attemptArchiveThread}
               />
             );
           }
