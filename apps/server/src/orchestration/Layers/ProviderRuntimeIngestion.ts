@@ -56,16 +56,33 @@ interface PendingToolUpdate {
   readonly activity: OrchestrationThreadActivity;
 }
 
-// Fallback when the in-memory description cache no longer has the task name
-// (server restart, session-exit sweep, TTL/capacity eviction): earlier
-// task.started/task.progress activities for the task are persisted with it.
-function findTaskTitleInActivities(
+// Value shape of the per-task metadata cache below (keyed by providerTaskKey).
+interface RememberedTaskMetadata {
+  readonly description?: string | undefined;
+  readonly subagentType?: string | undefined;
+}
+
+// Task metadata that arrives on task.started/task.progress but not on the
+// later task.completed/task.updated events, resolved by the dispatch site and
+// threaded into runtimeEventToActivities so those activities stay labeled.
+export interface TaskActivityMetadata {
+  readonly title?: string | undefined;
+  readonly subagentType?: string | undefined;
+}
+
+// Fallback when the in-memory metadata cache no longer has the task name or
+// subagent type (server restart, session-exit sweep, TTL/capacity eviction):
+// earlier task.started/task.progress activities for the task are persisted
+// with them.
+function findTaskMetadataInActivities(
   activities: ReadonlyArray<OrchestrationThreadActivity> | undefined,
   taskId: string,
-): string | undefined {
+): TaskActivityMetadata {
   if (!activities) {
-    return undefined;
+    return {};
   }
+  let title: string | undefined;
+  let subagentType: string | undefined;
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index];
     if (!activity || (activity.kind !== "task.started" && activity.kind !== "task.progress")) {
@@ -73,22 +90,38 @@ function findTaskTitleInActivities(
     }
     const payload =
       activity.payload && typeof activity.payload === "object"
-        ? (activity.payload as { taskId?: unknown; title?: unknown; detail?: unknown })
+        ? (activity.payload as {
+            taskId?: unknown;
+            title?: unknown;
+            detail?: unknown;
+            subagentType?: unknown;
+          })
         : undefined;
     if (payload?.taskId !== taskId) {
       continue;
     }
-    const title =
-      typeof payload.title === "string"
-        ? payload.title
-        : activity.kind === "task.started" && typeof payload.detail === "string"
-          ? payload.detail
-          : undefined;
-    if (title && title.trim().length > 0) {
-      return title;
+    if (title === undefined) {
+      const candidate =
+        typeof payload.title === "string"
+          ? payload.title
+          : activity.kind === "task.started" && typeof payload.detail === "string"
+            ? payload.detail
+            : undefined;
+      if (candidate && candidate.trim().length > 0) {
+        title = candidate;
+      }
+    }
+    if (subagentType === undefined && typeof payload.subagentType === "string") {
+      subagentType = payload.subagentType;
+    }
+    if (title !== undefined && subagentType !== undefined) {
+      break;
     }
   }
-  return undefined;
+  return {
+    ...(title !== undefined ? { title } : {}),
+    ...(subagentType !== undefined ? { subagentType } : {}),
+  };
 }
 
 interface AssistantSegmentState {
@@ -342,7 +375,7 @@ function requestKindFromCanonicalRequestType(
 
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
-  taskTitle?: string,
+  taskContext?: TaskActivityMetadata,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
     const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
@@ -538,6 +571,16 @@ export function runtimeEventToActivities(
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
+            ...(event.payload.subagentType ? { subagentType: event.payload.subagentType } : {}),
+            // toolUseId is the wire correlation id (the spawning
+            // collab_agent_tool_call's Task tool_use id); spawnedByItemId is
+            // the same value under its read-model name
+            // (OrchestrationThreadSubagent.spawnedByItemId) so payload
+            // consumers need no join logic.
+            ...(event.payload.toolUseId
+              ? { toolUseId: event.payload.toolUseId, spawnedByItemId: event.payload.toolUseId }
+              : {}),
+            ...(event.payload.prompt ? { prompt: truncateDetail(event.payload.prompt, 2000) } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -546,9 +589,19 @@ export function runtimeEventToActivities(
     }
 
     case "task.progress": {
+      // A chatty subagent emits hundreds of task.progress events per run. Key
+      // the activity by (threadId, taskId) instead of the per-event eventId so
+      // the projection upserts one row in place, mirroring the tool.updated
+      // coalescing in the "item.updated" case below (same rationale for the
+      // kind-specific prefix: task.started/task.completed keep their own ids,
+      // and a shared key would upsert-overwrite them on the activity_id
+      // primary key). Unlike item.updated there is no dispatch throttle on
+      // top: task.progress arrives at tool-call cadence (roughly one event
+      // per subagent tool use), not at streaming-delta cadence, so one
+      // dispatch per event stays cheap once the row count is fixed.
       return [
         {
-          id: event.eventId,
+          id: EventId.make(`task-progress:${event.threadId}:${event.payload.taskId}`),
           createdAt: event.createdAt,
           tone: "info",
           kind: "task.progress",
@@ -565,6 +618,42 @@ export function runtimeEventToActivities(
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...(event.payload.subagentType ? { subagentType: event.payload.subagentType } : {}),
+            ...(event.payload.toolUseId ? { toolUseId: event.payload.toolUseId } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "task.updated": {
+      const patch = event.payload.patch;
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: patch.status === "failed" ? "error" : "info",
+          kind: "task.updated",
+          summary:
+            patch.isBackgrounded === true
+              ? "Task moved to background"
+              : patch.isBackgrounded === false
+                ? "Task moved to foreground"
+                : patch.status
+                  ? `Task ${patch.status}`
+                  : "Task updated",
+          payload: {
+            taskId: event.payload.taskId,
+            ...(patch.status ? { status: patch.status } : {}),
+            ...(patch.description
+              ? { title: truncateDetail(patch.description, 120) }
+              : taskContext?.title
+                ? { title: truncateDetail(taskContext.title, 120) }
+                : {}),
+            ...(patch.isBackgrounded !== undefined ? { isBackgrounded: patch.isBackgrounded } : {}),
+            ...(patch.error ? { error: truncateDetail(patch.error) } : {}),
+            ...(taskContext?.subagentType ? { subagentType: taskContext.subagentType } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -588,7 +677,8 @@ export function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             status: event.payload.status,
-            ...(taskTitle ? { title: truncateDetail(taskTitle, 120) } : {}),
+            ...(taskContext?.title ? { title: truncateDetail(taskContext.title, 120) } : {}),
+            ...(taskContext?.subagentType ? { subagentType: taskContext.subagentType } : {}),
             // summary + detail mirror task.progress: clients label the row from
             // summary and keep detail for the preview/expanded body.
             ...(event.payload.summary
@@ -598,6 +688,47 @@ export function runtimeEventToActivities(
                 }
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...(event.payload.toolUseId ? { toolUseId: event.payload.toolUseId } : {}),
+            ...(event.payload.outputFile ? { outputFile: event.payload.outputFile } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "tool.progress": {
+      // Long-running tools emit periodic heartbeats. Key the activity by the
+      // owning task (or the tool call itself for top-level tools) so repeated
+      // heartbeats upsert one row instead of appending one per beat -- the
+      // same stable-id pattern as the "item.updated" case below. Fall back to
+      // eventId when the event carries neither id; nothing coalesces there.
+      const heartbeatKey = event.payload.taskId ?? event.payload.toolUseId;
+      return [
+        {
+          id:
+            heartbeatKey !== undefined
+              ? EventId.make(`tool-progress:${event.threadId}:${heartbeatKey}`)
+              : event.eventId,
+          createdAt: event.createdAt,
+          tone: "tool",
+          kind: "tool.progress",
+          summary: event.payload.summary
+            ? truncateDetail(event.payload.summary, 120)
+            : event.payload.toolName
+              ? `${event.payload.toolName} running`
+              : "Tool running",
+          payload: {
+            ...(event.payload.toolUseId ? { toolUseId: event.payload.toolUseId } : {}),
+            ...(event.payload.toolName ? { toolName: event.payload.toolName } : {}),
+            ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
+            ...(event.payload.elapsedSeconds !== undefined
+              ? { elapsedSeconds: event.payload.elapsedSeconds }
+              : {}),
+            ...(event.payload.parentToolUseId
+              ? { parentToolUseId: event.payload.parentToolUseId }
+              : {}),
+            ...(event.payload.taskId ? { taskId: event.payload.taskId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -677,6 +808,13 @@ export function runtimeEventToActivities(
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            // parentToolUseId marks tool calls that ran inside a subagent (it
+            // is the spawning Task tool_use id), letting the UI nest the row
+            // under that task.
+            ...(event.payload.parentToolUseId
+              ? { parentToolUseId: event.payload.parentToolUseId }
+              : {}),
+            ...(event.payload.subagentType ? { subagentType: event.payload.subagentType } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -699,6 +837,10 @@ export function runtimeEventToActivities(
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.parentToolUseId
+              ? { parentToolUseId: event.payload.parentToolUseId }
+              : {}),
+            ...(event.payload.subagentType ? { subagentType: event.payload.subagentType } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -720,6 +862,10 @@ export function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.parentToolUseId
+              ? { parentToolUseId: event.payload.parentToolUseId }
+              : {}),
+            ...(event.payload.subagentType ? { subagentType: event.payload.subagentType } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -778,16 +924,36 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
   });
 
-  // Task names arrive on task.started/task.progress but not on task.completed,
-  // so remember them per task to title the completion activity.
-  const taskDescriptionByTaskKey = yield* Cache.make<string, string>({
+  // Task names and subagent types arrive on task.started/task.progress but
+  // not on task.completed/task.updated, so remember them per task to label
+  // the later activities.
+  const taskMetadataByTaskKey = yield* Cache.make<string, RememberedTaskMetadata>({
     capacity: TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY,
     timeToLive: TASK_DESCRIPTION_BY_TASK_TTL,
-    lookup: () => Effect.succeed(""),
+    lookup: () => Effect.succeed({}),
   });
 
-  const rememberTaskDescription = (threadId: ThreadId, taskId: string, description: string) =>
-    Cache.set(taskDescriptionByTaskKey, providerTaskKey(threadId, taskId), description);
+  // Merges with the remembered entry: a later event that carries only one of
+  // the fields (e.g. a task.progress without subagentType) must not wipe the
+  // other one remembered from task.started.
+  const rememberTaskMetadata = (
+    threadId: ThreadId,
+    taskId: string,
+    metadata: RememberedTaskMetadata,
+  ) =>
+    Cache.getOption(taskMetadataByTaskKey, providerTaskKey(threadId, taskId)).pipe(
+      Effect.flatMap((existing) => {
+        const current = Option.getOrUndefined(existing);
+        return Cache.set(taskMetadataByTaskKey, providerTaskKey(threadId, taskId), {
+          ...((metadata.description ?? current?.description)
+            ? { description: metadata.description ?? current?.description }
+            : {}),
+          ...((metadata.subagentType ?? current?.subagentType)
+            ? { subagentType: metadata.subagentType ?? current?.subagentType }
+            : {}),
+        });
+      }),
+    );
 
   // Coalesced item.updated -> tool.updated activity awaiting dispatch, keyed
   // by toolUpdateThrottleKey(threadId, itemId). Entries live for at most one
@@ -924,11 +1090,9 @@ const make = Effect.gen(function* () {
   // Entries are left in place after completion so replayed or duplicate
   // terminal events stay titled; TTL, capacity, and the session-exit sweep
   // bound the cache.
-  const lookupTaskDescription = (threadId: ThreadId, taskId: string) =>
-    Cache.getOption(taskDescriptionByTaskKey, providerTaskKey(threadId, taskId)).pipe(
-      Effect.map((description) =>
-        Option.filter(description, (value) => value.length > 0).pipe(Option.getOrUndefined),
-      ),
+  const lookupTaskMetadata = (threadId: ThreadId, taskId: string) =>
+    Cache.getOption(taskMetadataByTaskKey, providerTaskKey(threadId, taskId)).pipe(
+      Effect.map(Option.getOrUndefined),
     );
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
@@ -1360,7 +1524,7 @@ const make = Effect.gen(function* () {
       const turnKeys = Array.from(yield* Cache.keys(turnMessageIdsByTurnKey));
       const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
       const proposedPlanKeys = Array.from(yield* Cache.keys(bufferedProposedPlanById));
-      const taskDescriptionKeys = Array.from(yield* Cache.keys(taskDescriptionByTaskKey));
+      const taskMetadataKeys = Array.from(yield* Cache.keys(taskMetadataByTaskKey));
       // Nothing should be left pending here: the processRuntimeEvent
       // accelerator flushes every pending tool.updated for this thread (via
       // flushPendingToolUpdatesForThread) before this function runs. Only the
@@ -1404,9 +1568,9 @@ const make = Effect.gen(function* () {
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
       yield* Effect.forEach(
-        taskDescriptionKeys,
+        taskMetadataKeys,
         (key) =>
-          key.startsWith(prefix) ? Cache.invalidate(taskDescriptionByTaskKey, key) : Effect.void,
+          key.startsWith(prefix) ? Cache.invalidate(taskMetadataByTaskKey, key) : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
       yield* Effect.forEach(
@@ -1981,20 +2145,44 @@ const make = Effect.gen(function* () {
 
       if (event.type === "task.started" || event.type === "task.progress") {
         const description = event.payload.description?.trim();
-        if (description) {
-          yield* rememberTaskDescription(thread.id, event.payload.taskId, description);
+        const subagentType = event.payload.subagentType;
+        if (description || subagentType) {
+          yield* rememberTaskMetadata(thread.id, event.payload.taskId, {
+            ...(description ? { description } : {}),
+            ...(subagentType ? { subagentType } : {}),
+          });
         }
       }
-      let taskTitle: string | undefined;
-      if (event.type === "task.completed") {
-        taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
-        if (!taskTitle) {
+      if (event.type === "task.updated" && event.payload.patch.description) {
+        yield* rememberTaskMetadata(thread.id, event.payload.taskId, {
+          description: event.payload.patch.description.trim(),
+        });
+      }
+      let taskContext: TaskActivityMetadata | undefined;
+      if (event.type === "task.completed" || event.type === "task.updated") {
+        const remembered = yield* lookupTaskMetadata(thread.id, event.payload.taskId);
+        let title = remembered?.description;
+        let subagentType = remembered?.subagentType;
+        // Fall back to persisted activities only when the title is gone: the
+        // cache remembers both fields together, so a present title with an
+        // absent subagentType means the wire never carried one and the
+        // persisted payloads will not have it either.
+        if (!title) {
           const threadDetail = yield* getLoadedThreadDetail();
-          taskTitle = findTaskTitleInActivities(threadDetail?.activities, event.payload.taskId);
+          const persisted = findTaskMetadataInActivities(
+            threadDetail?.activities,
+            event.payload.taskId,
+          );
+          title = persisted.title;
+          subagentType = subagentType ?? persisted.subagentType;
         }
+        taskContext = {
+          ...(title ? { title } : {}),
+          ...(subagentType ? { subagentType } : {}),
+        };
       }
 
-      const activities = runtimeEventToActivities(event, taskTitle);
+      const activities = runtimeEventToActivities(event, taskContext);
       yield* Effect.forEach(activities, (activity) => {
         // Only item.updated's tool.updated activity is throttled -- every
         // other kind (approvals, tool.started/completed, task.*, ...) keeps

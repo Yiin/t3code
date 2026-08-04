@@ -3312,8 +3312,11 @@ describe("ProviderRuntimeIngestion", () => {
     const started = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-started",
     );
+    // task.progress activities coalesce onto a stable per-task id (not the
+    // eventId) so a chatty task upserts one row -- see runtimeEventToActivities.
     const progress = thread.activities.find(
-      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-progress",
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "task-progress:thread-1:turn-task-1",
     );
     const completed = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-completed",
@@ -3397,7 +3400,8 @@ describe("ProviderRuntimeIngestion", () => {
     );
 
     const progress = thread.activities.find(
-      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-named-task-progress",
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "task-progress:thread-1:named-task-1",
     );
     const completed = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-named-task-completed",
@@ -3488,7 +3492,8 @@ describe("ProviderRuntimeIngestion", () => {
 
     await waitForThread(harness.readModel, (entry) =>
       entry.activities.some(
-        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-swept-task-progress",
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "task-progress:thread-1:swept-task-1",
       ),
     );
 
@@ -3532,6 +3537,297 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
 
     expect(completedPayload?.title).toBe("Watch round-3 CI and bots");
+  });
+
+  it("coalesces repeated task.progress events for one task into a single upserted activity row", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-chatty-task-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-chatty-task"),
+      sessionSequence: 1,
+      payload: {
+        taskId: "chatty-task-1",
+        description: "Sweep the repo for dead code",
+      },
+    });
+
+    for (let index = 0; index < 50; index += 1) {
+      harness.emit({
+        type: "task.progress",
+        eventId: asEventId(`evt-chatty-task-progress-${index}`),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-chatty-task"),
+        sessionSequence: 2 + index,
+        payload: {
+          taskId: "chatty-task-1",
+          description: "Sweep the repo for dead code",
+          summary: `Checked ${index + 1} files so far.`,
+        },
+      });
+    }
+
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-chatty-task-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-chatty-task"),
+      sessionSequence: 52,
+      payload: {
+        taskId: "chatty-task-1",
+        status: "completed",
+        summary: "No dead code found.",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-chatty-task-completed",
+      ),
+    );
+
+    const progressRows = thread.activities.filter(
+      (activity: ProviderRuntimeTestActivity) => activity.kind === "task.progress",
+    );
+    expect(progressRows).toHaveLength(1);
+    expect(progressRows[0]?.id).toBe("task-progress:thread-1:chatty-task-1");
+    const progressPayload = progressRows[0]?.payload as Record<string, unknown>;
+    // The upsert replaced the row in place: the payload reflects the last event.
+    expect(progressPayload?.summary).toBe("Checked 50 files so far.");
+
+    // Sequence still tracks the latest event, keeping the coalesced row
+    // ordered after task.started and before task.completed.
+    const orderedIds = thread.activities
+      .filter((activity: ProviderRuntimeTestActivity) =>
+        [
+          "evt-chatty-task-started",
+          "task-progress:thread-1:chatty-task-1",
+          "evt-chatty-task-completed",
+        ].includes(activity.id),
+      )
+      .map((activity: ProviderRuntimeTestActivity) => activity.id);
+    expect(orderedIds).toEqual([
+      "evt-chatty-task-started",
+      "task-progress:thread-1:chatty-task-1",
+      "evt-chatty-task-completed",
+    ]);
+    expect(progressRows[0]?.sequence).toBe(51);
+  });
+
+  it("carries subagent linkage fields through task activity payloads", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-subagent-task-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-subagent-task"),
+      payload: {
+        taskId: "subagent-task-1",
+        description: "Explore the persistence layer",
+        subagentType: "Explore",
+        toolUseId: "toolu-task-spawn-1",
+        prompt: "Find every projection table and report its writer.",
+      },
+    });
+
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-subagent-task-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-subagent-task"),
+      payload: {
+        taskId: "subagent-task-1",
+        status: "completed",
+        summary: "Report written.",
+        toolUseId: "toolu-task-spawn-1",
+        outputFile: "/tmp/subagent-report.md",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-task-completed",
+      ),
+    );
+
+    const started = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-task-started",
+    );
+    expect(started?.payload).toMatchObject({
+      taskId: "subagent-task-1",
+      subagentType: "Explore",
+      toolUseId: "toolu-task-spawn-1",
+      // spawnedByItemId mirrors toolUseId under its read-model name.
+      spawnedByItemId: "toolu-task-spawn-1",
+      prompt: "Find every projection table and report its writer.",
+    });
+
+    const completed = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-task-completed",
+    );
+    expect(completed?.payload).toMatchObject({
+      taskId: "subagent-task-1",
+      toolUseId: "toolu-task-spawn-1",
+      outputFile: "/tmp/subagent-report.md",
+      // subagentType is absent from the task.completed wire payload; it is
+      // remembered from task.started.
+      subagentType: "Explore",
+    });
+  });
+
+  it("projects task.updated runtime events into task.updated activities", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-bg-task-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-bg-task"),
+      payload: {
+        taskId: "bg-task-1",
+        description: "Watch the release pipeline",
+        subagentType: "general-purpose",
+      },
+    });
+
+    harness.emit({
+      type: "task.updated",
+      eventId: asEventId("evt-bg-task-updated"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-bg-task"),
+      payload: {
+        taskId: "bg-task-1",
+        patch: {
+          status: "running",
+          isBackgrounded: true,
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "task.updated",
+      ),
+    );
+
+    const updated = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-bg-task-updated",
+    );
+    expect(updated?.kind).toBe("task.updated");
+    expect(updated?.summary).toBe("Task moved to background");
+    expect(updated?.payload).toMatchObject({
+      taskId: "bg-task-1",
+      status: "running",
+      isBackgrounded: true,
+      title: "Watch the release pipeline",
+      subagentType: "general-purpose",
+    });
+  });
+
+  it("upserts repeated tool.progress heartbeats for one task into a single activity row", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    for (let index = 0; index < 5; index += 1) {
+      harness.emit({
+        type: "tool.progress",
+        eventId: asEventId(`evt-heartbeat-${index}`),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-heartbeat"),
+        payload: {
+          taskId: "heartbeat-task-1",
+          toolUseId: `toolu-inner-${index}`,
+          toolName: "Bash",
+          summary: `Still running (${index + 1}0s)`,
+          elapsedSeconds: (index + 1) * 10,
+          parentToolUseId: "toolu-task-spawn-1",
+        },
+      });
+    }
+
+    // Wait for the LAST heartbeat to land so the row-count assertion below
+    // sees all five events applied, not a prefix.
+    const settled = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.kind === "tool.progress" &&
+          (activity.payload as Record<string, unknown> | undefined)?.elapsedSeconds === 50,
+      ),
+    );
+
+    const heartbeats = settled.activities.filter(
+      (activity: ProviderRuntimeTestActivity) => activity.kind === "tool.progress",
+    );
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]?.id).toBe("tool-progress:thread-1:heartbeat-task-1");
+    expect(heartbeats[0]?.payload).toMatchObject({
+      taskId: "heartbeat-task-1",
+      toolName: "Bash",
+      elapsedSeconds: 50,
+      parentToolUseId: "toolu-task-spawn-1",
+    });
+  });
+
+  it("persists parentToolUseId on subagent-attributed item lifecycle activities", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "item.updated",
+      eventId: asEventId("evt-subagent-item-updated"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-subagent-item"),
+      itemId: asItemId("item-subagent-tool"),
+      payload: {
+        itemType: "command_execution",
+        status: "in_progress",
+        title: "Run tests",
+        detail: "bun test",
+        parentToolUseId: "toolu-task-spawn-1",
+        subagentType: "Explore",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "tool-updated:thread-1:item-subagent-tool",
+      ),
+    );
+
+    const toolUpdate = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "tool-updated:thread-1:item-subagent-tool",
+    );
+    expect(toolUpdate?.payload).toMatchObject({
+      itemType: "command_execution",
+      parentToolUseId: "toolu-task-spawn-1",
+      subagentType: "Explore",
+    });
   });
 
   it("projects structured user input request and resolution as thread activities", async () => {
