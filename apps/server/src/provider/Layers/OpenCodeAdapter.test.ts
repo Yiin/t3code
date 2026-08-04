@@ -1150,6 +1150,148 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("emits task.started with description/agent/prompt for a subtask part", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-subtask-started");
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            part: {
+              id: "subtask-1",
+              sessionID: "http://127.0.0.1:9999/session",
+              messageID: "msg-subtask-1",
+              type: "subtask",
+              prompt: "Survey the repo for entry points",
+              description: "Survey subtask",
+              agent: "Explore",
+            },
+            time: 1,
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const started = events[0];
+      NodeAssert.equal(started?.type, "task.started");
+      if (started?.type === "task.started") {
+        NodeAssert.equal(started.payload.taskId, "subtask-1");
+        NodeAssert.equal(started.payload.description, "Survey subtask");
+        NodeAssert.equal(started.payload.subagentType, "Explore");
+        NodeAssert.equal(started.payload.prompt, "Survey the repo for entry points");
+      }
+    }),
+  );
+
+  it.effect(
+    "emits task.completed with the subtask's taskId once the corresponding tool part reaches a terminal state",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-subtask-completed");
+        runtimeMock.state.subscribedEvents = [
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "http://127.0.0.1:9999/session",
+              part: {
+                id: "subtask-2",
+                sessionID: "http://127.0.0.1:9999/session",
+                messageID: "msg-subtask-2",
+                type: "subtask",
+                prompt: "Investigate the failing test",
+                description: "Investigate subtask",
+                agent: "general",
+              },
+              time: 1,
+            },
+          },
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "http://127.0.0.1:9999/session",
+              part: {
+                id: "tool-2",
+                sessionID: "http://127.0.0.1:9999/session",
+                messageID: "msg-subtask-2",
+                type: "tool",
+                callID: "call-2",
+                tool: "task",
+                state: {
+                  status: "pending",
+                  input: {},
+                  raw: "",
+                },
+              },
+              time: 2,
+            },
+          },
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "http://127.0.0.1:9999/session",
+              part: {
+                id: "tool-2",
+                sessionID: "http://127.0.0.1:9999/session",
+                messageID: "msg-subtask-2",
+                type: "tool",
+                callID: "call-2",
+                tool: "task",
+                state: {
+                  status: "completed",
+                  input: {},
+                  output: "Subtask finished successfully.",
+                  title: "task",
+                  metadata: {},
+                  time: { start: 1, end: 2 },
+                },
+              },
+              time: 3,
+            },
+          },
+        ];
+
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.filter((event) => event.type === "task.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        const completedTask = events[0];
+        NodeAssert.equal(completedTask?.type, "task.completed");
+        if (completedTask?.type === "task.completed") {
+          NodeAssert.equal(completedTask.payload.taskId, "subtask-2");
+          NodeAssert.equal(completedTask.payload.status, "completed");
+          NodeAssert.equal(completedTask.payload.summary, "Subtask finished successfully.");
+        }
+      }),
+  );
+
   it.effect("lets OpenCode own session title generation and emits title metadata updates", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

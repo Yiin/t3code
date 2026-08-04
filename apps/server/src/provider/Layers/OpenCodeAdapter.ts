@@ -7,6 +7,7 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ThreadId,
   type ToolLifecycleItemType,
   TurnId,
@@ -203,6 +204,28 @@ interface OpenCodeSessionContext {
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
+  /**
+   * Idempotency guard: `message.part.updated` can redeliver the same
+   * `SubtaskPart` id, and a `task.started` must be emitted at most once per
+   * subtask.
+   */
+  readonly subtaskTaskIdsStarted: Set<string>;
+  /**
+   * OpenCode's wire types give a `SubtaskPart` no FK to the `ToolPart` that
+   * carries its terminal status — the SDK's `SubtaskPart` shape is static
+   * metadata (prompt/description/agent/model) with no `state`. Per the
+   * t3code-09a.8 research capture, SubtaskPart is not even observed in the
+   * live task-tool flow today (OpenCode 1.18.9 routes subtasks through a
+   * plain `ToolPart` named "task", already handled by
+   * {@link toToolLifecycleItemType}); this map exists for forward
+   * compatibility with servers that do emit it. Best-effort heuristic: the
+   * first `ToolPart` in the SAME message to reach a terminal state after a
+   * subtask started resolves that subtask's `task.completed`. This can
+   * misfire when a message holds more than one subtask, or an unrelated
+   * tool call in the same message finishes first — no stronger correlation
+   * key exists on the wire.
+   */
+  readonly pendingSubtaskTaskIdByMessageId: Map<string, string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
@@ -884,6 +907,30 @@ export function makeOpenCodeAdapter(
             yield* emitAssistantTextDelta(context, part, turnId, event);
           }
 
+          // AgentPart ({type:"agent", name}) is an inline @-agent mention in
+          // message text, not a task lifecycle signal: OpenCode attaches no
+          // status/state to it, so there is nothing to bridge to a task.*
+          // event. No branch needed for it.
+
+          if (part.type === "subtask" && !context.subtaskTaskIdsStarted.has(part.id)) {
+            context.subtaskTaskIdsStarted.add(part.id);
+            context.pendingSubtaskTaskIdByMessageId.set(part.messageID, part.id);
+            yield* emit({
+              ...(yield* buildEventBase({
+                threadId: context.session.threadId,
+                turnId,
+                raw: event,
+              })),
+              type: "task.started",
+              payload: {
+                taskId: RuntimeTaskId.make(part.id),
+                description: part.description,
+                subagentType: part.agent,
+                prompt: part.prompt,
+              },
+            });
+          }
+
           if (part.type === "tool") {
             const itemType = toToolLifecycleItemType(part.tool);
             const title =
@@ -921,6 +968,32 @@ export function makeOpenCodeAdapter(
             };
             appendTurnItem(context, turnId, part);
             yield* emit(runtimeEvent);
+
+            // See `pendingSubtaskTaskIdByMessageId` doc comment: bridge a
+            // subtask's completion off the corresponding tool part's
+            // terminal state, since OpenCode's event stream does not (yet)
+            // deliver a dedicated completion signal for SubtaskPart itself.
+            if (part.state.status === "completed" || part.state.status === "error") {
+              const pendingTaskId = context.pendingSubtaskTaskIdByMessageId.get(part.messageID);
+              if (pendingTaskId !== undefined) {
+                context.pendingSubtaskTaskIdByMessageId.delete(part.messageID);
+                const summary = trimText(detail);
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId,
+                    createdAt: toolStateCreatedAt(part),
+                    raw: event,
+                  })),
+                  type: "task.completed",
+                  payload: {
+                    taskId: RuntimeTaskId.make(pendingTaskId),
+                    status: part.state.status === "completed" ? "completed" : "failed",
+                    ...(summary ? { summary } : {}),
+                  },
+                });
+              }
+            }
           }
           break;
         }
@@ -1380,6 +1453,8 @@ export function makeOpenCodeAdapter(
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
           completedAssistantPartIds: new Set(),
+          subtaskTaskIdsStarted: new Set(),
+          pendingSubtaskTaskIdByMessageId: new Map(),
           turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
