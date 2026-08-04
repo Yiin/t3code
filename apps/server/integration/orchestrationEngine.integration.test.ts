@@ -25,6 +25,11 @@ import * as Schema from "effect/Schema";
 
 import type { TestTurnResponse } from "./TestProviderAdapter.integration.ts";
 import {
+  claudeParallelSubagentsTurnFixture,
+  claudeSubagentFailedTurnFixture,
+  claudeSubagentTurnFixture,
+} from "./fixtures/providerRuntime.ts";
+import {
   gitRefExists,
   gitShowFileAtRef,
   makeOrchestrationIntegrationHarness,
@@ -1435,6 +1440,228 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           false,
         );
         assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+      }),
+    CLAUDE_AGENT_PROVIDER,
+  ),
+);
+
+const activityPayload = (activity: { readonly payload: unknown } | undefined) =>
+  typeof activity?.payload === "object" && activity.payload !== null
+    ? (activity.payload as Record<string, unknown>)
+    : {};
+
+const CLAUDE_MODEL_SELECTION: ModelSelection = {
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  model: "claude-sonnet-4-6",
+};
+
+it.live("projects a completed claude subagent onto thread.subagents with coalesced progress", () =>
+  withHarness(
+    (harness) =>
+      Effect.gen(function* () {
+        yield* seedProjectAndThread(harness);
+
+        yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+          events: claudeSubagentTurnFixture,
+        });
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-subagent",
+          messageId: "msg-user-subagent",
+          text: "Explore the auth module with a subagent",
+          modelSelection: CLAUDE_MODEL_SELECTION,
+        });
+
+        const thread = yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) =>
+            entry.session?.status === "ready" &&
+            entry.subagents.some(
+              (subagent) =>
+                subagent.subagentId === "task-subagent-explore" && subagent.status === "completed",
+            ),
+        );
+
+        assert.equal(thread.subagents.length, 1);
+        const subagent = thread.subagents[0]!;
+        assert.equal(subagent.subagentId, "task-subagent-explore");
+        assert.equal(subagent.turnId, "turn-1");
+        assert.equal(subagent.agentType, "Explore");
+        assert.equal(subagent.description, "Explore the auth module");
+        assert.equal(subagent.spawnedByItemId, "toolu-spawn-explore");
+        assert.equal(subagent.status, "completed");
+        assert.equal(
+          subagent.lastProgressSummary,
+          "Explored the auth module and mapped the login flow.",
+        );
+        assert.equal(subagent.lastToolName, "Grep");
+        assert.deepEqual(subagent.usage, { inputTokens: 300, outputTokens: 80 });
+        assert.equal(subagent.startedAt, "2026-02-24T11:00:00.100Z");
+        assert.equal(subagent.completedAt, "2026-02-24T11:00:00.500Z");
+
+        const startedActivities = thread.activities.filter(
+          (activity) => activity.kind === "task.started",
+        );
+        assert.equal(startedActivities.length, 1);
+        const startedPayload = activityPayload(startedActivities[0]);
+        assert.equal(startedPayload.taskId, "task-subagent-explore");
+        assert.equal(startedPayload.subagentType, "Explore");
+        assert.equal(startedPayload.toolUseId, "toolu-spawn-explore");
+        assert.equal(startedPayload.spawnedByItemId, "toolu-spawn-explore");
+
+        // Two task.progress events must coalesce into one persisted activity
+        // row (stable task-progress:<threadId>:<taskId> id) holding the
+        // latest progress payload.
+        const progressActivities = thread.activities.filter(
+          (activity) => activity.kind === "task.progress",
+        );
+        assert.equal(progressActivities.length, 1);
+        const progressPayload = activityPayload(progressActivities[0]);
+        assert.equal(progressPayload.taskId, "task-subagent-explore");
+        assert.equal(progressPayload.summary, "Tracing the login flow");
+        assert.equal(progressPayload.lastToolName, "Grep");
+
+        const completedActivities = thread.activities.filter(
+          (activity) => activity.kind === "task.completed",
+        );
+        assert.equal(completedActivities.length, 1);
+        assert.equal(completedActivities[0]?.tone, "info");
+        const completedPayload = activityPayload(completedActivities[0]);
+        assert.equal(completedPayload.taskId, "task-subagent-explore");
+        assert.equal(completedPayload.status, "completed");
+        assert.equal(
+          completedPayload.summary,
+          "Explored the auth module and mapped the login flow.",
+        );
+      }),
+    CLAUDE_AGENT_PROVIDER,
+  ),
+);
+
+it.live("projects a failed claude subagent with failed status and error-toned activity", () =>
+  withHarness(
+    (harness) =>
+      Effect.gen(function* () {
+        yield* seedProjectAndThread(harness);
+
+        yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+          events: claudeSubagentFailedTurnFixture,
+        });
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-subagent-failed",
+          messageId: "msg-user-subagent-failed",
+          text: "Migrate the settings schema with a subagent",
+          modelSelection: CLAUDE_MODEL_SELECTION,
+        });
+
+        const thread = yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) =>
+            entry.session?.status === "ready" &&
+            entry.subagents.some(
+              (subagent) =>
+                subagent.subagentId === "task-subagent-migrate" && subagent.status === "failed",
+            ),
+        );
+
+        assert.equal(thread.subagents.length, 1);
+        const subagent = thread.subagents[0]!;
+        assert.equal(subagent.subagentId, "task-subagent-migrate");
+        assert.equal(subagent.agentType, "general-purpose");
+        assert.equal(subagent.description, "Migrate the settings schema");
+        assert.equal(subagent.spawnedByItemId, "toolu-spawn-migrate");
+        assert.equal(subagent.status, "failed");
+        assert.equal(subagent.lastProgressSummary, "Migration script crashed before finishing.");
+        assert.equal(subagent.completedAt, "2026-02-24T11:01:00.300Z");
+
+        const completedActivity = thread.activities.find(
+          (activity) => activity.kind === "task.completed",
+        );
+        assert.equal(completedActivity?.tone, "error");
+        assert.equal(completedActivity?.summary, "Task failed");
+        const completedPayload = activityPayload(completedActivity);
+        assert.equal(completedPayload.status, "failed");
+        assert.equal(completedPayload.summary, "Migration script crashed before finishing.");
+      }),
+    CLAUDE_AGENT_PROVIDER,
+  ),
+);
+
+it.live("keeps parallel claude subagents distinct across interleaved progress", () =>
+  withHarness(
+    (harness) =>
+      Effect.gen(function* () {
+        yield* seedProjectAndThread(harness);
+
+        yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+          events: claudeParallelSubagentsTurnFixture,
+        });
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-subagents-parallel",
+          messageId: "msg-user-subagents-parallel",
+          text: "Audit the server and web with two subagents",
+          modelSelection: CLAUDE_MODEL_SELECTION,
+        });
+
+        const thread = yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) =>
+            entry.session?.status === "ready" &&
+            entry.subagents.filter((subagent) => subagent.status === "completed").length === 2,
+        );
+
+        assert.equal(thread.subagents.length, 2);
+        const subagentA = thread.subagents.find(
+          (subagent) => subagent.subagentId === "task-parallel-a",
+        );
+        const subagentB = thread.subagents.find(
+          (subagent) => subagent.subagentId === "task-parallel-b",
+        );
+
+        assert.equal(subagentA?.agentType, "Explore");
+        assert.equal(subagentA?.description, "Audit server routes");
+        assert.equal(subagentA?.spawnedByItemId, "toolu-spawn-a");
+        assert.equal(subagentA?.status, "completed");
+        assert.equal(subagentA?.lastProgressSummary, "Server routes audited.");
+        assert.equal(subagentA?.lastToolName, "Grep");
+        assert.equal(subagentA?.completedAt, "2026-02-24T11:02:00.500Z");
+
+        assert.equal(subagentB?.agentType, "general-purpose");
+        assert.equal(subagentB?.description, "Audit web components");
+        assert.equal(subagentB?.spawnedByItemId, "toolu-spawn-b");
+        assert.equal(subagentB?.status, "completed");
+        assert.equal(subagentB?.lastProgressSummary, "Web components audited.");
+        assert.equal(subagentB?.lastToolName, "Glob");
+        assert.equal(subagentB?.completedAt, "2026-02-24T11:02:00.400Z");
+
+        // One coalesced task.progress row per task: interleaved progress from
+        // two tasks must not collapse into a single row or cross-contaminate.
+        const progressActivities = thread.activities.filter(
+          (activity) => activity.kind === "task.progress",
+        );
+        assert.equal(progressActivities.length, 2);
+        const progressByTask = new Map(
+          progressActivities.map((activity) => {
+            const payload = activityPayload(activity);
+            return [payload.taskId, payload] as const;
+          }),
+        );
+        assert.equal(
+          progressByTask.get("task-parallel-a")?.summary,
+          "Cross-checking route handlers",
+        );
+        assert.equal(progressByTask.get("task-parallel-b")?.summary, "Listing component files");
+
+        const startedActivities = thread.activities.filter(
+          (activity) => activity.kind === "task.started",
+        );
+        assert.equal(startedActivities.length, 2);
+        const completedActivities = thread.activities.filter(
+          (activity) => activity.kind === "task.completed",
+        );
+        assert.equal(completedActivities.length, 2);
       }),
     CLAUDE_AGENT_PROVIDER,
   ),
