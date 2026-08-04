@@ -905,7 +905,7 @@ fi
 # ---------------------------------------------------------------- state ----
 declare -A PID2CHILD=() PID2BRANCH=() PID2WORKER=() PID2WT=() PID2ARTIFACT=() PID2OUTPUT_BYTES=() PID2RATE_LIMIT=() PID2COST=()
 declare -A PID2STOP_REASON=()
-declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=() PERM_DENIALS=()
+declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=() PERM_DENIALS=() CHILD_ORIENTATION=()
 declare -A PRE_HEAD=() PRE_SIB_HEAD=() FIRST_SIG=() FIRST_HEAD=() FIRST_SIB_HEAD=() FIRST_UNTRACKED=() # sequential verification
 declare -A LIVE_STARTED=() LIVE_LAST_PROGRESS=() LIVE_OUTPUT_SIZE=() LIVE_CPU=() LIVE_IO=() LIVE_TREE=()
 declare -A LIVE_NEXT_INSPECT=() LIVE_NEXT_REPO_PROBE=() LIVE_GENERATION=() LIVE_CGROUP=()
@@ -1850,6 +1850,56 @@ extract_cost() { # <artifact> <streamed cost path> -> prints cost or empty
     | tail -n 1 | sed -E 's/.*:[[:space:]]*//' || true
 }
 
+# claude/ccx only: resolve the worker's transcript from its session_id and
+# derive time/tools/tokens spent before its first Edit|Write|MultiEdit|
+# NotebookEdit call. Any other harness, or a missing/unreadable transcript,
+# prints the JSON literal null so reap_worker never breaks on it.
+orientation_metrics() { # <artifact> -> prints one compact JSON object or null
+  local artifact="$1" sid transcript f result
+  [ "$COST_SUPPORTED" -eq 1 ] || { echo null; return 0; }
+  sid=$(grep -aoE '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$artifact" 2>/dev/null \
+    | tail -n 1 | sed -E 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"/\1/')
+  [ -n "$sid" ] || { echo null; return 0; }
+  transcript=''
+  for f in "$HOME"/.claude/projects/*/"$sid.jsonl"; do
+    [ -e "$f" ] && transcript="$f"
+  done
+  [ -n "$transcript" ] || { echo null; return 0; }
+  result=$(jq -sc '
+    def cleants: sub("\\.[0-9]+Z$"; "Z");
+    [.[] | select(.type == "assistant" and (.timestamp != null))] as $a
+    | ($a | to_entries
+        | map(select(.value.message.content[]?
+            | .type == "tool_use"
+              and (.name as $n | ["Edit","Write","MultiEdit","NotebookEdit"] | index($n) != null)))
+        | first) as $edit
+    | if ($a | length) == 0 or $edit == null then
+        {secondsToFirstEdit: null, toolCallsBeforeFirstEdit: null, tokensBeforeFirstEdit: null}
+      else
+        ($a[0:$edit.key]) as $before
+        | {
+            secondsToFirstEdit: (($edit.value.timestamp | cleants | fromdateiso8601)
+              - ($a[0].timestamp | cleants | fromdateiso8601)),
+            toolCallsBeforeFirstEdit: ([$before[].message.content[]? | select(.type == "tool_use")] | length),
+            tokensBeforeFirstEdit: ([$before[].message.usage
+              | (.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.output_tokens // 0)] | add // 0)
+          }
+      end
+  ' "$transcript" 2>/dev/null)
+  [ -n "$result" ] && printf '%s\n' "$result" || echo null
+}
+
+append_orientation_summary() { # <child> <orientation-json-or-null>
+  local child="$1" o="$2" secs calls toks
+  [ -n "$o" ] && [ "$o" != null ] || return 0
+  secs=$(jq -r '.secondsToFirstEdit // empty' <<<"$o" 2>/dev/null)
+  calls=$(jq -r '.toolCallsBeforeFirstEdit // empty' <<<"$o" 2>/dev/null)
+  toks=$(jq -r '.tokensBeforeFirstEdit // empty' <<<"$o" 2>/dev/null)
+  [ -n "$secs" ] && [ -n "$calls" ] && [ -n "$toks" ] || return 0
+  printf -- '- %s orientation: %ss to first edit, %s tool calls, %s tokens before first edit\n' \
+    "$child" "$secs" "$calls" "$toks" >> "$SUMMARY"
+}
+
 cleanup_worktree() { # <wt> — only coordinator-owned run-scoped paths are removable
   [ "$1" = "$REPO" ] && return 0  # sequential mode: the "worktree" IS the main checkout
   local wt="$1" layout s swt failed=0
@@ -2081,9 +2131,10 @@ reap_worker() { # <pid> <rc>
   unset "PID2STOP_REASON[$pid]"
   unset "INFLIGHT[$child]"
 
-  local cost status commits title
+  local cost status commits title orientation
   cost=$(extract_cost "$artifact" "$cost_path")
   [ -n "$cost" ] && TOTAL_COST=$(jq -cn --argjson t "$TOTAL_COST" --argjson c "$cost" '$t + $c')
+  orientation=$(orientation_metrics "$artifact")
   status=$(bd show "$child" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .status // "?"')
   commits=$(git rev-list --count "$BASE_BRANCH..$branch" 2>/dev/null || echo 0)
   title=$(bd show "$child" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .title // ""')
@@ -2115,7 +2166,7 @@ reap_worker() { # <pid> <rc>
   # Sequential mode has its own verification: commits are already on the base
   # branch in the main checkout, so "landing" means gate + push, not a merge.
   if [ "$SEQUENTIAL" = 1 ]; then
-    reap_sequential "$child" "$worker" "$rc" "$status" "$title" "$stopped_reason" "$perm_denied"
+    reap_sequential "$child" "$worker" "$rc" "$status" "$title" "$stopped_reason" "$perm_denied" "$orientation"
     return
   fi
 
@@ -2141,8 +2192,8 @@ reap_worker() { # <pid> <rc>
     fi
     if [ "$total_commits" -eq 0 ]; then
       mbox --arg child "$child" --arg worker "$worker" --argjson comments "$now_comments" \
-        --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
-        '{event:"researched",child:$child,worker:$worker,comments:$comments,cost:$cost,ts:$ts}'
+        --argjson cost "${cost:-null}" --argjson orientation "$orientation" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"researched",child:$child,worker:$worker,comments:$comments,cost:$cost,orientation:$orientation,ts:$ts}'
       say "$child researched on $worker (findings in beads, no code) — nothing to merge"
       RESEARCHED=$((RESEARCHED + 1))
       cleanup_worktree "$wt"
@@ -2160,8 +2211,8 @@ reap_worker() { # <pid> <rc>
     nc_comments=$(comment_count_of "$child")
     if [ "$nc_comments" -gt "${PRECOMMENTS[$child]:-0}" ]; then
       mbox --arg child "$child" --arg worker "$worker" --argjson comments "$nc_comments" \
-        --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
-        '{event:"completed-no-code",child:$child,worker:$worker,comments:$comments,cost:$cost,ts:$ts}'
+        --argjson cost "${cost:-null}" --argjson orientation "$orientation" --arg ts "$(date +%H:%M:%S)" \
+        '{event:"completed-no-code",child:$child,worker:$worker,comments:$comments,cost:$cost,orientation:$orientation,ts:$ts}'
       say "$child completed on $worker with no new commits (evidence in bead comment) — nothing to merge"
       MERGED=$((MERGED + 1))
       cleanup_worktree "$wt"
@@ -2181,8 +2232,10 @@ reap_worker() { # <pid> <rc>
       done
     fi
     mbox --arg child "$child" --arg worker "$worker" --arg branch "$branch" \
-      --arg summary "$summary" --argjson commits "$total_commits" --argjson cost "${cost:-null}" --arg ts "$(date +%H:%M:%S)" \
-      '{event:"done",child:$child,worker:$worker,branch:$branch,summary:$summary,commits:$commits,cost:$cost,ts:$ts}'
+      --arg summary "$summary" --argjson commits "$total_commits" --argjson cost "${cost:-null}" \
+      --argjson orientation "$orientation" --arg ts "$(date +%H:%M:%S)" \
+      '{event:"done",child:$child,worker:$worker,branch:$branch,summary:$summary,commits:$commits,cost:$cost,orientation:$orientation,ts:$ts}'
+    CHILD_ORIENTATION[$child]="$orientation"
     say "$child done on $worker ($total_commits commits) — queued for merge"
     if [[ "$title" =~ ^Merge\ fix:\ land\ ([^ ]+) ]]; then
       # A repaired branch: re-enqueue the ORIGINAL child's merge.
@@ -2216,8 +2269,8 @@ reap_worker() { # <pid> <rc>
 # tree clean, and the tree moved since dispatch (or since the child's first
 # dispatch, which covers crash-before-close retries that only needed to close)
 # — then run the integration gate and push whatever moved.
-reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason> <perm-denied>
-  local child="$1" worker="$2" rc="$3" status="$4" title="$5" stopped_reason="${6:-}" perm_denied="${7:-0}"
+reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason> <perm-denied> <orientation>
+  local child="$1" worker="$2" rc="$3" status="$4" title="$5" stopped_reason="${6:-}" perm_denied="${7:-0}" orientation="${8:-null}"
   local commits=0 dirty=0 s head summary now_comments reason effects landing
   # While a sequential worker owns the checkout its commits are indistinguishable
   # from an external writer. Accept its ending HEAD, then detect any movement
@@ -2315,9 +2368,11 @@ reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason> <perm
     [ "$PUSH_ENABLED" -eq 1 ] && landing='gated, pushed, landed'
     [ "$PUSH_ENABLED" -eq 1 ] && [ "$VERIFIED" -eq 0 ] && landing='pushed, landed unverified'
     mbox --arg child "$child" --arg worker "$worker" --arg branch "$BASE_BRANCH" \
-      --arg summary "$summary" --argjson commits "$commits" --argjson repos "$effects" --arg ts "$(date +%H:%M:%S)" \
-      '{event:"done",child:$child,worker:$worker,branch:$branch,summary:$summary,commits:$commits,repositories:$repos,ts:$ts}'
+      --arg summary "$summary" --argjson commits "$commits" --argjson repos "$effects" \
+      --argjson orientation "$orientation" --arg ts "$(date +%H:%M:%S)" \
+      '{event:"done",child:$child,worker:$worker,branch:$branch,summary:$summary,commits:$commits,repositories:$repos,orientation:$orientation,ts:$ts}'
     printf -- '- %s %s on `%s` (%s)\n' "$child" "$landing" "$BASE_BRANCH" "$head" >> "$SUMMARY"
+    append_orientation_summary "$child" "$orientation"
     MERGED=$((MERGED + 1))
     say "$child done on $worker ($commits commits) — $landing on $BASE_BRANCH ($head)"
     return
@@ -2567,6 +2622,7 @@ process_merges() {
       --argjson repos "$repos_json" --arg ts "$(date +%H:%M:%S)" \
       '{event:"merged",child:$child,branch:$branch,commit:$commit,landing:$landing,repositories:$repos,ts:$ts}'
     printf -- '- %s %s via `%s` (%s)\n' "$child" "$merge_landing" "$branch" "$merge_commit" >> "$SUMMARY"
+    append_orientation_summary "$child" "${CHILD_ORIENTATION[$child]:-null}"
     say "$merge_landing $branch ($child) into $BASE_BRANCH ($merge_commit)"
     delete_branch_everywhere "$branch"
     [ "$PUSH_ENABLED" -eq 1 ] && push_repo "$REPO" origin --delete "$branch" >>"$LOG" 2>&1 || true
