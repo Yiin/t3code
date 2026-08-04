@@ -38,6 +38,7 @@ import {
   sidebarTraversalThreadIds,
   sortThreadsForSidebarV2,
   sortProjectsForSidebar,
+  threadStatusPillText,
   sortScopedProjectsForSidebar,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
 } from "./Sidebar.logic";
@@ -728,6 +729,23 @@ describe("resolveSidebarV2Status", () => {
 
   it("defaults to ready with no session", () => {
     expect(resolveSidebarV2Status({ ...idle, session: null })).toBe("ready");
+  });
+
+  it("reports subagents only when the parent is idle with active children", () => {
+    expect(resolveSidebarV2Status({ ...idle, session: null, activeSubagentCount: 2 })).toBe(
+      "subagents",
+    );
+    expect(resolveSidebarV2Status({ ...idle, session, activeSubagentCount: 2 })).toBe("working");
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        session: { ...session, status: "error" as const, lastError: "boom" },
+        activeSubagentCount: 2,
+      }),
+    ).toBe("failed");
+    expect(resolveSidebarV2Status({ ...idle, session: null, activeSubagentCount: 0 })).toBe(
+      "ready",
+    );
   });
 });
 
@@ -1486,6 +1504,59 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({ label: "Completed", pulse: false });
   });
+
+  it("shows a pulsing subagent pill with the count when the parent is idle but children run", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          activeSubagentCount: 3,
+          session: { ...baseThread.session, status: "ready", activeTurnId: null },
+        },
+      }),
+    ).toMatchObject({ label: "Subagents", count: 3, pulse: true });
+  });
+
+  it("keeps working ahead of subagents while the parent session runs", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...baseThread, activeSubagentCount: 2 },
+      }),
+    ).toMatchObject({ label: "Working" });
+  });
+
+  it("prefers subagents over plan-ready and unseen completion", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          activeSubagentCount: 1,
+          hasActionableProposedPlan: true,
+          interactionMode: "default",
+          latestTurn: makeLatestTurn(),
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          session: { ...baseThread.session, status: "ready", activeTurnId: null },
+        },
+      }),
+    ).toMatchObject({ label: "Subagents", count: 1 });
+  });
+});
+
+describe("threadStatusPillText", () => {
+  it("appends the count only when present", () => {
+    expect(
+      threadStatusPillText({
+        label: "Subagents",
+        count: 4,
+        colorClass: "",
+        dotClass: "",
+        pulse: true,
+      }),
+    ).toBe("Subagents (4)");
+    expect(
+      threadStatusPillText({ label: "Working", colorClass: "", dotClass: "", pulse: true }),
+    ).toBe("Working");
+  });
 });
 
 describe("resolveThreadRowClassName", () => {
@@ -1559,6 +1630,33 @@ describe("resolveProjectStatusIndicator", () => {
         },
       ]),
     ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
+  });
+
+  it("ranks subagents below working but above plan-ready", () => {
+    const subagents = {
+      label: "Subagents" as const,
+      count: 2,
+      colorClass: "text-sky-600",
+      dotClass: "bg-sky-500",
+      pulse: true,
+    };
+    expect(
+      resolveProjectStatusIndicator([
+        subagents,
+        { label: "Working", colorClass: "text-sky-600", dotClass: "bg-sky-500", pulse: true },
+      ]),
+    ).toMatchObject({ label: "Working" });
+    expect(
+      resolveProjectStatusIndicator([
+        {
+          label: "Plan Ready",
+          colorClass: "text-violet-600",
+          dotClass: "bg-violet-500",
+          pulse: false,
+        },
+        subagents,
+      ]),
+    ).toMatchObject({ label: "Subagents", count: 2 });
   });
 });
 

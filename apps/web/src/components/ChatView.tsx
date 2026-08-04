@@ -140,7 +140,13 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
-import { ChefHatIcon, ChevronDownIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import {
+  BotIcon,
+  ChefHatIcon,
+  ChevronDownIcon,
+  TriangleAlertIcon,
+  WifiOffIcon,
+} from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -214,6 +220,7 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { resolveFirstRunningSubagentRowId } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -1264,6 +1271,9 @@ function ChatViewContent(props: ChatViewProps) {
     LastInvokedScriptByProjectSchema,
   );
   const legendListRef = useRef<LegendListRef | null>(null);
+  // Filled by MessagesTimeline; lets the composer subagent banner jump the
+  // list to the first running SubagentCard.
+  const timelineScrollToRowRef = useRef<((rowId: string) => void) | null>(null);
   const [composerOverlayElement, setComposerOverlayElement] = useState<HTMLDivElement | null>(null);
   const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
   const isAtEndRef = useRef(true);
@@ -2351,6 +2361,17 @@ function ChatViewContent(props: ChatViewProps) {
     () =>
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
     [activeThread?.proposedPlans, timelineMessages, workLogEntries],
+  );
+  // Composer presence banner: count from the thread's folded subagent read
+  // model (the same task.* fold the server uses for the sidebar shell count),
+  // jump target from the derived timeline rows.
+  const runningSubagentCount = useMemo(
+    () => activeThreadSubagents.filter((subagent) => subagent.status === "running").length,
+    [activeThreadSubagents],
+  );
+  const firstRunningSubagentRowId = useMemo(
+    () => resolveFirstRunningSubagentRowId(timelineEntries, subagentGroups),
+    [subagentGroups, timelineEntries],
   );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
@@ -4010,12 +4031,33 @@ function ChatViewContent(props: ChatViewProps) {
     updateThreadMetadata,
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
+    const items = [...systemComposerBannerItems];
+    if (activeThreadId !== null && runningSubagentCount > 0) {
+      items.push({
+        id: `subagent-presence:${activeThreadId}`,
+        variant: "info",
+        icon: <BotIcon />,
+        title:
+          runningSubagentCount === 1
+            ? "1 subagent working"
+            : `${runningSubagentCount} subagents working`,
+        actions: firstRunningSubagentRowId ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => timelineScrollToRowRef.current?.(firstRunningSubagentRowId)}
+          >
+            View
+          </Button>
+        ) : undefined,
+      });
+    }
     if (!localCheckoutBranchMismatch) {
-      return systemComposerBannerItems;
+      return items;
     }
     const isRepairingBranch = branchRepairAction !== null;
     return [
-      ...systemComposerBannerItems,
+      ...items,
       {
         id: `branch-mismatch:${activeThread?.id ?? "unknown"}:${localCheckoutBranchMismatch.threadBranch}:${localCheckoutBranchMismatch.currentBranch}`,
         variant: "warning",
@@ -4062,10 +4104,13 @@ function ChatViewContent(props: ChatViewProps) {
     ];
   }, [
     activeThread?.id,
+    activeThreadId,
     branchRepairAction,
+    firstRunningSubagentRowId,
     handleSwitchCheckoutToThread,
     handleUpdateThreadToCheckout,
     localCheckoutBranchMismatch,
+    runningSubagentCount,
     systemComposerBannerItems,
   ]);
 
@@ -5591,6 +5636,7 @@ function ChatViewContent(props: ChatViewProps) {
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
+                scrollToRowRef={timelineScrollToRowRef}
                 timelineEntries={timelineEntries}
                 subagentGroups={subagentGroups}
                 activitiesTruncated={activeThreadActivitiesTruncated}

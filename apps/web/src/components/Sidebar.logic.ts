@@ -96,18 +96,30 @@ export interface ThreadStatusPill {
     | "Pending Approval"
     | "Awaiting Input"
     | "Run active"
+    | "Subagents"
     | "Plan Ready";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
+  /** Rendered as a "(N)" suffix — see `threadStatusPillText`. */
+  count?: number;
 }
 
+/** Display text for a pill: the count-bearing labels append "(N)". */
+export function threadStatusPillText(status: ThreadStatusPill): string {
+  return status.count === undefined ? status.label : `${status.label} (${status.count})`;
+}
+
+// Subagents ranks just below Working: while the parent turn runs, Working
+// already implies activity — the subagent pill only wins when the parent is
+// otherwise idle but children still run (e.g. backgrounded Agent spawns).
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
   "Run active": 3.5,
   Working: 3,
   Connecting: 3,
+  Subagents: 2.5,
   "Plan Ready": 2,
   Completed: 1,
 };
@@ -122,6 +134,9 @@ type ThreadStatusInput = Pick<
   | "session"
 > & {
   lastVisitedAt?: string | undefined;
+  /** From the shell row (`OrchestrationThreadShell.activeSubagentCount`);
+      optional so pre-subagent callers and fixtures keep working. */
+  activeSubagentCount?: number;
 };
 
 export interface ThreadJumpHintVisibilityController {
@@ -428,12 +443,21 @@ export function resolveThreadRowClassName(input: {
 // whether it finished, asked a question, or proposed a plan.
 // Unread completion is tracked separately: it describes whether a ready
 // thread needs attention, not what the thread is currently doing.
-export type SidebarV2Status = "approval" | "input" | "run-active" | "working" | "failed" | "ready";
+export type SidebarV2Status =
+  | "approval"
+  | "input"
+  | "run-active"
+  | "working"
+  | "failed"
+  | "subagents"
+  | "ready";
 
 type SidebarV2StatusInput = Pick<
   SidebarThreadSummary,
   "hasPendingApprovals" | "hasPendingUserInput" | "session"
->;
+> & {
+  activeSubagentCount?: number;
+};
 
 export function resolveSidebarV2Status(
   thread: SidebarV2StatusInput,
@@ -451,6 +475,11 @@ export function resolveSidebarV2Status(
   }
   if (thread.session?.status === "error") {
     return "failed";
+  }
+  // Below working/failed: the parent turn's own state describes the thread
+  // better while it runs; subagents only surface when the parent is idle.
+  if ((thread.activeSubagentCount ?? 0) > 0) {
+    return "subagents";
   }
   return "ready";
 }
@@ -1046,6 +1075,17 @@ export function resolveThreadStatusPill(input: {
   if (thread.session?.status === "starting") {
     return {
       label: "Connecting",
+      colorClass: "text-sky-600 dark:text-sky-300/80",
+      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: true,
+    };
+  }
+
+  const activeSubagentCount = thread.activeSubagentCount ?? 0;
+  if (activeSubagentCount > 0) {
+    return {
+      label: "Subagents",
+      count: activeSubagentCount,
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
       pulse: true,

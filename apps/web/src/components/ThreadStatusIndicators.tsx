@@ -14,7 +14,11 @@ import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { vcsEnvironment } from "../state/vcs";
 import { useUiStateStore } from "../uiStateStore";
 import { resolveChangeRequestPresentation } from "../sourceControlPresentation";
-import { resolveThreadStatusPill, type ThreadStatusPill } from "./Sidebar.logic";
+import {
+  resolveThreadStatusPill,
+  threadStatusPillText,
+  type ThreadStatusPill,
+} from "./Sidebar.logic";
 import type { SidebarThreadSummary } from "../types";
 import { formatWorktreePathForDisplay } from "@t3tools/client-runtime/state/worktree-cleanup";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -175,13 +179,14 @@ export function ThreadStatusLabel({
   status: ThreadStatusPill;
   compact?: boolean;
 }) {
+  const pillText = threadStatusPillText(status);
   if (compact) {
     return (
       <Tooltip>
         <TooltipTrigger
           render={
             <span
-              aria-label={status.label}
+              aria-label={pillText}
               className={`inline-flex size-3.5 shrink-0 items-center justify-center ${status.colorClass}`}
             />
           }
@@ -192,7 +197,7 @@ export function ThreadStatusLabel({
             } motion-reduce:animate-none`}
           />
         </TooltipTrigger>
-        <TooltipPopup side="top">{status.label}</TooltipPopup>
+        <TooltipPopup side="top">{pillText}</TooltipPopup>
       </Tooltip>
     );
   }
@@ -202,7 +207,7 @@ export function ThreadStatusLabel({
       <TooltipTrigger
         render={
           <span
-            aria-label={status.label}
+            aria-label={pillText}
             className={`inline-flex items-center gap-1 text-[10px] ${status.colorClass}`}
           />
         }
@@ -212,9 +217,9 @@ export function ThreadStatusLabel({
             status.pulse ? "animate-status-pulse" : ""
           } motion-reduce:animate-none`}
         />
-        <span className="hidden md:inline">{status.label}</span>
+        <span className="hidden md:inline">{pillText}</span>
       </TooltipTrigger>
-      <TooltipPopup side="top">{status.label}</TooltipPopup>
+      <TooltipPopup side="top">{pillText}</TooltipPopup>
     </Tooltip>
   );
 }

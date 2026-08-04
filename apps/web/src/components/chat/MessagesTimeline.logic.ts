@@ -474,6 +474,34 @@ function deriveTurnFolds(input: {
 
 const ACTIVITIES_TRUNCATED_ROW_ID = "activities-truncated";
 
+/**
+ * Timeline row id of the first (oldest) running SubagentCard, for jump
+ * actions living outside the list (e.g. the composer presence banner).
+ * Mirrors the subagent-row mapping in `deriveMessagesTimelineRows`: a work
+ * entry whose entry id anchors a running group renders as that group's card
+ * under the same row id.
+ */
+export function resolveFirstRunningSubagentRowId(
+  timelineEntries: ReadonlyArray<TimelineEntry>,
+  subagentGroups: ReadonlyArray<SubagentGroup>,
+): string | null {
+  const runningGroupEntryIds = new Set<string>();
+  for (const group of subagentGroups) {
+    if (group.status === "running") {
+      runningGroupEntryIds.add(group.entryId);
+    }
+  }
+  if (runningGroupEntryIds.size === 0) {
+    return null;
+  }
+  for (const timelineEntry of timelineEntries) {
+    if (timelineEntry.kind === "work" && runningGroupEntryIds.has(timelineEntry.entry.id)) {
+      return timelineEntry.id;
+    }
+  }
+  return null;
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   activitiesTruncated?: OrchestrationThreadActivityTruncation | null;

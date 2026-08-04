@@ -195,6 +195,10 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
   hideEmptyPlaceholder?: boolean;
+  /** Receives the scroll-to-row function so callers outside the list (e.g.
+      the composer subagent banner) can jump to a timeline row by id. Row
+      indices shift while a turn streams, so the id resolves at call time. */
+  scrollToRowRef?: React.RefObject<((rowId: string) => void) | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +235,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onIsAtEndChange,
   onManualNavigation,
   hideEmptyPlaceholder = false,
+  scrollToRowRef,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -390,6 +395,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     },
     [listRef, onManualNavigation],
   );
+  useEffect(() => {
+    if (!scrollToRowRef) {
+      return;
+    }
+    scrollToRowRef.current = onScrollToTimelineRow;
+    return () => {
+      scrollToRowRef.current = null;
+    };
+  }, [onScrollToTimelineRow, scrollToRowRef]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );

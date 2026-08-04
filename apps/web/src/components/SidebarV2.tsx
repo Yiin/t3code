@@ -357,13 +357,20 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                   icon: null,
                   className: "text-red-700 dark:text-red-300",
                 }
-              : isUnread
+              : status === "subagents"
                 ? {
-                    label: "Done",
-                    icon: "done" as const,
-                    className: "text-emerald-700 dark:text-emerald-300",
+                    label: `Subagents (${thread.activeSubagentCount})`,
+                    icon: "working" as const,
+                    className:
+                      "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none dark:text-sky-400",
                   }
-                : null;
+                : isUnread
+                  ? {
+                      label: "Done",
+                      icon: "done" as const,
+                      className: "text-emerald-700 dark:text-emerald-300",
+                    }
+                  : null;
 
   const gitCwd = thread.worktreePath ?? props.projectCwd;
   const gitStatus = useEnvironmentQuery(

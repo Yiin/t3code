@@ -6,6 +6,7 @@ import {
   formatSubagentFleetSummary,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveFirstRunningSubagentRowId,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -1461,6 +1462,56 @@ describe("deriveMessagesTimelineRows", () => {
     expect(expandedRows.find((row) => row.kind === "work-toggle")).toMatchObject({
       expanded: true,
     });
+  });
+});
+
+describe("resolveFirstRunningSubagentRowId", () => {
+  const spawnEntry = (index: number) => ({
+    id: `spawn-entry-${index}`,
+    kind: "work" as const,
+    createdAt: `2026-01-01T00:00:0${index}Z`,
+    entry: {
+      id: `work-spawn-${index}`,
+      createdAt: `2026-01-01T00:00:0${index}Z`,
+      label: "Task",
+      tone: "tool" as const,
+      itemType: "collab_agent_tool_call" as const,
+      toolCallId: `toolu_${index}`,
+    },
+  });
+  const group = (index: number, status: "running" | "completed" | "failed" | "stopped") => ({
+    entryId: `work-spawn-${index}`,
+    toolCallId: `toolu_${index}`,
+    name: `agent-${index}`,
+    description: null,
+    status,
+    startedAt: `2026-01-01T00:00:0${index}Z`,
+    completedAt: null,
+    children: [],
+    resultText: null,
+    prompt: null,
+  });
+
+  it("returns the timeline row id of the oldest running subagent", () => {
+    expect(
+      resolveFirstRunningSubagentRowId(
+        [spawnEntry(1), spawnEntry(2), spawnEntry(3)] as never,
+        [group(1, "completed"), group(2, "running"), group(3, "running")] as never,
+      ),
+    ).toBe("spawn-entry-2");
+  });
+
+  it("returns null when no subagent is running", () => {
+    expect(
+      resolveFirstRunningSubagentRowId([spawnEntry(1)] as never, [group(1, "completed")] as never),
+    ).toBeNull();
+    expect(resolveFirstRunningSubagentRowId([spawnEntry(1)] as never, [])).toBeNull();
+  });
+
+  it("returns null when the running group has no timeline anchor", () => {
+    expect(
+      resolveFirstRunningSubagentRowId([spawnEntry(1)] as never, [group(9, "running")] as never),
+    ).toBeNull();
   });
 });
 
