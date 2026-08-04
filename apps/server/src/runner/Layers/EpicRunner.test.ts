@@ -41,7 +41,7 @@ import {
   type EpicRunLockLease,
 } from "../Services/EpicRunLock.ts";
 import { EpicRunner } from "../Services/EpicRunner.ts";
-import { makeEpicRunnerLive } from "./EpicRunner.ts";
+import { EPIC_RUN_ITERATION_PROMPT, makeEpicRunnerLive } from "./EpicRunner.ts";
 
 const projectId = ProjectId.make("project-epic-runner");
 const modelSelection = {
@@ -646,6 +646,22 @@ const startRun = (maxIterations = 10) =>
 // between attempts, so it needs the real clock rather than a virtual one that
 // only advances when a test tells it to.
 describe("EpicRunner", () => {
+  // The runner settles the thread as soon as the turn ends — no notification
+  // ever re-invokes the agent. Agents that backgrounded work and yielded
+  // ("waiting for the workflow to notify me") lost that work when the session
+  // was killed, so the prompt must state the contract explicitly.
+  it("iteration prompt states the no-re-invocation and no-background-yield contract", () => {
+    assert.include(EPIC_RUN_ITERATION_PROMPT, "nothing re-invokes you after your turn ends");
+    assert.include(EPIC_RUN_ITERATION_PROMPT, "Run all work in the foreground");
+    assert.include(
+      EPIC_RUN_ITERATION_PROMPT,
+      "Never end your turn while a background task, workflow, or watchdog is still running",
+    );
+    // The RALPH protocol markers the runner parses must stay intact.
+    assert.include(EPIC_RUN_ITERATION_PROMPT, "RALPH_DONE");
+    assert.include(EPIC_RUN_ITERATION_PROMPT, 'RALPH_MSG: {"summary":');
+  });
+
   it.live("publishes each persisted run transition", () => {
     const publishedStatuses: string[] = [];
     const harness = createHarness({
