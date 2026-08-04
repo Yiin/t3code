@@ -25,6 +25,13 @@
  * fresh config map against the live state, tearing down removed instances
  * and building new ones without disturbing unaffected instances.
  *
+ * Before it closes an instance, `reconcile` hands that instance's id to
+ * `ProviderInstanceTeardown` so the sessions running on it are stopped
+ * through the one path that writes a `stopped` binding, revokes the thread's
+ * MCP credential, and updates the projected session. Closing the scope on its
+ * own writes none of that — see that module for why the hook is inverted and
+ * why it has to run before, not inside, the finalizer.
+ *
  * Every live instance runs inside its own child `Scope`. The registry's
  * own scope owns all child scopes via finalizers, so closing the registry
  * tears every instance down in reverse order; closing a single instance
@@ -60,6 +67,10 @@ import {
   ProviderInstanceRegistryMutator,
   type ProviderInstanceRegistryMutatorShape,
 } from "../Services/ProviderInstanceRegistryMutator.ts";
+import {
+  ProviderInstanceTeardown,
+  type ProviderInstanceTeardownShape,
+} from "../Services/ProviderInstanceTeardown.ts";
 import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 
 /**
@@ -212,8 +223,9 @@ const makeReconcile = <R>(input: {
   readonly state: RegistryState;
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
   readonly parentScope: Scope.Scope;
+  readonly teardown: ProviderInstanceTeardownShape;
 }): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
-  const { state, driversById, parentScope } = input;
+  const { state, driversById, parentScope, teardown } = input;
   return (configMap: ProviderInstanceConfigMap) =>
     Effect.gen(function* () {
       const previousEntries = yield* Ref.get(state.entries);
@@ -238,7 +250,21 @@ const makeReconcile = <R>(input: {
           replacedIds.add(instanceId);
         }
       }
-      for (const id of [...removedIds, ...replacedIds]) {
+      const torndownIds = [...removedIds, ...replacedIds];
+
+      // Stop the sessions running on those instances first. Closing a scope
+      // kills the subprocess through the driver's finalizers and writes
+      // nothing, so a session torn down that way keeps a `running` binding, a
+      // resolvable MCP credential, and a projected session that claims the
+      // provider is alive. The write has to happen here, not in a finalizer:
+      // once the scope is closed and the entry is dropped below,
+      // `ProviderAdapterRegistry` can no longer resolve the instance and the
+      // stop fails outright.
+      if (torndownIds.length > 0) {
+        yield* teardown.stopSessionsOnInstances(torndownIds);
+      }
+
+      for (const id of torndownIds) {
         const live = previousEntries.get(id);
         if (live) {
           yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
@@ -336,12 +362,16 @@ export const makeProviderInstanceRegistry = <R>(input: {
     readonly mutator: ProviderInstanceRegistryMutatorShape;
   },
   never,
-  R | Scope.Scope
+  R | ProviderInstanceTeardown | Scope.Scope
 > =>
   Effect.gen(function* () {
     const driversById = new Map<ProviderDriverKind, AnyProviderDriver<R>>(
       input.drivers.map((driver) => [driver.driverKind, driver]),
     );
+
+    // Resolved once, up front: `reconcile` runs later from the settings
+    // watcher's fiber, which has no reason to carry this service.
+    const teardown = yield* ProviderInstanceTeardown;
 
     // Capture the enclosing scope so per-instance child scopes can be
     // attached to it at `reconcile` time. Without this, `reconcile`
@@ -361,7 +391,7 @@ export const makeProviderInstanceRegistry = <R>(input: {
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
     const state: RegistryState = { entries, unavailable, changes };
-    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcileWithR = makeReconcile({ state, driversById, parentScope, teardown });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
       reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
 
@@ -414,11 +444,11 @@ export const makeProviderInstanceRegistry = <R>(input: {
 export const ProviderInstanceRegistryLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
-}): Layer.Layer<ProviderInstanceRegistry, never, R> =>
+}): Layer.Layer<ProviderInstanceRegistry, never, R | ProviderInstanceTeardown> =>
   Layer.effect(
     ProviderInstanceRegistry,
     makeProviderInstanceRegistry(input).pipe(Effect.map((built) => built.registry)),
-  ) as Layer.Layer<ProviderInstanceRegistry, never, R>;
+  ) as Layer.Layer<ProviderInstanceRegistry, never, R | ProviderInstanceTeardown>;
 
 /**
  * Layer variant that also exposes the mutator tag. Consumed by
@@ -429,7 +459,11 @@ export const ProviderInstanceRegistryLayer = <R>(input: {
 export const ProviderInstanceRegistryMutableLayer = <R>(input: {
   readonly drivers: ReadonlyArray<AnyProviderDriver<R>>;
   readonly configMap: ProviderInstanceConfigMap;
-}): Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R> =>
+}): Layer.Layer<
+  ProviderInstanceRegistry | ProviderInstanceRegistryMutator,
+  never,
+  R | ProviderInstanceTeardown
+> =>
   Layer.effectContext(
     makeProviderInstanceRegistry(input).pipe(
       Effect.map(({ registry, mutator }) =>
@@ -438,6 +472,10 @@ export const ProviderInstanceRegistryMutableLayer = <R>(input: {
         ),
       ),
     ),
-  ) as Layer.Layer<ProviderInstanceRegistry | ProviderInstanceRegistryMutator, never, R>;
+  ) as Layer.Layer<
+    ProviderInstanceRegistry | ProviderInstanceRegistryMutator,
+    never,
+    R | ProviderInstanceTeardown
+  >;
 
 export { defaultInstanceIdForDriver };

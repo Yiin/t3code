@@ -8,6 +8,13 @@
  *     asserts each gets its own closures and identity. This is the
  *     multi-codex capability the refactor exists to unlock.
  *
+ *  1b. **Teardown ordering** — the "reconcile teardown slice" describe block
+ *     pins that `reconcile` stops the sessions on a removed or replaced
+ *     instance *before* it closes that instance's scope. The order is the
+ *     whole point: a scope close writes no binding, and once the instance is
+ *     gone `ProviderService.stopSession` can no longer resolve its adapter,
+ *     so a stop that runs after the close writes nothing at all (t3code-iad).
+ *
  *  2. **Many drivers, one registry** — the "all drivers slice" describe
  *     block below configures one instance of every shipped driver
  *     (`codex`, `claudeAgent`, `cursor`, `grok`, `opencode`) in a single
@@ -36,10 +43,20 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  defaultProviderContinuationIdentity,
+  type AnyProviderDriver,
+  type ProviderInstance,
+} from "../ProviderDriver.ts";
+import {
+  NoOpProviderInstanceTeardownLive,
+  ProviderInstanceTeardown,
+} from "../Services/ProviderInstanceTeardown.ts";
 import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import { CursorDriver } from "../Drivers/CursorDriver.ts";
@@ -112,6 +129,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(NoOpProviderInstanceTeardownLive),
   );
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
@@ -229,6 +247,129 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
   );
 });
 
+describe("ProviderInstanceRegistryLive — reconcile teardown slice", () => {
+  const recordingDriverKind = ProviderDriverKind.make("recordingDriver");
+
+  /**
+   * A driver with no process behind it. `create` only registers a scope
+   * finalizer, so the trace below shows exactly when the registry closed each
+   * instance — which is the thing this slice is about.
+   */
+  const makeRecordingDriver = (trace: Array<string>): AnyProviderDriver<never> => ({
+    driverKind: recordingDriverKind,
+    metadata: { displayName: "Recording" },
+    configSchema: Schema.Unknown,
+    defaultConfig: () => ({}),
+    create: (input) =>
+      Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            trace.push(`scope-closed:${input.instanceId}`);
+          }),
+        );
+        return {
+          instanceId: input.instanceId,
+          driverKind: recordingDriverKind,
+          continuationIdentity: defaultProviderContinuationIdentity({
+            driverKind: recordingDriverKind,
+            instanceId: input.instanceId,
+          }),
+          displayName: input.displayName,
+          enabled: input.enabled,
+          // Nothing in this slice reads the three closures; the registry only
+          // stores them.
+          snapshot: {} as ProviderInstance["snapshot"],
+          adapter: {} as ProviderInstance["adapter"],
+          textGeneration: {} as ProviderInstance["textGeneration"],
+        } satisfies ProviderInstance;
+      }),
+  });
+
+  const recordingTeardownLayer = (trace: Array<string>) =>
+    Layer.succeed(ProviderInstanceTeardown, {
+      stopSessionsOnInstances: (instanceIds) =>
+        Effect.sync(() => {
+          trace.push(`stop-sessions:${[...instanceIds].sort().join(",")}`);
+        }),
+    });
+
+  // Held as consts so the kept entry is the *same* envelope on the second
+  // reconcile — a fresh literal would read as a config change and rebuild it.
+  const keptConfig = { driver: recordingDriverKind, displayName: "Kept", config: {} };
+  const removedConfig = { driver: recordingDriverKind, displayName: "Removed", config: {} };
+
+  it.live("stops the sessions on a removed instance before closing its scope", () =>
+    Effect.gen(function* () {
+      const keptId = ProviderInstanceId.make("recording_kept");
+      const removedId = ProviderInstanceId.make("recording_removed");
+      const trace: Array<string> = [];
+
+      const { mutator } = yield* makeProviderInstanceRegistry({
+        drivers: [makeRecordingDriver(trace)],
+        configMap: {
+          [keptId]: keptConfig,
+          [removedId]: removedConfig,
+        } as ProviderInstanceConfigMap,
+      }).pipe(Effect.provide(recordingTeardownLayer(trace)));
+
+      // Booting builds instances; it tears nothing down.
+      expect(trace).toEqual([]);
+
+      yield* mutator.reconcile({ [keptId]: keptConfig } as ProviderInstanceConfigMap);
+
+      // The order is the fix. Reversed, the stop would run against an
+      // instance the adapter registry can no longer resolve, and the thread
+      // would keep a "running" binding with no process behind it.
+      expect(trace).toEqual([`stop-sessions:${removedId}`, `scope-closed:${removedId}`]);
+    }),
+  );
+
+  it.live("stops the sessions on a replaced instance before closing its scope", () =>
+    Effect.gen(function* () {
+      const keptId = ProviderInstanceId.make("recording_kept");
+      const replacedId = ProviderInstanceId.make("recording_replaced");
+      const trace: Array<string> = [];
+
+      const { mutator, registry } = yield* makeProviderInstanceRegistry({
+        drivers: [makeRecordingDriver(trace)],
+        configMap: {
+          [keptId]: keptConfig,
+          [replacedId]: { driver: recordingDriverKind, displayName: "Before", config: {} },
+        } as ProviderInstanceConfigMap,
+      }).pipe(Effect.provide(recordingTeardownLayer(trace)));
+
+      yield* mutator.reconcile({
+        [keptId]: keptConfig,
+        [replacedId]: { driver: recordingDriverKind, displayName: "After", config: {} },
+      } as ProviderInstanceConfigMap);
+
+      expect(trace).toEqual([`stop-sessions:${replacedId}`, `scope-closed:${replacedId}`]);
+
+      // The replacement is live, and the untouched instance was never closed.
+      const replaced = yield* registry.getInstance(replacedId);
+      expect(replaced?.displayName).toBe("After");
+      const kept = yield* registry.getInstance(keptId);
+      expect(kept).toBeDefined();
+    }),
+  );
+
+  it.live("does not call the teardown hook when nothing is removed or replaced", () =>
+    Effect.gen(function* () {
+      const keptId = ProviderInstanceId.make("recording_kept");
+      const trace: Array<string> = [];
+
+      const { mutator } = yield* makeProviderInstanceRegistry({
+        drivers: [makeRecordingDriver(trace)],
+        configMap: { [keptId]: keptConfig } as ProviderInstanceConfigMap,
+      }).pipe(Effect.provide(recordingTeardownLayer(trace)));
+
+      yield* mutator.reconcile({ [keptId]: keptConfig } as ProviderInstanceConfigMap);
+
+      expect(trace).toEqual([]);
+    }),
+  );
+});
+
 describe("ProviderInstanceRegistryLive — all drivers slice", () => {
   // All drivers need `NodeServices` (ChildProcessSpawner + FileSystem +
   // Path). `OpenCodeDriver.create` additionally yields `OpenCodeRuntime`
@@ -250,6 +391,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(NoOpProviderInstanceTeardownLive),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>

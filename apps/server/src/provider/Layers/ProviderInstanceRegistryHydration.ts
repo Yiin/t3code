@@ -55,6 +55,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
+import type { ProviderInstanceTeardown } from "../Services/ProviderInstanceTeardown.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
 
 /**
@@ -152,7 +153,7 @@ const SettingsWatcherLive = Layer.effectDiscard(
 export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
   ProviderInstanceRegistry,
   never,
-  BuiltInDriversEnv | ServerSettingsService
+  BuiltInDriversEnv | ServerSettingsService | ProviderInstanceTeardown
 > = Layer.unwrap(
   Effect.gen(function* () {
     const serverSettings = yield* ServerSettingsService;
@@ -171,4 +172,8 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
 
     return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));
   }),
-) as Layer.Layer<ProviderInstanceRegistry, never, BuiltInDriversEnv | ServerSettingsService>;
+) as Layer.Layer<
+  ProviderInstanceRegistry,
+  never,
+  BuiltInDriversEnv | ServerSettingsService | ProviderInstanceTeardown
+>;
