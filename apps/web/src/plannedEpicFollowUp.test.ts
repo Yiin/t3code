@@ -30,6 +30,7 @@ describe("planned epic follow-up", () => {
         epicId: "t3code-vst",
         projectId: "project-1",
         cwd: "/workspace/t3code",
+        originThreadId: "thread-1",
       },
     });
   });

@@ -23,6 +23,10 @@ export function plannedEpicLaunchInput(correlation: ScopedEpicPlanCorrelation) {
       epicId: correlation.epicId,
       projectId: correlation.projectId as ProjectId,
       cwd: correlation.cwd,
+      // The planning conversation is the launcher: without it the run's
+      // sidebar group floats at project level and never tidies away with
+      // the thread it came from.
+      originThreadId: correlation.threadId,
     },
   };
 }
