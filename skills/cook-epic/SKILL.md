@@ -256,6 +256,15 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    was blocked. A run that ended with exit 75 dispatched nothing: report the
    holding run instead (see step 6) and stop there.
 
+   Each landed child's `done`/`researched`/`completed-no-code` mailbox event
+   also carries an `orientation` field — for claude/ccx workers,
+   `{secondsToFirstEdit, toolCallsBeforeFirstEdit, tokensBeforeFirstEdit}`
+   measured from the worker's own transcript up to its first
+   Edit/Write/MultiEdit/NotebookEdit call, or `orientation: null` when the
+   transcript is missing or the harness isn't claude/ccx. `summary.md` gets a
+   matching `- <child> orientation: …` line per landed child (omitted when
+   `orientation` is null).
+
 ## Running inside t3code
 
 When the skill executes inside a t3code agent session, the server injects
@@ -512,6 +521,10 @@ landed.
   error rather than guessing.
 - Budgets are soft: the cap stops NEW dispatches; in-flight workers finish.
   Cost is only tracked on claude/ccx; kimi, codex, and opencode workers report no spend.
+- Orientation metrics (time/tool-calls/tokens spent before a worker's first
+  edit) are likewise claude/ccx-only, computed from the worker's transcript;
+  other harnesses and any unresolvable transcript report `orientation: null`
+  without affecting reaping.
 - Workers share one beads database and one `node_modules`. If a child adds a
   dependency, expect the integration gate to need an install — this is the
   known sharp edge; watch for it in parked merges.
