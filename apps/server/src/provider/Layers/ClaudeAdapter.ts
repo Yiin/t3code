@@ -181,6 +181,40 @@ interface ToolInFlight {
  */
 const subagentToolKey = (parentToolUseId: string, index: number) => `${parentToolUseId}:${index}`;
 
+/**
+ * Subagent tool_use blocks that arrive as complete assistant messages (the
+ * only form the SDK actually sends for subagents — they never stream) have no
+ * content-block index, so they are keyed by their tool_use id instead.
+ */
+const subagentToolIdKey = (parentToolUseId: string, toolUseId: string) =>
+  `${parentToolUseId}:id:${toolUseId}`;
+
+/**
+ * Env flag gating the SDK's `forwardSubagentText` query option (nested
+ * subagent transcripts). Default on; set to `0`, `false`, `off`, or `no` to
+ * fall back to tool_use/tool_result-only subagent forwarding if live traffic
+ * shows volume or ordering problems.
+ */
+const FORWARD_SUBAGENT_TEXT_ENV_VAR = "T3_CLAUDE_FORWARD_SUBAGENT_TEXT";
+
+function resolveForwardSubagentTextFlag(env: NodeJS.ProcessEnv): boolean {
+  const raw = env[FORWARD_SUBAGENT_TEXT_ENV_VAR]?.trim().toLowerCase();
+  if (raw === undefined || raw.length === 0) {
+    return true;
+  }
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+/**
+ * Top-level `subagent_type` rides on parent-tagged assistant/user messages on
+ * the wire, but the SDK only declares it on some members of the unions the
+ * handlers narrow to — read it structurally.
+ */
+function readTopLevelSubagentType(message: SDKMessage): string | undefined {
+  const candidate = (message as { subagent_type?: unknown }).subagent_type;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
 interface ClaudeTaskState {
   readonly id: string;
   subject: string;
@@ -1359,6 +1393,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     claudeSettings.binaryPath,
     claudeEnvironment,
   );
+  const forwardSubagentText = resolveForwardSubagentTextFlag(options?.environment ?? process.env);
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -2403,11 +2438,225 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  const findSubagentToolInFlight = (
+    context: ClaudeSessionContext,
+    toolUseId: string,
+  ): readonly [string, ToolInFlight] | undefined => {
+    for (const entry of context.subagentToolsInFlight) {
+      if (entry[1].itemId === toolUseId) {
+        return entry;
+      }
+    }
+    return undefined;
+  };
+
+  /**
+   * Subagent-originated assistant messages (`parent_tool_use_id` set; text and
+   * thinking blocks arrive when `forwardSubagentText` is on, tool_use blocks
+   * always). They never touch the main transcript: no synthetic turns, no
+   * assistant-text backfill, no turn items. Instead every block surfaces as a
+   * content/item event tagged with `parentToolUseId` so ingestion can build
+   * the nested subagent view.
+   */
+  const handleSubagentAssistantMessage = Effect.fn("handleSubagentAssistantMessage")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+    parentToolUseId: string,
+  ) {
+    if (message.type !== "assistant") {
+      return;
+    }
+
+    const subagentType = readTopLevelSubagentType(message);
+    const content = message.message?.content;
+    if (!Array.isArray(content)) {
+      return;
+    }
+
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const candidate = block as {
+        type?: unknown;
+        text?: unknown;
+        thinking?: unknown;
+        id?: unknown;
+        name?: unknown;
+        input?: unknown;
+      };
+
+      if (candidate.type === "text" || candidate.type === "thinking") {
+        const deltaText =
+          candidate.type === "text"
+            ? typeof candidate.text === "string"
+              ? candidate.text
+              : ""
+            : typeof candidate.thinking === "string"
+              ? candidate.thinking
+              : "";
+        if (deltaText.length === 0) {
+          continue;
+        }
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "content.delta",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+          payload: {
+            streamKind: candidate.type === "thinking" ? "reasoning_text" : "assistant_text",
+            delta: deltaText,
+            parentToolUseId,
+          },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/assistant",
+            payload: message,
+          },
+        });
+        continue;
+      }
+
+      if (
+        candidate.type !== "tool_use" &&
+        candidate.type !== "server_tool_use" &&
+        candidate.type !== "mcp_tool_use"
+      ) {
+        continue;
+      }
+      if (typeof candidate.id !== "string" || typeof candidate.name !== "string") {
+        continue;
+      }
+      // Already tracked from a parent-tagged stream event: don't double-start.
+      if (findSubagentToolInFlight(context, candidate.id)) {
+        continue;
+      }
+
+      const toolName = candidate.name;
+      const itemType = classifyToolItemType(toolName);
+      const toolInput =
+        typeof candidate.input === "object" && candidate.input !== null
+          ? (candidate.input as Record<string, unknown>)
+          : {};
+      const detail = summarizeToolRequest(toolName, toolInput);
+      const tool: ToolInFlight = {
+        itemId: candidate.id,
+        itemType,
+        toolName,
+        title: titleForTool(itemType),
+        ...(detail ? { detail } : {}),
+        input: toolInput,
+        partialInputJson: "",
+        parentToolUseId,
+      };
+      context.subagentToolsInFlight.set(subagentToolIdKey(parentToolUseId, candidate.id), tool);
+
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "item.started",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+        itemId: asRuntimeItemId(tool.itemId),
+        payload: {
+          itemType: tool.itemType,
+          status: "inProgress",
+          title: tool.title,
+          ...(tool.detail ? { detail: tool.detail } : {}),
+          parentToolUseId,
+          ...(subagentType ? { subagentType } : {}),
+          data: {
+            toolName: tool.toolName,
+            input: toolInput,
+          },
+        },
+        providerRefs: nativeProviderRefs(context, {
+          providerItemId: tool.itemId,
+        }),
+        raw: {
+          source: "claude.sdk.message",
+          method: "claude/assistant",
+          payload: message,
+        },
+      });
+    }
+  });
+
+  /**
+   * Subagent-originated user messages: tool_result blocks complete the tagged
+   * subagent tools. The subagent's initial prompt text is consumed without
+   * emitting — `task.started` already carries the prompt.
+   */
+  const handleSubagentUserMessage = Effect.fn("handleSubagentUserMessage")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+    parentToolUseId: string,
+  ) {
+    if (message.type !== "user") {
+      return;
+    }
+
+    const subagentType = readTopLevelSubagentType(message);
+    for (const toolResult of toolResultBlocksFromUserMessage(message)) {
+      const entry = findSubagentToolInFlight(context, toolResult.toolUseId);
+      if (!entry) {
+        continue;
+      }
+      const [key, tool] = entry;
+      context.subagentToolsInFlight.delete(key);
+
+      const stamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "item.completed",
+        eventId: stamp.eventId,
+        provider: PROVIDER,
+        createdAt: stamp.createdAt,
+        threadId: context.session.threadId,
+        ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+        itemId: asRuntimeItemId(tool.itemId),
+        payload: {
+          itemType: tool.itemType,
+          status: toolResult.isError ? "failed" : "completed",
+          title: tool.title,
+          ...(tool.detail ? { detail: tool.detail } : {}),
+          parentToolUseId,
+          ...(subagentType ? { subagentType } : {}),
+          data: {
+            toolName: tool.toolName,
+            input: tool.input,
+            result: toolResult.block,
+          },
+        },
+        providerRefs: nativeProviderRefs(context, {
+          providerItemId: tool.itemId,
+        }),
+        raw: {
+          source: "claude.sdk.message",
+          method: "claude/user",
+          payload: message,
+        },
+      });
+    }
+  });
+
   const handleUserMessage = Effect.fn("handleUserMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
     if (message.type !== "user") {
+      return;
+    }
+
+    // Subagent-tagged user messages must not pollute the main turn's items or
+    // match against main-thread in-flight tools.
+    if (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined) {
+      yield* handleSubagentUserMessage(context, message, message.parent_tool_use_id);
       return;
     }
 
@@ -2533,8 +2782,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    // Subagent-tagged assistant messages are routed into the tagged subagent
+    // stream: they must not auto-start synthetic turns, feed the
+    // assistant-text backfill, or advance the main-thread resume cursor.
+    if (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined) {
+      yield* handleSubagentAssistantMessage(context, message, message.parent_tool_use_id);
+      return;
+    }
+
     // Auto-start a synthetic turn for assistant messages that arrive without
-    // an active turn (e.g., background agent/subagent responses between user prompts).
+    // an active turn (e.g., background agent responses between user prompts).
     if (!context.turnState) {
       const turnId = TurnId.make(yield* randomUUIDv4);
       const startedAt = yield* nowIso;
@@ -3636,6 +3893,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
+        // Forward subagent text/thinking as parent-tagged assistant/user
+        // messages so the UI can render a nested live transcript. The tagged
+        // messages are routed off the main transcript in
+        // handleAssistantMessage/handleUserMessage; the env flag only
+        // disables the extra SDK forwarding, not the routing guards.
+        ...(forwardSubagentText ? { forwardSubagentText: true } : {}),
         canUseTool,
         // `claudeEnvironment` is built once at construction and shared across
         // threads; merge the per-session T3_* vars without mutating it.
@@ -3677,6 +3940,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.resume": existingResumeSessionId ?? "",
         "claude.query.session_id": newSessionId ?? "",
         "claude.query.include_partial_messages": true,
+        "claude.query.forward_subagent_text": forwardSubagentText,
         "claude.query.additional_directories": input.cwd ? [input.cwd] : [],
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",

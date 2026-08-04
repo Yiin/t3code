@@ -156,6 +156,7 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly environment?: NodeJS.ProcessEnv;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -167,6 +168,7 @@ function makeHarness(config?: {
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
+    ...(config?.environment ? { environment: config.environment } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -2031,6 +2033,285 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("opts into forwardSubagentText on the SDK query by default", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(harness.getLastCreateQueryInput()?.options.forwardSubagentText, true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("disables forwardSubagentText when the env flag turns it off", () => {
+    const harness = makeHarness({
+      environment: { ...process.env, T3_CLAUDE_FORWARD_SUBAGENT_TEXT: "0" },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(harness.getLastCreateQueryInput()?.options.forwardSubagentText, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "routes parent-tagged assistant/user messages into tagged subagent events without synthetic turns",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => runtimeEvents.push(event)),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        // No active turn: a background subagent's forwarded transcript lands
+        // between user prompts. It must not auto-start a synthetic turn.
+        harness.query.emit({
+          type: "assistant",
+          session_id: "sdk-session-subagent-fwd",
+          uuid: "sub-assistant-1",
+          parent_tool_use_id: "toolu-spawn-1",
+          subagent_type: "Explore",
+          task_description: "List repo files",
+          message: {
+            id: "sub-message-1",
+            content: [
+              { type: "thinking", thinking: "planning the survey" },
+              { type: "text", text: "Scanning the repo now." },
+              {
+                type: "tool_use",
+                id: "toolu-sub-bash-1",
+                name: "Bash",
+                input: { command: "ls" },
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "user",
+          session_id: "sdk-session-subagent-fwd",
+          uuid: "sub-user-1",
+          parent_tool_use_id: "toolu-spawn-1",
+          subagent_type: "Explore",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu-sub-bash-1",
+                content: "README.md",
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+
+        // No synthetic turn for subagent-tagged messages.
+        assert.deepEqual(
+          runtimeEvents.filter((event) => event.type === "turn.started"),
+          [],
+        );
+        // No main-transcript assistant items either.
+        assert.deepEqual(
+          runtimeEvents.filter(
+            (event) =>
+              (event.type === "item.started" || event.type === "item.completed") &&
+              event.payload.itemType === "assistant_message",
+          ),
+          [],
+        );
+
+        const deltas = runtimeEvents.filter((event) => event.type === "content.delta");
+        assert.equal(deltas.length, 2);
+        const reasoningDelta = deltas.find(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind === "reasoning_text",
+        );
+        assert.equal(reasoningDelta?.type, "content.delta");
+        if (reasoningDelta?.type === "content.delta") {
+          assert.equal(reasoningDelta.payload.delta, "planning the survey");
+          assert.equal(reasoningDelta.payload.parentToolUseId, "toolu-spawn-1");
+        }
+        const textDelta = deltas.find(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+        );
+        assert.equal(textDelta?.type, "content.delta");
+        if (textDelta?.type === "content.delta") {
+          assert.equal(textDelta.payload.delta, "Scanning the repo now.");
+          assert.equal(textDelta.payload.parentToolUseId, "toolu-spawn-1");
+        }
+
+        const toolStarted = runtimeEvents.find((event) => event.type === "item.started");
+        assert.equal(toolStarted?.type, "item.started");
+        if (toolStarted?.type === "item.started") {
+          assert.equal(String(toolStarted.itemId), "toolu-sub-bash-1");
+          assert.equal(toolStarted.payload.itemType, "command_execution");
+          assert.equal(toolStarted.payload.parentToolUseId, "toolu-spawn-1");
+          assert.equal(toolStarted.payload.subagentType, "Explore");
+        }
+
+        const toolCompleted = runtimeEvents.find((event) => event.type === "item.completed");
+        assert.equal(toolCompleted?.type, "item.completed");
+        if (toolCompleted?.type === "item.completed") {
+          assert.equal(String(toolCompleted.itemId), "toolu-sub-bash-1");
+          assert.equal(toolCompleted.payload.status, "completed");
+          assert.equal(toolCompleted.payload.parentToolUseId, "toolu-spawn-1");
+          assert.equal(toolCompleted.payload.subagentType, "Explore");
+          assert.deepEqual(toolCompleted.payload.data, {
+            toolName: "Bash",
+            input: { command: "ls" },
+            result: {
+              type: "tool_result",
+              tool_use_id: "toolu-sub-bash-1",
+              content: "README.md",
+            },
+          });
+        }
+
+        runtimeEventsFiber.interruptUnsafe();
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("keeps subagent text out of the main-transcript backfill during an active turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "spawn a subagent",
+        attachments: [],
+      });
+
+      // Main-thread text streams normally.
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-subagent-backfill",
+        uuid: "main-stream-0",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-subagent-backfill",
+        uuid: "main-stream-1",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Hi" },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-subagent-backfill",
+        uuid: "main-stream-2",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_stop",
+          index: 0,
+        },
+      } as unknown as SDKMessage);
+      // Forwarded subagent report arrives mid-turn, parent-tagged.
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-subagent-backfill",
+        uuid: "sub-assistant-1",
+        parent_tool_use_id: "toolu-spawn-1",
+        subagent_type: "Explore",
+        message: {
+          id: "sub-message-1",
+          content: [{ type: "text", text: "subagent internal report" }],
+        },
+      } as unknown as SDKMessage);
+      // Main-thread assistant snapshot backfills as usual.
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-subagent-backfill",
+        uuid: "main-assistant-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "main-message-1",
+          content: [{ type: "text", text: "Hi" }],
+        },
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      // Exactly one main assistant item: the streamed "Hi" block. The
+      // parent-tagged report must not create a synthetic transcript block.
+      const assistantItems = runtimeEvents.filter(
+        (event) =>
+          event.type === "item.completed" && event.payload.itemType === "assistant_message",
+      );
+      assert.equal(assistantItems.length, 1);
+
+      const deltas = runtimeEvents.filter((event) => event.type === "content.delta");
+      const subagentDelta = deltas.find(
+        (event) =>
+          event.type === "content.delta" && event.payload.delta === "subagent internal report",
+      );
+      assert.equal(subagentDelta?.type, "content.delta");
+      if (subagentDelta?.type === "content.delta") {
+        assert.equal(subagentDelta.payload.parentToolUseId, "toolu-spawn-1");
+      }
+      const mainDelta = deltas.find(
+        (event) => event.type === "content.delta" && event.payload.delta === "Hi",
+      );
+      assert.equal(mainDelta?.type, "content.delta");
+      if (mainDelta?.type === "content.delta") {
+        assert.equal(mainDelta.payload.parentToolUseId, undefined);
+      }
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("consumes undeclared and UX-internal system subtypes without warning rows", () => {
     const harness = makeHarness();
