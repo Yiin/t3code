@@ -721,6 +721,18 @@ fleet_run() { # run a command under the fleet's resource cgroup
   fi
 }
 
+gate_run() { # run $GATE with this coordinator's own COOKEPIC_* vars stripped
+  # A gate command may itself be (or invoke) cook-epic's own test suite —
+  # self-testing this skill against a repo whose ambient environment already
+  # carries this coordinator's COOKEPIC_EPIC/COOKEPIC_SIBLINGS/etc leaks that
+  # state into the nested run, corrupting fixtures that assume a clean slate.
+  local name
+  while IFS='=' read -r name _; do
+    case "$name" in COOKEPIC_*) unset "$name" ;; esac
+  done < <(env)
+  fleet_run flock "$HEAVY_LOCK" bash -c "$GATE"
+}
+
 fallback_exec() { # <identity file> <command...>
   local identity="$1" pid rc=0
   shift
@@ -2405,7 +2417,7 @@ reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason> <perm
   if [ "$status" = closed ] && [ "$dirty" -eq 0 ] \
      && { [ "$commits" -gt 0 ] || [ "${FIRST_SIG[$child]:-}" != "$(tree_sig)" ]; }; then
     if [ -n "$GATE" ]; then
-      if ! ( cd "$REPO" && fleet_run flock "$HEAVY_LOCK" bash -c "$GATE" ) >>"$LOG" 2>&1; then
+      if ! ( cd "$REPO" && gate_run ) >>"$LOG" 2>&1; then
         # The child is still marked closed here. Claim its existing effects
         # before fail_attempt reopens it so another child cannot run first.
         sequential_claim_recovery_if_effects "$child"
@@ -2614,7 +2626,7 @@ process_merges() {
     # One gate for the whole set, run from the main integration worktree so
     # relative sibling references resolve against the sibling trial merges.
     if [ -n "$GATE" ]; then
-      if ! ( cd "$INTEG_WT" && fleet_run flock "$HEAVY_LOCK" bash -c "$GATE" ) >>"$LOG" 2>&1; then
+      if ! ( cd "$INTEG_WT" && gate_run ) >>"$LOG" 2>&1; then
         git -C "$INTEG_WT" reset --hard "$BASE_BRANCH" >>"$LOG" 2>&1
         if [ "$LAYOUT_MODE" -eq 1 ]; then
           for s in "${SIBLINGS[@]}"; do
