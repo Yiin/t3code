@@ -208,10 +208,35 @@ bd update $EPIC --body-file - <<'EOF'
 <what this epic deliberately does not touch>
 
 ## Context & architecture
-<what a fresh-context agent needs before touching code: repo layout, key files
-(path:line), conventions, constraints, and decisions already made. This section
-is the shared brain — edit it when a decision changes how the REMAINING children
-should be built, so the next iteration inherits it.>
+<!-- HARD BUDGET: this section stays under 4096 bytes. Operational facts only:
+paths, literal commands, exact terms, dated rules. NO narrative architecture
+prose — if a sentence explains how the system works instead of what to do,
+cut it. No 'Order' prose: ordering lives in the dependency graph only. -->
+
+### Repos & where things live
+- BEADS: <absolute path> — run every bd command from here.
+- CODE: <absolute path> — child-issue file paths are relative to this repo.
+- <path> — <one-line responsibility>
+(max 12 path entries; key files and dirs only)
+
+### Check commands
+- Typecheck: `<literal command>` (from <dir>)
+- Focused tests: `<literal command>`
+- Lint: `<literal command>`
+
+### Vocabulary & contracts
+- Use these terms exactly: <terms, or pointer to the glossary file>.
+- <contract doc path> binds <what it binds>. (one line per contract)
+
+### Do not
+- <imperative gotcha: don't X, do Y instead> (<YYYY-MM-DD> <child-id>)
+
+### Decisions
+- <YYYY-MM-DD> <child-id>: <decision stated as the new rule, one line>
+
+### Orientation card
+- Read <absolute path to the card in the CODE repo> before touching code.
+  If it contradicts this section, this section wins for this epic.
 
 ## Handoff Protocol  — you are ONE iteration picking its own next child
 This applies when something runs the epic id itself (`/cook-it <EPIC>`) rather
@@ -230,16 +255,25 @@ stop. If a coordinator assigned you a specific child, skip to "Worker mode".
    no gate). Never weaken tests. Never edit a child's scope — only its
    status/notes.
 4. Before you stop, update THIS epic:
-   - Append one line to the progress log:
+   - Append one note (max 400 characters) to the progress log:
      `bd note <EPIC> "<child-id> done — <what changed>; commit <hash>. Next: <the pointer the next iteration should act on>."`
      The LAST note is the live "what's next" — the next iteration reads it first.
      A last note without a `Next:` (e.g. from a parallel run) means fall back to
-     `bd ready`.
+     `bd ready`. Any decision that changes how remaining children should be built
+     goes inside the note as `DECISION: <one line>`; any trap the next iteration
+     must avoid goes in as `GOTCHA: <one line>`.
    - Discovered new work? Create it as a child now:
      `bd create "<title>" --type task --parent <EPIC> --deps discovered-from:<child-id> ...`
      and link any ordering. Mention it in your note.
-   - A decision or gotcha that changes remaining children? Edit "Context &
-     architecture" above via `bd update <EPIC> --body-file -` so it carries forward.
+   - Fold this same note's `DECISION:`/`GOTCHA:` markers into "Context &
+     architecture" now, in this same iteration:
+     `bd show <EPIC> --json | jq -r '(if type=="array" then .[0] else . end).description' > /tmp/epic-body.md`,
+     move each `DECISION:`/`GOTCHA:` payload into `### Decisions` / `### Do not`
+     as a dated entry, delete any bullet the new decision supersedes, then write
+     back with `bd update <EPIC> --body-file /tmp/epic-body.md`. Pruning rule:
+     when the section exceeds 4096 bytes, delete entries that only applied to
+     now-closed children, then the oldest Do-not entries. Never delete Repos,
+     Check commands, or Vocabulary & contracts.
 5. When `bd ready --parent <EPIC>` is empty AND no open children remain, the epic
    is done: `bd close <EPIC>` with a one-paragraph summary, then output RALPH_DONE.
 
@@ -260,8 +294,9 @@ in sequential mode) — follow it over the branch wording below. Either way:
   closes it.
 - Commit and push only your own `epic/<child-id>` branch. The coordinator owns
   every merge into the base branch.
-- Decisions that change how REMAINING children should be built still go into
-  "Context & architecture" — your sibling workers read it before starting.
+- Never edit this epic's body. Put decisions and gotchas in your single
+  close-out note as `DECISION: …` / `GOTCHA: …` lines — the coordinator folds
+  them into Context & architecture after your branch lands.
 EOF
 ```
 
@@ -355,7 +390,7 @@ done
 ## Why the handoff lives on the epic
 
 - **One source of truth per epic.** Goal, architecture, live state, and "what next" sit on the bead, not in a file that collides when several epics are active.
-- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so concurrent workers never race a read-modify-write. The description holds the _stable_ doc; only the shared-brain Context section is edited, and only on a real decision change.
+- **Append-only log, no clobbering.** Progress goes to `bd note` (append-only, first-class in beads), so concurrent workers never race a read-modify-write. `bd update --body-file` replaces the whole description with no compare-and-swap, so concurrent writers clobber each other — that's why exactly one writer per mode ever edits the body: in iteration mode the same agent folds its own note in the same turn; under `/cook-epic` only the coordinator writes the body, folding workers' `DECISION:`/`GOTCHA:` markers in after each child lands.
 - **The last note is the pointer.** Instead of maintaining a mutable "Next up" block, each iteration ends its note with `Next: …`. The freshest instruction is always the last line of the log.
 
 ## Cautions
