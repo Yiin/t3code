@@ -46,7 +46,11 @@ import {
   type EpicRunnerError,
 } from "../Errors.ts";
 import { EpicRunLock, type EpicRunLockLease } from "../Services/EpicRunLock.ts";
-import { classifyIteration, type EpicIterationOutcome } from "../ralphProtocol.ts";
+import {
+  classifyIteration,
+  type EpicIterationOutcome,
+  type IterationTurnState,
+} from "../ralphProtocol.ts";
 import {
   EpicRunner,
   type EpicRunnerShape,
@@ -66,6 +70,14 @@ const RECENT_ITERATIONS_LIMIT = 25;
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 const GIT_HEAD_TIMEOUT_MS = 15_000;
 const MAX_SETTLE_READS = 20;
+/**
+ * The bound for the one absence worth waiting out: a completed turn whose
+ * assistant row has not projected at all. Two minutes at the default quiet
+ * period, which is far past any projection lag but nothing against an iteration
+ * measured in hours — and it is only ever spent when the alternative is calling
+ * a pending message a missing one.
+ */
+const MAX_ABSENT_MESSAGE_SETTLE_READS = 120;
 const ACTIVE_RUN_RETRY_ATTEMPTS = 20;
 const ACTIVE_RUN_RETRY_DELAY_MS = 5;
 
@@ -180,6 +192,31 @@ const resolveFinalAssistantMessage = (
     pointer === null ? undefined : assistantMessages.find((message) => message.id === pointer);
   const message = named ?? assistantMessages[assistantMessages.length - 1];
   return message === undefined ? null : { text: message.text, streaming: message.streaming };
+};
+
+/**
+ * The turn state a thread detail implies, turn row first and session status
+ * second.
+ *
+ * `latestTurn` resolves through an inner join on `threads.latest_turn_id`
+ * (`ProjectionSnapshotQuery.ts:1122-1130`), and the same transaction that
+ * settles the turn nulls that pointer (`ProjectionPipeline.ts:757-771`). The
+ * pointer is only restored later, by `thread.turn-diff-completed` after the
+ * CheckpointReactor has captured a git checkpoint and diffed it — seconds of
+ * work unrelated to the turn, and skipped entirely when that capture fails. So
+ * a settled turn routinely reads back as `null` here, which `classifyIteration`
+ * cannot distinguish from "never ran".
+ *
+ * The session row is the reliable stand-in: the projector writes it in the same
+ * transaction it settles the turn with, from this exact mapping, so it can never
+ * disagree with the turn row that eventually reappears.
+ */
+const iterationTurnState = (thread: OrchestrationThread | undefined): IterationTurnState => {
+  const sessionStatus = thread?.session?.status ?? null;
+  return (
+    thread?.latestTurn?.state ??
+    (sessionStatus === null ? null : settledTurnStateFromSessionStatus(sessionStatus))
+  );
 };
 
 /** How an iteration's turn stopped, before its output has been classified. */
@@ -761,6 +798,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * whose turn truly ends with no assistant row — would otherwise hold the
      * loop here forever, so after `MAX_SETTLE_READS` the last read is used
      * as-is and classification decides what it means.
+     *
+     * That base bound is short because a rewriting provider is still working.
+     * A *completed* turn with no assistant row at all is a different wait: the
+     * only outstanding work is ingestion's own finalize, so the wait extends to
+     * `MAX_ABSENT_MESSAGE_SETTLE_READS` for as long as the turn keeps reading
+     * back completed. The extension is why the exhausted flag below means
+     * something: when even that runs out, the absence has been watched for as
+     * long as it is worth watching.
      */
     const readSettledFinalMessage = (threadId: ThreadId) =>
       Effect.gen(function* () {
@@ -774,7 +819,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         );
 
         let previous = yield* read;
-        for (let attempt = 0; attempt < MAX_SETTLE_READS; attempt += 1) {
+        // Raised, in the loop, the first time a completed turn reads back with
+        // no assistant row — the one absence worth waiting out.
+        let maxReads = MAX_SETTLE_READS;
+        let watchedCompletedTurnWithoutMessage = false;
+        for (let attempt = 0; attempt < maxReads; attempt += 1) {
           yield* Effect.sleep(Duration.millis(quietPeriodMs));
           const current = yield* read;
           const previousMessage = resolveFinalAssistantMessage(previous?.thread);
@@ -784,12 +833,23 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             previousMessage?.text === currentMessage.text &&
             previousMessage?.streaming === currentMessage.streaming
           ) {
-            return current;
+            return { snapshot: current, messageWaitExhausted: false };
+          }
+          if (currentMessage === null && iterationTurnState(current?.thread) === "completed") {
+            watchedCompletedTurnWithoutMessage = true;
+            maxReads = MAX_ABSENT_MESSAGE_SETTLE_READS;
           }
           previous = current;
         }
-        yield* Effect.logWarning("epic.runner.final-message-never-settled", { threadId });
-        return previous;
+        const settledMessage = resolveFinalAssistantMessage(previous?.thread);
+        yield* Effect.logWarning("epic.runner.final-message-never-settled", {
+          threadId,
+          messageProjected: settledMessage !== null,
+        });
+        return {
+          snapshot: previous,
+          messageWaitExhausted: watchedCompletedTurnWithoutMessage && settledMessage === null,
+        };
       });
 
     const classifyFromProjection = (input: {
@@ -804,32 +864,17 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // A timed-out turn was just interrupted and may still be streaming, so
         // there is nothing to wait for — and `classifyIteration` ignores the
         // message for a timeout anyway.
-        const snapshot = input.timedOut
-          ? undefined
+        const settled = input.timedOut
+          ? { snapshot: undefined, messageWaitExhausted: false }
           : yield* readSettledFinalMessage(input.threadId);
-
-        // `latestTurn` resolves through an inner join on
-        // `threads.latest_turn_id` (`ProjectionSnapshotQuery.ts:1122-1130`), and
-        // the same transaction that settles the turn nulls that pointer
-        // (`ProjectionPipeline.ts:757-771`). The pointer is only restored later,
-        // by `thread.turn-diff-completed` after the CheckpointReactor has
-        // captured a git checkpoint and diffed it — seconds of work unrelated to
-        // the turn, and skipped entirely when that capture fails. So a settled
-        // turn routinely reads back as `null` here, which
-        // `classifyIteration` cannot distinguish from "never ran".
-        //
-        // The session row is the reliable stand-in: the projector writes it in
-        // the same transaction it settles the turn with, from this exact
-        // mapping, so it can never disagree with the turn row that eventually
-        // reappears.
-        const sessionStatus = snapshot?.thread.session?.status ?? null;
-        const turnState =
-          snapshot?.thread.latestTurn?.state ??
-          (sessionStatus === null ? null : settledTurnStateFromSessionStatus(sessionStatus));
+        const thread = settled.snapshot?.thread;
 
         return classifyIteration({
-          turnState,
-          finalMessage: resolveFinalAssistantMessage(snapshot?.thread),
+          // Falls back to the session status when the turn pointer is missing —
+          // see `iterationTurnState`.
+          turnState: iterationTurnState(thread),
+          finalMessage: resolveFinalAssistantMessage(thread),
+          finalMessageWaitExhausted: settled.messageWaitExhausted,
           committed,
           timedOut: input.timedOut,
         });

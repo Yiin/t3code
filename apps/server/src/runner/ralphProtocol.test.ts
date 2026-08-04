@@ -6,9 +6,19 @@ const completedWith = (text: string) =>
   ({
     turnState: "completed",
     finalMessage: { text, streaming: false },
+    finalMessageWaitExhausted: false,
     committed: false,
     timedOut: false,
   }) as const;
+
+/** A completed turn that read back with no assistant row at all. */
+const completedWithoutMessage = {
+  turnState: "completed",
+  finalMessage: null,
+  finalMessageWaitExhausted: false,
+  committed: false,
+  timedOut: false,
+} as const;
 
 describe("parseRalphReport", () => {
   it("reads summary and why from the report line", () => {
@@ -82,19 +92,51 @@ describe("classifyIteration", () => {
   });
 
   it("never infers done from a missing assistant message", () => {
+    const outcome = classifyIteration(completedWithoutMessage);
+    expect(outcome.kind).toBe("protocol-error");
+  });
+
+  it("never forgives a missing assistant message on a commit alone", () => {
+    // The commit only speaks once the runner has stopped waiting. While the
+    // wait is still open the absence means nothing, and a `done` here would let
+    // any half-read turn pass.
+    const outcome = classifyIteration({ ...completedWithoutMessage, committed: true });
+    expect(outcome.kind).toBe("protocol-error");
+    expect(outcome.detail).toBe("turn completed without an assistant message");
+  });
+
+  it("keeps a message-less turn that committed nothing a protocol error after the wait", () => {
+    // "No message ever": the runner watched the settled turn for its whole
+    // bound and the iteration left nothing behind. Still inconclusive, still a
+    // failure — this is the case the forgiveness below must not swallow.
     const outcome = classifyIteration({
-      turnState: "completed",
-      finalMessage: null,
-      committed: false,
-      timedOut: false,
+      ...completedWithoutMessage,
+      finalMessageWaitExhausted: true,
     });
     expect(outcome.kind).toBe("protocol-error");
+    expect(outcome.detail).toBe("turn completed without an assistant message");
+  });
+
+  it("accepts a message-less turn that committed once the wait is exhausted", () => {
+    // "No message yet, and no way left to tell": the work landed, so the loop
+    // carries on rather than counting a projection lag as agent failure.
+    const outcome = classifyIteration({
+      ...completedWithoutMessage,
+      finalMessageWaitExhausted: true,
+      committed: true,
+    });
+    expect(outcome.kind).toBe("done");
+    expect(outcome.detail).toBe(
+      "assistant message never projected; accepted on the iteration's commit",
+    );
+    expect(outcome.report).toBeNull();
   });
 
   it("never infers done from a message that was never finalized", () => {
     const outcome = classifyIteration({
       turnState: "completed",
       finalMessage: { text: "RALPH_DONE", streaming: true },
+      finalMessageWaitExhausted: false,
       committed: false,
       timedOut: false,
     });
@@ -105,7 +147,21 @@ describe("classifyIteration", () => {
     const outcome = classifyIteration({
       turnState: "interrupted",
       finalMessage: { text: "RALPH_DONE", streaming: false },
+      finalMessageWaitExhausted: false,
       committed: false,
+      timedOut: false,
+    });
+    expect(outcome.kind).toBe("error");
+  });
+
+  it("does not accept an interrupted turn that committed and lost its message", () => {
+    // The forgiveness is scoped to a *completed* turn. An interrupted one is
+    // an error whatever it committed.
+    const outcome = classifyIteration({
+      turnState: "interrupted",
+      finalMessage: null,
+      finalMessageWaitExhausted: true,
+      committed: true,
       timedOut: false,
     });
     expect(outcome.kind).toBe("error");
@@ -115,6 +171,7 @@ describe("classifyIteration", () => {
     const outcome = classifyIteration({
       turnState: "completed",
       finalMessage: { text: "RALPH_DONE", streaming: false },
+      finalMessageWaitExhausted: false,
       committed: false,
       timedOut: true,
     });

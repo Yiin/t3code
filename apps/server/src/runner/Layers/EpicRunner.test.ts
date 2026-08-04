@@ -943,6 +943,8 @@ describe("EpicRunner", () => {
   );
 
   it.live("classifies a genuinely message-less completed turn as a protocol error", () => {
+    // "No message ever". The turn completed, the settle wait ran out, and the
+    // iteration left no commit behind — nothing to judge it by, so it fails.
     const harness = createHarness({
       script: [{ text: null, head: "head-0", turnState: "completed" }],
       options: { maxConsecutiveFailures: 1 },
@@ -957,6 +959,38 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live(
+    "keeps a committed iteration whose message never projected out of the failure count",
+    () => {
+      // Regression for t3code-9vf. "No message *yet*" and "no message ever" look
+      // identical in projections — under the default buffered delivery mode a
+      // pending final message has no assistant row at all, not a streaming one —
+      // so once the settle wait is exhausted the verdict falls to the other
+      // observation: the commit. Without it this iteration reads as a protocol
+      // error and three in a row kill the run.
+      const harness = createHarness({
+        script: [{ text: null, head: "head-1", turnState: "completed" }],
+        options: { iterationTimeoutMs: 60_000, maxConsecutiveFailures: 1 },
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "completed");
+
+        assert.strictEqual(
+          harness.store.iterations[0]?.summary,
+          "assistant message never projected; accepted on the iteration's commit",
+        );
+        assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+        assert.strictEqual(harness.store.runs.get(run.runId)?.lastError, null);
+        assert.notStrictEqual(harness.store.runs.get(run.runId)?.status, "failed");
+
+        yield* runner.cancelRun({ runId: run.runId });
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.live(
     "classifies a settled iteration done when the turn pointer has not been restored yet",
