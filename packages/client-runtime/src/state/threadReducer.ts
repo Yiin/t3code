@@ -2,6 +2,7 @@ import { pipe } from "effect/Function";
 import * as Arr from "effect/Array";
 import * as O from "effect/Order";
 import {
+  applySubagentActivity,
   THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
   THREAD_DETAIL_ACTIVITY_LIMIT,
 } from "@t3tools/contracts";
@@ -533,11 +534,20 @@ export function applyThreadDetailEvent(
       );
       const { activities, droppedCount } = capActivities(merged);
 
+      // Fold `task.*` activities into the subagent read model. Subagents live
+      // outside the activity cap on purpose: a subagent must stay visible
+      // after its originating `task.started` row is evicted. The fold's
+      // upsert-by-subagentId semantics make replays (reconnect resume, the
+      // coalesced `task.progress` row re-arriving under one id) updates
+      // rather than duplicates; non-`task.*` kinds return the same reference.
+      const subagents = applySubagentActivity(thread.subagents, event.payload.activity);
+
       return {
         kind: "updated",
         thread: {
           ...thread,
           activities,
+          subagents,
           ...(droppedCount > 0
             ? {
                 activitiesTruncated: {

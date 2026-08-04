@@ -809,6 +809,191 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("thread.activity-appended: subagent fold", () => {
+    const taskActivity = (input: {
+      readonly id: string;
+      readonly kind: "task.started" | "task.progress" | "task.completed";
+      readonly payload: unknown;
+      readonly sequence: number;
+      readonly createdAt?: string;
+    }): OrchestrationThreadActivity => ({
+      id: EventId.make(input.id),
+      tone: "info",
+      kind: input.kind,
+      summary: "Subagent update",
+      payload: input.payload,
+      turnId: TurnId.make("turn-1"),
+      sequence: input.sequence,
+      createdAt: input.createdAt ?? "2026-04-01T11:00:00.000Z",
+    });
+
+    it("folds live started/progress/completed activities into a running→completed row", () => {
+      const thread = appendActivities(baseThread, [
+        taskActivity({
+          id: "activity-task-started",
+          kind: "task.started",
+          payload: { taskId: "task-1", detail: "Explore the repo", subagentType: "Explore" },
+          sequence: 1,
+          createdAt: "2026-04-01T11:00:00.000Z",
+        }),
+        taskActivity({
+          id: "activity-task-progress",
+          kind: "task.progress",
+          payload: { taskId: "task-1", summary: "Reading files", lastToolName: "Read" },
+          sequence: 2,
+          createdAt: "2026-04-01T11:00:10.000Z",
+        }),
+        taskActivity({
+          id: "activity-task-completed",
+          kind: "task.completed",
+          payload: { taskId: "task-1", status: "completed", summary: "Found 3 call sites" },
+          sequence: 3,
+          createdAt: "2026-04-01T11:00:20.000Z",
+        }),
+      ]);
+
+      expect(thread.subagents).toHaveLength(1);
+      expect(thread.subagents[0]).toMatchObject({
+        subagentId: "task-1",
+        agentType: "Explore",
+        description: "Explore the repo",
+        status: "completed",
+        lastProgressSummary: "Found 3 call sites",
+        lastToolName: "Read",
+        startedAt: "2026-04-01T11:00:00.000Z",
+        completedAt: "2026-04-01T11:00:20.000Z",
+      });
+    });
+
+    it("keeps snapshot-seeded subagents and folds live activities on top", () => {
+      // A cold client seeds `subagents` from the decoded snapshot; live
+      // activities for the same subagentId must update that row, not add one.
+      const seeded: OrchestrationThread = {
+        ...baseThread,
+        subagents: [
+          {
+            subagentId: "task-1",
+            turnId: TurnId.make("turn-1"),
+            description: "Explore the repo",
+            status: "running",
+            startedAt: "2026-04-01T10:59:00.000Z",
+            updatedAt: "2026-04-01T10:59:00.000Z",
+            completedAt: null,
+          },
+        ],
+      };
+
+      const thread = appendActivities(seeded, [
+        taskActivity({
+          id: "activity-task-completed",
+          kind: "task.completed",
+          payload: { taskId: "task-1", status: "completed" },
+          sequence: 1,
+          createdAt: "2026-04-01T11:00:00.000Z",
+        }),
+      ]);
+
+      expect(thread.subagents).toHaveLength(1);
+      expect(thread.subagents[0]).toMatchObject({
+        subagentId: "task-1",
+        description: "Explore the repo",
+        status: "completed",
+        completedAt: "2026-04-01T11:00:00.000Z",
+      });
+    });
+
+    it("leaves subagents untouched (same reference) for non-task activities", () => {
+      const seeded: OrchestrationThread = {
+        ...baseThread,
+        subagents: [
+          {
+            subagentId: "task-1",
+            turnId: TurnId.make("turn-1"),
+            status: "running",
+            startedAt: "2026-04-01T10:59:00.000Z",
+            updatedAt: "2026-04-01T10:59:00.000Z",
+            completedAt: null,
+          },
+        ],
+      };
+
+      const thread = appendActivities(seeded, [fillerActivity(1)]);
+
+      expect(thread.subagents).toBe(seeded.subagents);
+    });
+
+    it("replaying an already-applied activity leaves subagent state unchanged", () => {
+      const started = taskActivity({
+        id: "activity-task-started",
+        kind: "task.started",
+        payload: { taskId: "task-1", detail: "Explore the repo" },
+        sequence: 1,
+      });
+      const once = appendActivities(baseThread, [started]);
+      const twice = appendActivities(once, [started]);
+
+      expect(twice.subagents).toEqual(once.subagents);
+      expect(twice.activities).toHaveLength(1);
+    });
+
+    it("keeps the subagent after the cap evicts its task.started activity", () => {
+      const started = taskActivity({
+        id: "activity-task-started",
+        kind: "task.started",
+        payload: { taskId: "task-1", detail: "Explore the repo" },
+        sequence: 1,
+      });
+      const thread = appendActivities(baseThread, [
+        started,
+        ...Array.from({ length: THREAD_DETAIL_ACTIVITY_LIMIT + 100 }, (_, index) =>
+          fillerActivity(index + 2),
+        ),
+      ]);
+
+      expect(thread.activities.some((activity) => activity.id === started.id)).toBe(false);
+      expect(thread.subagents).toHaveLength(1);
+      expect(thread.subagents[0]).toMatchObject({ subagentId: "task-1", status: "running" });
+    });
+
+    it("treats repeated coalesced task.progress rows with one id as in-place updates", () => {
+      // Server ingestion coalesces progress under one activity id
+      // (`task-progress:<threadId>:<taskId>`), so the same id arrives
+      // repeatedly with fresher content.
+      const coalescedId = "task-progress:thread-1:task-1";
+      const thread = appendActivities(baseThread, [
+        taskActivity({
+          id: "activity-task-started",
+          kind: "task.started",
+          payload: { taskId: "task-1" },
+          sequence: 1,
+        }),
+        taskActivity({
+          id: coalescedId,
+          kind: "task.progress",
+          payload: { taskId: "task-1", summary: "Reading files" },
+          sequence: 2,
+          createdAt: "2026-04-01T11:00:10.000Z",
+        }),
+        taskActivity({
+          id: coalescedId,
+          kind: "task.progress",
+          payload: { taskId: "task-1", summary: "Grepping call sites" },
+          sequence: 3,
+          createdAt: "2026-04-01T11:00:20.000Z",
+        }),
+      ]);
+
+      expect(thread.activities.filter((activity) => activity.id === coalescedId)).toHaveLength(1);
+      expect(thread.subagents).toHaveLength(1);
+      expect(thread.subagents[0]).toMatchObject({
+        subagentId: "task-1",
+        status: "running",
+        lastProgressSummary: "Grepping call sites",
+        updatedAt: "2026-04-01T11:00:20.000Z",
+      });
+    });
+  });
+
   describe("thread.turn-diff-completed", () => {
     it("adds a checkpoint and updates latestTurn", () => {
       const result = applyThreadDetailEvent(baseThread, {

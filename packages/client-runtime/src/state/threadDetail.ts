@@ -7,6 +7,7 @@ import type {
   OrchestrationThread,
   OrchestrationThreadActivity,
   OrchestrationThreadActivityTruncation,
+  OrchestrationThreadSubagent,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -22,6 +23,7 @@ const EMPTY_MESSAGES: ReadonlyArray<OrchestrationMessage> = Object.freeze([]);
 const EMPTY_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = Object.freeze([]);
 const EMPTY_PROPOSED_PLANS: ReadonlyArray<OrchestrationProposedPlan> = Object.freeze([]);
 const EMPTY_CHECKPOINTS: ReadonlyArray<OrchestrationCheckpointSummary> = Object.freeze([]);
+const EMPTY_SUBAGENTS: ReadonlyArray<OrchestrationThreadSubagent> = Object.freeze([]);
 
 /**
  * Combine detail-only collections with the shell's authoritative thread metadata.
@@ -165,6 +167,25 @@ export function createEnvironmentThreadDetailAtoms<E>(
     ),
   );
 
+  const threadSubagentsAtomFamily = Atom.family((key: string) =>
+    Atom.make(
+      (get): ReadonlyArray<OrchestrationThreadSubagent> =>
+        get(threadDetailAtomFamily(key))?.subagents ?? EMPTY_SUBAGENTS,
+    ).pipe(
+      Atom.setIdleTTL(THREAD_STATE_IDLE_TTL_MS),
+      Atom.withLabel(`environment-thread-subagents:${key}`),
+    ),
+  );
+
+  const threadHasRunningSubagentsAtomFamily = Atom.family((key: string) =>
+    Atom.make((get): boolean =>
+      get(threadSubagentsAtomFamily(key)).some((subagent) => subagent.status === "running"),
+    ).pipe(
+      Atom.setIdleTTL(THREAD_STATE_IDLE_TTL_MS),
+      Atom.withLabel(`environment-thread-has-running-subagents:${key}`),
+    ),
+  );
+
   const threadSessionAtomFamily = Atom.family((key: string) =>
     Atom.make(
       (get): OrchestrationSession | null => get(threadDetailAtomFamily(key))?.session ?? null,
@@ -194,6 +215,9 @@ export function createEnvironmentThreadDetailAtoms<E>(
       threadActivitiesTruncatedAtomFamily(threadKey(ref)),
     proposedPlansAtom: (ref: ScopedThreadRef) => threadProposedPlansAtomFamily(threadKey(ref)),
     checkpointsAtom: (ref: ScopedThreadRef) => threadCheckpointsAtomFamily(threadKey(ref)),
+    subagentsAtom: (ref: ScopedThreadRef) => threadSubagentsAtomFamily(threadKey(ref)),
+    hasRunningSubagentsAtom: (ref: ScopedThreadRef) =>
+      threadHasRunningSubagentsAtomFamily(threadKey(ref)),
     sessionAtom: (ref: ScopedThreadRef) => threadSessionAtomFamily(threadKey(ref)),
     latestTurnAtom: (ref: ScopedThreadRef) => threadLatestTurnAtomFamily(threadKey(ref)),
   };

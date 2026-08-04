@@ -370,4 +370,70 @@ describe("environment entity projections", () => {
     expect(harness.registry.get(messagesAtom)).toBe(messages);
     expect(harness.registry.get(activitiesAtom)).toBe(activities);
   });
+
+  it("exposes thread subagents and a derived running signal", () => {
+    const harness = makeHarness();
+    const threadRef = {
+      environmentId: ENVIRONMENT_ID,
+      threadId: THREAD_ID,
+    };
+    const subagentsAtom = harness.threadDetails.subagentsAtom(threadRef);
+    const hasRunningSubagentsAtom = harness.threadDetails.hasRunningSubagentsAtom(threadRef);
+
+    // No detail loaded yet: stable empty array, no running signal.
+    const emptySubagents = harness.registry.get(subagentsAtom);
+    expect(emptySubagents).toEqual([]);
+    expect(harness.registry.get(hasRunningSubagentsAtom)).toBe(false);
+
+    const runningSubagent = {
+      subagentId: "task-1",
+      turnId: null,
+      description: "Explore the repo",
+      status: "running",
+      startedAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      completedAt: null,
+    } as const;
+    const detail = {
+      ...THREAD_SHELL,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      subagents: [runningSubagent],
+      activities: [],
+      checkpoints: [],
+    } satisfies OrchestrationThread;
+
+    harness.registry.set(
+      harness.threadStateAtom(THREAD_ID),
+      AsyncResult.success<EnvironmentThreadState>({
+        data: Option.some(detail),
+        status: "live",
+        error: Option.none(),
+      }),
+    );
+
+    expect(harness.registry.get(subagentsAtom)).toEqual([runningSubagent]);
+    expect(harness.registry.get(hasRunningSubagentsAtom)).toBe(true);
+
+    harness.registry.set(
+      harness.threadStateAtom(THREAD_ID),
+      AsyncResult.success<EnvironmentThreadState>({
+        data: Option.some({
+          ...detail,
+          subagents: [
+            {
+              ...runningSubagent,
+              status: "completed",
+              completedAt: "2026-06-01T00:01:00.000Z",
+            },
+          ],
+        }),
+        status: "live",
+        error: Option.none(),
+      }),
+    );
+
+    expect(harness.registry.get(hasRunningSubagentsAtom)).toBe(false);
+  });
 });
