@@ -884,6 +884,118 @@ describe("orchestration projector", () => {
     }),
   );
 
+  effectIt.effect("closes running subagents when the session reaches a terminal status", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-02-23T11:00:00.000Z";
+      const model = createEmptyReadModel(createdAt);
+
+      const afterCreate = yield* projectEvent(
+        model,
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5.3-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      );
+
+      const afterStarted = yield* projectEvent(
+        afterCreate,
+        makeEvent({
+          sequence: 2,
+          type: "thread.activity-appended",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: "2026-02-23T11:00:01.000Z",
+          commandId: null,
+          payload: {
+            threadId: "thread-1",
+            activity: {
+              id: "activity-task-started",
+              tone: "info",
+              kind: "task.started",
+              summary: "Subagent started",
+              payload: {
+                taskId: "task-1",
+                detail: "Scan the repo",
+              },
+              turnId: "turn-1",
+              createdAt: "2026-02-23T11:00:01.000Z",
+            },
+          },
+        }),
+      );
+
+      const sessionSet = (input: {
+        readonly sequence: number;
+        readonly status: "idle" | "stopped" | "error";
+        readonly occurredAt: string;
+      }) =>
+        makeEvent({
+          sequence: input.sequence,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: input.occurredAt,
+          commandId: null,
+          payload: {
+            threadId: "thread-1",
+            session: {
+              threadId: "thread-1",
+              status: input.status,
+              providerName: "claude",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: input.occurredAt,
+            },
+          },
+        });
+
+      // A falsely idle main stream leaves the running row alone — that row
+      // is exactly the signal the settle/reap guards consume.
+      const afterIdle = yield* projectEvent(
+        afterStarted,
+        sessionSet({ sequence: 3, status: "idle", occurredAt: "2026-02-23T11:00:02.000Z" }),
+      );
+      expect(afterIdle.threads[0]?.subagents).toEqual(afterStarted.threads[0]?.subagents);
+
+      // A terminal session status closes the orphaned row, mirroring the SQL
+      // projector via the shared contracts fold.
+      const afterStopped = yield* projectEvent(
+        afterIdle,
+        sessionSet({ sequence: 4, status: "stopped", occurredAt: "2026-02-23T11:00:03.000Z" }),
+      );
+      expect(afterStopped.threads[0]?.subagents).toEqual([
+        {
+          subagentId: "task-1",
+          turnId: "turn-1",
+          description: "Scan the repo",
+          status: "stopped",
+          startedAt: "2026-02-23T11:00:01.000Z",
+          updatedAt: "2026-02-23T11:00:03.000Z",
+          completedAt: "2026-02-23T11:00:03.000Z",
+        },
+      ]);
+    }),
+  );
+
   it("does not fallback-retain messages tied to removed turn IDs", async () => {
     const createdAt = "2026-02-26T12:00:00.000Z";
     const model = createEmptyReadModel(createdAt);

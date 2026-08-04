@@ -548,6 +548,63 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.latestTurn?.state).toBe("running");
       }
     });
+
+    it("closes running subagent rows when the session reaches a terminal status", () => {
+      const threadWithRunningSubagent: OrchestrationThread = {
+        ...baseThread,
+        subagents: [
+          {
+            subagentId: "task-1",
+            turnId: TurnId.make("turn-1"),
+            description: "Explore the repo",
+            status: "running",
+            startedAt: "2026-04-01T07:00:00.000Z",
+            updatedAt: "2026-04-01T07:00:00.000Z",
+            completedAt: null,
+          },
+        ],
+      };
+
+      const sessionSet = (status: "idle" | "error") =>
+        applyThreadDetailEvent(threadWithRunningSubagent, {
+          ...baseEventFields,
+          sequence: 9,
+          occurredAt: "2026-04-01T08:00:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.session-set",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status,
+              providerName: "claude",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-04-01T08:00:00.000Z",
+            },
+          },
+        });
+
+      // A falsely idle main stream must not close a still-working subagent.
+      const afterIdle = sessionSet("idle");
+      expect(afterIdle.kind).toBe("updated");
+      if (afterIdle.kind === "updated") {
+        expect(afterIdle.thread.subagents).toBe(threadWithRunningSubagent.subagents);
+      }
+
+      const afterError = sessionSet("error");
+      expect(afterError.kind).toBe("updated");
+      if (afterError.kind === "updated") {
+        expect(afterError.thread.subagents[0]).toMatchObject({
+          subagentId: "task-1",
+          status: "failed",
+          updatedAt: "2026-04-01T08:00:00.000Z",
+          completedAt: "2026-04-01T08:00:00.000Z",
+        });
+      }
+    });
   });
 
   describe("thread.session-stop-requested", () => {

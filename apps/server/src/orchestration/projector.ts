@@ -1,6 +1,7 @@
 import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
 import {
   applySubagentActivity,
+  closeRunningSubagentsForSession,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
@@ -528,10 +529,15 @@ export function projectEvent(
         // Leaving the "running" session status is the turn-end signal: settle
         // a still-running latest turn so its duration reflects the whole turn.
         const settledTurnState = settledTurnStateForSessionStatus(session.status);
+        // The same shared fold the SQL projector applies: a terminal session
+        // status closes orphaned running subagent rows so the decider read
+        // model and the SQL projection cannot drift.
+        const subagents = closeRunningSubagentsForSession(thread.subagents, session);
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
+            ...(subagents !== thread.subagents ? { subagents } : {}),
             latestTurn:
               session.status === "running" && session.activeTurnId !== null
                 ? {

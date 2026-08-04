@@ -13,6 +13,7 @@ import {
   OrchestrationLatestTurn,
   OrchestrationThreadActivity,
   applySubagentActivity,
+  closeRunningSubagentsForSession,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -633,6 +634,52 @@ it("creates a running row for progress on an unseen task", () => {
   assert.strictEqual(row.subagentId, "a027ffbeca4f867d2");
   assert.strictEqual(row.status, "running");
   assert.strictEqual(row.startedAt, "2026-01-01T00:00:05.000Z");
+});
+
+it("closes running subagent rows when the session reaches a terminal status", () => {
+  const running = applySubagentActivity([], subagentStarted);
+
+  const failed = closeRunningSubagentsForSession(running, {
+    status: "error",
+    updatedAt: "2026-01-01T00:01:00.000Z",
+  });
+  assert.strictEqual(failed.length, 1);
+  assert.strictEqual(failed[0]?.status, "failed");
+  assert.strictEqual(failed[0]?.updatedAt, "2026-01-01T00:01:00.000Z");
+  assert.strictEqual(failed[0]?.completedAt, "2026-01-01T00:01:00.000Z");
+
+  const stopped = closeRunningSubagentsForSession(running, {
+    status: "stopped",
+    updatedAt: "2026-01-01T00:01:00.000Z",
+  });
+  assert.strictEqual(stopped[0]?.status, "stopped");
+  assert.strictEqual(stopped[0]?.completedAt, "2026-01-01T00:01:00.000Z");
+});
+
+it("leaves subagent rows untouched for non-terminal session statuses and settled rows", () => {
+  const running = applySubagentActivity([], subagentStarted);
+
+  // The incident class has the main stream falsely idle while a subagent
+  // still works: idle/ready/running must never close a running row.
+  for (const status of ["idle", "starting", "running", "ready", "interrupted"] as const) {
+    assert.strictEqual(
+      closeRunningSubagentsForSession(running, {
+        status,
+        updatedAt: "2026-01-01T00:01:00.000Z",
+      }),
+      running,
+    );
+  }
+
+  // A settled row keeps its own completion status and timestamps.
+  const settled = applySubagentActivity(running, subagentCompleted);
+  assert.strictEqual(
+    closeRunningSubagentsForSession(settled, {
+      status: "error",
+      updatedAt: "2026-01-01T00:01:00.000Z",
+    }),
+    settled,
+  );
 });
 
 it.effect("decodes thread archived and unarchived events", () =>

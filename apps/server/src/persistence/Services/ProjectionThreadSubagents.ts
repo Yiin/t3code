@@ -54,6 +54,14 @@ export const DeleteProjectionThreadSubagentsInput = Schema.Struct({
 });
 export type DeleteProjectionThreadSubagentsInput = typeof DeleteProjectionThreadSubagentsInput.Type;
 
+export const CloseRunningProjectionThreadSubagentsInput = Schema.Struct({
+  threadId: ThreadId,
+  status: Schema.Literals(["completed", "failed", "stopped"]),
+  completedAt: IsoDateTime,
+});
+export type CloseRunningProjectionThreadSubagentsInput =
+  typeof CloseRunningProjectionThreadSubagentsInput.Type;
+
 /**
  * ProjectionThreadSubagentRepositoryShape - Service API for projected
  * subagent rows.
@@ -87,6 +95,17 @@ export interface ProjectionThreadSubagentRepositoryShape {
    */
   readonly deleteByThreadId: (
     input: DeleteProjectionThreadSubagentsInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Bulk-close a thread's still-`running` rows to a terminal status.
+   *
+   * Used when the thread's session reaches a terminal status and can no
+   * longer complete its subagents; stamps `updatedAt`/`completedAt` with
+   * `completedAt`.
+   */
+  readonly closeRunningByThreadId: (
+    input: CloseRunningProjectionThreadSubagentsInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 }
 

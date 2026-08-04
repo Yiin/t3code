@@ -631,6 +631,57 @@ export const applySubagentActivity = (
   }
 };
 
+/**
+ * The terminal subagent status a session status forces, or `null` when the
+ * session status says nothing about subagent liveness.
+ *
+ * Only `stopped` and `error` close rows: a dead session can no longer emit
+ * the `task.completed` that would settle them. `idle`/`ready` must leave
+ * running rows untouched — the incident class has the main stream falsely
+ * idle while a subagent still works, and that running row is exactly the
+ * signal the settle/reap guards consume.
+ */
+export const subagentCloseStatusForSessionStatus = (
+  status: OrchestrationSessionStatus,
+): Extract<OrchestrationThreadSubagentStatus, "failed" | "stopped"> | null => {
+  switch (status) {
+    case "error":
+      return "failed";
+    case "stopped":
+      return "stopped";
+    default:
+      return null;
+  }
+};
+
+/**
+ * Fold one `thread.session-set` into the subagent read model: a terminal
+ * session status orphans any still-running rows, so close them at the
+ * session timestamp. Total and replay-safe like `applySubagentActivity` —
+ * non-terminal statuses and already-settled rows return the input array
+ * unchanged (same reference), and the SQL projector, the in-memory
+ * projector, and the client reducer all share this one fold so their views
+ * cannot drift.
+ */
+export const closeRunningSubagentsForSession = (
+  subagents: ReadonlyArray<OrchestrationThreadSubagent>,
+  session: Pick<OrchestrationSession, "status" | "updatedAt">,
+): ReadonlyArray<OrchestrationThreadSubagent> => {
+  const closeStatus = subagentCloseStatusForSessionStatus(session.status);
+  if (closeStatus === null) return subagents;
+  if (!subagents.some((entry) => entry.status === "running")) return subagents;
+  return subagents.map((entry) =>
+    entry.status === "running"
+      ? {
+          ...entry,
+          status: closeStatus,
+          updatedAt: session.updatedAt,
+          completedAt: session.updatedAt,
+        }
+      : entry,
+  );
+};
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,

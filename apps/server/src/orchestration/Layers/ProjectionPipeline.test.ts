@@ -3733,19 +3733,112 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-suba
         const rowsAfterRebuild = yield* readSubagentRows;
         assert.deepEqual(rowsAfterRebuild, rowsAfterComplete);
 
+        // A second subagent that never reports task.completed: its session
+        // dying is the only signal left to close the row.
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-subagents-orphan-1"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:05.000Z",
+          commandId: CommandId.make("cmd-subagents-orphan-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-orphan-1"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            activity: {
+              id: EventId.make("activity-subagents-orphan-started"),
+              tone: "info",
+              kind: "task.started",
+              summary: "Orphaned subagent started",
+              payload: {
+                taskId: "task-sub-2",
+                detail: "Long-running audit",
+              },
+              turnId: TurnId.make("turn-subagents-2"),
+              createdAt: "2026-03-01T10:00:05.000Z",
+            },
+          },
+        });
+
+        const sessionSetEvent = (input: {
+          readonly suffix: string;
+          readonly status: "idle" | "stopped" | "error";
+          readonly occurredAt: string;
+        }) =>
+          appendAndProject({
+            type: "thread.session-set",
+            eventId: EventId.make(`evt-subagents-session-${input.suffix}`),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make("thread-subagents"),
+            occurredAt: input.occurredAt,
+            commandId: CommandId.make(`cmd-subagents-session-${input.suffix}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-subagents-session-${input.suffix}`),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make("thread-subagents"),
+              session: {
+                threadId: ThreadId.make("thread-subagents"),
+                status: input.status,
+                providerName: "claude",
+                runtimeMode: "full-access",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: input.occurredAt,
+              },
+            },
+          });
+
+        // A falsely idle main stream must not close the still-working
+        // subagent — that running row is the settle/reap guards' signal.
+        yield* sessionSetEvent({
+          suffix: "idle",
+          status: "idle",
+          occurredAt: "2026-03-01T10:00:06.000Z",
+        });
+        const rowsAfterIdle = yield* readSubagentRows;
+        assert.equal(rowsAfterIdle.length, 2);
+        assert.equal(rowsAfterIdle[1]?.subagentId, "task-sub-2");
+        assert.equal(rowsAfterIdle[1]?.status, "running");
+        assert.equal(rowsAfterIdle[1]?.completedAt, null);
+
+        // A terminal session status closes the orphaned running row and
+        // leaves the already-settled one untouched.
+        yield* sessionSetEvent({
+          suffix: "error",
+          status: "error",
+          occurredAt: "2026-03-01T10:00:07.000Z",
+        });
+        const rowsAfterError = yield* readSubagentRows;
+        assert.deepEqual(rowsAfterError[0], rowsAfterComplete[0]);
+        assert.equal(rowsAfterError[1]?.subagentId, "task-sub-2");
+        assert.equal(rowsAfterError[1]?.status, "failed");
+        assert.equal(rowsAfterError[1]?.updatedAt, "2026-03-01T10:00:07.000Z");
+        assert.equal(rowsAfterError[1]?.completedAt, "2026-03-01T10:00:07.000Z");
+
+        const runningCountAfterError = yield* sql<{ readonly runningCount: number }>`
+          SELECT COUNT(*) AS "runningCount"
+          FROM projection_thread_subagents
+          WHERE thread_id = 'thread-subagents'
+            AND status = 'running'
+        `;
+        assert.equal(runningCountAfterError[0]?.runningCount, 0);
+
         yield* appendAndProject({
           type: "thread.deleted",
           eventId: EventId.make("evt-subagents-6"),
           aggregateKind: "thread",
           aggregateId: ThreadId.make("thread-subagents"),
-          occurredAt: "2026-03-01T10:00:05.000Z",
+          occurredAt: "2026-03-01T10:00:08.000Z",
           commandId: CommandId.make("cmd-subagents-6"),
           causationEventId: null,
           correlationId: CorrelationId.make("cmd-subagents-6"),
           metadata: {},
           payload: {
             threadId: ThreadId.make("thread-subagents"),
-            deletedAt: "2026-03-01T10:00:05.000Z",
+            deletedAt: "2026-03-01T10:00:08.000Z",
           },
         });
 

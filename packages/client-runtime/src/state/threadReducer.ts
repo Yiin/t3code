@@ -3,6 +3,7 @@ import * as Arr from "effect/Array";
 import * as O from "effect/Order";
 import {
   applySubagentActivity,
+  closeRunningSubagentsForSession,
   THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
   THREAD_DETAIL_ACTIVITY_LIMIT,
 } from "@t3tools/contracts";
@@ -380,11 +381,17 @@ export function applyThreadDetailEvent(
               }
             : thread.latestTurn;
 
+      // The same shared fold the server projectors apply: a terminal session
+      // status closes orphaned running subagent rows so the detail view never
+      // shows ghost subagents for a dead session.
+      const subagents = closeRunningSubagentsForSession(thread.subagents, event.payload.session);
+
       return {
         kind: "updated",
         thread: {
           ...thread,
           session: event.payload.session,
+          ...(subagents !== thread.subagents ? { subagents } : {}),
           latestTurn,
           updatedAt: event.occurredAt,
         },

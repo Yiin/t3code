@@ -5,6 +5,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
   type OrchestrationThreadSubagent,
+  subagentCloseStatusForSessionStatus,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -1076,6 +1077,24 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);
+          return;
+        }
+
+        case "thread.session-set": {
+          // A terminal session status orphans still-running rows: the process
+          // that would emit their `task.completed` is gone. Close them so
+          // activeSubagentCount and the settle/reap guards never trust a dead
+          // session's leftovers. The status mapping is the shared contracts
+          // fold's, so SQL rows and the in-memory read model stay converged.
+          const closeStatus = subagentCloseStatusForSessionStatus(event.payload.session.status);
+          if (closeStatus === null) {
+            return;
+          }
+          yield* projectionThreadSubagentRepository.closeRunningByThreadId({
+            threadId: event.payload.threadId,
+            status: closeStatus,
+            completedAt: event.payload.session.updatedAt,
+          });
           return;
         }
 

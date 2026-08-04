@@ -9,6 +9,7 @@ import * as Struct from "effect/Struct";
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 
 import {
+  CloseRunningProjectionThreadSubagentsInput,
   CountRunningProjectionThreadSubagentsInput,
   DeleteProjectionThreadSubagentsInput,
   ListProjectionThreadSubagentsInput,
@@ -140,6 +141,20 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
       `,
   });
 
+  const closeRunningProjectionThreadSubagentRows = SqlSchema.void({
+    Request: CloseRunningProjectionThreadSubagentsInput,
+    execute: ({ threadId, status, completedAt }) =>
+      sql`
+        UPDATE projection_thread_subagents
+        SET
+          status = ${status},
+          updated_at = ${completedAt},
+          completed_at = ${completedAt}
+        WHERE thread_id = ${threadId}
+          AND status = 'running'
+      `,
+  });
+
   const upsert: ProjectionThreadSubagentRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadSubagentRow(row).pipe(
       Effect.mapError(
@@ -198,11 +213,23 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
       ),
     );
 
+  const closeRunningByThreadId: ProjectionThreadSubagentRepositoryShape["closeRunningByThreadId"] =
+    (input) =>
+      closeRunningProjectionThreadSubagentRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionThreadSubagentRepository.closeRunningByThreadId:query",
+            "ProjectionThreadSubagentRepository.closeRunningByThreadId:encodeRequest",
+          ),
+        ),
+      );
+
   return {
     upsert,
     listByThreadId,
     countRunningByThreadId,
     deleteByThreadId,
+    closeRunningByThreadId,
   } satisfies ProjectionThreadSubagentRepositoryShape;
 });
 
