@@ -77,6 +77,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   derivePhase,
+  deriveSubagentGroups,
   deriveTimelineEntries,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
@@ -203,6 +204,7 @@ import {
   useThreadActivitiesTruncated,
   useThreadProposedPlans,
   useThreadRefs,
+  useThreadSubagents,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { epicsEnvironment } from "../state/epics";
@@ -1517,6 +1519,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeLatestTurn?.sourceProposedPlan?.threadId, activeThread]);
   const sourceThreadProposedPlans = useThreadProposedPlans(sourcePlanThreadRef);
   const activeThreadActivitiesTruncated = useThreadActivitiesTruncated(activeThreadRef);
+  const activeThreadSubagents = useThreadSubagents(activeThreadRef);
   const threadPlanCatalog = useMemo<ThreadPlanCatalogEntry[]>(() => {
     if (!activeThread) {
       return [];
@@ -2005,6 +2008,14 @@ function ChatViewContent(props: ChatViewProps) {
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+  const subagentGroups = useMemo(
+    () =>
+      deriveSubagentGroups(workLogEntries, {
+        turnSettled: latestTurnSettled,
+        subagents: activeThreadSubagents,
+      }),
+    [activeThreadSubagents, latestTurnSettled, workLogEntries],
+  );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -5581,6 +5592,7 @@ function ChatViewContent(props: ChatViewProps) {
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
+                subagentGroups={subagentGroups}
                 activitiesTruncated={activeThreadActivitiesTruncated}
                 latestTurn={activeLatestTurn}
                 runningTurnId={

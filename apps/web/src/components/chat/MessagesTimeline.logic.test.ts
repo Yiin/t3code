@@ -997,6 +997,249 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRow?.showAssistantCopyButton).toBe(false);
   });
 
+  it("replaces a subagent spawn row with a subagent card row and hides its children", () => {
+    const spawnEntry = {
+      id: "work-spawn",
+      createdAt: "2026-01-01T00:00:01Z",
+      label: "Task",
+      tone: "tool" as const,
+      itemType: "collab_agent_tool_call" as const,
+      toolCallId: "toolu_1",
+    };
+    const childEntry = {
+      id: "work-child",
+      createdAt: "2026-01-01T00:00:02Z",
+      label: "Read file",
+      tone: "tool" as const,
+      parentToolUseId: "toolu_1",
+    };
+    const plainEntry = {
+      id: "work-plain",
+      createdAt: "2026-01-01T00:00:03Z",
+      label: "Ran command",
+      tone: "tool" as const,
+    };
+    const subagentGroup = {
+      entryId: "work-spawn",
+      toolCallId: "toolu_1",
+      name: "Explore",
+      description: "Scan the repo",
+      status: "running" as const,
+      startedAt: "2026-01-01T00:00:01Z",
+      completedAt: null,
+      children: [childEntry],
+      resultText: null,
+    };
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "spawn-entry",
+          kind: "work",
+          createdAt: spawnEntry.createdAt,
+          entry: spawnEntry,
+        },
+        {
+          id: "child-entry",
+          kind: "work",
+          createdAt: childEntry.createdAt,
+          entry: childEntry,
+        },
+        {
+          id: "plain-entry",
+          kind: "work",
+          createdAt: plainEntry.createdAt,
+          entry: plainEntry,
+        },
+      ],
+      subagentGroups: [subagentGroup],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows).toEqual([
+      {
+        kind: "subagent",
+        id: "spawn-entry",
+        createdAt: "2026-01-01T00:00:01Z",
+        group: subagentGroup,
+      },
+      {
+        kind: "work",
+        id: "plain-entry",
+        createdAt: "2026-01-01T00:00:03Z",
+        groupedEntries: [plainEntry],
+      },
+    ]);
+  });
+
+  it("keeps consecutive work grouping across hidden subagent children", () => {
+    const firstPlainEntry = {
+      id: "work-plain-1",
+      createdAt: "2026-01-01T00:00:01Z",
+      label: "read",
+      tone: "tool" as const,
+    };
+    const childEntry = {
+      id: "work-child",
+      createdAt: "2026-01-01T00:00:02Z",
+      label: "child tool",
+      tone: "tool" as const,
+      parentToolUseId: "toolu_1",
+    };
+    const secondPlainEntry = {
+      id: "work-plain-2",
+      createdAt: "2026-01-01T00:00:03Z",
+      label: "edit",
+      tone: "tool" as const,
+    };
+    const subagentGroup = {
+      entryId: "work-spawn",
+      toolCallId: "toolu_1",
+      name: "Explore",
+      description: null,
+      status: "completed" as const,
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:00:04Z",
+      children: [childEntry],
+      resultText: null,
+    };
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "plain-entry-1",
+          kind: "work",
+          createdAt: firstPlainEntry.createdAt,
+          entry: firstPlainEntry,
+        },
+        {
+          id: "child-entry",
+          kind: "work",
+          createdAt: childEntry.createdAt,
+          entry: childEntry,
+        },
+        {
+          id: "plain-entry-2",
+          kind: "work",
+          createdAt: secondPlainEntry.createdAt,
+          entry: secondPlainEntry,
+        },
+      ],
+      subagentGroups: [subagentGroup],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    // Both plain entries land in one group; the child never surfaces, so the
+    // overflow toggle counts only visible entries.
+    expect(rows.map((row) => row.id)).toEqual(["work-plain-2", "work-toggle:plain-entry-1"]);
+    expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({ hiddenCount: 1 });
+    expect(
+      rows.flatMap((row) => (row.kind === "work" ? row.groupedEntries : [])),
+    ).not.toContainEqual(childEntry);
+  });
+
+  it("skips a duplicate spawn row merged into an anchored subagent group", () => {
+    const firstSpawnEntry = {
+      id: "work-spawn-updated",
+      createdAt: "2026-01-01T00:00:01Z",
+      label: "Task",
+      tone: "tool" as const,
+      itemType: "collab_agent_tool_call" as const,
+      toolCallId: "toolu_1",
+    };
+    const secondSpawnEntry = {
+      id: "work-spawn-completed",
+      createdAt: "2026-01-01T00:00:05Z",
+      label: "Task",
+      tone: "tool" as const,
+      itemType: "collab_agent_tool_call" as const,
+      toolCallId: "toolu_1",
+    };
+    const subagentGroup = {
+      entryId: "work-spawn-updated",
+      toolCallId: "toolu_1",
+      name: "Explore",
+      description: null,
+      status: "completed" as const,
+      startedAt: "2026-01-01T00:00:01Z",
+      completedAt: null,
+      children: [],
+      resultText: "done",
+    };
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "spawn-updated-entry",
+          kind: "work",
+          createdAt: firstSpawnEntry.createdAt,
+          entry: firstSpawnEntry,
+        },
+        {
+          id: "spawn-completed-entry",
+          kind: "work",
+          createdAt: secondSpawnEntry.createdAt,
+          entry: secondSpawnEntry,
+        },
+      ],
+      subagentGroups: [subagentGroup],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows).toEqual([
+      {
+        kind: "subagent",
+        id: "spawn-updated-entry",
+        createdAt: "2026-01-01T00:00:01Z",
+        group: subagentGroup,
+      },
+    ]);
+  });
+
+  it("renders a subagent spawn as a plain work row when no groups are provided", () => {
+    const spawnEntry = {
+      id: "work-spawn",
+      createdAt: "2026-01-01T00:00:01Z",
+      label: "Task",
+      tone: "tool" as const,
+      itemType: "collab_agent_tool_call" as const,
+      toolCallId: "toolu_1",
+    };
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "spawn-entry",
+          kind: "work",
+          createdAt: spawnEntry.createdAt,
+          entry: spawnEntry,
+        },
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows).toEqual([
+      {
+        kind: "work",
+        id: "spawn-entry",
+        createdAt: "2026-01-01T00:00:01Z",
+        groupedEntries: [spawnEntry],
+      },
+    ]);
+  });
+
   it("models work log overflow expansion as inserted list rows", () => {
     const timelineEntries = [
       {

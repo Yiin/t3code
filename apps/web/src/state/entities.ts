@@ -11,6 +11,7 @@ import type {
   OrchestrationSession,
   OrchestrationThreadActivity,
   OrchestrationThreadActivityTruncation,
+  OrchestrationThreadSubagent,
   ScopedProjectRef,
   ScopedThreadRef,
   ServerConfig,
@@ -29,6 +30,7 @@ const EMPTY_THREAD_REFS: ReadonlyArray<ScopedThreadRef> = Object.freeze([]);
 const EMPTY_MESSAGES: ReadonlyArray<OrchestrationMessage> = Object.freeze([]);
 const EMPTY_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = Object.freeze([]);
 const EMPTY_PROPOSED_PLANS: ReadonlyArray<OrchestrationProposedPlan> = Object.freeze([]);
+const EMPTY_SUBAGENTS: ReadonlyArray<OrchestrationThreadSubagent> = Object.freeze([]);
 
 const EMPTY_PROJECT_ATOM = Atom.make<EnvironmentProject | null>(null).pipe(
   Atom.withLabel("web-project:empty"),
@@ -59,6 +61,9 @@ const EMPTY_PROPOSED_PLANS_ATOM = Atom.make(EMPTY_PROPOSED_PLANS).pipe(
 );
 const EMPTY_SESSION_ATOM = Atom.make<OrchestrationSession | null>(null).pipe(
   Atom.withLabel("web-thread-session:empty"),
+);
+const EMPTY_SUBAGENTS_ATOM = Atom.make(EMPTY_SUBAGENTS).pipe(
+  Atom.withLabel("web-thread-subagents:empty"),
 );
 
 export const activeEnvironmentIdAtom = Atom.make<EnvironmentId | null>(null).pipe(
@@ -175,6 +180,15 @@ export function useThreadActivitiesTruncated(
     ref === null
       ? EMPTY_ACTIVITIES_TRUNCATED_ATOM
       : environmentThreadDetails.activitiesTruncatedAtom(ref),
+  );
+}
+
+/** Ad-hoc subagents (Agent/Task spawns) folded from the thread's activities. */
+export function useThreadSubagents(
+  ref: ScopedThreadRef | null,
+): ReadonlyArray<OrchestrationThreadSubagent> {
+  return useAtomValue(
+    ref === null ? EMPTY_SUBAGENTS_ATOM : environmentThreadDetails.subagentsAtom(ref),
   );
 }
 

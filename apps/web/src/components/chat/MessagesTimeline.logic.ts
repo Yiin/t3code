@@ -3,6 +3,7 @@ import {
   formatDuration,
   workEntryIndicatesToolNeutralStatus,
   workLogEntryIsToolLike,
+  type SubagentGroup,
   type TimelineEntry,
   type WorkLogEntry,
 } from "../../session-logic";
@@ -179,6 +180,12 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string;
       proposedPlan: ProposedPlan;
+    }
+  | {
+      kind: "subagent";
+      id: string;
+      createdAt: string;
+      group: SubagentGroup;
     }
   | {
       kind: "activities-truncated";
@@ -422,6 +429,8 @@ export function deriveMessagesTimelineRows(input: {
   runningTurnId?: TurnId | null;
   expandedTurnIds?: ReadonlySet<TurnId>;
   expandedWorkGroupIds?: ReadonlySet<string>;
+  /** From `deriveSubagentGroups`; absent means no subagent grouping (plain work rows). */
+  subagentGroups?: ReadonlyArray<SubagentGroup>;
   isWorking: boolean;
   activeTurnStartedAt: string | null;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
@@ -464,6 +473,35 @@ export function deriveMessagesTimelineRows(input: {
     }
   }
 
+  // Subagent spawns replace their flat `collab_agent_tool_call` row with a
+  // card; the tool rows that ran inside a subagent leave the flat stream
+  // entirely (the card summarizes them, and expansion renders them later).
+  const subagentGroupByEntryId = new Map<string, SubagentGroup>();
+  const subagentGroupByToolCallId = new Map<string, SubagentGroup>();
+  const subagentChildEntryIds = new Set<string>();
+  for (const group of input.subagentGroups ?? []) {
+    subagentGroupByEntryId.set(group.entryId, group);
+    if (group.toolCallId !== null) {
+      subagentGroupByToolCallId.set(group.toolCallId, group);
+    }
+    for (const child of group.children) {
+      subagentChildEntryIds.add(child.id);
+    }
+  }
+  const isHiddenSubagentWorkEntry = (entry: WorkLogEntry): boolean => {
+    if (subagentChildEntryIds.has(entry.id)) {
+      return true;
+    }
+    // A duplicate spawn row merged into another group (deriveSubagentGroups
+    // dedupes same-toolCallId parents) must not resurface as a plain work row.
+    return (
+      entry.itemType === "collab_agent_tool_call" &&
+      !subagentGroupByEntryId.has(entry.id) &&
+      entry.toolCallId !== undefined &&
+      subagentGroupByToolCallId.has(entry.toolCallId)
+    );
+  };
+
   for (let index = 0; index < input.timelineEntries.length; index += 1) {
     const timelineEntry = input.timelineEntries[index];
     if (!timelineEntry) {
@@ -487,6 +525,20 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.kind === "work") {
+      const subagentGroup = subagentGroupByEntryId.get(timelineEntry.entry.id);
+      if (subagentGroup) {
+        nextRows.push({
+          kind: "subagent",
+          id: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          group: subagentGroup,
+        });
+        continue;
+      }
+      if (isHiddenSubagentWorkEntry(timelineEntry.entry)) {
+        continue;
+      }
+
       const groupedEntries = [timelineEntry.entry];
       let cursor = index + 1;
       while (cursor < input.timelineEntries.length) {
@@ -495,9 +547,14 @@ export function deriveMessagesTimelineRows(input: {
           !nextEntry ||
           nextEntry.kind !== "work" ||
           collapsedEntryIds.has(nextEntry.id) ||
-          foldsByAnchorEntryId.has(nextEntry.id)
+          foldsByAnchorEntryId.has(nextEntry.id) ||
+          subagentGroupByEntryId.has(nextEntry.entry.id)
         ) {
           break;
+        }
+        if (isHiddenSubagentWorkEntry(nextEntry.entry)) {
+          cursor += 1;
+          continue;
         }
         groupedEntries.push(nextEntry.entry);
         cursor += 1;
@@ -621,7 +678,10 @@ export function computeStableMessagesTimelineRows(
   return anyChanged ? { byId: next, result } : previous;
 }
 
-/** Shallow field comparison per row variant — avoids deep equality cost. */
+/**
+ * Per-variant field comparison; reference checks where producers keep stable
+ * references, structural `Equal.equals` where derivation rebuilds values.
+ */
 function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean {
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
@@ -641,6 +701,11 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "proposed-plan":
       return a.proposedPlan === (b as typeof a).proposedPlan;
+
+    case "subagent": {
+      const bs = b as typeof a;
+      return a.createdAt === bs.createdAt && Equal.equals(a.group, bs.group);
+    }
 
     case "work":
       return Equal.equals(a.groupedEntries, (b as typeof a).groupedEntries);

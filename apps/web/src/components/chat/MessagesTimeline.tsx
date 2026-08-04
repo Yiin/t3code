@@ -31,6 +31,7 @@ import {
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
   workLogEntryIsToolLike,
+  type SubagentGroup,
 } from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
 import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
@@ -66,6 +67,7 @@ import {
 import { Button } from "../ui/button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
+import { SubagentCard } from "./SubagentCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
@@ -153,6 +155,7 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_SUBAGENT_GROUPS: ReadonlyArray<SubagentGroup> = [];
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -164,6 +167,7 @@ interface MessagesTimelineProps {
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
+  subagentGroups?: ReadonlyArray<SubagentGroup>;
   activitiesTruncated: OrchestrationThreadActivityTruncation | null;
   latestTurn: TimelineLatestTurn | null;
   runningTurnId: TurnId | null;
@@ -199,6 +203,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   listRef,
   timelineEntries,
+  subagentGroups = EMPTY_SUBAGENT_GROUPS,
   activitiesTruncated,
   latestTurn,
   runningTurnId,
@@ -310,6 +315,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         runningTurnId,
         expandedTurnIds,
         expandedWorkGroupIds,
+        subagentGroups,
         isWorking,
         activeTurnStartedAt,
         turnDiffSummaryByAssistantMessageId,
@@ -322,6 +328,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       runningTurnId,
       expandedTurnIds,
       expandedWorkGroupIds,
+      subagentGroups,
       isWorking,
       activeTurnStartedAt,
       turnDiffSummaryByAssistantMessageId,
@@ -844,7 +851,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         // they sit closer to the work that follows them.
         (row.kind === "message" && row.message.role === "assistant" && !row.showAssistantMeta) ||
           row.kind === "work" ||
-          row.kind === "work-toggle"
+          row.kind === "work-toggle" ||
+          row.kind === "subagent"
           ? "pb-2"
           : "pb-4",
         row.kind === "message" && row.message.role === "assistant" ? "group/assistant" : null,
@@ -855,6 +863,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
+      {row.kind === "subagent" ? <SubagentTimelineRow row={row} /> : null}
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
@@ -1254,6 +1263,31 @@ function WorkGroupToggleTimelineRow({
     </button>
   );
 }
+
+/**
+ * Wraps the memoized SubagentCard with context reads: the card itself stays
+ * presentational, and the newest child tool row renders through the same
+ * SimpleWorkEntryRow used by flat work rows.
+ */
+const SubagentTimelineRow = memo(function SubagentTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "subagent" }>;
+}) {
+  const { workspaceRoot } = use(TimelineRowCtx);
+  const newestChild = row.group.status === "running" ? row.group.children.at(-1) : undefined;
+
+  return (
+    <SubagentCard
+      group={row.group}
+      liveActivity={
+        newestChild ? (
+          <SimpleWorkEntryRow workEntry={newestChild} workspaceRoot={workspaceRoot} />
+        ) : undefined
+      }
+    />
+  );
+});
 
 /** Subscribes directly to the UI state store for expand/collapse state,
  *  so toggling re-renders only this component — not the entire list. */
