@@ -100,7 +100,8 @@ export const parseRalphReport = (text: string): RalphReport | null => {
  *   once, a stuck loop when repeated.
  * - `blocked` — the agent reported `RALPH_BLOCKED`.
  * - `protocol-error` — the agent broke the contract, or the turn produced no
- *   readable final message. Never inferred as done.
+ *   readable final message and left nothing behind to judge it by. Never
+ *   inferred as done from the message alone.
  * - `timeout` / `error` — the turn did not finish, or finished badly.
  */
 export type EpicIterationOutcomeKind =
@@ -135,6 +136,20 @@ export interface ClassifyIterationInput {
    * with text never flushed. Both are inconclusive, never done.
    */
   readonly finalMessage: { readonly text: string; readonly streaming: boolean } | null;
+  /**
+   * Whether a null `finalMessage` is a *finished* observation rather than an
+   * in-flight one: the runner watched a settled turn for the whole of its
+   * bounded wait and no assistant row ever projected.
+   *
+   * Ingestion finalizes a turn's assistant messages *after* it reports the turn
+   * ended (`ProviderRuntimeIngestion.ts:1666`), and in the default buffered
+   * delivery mode the text lives only in memory until then — so a pending final
+   * message has no projected row at all, not a streaming one. "No row" is
+   * therefore what both "no message yet" and "no message ever" look like, and
+   * only the runner, which did the waiting, can say which it saw. Read this as
+   * "the wait is over", not as "a message is coming".
+   */
+  readonly finalMessageWaitExhausted: boolean;
   /** Whether the repo's `HEAD` moved across the iteration. */
   readonly committed: boolean;
   readonly timedOut: boolean;
@@ -158,6 +173,20 @@ export const classifyIteration = (input: ClassifyIterationInput): EpicIterationO
     };
   }
   if (input.finalMessage === null) {
+    // More waiting cannot separate a lost message from an absent one, so the
+    // verdict falls to the other observation of the iteration: its commit.
+    // Work that landed says the iteration ran and the loop should carry on —
+    // the missing report costs telemetry, not correctness. This cannot launder
+    // a `RALPH_DONE` into a `done`: `RALPH_DONE` with a commit is a protocol
+    // error below, and the final backlog-empty iteration has no commit, so it
+    // still has to produce a readable message to end the run.
+    if (input.finalMessageWaitExhausted && input.committed) {
+      return {
+        kind: "done",
+        detail: "assistant message never projected; accepted on the iteration's commit",
+        report: null,
+      };
+    }
     return {
       kind: "protocol-error",
       detail: "turn completed without an assistant message",
