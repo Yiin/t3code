@@ -12,6 +12,10 @@
  * The mutator exposes a single entry point, `reconcile(configMap)`, which:
  *
  *   1. Diffs the incoming map against the live one keyed by instance id.
+ *   1b. Stops every session running on a removed or replaced instance
+ *      through `ProviderInstanceTeardown`, before any scope closes — a
+ *      scope close writes no binding, so the session would otherwise stay
+ *      `running` in the directory with no process behind it.
  *   2. Closes the per-instance `Scope` of every removed or replaced entry
  *      (tearing down adapter processes, refresh fibres, temp files) BEFORE
  *      creating the replacement — `reconcile` guarantees "at most one live

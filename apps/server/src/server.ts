@@ -37,6 +37,7 @@ import * as GitHubCli from "./sourceControl/GitHubCli.ts";
 import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
+import { ProviderInstanceTeardownLive } from "./orchestration/Layers/ProviderInstanceTeardown.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -194,6 +195,29 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
 
+// `reconcile` stops the sessions on a removed or replaced provider instance
+// before it closes that instance's scope. The only path that writes a
+// `stopped` binding, revokes the thread's MCP credential, and updates the
+// projected session is the `thread.session.stop` command — and that path sits
+// *above* the instance registry, since `ProviderAdapterRegistry` resolves
+// every adapter through it. `ProviderInstanceTeardown` inverts the dependency
+// so the registry can reach it without closing a layer cycle.
+//
+// The three layers below are the same values the rest of the graph uses, so
+// Effect's layer memoization hands this subtree the one orchestration engine
+// and the one SQL client rather than building a second set. A second engine
+// would publish to a PubSub no reactor is subscribed to, and the dispatched
+// stop would go nowhere.
+const ProviderInstanceTeardownLayerLive = ProviderInstanceTeardownLive.pipe(
+  Layer.provide(OrchestrationLayerLive),
+  Layer.provide(ProviderSessionDirectoryLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const ProviderInstanceRegistryLayerLive = ProviderInstanceRegistryHydrationLive.pipe(
+  Layer.provide(ProviderInstanceTeardownLayerLive),
+);
+
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
 );
@@ -335,7 +359,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // `providerInstances` hydration merges `settings.providers.<kind>`
   // with explicit `providerInstances` entries on boot.
-  Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+  Layer.provideMerge(ProviderInstanceRegistryLayerLive),
   // Shared native/canonical NDJSON writers used by both the per-instance
   // drivers (native stream, written from inside each `<X>Adapter`) and
   // `ProviderService` (canonical stream, written after event normalization).
