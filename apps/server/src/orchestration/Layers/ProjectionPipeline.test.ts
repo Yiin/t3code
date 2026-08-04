@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -3488,3 +3489,269 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-subagents-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("projects subagent rows from task activities and survives rebuilds", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+        const readSubagentRows = sql<{
+          readonly subagentId: string;
+          readonly threadId: string;
+          readonly turnId: string | null;
+          readonly agentType: string | null;
+          readonly description: string | null;
+          readonly status: string;
+          readonly lastProgressSummary: string | null;
+          readonly lastToolName: string | null;
+          readonly usageJson: string | null;
+          readonly spawnedByItemId: string | null;
+          readonly startedAt: string;
+          readonly updatedAt: string;
+          readonly completedAt: string | null;
+        }>`
+          SELECT
+            subagent_id AS "subagentId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            agent_type AS "agentType",
+            description,
+            status,
+            last_progress_summary AS "lastProgressSummary",
+            last_tool_name AS "lastToolName",
+            usage_json AS "usageJson",
+            spawned_by_item_id AS "spawnedByItemId",
+            started_at AS "startedAt",
+            updated_at AS "updatedAt",
+            completed_at AS "completedAt"
+          FROM projection_thread_subagents
+          ORDER BY subagent_id ASC
+        `;
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-subagents-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-subagents"),
+          occurredAt: "2026-03-01T10:00:00.000Z",
+          commandId: CommandId.make("cmd-subagents-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-subagents"),
+            title: "Project Subagents",
+            workspaceRoot: "/tmp/project-subagents",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-03-01T10:00:00.000Z",
+            updatedAt: "2026-03-01T10:00:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-subagents-2"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:01.000Z",
+          commandId: CommandId.make("cmd-subagents-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-2"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            projectId: ProjectId.make("project-subagents"),
+            title: "Thread Subagents",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-03-01T10:00:01.000Z",
+            updatedAt: "2026-03-01T10:00:01.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-subagents-3"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:02.000Z",
+          commandId: CommandId.make("cmd-subagents-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-3"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            activity: {
+              id: EventId.make("activity-subagents-started"),
+              tone: "info",
+              kind: "task.started",
+              summary: "Subagent started",
+              payload: {
+                taskId: "task-sub-1",
+                detail: "Investigate flaky test",
+                subagentType: "Explore",
+                toolUseId: "toolu-sub-1",
+              },
+              turnId: TurnId.make("turn-subagents-1"),
+              createdAt: "2026-03-01T10:00:02.000Z",
+            },
+          },
+        });
+
+        const rowsAfterStart = yield* readSubagentRows;
+        assert.deepEqual(rowsAfterStart, [
+          {
+            subagentId: "task-sub-1",
+            threadId: "thread-subagents",
+            turnId: "turn-subagents-1",
+            agentType: "Explore",
+            description: "Investigate flaky test",
+            status: "running",
+            lastProgressSummary: null,
+            lastToolName: null,
+            usageJson: null,
+            spawnedByItemId: "toolu-sub-1",
+            startedAt: "2026-03-01T10:00:02.000Z",
+            updatedAt: "2026-03-01T10:00:02.000Z",
+            completedAt: null,
+          },
+        ]);
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-subagents-4"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:03.000Z",
+          commandId: CommandId.make("cmd-subagents-4"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-4"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            activity: {
+              id: EventId.make("activity-subagents-progress"),
+              tone: "info",
+              kind: "task.progress",
+              summary: "Subagent progress",
+              payload: {
+                taskId: "task-sub-1",
+                summary: "Reading test logs",
+                lastToolName: "Read",
+                usage: { inputTokens: 5 },
+              },
+              turnId: TurnId.make("turn-subagents-1"),
+              createdAt: "2026-03-01T10:00:03.000Z",
+            },
+          },
+        });
+
+        const rowsAfterProgress = yield* readSubagentRows;
+        assert.equal(rowsAfterProgress.length, 1);
+        assert.equal(rowsAfterProgress[0]?.status, "running");
+        assert.equal(rowsAfterProgress[0]?.lastProgressSummary, "Reading test logs");
+        assert.equal(rowsAfterProgress[0]?.lastToolName, "Read");
+        assert.equal(rowsAfterProgress[0]?.usageJson, '{"inputTokens":5}');
+        assert.equal(rowsAfterProgress[0]?.updatedAt, "2026-03-01T10:00:03.000Z");
+
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-subagents-5"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:04.000Z",
+          commandId: CommandId.make("cmd-subagents-5"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-5"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            activity: {
+              id: EventId.make("activity-subagents-completed"),
+              tone: "info",
+              kind: "task.completed",
+              summary: "Subagent completed",
+              payload: {
+                taskId: "task-sub-1",
+                status: "completed",
+                summary: "Found the flaky assertion",
+              },
+              turnId: TurnId.make("turn-subagents-1"),
+              createdAt: "2026-03-01T10:00:04.000Z",
+            },
+          },
+        });
+
+        const rowsAfterComplete = yield* readSubagentRows;
+        assert.deepEqual(rowsAfterComplete, [
+          {
+            subagentId: "task-sub-1",
+            threadId: "thread-subagents",
+            turnId: "turn-subagents-1",
+            agentType: "Explore",
+            description: "Investigate flaky test",
+            status: "completed",
+            lastProgressSummary: "Found the flaky assertion",
+            lastToolName: "Read",
+            usageJson: '{"inputTokens":5}',
+            spawnedByItemId: "toolu-sub-1",
+            startedAt: "2026-03-01T10:00:02.000Z",
+            updatedAt: "2026-03-01T10:00:04.000Z",
+            completedAt: "2026-03-01T10:00:04.000Z",
+          },
+        ]);
+
+        // Feeding every event a second time must not duplicate or mutate the
+        // row: replays are how projector rebuilds and reconnects behave.
+        yield* Stream.runForEach(eventStore.readFromSequence(0), (event) =>
+          projectionPipeline.projectEvent(event),
+        );
+        const rowsAfterReplay = yield* readSubagentRows;
+        assert.deepEqual(rowsAfterReplay, rowsAfterComplete);
+
+        // Rebuild from zero: a fresh projector cursor replays the whole event
+        // store and must converge on identical rows.
+        yield* sql`
+          DELETE FROM projection_state
+          WHERE projector = ${ORCHESTRATION_PROJECTOR_NAMES.threadSubagents}
+        `;
+        yield* sql`DELETE FROM projection_thread_subagents`;
+        yield* projectionPipeline.bootstrap;
+        const rowsAfterRebuild = yield* readSubagentRows;
+        assert.deepEqual(rowsAfterRebuild, rowsAfterComplete);
+
+        yield* appendAndProject({
+          type: "thread.deleted",
+          eventId: EventId.make("evt-subagents-6"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:05.000Z",
+          commandId: CommandId.make("cmd-subagents-6"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-6"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            deletedAt: "2026-03-01T10:00:05.000Z",
+          },
+        });
+
+        const rowsAfterDelete = yield* readSubagentRows;
+        assert.deepEqual(rowsAfterDelete, []);
+      }),
+    );
+  },
+);

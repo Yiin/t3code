@@ -1,8 +1,10 @@
 import {
   ApprovalRequestId,
+  applySubagentActivity,
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  type OrchestrationThreadSubagent,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -30,6 +32,10 @@ import {
 } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import {
+  type ProjectionThreadSubagent,
+  ProjectionThreadSubagentRepository,
+} from "../../persistence/Services/ProjectionThreadSubagents.ts";
+import {
   type ProjectionTurn,
   ProjectionTurnRepository,
 } from "../../persistence/Services/ProjectionTurns.ts";
@@ -41,6 +47,7 @@ import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
+import { ProjectionThreadSubagentRepositoryLive } from "../../persistence/Layers/ProjectionThreadSubagents.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
 import { ServerConfig } from "../../config.ts";
@@ -61,6 +68,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadMessages: "projection.thread-messages",
   threadProposedPlans: "projection.thread-proposed-plans",
   threadActivities: "projection.thread-activities",
+  threadSubagents: "projection.thread-subagents",
   threadSessions: "projection.thread-sessions",
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
@@ -110,6 +118,29 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
   (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
     Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
+
+/**
+ * Strip the persistence-only `threadId` off a projected subagent row so the
+ * shared contracts fold sees exactly the read-model shape it produces.
+ */
+function toThreadSubagentReadModel(row: ProjectionThreadSubagent): OrchestrationThreadSubagent {
+  return {
+    subagentId: row.subagentId,
+    turnId: row.turnId,
+    ...(row.agentType !== undefined ? { agentType: row.agentType } : {}),
+    ...(row.description !== undefined ? { description: row.description } : {}),
+    status: row.status,
+    ...(row.lastProgressSummary !== undefined
+      ? { lastProgressSummary: row.lastProgressSummary }
+      : {}),
+    ...(row.lastToolName !== undefined ? { lastToolName: row.lastToolName } : {}),
+    ...(row.usage !== undefined ? { usage: row.usage } : {}),
+    ...(row.spawnedByItemId !== undefined ? { spawnedByItemId: row.spawnedByItemId } : {}),
+    startedAt: row.startedAt,
+    updatedAt: row.updatedAt,
+    completedAt: row.completedAt,
+  };
+}
 
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   if (typeof payload !== "object" || payload === null) {
@@ -477,6 +508,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
     const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
+    const projectionThreadSubagentRepository = yield* ProjectionThreadSubagentRepository;
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
@@ -1013,6 +1045,53 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyThreadSubagentsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyThreadSubagentsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.activity-appended": {
+          const kind = event.payload.activity.kind;
+          if (kind !== "task.started" && kind !== "task.progress" && kind !== "task.completed") {
+            return;
+          }
+          const existingRows = yield* projectionThreadSubagentRepository.listByThreadId({
+            threadId: event.payload.threadId,
+          });
+          const existingSubagents = existingRows.map(toThreadSubagentReadModel);
+          // The shared contracts fold decodes the activity payload leniently
+          // and returns the input array unchanged when nothing applies, so a
+          // rebuild that replays the whole event store converges on the same
+          // rows without consulting any in-memory ingestion state.
+          const nextSubagents = applySubagentActivity(existingSubagents, event.payload.activity);
+          if (nextSubagents === existingSubagents) {
+            return;
+          }
+          const unchanged = new Set<OrchestrationThreadSubagent>(existingSubagents);
+          yield* Effect.forEach(
+            nextSubagents.filter((subagent) => !unchanged.has(subagent)),
+            (subagent) =>
+              projectionThreadSubagentRepository.upsert({
+                threadId: event.payload.threadId,
+                ...subagent,
+              }),
+            { concurrency: 1 },
+          ).pipe(Effect.asVoid);
+          return;
+        }
+
+        case "thread.deleted":
+        case "thread.reverted": {
+          yield* projectionThreadSubagentRepository.deleteByThreadId({
+            threadId: event.payload.threadId,
+          });
+          return;
+        }
+
+        default:
+          return;
+      }
+    });
+
     const applyThreadSessionsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadSessionsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -1510,6 +1589,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyThreadActivitiesProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadSubagents,
+        apply: applyThreadSubagentsProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
         apply: applyThreadSessionsProjection,
       },
@@ -1628,6 +1711,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),
   Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
+  Layer.provideMerge(ProjectionThreadSubagentRepositoryLive),
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),
