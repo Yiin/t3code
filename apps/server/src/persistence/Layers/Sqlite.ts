@@ -30,10 +30,25 @@ const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
   return clientModule.layer(config);
 }, Layer.unwrap);
 
+/**
+ * How long a statement waits for the SQLite write lock before it gives up.
+ *
+ * WAL lets readers and one writer run together, but a second writer still gets
+ * `SQLITE_BUSY` — immediately, because SQLite's default busy timeout is 0. Any
+ * process that shares this database (the server, and every `t3` CLI invocation)
+ * would then fail on nothing worse than a moment of contention. A busy timeout
+ * makes SQLite retry internally for this long instead, which is what turns
+ * "database is locked" back into a slightly slower write.
+ */
+export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
 const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`PRAGMA journal_mode = WAL;`;
+    // PRAGMA arguments cannot be bound parameters, so the timeout is
+    // interpolated; it is a module constant, not user input.
+    yield* sql.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     yield* sql`PRAGMA foreign_keys = ON;`;
     yield* runMigrations();
   }),
