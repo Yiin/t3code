@@ -1004,20 +1004,52 @@ export function epicRunIterationLabel(input: {
  *
  * `secondary` is `null` while no title has arrived, and then the row shows the
  * key alone as its primary line — never a blank primary line.
+ *
+ * `full` is the untouched title (before `primary` drops a leading qualifier
+ * segment — see `specificTitle`), for the row tooltip. Nothing is lost even
+ * though the row itself shows only the specific part.
  */
 export type SidebarEpicRowLabel = {
   readonly primary: string;
   readonly secondary: string | null;
+  readonly full: string;
 };
+
+/** Below this length a stripped tail reads as content-free on its own (e.g.
+    "ok" from "QA: ok"), so it is not worth losing the prefix for. Eight
+    characters is roughly two short words — enough to stand alone. */
+const MIN_SPECIFIC_TITLE_LENGTH = 8;
+
+/**
+ * Epic and issue titles in this codebase follow an "area - phase: specific
+ * thing" shape. Sidebar rows are one line and care only about the specific
+ * thing — the "area - phase" head is bookkeeping that crowds out the part
+ * that actually distinguishes the row.
+ *
+ * Splits on the FIRST ':', not the last: a tail like "fix X: the Y case"
+ * must survive whole, so a last-colon split would wrongly cut it down to
+ * "the Y case".
+ *
+ * Falls back to the full title when there is no ':', when the tail is blank,
+ * or when the tail is too short to read as a description on its own.
+ */
+export function specificTitle(title: string): string {
+  const colonIndex = title.indexOf(":");
+  if (colonIndex === -1) return title;
+  const tail = title.slice(colonIndex + 1).trim();
+  return tail.length < MIN_SPECIFIC_TITLE_LENGTH ? title : tail;
+}
 
 export function epicRunGroupRowLabel(input: {
   epicId: string | null;
   epicTitle: string | null;
 }): SidebarEpicRowLabel {
   const title = input.epicTitle?.trim() ?? "";
-  return title === ""
-    ? { primary: epicRunGroupTitle(input), secondary: null }
-    : { primary: title, secondary: input.epicId };
+  if (title === "") {
+    const fallback = epicRunGroupTitle(input);
+    return { primary: fallback, secondary: null, full: fallback };
+  }
+  return { primary: specificTitle(title), secondary: input.epicId, full: title };
 }
 
 export function epicRunIterationRowLabel(input: {
@@ -1027,7 +1059,8 @@ export function epicRunIterationRowLabel(input: {
 }): SidebarEpicRowLabel {
   const label = epicRunIterationLabel(input);
   const title = input.issueTitle?.trim() ?? "";
-  return title === "" ? { primary: label, secondary: null } : { primary: title, secondary: label };
+  if (title === "") return { primary: label, secondary: null, full: label };
+  return { primary: specificTitle(title), secondary: label, full: title };
 }
 
 export function resolveThreadStatusPill(input: {

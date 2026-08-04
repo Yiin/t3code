@@ -800,7 +800,7 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
   // The title is the row's identity and gets every pixel left over, so the
   // count rides the layers icon as a bare number and the full wording (plus the
   // epic id, which the row truncates) lives in the row tooltip.
-  const rowTooltip = [rowLabel.primary, rowLabel.secondary, countLabel, statusPill?.label]
+  const rowTooltip = [rowLabel.full, rowLabel.secondary, countLabel, statusPill?.label]
     .filter((part) => part !== undefined && part !== null)
     .join(" · ");
   const handleOpen = useCallback(() => onOpenRun(group), [group, onOpenRun]);
@@ -923,7 +923,7 @@ const SidebarV2EpicRunIterationRow = memo(function SidebarV2EpicRunIterationRow(
 }) {
   const { iteration, onActivate, onClick } = props;
   const rowLabel = epicRunIterationRowLabel(iteration);
-  const rowTooltip = [rowLabel.primary, rowLabel.secondary]
+  const rowTooltip = [rowLabel.full, rowLabel.secondary]
     .filter((part) => part !== null)
     .join(" · ");
   const threadRef = useMemo(

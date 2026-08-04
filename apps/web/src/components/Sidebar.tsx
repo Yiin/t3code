@@ -999,7 +999,7 @@ const SidebarEpicRunGroupRow = memo(function SidebarEpicRunGroupRow(props: {
   const rowLabel = epicRunGroupRowLabel(group);
   // Every row in this sidebar is one hard-height line, so the epic id moves
   // into the tooltip instead of onto a second line; the title takes the row.
-  const rowTooltip = [rowLabel.primary, rowLabel.secondary, countLabel, statusPill?.label]
+  const rowTooltip = [rowLabel.full, rowLabel.secondary, countLabel, statusPill?.label]
     .filter((part) => part !== undefined && part !== null)
     .join(" · ");
   const rowButtonRender = useMemo(() => <div role="button" tabIndex={0} />, []);
@@ -1196,7 +1196,7 @@ const SidebarEpicRunIterationRow = memo(function SidebarEpicRunIterationRow(prop
   const rowLabel = epicRunIterationRowLabel(iteration);
   // One hard-height line per row here too, so the 'iteration N · id' line lives
   // in the tooltip and the issue title takes the row.
-  const rowTooltip = [rowLabel.primary, rowLabel.secondary]
+  const rowTooltip = [rowLabel.full, rowLabel.secondary]
     .filter((part) => part !== null)
     .join(" · ");
   const threadRef = useMemo(

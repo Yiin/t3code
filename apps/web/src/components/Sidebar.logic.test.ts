@@ -31,6 +31,7 @@ import {
   resolveSidebarV2Status,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  specificTitle,
   sidebarEpicRunBeadsSources,
   sidebarEpicRunTitlesByRunId,
   sidebarNodeThreads,
@@ -1151,14 +1152,22 @@ describe("epic run rows carry human titles", () => {
   it("leads with the title and drops the key beneath it", () => {
     expect(
       epicRunGroupRowLabel({ epicId: "t3code-ypi", epicTitle: "Rebuild the epics page" }),
-    ).toEqual({ primary: "Rebuild the epics page", secondary: "t3code-ypi" });
+    ).toEqual({
+      primary: "Rebuild the epics page",
+      secondary: "t3code-ypi",
+      full: "Rebuild the epics page",
+    });
     expect(
       epicRunIterationRowLabel({
         iterationIndex: 0,
         issueId: "t3code-ypi.1",
         issueTitle: "Widen the run projection",
       }),
-    ).toEqual({ primary: "Widen the run projection", secondary: "iteration 1 · t3code-ypi.1" });
+    ).toEqual({
+      primary: "Widen the run projection",
+      secondary: "iteration 1 · t3code-ypi.1",
+      full: "Widen the run projection",
+    });
   });
 
   // No snapshot yet, or a title that is blank: the key takes the primary line
@@ -1167,18 +1176,79 @@ describe("epic run rows carry human titles", () => {
     expect(epicRunGroupRowLabel({ epicId: "t3code-ypi", epicTitle: null })).toEqual({
       primary: "t3code-ypi",
       secondary: null,
+      full: "t3code-ypi",
     });
     expect(epicRunGroupRowLabel({ epicId: "t3code-ypi", epicTitle: "   " })).toEqual({
       primary: "t3code-ypi",
       secondary: null,
+      full: "t3code-ypi",
     });
     expect(epicRunGroupRowLabel({ epicId: null, epicTitle: null })).toEqual({
       primary: "Epic run",
       secondary: null,
+      full: "Epic run",
     });
     expect(
       epicRunIterationRowLabel({ iterationIndex: 2, issueId: "t3code-ypi.3", issueTitle: null }),
-    ).toEqual({ primary: "iteration 3 · t3code-ypi.3", secondary: null });
+    ).toEqual({
+      primary: "iteration 3 · t3code-ypi.3",
+      secondary: null,
+      full: "iteration 3 · t3code-ypi.3",
+    });
+  });
+
+  // Epic and issue titles here follow an "area - phase: specific thing"
+  // shape. The row shows only the specific thing; the full title survives in
+  // the tooltip via `full`, and the key/issue-id line still disambiguates
+  // two epics whose specific thing collides.
+  it("drops the leading qualifier segment from the row but keeps it in the tooltip", () => {
+    expect(
+      epicRunGroupRowLabel({
+        epicId: "proga-webapp-0iy",
+        epicTitle: "Invitation editor v2 - post-jl4 fixes: adjust the RSVP banner copy",
+      }),
+    ).toEqual({
+      primary: "adjust the RSVP banner copy",
+      secondary: "proga-webapp-0iy",
+      full: "Invitation editor v2 - post-jl4 fixes: adjust the RSVP banner copy",
+    });
+  });
+
+  describe("specificTitle", () => {
+    // No ':' at all: nothing to drop, the title renders unchanged.
+    it("returns the title unchanged when it has no colon", () => {
+      expect(specificTitle("Epic detail page cannot start a second run")).toBe(
+        "Epic detail page cannot start a second run",
+      );
+    });
+
+    // Split on the FIRST ':', not the last — a last-colon split would wrongly
+    // leave only "the Y case" instead of the whole intended tail.
+    it("splits on the first colon, not the last", () => {
+      expect(specificTitle("fixes: fix X: the Y case")).toBe("fix X: the Y case");
+    });
+
+    // A blank or whitespace-only tail is not useful on its own, so the full
+    // title survives rather than rendering an empty row.
+    it("falls back to the full title when the tail is empty or blank", () => {
+      expect(specificTitle("Invitation editor v2 - post-jl4 fixes:")).toBe(
+        "Invitation editor v2 - post-jl4 fixes:",
+      );
+      expect(specificTitle("Invitation editor v2 - post-jl4 fixes:   ")).toBe(
+        "Invitation editor v2 - post-jl4 fixes:   ",
+      );
+    });
+
+    // A short tail like "ok" reads as content-free without its prefix, so it
+    // is not worth stripping.
+    it("falls back to the full title when the tail is too short to stand alone", () => {
+      expect(specificTitle("X: ok")).toBe("X: ok");
+    });
+
+    // A tail right at the minimum length is still trusted.
+    it("keeps a tail that clears the minimum length", () => {
+      expect(specificTitle("QA: fix the bug")).toBe("fix the bug");
+    });
   });
 });
 
