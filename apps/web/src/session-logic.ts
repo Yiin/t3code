@@ -5,6 +5,8 @@ import {
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadSubagent,
+  type OrchestrationThreadSubagentStatus,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
   type ToolLifecycleItemType,
@@ -84,12 +86,20 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /**
+   * Provider tool-call id, from `payload.data.toolCallId` or (for subagent
+   * spawns) parsed from the coalesced `tool-updated:{threadId}:{itemId}`
+   * activity id. Correlates a `collab_agent_tool_call` row with its
+   * read-model subagent (`spawnedByItemId`) and with child tool rows.
+   */
+  toolCallId?: string;
+  /** Spawning Task tool_use id when this tool call ran inside a subagent. */
+  parentToolUseId?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
   collapseKey?: string;
-  toolCallId?: string;
 }
 
 export interface PendingApproval {
@@ -709,7 +719,16 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       ? stripTrailingExitCode(payload.detail).output
       : null
     : extractToolDetail(payload, title ?? activity.summary);
-  const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
+  const itemType = extractWorkLogItemType(payload);
+  let toolCallId = isTaskActivity ? null : extractToolCallId(payload);
+  if (!toolCallId && itemType === "collab_agent_tool_call") {
+    // Claude puts no toolCallId in `data`; recover the spawning tool_use id
+    // from the coalesced activity id ingestion builds for item.updated rows
+    // (ProviderRuntimeIngestion). Parsing here (pre-collapse) matters: the
+    // merged updated+completed entry keeps the updated row's toolCallId even
+    // though the completed row's eventId wins as the entry id.
+    toolCallId = toolCallIdFromCoalescedActivityId(activity);
+  }
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     createdAt: activity.createdAt,
@@ -723,7 +742,6 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           : activity.tone,
     activityKind: activity.kind,
   };
-  const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
   if (detail) {
     entry.detail = detail;
@@ -746,6 +764,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       entry.toolData = data.item;
     }
   }
+  if (itemType === "collab_agent_tool_call" && payload?.data !== undefined) {
+    // Keep the Task call's `{toolName, input, result}` so subagent groups can
+    // read the agent type / description / result after the raw payload is gone.
+    entry.toolData = payload.data;
+  }
   if (itemType) {
     entry.itemType = itemType;
   }
@@ -754,6 +777,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (toolCallId) {
     entry.toolCallId = toolCallId;
+  }
+  const parentToolUseId = asTrimmedString(payload?.parentToolUseId);
+  if (parentToolUseId) {
+    entry.parentToolUseId = parentToolUseId;
   }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
@@ -822,6 +849,7 @@ function mergeDerivedWorkLogEntries(
   const requestKind = next.requestKind ?? previous.requestKind;
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
+  const parentToolUseId = next.parentToolUseId ?? previous.parentToolUseId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
   return {
@@ -836,6 +864,7 @@ function mergeDerivedWorkLogEntries(
     ...(requestKind ? { requestKind } : {}),
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolCallId ? { toolCallId } : {}),
+    ...(parentToolUseId ? { parentToolUseId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
   };
@@ -870,6 +899,219 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
 
 function normalizeCompactToolLabel(value: string): string {
   return value.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
+}
+
+const COALESCED_TOOL_UPDATED_ID_PREFIX = "tool-updated:";
+
+/**
+ * Recover the provider item id (the Task tool_use id) from the coalesced
+ * activity id ingestion assigns to item.updated rows:
+ * `tool-updated:{threadId}:{itemId}`. Item ids are colon-free provider tokens
+ * (e.g. `toolu_…`), so the last `:` separates them from the thread id.
+ */
+function toolCallIdFromCoalescedActivityId(activity: OrchestrationThreadActivity): string | null {
+  if (activity.kind !== "tool.updated") {
+    return null;
+  }
+  if (!activity.id.startsWith(COALESCED_TOOL_UPDATED_ID_PREFIX)) {
+    return null;
+  }
+  const rest = activity.id.slice(COALESCED_TOOL_UPDATED_ID_PREFIX.length);
+  const separator = rest.lastIndexOf(":");
+  if (separator <= 0) {
+    return null;
+  }
+  return asTrimmedString(rest.slice(separator + 1));
+}
+
+/** One subagent (Agent/Task spawn) grouped for inline timeline rendering. */
+export interface SubagentGroup {
+  /** Work-log entry id of the spawning `collab_agent_tool_call` row (timeline anchor). */
+  entryId: string;
+  /** Task tool_use id correlating the read-model row and child tool rows; null when the provider gave none. */
+  toolCallId: string | null;
+  /** Subagent type (e.g. `Explore`), falling back to `"Subagent"`. */
+  name: string;
+  description: string | null;
+  status: OrchestrationThreadSubagentStatus;
+  startedAt: string;
+  completedAt: string | null;
+  /** Tool rows that ran inside this subagent (via `parentToolUseId`); empty when linkage is absent. */
+  children: WorkLogEntry[];
+  resultText: string | null;
+}
+
+/**
+ * Group subagent spawns out of the flat work log. Parents are
+ * `collab_agent_tool_call` entries; the `thread.subagents` read model, when
+ * provided, is preferred for identity/status/description/timestamps, with the
+ * activity-derived entry as the fallback (old servers, providers without
+ * task events). Children attach via `parentToolUseId`; when that linkage is
+ * absent the group is still produced with `children: []`.
+ */
+export function deriveSubagentGroups(
+  workEntries: ReadonlyArray<WorkLogEntry>,
+  options: {
+    /** From `isLatestTurnSettled`; a settled turn turns lingering running groups into `stopped`. */
+    turnSettled: boolean;
+    /** `thread.subagents` read model for this thread, when available. */
+    subagents?: ReadonlyArray<OrchestrationThreadSubagent>;
+  },
+): SubagentGroup[] {
+  const childrenByParent = new Map<string, WorkLogEntry[]>();
+  for (const entry of workEntries) {
+    if (!entry.parentToolUseId) {
+      continue;
+    }
+    const bucket = childrenByParent.get(entry.parentToolUseId);
+    if (bucket) {
+      bucket.push(entry);
+    } else {
+      childrenByParent.set(entry.parentToolUseId, [entry]);
+    }
+  }
+
+  const groups: SubagentGroup[] = [];
+  // Providers that put toolCallId in `data` on every lifecycle row (e.g.
+  // Codex) can yield two same-id parents when the adjacency collapse missed
+  // the pair — dedupe those into one group. (Claude's completed row carries
+  // no recoverable id, so an escaped pair there still yields two groups.)
+  const groupIndexByToolCallId = new Map<string, number>();
+  for (const entry of workEntries) {
+    if (entry.itemType !== "collab_agent_tool_call") {
+      continue;
+    }
+    const group = toSubagentGroup(entry, childrenByParent, options);
+    if (group.toolCallId !== null) {
+      const existingIndex = groupIndexByToolCallId.get(group.toolCallId);
+      const existing = existingIndex === undefined ? undefined : groups[existingIndex];
+      if (existingIndex !== undefined && existing !== undefined) {
+        groups[existingIndex] = mergeSubagentGroups(existing, group);
+        continue;
+      }
+      groupIndexByToolCallId.set(group.toolCallId, groups.length);
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+function toSubagentGroup(
+  entry: WorkLogEntry,
+  childrenByParent: ReadonlyMap<string, WorkLogEntry[]>,
+  options: {
+    turnSettled: boolean;
+    subagents?: ReadonlyArray<OrchestrationThreadSubagent>;
+  },
+): SubagentGroup {
+  const toolCallId = entry.toolCallId ?? null;
+  const data = asRecord(entry.toolData);
+  const input = asRecord(data?.input);
+  const readModel =
+    toolCallId !== null
+      ? options.subagents?.find((subagent) => subagent.spawnedByItemId === toolCallId)
+      : undefined;
+  return {
+    entryId: entry.id,
+    toolCallId,
+    name: readModel?.agentType ?? asTrimmedString(input?.subagent_type) ?? "Subagent",
+    description: readModel?.description ?? asTrimmedString(input?.description),
+    status: deriveSubagentGroupStatus(entry, readModel, options.turnSettled),
+    startedAt: readModel?.startedAt ?? entry.createdAt,
+    completedAt: readModel?.completedAt ?? null,
+    children: toolCallId !== null ? (childrenByParent.get(toolCallId) ?? []) : [],
+    resultText: extractSubagentResultText(data?.result),
+  };
+}
+
+function deriveSubagentGroupStatus(
+  entry: WorkLogEntry,
+  readModel: OrchestrationThreadSubagent | undefined,
+  turnSettled: boolean,
+): OrchestrationThreadSubagentStatus {
+  // A settled read-model status is authoritative; a row still "running"
+  // may just lag the tool result that already arrived on the activity side.
+  if (readModel !== undefined && readModel.status !== "running") {
+    return readModel.status;
+  }
+  const entryStatus = subagentStatusFromEntry(entry);
+  if (entryStatus !== "running") {
+    return entryStatus;
+  }
+  // Still in progress after the turn settled: the run was interrupted before
+  // the provider reported completion.
+  return turnSettled ? "stopped" : "running";
+}
+
+function subagentStatusFromEntry(entry: WorkLogEntry): OrchestrationThreadSubagentStatus {
+  // The tool.completed activity carries no lifecycle status and gets defaulted
+  // to "completed", clobbering the updated row's "failed" in the collapse —
+  // so check the raw tool_result error flag first.
+  const result = asRecord(asRecord(entry.toolData)?.result);
+  if (result?.is_error === true || result?.isError === true) {
+    return "failed";
+  }
+  if (workEntryIndicatesToolFailure(entry)) {
+    return "failed";
+  }
+  const lifecycleStatus = entry.toolLifecycleStatus;
+  if (lifecycleStatus === "completed") {
+    return "completed";
+  }
+  if (lifecycleStatus === "stopped") {
+    return "stopped";
+  }
+  return "running";
+}
+
+/**
+ * Flatten a Task tool_result into display text. Handles a bare string, a
+ * `{type:"text", text}` block, arrays of blocks, and a `tool_result`-shaped
+ * record whose `content` nests any of those.
+ */
+export function extractSubagentResultText(result: unknown): string | null {
+  return collectSubagentResultText(result, 0);
+}
+
+function collectSubagentResultText(value: unknown, depth: number): string | null {
+  if (depth > 3) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return asTrimmedString(value);
+  }
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    for (const item of value) {
+      const text = collectSubagentResultText(item, depth + 1);
+      if (text !== null) {
+        parts.push(text);
+      }
+    }
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  if (record.type === "text") {
+    return asTrimmedString(record.text);
+  }
+  if ("content" in record) {
+    return collectSubagentResultText(record.content, depth + 1);
+  }
+  return null;
+}
+
+function mergeSubagentGroups(first: SubagentGroup, second: SubagentGroup): SubagentGroup {
+  return {
+    ...first,
+    name: second.name !== "Subagent" ? second.name : first.name,
+    description: second.description ?? first.description,
+    status: second.status !== "running" ? second.status : first.status,
+    completedAt: second.completedAt ?? first.completedAt,
+    resultText: second.resultText ?? first.resultText,
+  };
 }
 
 function toLatestProposedPlanState(proposedPlan: ProposedPlan): LatestProposedPlanState {

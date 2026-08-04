@@ -4,6 +4,7 @@ import {
   ThreadId,
   TurnId,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadSubagent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -12,8 +13,10 @@ import {
   deriveActivePlanState,
   derivePendingApprovals,
   derivePendingUserInputs,
+  deriveSubagentGroups,
   deriveTimelineEntries,
   deriveWorkLogEntries,
+  extractSubagentResultText,
   findLatestProposedPlan,
   findSidebarProposedPlan,
   hasActionableProposedPlan,
@@ -1727,5 +1730,243 @@ describe("deriveActiveWorkStartedAt", () => {
         "2026-02-27T21:11:00.000Z",
       ),
     ).toBe("2026-02-27T21:11:00.000Z");
+  });
+});
+
+const SUBAGENT_TASK_INPUT = {
+  subagent_type: "Explore",
+  description: "Explore the repo",
+  prompt: "Find every usage of deriveWorkLogEntries",
+};
+
+/** Claude-shaped spawn: coalesced item.updated row + eventId-keyed item.completed row. */
+function makeClaudeSubagentSpawnActivities(overrides?: {
+  result?: unknown;
+  updatedStatus?: string;
+}): OrchestrationThreadActivity[] {
+  const result = overrides?.result ?? {
+    type: "tool_result",
+    tool_use_id: "toolu_task",
+    content: [{ type: "text", text: "Found 3 usages" }],
+  };
+  const data = { toolName: "Task", input: SUBAGENT_TASK_INPUT, result };
+  return [
+    makeActivity({
+      id: "tool-updated:thread-1:toolu_task",
+      createdAt: "2026-02-23T00:00:05.000Z",
+      kind: "tool.updated",
+      summary: "Subagent task",
+      sequence: 5,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: overrides?.updatedStatus ?? "inProgress",
+        title: "Subagent task",
+        data,
+      },
+    }),
+    makeActivity({
+      id: "task-complete-event",
+      createdAt: "2026-02-23T00:00:06.000Z",
+      kind: "tool.completed",
+      summary: "Subagent task",
+      sequence: 6,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        title: "Subagent task",
+        data,
+      },
+    }),
+  ];
+}
+
+describe("deriveSubagentGroups", () => {
+  it("groups a Claude-shaped spawn with children attributed via parentToolUseId", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "child-complete",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "tool.completed",
+        summary: "Terminal",
+        sequence: 3,
+        payload: {
+          itemType: "command_execution",
+          title: "Terminal",
+          detail: "ls",
+          parentToolUseId: "toolu_task",
+          data: {},
+        },
+      }),
+      ...makeClaudeSubagentSpawnActivities(),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    const groups = deriveSubagentGroups(entries, { turnSettled: true });
+
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    expect(group?.toolCallId).toBe("toolu_task");
+    expect(group?.name).toBe("Explore");
+    expect(group?.description).toBe("Explore the repo");
+    expect(group?.status).toBe("completed");
+    expect(group?.resultText).toBe("Found 3 usages");
+    expect(group?.children.map((child) => child.id)).toEqual(["child-complete"]);
+    expect(group?.completedAt).toBeNull();
+  });
+
+  it("still produces a group with empty children when linkage fields are absent", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "legacy-subagent-event",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        sequence: 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Subagent task",
+          data: { toolName: "Task", input: SUBAGENT_TASK_INPUT },
+        },
+      }),
+      makeActivity({
+        id: "unrelated-tool",
+        createdAt: "2026-02-23T00:00:06.000Z",
+        kind: "tool.completed",
+        summary: "Terminal",
+        sequence: 6,
+        payload: { itemType: "command_execution", detail: "ls", data: {} },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    const groups = deriveSubagentGroups(entries, { turnSettled: false });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.toolCallId).toBeNull();
+    expect(groups[0]?.children).toEqual([]);
+    expect(groups[0]?.name).toBe("Explore");
+    expect(groups[0]?.status).toBe("running");
+  });
+
+  it("marks the group failed when the tool result is an error", () => {
+    const activities = makeClaudeSubagentSpawnActivities({
+      updatedStatus: "failed",
+      result: {
+        type: "tool_result",
+        tool_use_id: "toolu_task",
+        is_error: true,
+        content: "Agent crashed",
+      },
+    });
+
+    const entries = deriveWorkLogEntries(activities);
+    const groups = deriveSubagentGroups(entries, { turnSettled: true });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.status).toBe("failed");
+    expect(groups[0]?.resultText).toBe("Agent crashed");
+  });
+
+  it("marks a still-running group stopped once the turn settles", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-updated:thread-1:toolu_task",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        sequence: 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Subagent task",
+          data: { toolName: "Task", input: SUBAGENT_TASK_INPUT },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(deriveSubagentGroups(entries, { turnSettled: false })[0]?.status).toBe("running");
+    expect(deriveSubagentGroups(entries, { turnSettled: true })[0]?.status).toBe("stopped");
+  });
+
+  it("prefers the thread.subagents read model for identity, status, and timestamps", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-updated:thread-1:toolu_task",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        sequence: 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Subagent task",
+          data: { toolName: "Task", input: SUBAGENT_TASK_INPUT },
+        },
+      }),
+    ];
+    const readModelRow: OrchestrationThreadSubagent = {
+      subagentId: "task-1",
+      turnId: null,
+      agentType: "code-reviewer",
+      description: "Review the diff",
+      status: "completed",
+      spawnedByItemId: "toolu_task",
+      startedAt: "2026-02-23T00:00:04.000Z",
+      updatedAt: "2026-02-23T00:00:09.000Z",
+      completedAt: "2026-02-23T00:00:09.000Z",
+    };
+
+    const entries = deriveWorkLogEntries(activities);
+    const groups = deriveSubagentGroups(entries, {
+      turnSettled: false,
+      subagents: [readModelRow],
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.name).toBe("code-reviewer");
+    expect(groups[0]?.description).toBe("Review the diff");
+    expect(groups[0]?.status).toBe("completed");
+    expect(groups[0]?.startedAt).toBe("2026-02-23T00:00:04.000Z");
+    expect(groups[0]?.completedAt).toBe("2026-02-23T00:00:09.000Z");
+
+    const stillRunning = deriveSubagentGroups(entries, {
+      turnSettled: true,
+      subagents: [{ ...readModelRow, status: "running", completedAt: null }],
+    });
+    expect(stillRunning[0]?.status).toBe("stopped");
+  });
+});
+
+describe("extractSubagentResultText", () => {
+  it("returns trimmed bare strings", () => {
+    expect(extractSubagentResultText("  done  ")).toBe("done");
+    expect(extractSubagentResultText("   ")).toBeNull();
+  });
+
+  it("reads text blocks and joins arrays of blocks", () => {
+    expect(extractSubagentResultText({ type: "text", text: "hello" })).toBe("hello");
+    expect(
+      extractSubagentResultText([
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ]),
+    ).toBe("first\nsecond");
+  });
+
+  it("unwraps tool_result-shaped records via their content", () => {
+    expect(
+      extractSubagentResultText({
+        type: "tool_result",
+        tool_use_id: "toolu_task",
+        content: [{ type: "text", text: "nested" }],
+      }),
+    ).toBe("nested");
+  });
+
+  it("returns null for shapes it does not understand", () => {
+    expect(extractSubagentResultText(undefined)).toBeNull();
+    expect(extractSubagentResultText({ status: "ok" })).toBeNull();
+    expect(extractSubagentResultText([])).toBeNull();
   });
 });
