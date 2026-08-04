@@ -57,6 +57,8 @@ import {
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
+  makeAcpTaskCompletedEvent,
+  makeAcpTaskStartedEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import {
@@ -66,9 +68,12 @@ import {
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
+  type KimiSubagentTaskTracker,
   applyKimiAcpModelSelection,
   makeKimiAcpRuntime,
+  makeKimiSubagentTaskTracker,
   resolveKimiAcpBaseModelId,
+  trackKimiSubagentToolCall,
 } from "../acp/KimiAcpSupport.ts";
 import { type KimiAdapterShape } from "../Services/KimiAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -126,6 +131,8 @@ interface KimiSessionContext {
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Per-session dedupe state for the kimi subagent detection heuristic. */
+  readonly subagentTracker: KimiSubagentTaskTracker;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   /** Number of sendTurn prompts currently in flight or being prepared.
@@ -666,6 +673,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             pendingApprovals,
             pendingUserInputs,
             turns: [],
+            subagentTracker: makeKimiSubagentTaskTracker(),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             promptsInFlight: 0,
@@ -709,8 +717,31 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* emitPlanUpdate(ctx, event.payload, event.rawPayload, "session/update");
                     return;
-                  case "ToolCallUpdated":
+                  case "ToolCallUpdated": {
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
+                    const subagentSignals = trackKimiSubagentToolCall(
+                      ctx.subagentTracker,
+                      event.toolCall,
+                    );
+                    if (subagentSignals.started) {
+                      const started = subagentSignals.started;
+                      yield* offerRuntimeEvent(
+                        makeAcpTaskStartedEvent({
+                          stamp: yield* makeEventStamp(),
+                          provider: PROVIDER,
+                          threadId: ctx.threadId,
+                          turnId: ctx.activeTurnId,
+                          taskId: started.toolCallId,
+                          toolUseId: started.toolCallId,
+                          subagentType: started.subagentType,
+                          ...(started.description ? { description: started.description } : {}),
+                          ...(started.prompt ? { prompt: started.prompt } : {}),
+                          source: "acp.jsonrpc",
+                          method: "session/update",
+                          rawPayload: event.rawPayload,
+                        }),
+                      );
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp: yield* makeEventStamp(),
@@ -718,10 +749,32 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                         threadId: ctx.threadId,
                         turnId: ctx.activeTurnId,
                         toolCall: event.toolCall,
+                        ...(subagentSignals.isSubagentToolCall
+                          ? { itemType: "collab_agent_tool_call" as const }
+                          : {}),
                         rawPayload: event.rawPayload,
                       }),
                     );
+                    if (subagentSignals.completed) {
+                      const completed = subagentSignals.completed;
+                      yield* offerRuntimeEvent(
+                        makeAcpTaskCompletedEvent({
+                          stamp: yield* makeEventStamp(),
+                          provider: PROVIDER,
+                          threadId: ctx.threadId,
+                          turnId: ctx.activeTurnId,
+                          taskId: completed.toolCallId,
+                          toolUseId: completed.toolCallId,
+                          status: completed.status,
+                          ...(completed.summary ? { summary: completed.summary } : {}),
+                          source: "acp.jsonrpc",
+                          method: "session/update",
+                          rawPayload: event.rawPayload,
+                        }),
+                      );
+                    }
                     return;
+                  }
                   case "ContentDelta":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* offerRuntimeEvent(

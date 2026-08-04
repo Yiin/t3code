@@ -86,6 +86,91 @@ export function extractPlanMarkdown(params: typeof CursorCreatePlanRequest.Type)
   return params.plan || "# Plan\n\n(Cursor did not supply plan text.)";
 }
 
+/**
+ * cursor/task — a notification about subagent task activity, per the public
+ * docs (fields: toolCallId, description, prompt, subagentType — a string enum
+ * or `{ custom }` — plus optional model, agentId, durationMs). No live
+ * capture of this method exists yet, so parsing is deliberately
+ * schema-tolerant: anything without a usable toolCallId returns undefined
+ * and the caller logs and ignores it rather than failing the session.
+ */
+export interface CursorTaskSignal {
+  readonly toolCallId: string;
+  readonly subagentType?: string;
+  readonly description?: string;
+  readonly prompt?: string;
+  readonly model?: string;
+  readonly agentId?: string;
+  readonly durationMs?: number;
+  /**
+   * True when the notification carries a terminal signal: the docs describe
+   * durationMs as "how long the task ran", so its presence (or a terminal
+   * status-like field) marks completion.
+   */
+  readonly terminal: boolean;
+  readonly status: "completed" | "failed" | "stopped";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+const CURSOR_TASK_FAILED_STATUSES = new Set(["failed", "error", "errored"]);
+const CURSOR_TASK_STOPPED_STATUSES = new Set([
+  "stopped",
+  "cancelled",
+  "canceled",
+  "aborted",
+  "killed",
+]);
+const CURSOR_TASK_COMPLETED_STATUSES = new Set(["completed", "complete", "success", "done"]);
+
+export function parseCursorTaskNotification(params: unknown): CursorTaskSignal | undefined {
+  if (!isRecord(params)) {
+    return undefined;
+  }
+  const toolCallId = nonEmptyString(params.toolCallId);
+  if (!toolCallId) {
+    return undefined;
+  }
+  const subagentTypeRaw = params.subagentType;
+  const subagentType =
+    nonEmptyString(subagentTypeRaw) ??
+    (isRecord(subagentTypeRaw) ? nonEmptyString(subagentTypeRaw.custom) : undefined);
+  const description = nonEmptyString(params.description);
+  const prompt = nonEmptyString(params.prompt);
+  const model = nonEmptyString(params.model);
+  const agentId = nonEmptyString(params.agentId);
+  const durationMs =
+    typeof params.durationMs === "number" && Number.isFinite(params.durationMs)
+      ? params.durationMs
+      : undefined;
+  const statusText = nonEmptyString(params.status)?.toLowerCase();
+  const failed = statusText !== undefined && CURSOR_TASK_FAILED_STATUSES.has(statusText);
+  const stopped = statusText !== undefined && CURSOR_TASK_STOPPED_STATUSES.has(statusText);
+  const completedStatus =
+    statusText !== undefined && CURSOR_TASK_COMPLETED_STATUSES.has(statusText);
+  return {
+    toolCallId,
+    ...(subagentType ? { subagentType } : {}),
+    ...(description ? { description } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(model ? { model } : {}),
+    ...(agentId ? { agentId } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    terminal: durationMs !== undefined || failed || stopped || completedStatus,
+    status: failed ? "failed" : stopped ? "stopped" : "completed",
+  };
+}
+
 export function extractTodosAsPlan(params: typeof CursorUpdateTodosRequest.Type): {
   readonly explanation?: string;
   readonly plan: ReadonlyArray<{

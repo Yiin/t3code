@@ -7,6 +7,8 @@ import {
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
+  makeAcpTaskCompletedEvent,
+  makeAcpTaskStartedEvent,
   makeAcpToolCallEvent,
 } from "./AcpCoreRuntimeEvents.ts";
 
@@ -151,5 +153,140 @@ describe("AcpCoreRuntimeEvents", () => {
         status: "inProgress",
       },
     });
+  });
+
+  it("honors the item type override for classified tool calls", () => {
+    const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
+
+    expect(
+      makeAcpToolCallEvent({
+        stamp,
+        provider: ProviderDriverKind.make("kimi"),
+        threadId: "thread-1" as never,
+        turnId: TurnId.make("turn-1"),
+        toolCall: {
+          toolCallId: "tool-1",
+          kind: "other",
+          status: "inProgress",
+          title: "Launching explore agent: Review the fix",
+          data: { toolCallId: "tool-1" },
+        },
+        itemType: "collab_agent_tool_call",
+        rawPayload: { sessionId: "session-1" },
+      }),
+    ).toMatchObject({
+      type: "item.updated",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+      },
+    });
+  });
+
+  it("maps ACP subagent task lifecycle events", () => {
+    const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
+    const turnId = TurnId.make("turn-1");
+
+    expect(
+      makeAcpTaskStartedEvent({
+        stamp,
+        provider: ProviderDriverKind.make("kimi"),
+        threadId: "thread-1" as never,
+        turnId,
+        taskId: "tool-1",
+        toolUseId: "tool-1",
+        subagentType: "explore",
+        description: "Review the fix",
+        prompt: "You are a skeptical reviewer.",
+        source: "acp.jsonrpc",
+        method: "session/update",
+        rawPayload: { sessionId: "session-1" },
+      }),
+    ).toEqual({
+      type: "task.started",
+      eventId: "event-1",
+      createdAt: "2026-03-27T00:00:00.000Z",
+      provider: "kimi",
+      threadId: "thread-1",
+      turnId,
+      payload: {
+        taskId: "tool-1",
+        toolUseId: "tool-1",
+        subagentType: "explore",
+        description: "Review the fix",
+        prompt: "You are a skeptical reviewer.",
+      },
+      raw: {
+        source: "acp.jsonrpc",
+        method: "session/update",
+        payload: { sessionId: "session-1" },
+      },
+    });
+
+    expect(
+      makeAcpTaskCompletedEvent({
+        stamp,
+        provider: ProviderDriverKind.make("cursor"),
+        threadId: "thread-1" as never,
+        turnId,
+        taskId: "tool-1",
+        toolUseId: "tool-1",
+        status: "failed",
+        summary: "The subagent hit an error.",
+        source: "acp.cursor.extension",
+        method: "cursor/task",
+        rawPayload: { toolCallId: "tool-1" },
+      }),
+    ).toEqual({
+      type: "task.completed",
+      eventId: "event-1",
+      createdAt: "2026-03-27T00:00:00.000Z",
+      provider: "cursor",
+      threadId: "thread-1",
+      turnId,
+      payload: {
+        taskId: "tool-1",
+        status: "failed",
+        toolUseId: "tool-1",
+        summary: "The subagent hit an error.",
+      },
+      raw: {
+        source: "acp.cursor.extension",
+        method: "cursor/task",
+        payload: { toolCallId: "tool-1" },
+      },
+    });
+  });
+
+  it("drops empty optional task fields instead of emitting blanks", () => {
+    const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
+
+    const started = makeAcpTaskStartedEvent({
+      stamp,
+      provider: ProviderDriverKind.make("kimi"),
+      threadId: "thread-1" as never,
+      turnId: undefined,
+      taskId: "tool-1",
+      subagentType: "  ",
+      description: "",
+      source: "acp.jsonrpc",
+      method: "session/update",
+      rawPayload: {},
+    });
+    expect(started.payload).toEqual({ taskId: "tool-1" });
+
+    const completed = makeAcpTaskCompletedEvent({
+      stamp,
+      provider: ProviderDriverKind.make("kimi"),
+      threadId: "thread-1" as never,
+      turnId: undefined,
+      taskId: "tool-1",
+      status: "completed",
+      summary: "   ",
+      source: "acp.jsonrpc",
+      method: "session/update",
+      rawPayload: {},
+    });
+    expect(completed.payload).toEqual({ taskId: "tool-1", status: "completed" });
   });
 });

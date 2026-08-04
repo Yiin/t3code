@@ -5,6 +5,7 @@ import {
   extractAskQuestions,
   extractPlanMarkdown,
   extractTodosAsPlan,
+  parseCursorTaskNotification,
 } from "./CursorAcpExtension.ts";
 
 describe("CursorAcpExtension", () => {
@@ -131,5 +132,93 @@ describe("CursorAcpExtension", () => {
     });
 
     expect(decoded.models[0]?.configOptions?.[0]?.id).toBe("reasoning");
+  });
+
+  it("parses a documented cursor/task start notification as non-terminal", () => {
+    expect(
+      parseCursorTaskNotification({
+        toolCallId: "task-tool-1",
+        description: "Explore the auth flow",
+        prompt: "Read the auth module and report entry points.",
+        subagentType: "explore",
+        model: "gpt-5.4",
+      }),
+    ).toEqual({
+      toolCallId: "task-tool-1",
+      subagentType: "explore",
+      description: "Explore the auth flow",
+      prompt: "Read the auth module and report entry points.",
+      model: "gpt-5.4",
+      terminal: false,
+      status: "completed",
+    });
+  });
+
+  it("treats durationMs as the completion signal for cursor/task", () => {
+    const signal = parseCursorTaskNotification({
+      toolCallId: "task-tool-1",
+      description: "Explore the auth flow",
+      subagentType: "explore",
+      agentId: "agent-1",
+      durationMs: 42_000,
+    });
+
+    expect(signal).toMatchObject({
+      toolCallId: "task-tool-1",
+      agentId: "agent-1",
+      durationMs: 42_000,
+      terminal: true,
+      status: "completed",
+    });
+  });
+
+  it("maps custom subagent types and status-like fields on cursor/task", () => {
+    expect(
+      parseCursorTaskNotification({
+        toolCallId: "task-tool-2",
+        subagentType: { custom: "docs-writer" },
+        status: "failed",
+      }),
+    ).toMatchObject({
+      toolCallId: "task-tool-2",
+      subagentType: "docs-writer",
+      terminal: true,
+      status: "failed",
+    });
+
+    expect(
+      parseCursorTaskNotification({
+        toolCallId: "task-tool-3",
+        status: "cancelled",
+      }),
+    ).toMatchObject({ terminal: true, status: "stopped" });
+  });
+
+  it("returns undefined for malformed cursor/task payloads instead of throwing", () => {
+    expect(parseCursorTaskNotification(null)).toBeUndefined();
+    expect(parseCursorTaskNotification(undefined)).toBeUndefined();
+    expect(parseCursorTaskNotification("cursor/task")).toBeUndefined();
+    expect(parseCursorTaskNotification(42)).toBeUndefined();
+    expect(parseCursorTaskNotification([])).toBeUndefined();
+    expect(parseCursorTaskNotification({})).toBeUndefined();
+    expect(parseCursorTaskNotification({ toolCallId: "" })).toBeUndefined();
+    expect(parseCursorTaskNotification({ toolCallId: "   " })).toBeUndefined();
+    expect(parseCursorTaskNotification({ toolCallId: 7 })).toBeUndefined();
+  });
+
+  it("ignores wrong-typed optional cursor/task fields while still parsing", () => {
+    expect(
+      parseCursorTaskNotification({
+        toolCallId: "task-tool-4",
+        subagentType: 42,
+        durationMs: "fast",
+        description: ["not", "a", "string"],
+        unexpectedField: { nested: true },
+      }),
+    ).toEqual({
+      toolCallId: "task-tool-4",
+      terminal: false,
+      status: "completed",
+    });
   });
 });

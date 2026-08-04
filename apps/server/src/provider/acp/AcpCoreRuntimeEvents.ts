@@ -1,6 +1,7 @@
 import {
   type RuntimeEventRawSource,
   RuntimeItemId,
+  RuntimeTaskId,
   type CanonicalRequestType,
   type EventId,
   type ProviderApprovalDecision,
@@ -163,6 +164,12 @@ export function makeAcpToolCallEvent(input: {
   readonly threadId: ThreadId;
   readonly turnId: TurnId | undefined;
   readonly toolCall: AcpToolCallState;
+  /**
+   * Overrides the kind-derived item type. Used when the caller has classified
+   * the tool call beyond what the closed ACP ToolKind enum can express, e.g.
+   * kimi subagent spawns become `collab_agent_tool_call`.
+   */
+  readonly itemType?: ToolLifecycleItemType;
   readonly rawPayload: unknown;
 }): ProviderRuntimeEvent {
   const runtimeStatus = runtimeItemStatusFromAcpToolStatus(input.toolCall.status);
@@ -177,7 +184,7 @@ export function makeAcpToolCallEvent(input: {
     turnId: input.turnId,
     itemId: RuntimeItemId.make(input.toolCall.toolCallId),
     payload: {
-      itemType: canonicalItemTypeFromAcpToolKind(input.toolCall.kind),
+      itemType: input.itemType ?? canonicalItemTypeFromAcpToolKind(input.toolCall.kind),
       ...(runtimeStatus ? { status: runtimeStatus } : {}),
       ...(input.toolCall.title ? { title: input.toolCall.title } : {}),
       ...(input.toolCall.detail ? { detail: input.toolCall.detail } : {}),
@@ -209,6 +216,90 @@ export function makeAcpAssistantItemEvent(input: {
     payload: {
       itemType: "assistant_message",
       status: input.lifecycle === "item.completed" ? "completed" : "inProgress",
+    },
+  };
+}
+
+function trimmedOrUndefined(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Subagent task spawn detected on an ACP provider (kimi heuristic, cursor/task
+ * extension). taskId doubles as the join key: ACP has no separate task id, so
+ * the spawning tool call id serves as both taskId and toolUseId.
+ */
+export function makeAcpTaskStartedEvent(input: {
+  readonly stamp: AcpEventStamp;
+  readonly provider: ProviderDriverKind;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId | undefined;
+  readonly taskId: string;
+  readonly toolUseId?: string;
+  readonly subagentType?: string;
+  readonly description?: string;
+  readonly prompt?: string;
+  readonly source: AcpAdapterRawSource;
+  readonly method: string;
+  readonly rawPayload: unknown;
+}): ProviderRuntimeEvent {
+  const toolUseId = trimmedOrUndefined(input.toolUseId);
+  const subagentType = trimmedOrUndefined(input.subagentType);
+  const description = trimmedOrUndefined(input.description);
+  const prompt = trimmedOrUndefined(input.prompt);
+  return {
+    type: "task.started",
+    ...input.stamp,
+    provider: input.provider,
+    threadId: input.threadId,
+    turnId: input.turnId,
+    payload: {
+      taskId: RuntimeTaskId.make(input.taskId),
+      ...(toolUseId ? { toolUseId } : {}),
+      ...(subagentType ? { subagentType } : {}),
+      ...(description ? { description } : {}),
+      ...(prompt ? { prompt } : {}),
+    },
+    raw: {
+      source: input.source,
+      method: input.method,
+      payload: input.rawPayload,
+    },
+  };
+}
+
+export function makeAcpTaskCompletedEvent(input: {
+  readonly stamp: AcpEventStamp;
+  readonly provider: ProviderDriverKind;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId | undefined;
+  readonly taskId: string;
+  readonly toolUseId?: string;
+  readonly status: "completed" | "failed" | "stopped";
+  readonly summary?: string;
+  readonly source: AcpAdapterRawSource;
+  readonly method: string;
+  readonly rawPayload: unknown;
+}): ProviderRuntimeEvent {
+  const toolUseId = trimmedOrUndefined(input.toolUseId);
+  const summary = trimmedOrUndefined(input.summary);
+  return {
+    type: "task.completed",
+    ...input.stamp,
+    provider: input.provider,
+    threadId: input.threadId,
+    turnId: input.turnId,
+    payload: {
+      taskId: RuntimeTaskId.make(input.taskId),
+      status: input.status,
+      ...(toolUseId ? { toolUseId } : {}),
+      ...(summary ? { summary } : {}),
+    },
+    raw: {
+      source: input.source,
+      method: input.method,
+      payload: input.rawPayload,
     },
   };
 }

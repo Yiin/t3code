@@ -58,6 +58,8 @@ import {
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
+  makeAcpTaskCompletedEvent,
+  makeAcpTaskStartedEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import {
@@ -74,6 +76,7 @@ import {
   extractAskQuestions,
   extractPlanMarkdown,
   extractTodosAsPlan,
+  parseCursorTaskNotification,
 } from "../acp/CursorAcpExtension.ts";
 import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
@@ -506,6 +509,9 @@ export function makeCursorAdapter(
 
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
           const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
+          // toolCallIds already surfaced as task.started via cursor/task; a
+          // later notification for the same id only adds the completion.
+          const seenCursorTaskToolCallIds = new Set<string>();
           const sessionScope = yield* Scope.make("sequential");
           let sessionScopeTransferred = false;
           yield* Effect.addFinalizer(() =>
@@ -670,6 +676,61 @@ export function makeCursorAdapter(
                     }
                   }),
                 ),
+            );
+            // cursor/task notifies about subagent activity (docs: toolCallId,
+            // description, prompt, subagentType, model?, agentId?,
+            // durationMs?). Registered with Schema.Unknown and parsed
+            // tolerantly: no live capture of the method exists yet, so a
+            // malformed payload must log and no-op, never fail the session.
+            yield* acp.handleExtNotification("cursor/task", Schema.Unknown, (params) =>
+              mapExtensionFailure(
+                Effect.gen(function* () {
+                  yield* logNative(input.threadId, "cursor/task", params, "acp.cursor.extension");
+                  const signal = parseCursorTaskNotification(params);
+                  if (signal === undefined) {
+                    yield* Effect.logWarning(
+                      "Ignoring cursor/task notification with unrecognized payload shape.",
+                      { threadId: input.threadId },
+                    );
+                    return;
+                  }
+                  if (!seenCursorTaskToolCallIds.has(signal.toolCallId)) {
+                    seenCursorTaskToolCallIds.add(signal.toolCallId);
+                    yield* offerRuntimeEvent(
+                      makeAcpTaskStartedEvent({
+                        stamp: yield* makeEventStamp(),
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        turnId: ctx?.activeTurnId,
+                        taskId: signal.toolCallId,
+                        toolUseId: signal.toolCallId,
+                        ...(signal.subagentType ? { subagentType: signal.subagentType } : {}),
+                        ...(signal.description ? { description: signal.description } : {}),
+                        ...(signal.prompt ? { prompt: signal.prompt } : {}),
+                        source: "acp.cursor.extension",
+                        method: "cursor/task",
+                        rawPayload: params,
+                      }),
+                    );
+                  }
+                  if (signal.terminal) {
+                    yield* offerRuntimeEvent(
+                      makeAcpTaskCompletedEvent({
+                        stamp: yield* makeEventStamp(),
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        turnId: ctx?.activeTurnId,
+                        taskId: signal.toolCallId,
+                        toolUseId: signal.toolCallId,
+                        status: signal.status,
+                        source: "acp.cursor.extension",
+                        method: "cursor/task",
+                        rawPayload: params,
+                      }),
+                    );
+                  }
+                }),
+              ),
             );
             yield* acp.handleRequestPermission((params) =>
               mapExtensionFailure(
