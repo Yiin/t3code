@@ -13,6 +13,15 @@
 # Environment (all optional unless noted):
 #   COOKEPIC_EPIC              beads epic id                       (REQUIRED)
 #   COOKEPIC_HARNESS           auto, kimi, claude, ccx, codex, or opencode (default auto)
+#                              claude/ccx workers all launch with
+#                              --exclude-dynamic-system-prompt-sections so their
+#                              system prompts share one cache prefix across
+#                              worktrees; ENABLE_PROMPT_CACHING_1H=1 is exported
+#                              (unless already set) for the longer cache TTL, and
+#                              a one-shot warm-up request with the same flag/model
+#                              runs before the first dispatch wave to seed that
+#                              prefix — a warm-up failure only logs a WARNING and
+#                              never stops the run. kimi/codex/opencode: unaffected.
 #   COOKEPIC_WORKERS           max concurrent workers              (default 3)
 #   COOKEPIC_MAX_DISPATCHES    global spawn cap                    (default 50)
 #   COOKEPIC_WORKER_TIMEOUT    optional absolute worker timeout, seconds (unset = none)
@@ -1841,6 +1850,13 @@ spawn_worker() { # <child> <title>
        && [ -z "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS+x}" ]; then
       export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
     fi
+    # Long-lived prompt-cache TTL so the shared system-prompt prefix (see
+    # --exclude-dynamic-system-prompt-sections below) survives the gap between
+    # dispatch waves. Respect an explicit caller setting.
+    if { [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; } \
+       && [ -z "${ENABLE_PROMPT_CACHING_1H+x}" ]; then
+      export ENABLE_PROMPT_CACHING_1H=1
+    fi
     rc=0
     case "$HARNESS" in
       worker-cmd)
@@ -1856,6 +1872,10 @@ spawn_worker() { # <child> <title>
         # Default Claude-family workers to Sonnet: implementation does not need
         # the top-tier model, and the prompt raises plan/review stages itself.
         args+=(--model "${COOKEPIC_MODEL:-sonnet}")
+        # Move per-machine sections (cwd, env, git status) out of the system
+        # prompt so parallel workers in distinct worktrees share one
+        # prompt-cache prefix instead of fragmenting it.
+        args+=(--exclude-dynamic-system-prompt-sections)
         capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" || rc=$? ;;
       codex)
         case "$PERM_MODE" in
@@ -2770,6 +2790,22 @@ else
   MODE_DESC="parallel:$WORKERS"
 fi
 say "cook-epic start: epic=$EPIC harness=$HARNESS mode=$MODE_DESC base=$BASE_BRANCH gate='${GATE:-none}' timeout=${WORKER_TIMEOUT:-none} idle-threshold=${IDLE_THRESHOLD}s inspector-timeout=${INSPECTOR_TIMEOUT}s attempts=$MAX_ATTEMPTS push=$PUSH_ENABLED cgroup=$([ "$SCOPE_OK" -eq 1 ] && echo "cook-epic.slice cpu=$CPU_WEIGHT io=$IO_WEIGHT mem-high=$MEMORY_HIGH" || echo nice-fallback)"
+
+# Populate the shared system-prompt cache prefix before the first dispatch
+# wave (dispatches are only SPAWN_DELAY apart) so early parallel workers land
+# a cache hit instead of racing to be first. Same flag/model shape as workers
+# or the prefix won't match. HARNESS is forced to worker-cmd whenever
+# COOKEPIC_WORKER_CMD is set (see line 313), so this never invokes claude
+# under the test hook.
+if [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; then
+  if [ -z "${ENABLE_PROMPT_CACHING_1H+x}" ]; then
+    export ENABLE_PROMPT_CACHING_1H=1
+  fi
+  timeout 120 "$AGENT_BIN" -p --permission-mode "$PERM_MODE" --output-format json \
+    --exclude-dynamic-system-prompt-sections --model "${COOKEPIC_MODEL:-sonnet}" \
+    -- 'Reply with exactly: ok' >>"$LOG" 2>&1 \
+    || say 'WARNING: cache warm-up failed; continuing'
+fi
 
 TICK="$SUPERVISION_TICK"
 while true; do

@@ -197,6 +197,14 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
    `COOKEPIC_HARNESS=kimi`. Claude Code: `claude`. ccx: `ccx`. Codex: `codex`.
    OpenCode: `opencode`.
 
+   claude/ccx workers automatically launch with
+   `--exclude-dynamic-system-prompt-sections` and `ENABLE_PROMPT_CACHING_1H=1`
+   so parallel workers in distinct worktrees share one prompt-cache prefix
+   instead of fragmenting it on cwd/git-status, and the runner fires a cheap
+   warm-up request before the first dispatch wave to seed that prefix (a
+   warm-up failure only warns; it never stops the run). No action needed —
+   this is automatic for claude/ccx and a no-op for kimi/codex/opencode.
+
 6. **Resolve the runner from this skill, then launch from the project root.** Derive `SKILL_DIR` from the directory containing the `SKILL.md` you loaded. Use `${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}`; this lets callers pin a specific copy with `COOKEPIC_RUNNER`. Only when the loaded skill path is unavailable or ambiguous, fall back to `~/.agents/skills/cook-epic/run.sh`.
 
    In a server or remote harness, detach the coordinator by default so the OS
