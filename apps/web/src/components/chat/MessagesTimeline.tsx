@@ -67,13 +67,14 @@ import {
 import { Button } from "../ui/button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
-import { SubagentCard } from "./SubagentCard";
+import { capitalizeSubagentName, SubagentCard } from "./SubagentCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
+  formatSubagentFleetSummary,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -144,6 +145,7 @@ interface TimelineRowSharedState {
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
   onToggleSubagentExpanded: (subagentKey: string, anchorElement?: HTMLElement) => void;
+  onScrollToTimelineRow: (rowId: string) => void;
 }
 
 interface TimelineRowActivityState {
@@ -371,6 +373,23 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const rows = useStableRows(rawRows);
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  // Row indices shift while a turn streams, so scroll targets resolve at click
+  // time against the current rows instead of being baked into row data.
+  const rowsRef = useRef(rows);
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+  const onScrollToTimelineRow = useCallback(
+    (rowId: string) => {
+      const index = rowsRef.current.findIndex((row) => row.id === rowId);
+      if (index < 0) {
+        return;
+      }
+      onManualNavigation();
+      void listRef.current?.scrollToIndex({ index, animated: true, viewOffset: 24 });
+    },
+    [listRef, onManualNavigation],
+  );
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
@@ -477,6 +496,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleTurnFold,
       onToggleWorkGroup,
       onToggleSubagentExpanded,
+      onScrollToTimelineRow,
     }),
     [
       timestampFormat,
@@ -492,6 +512,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleTurnFold,
       onToggleWorkGroup,
       onToggleSubagentExpanded,
+      onScrollToTimelineRow,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -888,7 +909,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         (row.kind === "message" && row.message.role === "assistant" && !row.showAssistantMeta) ||
           row.kind === "work" ||
           row.kind === "work-toggle" ||
-          row.kind === "subagent"
+          row.kind === "subagent" ||
+          row.kind === "subagent-fleet"
           ? "pb-2"
           : "pb-4",
         row.kind === "message" && row.message.role === "assistant" ? "group/assistant" : null,
@@ -900,6 +922,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
     >
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
       {row.kind === "subagent" ? <SubagentTimelineRow row={row} /> : null}
+      {row.kind === "subagent-fleet" ? <SubagentFleetTimelineRow row={row} /> : null}
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
@@ -1175,6 +1198,9 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
           ) : (
             "Working..."
           )}
+          {row.runningSubagentCount > 0
+            ? ` · ${row.runningSubagentCount} ${row.runningSubagentCount === 1 ? "subagent" : "subagents"}`
+            : null}
         </span>
       </div>
     </div>
@@ -1297,6 +1323,73 @@ function WorkGroupToggleTimelineRow({
         </span>
       )}
     </button>
+  );
+}
+
+// Dot palette mirrors the sidebar thread-status pills (resolveThreadStatusPill
+// in Sidebar.logic.ts) so one status reads the same everywhere.
+const SUBAGENT_FLEET_DOT_CLASS: Record<
+  Extract<TimelineRow, { kind: "subagent-fleet" }>["agents"][number]["status"],
+  string
+> = {
+  running: "bg-sky-500 dark:bg-sky-300/80 animate-status-pulse motion-reduce:animate-none",
+  completed: "bg-emerald-500 dark:bg-emerald-300/90",
+  failed: "bg-destructive",
+  stopped: "bg-muted-foreground/40",
+};
+
+const SUBAGENT_FLEET_STATUS_LABEL: Record<
+  Extract<TimelineRow, { kind: "subagent-fleet" }>["agents"][number]["status"],
+  string
+> = {
+  running: "Running",
+  completed: "Done",
+  failed: "Failed",
+  stopped: "Stopped",
+};
+
+/**
+ * One summary line above the unsettled turn's subagent cards when 2+ run
+ * concurrently: aggregate counts plus one status dot per agent, ordered
+ * attention-first. Clicking a dot scrolls the list to that agent's card.
+ */
+function SubagentFleetTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "subagent-fleet" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+
+  return (
+    <div className="flex items-center gap-1.5 py-0.5 pl-1.5 text-[11px] text-muted-foreground/70 tabular-nums">
+      <span>{formatSubagentFleetSummary(row)}</span>
+      <span className="inline-flex items-center" role="list" aria-label="Subagents">
+        {row.agents.map((agent) => {
+          const label = `${capitalizeSubagentName(agent.name)} · ${SUBAGENT_FLEET_STATUS_LABEL[agent.status]}`;
+          return (
+            <Tooltip key={agent.key}>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    role="listitem"
+                    aria-label={`Scroll to subagent: ${label}`}
+                    className="flex size-4 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+                    onClick={() => ctx.onScrollToTimelineRow(agent.rowId)}
+                  />
+                }
+              >
+                <span
+                  className={cn("size-1.5 rounded-full", SUBAGENT_FLEET_DOT_CLASS[agent.status])}
+                  aria-hidden
+                />
+              </TooltipTrigger>
+              <TooltipPopup side="top">{label}</TooltipPopup>
+            </Tooltip>
+          );
+        })}
+      </span>
+    </div>
   );
 }
 

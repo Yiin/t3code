@@ -158,7 +158,7 @@ function completedStatusLabel(group: SubagentGroup, toolCountLabel: string | nul
   return toolCountLabel ? `${label} · ${toolCountLabel}` : label;
 }
 
-function capitalizeSubagentName(name: string): string {
+export function capitalizeSubagentName(name: string): string {
   return name.length === 0 ? name : name.charAt(0).toUpperCase() + name.slice(1);
 }
 

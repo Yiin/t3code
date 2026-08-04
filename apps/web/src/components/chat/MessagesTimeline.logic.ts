@@ -12,6 +12,7 @@ import {
   type MessageId,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivityTruncation,
+  type OrchestrationThreadSubagentStatus,
   type TurnId,
 } from "@t3tools/contracts";
 
@@ -188,12 +189,63 @@ export type MessagesTimelineRow =
       group: SubagentGroup;
     }
   | {
+      kind: "subagent-fleet";
+      id: string;
+      createdAt: string;
+      total: number;
+      running: number;
+      completed: number;
+      failed: number;
+      /** Attention-first (failed, running, then finished) — see `subagentFleetDotPriority`. */
+      agents: ReadonlyArray<SubagentFleetAgent>;
+    }
+  | {
       kind: "activities-truncated";
       id: string;
       createdAt: string;
       omittedCount: number;
     }
-  | { kind: "working"; id: string; createdAt: string | null };
+  | {
+      kind: "working";
+      id: string;
+      createdAt: string | null;
+      /** Groups still running, shown as "· N subagents" after the working label. */
+      runningSubagentCount: number;
+    };
+
+export interface SubagentFleetAgent {
+  /** Stable identity across derives (toolCallId, falling back to entryId). */
+  key: string;
+  /** Timeline row id of this agent's SubagentCard, for dot-click scrolling. */
+  rowId: string;
+  name: string;
+  status: OrchestrationThreadSubagentStatus;
+}
+
+/**
+ * Attention-first ordering for fleet dots, matching the mobile Live Activity
+ * precedent (`phasePriority` in apps/mobile AgentActivity): failures first,
+ * then in-flight work, then finished. Subagents have no waiting states.
+ */
+function subagentFleetDotPriority(status: OrchestrationThreadSubagentStatus): number {
+  if (status === "failed") return 0;
+  if (status === "running") return 1;
+  return 2;
+}
+
+/** "{total} subagents · {running} running · {done} done · {failed} failed", zero segments omitted. */
+export function formatSubagentFleetSummary(counts: {
+  total: number;
+  running: number;
+  completed: number;
+  failed: number;
+}): string {
+  const segments = [`${counts.total} subagents`];
+  if (counts.running > 0) segments.push(`${counts.running} running`);
+  if (counts.completed > 0) segments.push(`${counts.completed} done`);
+  if (counts.failed > 0) segments.push(`${counts.failed} failed`);
+  return segments.join(" · ");
+}
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -488,6 +540,51 @@ export function deriveMessagesTimelineRows(input: {
       subagentChildEntryIds.add(child.id);
     }
   }
+  // With 2+ subagents in the unsettled turn, one fleet summary row goes
+  // directly above the turn's first subagent card. Presentation-only: the
+  // cards below stay individually rendered and expandable.
+  interface FleetCandidate {
+    rowId: string;
+    createdAt: string;
+    group: SubagentGroup;
+  }
+  const fleetCandidates: FleetCandidate[] = [];
+  if (unsettledTurnId !== null) {
+    for (const timelineEntry of input.timelineEntries) {
+      if (timelineEntry.kind !== "work" || timelineEntry.entry.turnId !== unsettledTurnId) {
+        continue;
+      }
+      const group = subagentGroupByEntryId.get(timelineEntry.entry.id);
+      if (group) {
+        fleetCandidates.push({
+          rowId: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          group,
+        });
+      }
+    }
+  }
+  const firstFleetCandidate = fleetCandidates.length >= 2 ? fleetCandidates[0] : undefined;
+  const fleetRow: MessagesTimelineRow | null = firstFleetCandidate
+    ? {
+        kind: "subagent-fleet",
+        id: `subagent-fleet:${unsettledTurnId}`,
+        createdAt: firstFleetCandidate.createdAt,
+        total: fleetCandidates.length,
+        running: fleetCandidates.filter((c) => c.group.status === "running").length,
+        completed: fleetCandidates.filter((c) => c.group.status === "completed").length,
+        failed: fleetCandidates.filter((c) => c.group.status === "failed").length,
+        agents: fleetCandidates
+          .map((candidate) => ({
+            key: candidate.group.toolCallId ?? candidate.group.entryId,
+            rowId: candidate.rowId,
+            name: candidate.group.name,
+            status: candidate.group.status,
+          }))
+          .sort((a, b) => subagentFleetDotPriority(a.status) - subagentFleetDotPriority(b.status)),
+      }
+    : null;
+
   const isHiddenSubagentWorkEntry = (entry: WorkLogEntry): boolean => {
     if (subagentChildEntryIds.has(entry.id)) {
       return true;
@@ -527,6 +624,9 @@ export function deriveMessagesTimelineRows(input: {
     if (timelineEntry.kind === "work") {
       const subagentGroup = subagentGroupByEntryId.get(timelineEntry.entry.id);
       if (subagentGroup) {
+        if (fleetRow !== null && timelineEntry.id === firstFleetCandidate?.rowId) {
+          nextRows.push(fleetRow);
+        }
         nextRows.push({
           kind: "subagent",
           id: timelineEntry.id,
@@ -652,6 +752,9 @@ export function deriveMessagesTimelineRows(input: {
       kind: "working",
       id: "working-indicator-row",
       createdAt: input.activeTurnStartedAt,
+      runningSubagentCount: (input.subagentGroups ?? []).filter(
+        (group) => group.status === "running",
+      ).length,
     });
   }
 
@@ -686,8 +789,10 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
-    case "working":
-      return a.createdAt === (b as typeof a).createdAt;
+    case "working": {
+      const bw = b as typeof a;
+      return a.createdAt === bw.createdAt && a.runningSubagentCount === bw.runningSubagentCount;
+    }
 
     case "activities-truncated": {
       const bt = b as typeof a;
@@ -705,6 +810,18 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "subagent": {
       const bs = b as typeof a;
       return a.createdAt === bs.createdAt && Equal.equals(a.group, bs.group);
+    }
+
+    case "subagent-fleet": {
+      const bf = b as typeof a;
+      return (
+        a.createdAt === bf.createdAt &&
+        a.total === bf.total &&
+        a.running === bf.running &&
+        a.completed === bf.completed &&
+        a.failed === bf.failed &&
+        Equal.equals(a.agents, bf.agents)
+      );
     }
 
     case "work":

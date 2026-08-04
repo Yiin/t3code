@@ -3,6 +3,7 @@ import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
+  formatSubagentFleetSummary,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
 } from "./MessagesTimeline.logic";
@@ -1208,6 +1209,154 @@ describe("deriveMessagesTimelineRows", () => {
     ]);
   });
 
+  const fleetSpawnEntry = (
+    index: number,
+    turnId: string | null = "turn-1",
+  ): { id: string; kind: "work"; createdAt: string; entry: Record<string, unknown> } => ({
+    id: `spawn-entry-${index}`,
+    kind: "work" as const,
+    createdAt: `2026-01-01T00:00:0${index}Z`,
+    entry: {
+      id: `work-spawn-${index}`,
+      createdAt: `2026-01-01T00:00:0${index}Z`,
+      turnId: turnId as never,
+      label: "Task",
+      tone: "tool" as const,
+      itemType: "collab_agent_tool_call" as const,
+      toolCallId: `toolu_${index}`,
+    },
+  });
+
+  const fleetGroup = (
+    index: number,
+    status: "running" | "completed" | "failed" | "stopped",
+  ): Record<string, unknown> => ({
+    entryId: `work-spawn-${index}`,
+    toolCallId: `toolu_${index}`,
+    name: `agent-${index}`,
+    description: null,
+    status,
+    startedAt: `2026-01-01T00:00:0${index}Z`,
+    completedAt: null,
+    children: [],
+    resultText: null,
+    prompt: null,
+  });
+
+  it("inserts one fleet summary row above the unsettled turn's first subagent card", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        fleetSpawnEntry(1),
+        fleetSpawnEntry(2),
+        fleetSpawnEntry(3),
+        fleetSpawnEntry(4),
+      ] as never,
+      runningTurnId: "turn-1" as never,
+      subagentGroups: [
+        fleetGroup(1, "completed"),
+        fleetGroup(2, "failed"),
+        fleetGroup(3, "running"),
+        fleetGroup(4, "stopped"),
+      ] as never,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual([
+      "subagent-fleet",
+      "subagent",
+      "subagent",
+      "subagent",
+      "subagent",
+    ]);
+    const fleetRow = rows[0];
+    if (fleetRow?.kind !== "subagent-fleet") throw new Error("expected fleet row");
+    expect(fleetRow.id).toBe("subagent-fleet:turn-1");
+    expect(fleetRow.createdAt).toBe("2026-01-01T00:00:01Z");
+    expect(fleetRow).toMatchObject({ total: 4, running: 1, completed: 1, failed: 1 });
+    // Attention-first dots: failed, then running, then finished in emission order.
+    expect(fleetRow.agents.map((agent) => agent.status)).toEqual([
+      "failed",
+      "running",
+      "completed",
+      "stopped",
+    ]);
+    // Each dot targets the timeline row id of its card, for scroll-to-index.
+    expect(fleetRow.agents.map((agent) => agent.rowId)).toEqual([
+      "spawn-entry-2",
+      "spawn-entry-3",
+      "spawn-entry-1",
+      "spawn-entry-4",
+    ]);
+    expect(fleetRow.agents.map((agent) => agent.key)).toEqual([
+      "toolu_2",
+      "toolu_3",
+      "toolu_1",
+      "toolu_4",
+    ]);
+  });
+
+  it("renders no fleet row for a single subagent in the unsettled turn", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [fleetSpawnEntry(1)] as never,
+      runningTurnId: "turn-1" as never,
+      subagentGroups: [fleetGroup(1, "running")] as never,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual(["subagent"]);
+  });
+
+  it("renders no fleet row once the turn has settled", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [fleetSpawnEntry(1), fleetSpawnEntry(2)] as never,
+      latestTurn: {
+        turnId: "turn-1" as never,
+        state: "completed",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:09Z",
+      },
+      // Expand the settled turn's fold so the cards themselves still render.
+      expandedTurnIds: new Set(["turn-1" as never]),
+      subagentGroups: [fleetGroup(1, "completed"), fleetGroup(2, "stopped")] as never,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.some((row) => row.kind === "subagent-fleet")).toBe(false);
+    expect(rows.filter((row) => row.kind === "subagent")).toHaveLength(2);
+  });
+
+  it("counts running subagents on the working row", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [fleetSpawnEntry(1), fleetSpawnEntry(2), fleetSpawnEntry(3)] as never,
+      runningTurnId: "turn-1" as never,
+      subagentGroups: [
+        fleetGroup(1, "running"),
+        fleetGroup(2, "running"),
+        fleetGroup(3, "completed"),
+      ] as never,
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.at(-1)).toEqual({
+      kind: "working",
+      id: "working-indicator-row",
+      createdAt: "2026-01-01T00:00:00Z",
+      runningSubagentCount: 2,
+    });
+  });
+
   it("renders a subagent spawn as a plain work row when no groups are provided", () => {
     const spawnEntry = {
       id: "work-spawn",
@@ -1312,6 +1461,24 @@ describe("deriveMessagesTimelineRows", () => {
     expect(expandedRows.find((row) => row.kind === "work-toggle")).toMatchObject({
       expanded: true,
     });
+  });
+});
+
+describe("formatSubagentFleetSummary", () => {
+  it("joins the non-zero segments", () => {
+    expect(formatSubagentFleetSummary({ total: 4, running: 2, completed: 1, failed: 1 })).toBe(
+      "4 subagents · 2 running · 1 done · 1 failed",
+    );
+  });
+
+  it("omits zero segments", () => {
+    expect(formatSubagentFleetSummary({ total: 2, running: 2, completed: 0, failed: 0 })).toBe(
+      "2 subagents · 2 running",
+    );
+    // All stopped: nothing but the total remains.
+    expect(formatSubagentFleetSummary({ total: 2, running: 0, completed: 0, failed: 0 })).toBe(
+      "2 subagents",
+    );
   });
 });
 
