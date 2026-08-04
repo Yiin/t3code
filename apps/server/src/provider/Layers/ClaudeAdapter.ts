@@ -170,7 +170,16 @@ interface ToolInFlight {
   readonly input: Record<string, unknown>;
   readonly partialInputJson: string;
   readonly lastEmittedInputFingerprint?: string;
+  /** Task tool_use id of the spawning subagent, when the tool ran inside one. */
+  readonly parentToolUseId?: string;
 }
+
+/**
+ * Subagent stream events reuse the main stream's content-block index space
+ * (both start at 0), so subagent tools are tracked in a separate map keyed by
+ * parent tool_use id + block index to avoid clobbering main-thread state.
+ */
+const subagentToolKey = (parentToolUseId: string, index: number) => `${parentToolUseId}:${index}`;
 
 interface ClaudeTaskState {
   readonly id: string;
@@ -195,6 +204,8 @@ interface ClaudeSessionContext {
     items: Array<unknown>;
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
+  /** Tools streaming inside subagents, keyed by subagentToolKey. */
+  readonly subagentToolsInFlight: Map<string, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
@@ -2015,6 +2026,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     // Clear any remaining stale entries (e.g. from interrupted content blocks)
     context.inFlightTools.clear();
+    context.subagentToolsInFlight.clear();
 
     for (const block of turnState.assistantTextBlockOrder) {
       yield* completeAssistantTextBlock(context, block, {
@@ -2076,6 +2088,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const { event } = message;
+    // Non-null when the stream event originates inside a subagent: the value
+    // is the Task tool_use id of the spawning collab_agent_tool_call.
+    const parentToolUseId = message.parent_tool_use_id ?? undefined;
 
     if (event.type === "message_delta") {
       if (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined) {
@@ -2109,6 +2124,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return;
         }
         const streamKind = streamKindFromDeltaType(event.delta.type);
+        if (parentToolUseId) {
+          // Subagent transcript delta: tag it with the spawning Task
+          // tool_use id instead of folding it into the main-thread assistant
+          // blocks (subagent streams reuse the main index space).
+          const stamp = yield* makeEventStamp();
+          yield* offerRuntimeEvent({
+            type: "content.delta",
+            eventId: stamp.eventId,
+            provider: PROVIDER,
+            createdAt: stamp.createdAt,
+            threadId: context.session.threadId,
+            turnId: context.turnState.turnId,
+            payload: {
+              streamKind,
+              delta: deltaText,
+              parentToolUseId,
+            },
+            providerRefs: nativeProviderRefs(context),
+            raw: {
+              source: "claude.sdk.message",
+              method: "claude/stream_event/content_block_delta",
+              payload: message,
+            },
+          });
+          return;
+        }
         const assistantBlockEntry =
           event.delta.type === "text_delta"
             ? yield* ensureAssistantTextBlock(context, event.index)
@@ -2151,7 +2192,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       if (event.delta.type === "input_json_delta") {
-        const tool = context.inFlightTools.get(event.index);
+        const tool = parentToolUseId
+          ? context.subagentToolsInFlight.get(subagentToolKey(parentToolUseId, event.index))
+          : context.inFlightTools.get(event.index);
         if (!tool || typeof event.delta.partial_json !== "string") {
           return;
         }
@@ -2170,7 +2213,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           parsedInput && Object.keys(parsedInput).length > 0
             ? toolInputFingerprint(parsedInput)
             : undefined;
-        context.inFlightTools.set(event.index, nextTool);
+        const storeTool = (value: ToolInFlight) => {
+          if (parentToolUseId) {
+            context.subagentToolsInFlight.set(subagentToolKey(parentToolUseId, event.index), value);
+          } else {
+            context.inFlightTools.set(event.index, value);
+          }
+        };
+        storeTool(nextTool);
 
         if (
           !parsedInput ||
@@ -2184,7 +2234,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...nextTool,
           lastEmittedInputFingerprint: nextFingerprint,
         };
-        context.inFlightTools.set(event.index, nextTool);
+        storeTool(nextTool);
 
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
@@ -2204,6 +2254,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: "inProgress",
             title: nextTool.title,
             ...(nextTool.detail ? { detail: nextTool.detail } : {}),
+            ...(nextTool.parentToolUseId ? { parentToolUseId: nextTool.parentToolUseId } : {}),
             data: {
               toolName: nextTool.toolName,
               input: nextTool.input,
@@ -2219,8 +2270,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        // Emit plan update when TodoWrite input is parsed
-        if (parsedInput && isTodoTool(nextTool.toolName)) {
+        // Emit plan update when TodoWrite input is parsed. Subagent plans
+        // stay out of the main turn's plan.
+        if (parsedInput && !parentToolUseId && isTodoTool(nextTool.toolName)) {
           const planSteps = extractPlanStepsFromTodoInput(parsedInput);
           if (planSteps && planSteps.length > 0) {
             const planStamp = yield* makeEventStamp();
@@ -2249,6 +2301,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (event.type === "content_block_start") {
       const { index, content_block: block } = event;
       if (block.type === "text") {
+        if (parentToolUseId) {
+          // Subagent text streams are not main-thread assistant blocks; their
+          // deltas are emitted tagged with parentToolUseId instead.
+          return;
+        }
         yield* ensureAssistantTextBlock(context, index, {
           fallbackText: extractContentBlockText(block),
         });
@@ -2282,8 +2339,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         input: toolInput,
         partialInputJson: "",
         ...(inputFingerprint ? { lastEmittedInputFingerprint: inputFingerprint } : {}),
+        ...(parentToolUseId ? { parentToolUseId } : {}),
       };
-      context.inFlightTools.set(index, tool);
+      if (parentToolUseId) {
+        context.subagentToolsInFlight.set(subagentToolKey(parentToolUseId, index), tool);
+      } else {
+        context.inFlightTools.set(index, tool);
+      }
 
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -2299,6 +2361,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           status: "inProgress",
           title: tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
+          ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
           data: {
             toolName: tool.toolName,
             input: toolInput,
@@ -2318,6 +2381,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (event.type === "content_block_stop") {
       const { index } = event;
+      if (parentToolUseId) {
+        // Subagent block indexes collide with main-thread ones; never close a
+        // main-thread block on a subagent stop.
+        context.subagentToolsInFlight.delete(subagentToolKey(parentToolUseId, index));
+        return;
+      }
       const assistantBlock = context.turnState?.assistantTextBlocks.get(index);
       if (assistantBlock) {
         assistantBlock.streamClosed = true;
@@ -2685,6 +2754,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             taskId: RuntimeTaskId.make(message.task_id),
             description: message.description,
             ...(message.task_type ? { taskType: message.task_type } : {}),
+            ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
+            ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
+            ...(message.prompt ? { prompt: message.prompt } : {}),
+            ...(typeof message.skip_transcript === "boolean"
+              ? { skipTranscript: message.skip_transcript }
+              : {}),
           },
         });
         return;
@@ -2706,13 +2781,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(message.summary ? { summary: message.summary } : {}),
             ...(message.usage ? { usage: message.usage } : {}),
             ...(message.last_tool_name ? { lastToolName: message.last_tool_name } : {}),
+            ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
+            ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
           },
         });
         return;
-      // Task state patch (status/backgrounded/end_time). No runtime mapping
-      // yet — the terminal task_notification reports the outcome — but it
-      // must not surface as an unknown-subtype warning row.
       case "task_updated":
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.updated",
+          payload: {
+            taskId: RuntimeTaskId.make(message.task_id),
+            patch: {
+              ...(message.patch.status ? { status: message.patch.status } : {}),
+              ...(message.patch.description ? { description: message.patch.description } : {}),
+              ...(typeof message.patch.is_backgrounded === "boolean"
+                ? { isBackgrounded: message.patch.is_backgrounded }
+                : {}),
+              ...(message.patch.error ? { error: message.patch.error } : {}),
+            },
+          },
+        });
         return;
       case "task_notification":
         yield* emitThreadTokenUsage(
@@ -2731,6 +2820,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: message.status,
             ...(message.summary ? { summary: message.summary } : {}),
             ...(message.usage ? { usage: message.usage } : {}),
+            ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
+            ...(message.output_file ? { outputFile: message.output_file } : {}),
           },
         });
         return;
@@ -2869,7 +2960,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           toolUseId: message.tool_use_id,
           toolName: message.tool_name,
           elapsedSeconds: message.elapsed_time_seconds,
-          ...(message.task_id ? { summary: `task:${message.task_id}` } : {}),
+          ...(message.parent_tool_use_id ? { parentToolUseId: message.parent_tool_use_id } : {}),
+          ...(message.task_id ? { taskId: RuntimeTaskId.make(message.task_id) } : {}),
         },
       });
       return;
@@ -3190,6 +3282,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
       const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
       const inFlightTools = new Map<number, ToolInFlight>();
+      const subagentToolsInFlight = new Map<string, ToolInFlight>();
       const claudeTasks = new Map<string, ClaudeTaskState>();
 
       const contextRef = yield* Ref.make<ClaudeSessionContext | undefined>(undefined);
@@ -3403,6 +3496,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               toolName,
               input: toolInput,
               ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
+              // Present when the approval came from inside a subagent, so the
+              // request is attributable to the spawning task.
+              ...(callbackOptions.agentID ? { agentId: callbackOptions.agentID } : {}),
             },
           },
           providerRefs: nativeProviderRefs(context, {
@@ -3635,6 +3731,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingUserInputs,
         turns: [],
         inFlightTools,
+        subagentToolsInFlight,
         claudeTasks,
         turnState: undefined,
         lastKnownContextWindow: initialContextWindow,

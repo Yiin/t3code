@@ -1711,6 +1711,327 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("forwards subagent linkage fields across the task lifecycle", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-link-1",
+        tool_use_id: "toolu-spawn-1",
+        subagent_type: "code-reviewer",
+        task_type: "local_agent",
+        prompt: "Review the migration edge cases.",
+        skip_transcript: true,
+        description: "Review migration",
+        session_id: "sdk-session-task-link",
+        uuid: "task-link-started",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "task-link-1",
+        tool_use_id: "toolu-spawn-1",
+        subagent_type: "code-reviewer",
+        description: "Review migration",
+        usage: { total_tokens: 10, tool_uses: 1, duration_ms: 50 },
+        session_id: "sdk-session-task-link",
+        uuid: "task-link-progress",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "task-link-1",
+        patch: {
+          status: "running",
+          description: "Reviewing edge cases",
+          is_backgrounded: true,
+          end_time: 1234,
+        },
+        session_id: "sdk-session-task-link",
+        uuid: "task-link-updated",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-link-1",
+        tool_use_id: "toolu-spawn-1",
+        status: "completed",
+        output_file: "/tmp/task-link-1.md",
+        summary: "Reviewed all edge cases.",
+        session_id: "sdk-session-task-link",
+        uuid: "task-link-done",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const started = runtimeEvents.find((event) => event.type === "task.started");
+      assert.equal(started?.type, "task.started");
+      if (started?.type === "task.started") {
+        assert.equal(started.payload.toolUseId, "toolu-spawn-1");
+        assert.equal(started.payload.subagentType, "code-reviewer");
+        assert.equal(started.payload.prompt, "Review the migration edge cases.");
+        assert.equal(started.payload.skipTranscript, true);
+        assert.equal(started.payload.taskType, "local_agent");
+      }
+
+      const progress = runtimeEvents.find((event) => event.type === "task.progress");
+      assert.equal(progress?.type, "task.progress");
+      if (progress?.type === "task.progress") {
+        assert.equal(progress.payload.toolUseId, "toolu-spawn-1");
+        assert.equal(progress.payload.subagentType, "code-reviewer");
+      }
+
+      const updated = runtimeEvents.find((event) => event.type === "task.updated");
+      assert.equal(updated?.type, "task.updated");
+      if (updated?.type === "task.updated") {
+        assert.equal(String(updated.payload.taskId), "task-link-1");
+        assert.deepEqual(updated.payload.patch, {
+          status: "running",
+          description: "Reviewing edge cases",
+          isBackgrounded: true,
+        });
+      }
+
+      const completed = runtimeEvents.find((event) => event.type === "task.completed");
+      assert.equal(completed?.type, "task.completed");
+      if (completed?.type === "task.completed") {
+        assert.equal(completed.payload.toolUseId, "toolu-spawn-1");
+        assert.equal(completed.payload.outputFile, "/tmp/task-link-1.md");
+        assert.equal(completed.payload.status, "completed");
+      }
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits typed subagent linkage on tool_progress telemetry", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      harness.query.emit({
+        type: "tool_progress",
+        tool_use_id: "toolu-child-1",
+        tool_name: "Grep",
+        parent_tool_use_id: "toolu-spawn-1",
+        elapsed_time_seconds: 2.5,
+        task_id: "task-link-1",
+        session_id: "sdk-session-tool-progress",
+        uuid: "tool-progress-subagent",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const progress = runtimeEvents.find((event) => event.type === "tool.progress");
+      assert.equal(progress?.type, "tool.progress");
+      if (progress?.type === "tool.progress") {
+        assert.equal(progress.payload.toolUseId, "toolu-child-1");
+        assert.equal(progress.payload.parentToolUseId, "toolu-spawn-1");
+        assert.equal(String(progress.payload.taskId), "task-link-1");
+        // task_id no longer rides the human-readable summary field.
+        assert.equal(progress.payload.summary, undefined);
+      }
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "tags stream events carrying parent_tool_use_id instead of mixing them into the main thread",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => runtimeEvents.push(event)),
+        ).pipe(Effect.forkChild);
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "spawn a subagent",
+          attachments: [],
+        });
+
+        // Subagent tool call: index 0 collides with the main stream's index
+        // space on purpose.
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "sub-stream-0",
+          parent_tool_use_id: "toolu-spawn-1",
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "toolu-sub-tool-1",
+              name: "Bash",
+              input: {},
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "sub-stream-1",
+          parent_tool_use_id: "toolu-spawn-1",
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: {
+              type: "input_json_delta",
+              partial_json: '{"command":"ls"}',
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "sub-stream-2",
+          parent_tool_use_id: "toolu-spawn-1",
+          event: {
+            type: "content_block_stop",
+            index: 0,
+          },
+        } as unknown as SDKMessage);
+        // Subagent text stream.
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "sub-stream-3",
+          parent_tool_use_id: "toolu-spawn-1",
+          event: {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "text", text: "" },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "sub-stream-4",
+          parent_tool_use_id: "toolu-spawn-1",
+          event: {
+            type: "content_block_delta",
+            index: 1,
+            delta: {
+              type: "text_delta",
+              text: "subagent says hi",
+            },
+          },
+        } as unknown as SDKMessage);
+        // Main-thread text at the same index stays untagged.
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "main-stream-0",
+          parent_tool_use_id: null,
+          event: {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "text", text: "" },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-subagent-stream",
+          uuid: "main-stream-1",
+          parent_tool_use_id: null,
+          event: {
+            type: "content_block_delta",
+            index: 1,
+            delta: {
+              type: "text_delta",
+              text: "main thread reply",
+            },
+          },
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+
+        const subagentToolStarted = runtimeEvents.find(
+          (event) =>
+            event.type === "item.started" && event.payload.parentToolUseId === "toolu-spawn-1",
+        );
+        assert.equal(subagentToolStarted?.type, "item.started");
+        if (subagentToolStarted?.type === "item.started") {
+          assert.equal(String(subagentToolStarted.itemId), "toolu-sub-tool-1");
+          assert.equal(subagentToolStarted.payload.itemType, "command_execution");
+        }
+
+        const subagentToolUpdated = runtimeEvents.find(
+          (event) =>
+            event.type === "item.updated" && event.payload.parentToolUseId === "toolu-spawn-1",
+        );
+        assert.equal(subagentToolUpdated?.type, "item.updated");
+        if (subagentToolUpdated?.type === "item.updated") {
+          assert.deepEqual(subagentToolUpdated.payload.data, {
+            toolName: "Bash",
+            input: { command: "ls" },
+          });
+        }
+
+        const deltas = runtimeEvents.filter((event) => event.type === "content.delta");
+        const subagentDelta = deltas.find(
+          (event) =>
+            event.type === "content.delta" && event.payload.parentToolUseId === "toolu-spawn-1",
+        );
+        assert.equal(subagentDelta?.type, "content.delta");
+        if (subagentDelta?.type === "content.delta") {
+          assert.equal(subagentDelta.payload.delta, "subagent says hi");
+          assert.equal(subagentDelta.itemId, undefined);
+        }
+        const mainDelta = deltas.find(
+          (event) => event.type === "content.delta" && event.payload.delta === "main thread reply",
+        );
+        assert.equal(mainDelta?.type, "content.delta");
+        if (mainDelta?.type === "content.delta") {
+          assert.equal(mainDelta.payload.parentToolUseId, undefined);
+        }
+
+        runtimeEventsFiber.interruptUnsafe();
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("consumes undeclared and UX-internal system subtypes without warning rows", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2907,6 +3228,58 @@ describe("ClaudeAdapterLive", () => {
       );
       yield* Stream.runHead(adapter.streamEvents);
       yield* Effect.promise(() => grepPermissionPromise);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("surfaces the subagent id on approvals raised inside a subagent", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+      const createInput = harness.getLastCreateQueryInput();
+      const canUseTool = createInput?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      if (!canUseTool) {
+        return;
+      }
+
+      const permissionPromise = canUseTool(
+        "Bash",
+        { command: "pwd" },
+        {
+          signal: new AbortController().signal,
+          toolUseID: "toolu-sub-approval-1",
+          agentID: "agent-42",
+        },
+      );
+
+      const requested = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requested._tag, "Some");
+      if (requested._tag !== "Some" || requested.value.type !== "request.opened") {
+        return;
+      }
+      const args = requested.value.payload.args as Record<string, unknown>;
+      assert.equal(args.agentId, "agent-42");
+      assert.equal(args.toolUseId, "toolu-sub-approval-1");
+
+      yield* adapter.respondToRequest(
+        session.threadId,
+        ApprovalRequestId.make(String(requested.value.requestId)),
+        "accept",
+      );
+      yield* Stream.runHead(adapter.streamEvents);
+      yield* Effect.promise(() => permissionPromise);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -421,6 +421,9 @@ const ContentDeltaPayload = Schema.Struct({
   delta: Schema.String,
   contentIndex: Schema.optional(Schema.Int),
   summaryIndex: Schema.optional(Schema.Int),
+  // Set when the delta streamed from inside a subagent: parentToolUseId is
+  // the Task tool_use id of the spawning collab_agent_tool_call.
+  parentToolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 
