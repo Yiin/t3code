@@ -11,6 +11,8 @@ End-to-end execution of a well-scoped engineering task. You own the **result**, 
 
 **Model tiers (Claude-family harness only).** When you dispatch subagents, match the model to the stage: plan-composition and plan-critique agents get model `opus`, implementer agents get model `sonnet`, reviewer agents get model `fable`. Work done in your own session stays on the session model. If the user named a model explicitly, that pins every stage instead.
 
+If a `fable` dispatch fails because the model is unavailable or its usage limit is exhausted, re-dispatch that same agent on model `opus` and carry on. Say in one clause that reviews ran on `opus`. Never drop the review stage over a model limit, and never downgrade it to the session thread while a fallback model is available.
+
 **Harness fallback (applies to every dispatch below).** When the harness provides subagents, use them. Otherwise invoke a fresh one-shot process of the same headless harness with a self-contained brief in a temporary file (following `ralph/run.sh`'s invocation pattern) — except for repository writes, which stay in the main thread. If the same harness cannot be invoked headlessly at all, do the step in the main thread and say plainly that independent review was unavailable.
 
 ## When this skill fits

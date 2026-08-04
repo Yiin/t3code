@@ -14,16 +14,12 @@ RUN_DIR="${1:?usage: watch.sh <run-dir>}"
 MBOX="$RUN_DIR/mailbox.jsonl"
 
 # jq program: render one mailbox record as a single human line.
+# cost and total_cost are recorded in mailbox.jsonl but never rendered:
+# dollar figures stay out of the chat transcript. Read the mailbox directly
+# if you need them.
 FMT='
-  def iteration_cost:
-    if has("cost") then
-      (if .cost == null then " — cost unavailable" else " — cost $\(.cost)" end)
-    else
-      ""
-    end;
   if .status=="finished" then
-    "🏁 loop finished: \(.reason) — \(.iters) iterations" +
-      (if .total_cost == null then " — cost unavailable" else " — total cost $\(.total_cost)" end)
+    "🏁 loop finished: \(.reason) — \(.iters) iterations"
   else
     (if .status=="done" then
       "✅ iter \(.iter): \(.summary)" + (if (.why // "")!="" then " — why: \(.why)" else "" end)
@@ -39,7 +35,7 @@ FMT='
       "⚠ iter \(.iter): protocol error" + (if (.detail // "")!="" then " — \(.detail)" else "" end)
     else
       "• iter \(.iter): \(.status)"
-    end) + iteration_cost
+    end)
   end
 '
 

@@ -15,9 +15,11 @@ Run the user's prompt in a loop of independent headless sessions through the `ru
    - If the prompt is empty, ask what the loop should run.
 
 2. **Create the run directory under `/var/tmp`, never in the project tree:**
+
    ```bash
    RUN_DIR=$(mktemp -d "/var/tmp/ralph.$(date +%Y%m%d-%H%M%S).XXXXXX")
    ```
+
    Write the exact prompt to `$RUN_DIR/prompt.md` with the current harness's file-writing tool. All artifacts (`prompt.md`, `summary.md`, `loop.log`, `mailbox.jsonl`, and `iter-N.json`) stay in this directory.
 
 3. **Select the current harness yourself; never ask the user:**
@@ -31,13 +33,13 @@ Run the user's prompt in a loop of independent headless sessions through the `ru
 
 4. **Map optional user knobs:**
 
-   | User says | Environment variable | Default |
-   |---|---|---|
-   | "20 iterations", "keep going longer" | `RALPH_MAX_ITER` | 30 |
-   | "budget $30", "cap spend" | `RALPH_BUDGET_USD` | none; Claude/ccx only |
-   | "1h per iteration" | `RALPH_ITER_TIMEOUT` (seconds) | 0 (no limit) |
-   | "yolo", "skip permissions" | `RALPH_PERMISSION_MODE=bypassPermissions` | `auto` |
-   | "use <model>" | `RALPH_MODEL` | harness default |
+   | User says                            | Environment variable                      | Default               |
+   | ------------------------------------ | ----------------------------------------- | --------------------- |
+   | "20 iterations", "keep going longer" | `RALPH_MAX_ITER`                          | 30                    |
+   | "budget $30", "cap spend"            | `RALPH_BUDGET_USD`                        | none; Claude/ccx only |
+   | "1h per iteration"                   | `RALPH_ITER_TIMEOUT` (seconds)            | 0 (no limit)          |
+   | "yolo", "skip permissions"           | `RALPH_PERMISSION_MODE=bypassPermissions` | `auto`                |
+   | "use <model>"                        | `RALPH_MODEL`                             | harness default       |
 
    Pass model names through unchanged; model aliases are harness-specific. Codex, Kimi, and OpenCode do not report USD cost, so do not accept a dollar budget for those loops. Claude Code and `ccx` report and enforce the Claude-compatible USD budget.
 
@@ -51,13 +53,16 @@ Run the user's prompt in a loop of independent headless sessions through the `ru
 
    In a server or remote harness, detach the loop by default so the OS owns it
    after the chat session closes:
+
    ```bash
    cd <project-root> && nohup setsid env RALPH_HARNESS="$HARNESS" \
      "${RALPH_RUNNER:-"$SKILL_DIR/run.sh"}" "$RUN_DIR" >/dev/null 2>&1 &
    ```
+
    Add the optional variables the user requested after `env`. In a plain
    interactive CLI, a non-detached launch is still fine when the user is
    watching it live:
+
    ```bash
    cd <project-root> && RALPH_HARNESS="$HARNESS" "${RALPH_RUNNER:-"$SKILL_DIR/run.sh"}" "$RUN_DIR"
    ```
@@ -104,7 +109,7 @@ Run the user's prompt in a loop of independent headless sessions through the `ru
    appear in chat and that `touch $RUN_DIR/STOP` stops after the current
    iteration.
 
-8. **When the loop finishes:** report the stop reason, iterations run, and the full list from `$RUN_DIR/summary.md`. If it stops on a gutter or timeout, inspect the last iteration artifact and explain what blocked the child. Report spend only when a budget cap is what stopped the loop. A loop that ended with exit 75 ran no iterations: report the holding run instead (see step 5) and stop there.
+8. **When the loop finishes:** report the stop reason, iterations run, and the full list from `$RUN_DIR/summary.md`. If it stops on a gutter or timeout, inspect the last iteration artifact and explain what blocked the child. A loop that ended with exit 75 ran no iterations: report the holding run instead (see step 5) and stop there.
 
 Each child must end its final response with `RALPH_MSG: {"summary","why"}` as required by the protocol appended in `run.sh`. The runner normalizes Claude/ccx JSON, Codex JSONL, Kimi stream-json, and OpenCode JSONL into the same mailbox records. For OpenCode, it uses the first top-level `sessionID`, the last `type:"text"` record's `part.text`, and reports cost as unavailable. Commit subjects remain the fallback when a child omits its message.
 

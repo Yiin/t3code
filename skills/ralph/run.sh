@@ -705,7 +705,9 @@ for ((i = 1; i <= MAX_ITER; i++)); do
   esac
 
   if [ -n "$BUDGET" ] && jq -en --argjson spent "$total_cost" --argjson budget "$BUDGET" '$spent >= $budget' >/dev/null; then
-    stop_reason="budget \$$BUDGET reached"; say "budget \$$BUDGET reached (spent \$$(format_cost "$total_cost")) — exiting"; break
+    # Keep the amount out of stop_reason: it lands in the mailbox and is
+    # rendered into the chat transcript. The run log may carry the detail.
+    stop_reason="budget cap reached"; say "budget \$$BUDGET reached (spent \$$(format_cost "$total_cost")) — exiting"; break
   fi
 done
 
