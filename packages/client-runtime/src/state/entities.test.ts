@@ -103,6 +103,7 @@ const THREAD_SHELL = {
   hasPendingApprovals: false,
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
+  activeSubagentCount: 0,
 } as const;
 
 const SNAPSHOT: OrchestrationShellSnapshot = {
@@ -208,6 +209,7 @@ describe("environment entity projections", () => {
       deletedAt: null,
       messages,
       proposedPlans: [],
+      subagents: [],
       activities: [],
       checkpoints: [],
     } satisfies OrchestrationThread & { readonly environmentId: EnvironmentId };
@@ -323,6 +325,7 @@ describe("environment entity projections", () => {
       deletedAt: null,
       messages: [],
       proposedPlans: [],
+      subagents: [],
       activities: [],
       checkpoints: [],
     } satisfies OrchestrationThread;

@@ -32,6 +32,7 @@ function makeThread(
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    activeSubagentCount: 0,
     ...input,
   };
 }

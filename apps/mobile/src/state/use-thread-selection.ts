@@ -65,6 +65,7 @@ function threadDetailToShell(
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    activeSubagentCount: 0,
   };
 }
 

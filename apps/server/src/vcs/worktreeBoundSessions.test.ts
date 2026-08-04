@@ -68,6 +68,7 @@ const makeThread = (input: {
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    activeSubagentCount: 0,
   };
 };
 

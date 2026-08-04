@@ -148,6 +148,7 @@ const makeThreadDetail = (input: {
             },
           ],
     proposedPlans: [],
+    subagents: [],
     activities: [],
     checkpoints: [],
     session:
@@ -448,6 +449,7 @@ function createHarness(input: {
           hasPendingApprovals: false,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
+          activeSubagentCount: 0,
         });
       }),
     getThreadSessionById: (threadId) =>

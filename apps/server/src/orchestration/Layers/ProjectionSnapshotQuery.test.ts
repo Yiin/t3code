@@ -743,6 +743,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               updatedAt: "2026-02-24T00:00:05.500Z",
             },
           ],
+          subagents: [],
           activities: [
             {
               id: asEventId("activity-1"),
@@ -845,6 +846,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasPendingApprovals: true,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
+          activeSubagentCount: 0,
         },
       ]);
 

@@ -401,6 +401,236 @@ export const OrchestrationLatestTurn = Schema.Struct({
 });
 export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
 
+export const OrchestrationThreadSubagentStatus = Schema.Literals([
+  "running",
+  "completed",
+  "failed",
+  "stopped",
+]);
+export type OrchestrationThreadSubagentStatus = typeof OrchestrationThreadSubagentStatus.Type;
+
+/**
+ * One ad-hoc subagent (Agent/Task tool spawn) observed on a thread.
+ *
+ * Subagent data travels only inside `thread.activity-appended` events — the
+ * activity kind is an open string and the payload is `Schema.Unknown`, so no
+ * closed union changes and older clients keep decoding frames. This row is
+ * the folded read-model view of those activities, keyed by `subagentId`.
+ */
+export const OrchestrationThreadSubagent = Schema.Struct({
+  /** The provider `RuntimeTaskId` — the upsert key across projections. */
+  subagentId: TrimmedNonEmptyString,
+  turnId: Schema.NullOr(TurnId),
+  /** Provider subagent type (e.g. `Explore`), when the provider reports one. */
+  agentType: Schema.optional(TrimmedNonEmptyString),
+  description: Schema.optional(TrimmedNonEmptyString),
+  status: OrchestrationThreadSubagentStatus,
+  lastProgressSummary: Schema.optional(TrimmedNonEmptyString),
+  lastToolName: Schema.optional(TrimmedNonEmptyString),
+  usage: Schema.optional(Schema.Unknown),
+  /**
+   * The spawning `collab_agent_tool_call` tool_use id. Providers report it
+   * alongside task events (Claude: `tool_use_id`), letting the UI nest live
+   * progress under the spawning tool row.
+   */
+  spawnedByItemId: Schema.optional(TrimmedNonEmptyString),
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  completedAt: Schema.NullOr(IsoDateTime),
+});
+export type OrchestrationThreadSubagent = typeof OrchestrationThreadSubagent.Type;
+
+/**
+ * Typed views of the `task.*` activity payloads that ingestion builds.
+ *
+ * Ingestion (`ProviderRuntimeIngestion`) constructs these payloads untyped;
+ * these schemas pin the shape so the fold below — and any other consumer —
+ * decodes instead of casting. `toolUseId` and `subagentType` are absent from
+ * payloads today; they are declared here so ingestion can start forwarding
+ * them without another contract change.
+ */
+export const SubagentTaskStartedActivityPayload = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  taskType: Schema.optional(TrimmedNonEmptyString),
+  detail: Schema.optional(TrimmedNonEmptyString),
+  subagentType: Schema.optional(TrimmedNonEmptyString),
+  toolUseId: Schema.optional(TrimmedNonEmptyString),
+});
+export type SubagentTaskStartedActivityPayload = typeof SubagentTaskStartedActivityPayload.Type;
+
+export const SubagentTaskProgressActivityPayload = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  title: Schema.optional(TrimmedNonEmptyString),
+  summary: Schema.optional(TrimmedNonEmptyString),
+  detail: Schema.optional(TrimmedNonEmptyString),
+  lastToolName: Schema.optional(TrimmedNonEmptyString),
+  usage: Schema.optional(Schema.Unknown),
+});
+export type SubagentTaskProgressActivityPayload = typeof SubagentTaskProgressActivityPayload.Type;
+
+export const SubagentTaskCompletedActivityPayload = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  status: Schema.Literals(["completed", "failed", "stopped"]),
+  title: Schema.optional(TrimmedNonEmptyString),
+  summary: Schema.optional(TrimmedNonEmptyString),
+  detail: Schema.optional(TrimmedNonEmptyString),
+  usage: Schema.optional(Schema.Unknown),
+});
+export type SubagentTaskCompletedActivityPayload = typeof SubagentTaskCompletedActivityPayload.Type;
+
+const decodeSubagentTaskStartedPayload = Schema.decodeUnknownOption(
+  SubagentTaskStartedActivityPayload,
+);
+const decodeSubagentTaskProgressPayload = Schema.decodeUnknownOption(
+  SubagentTaskProgressActivityPayload,
+);
+const decodeSubagentTaskCompletedPayload = Schema.decodeUnknownOption(
+  SubagentTaskCompletedActivityPayload,
+);
+
+const replaceSubagentAt = (
+  subagents: ReadonlyArray<OrchestrationThreadSubagent>,
+  index: number,
+  next: OrchestrationThreadSubagent,
+): ReadonlyArray<OrchestrationThreadSubagent> => {
+  const copy = subagents.slice();
+  copy[index] = next;
+  return copy;
+};
+
+/**
+ * Fold one thread activity into the subagent read model, upserting by
+ * `subagentId`. The SQL projector, the in-memory projector, and the client
+ * reducer all call this one function so their views cannot drift (precedent:
+ * the build/parse pair in `epicRuns.ts`).
+ *
+ * Total and replay-safe: non-`task.*` kinds and undecodable payloads return
+ * the input array unchanged (same reference), applying the same activity
+ * twice is a no-op the second time, and a `task.progress` arriving after the
+ * row settled (reconnect replay) is ignored rather than reviving the row.
+ */
+export const applySubagentActivity = (
+  subagents: ReadonlyArray<OrchestrationThreadSubagent>,
+  activity: OrchestrationThreadActivity,
+): ReadonlyArray<OrchestrationThreadSubagent> => {
+  switch (activity.kind) {
+    case "task.started": {
+      const decoded = decodeSubagentTaskStartedPayload(activity.payload);
+      if (Option.isNone(decoded)) return subagents;
+      const payload = decoded.value;
+      const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
+      const existing = index === -1 ? undefined : subagents[index];
+      if (existing === undefined) {
+        return [
+          ...subagents,
+          {
+            subagentId: payload.taskId,
+            turnId: activity.turnId,
+            ...(payload.subagentType !== undefined ? { agentType: payload.subagentType } : {}),
+            ...(payload.detail !== undefined ? { description: payload.detail } : {}),
+            status: "running",
+            ...(payload.toolUseId !== undefined ? { spawnedByItemId: payload.toolUseId } : {}),
+            startedAt: activity.createdAt,
+            updatedAt: activity.createdAt,
+            completedAt: null,
+          },
+        ];
+      }
+      // A row can pre-exist a replayed `task.started` (duplicate delivery, or
+      // a `task.progress` that arrived first). Fill start metadata without
+      // downgrading a settled status or rolling `updatedAt` back.
+      return replaceSubagentAt(subagents, index, {
+        ...existing,
+        turnId: existing.turnId ?? activity.turnId,
+        ...(existing.agentType === undefined && payload.subagentType !== undefined
+          ? { agentType: payload.subagentType }
+          : {}),
+        ...(existing.description === undefined && payload.detail !== undefined
+          ? { description: payload.detail }
+          : {}),
+        ...(existing.spawnedByItemId === undefined && payload.toolUseId !== undefined
+          ? { spawnedByItemId: payload.toolUseId }
+          : {}),
+        startedAt: activity.createdAt,
+      });
+    }
+
+    case "task.progress": {
+      const decoded = decodeSubagentTaskProgressPayload(activity.payload);
+      if (Option.isNone(decoded)) return subagents;
+      const payload = decoded.value;
+      const progressSummary = payload.title ?? payload.summary ?? payload.detail;
+      const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
+      const existing = index === -1 ? undefined : subagents[index];
+      if (existing === undefined) {
+        return [
+          ...subagents,
+          {
+            subagentId: payload.taskId,
+            turnId: activity.turnId,
+            status: "running",
+            ...(progressSummary !== undefined ? { lastProgressSummary: progressSummary } : {}),
+            ...(payload.lastToolName !== undefined ? { lastToolName: payload.lastToolName } : {}),
+            ...(payload.usage !== undefined ? { usage: payload.usage } : {}),
+            startedAt: activity.createdAt,
+            updatedAt: activity.createdAt,
+            completedAt: null,
+          },
+        ];
+      }
+      // Progress after settlement is replay noise; reviving the row would
+      // flip a completed card back to running on reconnect.
+      if (existing.status !== "running") return subagents;
+      return replaceSubagentAt(subagents, index, {
+        ...existing,
+        ...(progressSummary !== undefined ? { lastProgressSummary: progressSummary } : {}),
+        ...(payload.lastToolName !== undefined ? { lastToolName: payload.lastToolName } : {}),
+        ...(payload.usage !== undefined ? { usage: payload.usage } : {}),
+        updatedAt: activity.createdAt,
+      });
+    }
+
+    case "task.completed": {
+      const decoded = decodeSubagentTaskCompletedPayload(activity.payload);
+      if (Option.isNone(decoded)) return subagents;
+      const payload = decoded.value;
+      const finalSummary = payload.summary ?? payload.detail;
+      const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
+      const existing = index === -1 ? undefined : subagents[index];
+      if (existing === undefined) {
+        return [
+          ...subagents,
+          {
+            subagentId: payload.taskId,
+            turnId: activity.turnId,
+            ...(payload.title !== undefined ? { description: payload.title } : {}),
+            status: payload.status,
+            ...(finalSummary !== undefined ? { lastProgressSummary: finalSummary } : {}),
+            ...(payload.usage !== undefined ? { usage: payload.usage } : {}),
+            startedAt: activity.createdAt,
+            updatedAt: activity.createdAt,
+            completedAt: activity.createdAt,
+          },
+        ];
+      }
+      return replaceSubagentAt(subagents, index, {
+        ...existing,
+        ...(existing.description === undefined && payload.title !== undefined
+          ? { description: payload.title }
+          : {}),
+        status: payload.status,
+        ...(finalSummary !== undefined ? { lastProgressSummary: finalSummary } : {}),
+        ...(payload.usage !== undefined ? { usage: payload.usage } : {}),
+        updatedAt: activity.createdAt,
+        completedAt: activity.createdAt,
+      });
+    }
+
+    default:
+      return subagents;
+  }
+};
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -423,6 +653,9 @@ export const OrchestrationThread = Schema.Struct({
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  subagents: Schema.Array(OrchestrationThreadSubagent).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
@@ -476,6 +709,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
+  activeSubagentCount: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 

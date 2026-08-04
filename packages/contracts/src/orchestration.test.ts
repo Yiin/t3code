@@ -11,6 +11,8 @@ import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  OrchestrationThreadActivity,
+  applySubagentActivity,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -451,6 +453,187 @@ it.effect("leaves the activity truncation marker absent for snapshots without on
     assert.deepStrictEqual(withMarker.activitiesTruncated, { omittedCount: 42 });
   }),
 );
+
+it.effect("defaults subagent fields when decoding historical thread data", () =>
+  Effect.gen(function* () {
+    const common = {
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Historical thread",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      session: null,
+    };
+
+    // Snapshots written before subagents existed carry neither field.
+    const thread = yield* decodeOrchestrationThread({
+      ...common,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    });
+    const shell = yield* decodeOrchestrationThreadShell({
+      ...common,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    });
+
+    assert.deepStrictEqual(thread.subagents, []);
+    assert.strictEqual(shell.activeSubagentCount, 0);
+  }),
+);
+
+const decodeThreadActivity = Schema.decodeUnknownSync(OrchestrationThreadActivity);
+
+function subagentActivity(input: {
+  id: string;
+  kind: string;
+  payload: unknown;
+  createdAt: string;
+}): OrchestrationThreadActivity {
+  return decodeThreadActivity({
+    id: input.id,
+    tone: "info",
+    kind: input.kind,
+    summary: "subagent activity",
+    payload: input.payload,
+    turnId: "turn-1",
+    createdAt: input.createdAt,
+  });
+}
+
+const subagentStarted = subagentActivity({
+  id: "evt-task-started",
+  kind: "task.started",
+  payload: {
+    taskId: "a027ffbeca4f867d2",
+    taskType: "local_agent",
+    detail: "List repo files",
+    subagentType: "Explore",
+    toolUseId: "toolu_01TAkofjCxTj5rN3WCrNKgf8",
+  },
+  createdAt: "2026-01-01T00:00:00.000Z",
+});
+const subagentProgress = subagentActivity({
+  id: "evt-task-progress",
+  kind: "task.progress",
+  payload: {
+    taskId: "a027ffbeca4f867d2",
+    title: "Running List files recursively",
+    detail: "Running List files recursively",
+    lastToolName: "Bash",
+    usage: { total_tokens: 17215 },
+  },
+  createdAt: "2026-01-01T00:00:05.000Z",
+});
+const subagentCompleted = subagentActivity({
+  id: "evt-task-completed",
+  kind: "task.completed",
+  payload: {
+    taskId: "a027ffbeca4f867d2",
+    status: "completed",
+    summary: "Repo surveyed",
+    usage: { total_tokens: 17486 },
+  },
+  createdAt: "2026-01-01T00:00:09.000Z",
+});
+
+it("folds a started->progress->completed sequence into one subagent row", () => {
+  const afterStarted = applySubagentActivity([], subagentStarted);
+  assert.strictEqual(afterStarted.length, 1);
+  const started = afterStarted[0];
+  assert.ok(started);
+  assert.strictEqual(started.subagentId, "a027ffbeca4f867d2");
+  assert.strictEqual(started.status, "running");
+  assert.strictEqual(started.turnId, "turn-1");
+  assert.strictEqual(started.agentType, "Explore");
+  assert.strictEqual(started.description, "List repo files");
+  assert.strictEqual(started.spawnedByItemId, "toolu_01TAkofjCxTj5rN3WCrNKgf8");
+  assert.strictEqual(started.startedAt, "2026-01-01T00:00:00.000Z");
+  assert.strictEqual(started.completedAt, null);
+
+  const afterProgress = applySubagentActivity(afterStarted, subagentProgress);
+  assert.strictEqual(afterProgress.length, 1);
+  const progressed = afterProgress[0];
+  assert.ok(progressed);
+  assert.strictEqual(progressed.status, "running");
+  assert.strictEqual(progressed.lastProgressSummary, "Running List files recursively");
+  assert.strictEqual(progressed.lastToolName, "Bash");
+  assert.deepStrictEqual(progressed.usage, { total_tokens: 17215 });
+  assert.strictEqual(progressed.updatedAt, "2026-01-01T00:00:05.000Z");
+  assert.strictEqual(progressed.completedAt, null);
+
+  const afterCompleted = applySubagentActivity(afterProgress, subagentCompleted);
+  assert.strictEqual(afterCompleted.length, 1);
+  const completed = afterCompleted[0];
+  assert.ok(completed);
+  assert.strictEqual(completed.status, "completed");
+  assert.strictEqual(completed.lastProgressSummary, "Repo surveyed");
+  assert.deepStrictEqual(completed.usage, { total_tokens: 17486 });
+  assert.strictEqual(completed.startedAt, "2026-01-01T00:00:00.000Z");
+  assert.strictEqual(completed.updatedAt, "2026-01-01T00:00:09.000Z");
+  assert.strictEqual(completed.completedAt, "2026-01-01T00:00:09.000Z");
+});
+
+it("applies subagent activities idempotently for reconnect replay", () => {
+  const afterStarted = applySubagentActivity([], subagentStarted);
+  assert.deepStrictEqual(applySubagentActivity(afterStarted, subagentStarted), afterStarted);
+
+  const afterProgress = applySubagentActivity(afterStarted, subagentProgress);
+  assert.deepStrictEqual(applySubagentActivity(afterProgress, subagentProgress), afterProgress);
+
+  const afterCompleted = applySubagentActivity(afterProgress, subagentCompleted);
+  assert.deepStrictEqual(applySubagentActivity(afterCompleted, subagentCompleted), afterCompleted);
+
+  // A full replay over settled state must not revive or downgrade the row.
+  const replayed = [subagentStarted, subagentProgress, subagentCompleted].reduce(
+    applySubagentActivity,
+    afterCompleted,
+  );
+  assert.deepStrictEqual(replayed, afterCompleted);
+});
+
+it("ignores non-task activity kinds and undecodable task payloads", () => {
+  const rows = applySubagentActivity([], subagentStarted);
+
+  const toolActivity = subagentActivity({
+    id: "evt-tool",
+    kind: "tool.progress",
+    payload: { toolName: "Bash" },
+    createdAt: "2026-01-01T00:00:06.000Z",
+  });
+  assert.strictEqual(applySubagentActivity(rows, toolActivity), rows);
+
+  const malformed = subagentActivity({
+    id: "evt-task-malformed",
+    kind: "task.completed",
+    payload: { status: "completed" },
+    createdAt: "2026-01-01T00:00:07.000Z",
+  });
+  assert.strictEqual(applySubagentActivity(rows, malformed), rows);
+});
+
+it("creates a running row for progress on an unseen task", () => {
+  // Reconnect replay can start mid-stream: progress may be the first signal.
+  const rows = applySubagentActivity([], subagentProgress);
+  assert.strictEqual(rows.length, 1);
+  const row = rows[0];
+  assert.ok(row);
+  assert.strictEqual(row.subagentId, "a027ffbeca4f867d2");
+  assert.strictEqual(row.status, "running");
+  assert.strictEqual(row.startedAt, "2026-01-01T00:00:05.000Z");
+});
 
 it.effect("decodes thread archived and unarchived events", () =>
   Effect.gen(function* () {

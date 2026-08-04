@@ -1508,6 +1508,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
+                // Populated once the projection_thread_subagents table lands
+                // (t3code-09a.7); until then threads decode with the default.
+                subagents: [],
                 activities: activitiesByThread.get(row.threadId) ?? [],
                 checkpoints: checkpointsByThread.get(row.threadId) ?? [],
                 session: sessionsByThread.get(row.threadId) ?? null,
@@ -1700,6 +1703,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
+                  subagents: [],
                   activities: [],
                   checkpoints: [],
                   session: sessionByThread.get(row.threadId) ?? null,
@@ -1815,6 +1819,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                         hasPendingApprovals: row.pendingApprovalCount > 0,
                         hasPendingUserInput: row.pendingUserInputCount > 0,
                         hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
+                        // Wired to a real projection count in t3code-09a.7.
+                        activeSubagentCount: 0,
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
                 ),
@@ -1932,6 +1938,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     hasPendingApprovals: row.pendingApprovalCount > 0,
                     hasPendingUserInput: row.pendingUserInputCount > 0,
                     hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
+                    activeSubagentCount: 0,
                   }),
                 ),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
@@ -2179,6 +2186,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         hasPendingApprovals: threadRow.pendingApprovalCount > 0,
         hasPendingUserInput: threadRow.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.hasActionableProposedPlan > 0,
+        activeSubagentCount: 0,
       } satisfies OrchestrationThreadShell);
     });
 

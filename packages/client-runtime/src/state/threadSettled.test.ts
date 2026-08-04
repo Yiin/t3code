@@ -66,6 +66,7 @@ function makeShell(input: {
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
     hasActionableProposedPlan: false,
+    activeSubagentCount: 0,
   };
 }
 

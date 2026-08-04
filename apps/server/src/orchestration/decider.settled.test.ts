@@ -62,6 +62,7 @@ function makeReadModel(
         deletedAt: null,
         messages,
         proposedPlans: [],
+        subagents: [],
         activities,
         checkpoints: [],
         session,
