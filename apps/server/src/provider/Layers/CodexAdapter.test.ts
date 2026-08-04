@@ -14,6 +14,7 @@ import {
   ProviderItemId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
@@ -1260,6 +1261,258 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
       });
+    }),
+  );
+
+  it.effect(
+    "extracts a collabAgentToolCall spawnAgent lifecycle into task.started/progress/completed events",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        // 4 item.* rows (one per item/started + item/completed pair below)
+        // plus 3 task.* rows (started, progress, completed).
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        // 1. spawnAgent item starts: the tool call is issued and the child
+        // thread is pendingInit — this is the birth of the subagent task.
+        yield* runtime.emit({
+          id: asEventId("evt-collab-spawn-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("collab_1"),
+          payload: {
+            startedAtMs: 1_777_999_999_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "collabAgentToolCall",
+              id: "collab_1",
+              tool: "spawnAgent",
+              status: "inProgress",
+              senderThreadId: "thread-1",
+              receiverThreadIds: ["child-thread-1"],
+              model: "gpt-5.3-codex",
+              prompt: "Investigate the flaky test suite and report back with findings.",
+              agentsStates: {
+                "child-thread-1": { status: "pendingInit" },
+              },
+            },
+          },
+        } satisfies ProviderEvent);
+
+        // 2. spawnAgent item completes: the spawn call itself is done, but
+        // the child thread is now merely "running" — not a terminal state.
+        yield* runtime.emit({
+          id: asEventId("evt-collab-spawn-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "item/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("collab_1"),
+          payload: {
+            completedAtMs: 1_778_000_000_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "collabAgentToolCall",
+              id: "collab_1",
+              tool: "spawnAgent",
+              status: "completed",
+              senderThreadId: "thread-1",
+              receiverThreadIds: ["child-thread-1"],
+              model: "gpt-5.3-codex",
+              prompt: "Investigate the flaky test suite and report back with findings.",
+              agentsStates: {
+                "child-thread-1": { status: "running" },
+              },
+            },
+          },
+        } satisfies ProviderEvent);
+
+        // 3. a later "wait" item starts on the same child thread — no task
+        // event, since a wait call starting carries no new agent status.
+        yield* runtime.emit({
+          id: asEventId("evt-collab-wait-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("collab_2"),
+          payload: {
+            startedAtMs: 1_778_000_001_500,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "collabAgentToolCall",
+              id: "collab_2",
+              tool: "wait",
+              status: "inProgress",
+              senderThreadId: "thread-1",
+              receiverThreadIds: ["child-thread-1"],
+              agentsStates: {
+                "child-thread-1": { status: "running" },
+              },
+            },
+          },
+        } satisfies ProviderEvent);
+
+        // 4. the "wait" item completes and reports the child thread as
+        // terminal — this is what finishes the subagent task.
+        yield* runtime.emit({
+          id: asEventId("evt-collab-wait-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:03.000Z",
+          method: "item/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("collab_2"),
+          payload: {
+            completedAtMs: 1_778_000_003_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "collabAgentToolCall",
+              id: "collab_2",
+              tool: "wait",
+              status: "completed",
+              senderThreadId: "thread-1",
+              receiverThreadIds: ["child-thread-1"],
+              agentsStates: {
+                "child-thread-1": {
+                  status: "completed",
+                  message: "Test suite is stable now.",
+                },
+              },
+            },
+          },
+        } satisfies ProviderEvent);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+        // The generic item.* rows are still emitted unchanged, and now carry
+        // a real title instead of `undefined`.
+        const itemEvents = runtimeEvents.filter(
+          (event) => event.type === "item.started" || event.type === "item.completed",
+        );
+        NodeAssert.equal(itemEvents.length, 4);
+        for (const itemEvent of itemEvents) {
+          if (itemEvent.type === "item.started" || itemEvent.type === "item.completed") {
+            NodeAssert.equal(itemEvent.payload.itemType, "collab_agent_tool_call");
+            NodeAssert.equal(itemEvent.payload.title, "Subagent task");
+          }
+        }
+
+        const started = runtimeEvents.find((event) => event.type === "task.started");
+        NodeAssert.equal(started?.type, "task.started");
+        if (started?.type === "task.started") {
+          NodeAssert.equal(started.payload.taskId, "child-thread-1");
+          NodeAssert.equal(started.payload.toolUseId, "collab_1");
+          NodeAssert.equal(started.payload.subagentType, "gpt-5.3-codex");
+          NodeAssert.equal(
+            started.payload.description,
+            "Investigate the flaky test suite and report back with findings.",
+          );
+          NodeAssert.equal(
+            started.payload.prompt,
+            "Investigate the flaky test suite and report back with findings.",
+          );
+        }
+
+        const progress = runtimeEvents.find((event) => event.type === "task.progress");
+        NodeAssert.equal(progress?.type, "task.progress");
+        if (progress?.type === "task.progress") {
+          NodeAssert.equal(progress.payload.taskId, "child-thread-1");
+          NodeAssert.equal(progress.payload.toolUseId, "collab_1");
+          NodeAssert.equal(progress.payload.subagentType, "gpt-5.3-codex");
+          NodeAssert.ok(progress.payload.description.length > 0);
+        }
+
+        const completed = runtimeEvents.find((event) => event.type === "task.completed");
+        NodeAssert.equal(completed?.type, "task.completed");
+        if (completed?.type === "task.completed") {
+          NodeAssert.equal(completed.payload.taskId, "child-thread-1");
+          NodeAssert.equal(completed.payload.status, "completed");
+          NodeAssert.equal(completed.payload.toolUseId, "collab_2");
+          NodeAssert.equal(completed.payload.summary, "Test suite is stable now.");
+        }
+
+        // Exactly one task.started/progress/completed each — the "wait"
+        // item/started (step 3) must not have produced a spurious event.
+        NodeAssert.equal(runtimeEvents.filter((event) => event.type.startsWith("task.")).length, 3);
+      }),
+  );
+
+  it.effect("maps errored and shutdown agent states to failed/stopped task.completed", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      // 1 item.completed row plus 2 task.completed rows (one per receiver).
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-closeagent-errored"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("collab_err"),
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab_err",
+            tool: "wait",
+            status: "completed",
+            senderThreadId: "thread-1",
+            receiverThreadIds: ["child-thread-err", "child-thread-shutdown"],
+            agentsStates: {
+              "child-thread-err": { status: "errored", message: "Agent crashed." },
+              "child-thread-shutdown": { status: "shutdown" },
+            },
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      const completedEvents = runtimeEvents.filter((event) => event.type === "task.completed");
+      NodeAssert.equal(completedEvents.length, 2);
+
+      const errored = completedEvents.find(
+        (event) => event.type === "task.completed" && event.payload.taskId === "child-thread-err",
+      );
+      NodeAssert.equal(errored?.type, "task.completed");
+      if (errored?.type === "task.completed") {
+        NodeAssert.equal(errored.payload.status, "failed");
+        NodeAssert.equal(errored.payload.summary, "Agent crashed.");
+      }
+
+      const shutdown = completedEvents.find(
+        (event) =>
+          event.type === "task.completed" && event.payload.taskId === "child-thread-shutdown",
+      );
+      NodeAssert.equal(shutdown?.type, "task.completed");
+      if (shutdown?.type === "task.completed") {
+        NodeAssert.equal(shutdown.payload.status, "stopped");
+      }
     }),
   );
 });

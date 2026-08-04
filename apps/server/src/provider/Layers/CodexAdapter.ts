@@ -20,6 +20,7 @@ import {
   type ProviderUserInputAnswers,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
@@ -258,6 +259,8 @@ function itemTitle(itemType: CanonicalItemType, item?: CodexLifecycleItem): stri
       return "MCP tool call";
     case "dynamic_tool_call":
       return "Tool call";
+    case "collab_agent_tool_call":
+      return "Subagent task";
     case "web_search":
       return "Web search";
     case "image_view":
@@ -493,6 +496,130 @@ function mapItemLifecycle(
       ...(event.payload !== undefined ? { data: event.payload } : {}),
     },
   };
+}
+
+type CollabAgentToolCallItem = Extract<CodexLifecycleItem, { type: "collabAgentToolCall" }>;
+type CollabAgentState = CollabAgentToolCallItem["agentsStates"][string];
+
+const PROMPT_EXCERPT_MAX_LENGTH = 200;
+
+function promptExcerpt(prompt: string | null | undefined): string | undefined {
+  const trimmed = trimText(prompt ?? undefined);
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length > PROMPT_EXCERPT_MAX_LENGTH
+    ? `${trimmed.slice(0, PROMPT_EXCERPT_MAX_LENGTH - 3)}...`
+    : trimmed;
+}
+
+function collabAgentSubagentType(item: CollabAgentToolCallItem): string {
+  return trimText(item.model ?? undefined) ?? item.tool;
+}
+
+// Maps the collab tool call's per-thread agent status onto a terminal task
+// status, or `undefined` when the agent is still in flight (pendingInit,
+// running, interrupted) — the caller treats that as a task.progress signal.
+function collabAgentTerminalTaskStatus(
+  status: CollabAgentState["status"],
+): "completed" | "failed" | "stopped" | undefined {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "errored":
+    case "notFound":
+      return "failed";
+    case "shutdown":
+      return "stopped";
+    default:
+      return undefined;
+  }
+}
+
+function collabAgentProgressDescription(
+  state: CollabAgentState | undefined,
+  fallback: string | undefined,
+): string {
+  return trimText(state?.message ?? undefined) ?? fallback ?? `Agent ${state?.status ?? "update"}`;
+}
+
+// Codex has no live `item/updated` notification for collabAgentToolCall
+// (unlike Claude's task_started/task_progress/task_notification triad): a
+// subagent's lifecycle instead spans several distinct collab items sharing
+// the same receiver thread id (spawnAgent, then wait/sendInput/resumeAgent,
+// then closeAgent). We use the receiver thread id itself as the stable
+// `taskId` across that whole lifecycle, and derive task.started /
+// task.progress / task.completed from each item's snapshot of
+// `agentsStates` — terminal statuses (completed/errored/shutdown/notFound)
+// complete the task, everything else is progress. `toolUseId` is set to the
+// id of the collab item that produced this particular event; it is the
+// join key for THAT item, not a stable spawn-time id (Codex has no such
+// field), so it will differ between the spawnAgent item and any later
+// wait/closeAgent item for the same task.
+function mapCollabAgentTaskEvents(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  lifecycle: "item.started" | "item.completed",
+  item: CollabAgentToolCallItem,
+): ReadonlyArray<ProviderRuntimeEvent> {
+  const base = runtimeEventBase(event, canonicalThreadId);
+  const prompt = trimText(item.prompt ?? undefined);
+  const excerpt = promptExcerpt(item.prompt);
+  const subagentType = collabAgentSubagentType(item);
+
+  if (lifecycle === "item.started") {
+    if (item.tool !== "spawnAgent") {
+      return [];
+    }
+    return item.receiverThreadIds.map(
+      (childThreadId): ProviderRuntimeEvent => ({
+        ...base,
+        type: "task.started",
+        payload: {
+          taskId: RuntimeTaskId.make(childThreadId),
+          toolUseId: item.id,
+          subagentType,
+          ...(excerpt ? { description: excerpt } : {}),
+          ...(prompt ? { prompt } : {}),
+        },
+      }),
+    );
+  }
+
+  return item.receiverThreadIds.flatMap((childThreadId): ReadonlyArray<ProviderRuntimeEvent> => {
+    const state = item.agentsStates[childThreadId];
+    if (!state) {
+      return [];
+    }
+    const terminalStatus = collabAgentTerminalTaskStatus(state.status);
+    if (terminalStatus) {
+      const summary = trimText(state.message ?? undefined);
+      return [
+        {
+          ...base,
+          type: "task.completed",
+          payload: {
+            taskId: RuntimeTaskId.make(childThreadId),
+            status: terminalStatus,
+            toolUseId: item.id,
+            ...(summary ? { summary } : {}),
+          },
+        },
+      ];
+    }
+    return [
+      {
+        ...base,
+        type: "task.progress",
+        payload: {
+          taskId: RuntimeTaskId.make(childThreadId),
+          description: collabAgentProgressDescription(state, excerpt),
+          toolUseId: item.id,
+          subagentType,
+        },
+      },
+    ];
+  });
 }
 
 function mapToRuntimeEvents(
@@ -837,7 +964,18 @@ function mapToRuntimeEvents(
 
   if (event.method === "item/started") {
     const started = mapItemLifecycle(event, canonicalThreadId, "item.started");
-    return started ? [started] : [];
+    if (!started) {
+      return [];
+    }
+    const startedItem = readPayload(
+      EffectCodexSchema.V2ItemStartedNotification,
+      event.payload,
+    )?.item;
+    const taskEvents =
+      startedItem && startedItem.type === "collabAgentToolCall"
+        ? mapCollabAgentTaskEvents(event, canonicalThreadId, "item.started", startedItem)
+        : [];
+    return [started, ...taskEvents];
   }
 
   if (event.method === "item/completed") {
@@ -863,7 +1001,14 @@ function mapToRuntimeEvents(
       ];
     }
     const completed = mapItemLifecycle(event, canonicalThreadId, "item.completed");
-    return completed ? [completed] : [];
+    if (!completed) {
+      return [];
+    }
+    const taskEvents =
+      item.type === "collabAgentToolCall"
+        ? mapCollabAgentTaskEvents(event, canonicalThreadId, "item.completed", item)
+        : [];
+    return [completed, ...taskEvents];
   }
 
   if (
