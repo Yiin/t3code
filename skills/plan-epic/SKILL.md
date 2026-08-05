@@ -89,6 +89,7 @@ Whichever mode is used, each investigator gets a self-contained brief and return
 
 - **Findings**: what exists today, the constraints, the risky unknowns — cited at `file:line` where it read code.
 - **Proposed child issues**: for its area, a list of `{title, description, acceptance, depends_on}`. Descriptions must be self-contained — a fresh-context agent will implement them from the bead text alone. A proposal whose deliverable is knowledge rather than code should be titled `Research: …` (see step 3).
+- **Orientation card status**: whether the code repo already has a usable orientation card (`docs/agent-orientation.md` or an existing AGENTS.md-style file) and, if so, what's stale or missing from it — feeds step 3b directly.
 
 Use a structured `schema` so investigators return data, not prose, when using `Workflow`.
 
@@ -194,6 +195,16 @@ bd link <this-id> <blocker-id>   # blocker-id blocks this-id
 ```
 
 Show the user the resulting tree: `bd list --parent $EPIC --pretty`.
+
+### 3b. Create or refresh the orientation card
+
+For each CODE repo the epic touches:
+
+1. **Location**: the card lives in the CODE repo (the repo the children edit), not the beads repo — for multi-repo epics like health (beads at `/home/yiin/Projects/health`) -> dashboard-health (code at `/home/yiin/Projects/dashboard-health`) these differ. Default location: `docs/agent-orientation.md` in the code repo. If the repo already keeps operational agent docs elsewhere (e.g. an AGENTS.md with literal commands — dashboard-health has an 8.3KB one), extend that file instead of creating a duplicate.
+2. **Content**: mirror the epic Context template — path map with one-line responsibilities, literal check commands, conventions/vocabulary pointers, gotchas. Hard budget ~4KB. Operational facts only; no narrative architecture prose. Write it FROM the investigator findings of step 2 (self-contained file:line path maps) — that's exactly the material workers otherwise re-derive.
+3. **Refresh, don't rewrite**: if a card already exists, verify each mandated section is present and current; update only stale or missing parts. If it's current, skip the write.
+4. **Commit before handoff**: commit the card to the code repo before finishing this step. cook-epic's preflight hard-stops on uncommitted tracked changes, so an uncommitted card blocks the run.
+5. **Reference it from the epic**: the Context's `### Orientation card` bullet (step 4 below) must hold the card's ABSOLUTE path, one bullet per code repo the epic touches — workers run `bd` from the beads repo, so relative paths don't resolve.
 
 ### 4. Write the Handoff Protocol into the epic
 
