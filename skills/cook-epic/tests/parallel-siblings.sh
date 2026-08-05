@@ -118,6 +118,7 @@ launch() { # <extra env...> — later vars override the defaults
   local rc=0
   (
     cd "$REPO"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     env PATH="$BIN:$PATH" FAKE_BD_STATE="$STATE" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
       COOKEPIC_WORKER_CMD="$CASE/worker.sh" COOKEPIC_SIBLINGS="${CASE_SIBLINGS:-../api}" \
       COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_SUPERVISION_TICK=1 \

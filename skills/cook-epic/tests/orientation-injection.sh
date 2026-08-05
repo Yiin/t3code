@@ -113,6 +113,7 @@ run_sequential_case() {
   notes_file="$root/notes.txt"; write_notes_file "$notes_file"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" FAKE_EPIC_DESC_FILE="$desc_file" FAKE_EPIC_NOTES_FILE="$notes_file" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="" \
       COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 \
@@ -148,6 +149,7 @@ run_no_card_case() {
   notes_file="$root/notes.txt"; write_notes_file "$notes_file"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" FAKE_EPIC_DESC_FILE="$desc_file" FAKE_EPIC_NOTES_FILE="$notes_file" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="" \
       COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 \
@@ -172,6 +174,7 @@ run_override_case() {
   notes_file="$root/notes.txt"; write_notes_file "$notes_file"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" FAKE_EPIC_DESC_FILE="$desc_file" FAKE_EPIC_NOTES_FILE="$notes_file" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="" \
       COOKEPIC_ORIENTATION_FILE=custom-orientation.md \
@@ -196,6 +199,7 @@ run_parallel_case() {
   notes_file="$root/notes.txt"; write_notes_file "$notes_file"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" FAKE_EPIC_DESC_FILE="$desc_file" FAKE_EPIC_NOTES_FILE="$notes_file" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_WORKERS=1 COOKEPIC_SIBLINGS="" \
       COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 \

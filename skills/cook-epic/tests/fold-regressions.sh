@@ -126,7 +126,7 @@ bd update epic --body-file "$tmp"
 printf "folded: ok\n"'
 
 make_case marker-triggers-fold "$marker_worker" "$fold_agent"
-(cd "$CASE_REPO" && timeout --kill-after=2s 20s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 \
+(cd "$CASE_REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && timeout --kill-after=2s 20s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 \
   || { cat "$CASE_ROOT/stdout" >&2; cat "$CASE_RUN/loop.log" >&2 2>/dev/null || true; fail 'marker-triggers-fold run did not finish'; }
 
 [ -f "$CASE_RUN/captured-fold-prompt" ] || fail 'fold agent was never invoked despite DECISION:/GOTCHA: markers'
@@ -152,7 +152,7 @@ touch "$COOKEPIC_RUN_DIR/fold-was-called"
 printf "folded: ok\n"'
 
 make_case no-markers-no-fold "$plain_worker" "$never_agent"
-(cd "$CASE_REPO" && timeout --kill-after=2s 20s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 \
+(cd "$CASE_REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && timeout --kill-after=2s 20s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 \
   || { cat "$CASE_ROOT/stdout" >&2; cat "$CASE_RUN/loop.log" >&2 2>/dev/null || true; fail 'no-markers-no-fold run did not finish'; }
 
 [ ! -e "$CASE_RUN/fold-was-called" ] || fail 'fold agent was spawned for a child with no DECISION:/GOTCHA: markers'
@@ -164,7 +164,7 @@ assert_not_contains "$CASE_STATE/epic-description" '2026-08-05'
 failing_agent='#!/usr/bin/env bash
 exit 1'
 make_case fold-failure-non-fatal "$marker_worker" "$failing_agent"
-(cd "$CASE_REPO" && timeout --kill-after=2s 20s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 \
+(cd "$CASE_REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && timeout --kill-after=2s 20s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 \
   || { cat "$CASE_ROOT/stdout" >&2; cat "$CASE_RUN/loop.log" >&2 2>/dev/null || true; fail 'fold-failure-non-fatal run did not finish'; }
 
 assert_contains "$CASE_RUN/loop.log" 'fold skipped for child'

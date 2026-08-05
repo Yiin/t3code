@@ -86,6 +86,7 @@ EOF
   fi
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
       COOKEPIC_WORKER_CMD="$root/worker.sh" COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="../api" \
       COOKEPIC_GATE="$gate" COOKEPIC_NO_PUSH=$([ "$push_mode" = push ] && printf '' || printf 1) COOKEPIC_PUSH_CMD="${root}/push.sh" COOKEPIC_PUSH_LOG="$run/pushes" COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=3 \
@@ -203,6 +204,7 @@ EOF
   chmod +x "$root/worker.sh"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE="$gate" COOKEPIC_NO_PUSH=1 COOKEPIC_RATE_LIMIT_BACKOFF="$rate_backoff" COOKEPIC_RATE_CASE=$([ "$mode" = rate ] && printf 1 || printf 0) COOKEPIC_GATE_DIRT_CASE=$([ "$mode" = gate-dirt ] && printf 1 || printf 0) COOKEPIC_TEST_MODE="$mode" COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=4 \
       COOKEPIC_MAX_ATTEMPTS="$max_attempts" COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
@@ -316,6 +318,7 @@ EOF
   chmod +x "$bin/claude"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
       COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
@@ -345,6 +348,7 @@ EOF
   chmod +x "$bin/claude"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=123 COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
       COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
@@ -427,6 +431,7 @@ EOF
   chmod +x "$root/worker.sh"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_WORKERS=2 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=1 COOKEPIC_MAX_DISPATCHES=2 \
       COOKEPIC_MAX_ATTEMPTS=2 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
@@ -454,6 +459,7 @@ EOF
   chmod +x "$root/worker.sh"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
@@ -487,6 +493,7 @@ run_push_preflight_case() {
   set +e
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     if [ "$mode" = no-push ]; then
       PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH=1 COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
     elif [ "$mode" = missing-origin ]; then
@@ -534,6 +541,7 @@ EOF
   set +e
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="../api" COOKEPIC_GATE=true COOKEPIC_PUSH_CMD="$root/push.sh" COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1
@@ -566,6 +574,7 @@ EOF
   chmod +x "$root/worker.sh"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH=1 COOKEPIC_NO_GATE=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true

@@ -124,7 +124,7 @@ new_case() { # <name> -> sets CASE, REPO, BIN, STATE
 cook() { # <run dir> <extra env...>; runs from the fixture repo
   local run="$1"; shift
   mkdir -p "$run"
-  ( cd "$REPO" && exec setsid env PATH="$BIN:$PATH" FAKE_BD_STATE="$STATE" \
+  ( cd "$REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && exec setsid env PATH="$BIN:$PATH" FAKE_BD_STATE="$STATE" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$BIN/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
       COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_MAX_ATTEMPTS=1 COOKEPIC_WORKER_TIMEOUT=60 \
@@ -135,7 +135,7 @@ ralph() { # <run dir> <extra env...>; runs from the fixture repo
   local run="$1"; shift
   mkdir -p "$run"
   printf 'Epic: epic\n\nDo one unit of work.\n' > "$run/prompt.md"
-  ( cd "$REPO" && exec setsid env PATH="$BIN:$PATH" FAKE_BD_STATE="$STATE" \
+  ( cd "$REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && exec setsid env PATH="$BIN:$PATH" FAKE_BD_STATE="$STATE" \
       RALPH_HARNESS=claude RALPH_BIN="$BIN/claude" RALPH_MAX_ITER=1 \
       "$@" "$RALPH_RUNNER" "$run" )
 }

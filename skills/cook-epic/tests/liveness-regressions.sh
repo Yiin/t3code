@@ -156,6 +156,7 @@ run_case() { # <name> <worker body> <inspector mode> [timeout] [extra env...]
   if [ -n "$inspector_mode" ]; then inspector="$root/inspector.sh"; make_inspector "$inspector" "$inspector_mode"; fi
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     env PATH="$bin:$PATH" FAKE_BD_STATE="$state" TEST_REPO="$repo" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_INSPECTOR_CMD="$inspector" COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 \
@@ -218,6 +219,7 @@ run_harness_case() { # <name> <harness> [extra env...]
   printf open > "$state/child"; printf open > "$state/epic"
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     env PATH="$bin:$PATH" FAKE_BD_STATE="$state" TEST_HARNESS="$harness" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS="$harness" COOKEPIC_BIN="$root/harness" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
@@ -445,6 +447,7 @@ chmod +x "$collision_bin/systemd-run" "$collision_bin/systemctl"
 printf '%s\n' "$idle_worker" > "$collision_root/worker.sh"; chmod +x "$collision_root/worker.sh"
 (
   cd "$collision_repo"
+  for v in "${!COOKEPIC_@}"; do unset "$v"; done
   env PATH="$collision_bin:$PATH" FAKE_BD_STATE="$collision_state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
     COOKEPIC_WORKER_CMD="$collision_root/worker.sh" COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 \
     "$RUNNER" "$collision_run"
@@ -503,6 +506,7 @@ printf '%s\n' "$idle_worker" > "$cleanup_root/worker.sh"; chmod +x "$cleanup_roo
 make_inspector "$cleanup_root/inspector.sh" cleanup
 (
   cd "$cleanup_repo"
+  for v in "${!COOKEPIC_@}"; do unset "$v"; done
   exec env PATH="$cleanup_bin:$PATH" FAKE_BD_STATE="$cleanup_state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
     COOKEPIC_WORKER_CMD="$cleanup_root/worker.sh" COOKEPIC_INSPECTOR_CMD="$cleanup_root/inspector.sh" \
     COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 \

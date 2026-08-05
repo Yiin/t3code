@@ -120,7 +120,7 @@ set -euo pipefail
 printf '\''{"decision":"continue","confidence":"high","rationale":"silent sleep is idle","next_check_seconds":2}\n'\'' > "$2"'
 
 make_case silent-inspection "$finish_worker" "$continue_inspector"
-(cd "$CASE_REPO" && timeout --kill-after=2s 15s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 || fail 'silent fallback run did not finish'
+(cd "$CASE_REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && timeout --kill-after=2s 15s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 || fail 'silent fallback run did not finish'
 assert_contains "$CASE_RUN/mailbox.jsonl" '"event": "worker-idle"'
 assert_contains "$CASE_RUN/mailbox.jsonl" '"event": "inspection-started"'
 read -r worker_pid _ worker_pgid < "$CASE_RUN/worker-w1.owned"
@@ -135,7 +135,7 @@ git add result.txt
 git commit -qm done
 bd close "$COOKEPIC_CHILD"'
 make_case fifo-close "$quick_worker" ''
-(cd "$CASE_REPO" && timeout --kill-after=2s 10s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 || fail 'completed command left its capture path blocked'
+(cd "$CASE_REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && timeout --kill-after=2s 10s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 || fail 'completed command left its capture path blocked'
 [ ! -e "$CASE_RUN/worker-child.log.pipe" ] || fail 'worker FIFO survived command completion'
 
 tree_worker='#!/usr/bin/env bash
@@ -146,7 +146,7 @@ stop_inspector='#!/usr/bin/env bash
 set -euo pipefail
 printf '\''{"decision":"stop","confidence":"high","rationale":"confirmed idle worker"}\n'\'' > "$2"'
 make_case descendant-kill "$tree_worker" "$stop_inspector"
-(cd "$CASE_REPO" && timeout --kill-after=2s 15s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 || true
+(cd "$CASE_REPO" && for v in "${!COOKEPIC_@}"; do unset "$v"; done && timeout --kill-after=2s 15s "${RUNNER_ARGS[@]}") > "$CASE_ROOT/stdout" 2>&1 || true
 [ -f "$CASE_RUN/worker-child-pid" ] || fail 'TERM-ignoring worker descendant did not start'
 read -r _ _ worker_pgid < "$CASE_RUN/worker-w1.owned"
 assert_group_gone "$worker_pgid"
@@ -161,6 +161,7 @@ wait'
 make_case coordinator-cleanup "$idle_worker" "$cleanup_inspector"
 (
   cd "$CASE_REPO"
+  for v in "${!COOKEPIC_@}"; do unset "$v"; done
   exec "${RUNNER_ARGS[@]}"
 ) > "$CASE_ROOT/stdout" 2>&1 &
 coordinator=$!

@@ -100,6 +100,7 @@ run_valid_case() {
   make_opencode "$bin/opencode-cookepic" cookepic
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic \
       COOKEPIC_HARNESS=opencode OPENCODE_BIN="$bin/opencode-env" \
       COOKEPIC_BIN="$bin/opencode-cookepic" COOKEPIC_MODEL=test-model \
@@ -131,6 +132,7 @@ run_invalid_permission_case() {
   set +e
   (
     cd "$repo"
+    for v in "${!COOKEPIC_@}"; do unset "$v"; done
     PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic \
       COOKEPIC_HARNESS=opencode COOKEPIC_PERMISSION_MODE=read-only \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 \
