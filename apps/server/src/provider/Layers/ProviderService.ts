@@ -30,6 +30,7 @@ import {
   type T3SessionEnvironment,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -74,6 +75,14 @@ export interface ProviderServiceLiveOptions {
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
   ProviderService.ProviderService["Service"][Name];
+
+/**
+ * Minimum spacing between `binding.lastSeenAt` refreshes per thread. Runtime
+ * event streams are chatty (per-token content deltas); one write a minute is
+ * plenty for the reaper's idle-age resolution, whose thresholds are minutes
+ * to hours.
+ */
+export const BINDING_LAST_SEEN_REFRESH_INTERVAL_MS = 60_000;
 
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
@@ -342,6 +351,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       } satisfies T3SessionEnvironment;
     });
 
+  // Threads touched recently enough that another lastSeenAt write would be
+  // redundant. Entries are dropped on stopSession/stopAll; a stale survivor
+  // only suppresses touches for one interval, so precision is not required.
+  const bindingLastSeenTouchedAtMs = new Map<ThreadId, number>();
+
+  // Keeps `binding.lastSeenAt` tracking observed runtime output — message
+  // deltas, tool progress, subagent task.progress — so the reaper's idle age
+  // means "time since the session last produced anything", not "time since
+  // the turn was submitted". Throttled per thread; never fails the event path.
+  const touchBindingLastSeen = (threadId: ThreadId): Effect.Effect<void> =>
+    Clock.currentTimeMillis.pipe(
+      Effect.flatMap((nowMs) => {
+        const touchedAtMs = bindingLastSeenTouchedAtMs.get(threadId);
+        if (
+          touchedAtMs !== undefined &&
+          nowMs - touchedAtMs < BINDING_LAST_SEEN_REFRESH_INTERVAL_MS
+        ) {
+          return Effect.void;
+        }
+        bindingLastSeenTouchedAtMs.set(threadId, nowMs);
+        return directory.touchLastSeen(threadId).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("provider.session.last-seen-touch-failed", {
+              threadId,
+              error,
+            }),
+          ),
+        );
+      }),
+    );
+
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
@@ -409,7 +449,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
           eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        }).pipe(
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+          Effect.andThen(touchBindingLastSeen(canonicalEvent.threadId)),
+        ),
       ),
     );
 
@@ -991,6 +1034,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           yield* routed.adapter.stopSession(routed.threadId);
         }
         yield* clearMcpSession(input.threadId);
+        bindingLastSeenTouchedAtMs.delete(input.threadId);
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
@@ -1173,6 +1217,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
+    bindingLastSeenTouchedAtMs.clear();
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>
       Effect.gen(function* () {

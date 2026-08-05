@@ -45,6 +45,15 @@ export interface ProviderSessionDirectoryShape {
     binding: ProviderRuntimeBinding,
   ) => Effect.Effect<void, ProviderSessionDirectoryWriteError>;
 
+  /**
+   * Refresh the binding's `lastSeenAt` to now, touching nothing else. Cheap
+   * single-column UPDATE for the hot runtime-event path; a thread with no
+   * binding row is a no-op.
+   */
+  readonly touchLastSeen: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, ProviderSessionDirectoryPersistenceError>;
+
   readonly getProvider: (
     threadId: ThreadId,
   ) => Effect.Effect<ProviderDriverKind, ProviderSessionDirectoryReadError>;

@@ -15,6 +15,7 @@ import {
   AuthSessionId,
   EnvironmentId,
   EventId,
+  epicRunIterationThreadId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -25,6 +26,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -49,6 +51,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import { decideSessionReap } from "../sessionReapPolicy.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -2268,6 +2271,124 @@ validation.layer("ProviderServiceLive validation", (it) => {
       if (Option.isSome(runtime)) {
         assert.equal(runtime.value.threadId, session.threadId);
       }
+    }),
+  );
+});
+
+const lastSeenRefresh = makeProviderServiceLayer();
+lastSeenRefresh.layer("ProviderServiceLive lastSeenAt refresh", (it) => {
+  const readRuntimeRow = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const runtime = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(runtime), true);
+      return Option.getOrThrow(runtime);
+    });
+
+  const startCodexSession = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+    });
+
+  const emitTaskProgress = (threadId: ThreadId, eventId: string): void => {
+    lastSeenRefresh.codex.emit({
+      type: "task.progress",
+      eventId: asEventId(eventId),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId: asTurnId("turn-1"),
+    });
+  };
+
+  it.effect("refreshes binding.lastSeenAt from runtime events, one write per throttle window", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-last-seen-throttle");
+      yield* startCodexSession(threadId);
+      const atStart = (yield* readRuntimeRow(threadId)).lastSeenAt;
+
+      yield* advanceTestClock(5 * 60_000);
+      emitTaskProgress(threadId, "evt-touch-1");
+      yield* advanceTestClock(10);
+      const afterFirst = (yield* readRuntimeRow(threadId)).lastSeenAt;
+      assert.notEqual(afterFirst, atStart);
+
+      // A second event 1s after the first stays inside the throttle window:
+      // the pair produces exactly one write.
+      yield* advanceTestClock(1_000);
+      emitTaskProgress(threadId, "evt-touch-2");
+      yield* advanceTestClock(10);
+      assert.equal((yield* readRuntimeRow(threadId)).lastSeenAt, afterFirst);
+
+      // Past the window the next event writes again.
+      yield* advanceTestClock(60_000);
+      emitTaskProgress(threadId, "evt-touch-3");
+      yield* advanceTestClock(10);
+      const afterThird = (yield* readRuntimeRow(threadId)).lastSeenAt;
+      assert.isAbove(Date.parse(afterThird), Date.parse(afterFirst));
+    }),
+  );
+
+  it.effect(
+    "task.progress from an in-flight subagent keeps an epic-run iteration inside its idle threshold",
+    () =>
+      Effect.gen(function* () {
+        const threadId = asThreadId(
+          epicRunIterationThreadId({ runId: "run-last-seen", iterationIndex: 1 }),
+        );
+        yield* startCodexSession(threadId);
+        const startedAtMs = yield* Clock.currentTimeMillis;
+
+        // 70 virtual minutes of a quiet main stream whose only life is a
+        // subagent posting task.progress every 10 minutes — well past the
+        // 30-minute epic-run iteration idle backstop.
+        for (let i = 0; i < 7; i++) {
+          yield* advanceTestClock(10 * 60_000);
+          emitTaskProgress(threadId, `evt-subagent-${i}`);
+          yield* advanceTestClock(10);
+        }
+
+        const runtime = yield* readRuntimeRow(threadId);
+        const nowMs = yield* Clock.currentTimeMillis;
+        const decision = decideSessionReap({
+          threadId,
+          status: runtime.status,
+          idleDurationMs: nowMs - Date.parse(runtime.lastSeenAt),
+          settledOverride: null,
+          activeTurnId: null,
+        });
+        assert.deepEqual(
+          { reap: decision.reap, reason: decision.reason },
+          { reap: false, reason: "within_idle_threshold" },
+        );
+
+        // Regression contrast: idle age measured from the last directory
+        // upsert (session start) would have reaped this session.
+        const staleDecision = decideSessionReap({
+          threadId,
+          status: runtime.status,
+          idleDurationMs: nowMs - startedAtMs,
+          settledOverride: null,
+          activeTurnId: null,
+        });
+        assert.equal(staleDecision.reap, true);
+      }),
+  );
+
+  it.effect("does not write lastSeenAt for threads with no runtime events", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-last-seen-quiet");
+      yield* startCodexSession(threadId);
+      const atStart = (yield* readRuntimeRow(threadId)).lastSeenAt;
+
+      yield* advanceTestClock(15 * 60_000);
+      assert.equal((yield* readRuntimeRow(threadId)).lastSeenAt, atStart);
     }),
   );
 });

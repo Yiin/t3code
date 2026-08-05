@@ -29,10 +29,13 @@ export const DEFAULT_SETTLED_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
  * still set would otherwise make its session immortal — and every leaked
  * session pins a subprocess and a git worktree.
  *
- * 24 hours because idle age for an in-flight turn is "time since the turn was
- * submitted": `binding.lastSeenAt` is refreshed only on session start, session
- * recovery and sendTurn, never by streaming output. So the cap permits a single
- * turn a full day of wall-clock work and bounds the leak at a day.
+ * `binding.lastSeenAt` refreshes on session start, session recovery, sendTurn,
+ * and — throttled to once a minute per thread — on streamed runtime activity
+ * (message deltas, tool progress, subagent task.progress; see
+ * `touchBindingLastSeen` in ProviderServiceLive). So idle age for a session
+ * that is producing output stays near zero, and the cap only decides the fate
+ * of a turn that is genuinely silent: 24 hours permits a full day of quiet
+ * wall-clock work and bounds the leak at a day.
  */
 export const DEFAULT_ACTIVE_TURN_SKIP_CAP_MS = 24 * 60 * 60 * 1000;
 
