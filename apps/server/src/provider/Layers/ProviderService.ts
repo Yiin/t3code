@@ -12,10 +12,12 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  EventId,
   ModelSelection,
   NonNegativeInt,
   ProjectId,
   ThreadId,
+  TurnId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -71,6 +73,21 @@ const isModelSelection = Schema.is(ModelSelection);
  */
 export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogger?: EventNdjsonLogger;
+  /**
+   * Detects an open turn whose provider stream stopped producing events.
+   * Defaults: 30m idle, 30s sweep, 30s control-call timeout, and 60s grace.
+   * Provider-specific thresholds override the 30m fallback.
+   */
+  readonly idleWatchdog?: ProviderIdleWatchdogOptions;
+}
+
+export interface ProviderIdleWatchdogOptions {
+  readonly enabled?: boolean;
+  readonly defaultIdleThresholdMs?: number;
+  readonly idleThresholdMsByProvider?: Readonly<Record<string, number | undefined>>;
+  readonly sweepIntervalMs?: number;
+  readonly controlCallTimeoutMs?: number;
+  readonly completionGraceMs?: number;
 }
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
@@ -83,6 +100,29 @@ type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["S
  * to hours.
  */
 export const BINDING_LAST_SEEN_REFRESH_INTERVAL_MS = 60_000;
+// Adapter research in t3code-8qw.9 found no guaranteed heartbeat. A 10-minute
+// default can stop valid long tools, so all providers use 30 minutes until an
+// adapter proves a shorter safe threshold through periodic progress events.
+export const PROVIDER_IDLE_WATCHDOG_DEFAULT_THRESHOLD_MS = 30 * 60_000;
+export const PROVIDER_IDLE_WATCHDOG_SWEEP_INTERVAL_MS = 30_000;
+export const PROVIDER_IDLE_WATCHDOG_CONTROL_TIMEOUT_MS = 30_000;
+export const PROVIDER_IDLE_WATCHDOG_COMPLETION_GRACE_MS = 60_000;
+
+interface OpenTurnWatchdogState {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+  lastEventAtMs: number;
+  readonly openRequestIds: Set<string>;
+  anonymousOpenRequests: number;
+  sessionState: string | undefined;
+  recoveryStarted: boolean;
+}
+
+const formatIdleDuration = (durationMs: number): string =>
+  durationMs % 60_000 === 0 ? `${durationMs / 60_000}m` : `${durationMs}ms`;
 
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
@@ -355,6 +395,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // redundant. Entries are dropped on stopSession/stopAll; a stale survivor
   // only suppresses touches for one interval, so precision is not required.
   const bindingLastSeenTouchedAtMs = new Map<ThreadId, number>();
+  const openTurnWatchdogs = new Map<ThreadId, OpenTurnWatchdogState>();
+  const syntheticSettledTurns = new Map<ThreadId, TurnId>();
+  const idleWatchdogOptions = options?.idleWatchdog;
+  const idleWatchdogEnabled = idleWatchdogOptions?.enabled ?? true;
+  const idleWatchdogDefaultThresholdMs =
+    idleWatchdogOptions?.defaultIdleThresholdMs ?? PROVIDER_IDLE_WATCHDOG_DEFAULT_THRESHOLD_MS;
+  const idleWatchdogSweepIntervalMs =
+    idleWatchdogOptions?.sweepIntervalMs ?? PROVIDER_IDLE_WATCHDOG_SWEEP_INTERVAL_MS;
+  const idleWatchdogControlTimeoutMs =
+    idleWatchdogOptions?.controlCallTimeoutMs ?? PROVIDER_IDLE_WATCHDOG_CONTROL_TIMEOUT_MS;
+  const idleWatchdogCompletionGraceMs =
+    idleWatchdogOptions?.completionGraceMs ?? PROVIDER_IDLE_WATCHDOG_COMPLETION_GRACE_MS;
 
   // Keeps `binding.lastSeenAt` tracking observed runtime output — message
   // deltas, tool progress, subagent task.progress — so the reaper's idle age
@@ -391,6 +443,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ),
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
       Effect.asVoid,
+    );
+
+  const publishObservedRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
+    increment(providerRuntimeEventsTotal, {
+      provider: event.provider,
+      eventType: event.type,
+    }).pipe(
+      Effect.andThen(publishRuntimeEvent(event)),
+      Effect.andThen(touchBindingLastSeen(event.threadId)),
     );
 
   const requireBindingInstanceId = (
@@ -441,20 +502,225 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     source: {
       readonly instanceId: ProviderInstanceId;
       readonly provider: ProviderDriverKind;
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
     },
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
     Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
       Effect.flatMap((canonicalEvent) =>
-        increment(providerRuntimeEventsTotal, {
-          provider: canonicalEvent.provider,
-          eventType: canonicalEvent.type,
-        }).pipe(
-          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
-          Effect.andThen(touchBindingLastSeen(canonicalEvent.threadId)),
+        Clock.currentTimeMillis.pipe(
+          Effect.map((nowMs) => {
+            const threadId = canonicalEvent.threadId;
+            const tracked = openTurnWatchdogs.get(threadId);
+            const syntheticTurnId = syntheticSettledTurns.get(threadId);
+
+            if (
+              canonicalEvent.type === "turn.completed" &&
+              canonicalEvent.turnId !== undefined &&
+              syntheticTurnId === canonicalEvent.turnId
+            ) {
+              return false;
+            }
+
+            if (canonicalEvent.type === "session.started") {
+              openTurnWatchdogs.delete(threadId);
+              syntheticSettledTurns.delete(threadId);
+              return true;
+            }
+
+            if (canonicalEvent.type === "session.exited") {
+              if (tracked === undefined || tracked.adapter === source.adapter) {
+                openTurnWatchdogs.delete(threadId);
+              }
+              return true;
+            }
+
+            if (canonicalEvent.type === "turn.started") {
+              if (canonicalEvent.turnId === undefined) {
+                return true;
+              }
+              if (tracked !== undefined && tracked.adapter !== source.adapter) {
+                return true;
+              }
+              syntheticSettledTurns.delete(threadId);
+              openTurnWatchdogs.set(threadId, {
+                threadId,
+                turnId: canonicalEvent.turnId,
+                provider: canonicalEvent.provider,
+                providerInstanceId: source.instanceId,
+                adapter: source.adapter,
+                lastEventAtMs: nowMs,
+                openRequestIds: new Set(),
+                anonymousOpenRequests: 0,
+                sessionState: undefined,
+                recoveryStarted: false,
+              });
+              return true;
+            }
+
+            if (tracked === undefined || tracked.adapter !== source.adapter) {
+              return true;
+            }
+            if (canonicalEvent.turnId !== undefined && canonicalEvent.turnId !== tracked.turnId) {
+              return true;
+            }
+
+            tracked.lastEventAtMs = nowMs;
+            if (canonicalEvent.type === "turn.completed") {
+              if (canonicalEvent.turnId === tracked.turnId) {
+                openTurnWatchdogs.delete(threadId);
+              }
+              return true;
+            }
+            if (canonicalEvent.type === "request.opened") {
+              if (canonicalEvent.requestId === undefined) {
+                tracked.anonymousOpenRequests += 1;
+              } else {
+                tracked.openRequestIds.add(String(canonicalEvent.requestId));
+              }
+            } else if (canonicalEvent.type === "user-input.requested") {
+              if (canonicalEvent.requestId === undefined) {
+                tracked.anonymousOpenRequests += 1;
+              } else {
+                tracked.openRequestIds.add(String(canonicalEvent.requestId));
+              }
+            } else if (
+              canonicalEvent.type === "request.resolved" ||
+              canonicalEvent.type === "user-input.resolved"
+            ) {
+              if (canonicalEvent.requestId === undefined) {
+                tracked.anonymousOpenRequests = Math.max(0, tracked.anonymousOpenRequests - 1);
+              } else {
+                tracked.openRequestIds.delete(String(canonicalEvent.requestId));
+              }
+            } else if (canonicalEvent.type === "session.state.changed") {
+              tracked.sessionState = canonicalEvent.payload.state;
+            }
+            return true;
+          }),
+          Effect.flatMap((shouldPublish) =>
+            shouldPublish ? publishObservedRuntimeEvent(canonicalEvent) : Effect.void,
+          ),
         ),
       ),
     );
+
+  const recoverIdleTurn = Effect.fn("ProviderService.recoverIdleTurn")(function* (
+    tracked: OpenTurnWatchdogState,
+    idleDurationMs: number,
+  ) {
+    const idleDuration = formatIdleDuration(idleDurationMs);
+    const message = `provider stream idle for ${idleDuration} during an open turn`;
+    const eventIdPrefix = `provider-idle-watchdog:${String(tracked.threadId)}:${String(tracked.turnId)}`;
+    const runtimeErrorEvent: ProviderRuntimeEvent = {
+      type: "runtime.error",
+      eventId: EventId.make(`${eventIdPrefix}:error`),
+      provider: tracked.provider,
+      providerInstanceId: tracked.providerInstanceId,
+      threadId: tracked.threadId,
+      turnId: tracked.turnId,
+      createdAt: yield* nowIso,
+      payload: {
+        message: `${message}: thread ${String(tracked.threadId)}, turn ${String(tracked.turnId)}, provider ${String(tracked.provider)}`,
+        detail: {
+          idleDurationMs,
+          provider: tracked.provider,
+          providerInstanceId: tracked.providerInstanceId,
+          threadId: tracked.threadId,
+          turnId: tracked.turnId,
+        },
+      },
+    };
+    yield* publishObservedRuntimeEvent(runtimeErrorEvent).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.idle-watchdog.error-publish-failed", {
+          threadId: tracked.threadId,
+          turnId: tracked.turnId,
+          cause,
+        }),
+      ),
+    );
+    yield* tracked.adapter.interruptTurn(tracked.threadId, tracked.turnId).pipe(
+      Effect.timeout(`${idleWatchdogControlTimeoutMs} millis`),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.idle-watchdog.interrupt-failed", {
+          threadId: tracked.threadId,
+          turnId: tracked.turnId,
+          cause,
+        }),
+      ),
+    );
+    yield* Effect.sleep(`${idleWatchdogCompletionGraceMs} millis`);
+
+    if (openTurnWatchdogs.get(tracked.threadId) !== tracked) {
+      return;
+    }
+
+    syntheticSettledTurns.set(tracked.threadId, tracked.turnId);
+    yield* tracked.adapter.stopSession(tracked.threadId).pipe(
+      Effect.timeout(`${idleWatchdogControlTimeoutMs} millis`),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.idle-watchdog.stop-failed", {
+          threadId: tracked.threadId,
+          turnId: tracked.turnId,
+          cause,
+        }),
+      ),
+    );
+    yield* clearMcpSession(tracked.threadId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.idle-watchdog.mcp-cleanup-failed", {
+          threadId: tracked.threadId,
+          turnId: tracked.turnId,
+          cause,
+        }),
+      ),
+    );
+
+    if (syntheticSettledTurns.get(tracked.threadId) !== tracked.turnId) {
+      return;
+    }
+
+    if (openTurnWatchdogs.get(tracked.threadId) === tracked) {
+      openTurnWatchdogs.delete(tracked.threadId);
+    }
+    bindingLastSeenTouchedAtMs.delete(tracked.threadId);
+    const completedEvent: ProviderRuntimeEvent = {
+      type: "turn.completed",
+      eventId: EventId.make(`${eventIdPrefix}:completed`),
+      provider: tracked.provider,
+      providerInstanceId: tracked.providerInstanceId,
+      threadId: tracked.threadId,
+      turnId: tracked.turnId,
+      createdAt: yield* nowIso,
+      payload: {
+        state: "failed",
+        errorMessage: message,
+      },
+    };
+    yield* publishObservedRuntimeEvent(completedEvent);
+  });
+
+  const sweepIdleTurns = Effect.fn("ProviderService.sweepIdleTurns")(function* () {
+    const nowMs = yield* Clock.currentTimeMillis;
+    for (const tracked of openTurnWatchdogs.values()) {
+      const idleThresholdMs =
+        idleWatchdogOptions?.idleThresholdMsByProvider?.[String(tracked.provider)] ??
+        idleWatchdogDefaultThresholdMs;
+      const idleDurationMs = nowMs - tracked.lastEventAtMs;
+      if (
+        tracked.recoveryStarted ||
+        idleDurationMs < idleThresholdMs ||
+        tracked.openRequestIds.size > 0 ||
+        tracked.anonymousOpenRequests > 0 ||
+        tracked.sessionState === "waiting"
+      ) {
+        continue;
+      }
+      tracked.recoveryStarted = true;
+      yield* recoverIdleTurn(tracked, idleDurationMs).pipe(Effect.forkScoped);
+    }
+  });
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set
@@ -495,6 +761,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             {
               instanceId: id,
               provider: adapter.provider,
+              adapter,
             },
             event,
           ),
@@ -510,6 +777,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Stream.fromSubscription(instanceChanges),
     () => reconcileInstanceSubscriptions,
   ).pipe(Effect.forkScoped);
+  if (idleWatchdogEnabled) {
+    yield* Effect.forever(
+      Effect.sleep(`${idleWatchdogSweepIntervalMs} millis`).pipe(Effect.andThen(sweepIdleTurns)),
+    ).pipe(Effect.forkScoped);
+  }
 
   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
     readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
@@ -1035,6 +1307,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         yield* clearMcpSession(input.threadId);
         bindingLastSeenTouchedAtMs.delete(input.threadId);
+        openTurnWatchdogs.delete(input.threadId);
+        syntheticSettledTurns.delete(input.threadId);
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,
@@ -1218,6 +1492,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
     bindingLastSeenTouchedAtMs.clear();
+    openTurnWatchdogs.clear();
+    syntheticSettledTurns.clear();
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>
       Effect.gen(function* () {

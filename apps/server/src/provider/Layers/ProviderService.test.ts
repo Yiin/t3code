@@ -293,7 +293,7 @@ const hasMetricSnapshot = (
       Object.entries(attributes).every(([key, value]) => snapshot.attributes?.[key] === value),
   );
 
-function makeProviderServiceLayer() {
+function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServiceLive>[0]) {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
   const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
@@ -314,7 +314,7 @@ function makeProviderServiceLayer() {
 
   const layer = it.layer(
     Layer.mergeAll(
-      makeProviderServiceLiveForTest().pipe(
+      makeProviderServiceLiveForTest(options).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
@@ -2160,6 +2160,336 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
           true,
         );
       }),
+  );
+});
+
+const idleWatchdog = makeProviderServiceLayer({
+  idleWatchdog: {
+    defaultIdleThresholdMs: 1_000,
+    idleThresholdMsByProvider: { codex: 100 },
+    sweepIntervalMs: 10,
+    controlCallTimeoutMs: 20,
+    completionGraceMs: 50,
+  },
+});
+idleWatchdog.layer("ProviderServiceLive idle watchdog", (it) => {
+  const emitTurnStarted = (threadId: ThreadId, turnId: TurnId, eventId: string): void => {
+    idleWatchdog.codex.emit({
+      type: "turn.started",
+      eventId: asEventId(eventId),
+      provider: CODEX_DRIVER,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+      payload: {},
+    });
+  };
+
+  const emitTurnCompleted = (threadId: ThreadId, turnId: TurnId, eventId: string): void => {
+    idleWatchdog.codex.emit({
+      type: "turn.completed",
+      eventId: asEventId(eventId),
+      provider: CODEX_DRIVER,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+  };
+
+  const startEventCollector = Effect.fn("startIdleWatchdogEventCollector")(function* () {
+    const events = yield* Ref.make<Array<ProviderRuntimeEvent>>([]);
+    const fiber = yield* Stream.runForEach(
+      (yield* ProviderService.ProviderService).streamEvents,
+      (event) => Ref.update(events, (current) => [...current, event]),
+    ).pipe(Effect.forkChild);
+    yield* advanceTestClock(1);
+    return { events, fiber } as const;
+  });
+
+  it.effect("interrupts and fails a silent open turn, then drops its late completion", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-silent");
+      const turnId = asTurnId("turn-idle-watchdog-silent");
+      const collector = yield* startEventCollector();
+      idleWatchdog.codex.interruptTurn.mockClear();
+      idleWatchdog.codex.stopSession.mockClear();
+
+      emitTurnStarted(threadId, turnId, "evt-idle-started");
+      yield* advanceTestClock(110);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 1);
+
+      yield* advanceTestClock(60);
+      const beforeLateCompletion = yield* Ref.get(collector.events);
+      const runtimeError = beforeLateCompletion.find((event) => event.type === "runtime.error");
+      const failedCompletion = beforeLateCompletion.find(
+        (event) => event.type === "turn.completed" && event.payload.state === "failed",
+      );
+      assert.equal(idleWatchdog.codex.stopSession.mock.calls.length, 1);
+      assert.equal(runtimeError?.type, "runtime.error");
+      assert.include(runtimeError?.payload.message ?? "", String(threadId));
+      assert.include(runtimeError?.payload.message ?? "", String(turnId));
+      assert.include(runtimeError?.payload.message ?? "", String(CODEX_DRIVER));
+      assert.equal(failedCompletion?.type, "turn.completed");
+      if (failedCompletion?.type === "turn.completed") {
+        assert.include(failedCompletion.payload.errorMessage ?? "", "provider stream idle for");
+      }
+
+      emitTurnCompleted(threadId, turnId, "evt-idle-late-completion");
+      yield* advanceTestClock(1);
+      const afterLateCompletion = yield* Ref.get(collector.events);
+      assert.equal(
+        afterLateCompletion.filter(
+          (event) => event.type === "turn.completed" && event.turnId === turnId,
+        ).length,
+        1,
+      );
+      yield* Fiber.interrupt(collector.fiber);
+    }),
+  );
+
+  it.effect("does not trip while an approval request is open", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-request");
+      const turnId = asTurnId("turn-idle-watchdog-request");
+      idleWatchdog.codex.interruptTurn.mockClear();
+      emitTurnStarted(threadId, turnId, "evt-request-started");
+      idleWatchdog.codex.emit({
+        type: "request.opened",
+        eventId: asEventId("evt-request-opened"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        turnId,
+        requestId: asRequestId("request-idle-watchdog"),
+        payload: { requestType: "command_approval" },
+      });
+
+      yield* advanceTestClock(300);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 0);
+      emitTurnCompleted(threadId, turnId, "evt-request-completed");
+      yield* advanceTestClock(1);
+    }),
+  );
+
+  it.effect("uses every progress event as turn liveness", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-progress");
+      const turnId = asTurnId("turn-idle-watchdog-progress");
+      idleWatchdog.codex.interruptTurn.mockClear();
+      emitTurnStarted(threadId, turnId, "evt-progress-started");
+
+      for (let index = 0; index < 5; index++) {
+        yield* advanceTestClock(60);
+        idleWatchdog.codex.emit({
+          type: "tool.progress",
+          eventId: asEventId(`evt-progress-${index}`),
+          provider: CODEX_DRIVER,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          threadId,
+          turnId,
+          payload: { elapsedSeconds: index + 1 },
+        });
+        yield* Effect.yieldNow;
+      }
+
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 0);
+      emitTurnCompleted(threadId, turnId, "evt-progress-completed");
+      yield* advanceTestClock(1);
+    }),
+  );
+
+  it.effect("stops recovery when the provider completes during the grace window", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-grace");
+      const turnId = asTurnId("turn-idle-watchdog-grace");
+      idleWatchdog.codex.interruptTurn.mockClear();
+      idleWatchdog.codex.stopSession.mockClear();
+      emitTurnStarted(threadId, turnId, "evt-grace-started");
+
+      yield* advanceTestClock(110);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 1);
+      emitTurnCompleted(threadId, turnId, "evt-grace-completed");
+      yield* advanceTestClock(60);
+
+      assert.equal(idleWatchdog.codex.stopSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("does not let an old completion clear a newer turn", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-old-completion");
+      const oldTurnId = asTurnId("turn-idle-watchdog-old");
+      const newTurnId = asTurnId("turn-idle-watchdog-new");
+      idleWatchdog.codex.interruptTurn.mockClear();
+      emitTurnStarted(threadId, oldTurnId, "evt-old-turn-started");
+      emitTurnStarted(threadId, newTurnId, "evt-new-turn-started");
+      emitTurnCompleted(threadId, oldTurnId, "evt-old-turn-completed");
+
+      yield* advanceTestClock(110);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 1);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls[0]?.[1], newTurnId);
+      emitTurnCompleted(threadId, newTurnId, "evt-new-turn-completed");
+      yield* advanceTestClock(60);
+    }),
+  );
+
+  it.effect("publishes the failed completion when both control calls fail", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-control-failure");
+      const turnId = asTurnId("turn-idle-watchdog-control-failure");
+      const collector = yield* startEventCollector();
+      idleWatchdog.codex.interruptTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: String(CODEX_DRIVER),
+            method: "interruptTurn",
+            detail: "simulated interrupt failure",
+          }),
+        ),
+      );
+      idleWatchdog.codex.stopSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: String(CODEX_DRIVER),
+            method: "stopSession",
+            detail: "simulated stop failure",
+          }),
+        ),
+      );
+      emitTurnStarted(threadId, turnId, "evt-control-failure-started");
+
+      yield* advanceTestClock(170);
+      const events = yield* Ref.get(collector.events);
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.turnId === turnId &&
+            event.payload.state === "failed",
+        ),
+        true,
+      );
+      yield* Fiber.interrupt(collector.fiber);
+    }),
+  );
+
+  it.effect("publishes the failed completion when stop emits session.exited", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-stop-exit");
+      const turnId = asTurnId("turn-idle-watchdog-stop-exit");
+      const collector = yield* startEventCollector();
+      idleWatchdog.codex.stopSession.mockImplementationOnce(() =>
+        Effect.sync(() =>
+          idleWatchdog.codex.emit({
+            type: "session.exited",
+            eventId: asEventId("evt-stop-session-exited"),
+            provider: CODEX_DRIVER,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            threadId,
+            payload: { reason: "watchdog stop" },
+          }),
+        ).pipe(Effect.andThen(Effect.yieldNow)),
+      );
+      emitTurnStarted(threadId, turnId, "evt-stop-exit-started");
+
+      yield* advanceTestClock(170);
+      emitTurnCompleted(threadId, turnId, "evt-stop-exit-late-completion");
+      yield* advanceTestClock(1);
+      const events = yield* Ref.get(collector.events);
+      assert.equal(
+        events.filter((event) => event.type === "turn.completed" && event.turnId === turnId).length,
+        1,
+      );
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.turnId === turnId &&
+            event.payload.state === "failed",
+        ),
+        true,
+      );
+      yield* Fiber.interrupt(collector.fiber);
+    }),
+  );
+
+  it.effect("time-bounds control calls that never complete", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-control-timeout");
+      const turnId = asTurnId("turn-idle-watchdog-control-timeout");
+      const collector = yield* startEventCollector();
+      idleWatchdog.codex.interruptTurn.mockImplementationOnce(() => Effect.never);
+      idleWatchdog.codex.stopSession.mockImplementationOnce(() => Effect.never);
+      emitTurnStarted(threadId, turnId, "evt-control-timeout-started");
+
+      yield* advanceTestClock(110);
+      yield* advanceTestClock(25);
+      yield* advanceTestClock(60);
+      yield* advanceTestClock(25);
+      const events = yield* Ref.get(collector.events);
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.turnId === turnId &&
+            event.payload.state === "failed",
+        ),
+        true,
+      );
+      yield* Fiber.interrupt(collector.fiber);
+    }),
+  );
+
+  it.effect("does not trip while waiting or while an anonymous request is open", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-idle-watchdog-waiting");
+      const turnId = asTurnId("turn-idle-watchdog-waiting");
+      idleWatchdog.codex.interruptTurn.mockClear();
+      emitTurnStarted(threadId, turnId, "evt-waiting-started");
+      idleWatchdog.codex.emit({
+        type: "session.state.changed",
+        eventId: asEventId("evt-session-waiting"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        payload: { state: "waiting" },
+      });
+      yield* advanceTestClock(200);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 0);
+
+      idleWatchdog.codex.emit({
+        type: "session.state.changed",
+        eventId: asEventId("evt-session-running"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        payload: { state: "running" },
+      });
+      idleWatchdog.codex.emit({
+        type: "user-input.requested",
+        eventId: asEventId("evt-anonymous-request"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        turnId,
+        payload: { questions: [] },
+      });
+      yield* advanceTestClock(200);
+      assert.equal(idleWatchdog.codex.interruptTurn.mock.calls.length, 0);
+
+      idleWatchdog.codex.emit({
+        type: "user-input.resolved",
+        eventId: asEventId("evt-anonymous-resolved"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        turnId,
+        payload: { answers: {} },
+      });
+      emitTurnCompleted(threadId, turnId, "evt-waiting-completed");
+      yield* advanceTestClock(1);
+    }),
   );
 });
 
