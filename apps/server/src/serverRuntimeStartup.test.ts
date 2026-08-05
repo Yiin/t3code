@@ -258,6 +258,8 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
           getFullThreadDiffContext: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadSessionById: () => Effect.succeed(Option.none()),
+          getThreadSubagentLiveness: () =>
+            Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
           listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
@@ -323,6 +325,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         getFullThreadDiffContext: () => Effect.succeed(Option.none()),
         getThreadShellById: () => Effect.die("unused"),
         getThreadSessionById: () => Effect.die("unused"),
+        getThreadSubagentLiveness: () =>
+          Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
         listAutoSettleCandidates: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
@@ -369,6 +373,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
         getFullThreadDiffContext: () => Effect.succeed(Option.none()),
         getThreadShellById: () => Effect.die("unused"),
         getThreadSessionById: () => Effect.die("unused"),
+        getThreadSubagentLiveness: () =>
+          Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
         listAutoSettleCandidates: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
@@ -421,6 +427,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
         getFullThreadDiffContext: () => Effect.succeed(Option.none()),
         getThreadShellById: () => Effect.die("unused"),
         getThreadSessionById: () => Effect.die("unused"),
+        getThreadSubagentLiveness: () =>
+          Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
         listAutoSettleCandidates: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),

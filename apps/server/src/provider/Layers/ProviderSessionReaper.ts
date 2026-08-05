@@ -34,6 +34,12 @@ export interface ProviderSessionReaperLiveOptions {
    * test threshold into an instant kill for in-flight turns.
    */
   readonly activeTurnSkipCapMs?: number;
+  /**
+   * How recently a `running` subagent row must have been touched to keep its
+   * quiet session alive. Like the skip cap, deliberately not covered by
+   * `inactivityThresholdMs`: it is a freshness window, not an idle threshold.
+   */
+  readonly subagentFreshnessWindowMs?: number;
   readonly sweepIntervalMs?: number;
 }
 
@@ -62,6 +68,11 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       activeTurnSkipCapMs: Math.max(
         1,
         options?.activeTurnSkipCapMs ?? DEFAULT_SESSION_REAP_THRESHOLDS.activeTurnSkipCapMs,
+      ),
+      subagentFreshnessWindowMs: Math.max(
+        1,
+        options?.subagentFreshnessWindowMs ??
+          DEFAULT_SESSION_REAP_THRESHOLDS.subagentFreshnessWindowMs,
       ),
     };
     const shortestThresholdMs = minSessionReapThresholdMs(thresholds);
@@ -98,12 +109,30 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           .getThreadShellById(binding.threadId)
           .pipe(Effect.map(Option.getOrUndefined));
 
+        // The liveness read only happens when the shell already reports running
+        // subagent rows, so the common quiet session costs no extra query.
+        let activeSubagentCount = thread?.activeSubagentCount ?? 0;
+        let newestRunningSubagentAgeMs: number | null = null;
+        if (activeSubagentCount > 0) {
+          const liveness = yield* projectionSnapshotQuery.getThreadSubagentLiveness(
+            binding.threadId,
+          );
+          activeSubagentCount = liveness.activeSubagentCount;
+          const newestMs =
+            liveness.newestRunningUpdatedAt === null
+              ? Number.NaN
+              : Date.parse(liveness.newestRunningUpdatedAt);
+          newestRunningSubagentAgeMs = Number.isNaN(newestMs) ? null : now - newestMs;
+        }
+
         const decision = decideSessionReap({
           threadId: binding.threadId,
           status: binding.status,
           idleDurationMs,
           settledOverride: thread?.settledOverride ?? null,
           activeTurnId: thread?.session?.activeTurnId ?? null,
+          activeSubagentCount,
+          newestRunningSubagentAgeMs,
           thresholds,
         });
 
@@ -112,6 +141,14 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
             yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
               threadId: binding.threadId,
               activeTurnId: thread?.session?.activeTurnId,
+              idleDurationMs,
+            });
+          }
+          if (decision.reason === "active_subagent") {
+            yield* Effect.logDebug("provider.session.reaper.skipped-active-subagent", {
+              threadId: binding.threadId,
+              activeSubagentCount,
+              newestRunningSubagentAgeMs,
               idleDurationMs,
             });
           }

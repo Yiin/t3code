@@ -64,6 +64,16 @@ export interface ProjectionAutoSettleCandidate {
   readonly workspaceRoot: string;
 }
 
+/**
+ * The running-subagent slice of one thread, for liveness consumers.
+ */
+export interface ProjectionThreadSubagentLiveness {
+  /** Number of subagent rows still in status `running`. */
+  readonly activeSubagentCount: number;
+  /** `MAX(updated_at)` over the `running` rows, or null when there are none. */
+  readonly newestRunningUpdatedAt: string | null;
+}
+
 export interface ProjectionFullThreadDiffContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
@@ -202,6 +212,18 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadSessionById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationSession>, ProjectionRepositoryError>;
+
+  /**
+   * Read one thread's running-subagent liveness in a single indexed read.
+   *
+   * The session reaper consults this before reaping a quiet session: a fresh
+   * `running` row means in-flight work even when the main stream is idle
+   * (`sessionReapPolicy.ts`). Callers judge freshness against
+   * `RUNNING_SUBAGENT_FRESHNESS_MS` (`subagentLiveness.ts`).
+   */
+  readonly getThreadSubagentLiveness: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectionThreadSubagentLiveness, ProjectionRepositoryError>;
 
   /**
    * List the threads an auto-settle sweep may settle.

@@ -136,6 +136,7 @@ const ProjectionRunningSubagentCountRowSchema = Schema.Struct({
 });
 const ProjectionThreadRunningSubagentCountRowSchema = Schema.Struct({
   activeSubagentCount: Schema.Number,
+  newestRunningUpdatedAt: Schema.NullOr(Schema.String),
 });
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
@@ -894,7 +895,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadRunningSubagentCountRowSchema,
     execute: ({ threadId }) =>
       sql`
-        SELECT COUNT(*) AS "activeSubagentCount"
+        SELECT
+          COUNT(*) AS "activeSubagentCount",
+          MAX(updated_at) AS "newestRunningUpdatedAt"
         FROM projection_thread_subagents
         WHERE thread_id = ${threadId}
           AND status = 'running'
@@ -2444,6 +2447,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       } satisfies OrchestrationThreadShell);
     });
 
+  const getThreadSubagentLiveness: ProjectionSnapshotQueryShape["getThreadSubagentLiveness"] = (
+    threadId,
+  ) =>
+    countRunningSubagentRowsByThread({ threadId }).pipe(
+      Effect.map((row) => ({
+        activeSubagentCount: row.activeSubagentCount,
+        newestRunningUpdatedAt: row.newestRunningUpdatedAt,
+      })),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadSubagentLiveness:query",
+          "ProjectionSnapshotQuery.getThreadSubagentLiveness:decodeRow",
+        ),
+      ),
+      Effect.withSpan("ProjectionSnapshotQuery.getThreadSubagentLiveness"),
+    );
+
   // `projection_thread_sessions` has no archived_at column, so this read works
   // for an archived thread just as well as for an active one. That is the point:
   // teardown triggered by `thread.archived` has no other way to see the session.
@@ -2702,6 +2722,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFullThreadDiffContext,
     getThreadShellById,
     getThreadSessionById,
+    getThreadSubagentLiveness,
     listAutoSettleCandidates,
     getThreadDetailById,
     getThreadDetailSnapshot,

@@ -70,6 +70,8 @@ function makeReadModel(
   threads: ReadonlyArray<{
     readonly id: ThreadId;
     readonly settledOverride?: "settled" | "active" | null;
+    readonly activeSubagentCount?: number;
+    readonly newestRunningSubagentUpdatedAt?: string | null;
     readonly session: {
       readonly threadId: ThreadId;
       readonly status: "starting" | "running" | "ready" | "interrupted" | "stopped" | "error";
@@ -117,7 +119,8 @@ function makeReadModel(
       hasPendingApprovals: false,
       hasPendingUserInput: false,
       hasActionableProposedPlan: false,
-      activeSubagentCount: 0,
+      activeSubagentCount: thread.activeSubagentCount ?? 0,
+      newestRunningSubagentUpdatedAt: thread.newestRunningSubagentUpdatedAt ?? null,
       latestTurn: null,
       messages: [],
       session: thread.session,
@@ -230,6 +233,13 @@ describe("ProviderSessionReaper", () => {
                 input.readModel.threads.find((thread) => thread.id === threadId)?.session,
               ),
             ),
+          getThreadSubagentLiveness: (threadId) => {
+            const thread = input.readModel.threads.find((candidate) => candidate.id === threadId);
+            return Effect.succeed({
+              activeSubagentCount: thread?.activeSubagentCount ?? 0,
+              newestRunningUpdatedAt: thread?.newestRunningSubagentUpdatedAt ?? null,
+            });
+          },
           listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshot: () => Effect.die("unused"),
@@ -753,6 +763,125 @@ describe("ProviderSessionReaper", () => {
       iterationThreadId,
     ]);
     expect(harness.stoppedThreadIds.has(interactiveThreadId)).toBe(false);
+  });
+
+  it("spares a quiet-main-stream session whose subagent is still fresh", async () => {
+    const iterationThreadId = ThreadId.make(
+      epicRunIterationThreadId({
+        runId: "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d",
+        iterationIndex: 1,
+      }),
+    );
+    const now = DateTime.formatIso(DateTime.nowUnsafe());
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: iterationThreadId,
+          // The incident shape: the adapter falsely reported turn end, so the
+          // turn pointer is gone, but a Task subagent is still working.
+          activeSubagentCount: 1,
+          newestRunningSubagentUpdatedAt: now,
+          session: {
+            threadId: iterationThreadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: iterationThreadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        // Stale for the 1s idle threshold; only the fresh subagent saves it.
+        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        resumeCursor: {
+          opaque: "resume-fresh-subagent",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    await runtime!.runPromise(drainFibers);
+
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    const remaining = await runtime!.runPromise(
+      repository.getByThreadId({ threadId: iterationThreadId }),
+    );
+    expect(Option.isSome(remaining)).toBe(true);
+  });
+
+  it("reaps a quiet session whose running subagent row went stale", async () => {
+    const iterationThreadId = ThreadId.make(
+      epicRunIterationThreadId({
+        runId: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f",
+        iterationIndex: 4,
+      }),
+    );
+    const now = DateTime.nowUnsafe();
+    const staleSubagentUpdatedAt = DateTime.formatIso(
+      DateTime.subtractDuration(now, Duration.minutes(20)),
+    );
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: iterationThreadId,
+          activeSubagentCount: 1,
+          newestRunningSubagentUpdatedAt: staleSubagentUpdatedAt,
+          session: {
+            threadId: iterationThreadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: DateTime.formatIso(now),
+          },
+        },
+      ]),
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: iterationThreadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        resumeCursor: {
+          opaque: "resume-stale-subagent",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+
+    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: iterationThreadId });
   });
 
   it("reaps a settled thread on the short threshold", async () => {

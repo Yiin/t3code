@@ -989,6 +989,23 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       if (threadShell._tag === "Some") {
         assert.equal(threadShell.value.activeSubagentCount, 1);
       }
+
+      // The reaper's liveness read rides the same query: the running count
+      // plus the newest running row's updated_at ('task-1'; the completed
+      // 'task-2' row must not count).
+      const liveness = yield* snapshotQuery.getThreadSubagentLiveness(ThreadId.make("thread-1"));
+      assert.deepEqual(liveness, {
+        activeSubagentCount: 1,
+        newestRunningUpdatedAt: "2026-02-24T00:00:06.000Z",
+      });
+
+      const emptyLiveness = yield* snapshotQuery.getThreadSubagentLiveness(
+        ThreadId.make("thread-without-subagents"),
+      );
+      assert.deepEqual(emptyLiveness, {
+        activeSubagentCount: 0,
+        newestRunningUpdatedAt: null,
+      });
     }),
   );
 

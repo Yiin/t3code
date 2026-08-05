@@ -177,6 +177,8 @@ function withHarness(
     const dispatched: Array<OrchestrationCommand> = [];
 
     const snapshotQuery = {
+      getThreadSubagentLiveness: () =>
+        Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
       listAutoSettleCandidates: (request: {
         idleBefore: string | null;
         limit: number;

@@ -6,6 +6,7 @@ import {
   DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
   DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
   DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
+  DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS,
   decideSessionReap,
   minSessionReapThresholdMs,
   sessionReapThreadKind,
@@ -24,6 +25,7 @@ const INJECTED_THRESHOLDS = {
   epicRunIterationIdleThresholdMs: 1_000,
   settledIdleThresholdMs: 500,
   activeTurnSkipCapMs: 2_000,
+  subagentFreshnessWindowMs: 300,
 } as const;
 
 const decide = (overrides: Partial<SessionReapInput>): SessionReapDecision =>
@@ -282,6 +284,97 @@ describe("decideSessionReap", () => {
       thresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
     },
     {
+      name: "keeps a quiet iteration session while a fresh subagent still works",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: 60_000,
+      },
+      reap: false,
+      reason: "active_subagent",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "reaps a quiet iteration session whose running subagent went stale",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS,
+      },
+      reap: true,
+      reason: "epic_run_iteration_idle_threshold",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "reaps an iteration session with a fresh subagent past the skip cap",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: 1_000,
+      },
+      reap: true,
+      reason: "epic_run_iteration_idle_threshold",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "ignores a fresh subagent age when the running count is zero",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+        activeSubagentCount: 0,
+        newestRunningSubagentAgeMs: 60_000,
+      },
+      reap: true,
+      reason: "epic_run_iteration_idle_threshold",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "ignores running subagents whose timestamps are unreadable",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: null,
+      },
+      reap: true,
+      reason: "epic_run_iteration_idle_threshold",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "treats a future-stamped subagent row as fresh",
+      input: {
+        threadId: ITERATION_THREAD_ID,
+        idleDurationMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: -60_000,
+      },
+      reap: false,
+      reason: "active_subagent",
+      threadKind: "epic-run-iteration",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
+      name: "keeps a settled session while a fresh subagent still works",
+      input: {
+        settledOverride: "settled",
+        idleDurationMs: DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: 60_000,
+      },
+      reap: false,
+      reason: "active_subagent",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+    },
+    {
       name: "keeps a stopped binding even when its turn pointer is stale",
       input: {
         status: "stopped",
@@ -369,6 +462,38 @@ describe("decideSessionReap", () => {
     });
   });
 
+  it("honours an injected subagent freshness window", () => {
+    expect(
+      decide({
+        threadId: ITERATION_THREAD_ID,
+        thresholds: INJECTED_THRESHOLDS,
+        idleDurationMs: 1_500,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: 299,
+      }),
+    ).toEqual({
+      reap: false,
+      reason: "active_subagent",
+      threadKind: "epic-run-iteration",
+      thresholdMs: 2_000,
+    });
+
+    expect(
+      decide({
+        threadId: ITERATION_THREAD_ID,
+        thresholds: INJECTED_THRESHOLDS,
+        idleDurationMs: 1_500,
+        activeSubagentCount: 1,
+        newestRunningSubagentAgeMs: 300,
+      }),
+    ).toEqual({
+      reap: true,
+      reason: "epic_run_iteration_idle_threshold",
+      threadKind: "epic-run-iteration",
+      thresholdMs: 1_000,
+    });
+  });
+
   it("caps the skip below the interactive backstop, not above it", () => {
     // The cap is shorter than the 36-hour interactive threshold, so the active
     // turn must be judged before the idle compare or it never fires.
@@ -395,6 +520,7 @@ describe("minSessionReapThresholdMs", () => {
         epicRunIterationIdleThresholdMs: 1_000,
         settledIdleThresholdMs: 500,
         activeTurnSkipCapMs: 100,
+        subagentFreshnessWindowMs: 50,
       }),
     ).toBe(100);
   });

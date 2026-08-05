@@ -1,5 +1,7 @@
 import { parseEpicRunIterationThreadId } from "@t3tools/contracts";
 
+import { RUNNING_SUBAGENT_FRESHNESS_MS } from "../orchestration/subagentLiveness.ts";
+
 /**
  * Idle backstop for an ordinary interactive thread. Long on purpose: teardown
  * is settle-driven now, so the reaper only has to catch a session nobody ever
@@ -34,11 +36,24 @@ export const DEFAULT_SETTLED_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
  */
 export const DEFAULT_ACTIVE_TURN_SKIP_CAP_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How recently a `running` subagent row must have been touched for the session
+ * to count as actively working. Sourced from the shared liveness bound so
+ * "still working" means the same thing to the settle decider, the auto-settle
+ * sweep and the reaper.
+ */
+export const DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS = RUNNING_SUBAGENT_FRESHNESS_MS;
+
 export interface SessionReapThresholds {
   readonly interactiveIdleThresholdMs: number;
   readonly epicRunIterationIdleThresholdMs: number;
   readonly settledIdleThresholdMs: number;
   readonly activeTurnSkipCapMs: number;
+  /**
+   * Freshness window for the subagent skip, not an idle threshold: it never
+   * reaps anything on its own, so `minSessionReapThresholdMs` excludes it.
+   */
+  readonly subagentFreshnessWindowMs: number;
 }
 
 export const DEFAULT_SESSION_REAP_THRESHOLDS: SessionReapThresholds = {
@@ -46,6 +61,7 @@ export const DEFAULT_SESSION_REAP_THRESHOLDS: SessionReapThresholds = {
   epicRunIterationIdleThresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
   settledIdleThresholdMs: DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
   activeTurnSkipCapMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+  subagentFreshnessWindowMs: DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS,
 };
 
 export type SessionReapThreadKind = "interactive" | "epic-run-iteration";
@@ -57,6 +73,8 @@ export type SessionReapReason =
   | "within_idle_threshold"
   /** Keep: a turn is still attached to the thread and is inside the skip cap. */
   | "active_turn"
+  /** Keep: a fresh running subagent is still working the thread, inside the skip cap. */
+  | "active_subagent"
   /** Reap: a turn is still attached, but it outlived the skip cap, so it is dead. */
   | "stale_active_turn"
   /** Reap: idle past the interactive backstop. */
@@ -85,6 +103,15 @@ export interface SessionReapInput {
   /** `settledOverride` from the thread shell: an explicit settle or keep-active pin. */
   readonly settledOverride: "settled" | "active" | null;
   readonly activeTurnId: string | null;
+  /** `activeSubagentCount` from the thread shell: `running` subagent rows on the thread. */
+  readonly activeSubagentCount?: number;
+  /**
+   * Age of the newest `running` subagent row (now minus its `updatedAt`), or
+   * null when there is none or its timestamp is unreadable. The caller computes
+   * the age so the policy stays clock-free; a future timestamp (negative age)
+   * simply reads fresh, matching `countFreshRunningSubagents`.
+   */
+  readonly newestRunningSubagentAgeMs?: number | null;
   readonly thresholds?: SessionReapThresholds;
 }
 
@@ -155,6 +182,26 @@ export const decideSessionReap = (input: SessionReapInput): SessionReapDecision 
     return input.idleDurationMs < capMs
       ? { reap: false, reason: "active_turn", threadKind, thresholdMs: capMs }
       : { reap: true, reason: "stale_active_turn", threadKind, thresholdMs: capMs };
+  }
+
+  // A fresh running subagent is in-flight work even when the main stream is
+  // quiet — exactly the state after an adapter falsely reports turn end while
+  // a Task subagent still works. The freshness window keeps a stranded row
+  // from blocking forever, and the skip cap bounds the keep like the active
+  // turn's; past the cap the ordinary idle rules apply.
+  const subagentAgeMs = input.newestRunningSubagentAgeMs ?? null;
+  if (
+    (input.activeSubagentCount ?? 0) > 0 &&
+    subagentAgeMs !== null &&
+    subagentAgeMs < thresholds.subagentFreshnessWindowMs &&
+    input.idleDurationMs < thresholds.activeTurnSkipCapMs
+  ) {
+    return {
+      reap: false,
+      reason: "active_subagent",
+      threadKind,
+      thresholdMs: thresholds.activeTurnSkipCapMs,
+    };
   }
 
   if (input.idleDurationMs < thresholdMs) {
