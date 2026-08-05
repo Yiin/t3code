@@ -730,15 +730,20 @@ fleet_run() { # run a command under the fleet's resource cgroup
   fi
 }
 
-gate_run() { # run $GATE with this coordinator's own COOKEPIC_* vars stripped
+gate_run() { # run $GATE with this coordinator's own COOKEPIC_*/FLEET_UNIT vars stripped
   # A gate command may itself be (or invoke) cook-epic's own test suite —
   # self-testing this skill against a repo whose ambient environment already
   # carries this coordinator's COOKEPIC_EPIC/COOKEPIC_SIBLINGS/etc leaks that
   # state into the nested run, corrupting fixtures that assume a clean slate.
+  # FLEET_UNIT isn't COOKEPIC_-prefixed but leaks the same way: unset it so
+  # fleet_run asks systemd-run for an anonymous scope instead of reusing this
+  # coordinator's own (possibly still-live) unit name, which nested/self-test
+  # runs would otherwise collide with ("already loaded or has a fragment file").
   local name
   while IFS='=' read -r name _; do
     case "$name" in COOKEPIC_*) unset "$name" ;; esac
   done < <(env)
+  unset FLEET_UNIT
   fleet_run flock "$HEAVY_LOCK" bash -c "$GATE"
 }
 
