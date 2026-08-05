@@ -51,8 +51,11 @@ export const EpicRunIterationReport = Schema.Struct({
    * closed vocabulary — "no-commit-child-open", "turn-error", "timeout",
    * "dispatch-failed", "protocol-error", "blocked", "cancelled",
    * "server-restart" — so policy and UI can switch on it without parsing the
-   * human `summary`. Provider-attributed reasons ("provider-error:*") arrive
-   * with adapter error scoring.
+   * human `summary`. Provider-attributed failures carry the "provider-error"
+   * prefix: bare "provider-error" when only the session's error text is
+   * known, or "provider-error:spend-limit" / "provider-error:auth" /
+   * "provider-error:rate-limit" when the text matched the runner's curated
+   * pattern table.
    */
   failureReason: Schema.NullOr(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),

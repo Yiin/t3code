@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { classifyIteration, parseRalphReport } from "./ralphProtocol.ts";
+import { classifyIteration, detectProviderError, parseRalphReport } from "./ralphProtocol.ts";
 
 const completedWith = (text: string) =>
   ({
     turnState: "completed",
     finalMessage: { text, streaming: false },
     finalMessageWaitExhausted: false,
+    sessionLastError: null,
     committed: false,
     timedOut: false,
   }) as const;
@@ -16,6 +17,7 @@ const completedWithoutMessage = {
   turnState: "completed",
   finalMessage: null,
   finalMessageWaitExhausted: false,
+  sessionLastError: null,
   committed: false,
   timedOut: false,
 } as const;
@@ -137,6 +139,7 @@ describe("classifyIteration", () => {
       turnState: "completed",
       finalMessage: { text: "RALPH_DONE", streaming: true },
       finalMessageWaitExhausted: false,
+      sessionLastError: null,
       committed: false,
       timedOut: false,
     });
@@ -148,6 +151,7 @@ describe("classifyIteration", () => {
       turnState: "interrupted",
       finalMessage: { text: "RALPH_DONE", streaming: false },
       finalMessageWaitExhausted: false,
+      sessionLastError: null,
       committed: false,
       timedOut: false,
     });
@@ -161,6 +165,7 @@ describe("classifyIteration", () => {
       turnState: "interrupted",
       finalMessage: null,
       finalMessageWaitExhausted: true,
+      sessionLastError: null,
       committed: true,
       timedOut: false,
     });
@@ -172,9 +177,109 @@ describe("classifyIteration", () => {
       turnState: "completed",
       finalMessage: { text: "RALPH_DONE", streaming: false },
       finalMessageWaitExhausted: false,
+      sessionLastError: null,
       committed: false,
       timedOut: true,
     });
     expect(outcome.kind).toBe("timeout");
+  });
+
+  it("surfaces the session's lastError as the detail of an errored turn", () => {
+    const outcome = classifyIteration({
+      turnState: "error",
+      finalMessage: null,
+      finalMessageWaitExhausted: false,
+      sessionLastError: "You've hit your org's monthly spend limit; it resets on the 1st",
+      committed: false,
+      timedOut: false,
+    });
+    expect(outcome.kind).toBe("error");
+    expect(outcome.detail).toBe(
+      "provider error: You've hit your org's monthly spend limit; it resets on the 1st",
+    );
+    expect(outcome.failureReason).toBe("provider-error:spend-limit");
+  });
+
+  it("marks an uncategorised session lastError provider-error without a category", () => {
+    const outcome = classifyIteration({
+      turnState: "error",
+      finalMessage: null,
+      finalMessageWaitExhausted: false,
+      sessionLastError: "socket hang up",
+      committed: false,
+      timedOut: false,
+    });
+    expect(outcome.detail).toBe("provider error: socket hang up");
+    expect(outcome.failureReason).toBe("provider-error");
+  });
+
+  it("keeps the generic detail when an errored turn has no session lastError", () => {
+    const outcome = classifyIteration({
+      turnState: "error",
+      finalMessage: null,
+      finalMessageWaitExhausted: false,
+      sessionLastError: null,
+      committed: false,
+      timedOut: false,
+    });
+    expect(outcome.detail).toBe("turn ended in an error state");
+    expect(outcome.failureReason).toBeUndefined();
+  });
+
+  it("fails a report-less completed turn whose final message is a provider error", () => {
+    const outcome = classifyIteration(
+      completedWith("You've hit your org's monthly spend limit — upgrade to continue."),
+    );
+    expect(outcome.kind).toBe("error");
+    expect(outcome.detail).toBe(
+      "provider error: You've hit your org's monthly spend limit — upgrade to continue.",
+    );
+    expect(outcome.failureReason).toBe("provider-error:spend-limit");
+  });
+
+  it("does not reclassify a RALPH_MSG report that merely mentions limits", () => {
+    const outcome = classifyIteration({
+      ...completedWith(
+        'we discussed rate limits in the design\nRALPH_MSG: {"summary":"designed the rate limit backoff","why":"the API overloaded"}',
+      ),
+      committed: true,
+    });
+    expect(outcome.kind).toBe("done");
+    expect(outcome.failureReason).toBeUndefined();
+  });
+});
+
+describe("detectProviderError", () => {
+  it("categorises spend, auth, and rate-limit phrasing", () => {
+    expect(detectProviderError("You've hit your org's monthly spend limit.")).toEqual({
+      category: "spend-limit",
+      excerpt: "You've hit your org's monthly spend limit.",
+    });
+    expect(detectProviderError("Claude AI usage limit reached|1754355600")?.category).toBe(
+      "spend-limit",
+    );
+    expect(detectProviderError("Error: invalid API key")?.category).toBe("auth");
+    expect(detectProviderError("authentication_error: credentials expired")?.category).toBe("auth");
+    expect(detectProviderError("Your credit balance is too low")?.category).toBe("auth");
+    expect(detectProviderError("Request failed: 401 Unauthorized")?.category).toBe("auth");
+    expect(detectProviderError("Rate limit exceeded, retry later")?.category).toBe("rate-limit");
+    expect(detectProviderError("Overloaded: please try again")?.category).toBe("rate-limit");
+  });
+
+  it("returns the matched line, not the whole message", () => {
+    const match = detectProviderError(
+      "some preamble\nYou've hit your org's monthly spend limit; it resets tomorrow\ntrailing text",
+    );
+    expect(match?.excerpt).toBe("You've hit your org's monthly spend limit; it resets tomorrow");
+  });
+
+  it("bounds the excerpt length", () => {
+    const match = detectProviderError(`rate limit ${"x".repeat(500)}`);
+    expect(match?.excerpt.length).toBe(200);
+  });
+
+  it("does not match a bare number that is not 401, or ordinary prose", () => {
+    expect(detectProviderError("closed issue t3code-4012 with a commit")).toBeNull();
+    expect(detectProviderError("all tests passed; pushed the fix")).toBeNull();
   });
 });

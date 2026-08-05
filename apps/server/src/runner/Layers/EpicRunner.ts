@@ -131,6 +131,8 @@ const buildTransportRun = (
  * their own sites, which are the only places that know the turn never
  * started, was cancelled, or died with the server. A completed no-commit turn
  * is only chargeable when its child issue was left open, hence the suffix.
+ * Classification can override this table with something more specific — the
+ * `provider-error:*` family (`EpicIterationOutcome.failureReason`).
  */
 const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | null => {
   switch (kind) {
@@ -1088,6 +1090,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           turnState: iterationTurnState(thread),
           finalMessage: resolveFinalAssistantMessage(thread),
           finalMessageWaitExhausted: settled.messageWaitExhausted,
+          sessionLastError: thread?.session?.lastError ?? null,
           committed,
           timedOut: input.timedOut,
         });
@@ -1313,7 +1316,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             ? null
             : settleResult._tag === "dispatch-failed"
               ? "dispatch-failed"
-              : failureReasonForOutcome(outcome.kind);
+              : (outcome.failureReason ?? failureReasonForOutcome(outcome.kind));
 
         yield* store
           .updateIteration({

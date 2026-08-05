@@ -191,6 +191,9 @@ function EpicRunLog(props: {
                     <span className="font-mono">{iteration.issueId}</span>
                   ) : null}
                   <span>{iteration.turnStatus}</span>
+                  {iteration.failureReason ? (
+                    <span className="font-mono text-destructive">{iteration.failureReason}</span>
+                  ) : null}
                   <span className="tabular-nums">{epicRunIterationDuration(iteration, now)}</span>
                 </div>
                 {iteration.summary ? (

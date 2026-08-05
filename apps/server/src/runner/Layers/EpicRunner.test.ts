@@ -60,6 +60,8 @@ interface ScriptedIteration {
   readonly head: string;
   readonly turnState?: ProjectionThreadTurnStatus;
   readonly sessionStatus?: OrchestrationSessionStatus;
+  /** The projected session's `lastError` once the turn settles. */
+  readonly sessionLastError?: string;
   readonly streaming?: boolean;
   /** Leave the turn hanging so the iteration has to be cancelled or time out. */
   readonly stall?: boolean;
@@ -106,6 +108,7 @@ const makeThreadDetail = (input: {
    */
   readonly latestTurnPointerNull?: boolean;
   readonly sessionStatus?: OrchestrationSessionStatus;
+  readonly sessionLastError?: string | undefined;
 }): OrchestrationThread => {
   const messageId = MessageId.make(`${input.threadId}-assistant`);
   return {
@@ -160,7 +163,7 @@ const makeThreadDetail = (input: {
             providerName: "claudeAgent",
             runtimeMode: "full-access",
             activeTurnId: null,
-            lastError: null,
+            lastError: input.sessionLastError ?? null,
             updatedAt: NOW,
           },
   };
@@ -347,6 +350,7 @@ function createHarness(input: {
           streaming: scripted.streaming ?? false,
           latestTurnPointerNull: scripted.detailTurnPointerNull ?? false,
           sessionStatus: scripted.sessionStatus ?? "ready",
+          sessionLastError: scripted.sessionLastError,
         }),
       );
       if (scripted.messageSettleDelayReads !== undefined) {
@@ -1275,6 +1279,97 @@ describe("EpicRunner", () => {
       );
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live("surfaces the session's provider error into the iteration row and run.lastError", () => {
+    // The 2026-08-04 incident: a 429 spend limit killed both runs, but the
+    // only recorded reason was "gutter: 2 iterations without a commit". The
+    // real error text is in the projected session's lastError and must reach
+    // the iteration summary and, when the run fails, epic_runs.last_error.
+    const spendLimit = "You've hit your org's monthly spend limit; it resets on the 1st";
+    const harness = createHarness({
+      script: [
+        {
+          text: null,
+          head: "head-0",
+          turnState: "error",
+          sessionStatus: "error",
+          sessionLastError: spendLimit,
+        },
+      ],
+      options: { maxConsecutiveFailures: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(
+        harness.store.runs.get(run.runId)!.lastError,
+        `provider error: ${spendLimit}`,
+      );
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[0]?.summary, `provider error: ${spendLimit}`);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "provider-error:spend-limit");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live(
+    "fails an iteration whose final message is a provider error and releases its child",
+    () => {
+      // Failure mode B rendered the spend-limit error as an ordinary assistant
+      // message on a cleanly-completed turn. Without the text scan this scored
+      // "no-commit" and the true cause never left the provider logs.
+      const harness = createHarness({
+        script: [
+          {
+            text: "You've hit your org's monthly spend limit — upgrade to continue.",
+            head: "head-0",
+          },
+          { text: "RALPH_DONE", head: "head-0" },
+        ],
+        readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
+        childStatuses: { "child-1": "in_progress" },
+      });
+
+      return Effect.gen(function* () {
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        yield* settle;
+
+        assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+        assert.strictEqual(
+          harness.store.iterations[0]?.failureReason,
+          "provider-error:spend-limit",
+        );
+        assert.strictEqual(
+          harness.store.iterations[0]?.summary,
+          "provider error: You've hit your org's monthly spend limit — upgrade to continue.",
+        );
+
+        // The provider error charged consecutiveFailures, not the gutter, and
+        // the failed iteration's claimed child was reopened before the next
+        // iteration selected work — which re-picked it and finished the run.
+        const updates = harness.processRequests.filter(
+          (request) => request.command === "bd" && request.args[0] === "update",
+        );
+        assert.strictEqual(updates.length, 1);
+        assert.deepStrictEqual(updates[0]!.args, [
+          "update",
+          "child-1",
+          "--status",
+          "open",
+          "--assignee",
+          "",
+        ]);
+        const readyIndexes = harness.processRequests.flatMap((request, index) =>
+          request.command === "bd" && request.args[0] === "ready" ? [index] : [],
+        );
+        assert.strictEqual(readyIndexes.length, 2);
+        assert.isBelow(harness.processRequests.indexOf(updates[0]!), readyIndexes[1]!);
+        assert.strictEqual(harness.store.iterations[1]?.turnStatus, "completed");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.live("scores an iteration whose turn could not be dispatched with its own reason", () => {
     const harness = createHarness({

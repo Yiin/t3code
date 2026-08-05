@@ -50,6 +50,75 @@ export const hasRalphDone = (text: string): boolean => RALPH_DONE_PATTERN.test(t
 export const hasRalphBlocked = (text: string): boolean => RALPH_BLOCKED_PATTERN.test(text);
 
 /**
+ * A provider-error phrase recognised in an assistant message. The category is
+ * machine-readable — it becomes the `provider-error:<category>` failure
+ * reason — and the excerpt is the human-readable line it was found on.
+ */
+export interface ProviderErrorMatch {
+  readonly category: "spend-limit" | "auth" | "rate-limit";
+  readonly excerpt: string;
+}
+
+/**
+ * Curated, case-insensitive phrasing of the provider errors the SDKs render as
+ * ordinary assistant text (the 2026-08-04 spend-limit incident arrived as a
+ * synthetic assistant message, not an error event). Best-effort by design:
+ * false negatives are acceptable, so the list stays short and unambiguous
+ * rather than trying to match every provider's wording.
+ */
+const PROVIDER_ERROR_PATTERNS: ReadonlyArray<{
+  readonly category: ProviderErrorMatch["category"];
+  readonly pattern: RegExp;
+}> = [
+  { category: "spend-limit", pattern: /monthly spend limit/i },
+  { category: "spend-limit", pattern: /usage limit/i },
+  { category: "auth", pattern: /invalid api key/i },
+  { category: "auth", pattern: /authentication/i },
+  { category: "auth", pattern: /credit balance/i },
+  { category: "auth", pattern: /unauthorized/i },
+  { category: "auth", pattern: /\b401\b/ },
+  { category: "rate-limit", pattern: /rate limit/i },
+  { category: "rate-limit", pattern: /overloaded/i },
+];
+
+const MAX_PROVIDER_ERROR_EXCERPT_LENGTH = 200;
+
+/**
+ * Scan text for provider-error phrasing (spend limits, auth failures, rate
+ * limits) and return the first match, or `null`. The excerpt is the matched
+ * line, trimmed and bounded, so it can be surfaced verbatim as a failure
+ * reason. Callers gate this on "no RALPH_MSG report parsed": a legitimate
+ * report that merely *mentions* limits must never be reclassified.
+ */
+export const detectProviderError = (text: string): ProviderErrorMatch | null => {
+  for (const { category, pattern } of PROVIDER_ERROR_PATTERNS) {
+    const match = pattern.exec(text);
+    if (match === null) {
+      continue;
+    }
+    const lineStart = text.lastIndexOf("\n", match.index) + 1;
+    const lineEndIndex = text.indexOf("\n", match.index);
+    const lineEnd = lineEndIndex === -1 ? text.length : lineEndIndex;
+    const excerpt = text
+      .slice(lineStart, lineEnd)
+      .trim()
+      .slice(0, MAX_PROVIDER_ERROR_EXCERPT_LENGTH);
+    return { category, excerpt };
+  }
+  return null;
+};
+
+/**
+ * The `provider-error:*` failure reason for an error string: categorised when
+ * the text matches the pattern table, the bare prefix when it does not — a
+ * session `lastError` is provider-attributed regardless of its wording.
+ */
+export const providerErrorFailureReason = (text: string): string => {
+  const match = detectProviderError(text);
+  return match === null ? "provider-error" : `provider-error:${match.category}`;
+};
+
+/**
  * Extract the last `RALPH_MSG:` line's JSON payload, mirroring terminal ralph's
  * `grep -oE 'RALPH_MSG:.*' | tail -1` (`run.sh:329`). Last wins so a nested
  * quote of the protocol earlier in the message cannot shadow the real report.
@@ -118,6 +187,12 @@ export interface EpicIterationOutcome {
   /** Human-readable reason, present whenever the outcome is not routine. */
   readonly detail: string | null;
   readonly report: RalphReport | null;
+  /**
+   * Machine-readable failure reason when classification knows something more
+   * specific than the kind's default mapping — today the `provider-error:*`
+   * family. Absent otherwise; the runner falls back to its per-kind table.
+   */
+  readonly failureReason?: string;
 }
 
 /**
@@ -150,6 +225,15 @@ export interface ClassifyIterationInput {
    * "the wait is over", not as "a message is coming".
    */
   readonly finalMessageWaitExhausted: boolean;
+  /**
+   * The projected session's `lastError`, or `null`. Ingestion writes it from
+   * the provider's own error text (a failed turn's `errorMessage`, a
+   * `runtime.error`'s message) and clears it when the session reads back
+   * healthy, so a non-null value on an errored turn is the concrete provider
+   * error — "You've hit your org's monthly spend limit…" — that the generic
+   * "turn ended in an error state" used to launder away.
+   */
+  readonly sessionLastError: string | null;
   /** Whether the repo's `HEAD` moved across the iteration. */
   readonly committed: boolean;
   readonly timedOut: boolean;
@@ -160,7 +244,17 @@ export const classifyIteration = (input: ClassifyIterationInput): EpicIterationO
     return { kind: "timeout", detail: "iteration exceeded its timeout", report: null };
   }
   if (input.turnState === "error") {
-    return { kind: "error", detail: "turn ended in an error state", report: null };
+    // The session's lastError is the real provider error the turn died on;
+    // surfacing it is the difference between a run that reads "gutter: 2
+    // iterations without a commit" and one that reads "monthly spend limit".
+    return input.sessionLastError === null
+      ? { kind: "error", detail: "turn ended in an error state", report: null }
+      : {
+          kind: "error",
+          detail: `provider error: ${input.sessionLastError}`,
+          report: null,
+          failureReason: providerErrorFailureReason(input.sessionLastError),
+        };
   }
   if (input.turnState === "interrupted") {
     return { kind: "error", detail: "turn was interrupted", report: null };
@@ -215,6 +309,21 @@ export const classifyIteration = (input: ClassifyIterationInput): EpicIterationO
   }
   if (hasRalphBlocked(text)) {
     return { kind: "blocked", detail: "agent reported RALPH_BLOCKED", report };
+  }
+  // A turn that "completed" without a report may really be a provider error
+  // rendered as assistant text — the SDK prints spend-limit and auth failures
+  // as a synthetic final message. Scanned only when no RALPH_MSG parsed, so a
+  // legitimate report that mentions limits in prose is never reclassified.
+  if (report === null) {
+    const providerError = detectProviderError(text);
+    if (providerError !== null) {
+      return {
+        kind: "error",
+        detail: `provider error: ${providerError.excerpt}`,
+        report: null,
+        failureReason: `provider-error:${providerError.category}`,
+      };
+    }
   }
   return input.committed
     ? { kind: "done", detail: null, report }
