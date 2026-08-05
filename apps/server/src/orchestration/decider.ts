@@ -428,12 +428,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         Date.parse(occurredAt),
       );
       if (freshRunningSubagents > 0) {
-        return yield* Effect.fail(
-          new OrchestrationCommandInvariantError({
-            commandType: command.type,
-            detail: runningSubagentSettleRefusalDetail(command.threadId, freshRunningSubagents),
-          }),
-        );
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: runningSubagentSettleRefusalDetail(command.threadId, freshRunningSubagents),
+        });
       }
       // A queued turn start — a user message no turn has picked up yet — is
       // work in flight even though session is still null (turn.start emits

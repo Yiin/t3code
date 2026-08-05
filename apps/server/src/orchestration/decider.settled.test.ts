@@ -13,6 +13,8 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
@@ -202,10 +204,13 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           updatedAt,
           completedAt: status === "completed" ? updatedAt : null,
         });
-        // The decider reads the real clock, so freshness fixtures are relative
-        // to it rather than to the fixture NOW.
-        const freshAt = new Date().toISOString();
-        const staleAt = new Date(Date.now() - RUNNING_SUBAGENT_FRESHNESS_MS - 60_000).toISOString();
+        // The decider reads the Effect clock. Keep both fixtures on that same
+        // clock so this test remains deterministic under @effect/vitest.
+        const now = yield* DateTime.now;
+        const freshAt = DateTime.formatIso(now);
+        const staleAt = DateTime.formatIso(
+          DateTime.subtractDuration(now, Duration.millis(RUNNING_SUBAGENT_FRESHNESS_MS + 60_000)),
+        );
 
         // Fresh running subagent: in-flight work, settle refused — with the
         // stable marker the EpicRunner branches on.

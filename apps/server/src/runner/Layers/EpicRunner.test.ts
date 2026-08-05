@@ -13,6 +13,7 @@ import {
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -34,6 +35,7 @@ import {
 import * as ProcessRunner from "../../processRunner.ts";
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
+import { runningSubagentSettleRefusalDetail } from "../../orchestration/subagentLiveness.ts";
 import {
   EpicRunLock,
   EpicRunLockError,
@@ -41,7 +43,11 @@ import {
   type EpicRunLockLease,
 } from "../Services/EpicRunLock.ts";
 import { EpicRunner } from "../Services/EpicRunner.ts";
-import { EPIC_RUN_ITERATION_PROMPT, makeEpicRunnerLive } from "./EpicRunner.ts";
+import {
+  EPIC_RUN_CONTINUATION_PROMPT,
+  EPIC_RUN_ITERATION_PROMPT,
+  makeEpicRunnerLive,
+} from "./EpicRunner.ts";
 
 const projectId = ProjectId.make("project-epic-runner");
 const modelSelection = {
@@ -83,6 +89,15 @@ interface ScriptedIteration {
    * Classification then has only the session status to go on.
    */
   readonly detailTurnPointerNull?: boolean;
+  /**
+   * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
+   * that report one FRESH `running` subagent before it flips to `completed` —
+   * models the incident where the turn ended while a Task subagent was still
+   * working. `Number.POSITIVE_INFINITY` keeps it running forever, for the
+   * grace-timeout path. The row's `updatedAt` is stamped from the real clock
+   * at read time, because the runner's freshness window is real-clock too.
+   */
+  readonly subagentDrainReads?: number;
 }
 
 const waitFor = (predicate: () => boolean) =>
@@ -291,6 +306,12 @@ function createHarness(input: {
    * The command is still recorded, so a test can assert it was attempted.
    */
   readonly refuseCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
+  /**
+   * Details for successive `thread.settle` refusals, consumed one per settle;
+   * once exhausted, settles succeed. Lets a test hand the runner the decider's
+   * running-subagent refusal and observe the drain-and-retry branch.
+   */
+  readonly settleRefusalDetails?: ReadonlyArray<string>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs);
   for (const run of input.seedRuns ?? []) {
@@ -317,6 +338,10 @@ function createHarness(input: {
   // assistant message before the real one is revealed — see
   // `ScriptedIteration.messageSettleDelayReads`.
   const messageSettleDelayReads = new Map<string, number>();
+  // Remaining detail reads, per thread, that report a fresh running subagent —
+  // see `ScriptedIteration.subagentDrainReads`.
+  const subagentDrainReads = new Map<string, number>();
+  const settleRefusalDetails = [...(input.settleRefusalDetails ?? [])];
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -344,7 +369,10 @@ function createHarness(input: {
         threadId,
         makeThreadDetail({
           threadId,
-          turnId: TurnId.make(`${threadId}-turn`),
+          // Unique per dispatched turn: a continuation turn on the same thread
+          // must project a NEW turn id, exactly as provider adoption would,
+          // or `awaitTurnEnd`'s prior-turn mask could never see it end.
+          turnId: TurnId.make(`${threadId}-turn-${turnsStarted}`),
           turnState: scripted.turnState ?? "completed",
           text: scripted.text,
           streaming: scripted.streaming ?? false,
@@ -355,6 +383,9 @@ function createHarness(input: {
       );
       if (scripted.messageSettleDelayReads !== undefined) {
         messageSettleDelayReads.set(threadId, scripted.messageSettleDelayReads);
+      }
+      if (scripted.subagentDrainReads !== undefined) {
+        subagentDrainReads.set(threadId, scripted.subagentDrainReads);
       }
       shells.set(threadId, {
         latestTurn: scripted.turnState ?? "completed",
@@ -371,6 +402,12 @@ function createHarness(input: {
     ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
       Effect.gen(function* () {
         dispatched.push(command);
+        if (command.type === "thread.settle" && settleRefusalDetails.length > 0) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: settleRefusalDetails.shift()!,
+          });
+        }
         if (input.refuseCommandTypes?.includes(command.type) === true) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
@@ -429,7 +466,8 @@ function createHarness(input: {
             shell.latestTurn === null
               ? null
               : {
-                  turnId: TurnId.make(`${threadId}-turn`),
+                  turnId:
+                    details.get(threadId)?.latestTurn?.turnId ?? TurnId.make(`${threadId}-turn`),
                   state: shell.latestTurn,
                   requestedAt: NOW,
                   startedAt: NOW,
@@ -478,10 +516,33 @@ function createHarness(input: {
     listAutoSettleCandidates: () => Effect.succeed([]),
     getThreadDetailById: () => Effect.die("unused"),
     getThreadDetailSnapshot: (threadId) =>
-      Effect.sync(() => {
-        const thread = details.get(threadId);
-        if (thread === undefined) {
+      Effect.gen(function* () {
+        const detail = details.get(threadId);
+        if (detail === undefined) {
           return Option.none();
+        }
+        let thread = detail;
+        const remainingSubagentReads = subagentDrainReads.get(threadId);
+        if (remainingSubagentReads !== undefined) {
+          const running = remainingSubagentReads > 0;
+          if (running && Number.isFinite(remainingSubagentReads)) {
+            subagentDrainReads.set(threadId, remainingSubagentReads - 1);
+          }
+          // Use the same Effect clock as the runner's freshness check.
+          const stampedAt = DateTime.formatIso(yield* DateTime.now);
+          thread = {
+            ...thread,
+            subagents: [
+              {
+                subagentId: `task-${threadId}`,
+                turnId: TurnId.make(`${threadId}-turn`),
+                status: running ? "running" : "completed",
+                startedAt: stampedAt,
+                updatedAt: stampedAt,
+                completedAt: running ? null : stampedAt,
+              },
+            ],
+          };
         }
         const remainingDelay = messageSettleDelayReads.get(threadId) ?? 0;
         if (remainingDelay > 0) {
@@ -1250,6 +1311,124 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.runs.get(run.runId)?.status, "done");
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live(
+    "waits out running subagents after a no-commit turn and sends exactly one continuation",
+    () => {
+      // The 2026-08-04 incident shape: the agent backgrounded its work and
+      // ended the turn with no commit while a Task subagent was still running.
+      // Settling here would tear the session down and kill the subagent, so
+      // the runner must wait for the drain and grant one continuation turn.
+      const harness = createHarness({
+        script: [
+          {
+            text: "Watchdog running. Waiting for the workflow to complete...",
+            head: "head-0",
+            subagentDrainReads: 3,
+          },
+          // The continuation, dispatched only after the subagent drained.
+          {
+            text: 'folded it in\nRALPH_MSG: {"summary":"landed after grace","why":"subagent finished"}',
+            head: "head-1",
+          },
+          // A plain iteration with zero subagents settles exactly as today.
+          { text: "RALPH_DONE", head: "head-1" },
+        ],
+        options: { iterationTimeoutMs: 60_000 },
+      });
+
+      return Effect.gen(function* () {
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const created = harness.commandsOfType("thread.create");
+        assert.strictEqual(created.length, 2);
+        const iterationThreadId = created[0]!.threadId;
+        const turnStarts = harness
+          .commandsOfType("thread.turn.start")
+          .filter((command) => command.threadId === iterationThreadId);
+        // The original turn plus exactly ONE continuation, never more.
+        assert.strictEqual(turnStarts.length, 2);
+        const continuation = turnStarts[1]!;
+        assert.strictEqual(continuation.message.text, EPIC_RUN_CONTINUATION_PROMPT);
+        assert.strictEqual(continuation.message.messageId, `${iterationThreadId}-continue`);
+
+        // The thread was NOT settled on the original turn's end: its settle
+        // came only after the continuation turn was dispatched and finished.
+        const settles = harness.commandsOfType("thread.settle");
+        const settle = settles.find((command) => command.threadId === iterationThreadId)!;
+        assert.isAbove(harness.commands.indexOf(settle), harness.commands.indexOf(continuation));
+
+        // The continuation's commit and report classified the iteration.
+        assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+        assert.strictEqual(harness.store.iterations[0]?.summary, "landed after grace");
+        assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+
+        // The zero-subagent iteration got one turn and one settle — no
+        // continuation, no session stop anywhere.
+        assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 3);
+        assert.strictEqual(settles.length, 2);
+        assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.live("gives up the subagent grace wait at its bound and classifies as today", () => {
+    // A subagent that never drains must not wedge the iteration: the grace
+    // wait is bounded, and past the bound the no-commit turn is classified
+    // exactly as it would have been without the grace path.
+    const harness = createHarness({
+      script: [
+        {
+          text: "still waiting on my background task",
+          head: "head-0",
+          subagentDrainReads: Number.POSITIVE_INFINITY,
+        },
+      ],
+      options: { subagentGraceTimeoutMs: 40, maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      // No continuation was ever dispatched.
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live(
+    "retries a subagent-refused settle after the drain instead of stopping the session",
+    () => {
+      // The decider refuses a settle naming running subagents (e.g. the
+      // continuation turn spawned new ones). That refusal is real in-flight
+      // work, not a dead session: the runner must wait it out and settle again
+      // rather than falling straight through to the session stop that would
+      // kill the subagent.
+      const harness = createHarness({
+        script: [
+          { text: 'work\nRALPH_MSG: {"summary":"landed","why":"progress"}', head: "head-1" },
+          { text: "RALPH_DONE", head: "head-1" },
+        ],
+        settleRefusalDetails: [runningSubagentSettleRefusalDetail(ThreadId.make("thread-any"), 1)],
+      });
+
+      return Effect.gen(function* () {
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const settles = harness.commandsOfType("thread.settle");
+        // Iteration 1: the refused settle plus its retry; iteration 2: one.
+        assert.strictEqual(settles.length, 3);
+        assert.strictEqual(settles[0]!.threadId, settles[1]!.threadId);
+        // Receipts remember the refused commandId, so the retry needs its own.
+        assert.notStrictEqual(settles[0]!.commandId, settles[1]!.commandId);
+        assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.live("retries infra failures with backoff and fails only at the infra budget", () => {
     const failing = {
