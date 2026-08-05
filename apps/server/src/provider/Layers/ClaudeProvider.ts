@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type ModelSelection,
   type ServerProviderModel,
+  type ServerProviderSkill,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -564,7 +565,43 @@ type ClaudeCapabilitiesProbe = {
    */
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly skills: ReadonlyArray<ServerProviderSkill>;
 };
+
+function parseClaudeSkills(
+  skills: ReadonlyArray<ClaudeSlashCommand> | undefined,
+): ReadonlyArray<ServerProviderSkill> {
+  const skillsByName = new Map<string, ServerProviderSkill>();
+  for (const skill of skills ?? []) {
+    const name = nonEmptyProbeString(skill.name);
+    if (!name || skillsByName.has(name.toLowerCase())) {
+      continue;
+    }
+    const description = nonEmptyProbeString(skill.description);
+    skillsByName.set(name.toLowerCase(), {
+      name,
+      enabled: true,
+      ...(description ? { description } : {}),
+    });
+  }
+  return [...skillsByName.values()];
+}
+
+/**
+ * Skills double as slash commands in the CLI's command list. T3 Code
+ * surfaces skills only through the `$` composer trigger, so any command
+ * that names a known skill is dropped from the `/` command list.
+ */
+function excludeSkillCommands(
+  commands: ReadonlyArray<ServerProviderSlashCommand>,
+  skills: ReadonlyArray<ServerProviderSkill>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  if (skills.length === 0) {
+    return commands;
+  }
+  const skillNames = new Set(skills.map((skill) => skill.name.toLowerCase()));
+  return commands.filter((command) => !skillNames.has(command.name.toLowerCase()));
+}
 
 function parseClaudeInitializationCommands(
   commands: ReadonlyArray<ClaudeSlashCommand> | undefined,
@@ -629,6 +666,21 @@ function dedupeSlashCommands(
   return [...commandsByName.values()];
 }
 
+const SKILLS_PROBE_TIMEOUT_MS = 5_000;
+
+// Runs inside the SDK's promise-based query lifecycle, not Effect code.
+function raceWithTimeout<A>(promise: Promise<A>, timeoutMs: number): Promise<A | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => {
+      // @effect-diagnostics-next-line globalTimers:off
+      timer = setTimeout(() => resolve(undefined), timeoutMs);
+    }),
+    // @effect-diagnostics-next-line globalTimers:off
+  ]).finally(() => clearTimeout(timer));
+}
+
 function waitForAbortSignal(signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return Promise.resolve();
@@ -687,12 +739,22 @@ const probeClaudeCapabilities = (
             readonly apiProvider?: string;
           }
         | undefined;
+      // Skills are not part of the initialize response; the reload_skills
+      // control request is the only way to tell them apart from plain
+      // slash commands. Older CLIs may not answer it, so a missing or slow
+      // response degrades to "no skills" instead of failing the probe.
+      const skills = await raceWithTimeout(
+        q.reloadSkills().then((response) => parseClaudeSkills(response.skills)),
+        SKILLS_PROBE_TIMEOUT_MS,
+      ).catch(() => undefined);
+      const slashCommands = parseClaudeInitializationCommands(init.commands);
       return {
         email: account?.email,
         subscriptionType: account?.subscriptionType,
         tokenSource: account?.tokenSource,
         apiProvider: account?.apiProvider,
-        slashCommands: parseClaudeInitializationCommands(init.commands),
+        slashCommands: excludeSkillCommands(slashCommands, skills ?? []),
+        skills: skills ?? [],
       } satisfies ClaudeCapabilitiesProbe;
     });
   }).pipe(
@@ -876,6 +938,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     checkedAt,
     models,
     slashCommands: dedupedSlashCommands,
+    skills: capabilities.skills,
     probe: {
       installed: true,
       version: parsedVersion,

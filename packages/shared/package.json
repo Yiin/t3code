@@ -159,6 +159,10 @@
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"
     },
+    "./composerSkills": {
+      "types": "./src/composerSkills.ts",
+      "import": "./src/composerSkills.ts"
+    },
     "./terminalLabels": {
       "types": "./src/terminalLabels.ts",
       "import": "./src/terminalLabels.ts"

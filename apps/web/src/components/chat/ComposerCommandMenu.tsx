@@ -40,7 +40,6 @@ export type ComposerCommandItem =
       id: string;
       type: "provider-slash-command";
       provider: ProviderDriverKind;
-      source: "workspace" | "provider";
       command: ServerProviderSlashCommand;
       label: string;
       description: string;
@@ -92,19 +91,11 @@ export function groupCommandItems(
   }
 
   const builtInItems = items.filter((item) => item.type === "slash-command");
-  const workspaceItems = items.filter(
-    (item) => item.type === "provider-slash-command" && item.source === "workspace",
-  );
-  const providerItems = items.filter(
-    (item) => item.type === "provider-slash-command" && item.source !== "workspace",
-  );
+  const providerItems = items.filter((item) => item.type === "provider-slash-command");
 
   const groups: ComposerCommandGroup[] = [];
   if (builtInItems.length > 0) {
     groups.push({ id: "built-in", label: "Built-in", items: builtInItems });
-  }
-  if (workspaceItems.length > 0) {
-    groups.push({ id: "workspace", label: "Workspace", items: workspaceItems });
   }
   if (providerItems.length > 0) {
     groups.push({ id: "provider", label: "Provider", items: providerItems });

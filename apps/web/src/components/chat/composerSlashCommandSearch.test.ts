@@ -20,7 +20,6 @@ describe("searchSlashCommandItems", () => {
         id: "provider-slash-command:claudeAgent:ui",
         type: "provider-slash-command",
         provider: claudeDriver,
-        source: "provider",
         command: { name: "ui" },
         label: "/ui",
         description: "Explore, build, and refine UI.",
@@ -29,7 +28,6 @@ describe("searchSlashCommandItems", () => {
         id: "provider-slash-command:claudeAgent:frontend-design",
         type: "provider-slash-command",
         provider: claudeDriver,
-        source: "provider",
         command: { name: "frontend-design" },
         label: "/frontend-design",
         description: "Create distinctive, production-grade frontend interfaces",
@@ -50,7 +48,6 @@ describe("searchSlashCommandItems", () => {
         id: "provider-slash-command:claudeAgent:gh-fix-ci",
         type: "provider-slash-command",
         provider: claudeDriver,
-        source: "provider",
         command: { name: "gh-fix-ci" },
         label: "/gh-fix-ci",
         description: "Fix failing GitHub Actions",
@@ -59,7 +56,6 @@ describe("searchSlashCommandItems", () => {
         id: "provider-slash-command:claudeAgent:github",
         type: "provider-slash-command",
         provider: claudeDriver,
-        source: "provider",
         command: { name: "github" },
         label: "/github",
         description: "General GitHub help",
@@ -77,38 +73,26 @@ describe("searchSlashCommandItems", () => {
 describe("mergeComposerSlashCommands", () => {
   const provider = ProviderDriverKind.make("claudeAgent");
 
-  it("includes workspace commands when the provider reports none", () => {
+  it("maps provider commands to menu items", () => {
     expect(
       mergeComposerSlashCommands({
         provider,
-        providerCommands: [],
-        workspaceCommands: [{ name: "cook-it", description: "Cook a task", source: "workspace" }],
+        providerCommands: [
+          { name: "compact", description: "Compact the conversation" },
+          { name: "usage", input: { hint: "[detail]" } },
+        ],
       }),
     ).toMatchObject([
       {
-        command: { name: "cook-it", description: "Cook a task" },
-        source: "workspace",
-        label: "/cook-it",
-        description: "Cook a task",
+        command: { name: "compact" },
+        label: "/compact",
+        description: "Compact the conversation",
+      },
+      {
+        command: { name: "usage" },
+        label: "/usage",
+        description: "[detail]",
       },
     ]);
-  });
-
-  it("deduplicates case-insensitively with the provider command winning", () => {
-    const items = mergeComposerSlashCommands({
-      provider,
-      providerCommands: [{ name: "Cook-It", description: "Provider description" }],
-      workspaceCommands: [
-        { name: "cook-it", description: "Workspace description", source: "workspace" },
-        { name: "PLAN-EPIC", source: "workspace" },
-        { name: "plan-epic", source: "workspace" },
-      ],
-    });
-
-    expect(items.map((item) => item.command.name)).toEqual(["Cook-It", "PLAN-EPIC"]);
-    expect(items[0]?.description).toBe("Provider description");
-    expect(items[0]?.source).toBe("provider");
-    expect(items[1]?.description).toBe("Run command");
-    expect(items[1]?.source).toBe("workspace");
   });
 });

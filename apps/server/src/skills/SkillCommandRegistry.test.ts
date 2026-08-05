@@ -7,7 +7,11 @@ import * as Effect from "effect/Effect";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { makeSkillCommandRegistry, parseSkillCommand } from "./SkillCommandRegistry.ts";
+import {
+  makeSkillCommandRegistry,
+  parseSkillCommand,
+  parseSkillInvocation,
+} from "./SkillCommandRegistry.ts";
 
 describe("SkillCommandRegistry", () => {
   const roots = new Set<string>();
@@ -142,5 +146,20 @@ describe("parseSkillCommand", () => {
       arguments: "",
     });
     expect(parseSkillCommand("/cook-it.foo")).toBeUndefined();
+  });
+});
+
+describe("parseSkillInvocation", () => {
+  it("accepts only exact leading dollar skill tokens", () => {
+    expect(parseSkillInvocation("$cook-it task")).toEqual({ name: "cook-it", arguments: "task" });
+    expect(parseSkillInvocation("$cook-it")).toEqual({ name: "cook-it", arguments: "" });
+    expect(parseSkillInvocation("$plugin:skill go")).toEqual({
+      name: "plugin:skill",
+      arguments: "go",
+    });
+    expect(parseSkillInvocation(" $cook-it")).toBeUndefined();
+    expect(parseSkillInvocation("/cook-it")).toBeUndefined();
+    expect(parseSkillInvocation("$500 for this")).toBeUndefined();
+    expect(parseSkillInvocation("$cook-it.foo")).toBeUndefined();
   });
 });

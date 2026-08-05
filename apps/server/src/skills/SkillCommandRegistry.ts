@@ -176,6 +176,23 @@ export const parseSkillCommand = (
   };
 };
 
+/**
+ * Parse a leading `$name` skill invocation — the composer's provider-neutral
+ * skill syntax. The name charset matches the composer's inline skill token
+ * (`collectComposerInlineTokens`), which is wider than workspace skill names
+ * so provider-native skills (e.g. `plugin:skill`) parse too.
+ */
+export const parseSkillInvocation = (
+  input: string,
+): { readonly name: string; readonly arguments: string } | undefined => {
+  const match = /^\$([a-zA-Z][a-zA-Z0-9:_-]*)(?=\s|$)/.exec(input);
+  if (!match?.[1]) return undefined;
+  return {
+    name: match[1],
+    arguments: input.slice(match[0].length).trimStart(),
+  };
+};
+
 export function expandSkillCommand(skill: SkillCommand, argumentsText: string): string {
   return `The user invoked the /${skill.name} skill. Follow its instructions below.\n\n${skill.content}\n\nARGUMENTS: ${argumentsText}`;
 }

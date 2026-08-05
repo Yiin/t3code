@@ -11,19 +11,9 @@ describe("groupCommandItems", () => {
         id: "provider",
         type: "provider-slash-command",
         provider,
-        source: "provider",
         command: { name: "ui" },
         label: "/ui",
         description: "Provider",
-      },
-      {
-        id: "workspace",
-        type: "provider-slash-command",
-        provider,
-        source: "workspace",
-        command: { name: "cook-it" },
-        label: "/cook-it",
-        description: "Workspace",
       },
       {
         id: "built-in",
@@ -36,7 +26,6 @@ describe("groupCommandItems", () => {
 
     expect(groupCommandItems(items, "slash-command", true)).toMatchObject([
       { id: "built-in", items: [{ id: "built-in" }] },
-      { id: "workspace", items: [{ id: "workspace" }] },
       { id: "provider", items: [{ id: "provider" }] },
     ]);
   });

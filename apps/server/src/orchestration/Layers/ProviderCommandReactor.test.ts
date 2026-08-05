@@ -148,6 +148,7 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly skillsRoot?: string;
+    readonly providerSkills?: ReadonlyArray<{ readonly name: string; readonly enabled: boolean }>;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -302,6 +303,7 @@ describe("ProviderCommandReactor", () => {
         ...(input?.requiresNewThreadForModelChange === true
           ? { requiresNewThreadForModelChange: true }
           : {}),
+        ...(input?.providerSkills !== undefined ? { skills: input.providerSkills } : {}),
       },
     ];
 
@@ -425,8 +427,11 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    const managedRuntime = runtime;
     return {
       engine,
+      dispatch: (command: Parameters<typeof engine.dispatch>[0]) =>
+        managedRuntime.runPromise(engine.dispatch(command)),
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       startSession,
       sendTurn,
@@ -595,9 +600,51 @@ describe("ProviderCommandReactor", () => {
     },
   );
 
-  it.each(["/unknown task", "$cook-it task", "/cook-it-extra task", "/cook-it.foo", " /cook-it"])(
-    "passes non-matching OpenCode input through: %s",
-    async (messageText) => {
+  it.each([
+    "/unknown task",
+    "$unknown task",
+    "/cook-it-extra task",
+    "/cook-it.foo",
+    " /cook-it",
+    " $cook-it",
+  ])("passes non-matching OpenCode input through: %s", async (messageText) => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+    NodeFS.mkdirSync(skillDirectory);
+    NodeFS.writeFileSync(
+      NodePath.join(skillDirectory, "SKILL.md"),
+      "---\nname: cook-it\n---\nSkill instructions.\n",
+    );
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "test-model"),
+      skillsRoot,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-boundary-passthrough"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-boundary-passthrough"),
+          role: "user",
+          text: messageText,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: messageText.trim() });
+  });
+
+  it.each(["opencode", "kimi"])(
+    "expands workspace skill invocations for %s sessions",
+    async (provider) => {
       const skillsRoot = NodeFS.mkdtempSync(
         NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"),
       );
@@ -609,34 +656,166 @@ describe("ProviderCommandReactor", () => {
         "---\nname: cook-it\n---\nSkill instructions.\n",
       );
       const harness = await createHarness({
-        threadModelSelection: createModelSelection(
-          ProviderInstanceId.make("opencode"),
-          "test-model",
-        ),
+        threadModelSelection: createModelSelection(ProviderInstanceId.make(provider), "test-model"),
         skillsRoot,
       });
 
-      await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make("cmd-boundary-passthrough"),
-          threadId: ThreadId.make("thread-1"),
-          message: {
-            messageId: asMessageId("message-boundary-passthrough"),
-            role: "user",
-            text: messageText,
-            attachments: [],
-          },
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
-          createdAt: "2026-01-01T00:00:00.000Z",
-        }),
-      );
+      await harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-dollar-skill-${provider}`),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(`message-dollar-skill-${provider}`),
+          role: "user",
+          text: "$cook-it t3code-vst.17",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
 
       await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: messageText.trim() });
+      const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+      expect(sent.input).toContain(
+        "The user invoked the /cook-it skill. Follow its instructions below.",
+      );
+      expect(sent.input).toContain("ARGUMENTS: t3code-vst.17");
     },
   );
+
+  it("rewrites a leading $skill to /skill for Claude when the provider reports the skill", async () => {
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-sonnet-5",
+      ),
+      providerSkills: [{ name: "pdf", enabled: true }],
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-claude-native-skill"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-claude-native-skill"),
+        role: "user",
+        text: "$pdf extract the tables",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      input: "/pdf extract the tables",
+    });
+  });
+
+  it("expands workspace $skills for Claude when the provider does not report them", async () => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+    NodeFS.mkdirSync(skillDirectory);
+    NodeFS.writeFileSync(
+      NodePath.join(skillDirectory, "SKILL.md"),
+      "---\nname: cook-it\n---\nSkill instructions.\n",
+    );
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-sonnet-5",
+      ),
+      skillsRoot,
+      providerSkills: [{ name: "pdf", enabled: true }],
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-claude-workspace-skill"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-claude-workspace-skill"),
+        role: "user",
+        text: "$cook-it task",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+    expect(sent.input).toContain(
+      "The user invoked the /cook-it skill. Follow its instructions below.",
+    );
+  });
+
+  it("passes unknown $tokens through for Claude", async () => {
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-sonnet-5",
+      ),
+      providerSkills: [{ name: "pdf", enabled: true }],
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-claude-unknown-token"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-claude-unknown-token"),
+        role: "user",
+        text: "$HOME is where the heart is",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      input: "$HOME is where the heart is",
+    });
+  });
+
+  it("passes $skills through for Codex sessions", async () => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+    NodeFS.mkdirSync(skillDirectory);
+    NodeFS.writeFileSync(
+      NodePath.join(skillDirectory, "SKILL.md"),
+      "---\nname: cook-it\n---\nSkill instructions.\n",
+    );
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5-codex"),
+      skillsRoot,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-codex-dollar-skill"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-codex-dollar-skill"),
+        role: "user",
+        text: "$cook-it task",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "$cook-it task" });
+  });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {

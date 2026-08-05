@@ -8,6 +8,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
+import { mergeComposerSkills } from "@t3tools/shared/composerSkills";
 import {
   detectComposerTrigger,
   replaceTextRange,
@@ -373,13 +374,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     if (composerTrigger.kind === "slash-command") {
       return buildMobileSlashCommandItems({
         providerCommands: selectedProviderStatus?.slashCommands ?? [],
-        workspaceCommands: props.serverConfig?.serverSlashCommands ?? [],
         query: composerTrigger.query,
       });
     }
 
     if (composerTrigger.kind === "skill") {
-      const enabledSkills = (selectedProviderStatus?.skills ?? []).filter((s) => s.enabled);
+      const enabledSkills = mergeComposerSkills({
+        providerSkills: selectedProviderStatus?.skills ?? [],
+        workspaceCommands: props.serverConfig?.serverSlashCommands ?? [],
+      }).filter((s) => s.enabled);
       const normalizedQuery = normalizeSearchQuery(composerTrigger.query, {
         trimLeadingPattern: /^\$+/,
       });

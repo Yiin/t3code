@@ -7,34 +7,27 @@ import {
 } from "./composerSlashCommands";
 
 describe("mobile slash commands", () => {
-  it("merges case-insensitively with provider commands winning and preserves provenance", () => {
+  it("lists built-ins and provider commands in grouped sections", () => {
     const items = buildMobileSlashCommandItems({
-      providerCommands: [{ name: "Cook-It", description: "Provider version" }],
-      workspaceCommands: [
-        { name: "cook-it", description: "Workspace version", source: "workspace" },
-        { name: "plan-epic", description: "Plan work", source: "workspace" },
-      ],
+      providerCommands: [{ name: "compact", description: "Compact the conversation" }],
       query: "",
     });
 
-    expect(items.filter((item) => item.label.toLowerCase() === "/cook-it")).toMatchObject([
-      { source: "provider", description: "Provider version" },
-    ]);
-    expect(items.find((item) => item.label === "/plan-epic")).toMatchObject({
-      source: "workspace",
+    expect(items.find((item) => item.label === "/compact")).toMatchObject({
+      source: "provider",
+      description: "Compact the conversation",
     });
     expect(groupMobileSlashCommandItems(items).map((group) => group.label)).toEqual([
       "Built-in",
-      "Workspace",
       "Provider",
     ]);
   });
 
   it("keeps ranked search results in one ordered group", () => {
     const items = buildMobileSlashCommandItems({
-      providerCommands: [{ name: "ui", description: "Build interfaces" }],
-      workspaceCommands: [
-        { name: "cook-it", description: "UI task workflow", source: "workspace" },
+      providerCommands: [
+        { name: "ui", description: "Build interfaces" },
+        { name: "cook-it", description: "UI task workflow" },
       ],
       query: "ui",
     });

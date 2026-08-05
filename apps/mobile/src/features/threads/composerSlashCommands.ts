@@ -1,4 +1,4 @@
-import type { ServerProviderSlashCommand, ServerWorkspaceSlashCommand } from "@t3tools/contracts";
+import type { ServerProviderSlashCommand } from "@t3tools/contracts";
 import {
   insertRankedSearchResult,
   normalizeSearchQuery,
@@ -18,14 +18,14 @@ export type MobileSlashCommandItem =
       readonly id: string;
       readonly type: "provider-slash-command";
       readonly command: ServerProviderSlashCommand;
-      readonly source: "workspace" | "provider";
+      readonly source: "provider";
       readonly label: string;
       readonly description: string;
     };
 
 export interface MobileSlashCommandGroup {
-  readonly id: "built-in" | "workspace" | "provider" | "results";
-  readonly label: "Built-in" | "Workspace" | "Provider" | null;
+  readonly id: "built-in" | "provider" | "results";
+  readonly label: "Built-in" | "Provider" | null;
   readonly items: ReadonlyArray<MobileSlashCommandItem>;
 }
 
@@ -58,33 +58,17 @@ const builtIns: ReadonlyArray<MobileSlashCommandItem> = [
 
 export function buildMobileSlashCommandItems(input: {
   readonly providerCommands: ReadonlyArray<ServerProviderSlashCommand>;
-  readonly workspaceCommands: ReadonlyArray<ServerWorkspaceSlashCommand>;
   readonly query: string;
 }): MobileSlashCommandItem[] {
-  const providerNames = new Set(
-    input.providerCommands.map((command) => command.name.toLowerCase()),
-  );
-  const commands = [
-    ...input.providerCommands.map((command) => ({ command, source: "provider" as const })),
-    ...input.workspaceCommands
-      .filter((command) => !providerNames.has(command.name.toLowerCase()))
-      .filter(
-        (command, index, commands) =>
-          commands.findIndex(
-            (candidate) => candidate.name.toLowerCase() === command.name.toLowerCase(),
-          ) === index,
-      )
-      .map((command) => ({ command, source: "workspace" as const })),
-  ];
   const items: MobileSlashCommandItem[] = [
     ...builtIns,
-    ...commands.map(({ command, source }) => ({
-      id: `pcmd:${source}:${command.name}`,
+    ...input.providerCommands.map((command) => ({
+      id: `pcmd:provider:${command.name}`,
       type: "provider-slash-command" as const,
       command,
-      source,
+      source: "provider" as const,
       label: `/${command.name}`,
-      description: command.description ?? (source === "workspace" ? "Run command" : ""),
+      description: command.description ?? "",
     })),
   ];
   const query = normalizeSearchQuery(input.query, { trimLeadingPattern: /^\/+/ });
@@ -128,7 +112,6 @@ export function groupMobileSlashCommandItems(
 ): MobileSlashCommandGroup[] {
   const definitions = [
     { id: "built-in", label: "Built-in" },
-    { id: "workspace", label: "Workspace" },
     { id: "provider", label: "Provider" },
   ] as const;
   return definitions.flatMap((definition) => {

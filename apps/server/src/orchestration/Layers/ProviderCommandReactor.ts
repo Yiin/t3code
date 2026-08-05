@@ -45,6 +45,7 @@ import {
   expandSkillCommand,
   makeSkillCommandRegistry,
   parseSkillCommand,
+  parseSkillInvocation,
 } from "../../skills/SkillCommandRegistry.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
@@ -93,6 +94,8 @@ const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
 const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
+const CODEX_DRIVER = ProviderDriverKind.make("codex");
+const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -619,6 +622,60 @@ const make = Effect.gen(function* () {
     return startedSession.threadId;
   });
 
+  const findWorkspaceSkill = Effect.fnUntraced(function* (name: string) {
+    const { skillsRoot } = yield* serverSettingsService.getSettings;
+    return yield* skillCommandRegistry.find(skillsRoot, name);
+  });
+
+  /**
+   * `$name` is the composer's provider-neutral skill invocation; `/name`
+   * is kept for typed-in workspace skills. Codex resolves `$name` itself.
+   * Claude runs its native skills as `/name` commands, so a leading
+   * `$name` naming a known Claude skill is rewritten. Everything else
+   * falls back to expanding the workspace skill body inline, which is the
+   * only form providers without native skill support understand.
+   * Detection uses the raw message text so a leading space still means
+   * "literal text, do not invoke".
+   */
+  const resolveSkillProviderInput = Effect.fnUntraced(function* (input: {
+    readonly provider: ProviderSession["provider"];
+    readonly providerInstanceId: ProviderSession["providerInstanceId"];
+    readonly messageText: string;
+    readonly providerInput: string;
+  }) {
+    const skillInvocation = parseSkillInvocation(input.messageText);
+    if (skillInvocation !== undefined && input.provider !== CODEX_DRIVER) {
+      if (input.provider === CLAUDE_DRIVER) {
+        const providers = yield* providerRegistry.getProviders;
+        const snapshot = providers.find(
+          (provider) => provider.instanceId === input.providerInstanceId,
+        );
+        const isNativeSkill = snapshot?.skills.some(
+          (skill) =>
+            skill.enabled && skill.name.toLowerCase() === skillInvocation.name.toLowerCase(),
+        );
+        if (isNativeSkill) {
+          return `/${input.providerInput.slice(1)}`;
+        }
+      }
+      const workspaceSkill = yield* findWorkspaceSkill(skillInvocation.name);
+      if (workspaceSkill !== undefined) {
+        return expandSkillCommand(workspaceSkill, skillInvocation.arguments);
+      }
+      return input.providerInput;
+    }
+    if (input.provider === OPENCODE_DRIVER) {
+      const parsedCommand = parseSkillCommand(input.messageText);
+      if (parsedCommand !== undefined) {
+        const workspaceSkill = yield* findWorkspaceSkill(parsedCommand.name);
+        if (workspaceSkill !== undefined) {
+          return expandSkillCommand(workspaceSkill, parsedCommand.arguments);
+        }
+      }
+    }
+    return input.providerInput;
+  });
+
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
@@ -648,15 +705,13 @@ const make = Effect.gen(function* () {
         Effect.map((sessions) => sessions.find((session) => session.threadId === input.threadId)),
       );
     let providerInput = normalizedInput;
-    if (providerInput !== undefined && activeSession?.provider === OPENCODE_DRIVER) {
-      const parsedCommand = parseSkillCommand(input.messageText);
-      if (parsedCommand !== undefined) {
-        const { skillsRoot } = yield* serverSettingsService.getSettings;
-        const skill = yield* skillCommandRegistry.find(skillsRoot, parsedCommand.name);
-        if (skill !== undefined) {
-          providerInput = expandSkillCommand(skill, parsedCommand.arguments);
-        }
-      }
+    if (providerInput !== undefined && activeSession !== undefined) {
+      providerInput = yield* resolveSkillProviderInput({
+        provider: activeSession.provider,
+        providerInstanceId: activeSession.providerInstanceId,
+        messageText: input.messageText,
+        providerInput,
+      });
     }
     const sessionModelSwitch =
       activeSession === undefined
