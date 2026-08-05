@@ -23,6 +23,7 @@ function makeShell(input: {
   readonly activityAt: string | null;
   readonly sessionStatus?: "starting" | "running";
   readonly pending?: "approval" | "user-input";
+  readonly activeSubagentCount?: number;
 }): OrchestrationThreadShell {
   const threadId = ThreadId.make("thread-1");
   return {
@@ -66,7 +67,7 @@ function makeShell(input: {
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
     hasActionableProposedPlan: false,
-    activeSubagentCount: 0,
+    activeSubagentCount: input.activeSubagentCount ?? 0,
   };
 }
 
@@ -304,6 +305,11 @@ describe("canSettle", () => {
       false,
     );
     expect(canSettle(makeShell({ activityAt: FRESH, pending: "user-input" }), { now: NOW })).toBe(
+      false,
+    );
+    // Running subagents are in-flight work even after the main turn ends —
+    // the server's decider refuses the settle, so the UI must not offer it.
+    expect(canSettle(makeShell({ activityAt: FRESH, activeSubagentCount: 1 }), { now: NOW })).toBe(
       false,
     );
   });

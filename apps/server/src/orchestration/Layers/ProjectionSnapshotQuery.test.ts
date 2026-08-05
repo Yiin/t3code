@@ -150,6 +150,14 @@ const insertFillerActivities = (count: number) =>
 const AUTO_SETTLE_CUTOFF = "2026-04-07T00:00:00.000Z";
 const AUTO_SETTLE_FRESH = "2026-04-09T00:00:00.000Z";
 const AUTO_SETTLE_STALE = "2026-04-06T23:59:59.999Z";
+/**
+ * The running-subagent freshness cutoff the sweeps pass in, with a row on each
+ * side of it: rows updated at or after the cutoff are live work the settle
+ * decider would refuse; older ones are stranded rows that must not block.
+ */
+const AUTO_SETTLE_SUBAGENT_FRESH_AFTER = "2026-04-08T00:00:00.000Z";
+const AUTO_SETTLE_SUBAGENT_FRESH = "2026-04-08T00:00:00.000Z";
+const AUTO_SETTLE_SUBAGENT_STALE = "2026-04-07T23:59:59.999Z";
 
 interface AutoSettleThreadFixture {
   readonly threadId: string;
@@ -163,6 +171,10 @@ interface AutoSettleThreadFixture {
   readonly latestUserMessageAt?: string | null;
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
+  readonly subagent?: {
+    readonly status: "running" | "completed";
+    readonly updatedAt: string;
+  };
 }
 
 /** One project plus a thread (and optional session and latest turn) per fixture. */
@@ -174,6 +186,7 @@ const seedAutoSettleFixtures = (fixtures: ReadonlyArray<AutoSettleThreadFixture>
     yield* sql`DELETE FROM projection_threads`;
     yield* sql`DELETE FROM projection_thread_sessions`;
     yield* sql`DELETE FROM projection_turns`;
+    yield* sql`DELETE FROM projection_thread_subagents`;
 
     yield* sql`
       INSERT INTO projection_projects (
@@ -306,6 +319,41 @@ const seedAutoSettleFixtures = (fixtures: ReadonlyArray<AutoSettleThreadFixture>
             NULL,
             NULL,
             '[]'
+          )
+        `;
+      }
+
+      if (fixture.subagent !== undefined) {
+        yield* sql`
+          INSERT INTO projection_thread_subagents (
+            subagent_id,
+            thread_id,
+            turn_id,
+            agent_type,
+            description,
+            status,
+            last_progress_summary,
+            last_tool_name,
+            usage_json,
+            spawned_by_item_id,
+            started_at,
+            updated_at,
+            completed_at
+          )
+          VALUES (
+            ${`subagent-${fixture.threadId}`},
+            ${fixture.threadId},
+            NULL,
+            NULL,
+            NULL,
+            ${fixture.subagent.status},
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            '2026-04-05T00:00:00.000Z',
+            ${fixture.subagent.updatedAt},
+            ${fixture.subagent.status === "completed" ? fixture.subagent.updatedAt : null}
           )
         `;
       }
@@ -3079,6 +3127,8 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       const candidates = yield* snapshotQuery.listAutoSettleCandidates({
         idleBefore: AUTO_SETTLE_CUTOFF,
         limit: 1_000,
+
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
       });
 
       const expectedThreadIds = truthTable
@@ -3096,6 +3146,65 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
         [...new Set(candidates.map((candidate) => candidate.projectId))],
         [ProjectId.make("project-auto-settle")],
       );
+    }),
+  );
+
+  // A fresh running subagent is in-flight work the settle decider refuses, so
+  // neither sweep pass may read the thread as a candidate — while a stranded
+  // running row (stale) or a finished one must not block, or a crashed session
+  // would make its thread unsettleable forever.
+  it.effect("excludes threads with a fresh running subagent from both sweep passes", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+
+      yield* seedAutoSettleFixtures([
+        {
+          threadId: "thread-subagent-fresh-running",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: "ready",
+          pending: null,
+          subagent: { status: "running", updatedAt: AUTO_SETTLE_SUBAGENT_FRESH },
+        },
+        {
+          threadId: "thread-subagent-stale-running",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: "ready",
+          pending: null,
+          subagent: { status: "running", updatedAt: AUTO_SETTLE_SUBAGENT_STALE },
+        },
+        {
+          threadId: "thread-subagent-completed",
+          settledOverride: null,
+          activityAt: AUTO_SETTLE_STALE,
+          sessionStatus: "ready",
+          pending: null,
+          subagent: { status: "completed", updatedAt: AUTO_SETTLE_SUBAGENT_FRESH },
+        },
+      ]);
+
+      // The idle pass.
+      const idleCandidates = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: AUTO_SETTLE_CUTOFF,
+        limit: 1_000,
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
+      });
+      assert.deepEqual(idleCandidates.map((candidate) => candidate.threadId).toSorted(), [
+        ThreadId.make("thread-subagent-completed"),
+        ThreadId.make("thread-subagent-stale-running"),
+      ]);
+
+      // The merged-PR pass reads the same partition minus only the age rule.
+      const prCandidates = yield* snapshotQuery.listAutoSettleCandidates({
+        idleBefore: null,
+        limit: 1_000,
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
+      });
+      assert.deepEqual(prCandidates.map((candidate) => candidate.threadId).toSorted(), [
+        ThreadId.make("thread-subagent-completed"),
+        ThreadId.make("thread-subagent-stale-running"),
+      ]);
     }),
   );
 
@@ -3141,6 +3250,8 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       const everyAge = yield* snapshotQuery.listAutoSettleCandidates({
         idleBefore: null,
         limit: 1_000,
+
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
       });
 
       assert.deepEqual(
@@ -3171,6 +3282,8 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       const idleOnly = yield* snapshotQuery.listAutoSettleCandidates({
         idleBefore: AUTO_SETTLE_CUTOFF,
         limit: 1_000,
+
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
       });
       assert.deepEqual(
         idleOnly.map((candidate) => candidate.threadId),
@@ -3228,6 +3341,8 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       const candidates = yield* snapshotQuery.listAutoSettleCandidates({
         idleBefore: AUTO_SETTLE_CUTOFF,
         limit: 1_000,
+
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
       });
 
       // Oldest first, so a limited sweep settles the most neglected threads.
@@ -3242,6 +3357,8 @@ transactionBoundaryProbeLayer("ProjectionSnapshotQuery transaction boundary", (i
       const limited = yield* snapshotQuery.listAutoSettleCandidates({
         idleBefore: AUTO_SETTLE_CUTOFF,
         limit: 1,
+
+        runningSubagentFreshAfter: AUTO_SETTLE_SUBAGENT_FRESH_AFTER,
       });
       assert.deepEqual(
         limited.map((candidate) => candidate.threadId),

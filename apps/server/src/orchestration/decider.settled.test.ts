@@ -17,6 +17,10 @@ import * as Effect from "effect/Effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
+import {
+  RUNNING_SUBAGENT_FRESHNESS_MS,
+  isRunningSubagentSettleRefusal,
+} from "./subagentLiveness.ts";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const SETTLED_AT = "2025-12-30T00:00:00.000Z";
@@ -27,6 +31,7 @@ function makeReadModel(
   session: OrchestrationSession | null = null,
   activities: OrchestrationThread["activities"] = [],
   messages: OrchestrationThread["messages"] = [],
+  subagents: OrchestrationThread["subagents"] = [],
 ): OrchestrationReadModel {
   return {
     snapshotSequence: 0,
@@ -62,7 +67,7 @@ function makeReadModel(
         deletedAt: null,
         messages,
         proposedPlans: [],
-        subagents: [],
+        subagents,
         activities,
         checkpoints: [],
         session,
@@ -180,6 +185,67 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       const settledEvents = Array.isArray(settled) ? settled : [settled];
       expect(settledEvents[0]?.type).toBe("thread.settled");
     }),
+  );
+
+  it.effect(
+    "rejects settling a thread with a fresh running subagent, until it completes or goes stale",
+    () =>
+      Effect.gen(function* () {
+        const makeSubagent = (
+          status: "running" | "completed",
+          updatedAt: string,
+        ): OrchestrationThread["subagents"][number] => ({
+          subagentId: `subagent-${status}`,
+          turnId: null,
+          status,
+          startedAt: updatedAt,
+          updatedAt,
+          completedAt: status === "completed" ? updatedAt : null,
+        });
+        // The decider reads the real clock, so freshness fixtures are relative
+        // to it rather than to the fixture NOW.
+        const freshAt = new Date().toISOString();
+        const staleAt = new Date(Date.now() - RUNNING_SUBAGENT_FRESHNESS_MS - 60_000).toISOString();
+
+        // Fresh running subagent: in-flight work, settle refused — with the
+        // stable marker the EpicRunner branches on.
+        const error = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.settle",
+            commandId: CommandId.make("cmd-settle-subagent-fresh"),
+            threadId: ThreadId.make("thread-1"),
+          },
+          readModel: makeReadModel(null, null, null, [], [], [makeSubagent("running", freshAt)]),
+        }).pipe(Effect.flip);
+        expect(error._tag).toBe("OrchestrationCommandInvariantError");
+        expect(isRunningSubagentSettleRefusal(error.message)).toBe(true);
+        expect(error.message).toContain("thread-1");
+
+        // Completed subagent: settleable, however fresh the row is.
+        const completed = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.settle",
+            commandId: CommandId.make("cmd-settle-subagent-completed"),
+            threadId: ThreadId.make("thread-1"),
+          },
+          readModel: makeReadModel(null, null, null, [], [], [makeSubagent("completed", freshAt)]),
+        });
+        const completedEvents = Array.isArray(completed) ? completed : [completed];
+        expect(completedEvents[0]?.type).toBe("thread.settled");
+
+        // Running but stale: a row stranded by a dead session must not wedge
+        // settlement forever — the freshness bound clears it.
+        const stale = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.settle",
+            commandId: CommandId.make("cmd-settle-subagent-stale"),
+            threadId: ThreadId.make("thread-1"),
+          },
+          readModel: makeReadModel(null, null, null, [], [], [makeSubagent("running", staleAt)]),
+        });
+        const staleEvents = Array.isArray(stale) ? stale : [stale];
+        expect(staleEvents[0]?.type).toBe("thread.settled");
+      }),
   );
 
   it.effect("rejects settling a thread with an open approval or user-input request", () =>

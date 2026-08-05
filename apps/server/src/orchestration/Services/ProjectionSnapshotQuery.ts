@@ -224,10 +224,16 @@ export interface ProjectionSnapshotQueryShape {
    *   how recently someone typed in it.
    * @param limit - Maximum rows to return, so one sweep of a long-neglected
    *   database cannot dispatch unboundedly many commands.
+   * @param runningSubagentFreshAfter - Exclude threads with a `running`
+   *   subagent row updated at or after this timestamp: fresh running
+   *   subagents are in-flight work the settle decider refuses, so the sweep
+   *   must not even read those threads as candidates. Callers derive it as
+   *   now minus `RUNNING_SUBAGENT_FRESHNESS_MS` (`subagentLiveness.ts`).
    */
   readonly listAutoSettleCandidates: (input: {
     readonly idleBefore: string | null;
     readonly limit: number;
+    readonly runningSubagentFreshAfter: string;
   }) => Effect.Effect<ReadonlyArray<ProjectionAutoSettleCandidate>, ProjectionRepositoryError>;
 
   /**

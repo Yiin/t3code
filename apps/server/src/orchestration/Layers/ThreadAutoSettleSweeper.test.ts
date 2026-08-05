@@ -37,6 +37,7 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { ThreadAutoSettleSweeper } from "../Services/ThreadAutoSettleSweeper.ts";
+import { RUNNING_SUBAGENT_FRESHNESS_MS } from "../subagentLiveness.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -127,9 +128,16 @@ const commandThreadId = (command: OrchestrationCommand): ThreadId | null =>
 
 interface Harness {
   /** Every idle-pass candidate read the sweep issued, in order. */
-  readonly candidateReads: ReadonlyArray<{ readonly idleBefore: string; readonly limit: number }>;
+  readonly candidateReads: ReadonlyArray<{
+    readonly idleBefore: string;
+    readonly limit: number;
+    readonly runningSubagentFreshAfter: string;
+  }>;
   /** Every merged-PR-pass candidate read the sweep issued, in order. */
-  readonly prCandidateReads: ReadonlyArray<{ readonly limit: number }>;
+  readonly prCandidateReads: ReadonlyArray<{
+    readonly limit: number;
+    readonly runningSubagentFreshAfter: string;
+  }>;
   /** Every cwd the merged-PR pass peeked at, in order. */
   readonly peekedCwds: ReadonlyArray<string>;
   /** Every command the sweep dispatched, in order. */
@@ -159,20 +167,35 @@ function withHarness(
   body: (harness: Harness) => Effect.Effect<void>,
 ) {
   return Effect.gen(function* () {
-    const candidateReads: Array<{ idleBefore: string; limit: number }> = [];
-    const prCandidateReads: Array<{ limit: number }> = [];
+    const candidateReads: Array<{
+      idleBefore: string;
+      limit: number;
+      runningSubagentFreshAfter: string;
+    }> = [];
+    const prCandidateReads: Array<{ limit: number; runningSubagentFreshAfter: string }> = [];
     const peekedCwds: Array<string> = [];
     const dispatched: Array<OrchestrationCommand> = [];
 
     const snapshotQuery = {
-      listAutoSettleCandidates: (request: { idleBefore: string | null; limit: number }) =>
+      listAutoSettleCandidates: (request: {
+        idleBefore: string | null;
+        limit: number;
+        runningSubagentFreshAfter: string;
+      }) =>
         Effect.suspend(() => {
           // A null cutoff is the merged-PR pass: no idle window at all.
           if (request.idleBefore === null) {
-            prCandidateReads.push({ limit: request.limit });
+            prCandidateReads.push({
+              limit: request.limit,
+              runningSubagentFreshAfter: request.runningSubagentFreshAfter,
+            });
             return Effect.succeed(options.prCandidates ?? options.candidates ?? []);
           }
-          candidateReads.push({ idleBefore: request.idleBefore, limit: request.limit });
+          candidateReads.push({
+            idleBefore: request.idleBefore,
+            limit: request.limit,
+            runningSubagentFreshAfter: request.runningSubagentFreshAfter,
+          });
           if (options.failCandidateReadOnSweeps?.includes(candidateReads.length) === true) {
             return Effect.fail(
               new PersistenceSqlError({
@@ -261,6 +284,12 @@ describe("ThreadAutoSettleSweeper", () => {
           // whole window before it is read as a candidate at all.
           expect(candidateReads[0]?.idleBefore).toBe(isoAt(Date.parse(CLOCK_START) - 3 * DAY_MS));
           expect(candidateReads[0]?.limit).toBeGreaterThan(0);
+          // Both passes exclude threads with a fresh running subagent; the
+          // cutoff is the shared freshness window, measured from the sweep's
+          // clock.
+          expect(candidateReads[0]?.runningSubagentFreshAfter).toBe(
+            isoAt(Date.parse(CLOCK_START) - RUNNING_SUBAGENT_FRESHNESS_MS),
+          );
 
           expect(dispatched).toHaveLength(2);
           expect(dispatched[0]).toMatchObject({
@@ -389,9 +418,14 @@ describe("ThreadAutoSettleSweeper merged-PR pass", () => {
           [WORKTREE_PATH]: { local: localOnRef("main"), remote: remoteWithPr("merged") },
         },
       },
-      ({ peekedCwds, dispatched }) =>
+      ({ peekedCwds, prCandidateReads, dispatched }) =>
         Effect.sync(() => {
           expect(peekedCwds).toEqual([WORKTREE_PATH]);
+          // The no-idle-window pass excludes fresh running subagents too — the
+          // same cutoff as the idle pass, from the same sweep clock.
+          expect(prCandidateReads[0]?.runningSubagentFreshAfter).toBe(
+            isoAt(Date.parse(CLOCK_START) - RUNNING_SUBAGENT_FRESHNESS_MS),
+          );
           expect(dispatched).toHaveLength(1);
           expect(dispatched[0]).toMatchObject({
             type: "thread.settle",

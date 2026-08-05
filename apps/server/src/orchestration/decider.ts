@@ -21,6 +21,10 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import {
+  countFreshRunningSubagents,
+  runningSubagentSettleRefusalDetail,
+} from "./subagentLiveness.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -411,6 +415,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         );
       }
       const occurredAt = yield* nowIso;
+      // A fresh running subagent is in-flight work even after the main turn
+      // has ended: the provider reports turn end while Task subagents keep
+      // working, and settling here would tear the session down
+      // (`ThreadTeardownReactor`) and kill them mid-flight. Only FRESH rows
+      // refuse — a row stranded at `running` by a dead session ages past the
+      // window and stops blocking, so settlement can never be wedged forever.
+      // The detail carries a stable marker (`subagentLiveness.ts`) that the
+      // EpicRunner branches on to wait instead of stopping the session.
+      const freshRunningSubagents = countFreshRunningSubagents(
+        thread.subagents,
+        Date.parse(occurredAt),
+      );
+      if (freshRunningSubagents > 0) {
+        return yield* Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: runningSubagentSettleRefusalDetail(command.threadId, freshRunningSubagents),
+          }),
+        );
+      }
       // A queued turn start — a user message no turn has picked up yet — is
       // work in flight even though session is still null (turn.start emits
       // message-sent + turn-start-requested; the session arrives later).

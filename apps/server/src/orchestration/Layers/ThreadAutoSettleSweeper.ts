@@ -17,6 +17,7 @@ import {
   ThreadAutoSettleSweeper,
   type ThreadAutoSettleSweeperShape,
 } from "../Services/ThreadAutoSettleSweeper.ts";
+import { RUNNING_SUBAGENT_FRESHNESS_MS } from "../subagentLiveness.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1_000;
@@ -121,6 +122,16 @@ const makeThreadAutoSettleSweeper = (options?: ThreadAutoSettleSweeperLiveOption
      * settled, so the merged-PR pass does not dispatch a second command against
      * a row whose projection has not caught up yet.
      */
+    /**
+     * Threads with a `running` subagent row touched after this cutoff are
+     * excluded from both passes: the settle decider would refuse them anyway,
+     * so reading them as candidates only produces refusal traffic.
+     */
+    const runningSubagentFreshAfter = (now: DateTime.DateTime) =>
+      DateTime.formatIso(
+        DateTime.subtractDuration(now, Duration.millis(RUNNING_SUBAGENT_FRESHNESS_MS)),
+      );
+
     const sweepIdle = (now: DateTime.DateTime, nowIso: string) =>
       Effect.gen(function* () {
         const settled = new Set<ThreadId>();
@@ -138,6 +149,7 @@ const makeThreadAutoSettleSweeper = (options?: ThreadAutoSettleSweeperLiveOption
         const candidates = yield* projectionSnapshotQuery.listAutoSettleCandidates({
           idleBefore,
           limit: candidateLimit,
+          runningSubagentFreshAfter: runningSubagentFreshAfter(now),
         });
         if (candidates.length === 0) {
           return settled;
@@ -171,11 +183,16 @@ const makeThreadAutoSettleSweeper = (options?: ThreadAutoSettleSweeperLiveOption
      * governs the idle rule alone; the client's merge rule ignores it too
      * (packages/client-runtime/src/state/threadSettled.ts).
      */
-    const sweepPrMerged = (nowIso: string, alreadySettled: ReadonlySet<ThreadId>) =>
+    const sweepPrMerged = (
+      now: DateTime.DateTime,
+      nowIso: string,
+      alreadySettled: ReadonlySet<ThreadId>,
+    ) =>
       Effect.gen(function* () {
         const candidates = yield* projectionSnapshotQuery.listAutoSettleCandidates({
           idleBefore: null,
           limit: candidateLimit,
+          runningSubagentFreshAfter: runningSubagentFreshAfter(now),
         });
 
         let settledCount = 0;
@@ -220,7 +237,7 @@ const makeThreadAutoSettleSweeper = (options?: ThreadAutoSettleSweeperLiveOption
       const now = yield* DateTime.now;
       const nowIso = DateTime.formatIso(now);
       const settled = yield* sweepIdle(now, nowIso);
-      yield* sweepPrMerged(nowIso, settled);
+      yield* sweepPrMerged(now, nowIso, settled);
     });
 
     const start: ThreadAutoSettleSweeperShape["start"] = () =>

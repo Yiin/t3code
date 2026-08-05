@@ -54,7 +54,12 @@ export function hasQueuedTurnStart(
 export function canSettle(
   shell: Pick<
     OrchestrationThreadShell,
-    "hasPendingApprovals" | "hasPendingUserInput" | "session" | "latestUserMessageAt" | "latestTurn"
+    | "hasPendingApprovals"
+    | "hasPendingUserInput"
+    | "session"
+    | "latestUserMessageAt"
+    | "latestTurn"
+    | "activeSubagentCount"
   >,
   options: { readonly now: string },
 ): boolean {
@@ -63,6 +68,13 @@ export function canSettle(
   // Queued work is as blocked-on-progress as a live session: settling it
   // (or auto-settling it on a closed PR) would hide a just-requested turn.
   if (hasQueuedTurnStart(shell, options)) return false;
+  // Running subagents are in-flight work even after the main turn ends; the
+  // server refuses the settle (decider subagent invariant), so gate the UI
+  // before the round trip. Advisory twin only: the shell count carries no
+  // freshness, while the server ignores rows staler than its window — a
+  // stranded row clears the same way a stale session does, when the session
+  // reaches a terminal status and closes its running rows.
+  if (shell.activeSubagentCount > 0) return false;
   return true;
 }
 

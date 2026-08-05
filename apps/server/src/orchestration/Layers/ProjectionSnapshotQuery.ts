@@ -172,6 +172,7 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
 const AutoSettleCandidateLookupInput = Schema.Struct({
   idleBefore: Schema.NullOr(IsoDateTime),
   limit: NonNegativeInt,
+  runningSubagentFreshAfter: IsoDateTime,
 });
 const ProjectionAutoSettleCandidateRowSchema = Schema.Struct({
   threadId: ThreadId,
@@ -858,6 +859,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // The command read model's slice of the subagent table: only `running` rows
+  // matter there (the decider's settle invariant counts fresh running work),
+  // and their number is bounded by concurrent subagent use rather than by
+  // workspace size, so the decode may stay inline like `projection_state`'s.
+  // Rides idx_projection_thread_subagents_thread_status.
+  const listRunningThreadSubagentRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadSubagentDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          subagent_id AS "subagentId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          agent_type AS "agentType",
+          description,
+          status,
+          last_progress_summary AS "lastProgressSummary",
+          last_tool_name AS "lastToolName",
+          usage_json AS "usage",
+          spawned_by_item_id AS "spawnedByItemId",
+          started_at AS "startedAt",
+          updated_at AS "updatedAt",
+          completed_at AS "completedAt"
+        FROM projection_thread_subagents
+        WHERE status = 'running'
+        ORDER BY thread_id ASC, started_at ASC, subagent_id ASC
+      `,
+  });
+
   const countRunningSubagentRowsByThread = SqlSchema.findOne({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadRunningSubagentCountRowSchema,
@@ -1279,7 +1310,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listAutoSettleCandidateRows = SqlSchema.findAll({
     Request: AutoSettleCandidateLookupInput,
     Result: ProjectionAutoSettleCandidateRowSchema,
-    execute: ({ idleBefore, limit }) =>
+    execute: ({ idleBefore, limit, runningSubagentFreshAfter }) =>
       sql`
         SELECT
           "threadId",
@@ -1315,6 +1346,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND threads.pending_approval_count = 0
             AND threads.pending_user_input_count = 0
             AND (sessions.status IS NULL OR sessions.status NOT IN ('starting', 'running'))
+            -- A fresh running subagent is in-flight work the settle decider
+            -- would refuse anyway; keeping the thread out of the candidate
+            -- read means neither sweep pass even peeks at it. Stale running
+            -- rows (updated_at before the cutoff) do not block, mirroring the
+            -- decider's freshness bound.
+            AND NOT EXISTS (
+              SELECT 1
+              FROM projection_thread_subagents subagents
+              WHERE subagents.thread_id = threads.thread_id
+                AND subagents.status = 'running'
+                AND subagents.updated_at >= ${runningSubagentFreshAfter}
+            )
         )
         WHERE "lastActivityAt" <> ''
           AND (${idleBefore} IS NULL OR "lastActivityAt" < ${idleBefore})
@@ -1689,6 +1732,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           listThreadProposedPlanRawRows(undefined, COMMAND_READ_MODEL_READS.proposedPlans),
           listThreadSessionRawRows(undefined, COMMAND_READ_MODEL_READS.sessions),
           listLatestTurnRawRows(undefined, COMMAND_READ_MODEL_READS.latestTurns),
+          // Running subagent rows keep their decode inside too: their number is
+          // bounded by concurrent subagent use, not workspace size. The settle
+          // invariant needs them here — the in-memory read model accumulates
+          // them from live events, but every dispatch failure reconciles from
+          // this snapshot, and an empty list would erase exactly the state
+          // that made the decider refuse.
+          listRunningThreadSubagentRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCommandReadModel:listRunningThreadSubagents:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listRunningThreadSubagents:decodeRows",
+              ),
+            ),
+          ),
           // The one read that keeps its decode inside. `projection_state` holds
           // one row per projector — a fixed set — so its decode cannot grow
           // with the workspace, and splitting it would buy nothing.
@@ -1710,6 +1767,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             proposedPlanRawRows,
             sessionRawRows,
             latestTurnRawRows,
+            runningSubagentRows,
             stateRows,
           ]) =>
             Effect.gen(function* () {
@@ -1798,6 +1856,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 }
                 latestTurnByThread.set(row.threadId, mapLatestTurn(row));
               }
+              const runningSubagentsByThread = new Map<
+                string,
+                Array<OrchestrationThreadSubagent>
+              >();
+              for (const row of runningSubagentRows) {
+                const threadSubagents = runningSubagentsByThread.get(row.threadId) ?? [];
+                threadSubagents.push(mapThreadSubagentRow(row));
+                runningSubagentsByThread.set(row.threadId, threadSubagents);
+              }
               const proposedPlansByThread = new Map<string, Array<OrchestrationProposedPlan>>();
               const sessionByThread = new Map<string, OrchestrationSession>();
 
@@ -1842,10 +1909,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
-                  // Deliberately empty, like messages and activities: the
-                  // decider never reads subagents, and every command dispatch
-                  // waits on this read.
-                  subagents: [],
+                  // Only the `running` rows: they are all the settle invariant
+                  // reads, and settled rows would grow with history. Between
+                  // reconciles the in-memory fold may settle these in place —
+                  // `countFreshRunningSubagents` filters by status, so a
+                  // lingering settled row is inert.
+                  subagents: runningSubagentsByThread.get(row.threadId) ?? [],
                   activities: [],
                   checkpoints: [],
                   session: sessionByThread.get(row.threadId) ?? null,
