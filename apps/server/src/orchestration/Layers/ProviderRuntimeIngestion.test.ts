@@ -2039,6 +2039,161 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("excludes subagent-tagged deltas from buffered assistant text", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-buffered-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-subagent"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-buffered-subagent",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-buffered-parent-before"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-subagent"),
+      itemId: asItemId("item-buffered-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "Hello",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-buffered-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-subagent"),
+      itemId: asItemId("item-buffered-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "SUBAGENT",
+        parentToolUseId: "toolu_spawn_1",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-buffered-parent-after"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-subagent"),
+      itemId: asItemId("item-buffered-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: " world",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-message-completed-buffered-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-buffered-subagent"),
+      itemId: asItemId("item-buffered-subagent"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-buffered-subagent" && !message.streaming,
+      ),
+    );
+    const assistantMessages = thread.messages.filter((message: ProviderRuntimeTestMessage) =>
+      message.id.startsWith("assistant:"),
+    );
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0]?.text).toBe("Hello world");
+  });
+
+  it("does not create an assistant message from only subagent-tagged deltas", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-only-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-only-subagent"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-only-subagent",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-only-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-only-subagent"),
+      itemId: asItemId("item-only-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "SUBAGENT",
+        parentToolUseId: "toolu_spawn_1",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-message-completed-only-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-only-subagent"),
+      itemId: asItemId("item-only-subagent"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-only-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-only-subagent"),
+      payload: {
+        state: "completed",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "ready" && entry.session?.activeTurnId === null,
+    );
+    expect(
+      thread.messages.filter((message: ProviderRuntimeTestMessage) =>
+        message.id.startsWith("assistant:"),
+      ),
+    ).toHaveLength(0);
+  });
+
   it("flushes and completes buffered assistant text when an approval request opens", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -2555,6 +2710,92 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(finalMessage?.text).toBe("hello live");
     expect(finalMessage?.streaming).toBe(false);
+  });
+
+  it("excludes subagent-tagged deltas from streaming assistant text", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-streaming-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-subagent"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-streaming-subagent",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-streaming-parent-before"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-subagent"),
+      itemId: asItemId("item-streaming-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "Hello",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-streaming-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-subagent"),
+      itemId: asItemId("item-streaming-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "SUBAGENT",
+        parentToolUseId: "toolu_spawn_1",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-streaming-parent-after"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-subagent"),
+      itemId: asItemId("item-streaming-subagent"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: " world",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-message-completed-streaming-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-subagent"),
+      itemId: asItemId("item-streaming-subagent"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-streaming-subagent" && !message.streaming,
+      ),
+    );
+    const assistantMessages = thread.messages.filter((message: ProviderRuntimeTestMessage) =>
+      message.id.startsWith("assistant:"),
+    );
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0]?.text).toBe("Hello world");
   });
 
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {

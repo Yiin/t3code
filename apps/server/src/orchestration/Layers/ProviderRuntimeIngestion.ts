@@ -1848,7 +1848,9 @@ const make = Effect.gen(function* () {
       }
 
       const assistantDelta =
-        event.type === "content.delta" && event.payload.streamKind === "assistant_text"
+        event.type === "content.delta" &&
+        event.payload.streamKind === "assistant_text" &&
+        event.payload.parentToolUseId === undefined
           ? event.payload.delta
           : undefined;
       const proposedPlanDelta =
