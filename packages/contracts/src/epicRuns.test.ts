@@ -79,6 +79,8 @@ describe("EpicRun contracts", () => {
     });
     const event = { version: 1 as const, type: "run-state-changed" as const, run };
 
+    // The iteration above predates `failureReason`; old rows decode to null.
+    expect(run.recentIterations[0]?.failureReason).toBeNull();
     expect(decodeEpicRun(encodeEpicRun(run))).toEqual(run);
     expect(decodeEpicRunEvent(encodeEpicRunEvent(event))).toEqual(event);
   });

@@ -283,6 +283,7 @@ describe("EpicRunStore", () => {
               turnStatus: "completed",
               summary: null,
               why: null,
+              failureReason: null,
               startedAt: "2026-07-27T00:00:00.000Z",
               finishedAt: "2026-07-27T00:05:00.000Z",
             }),
@@ -326,6 +327,7 @@ describe("EpicRunStore", () => {
           turnStatus: "completed",
           summary: `iteration ${iterationIndex}`,
           why: `reason ${iterationIndex}`,
+          failureReason: null,
           startedAt: "2026-07-27T00:00:00.000Z",
           finishedAt: "2026-07-27T00:05:00.000Z",
         });
@@ -364,6 +366,7 @@ describe("EpicRunStore", () => {
         turnStatus: "running",
         summary: null,
         why: null,
+        failureReason: null,
         startedAt: "2026-07-27T00:00:30.000Z",
         finishedAt: null,
       });
@@ -381,6 +384,7 @@ describe("EpicRunStore", () => {
         turnStatus: "abandoned",
         summary: null,
         why: null,
+        failureReason: "server-restart",
         finishedAt: "2026-07-27T00:10:00.000Z",
       });
 
@@ -399,6 +403,7 @@ describe("EpicRunStore", () => {
         turnStatus: "running",
         summary: null,
         why: null,
+        failureReason: null,
         startedAt: "2026-07-27T00:10:01.000Z",
         finishedAt: null,
       });
@@ -406,9 +411,11 @@ describe("EpicRunStore", () => {
       const iterations = yield* store.listIterations({ runId });
       assert.strictEqual(iterations.length, 2);
       assert.strictEqual(iterations[0]?.turnStatus, "abandoned");
+      assert.strictEqual(iterations[0]?.failureReason, "server-restart");
       assert.strictEqual(iterations[0]?.finishedAt, "2026-07-27T00:10:00.000Z");
       assert.strictEqual(iterations[1]?.iterationIndex, 1);
       assert.strictEqual(iterations[1]?.turnStatus, "running");
+      assert.strictEqual(iterations[1]?.failureReason, null);
       assert.strictEqual(iterations[1]?.finishedAt, null);
 
       const duplicateFailure = yield* Effect.flip(
@@ -420,6 +427,7 @@ describe("EpicRunStore", () => {
           turnStatus: "running",
           summary: null,
           why: null,
+          failureReason: null,
           startedAt: "2026-07-27T00:11:00.000Z",
           finishedAt: null,
         }),

@@ -223,6 +223,7 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
           turnStatus: input.turnStatus,
           summary: input.summary,
           why: input.why,
+          failureReason: input.failureReason,
           finishedAt: input.finishedAt,
         };
       }),
@@ -768,6 +769,7 @@ describe("EpicRunner", () => {
           turnStatus: "completed",
           summary: `summary-${iterationIndex}`,
           why: `why-${iterationIndex}`,
+          failureReason: null,
           startedAt: NOW,
           finishedAt: NOW,
         });
@@ -823,6 +825,7 @@ describe("EpicRunner", () => {
           turnStatus: "completed" as const,
           summary: null,
           why: null,
+          failureReason: null,
           startedAt: NOW,
           finishedAt: NOW,
         })),
@@ -916,6 +919,10 @@ describe("EpicRunner", () => {
         harness.store.iterations.map((iteration) => iteration.turnStatus),
         ["completed", "completed", "completed"],
       );
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.failureReason),
+        [null, null, null],
+      );
       assert.strictEqual(harness.store.iterations[0]?.summary, "first");
       assert.strictEqual(harness.store.iterations[0]?.why, "needed");
       assert.deepStrictEqual(
@@ -975,6 +982,7 @@ describe("EpicRunner", () => {
       const failed = harness.store.runs.get(run.runId)!;
       assert.strictEqual(failed.lastError, "turn completed without an assistant message");
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "protocol-error");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1261,6 +1269,26 @@ describe("EpicRunner", () => {
         harness.store.iterations.map((iteration) => iteration.turnStatus),
         ["failed", "failed", "failed"],
       );
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.failureReason),
+        ["turn-error", "turn-error", "turn-error"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("scores an iteration whose turn could not be dispatched with its own reason", () => {
+    const harness = createHarness({
+      script: [{ text: "never reached", head: "head-0" }],
+      refuseCommandTypes: ["thread.turn.start"],
+      options: { maxConsecutiveFailures: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "dispatch-failed");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1454,6 +1482,79 @@ describe("EpicRunner", () => {
         "gutter: 2 iterations without a commit",
       );
       assert.strictEqual(harness.turnsStarted(), 2);
+      // The rows themselves are failed too: the children's statuses could not
+      // be read here (unknown counts as open), so nothing vouched for either
+      // iteration. Before this scoring the incident's dead sessions read as
+      // rows of "completed" under a failed run.
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => [
+          iteration.turnStatus,
+          iteration.failureReason,
+        ]),
+        [
+          ["failed", "no-commit-child-open"],
+          ["failed", "no-commit-child-open"],
+        ],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("fails a no-commit iteration whose child is still open, without burning the run", () => {
+    const harness = createHarness({
+      script: [
+        { text: "spun without landing anything", head: "head-0" },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
+      childStatuses: { "child-1": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "no-commit-child-open");
+      // The human summary stays what classification said.
+      assert.strictEqual(harness.store.iterations[0]?.summary, "iteration produced no commit");
+      // Run-level policy is untouched: one no-commit charges the gutter
+      // streak, not consecutiveFailures, and the run carried on to RALPH_DONE.
+      assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+      assert.strictEqual(harness.store.iterations[1]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[1]?.failureReason, null);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps a no-commit iteration completed when its child was closed in the turn", () => {
+    // A knowledge-only child ("Research: ...") legitimately produces no
+    // commit; the agent closing it is what vouches for the iteration.
+    const harness = createHarness({
+      script: [
+        {
+          text: 'researched it\nRALPH_MSG: {"summary":"wrote findings","why":"knowledge child"}',
+          head: "head-0",
+        },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
+      childStatuses: { "child-1": "closed" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      yield* settle;
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, null);
+      assert.strictEqual(harness.store.iterations[0]?.summary, "wrote findings");
+      // The closed child is left alone, mid-run and at the terminal sweep.
+      assert.isFalse(
+        harness.processRequests.some(
+          (request) => request.command === "bd" && request.args[0] === "update",
+        ),
+      );
+      assert.strictEqual(harness.childStatus("child-1"), "closed");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1485,6 +1586,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       // The abandoned iteration is closed out rather than left `running` forever.
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "cancelled");
 
       // The loop is gone: nothing else starts after the cancel.
       yield* settle;
@@ -1509,6 +1611,7 @@ describe("EpicRunner", () => {
       );
       assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 1);
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "timeout");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1545,6 +1648,7 @@ describe("EpicRunner", () => {
           turnStatus: "running",
           summary: null,
           why: null,
+          failureReason: null,
           startedAt: NOW,
           finishedAt: null,
         },
@@ -1562,6 +1666,7 @@ describe("EpicRunner", () => {
 
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
       assert.strictEqual(harness.store.iterations[0]?.summary, "abandoned by server restart");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "server-restart");
       assert.strictEqual(harness.childStatus("child-0"), "open");
       const releaseRequest = harness.processRequests.find(
         (request) =>
@@ -1636,6 +1741,7 @@ describe("EpicRunner", () => {
           turnStatus: "completed",
           summary: "done",
           why: null,
+          failureReason: null,
           startedAt: NOW,
           finishedAt: NOW,
         },

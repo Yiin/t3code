@@ -121,6 +121,35 @@ const buildTransportRun = (
   ),
 });
 
+/**
+ * The machine-readable `failure_reason` a classified outcome scores its
+ * iteration row with; `null` for the kinds that complete the iteration. Part
+ * of the closed vocabulary documented on
+ * `EpicRunIterationReport.failureReason` — downstream policy (infra-vs-child
+ * failure budgets, UI badges) switches on these strings, so they must stay
+ * stable. "dispatch-failed", "cancelled" and "server-restart" are assigned at
+ * their own sites, which are the only places that know the turn never
+ * started, was cancelled, or died with the server. A completed no-commit turn
+ * is only chargeable when its child issue was left open, hence the suffix.
+ */
+const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | null => {
+  switch (kind) {
+    case "done":
+    case "backlog-empty":
+      return null;
+    case "no-commit":
+      return "no-commit-child-open";
+    case "timeout":
+      return "timeout";
+    case "error":
+      return "turn-error";
+    case "protocol-error":
+      return "protocol-error";
+    case "blocked":
+      return "blocked";
+  }
+};
+
 const ReadyChildren = Schema.fromJsonString(
   Schema.Array(
     Schema.Struct({
@@ -586,14 +615,31 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * Never fails the caller: this runs from terminal paths (finalizers,
      * restart bookkeeping) that have nowhere useful to send an error.
      */
-    const releaseClaimedChild = (cwd: string, issueId: string): Effect.Effect<void> =>
+    /**
+     * The child issue's current `bd` status, or `null` when it cannot be read
+     * — a failing `bd show`, output the status decoder does not recognise.
+     * Callers must treat `null` conservatively; it is "unknown", not "open".
+     */
+    const readIssueStatus = (cwd: string, issueId: string): Effect.Effect<string | null> =>
       processRunner.run({ command: "bd", args: ["show", issueId, "--json"], cwd }).pipe(
-        Effect.flatMap((shown) => {
-          if (shown.code !== 0) return Effect.void;
+        Effect.map((shown) => {
+          if (shown.code !== 0) return null;
           const decoded = decodeIssueStatus(shown.stdout);
-          if (Option.isNone(decoded)) return Effect.void;
+          if (Option.isNone(decoded)) return null;
           const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
-          if (value?.status !== "in_progress") return Effect.void;
+          return value?.status ?? null;
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.issue-status-read-failed", { cwd, issueId, cause }).pipe(
+            Effect.as(null),
+          ),
+        ),
+      );
+
+    const releaseClaimedChild = (cwd: string, issueId: string): Effect.Effect<void> =>
+      readIssueStatus(cwd, issueId).pipe(
+        Effect.flatMap((status) => {
+          if (status !== "in_progress") return Effect.void;
           return processRunner
             .run({
               command: "bd",
@@ -1080,6 +1126,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             turnStatus: "running",
             summary: null,
             why: null,
+            failureReason: null,
             startedAt,
             finishedAt: null,
           })
@@ -1246,12 +1293,27 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           ),
         );
 
+        // A turn that ends cleanly with no commit only counts as a completed
+        // iteration when its child no longer needs one: knowledge-only
+        // children legitimately close without touching the repo. A child
+        // still open after such a turn means the work did not land — scoring
+        // that "completed" is how silent provider deaths masqueraded as
+        // progress on 2026-08-04. An unreadable status counts as open: the
+        // failure mode being defended against is exactly one where nothing
+        // can vouch for the iteration.
+        const noCommitChildClosed =
+          outcome.kind === "no-commit" && (yield* readIssueStatus(run.cwd, issueId)) === "closed";
+
         const iterationStatus: EpicRunIterationStatus =
-          outcome.kind === "backlog-empty" ||
-          outcome.kind === "done" ||
-          outcome.kind === "no-commit"
+          outcome.kind === "backlog-empty" || outcome.kind === "done" || noCommitChildClosed
             ? "completed"
             : "failed";
+        const failureReason =
+          iterationStatus === "completed"
+            ? null
+            : settleResult._tag === "dispatch-failed"
+              ? "dispatch-failed"
+              : failureReasonForOutcome(outcome.kind);
 
         yield* store
           .updateIteration({
@@ -1260,6 +1322,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             turnStatus: iterationStatus,
             summary: outcome.report?.summary ?? outcome.detail,
             why: outcome.report?.why ?? null,
+            failureReason,
             finishedAt,
           })
           .pipe(Effect.mapError(storeError("updateIteration")));
@@ -1688,6 +1751,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               turnStatus: "abandoned",
               summary: "cancelled",
               why: null,
+              failureReason: "cancelled",
               finishedAt: cancelledAt,
             })
             .pipe(Effect.mapError(storeError("updateIteration")));
@@ -1787,6 +1851,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   turnStatus: "abandoned",
                   summary: "abandoned by server restart",
                   why: null,
+                  failureReason: "server-restart",
                   finishedAt: abandonedAt,
                 })
                 .pipe(Effect.mapError(storeError("updateIteration")));

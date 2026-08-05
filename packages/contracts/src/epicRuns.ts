@@ -45,6 +45,18 @@ export const EpicRunIterationReport = Schema.Struct({
   turnStatus: Schema.Literals(["running", "completed", "failed", "abandoned"]),
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),
+  /**
+   * Why a `failed` or `abandoned` iteration was scored that way; `null` on
+   * every other status, and on rows written before the column existed. A
+   * closed vocabulary — "no-commit-child-open", "turn-error", "timeout",
+   * "dispatch-failed", "protocol-error", "blocked", "cancelled",
+   * "server-restart" — so policy and UI can switch on it without parsing the
+   * human `summary`. Provider-attributed reasons ("provider-error:*") arrive
+   * with adapter error scoring.
+   */
+  failureReason: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });

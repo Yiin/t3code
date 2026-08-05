@@ -71,6 +71,12 @@ export const EpicRunIteration = Schema.Struct({
   turnStatus: EpicRunIterationStatus,
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),
+  /**
+   * Machine-readable reason for a `failed`/`abandoned` status, `null`
+   * otherwise. Vocabulary lives on the transport schema
+   * (`EpicRunIterationReport.failureReason`).
+   */
+  failureReason: Schema.NullOr(Schema.String),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -104,6 +110,7 @@ export const UpdateEpicRunIterationInput = Schema.Struct({
   turnStatus: EpicRunIterationStatus,
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),
+  failureReason: Schema.NullOr(Schema.String),
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type UpdateEpicRunIterationInput = typeof UpdateEpicRunIterationInput.Type;
