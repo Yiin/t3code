@@ -36,6 +36,7 @@
 #   COOKEPIC_WORKER_ARTIFACT_BYTES rolling worker output limit (default 1048576)
 #   COOKEPIC_INSPECTOR_RESULT_BYTES inspector result limit (default 4096)
 #   COOKEPIC_INSPECTOR_LOG_BYTES inspector raw log limit (default 32768)
+#   COOKEPIC_FOLD_TIMEOUT      fold agent timeout, seconds         (default 180)
 #   COOKEPIC_REPO_EVIDENCE_BYTES aggregate repository evidence limit (default 8192)
 #   COOKEPIC_MAX_ATTEMPTS      attempts per child before blocked   (default 3)
 #   COOKEPIC_GATE              integration gate run before landing (REQUIRED unless COOKEPIC_NO_GATE=1)
@@ -55,6 +56,9 @@
 #   COOKEPIC_BUDGET_USD        soft spend cap (claude/ccx only; stops new dispatches)
 #   COOKEPIC_WORKER_CMD        test hook: run this instead of a harness
 #   COOKEPIC_INSPECTOR_CMD     test hook: receives prompt and result paths
+#   COOKEPIC_FOLD_CMD          test hook: receives the fold prompt path; unlike
+#                              the inspector, this agent needs real bd/Bash
+#                              access (it writes the epic body itself)
 #   COOKEPIC_CLOCK_CMD         test hook: prints integer epoch seconds
 #   COOKEPIC_RESOURCE_SAMPLER_CMD test hook: receives worker and pid; prints CPU-usec and I/O bytes
 #   COOKEPIC_WORKER_ACTIVE_CMD test hook: receives worker and pid
@@ -96,6 +100,7 @@ SUMMARY="$RUN_DIR/summary.md"
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$SKILL_DIR/worker-prompt.md"
 INSPECTOR_TEMPLATE="$SKILL_DIR/inspector-prompt.md"
+FOLD_TEMPLATE="$SKILL_DIR/fold-prompt.md"
 
 : > "$LOG"; : > "$MAILBOX"; : > "$SUMMARY"
 
@@ -145,6 +150,8 @@ SPAWN_DELAY="${COOKEPIC_SPAWN_DELAY:-2}"
 BUDGET="${COOKEPIC_BUDGET_USD:-}"
 WORKER_CMD="${COOKEPIC_WORKER_CMD:-}"
 INSPECTOR_CMD="${COOKEPIC_INSPECTOR_CMD:-}"
+FOLD_CMD="${COOKEPIC_FOLD_CMD:-}"
+FOLD_TIMEOUT="${COOKEPIC_FOLD_TIMEOUT:-180}"
 CLOCK_CMD="${COOKEPIC_CLOCK_CMD:-}"
 RESOURCE_SAMPLER_CMD="${COOKEPIC_RESOURCE_SAMPLER_CMD:-}"
 WORKER_ACTIVE_CMD="${COOKEPIC_WORKER_ACTIVE_CMD:-}"
@@ -179,6 +186,7 @@ fi
 [[ "$INSPECTOR_RESULT_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECTOR_RESULT_BYTES must be a positive integer' 'use bytes'
 [[ "$INSPECTOR_LOG_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECTOR_LOG_BYTES must be a positive integer' 'use bytes'
 [[ "$REPO_EVIDENCE_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_REPO_EVIDENCE_BYTES must be a positive integer' 'use bytes'
+[[ "$FOLD_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_FOLD_TIMEOUT must be a positive integer' 'use whole seconds'
 [ "$DISABLE_SYSTEMD" = 0 ] || [ "$DISABLE_SYSTEMD" = 1 ] || die 'COOKEPIC_DISABLE_SYSTEMD must be 0 or 1' 'use 1 only in fallback tests'
 [ "$INSPECT_MIN_DELAY" -le "$INSPECT_MAX_DELAY" ] || die 'COOKEPIC_INSPECT_MIN_DELAY must not exceed COOKEPIC_INSPECT_MAX_DELAY' 'raise the maximum or lower the minimum'
 [[ "$SPAWN_DELAY" =~ ^[0-9]+$ ]] || die 'COOKEPIC_SPAWN_DELAY must be zero or a positive integer' 'use whole seconds'
@@ -196,6 +204,7 @@ done
 [ -d .beads ] || die 'no .beads directory here' 'launch from the project root of a beads-enabled repo'
 [ -f "$TEMPLATE" ] || die "worker prompt template missing: $TEMPLATE" 'reinstall the cook-epic skill'
 [ -f "$INSPECTOR_TEMPLATE" ] || die "inspector prompt template missing: $INSPECTOR_TEMPLATE" 'reinstall the cook-epic skill'
+[ -f "$FOLD_TEMPLATE" ] || die "fold prompt template missing: $FOLD_TEMPLATE" 'reinstall the cook-epic skill'
 if git ls-files .beads | grep -qE '^\.beads/(dolt/|dolt-server\.|.*\.db$)'; then
   die 'the beads DATA dir is git-tracked; worktrees would fork the database' 'untrack the dolt data before running cook-epic'
 fi
@@ -934,7 +943,7 @@ fi
 # ---------------------------------------------------------------- state ----
 declare -A PID2CHILD=() PID2BRANCH=() PID2WORKER=() PID2WT=() PID2ARTIFACT=() PID2OUTPUT_BYTES=() PID2RATE_LIMIT=() PID2COST=()
 declare -A PID2STOP_REASON=()
-declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=() PERM_DENIALS=() CHILD_ORIENTATION=()
+declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=() PERM_DENIALS=() CHILD_ORIENTATION=() EPIC_NOTES_LEN=()
 declare -A PRE_HEAD=() PRE_SIB_HEAD=() FIRST_SIG=() FIRST_HEAD=() FIRST_SIB_HEAD=() FIRST_UNTRACKED=() # sequential verification
 declare -A LIVE_STARTED=() LIVE_LAST_PROGRESS=() LIVE_OUTPUT_SIZE=() LIVE_CPU=() LIVE_IO=() LIVE_TREE=()
 declare -A LIVE_NEXT_INSPECT=() LIVE_NEXT_REPO_PROBE=() LIVE_GENERATION=() LIVE_CGROUP=()
@@ -1712,6 +1721,17 @@ comment_count_of() { # <child> -> prints the bead's comment count (0 on any fail
     | jq -r 'if type=="array" then .[0] else . end | .comment_count // 0' 2>/dev/null || echo 0
 }
 
+epic_notes() { # -> prints the epic's current notes text verbatim (empty on any failure)
+  bd show "$EPIC" --json 2>/dev/null \
+    | jq -r 'if type=="array" then .[0] else . end | .notes // ""' 2>/dev/null
+}
+
+epic_notes_length() { # -> prints the char length of the epic's current notes text
+  local notes
+  notes="$(epic_notes)"
+  printf '%s\n' "${#notes}"
+}
+
 spawn_worker() { # <child> <title>
   local child="$1" title="$2"
   WORKER_NUM=$((WORKER_NUM + 1))
@@ -1775,6 +1795,7 @@ spawn_worker() { # <child> <title>
   fi
 
   PRECOMMENTS[$child]=$(comment_count_of "$child")
+  EPIC_NOTES_LEN[$child]=$(epic_notes_length)
 
   # Both modes need the run-wide baseline seeded immediately before the first
   # worker starts: sequential uses it for verify-by-effects, parallel needs the
@@ -1983,6 +2004,113 @@ append_orientation_summary() { # <child> <orientation-json-or-null>
   [ -n "$secs" ] && [ -n "$calls" ] && [ -n "$toks" ] || return 0
   printf -- '- %s orientation: %ss to first edit, %s tool calls, %s tokens before first edit\n' \
     "$child" "$secs" "$calls" "$toks" >> "$SUMMARY"
+}
+
+# ------------------------------------------------------------------ fold ----
+# Coordinator-owned single-writer fold: after a landed child whose epic notes
+# gained DECISION:/GOTCHA: lines since its dispatch, a one-shot agent (unlike
+# the tool-less liveness inspector, this one needs real Bash/bd access) folds
+# those payloads into the epic's Context & architecture section and writes the
+# result back with `bd update $EPIC --body-file`. Runs inline inside the
+# caller's already-serialized landing section (sequential tick / merge-slot-
+# held merge loop) so it can never race another fold. Failure is non-fatal.
+render_fold_prompt() { # <description> <new-notes> <prompt path>
+  local desc="$1" new_notes="$2" prompt="$3"
+  cp -f "$FOLD_TEMPLATE" "$prompt"
+  cat >> "$prompt" <<EOF
+
+## Epic id
+
+$EPIC
+
+## Today's date
+
+$(date +%Y-%m-%d)
+
+## Current description (verbatim — sections outside Context & architecture are shown for reference only; do not touch them)
+
+$desc
+
+## New DECISION:/GOTCHA: lines to fold in (from the epic notes added since this child's dispatch)
+
+$new_notes
+EOF
+  chmod 600 "$prompt"
+}
+
+run_fold_harness() { # <prompt> <raw> <identity file>
+  local prompt="$1" raw="$2" identity="$3" rc=0
+  export FLEET_UNIT="cook-epic-$SCOPE_ID-fold" COOKEPIC_FOLD=1 COOKEPIC_RUN_DIR="$RUN_DIR"
+  if [ -n "$FOLD_CMD" ]; then
+    capture_inspector_raw "$raw" inspector_exec "$identity" "$FOLD_CMD" "$prompt" || rc=$?
+    return "$rc"
+  fi
+  case "$HARNESS" in
+    claude|ccx)
+      capture_inspector_raw "$raw" inspector_exec "$identity" \
+        flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" -p --permission-mode "$PERM_MODE" \
+        --output-format text --model "${COOKEPIC_MODEL:-haiku}" --exclude-dynamic-system-prompt-sections \
+        -- "$(<"$prompt")" || rc=$?
+      ;;
+    kimi)
+      local -a kimi_args=(-p "$(<"$prompt")" --output-format stream-json)
+      [ -n "${COOKEPIC_MODEL:-}" ] && kimi_args+=(-m "$COOKEPIC_MODEL")
+      capture_inspector_raw "$raw" inspector_exec "$identity" \
+        flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" "${kimi_args[@]}" || rc=$?
+      ;;
+    codex)
+      local -a codex_args
+      case "$PERM_MODE" in
+        auto) codex_args=(-a never -s danger-full-access) ;;
+        bypassPermissions) codex_args=(--dangerously-bypass-approvals-and-sandbox) ;;
+        *) codex_args=(-a never -s "$PERM_MODE") ;;
+      esac
+      [ -n "${COOKEPIC_MODEL:-}" ] && codex_args+=(-m "$COOKEPIC_MODEL")
+      capture_inspector_raw "$raw" inspector_exec "$identity" \
+        flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" "${codex_args[@]}" exec --json "$(<"$prompt")" || rc=$?
+      ;;
+    opencode)
+      local -a oc_args=(run --format json --auto)
+      [ -n "${COOKEPIC_MODEL:-}" ] && oc_args+=(-m "$COOKEPIC_MODEL")
+      capture_inspector_raw "$raw" inspector_exec "$identity" \
+        flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" "${oc_args[@]}" -- "$(<"$prompt")" || rc=$?
+      ;;
+    worker-cmd) return 127 ;;
+  esac
+  return "$rc"
+}
+
+fold_skip() { # <child> <reason> — non-fatal: log and note the epic, run continues
+  local child="$1" reason="$2"
+  say "fold skipped for $child ($reason)"
+  bd note "$EPIC" "cook-epic: fold skipped for $child ($reason)" >/dev/null 2>>"$LOG"
+}
+
+fold_epic_notes() { # <child> — no-op unless the epic notes gained DECISION:/GOTCHA: since dispatch
+  local child="$1" epic_json notes old_len new_part desc prompt raw identity before after
+  old_len="${EPIC_NOTES_LEN[$child]:-}"
+  [ -n "$old_len" ] || return 0
+  epic_json="$(bd show "$EPIC" --json 2>/dev/null)" || { fold_skip "$child" "bd show $EPIC failed"; return 0; }
+  notes="$(jq -r 'if type=="array" then .[0] else . end | .notes // ""' <<<"$epic_json" 2>/dev/null)"
+  new_part="${notes:$old_len}"
+  [[ "$new_part" == *DECISION:* || "$new_part" == *GOTCHA:* ]] || return 0
+  desc="$(jq -r 'if type=="array" then .[0] else . end | .description // ""' <<<"$epic_json" 2>/dev/null)"
+  before="$desc"
+  prompt="$RUN_DIR/fold-$child.prompt.md"; raw="$RUN_DIR/fold-$child.raw.log"; identity="$RUN_DIR/fold-$child.owned"
+  render_fold_prompt "$desc" "$new_part" "$prompt"
+  rm -f "$raw" "$identity"
+  say "$child landed with DECISION:/GOTCHA: markers in the epic notes; folding into $EPIC"
+  if ! ( cd "$REPO" && run_fold_harness "$prompt" "$raw" "$identity" ); then
+    fold_skip "$child" "fold agent failed to run (see $raw)"
+    return 0
+  fi
+  after="$(bd show "$EPIC" --json 2>/dev/null | jq -r 'if type=="array" then .[0] else . end | .description // ""' 2>/dev/null)"
+  if [ "$after" = "$before" ]; then
+    fold_skip "$child" 'fold agent made no description change'
+    return 0
+  fi
+  mbox --arg child "$child" --arg ts "$(date +%H:%M:%S)" '{event:"folded",child:$child,ts:$ts}'
+  say "$child folded into $EPIC Context & architecture"
 }
 
 cleanup_worktree() { # <wt> — only coordinator-owned run-scoped paths are removable
@@ -2459,6 +2587,7 @@ reap_sequential() { # <child> <worker> <rc> <status> <title> <stop reason> <perm
     printf -- '- %s %s on `%s` (%s)\n' "$child" "$landing" "$BASE_BRANCH" "$head" >> "$SUMMARY"
     append_orientation_summary "$child" "$orientation"
     MERGED=$((MERGED + 1))
+    fold_epic_notes "$child"
     say "$child done on $worker ($commits commits) — $landing on $BASE_BRANCH ($head)"
     return
   fi
@@ -2708,6 +2837,7 @@ process_merges() {
       '{event:"merged",child:$child,branch:$branch,commit:$commit,landing:$landing,repositories:$repos,ts:$ts}'
     printf -- '- %s %s via `%s` (%s)\n' "$child" "$merge_landing" "$branch" "$merge_commit" >> "$SUMMARY"
     append_orientation_summary "$child" "${CHILD_ORIENTATION[$child]:-null}"
+    fold_epic_notes "$child"
     say "$merge_landing $branch ($child) into $BASE_BRANCH ($merge_commit)"
     delete_branch_everywhere "$branch"
     [ "$PUSH_ENABLED" -eq 1 ] && push_repo "$REPO" origin --delete "$branch" >>"$LOG" 2>&1 || true
