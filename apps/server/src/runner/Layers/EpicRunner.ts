@@ -53,6 +53,7 @@ import {
 import { EpicRunLock, type EpicRunLockLease } from "../Services/EpicRunLock.ts";
 import {
   classifyIteration,
+  iterationFailureClass,
   type EpicIterationOutcome,
   type IterationTurnState,
 } from "../ralphProtocol.ts";
@@ -70,6 +71,14 @@ const DEFAULT_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
 const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
+/**
+ * How many consecutive infra failures (provider errors, timeouts, dispatch
+ * failures — see `iterationFailureClass`) a run absorbs with backoff before it
+ * fails. Deliberately above `maxConsecutiveFailures`: an org spend limit or
+ * provider outage outlasts any child-failure streak worth retrying, but the
+ * budget must still terminate — infra failures are never infinite-retry.
+ */
+const DEFAULT_INFRA_FAILURE_BUDGET = 5;
 const DEFAULT_MAX_ITERATIONS = 50;
 const RECENT_ITERATIONS_LIMIT = 25;
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
@@ -125,14 +134,18 @@ const buildTransportRun = (
  * The machine-readable `failure_reason` a classified outcome scores its
  * iteration row with; `null` for the kinds that complete the iteration. Part
  * of the closed vocabulary documented on
- * `EpicRunIterationReport.failureReason` — downstream policy (infra-vs-child
- * failure budgets, UI badges) switches on these strings, so they must stay
- * stable. "dispatch-failed", "cancelled" and "server-restart" are assigned at
- * their own sites, which are the only places that know the turn never
- * started, was cancelled, or died with the server. A completed no-commit turn
- * is only chargeable when its child issue was left open, hence the suffix.
- * Classification can override this table with something more specific — the
- * `provider-error:*` family (`EpicIterationOutcome.failureReason`).
+ * `EpicRunIterationReport.failureReason` — downstream policy and UI badges
+ * switch on these strings, so they must stay stable. The persisted value is
+ * prefixed with the outcome's failure class (`iterationFailureClass`), e.g.
+ * "infra:timeout" / "child:no-commit-child-open", so post-mortems can tell a
+ * provider death from agent behavior. "dispatch-failed", "cancelled" and
+ * "server-restart" are assigned at their own sites, which are the only places
+ * that know the turn never started, was cancelled, or died with the server —
+ * dispatch failures are infra; the other two never had a classified outcome
+ * and stay unprefixed. A completed no-commit turn is only chargeable when its
+ * child issue was left open, hence the suffix. Classification can override
+ * this table with something more specific — the `provider-error:*` family
+ * (`EpicIterationOutcome.failureReason`).
  */
 const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | null => {
   switch (kind) {
@@ -303,6 +316,7 @@ export interface EpicRunnerLiveOptions {
   readonly retryMaxDelayMs?: number;
   readonly maxConsecutiveFailures?: number;
   readonly maxNoCommitStreak?: number;
+  readonly infraFailureBudget?: number;
   readonly defaultMaxIterations?: number;
   readonly subagentGraceTimeoutMs?: number;
 }
@@ -338,6 +352,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const maxNoCommitStreak = Math.max(
       1,
       options?.maxNoCommitStreak ?? DEFAULT_MAX_NO_COMMIT_STREAK,
+    );
+    const infraFailureBudget = Math.max(
+      1,
+      options?.infraFailureBudget ?? DEFAULT_INFRA_FAILURE_BUDGET,
     );
     const defaultMaxIterations = Math.max(
       1,
@@ -1311,12 +1329,17 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           outcome.kind === "backlog-empty" || outcome.kind === "done" || noCommitChildClosed
             ? "completed"
             : "failed";
+        const failureClass = iterationFailureClass(outcome.kind);
+        const baseFailureReason =
+          settleResult._tag === "dispatch-failed"
+            ? "dispatch-failed"
+            : (outcome.failureReason ?? failureReasonForOutcome(outcome.kind));
+        // A failed status implies a failure kind, and every failure kind has a
+        // class and a reason — the null guards only close the type.
         const failureReason =
-          iterationStatus === "completed"
+          iterationStatus === "completed" || failureClass === null || baseFailureReason === null
             ? null
-            : settleResult._tag === "dispatch-failed"
-              ? "dispatch-failed"
-              : (outcome.failureReason ?? failureReasonForOutcome(outcome.kind));
+            : `${failureClass}:${baseFailureReason}`;
 
         yield* store
           .updateIteration({
@@ -1363,6 +1386,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // In-memory on purpose: the gutter rule guards against a loop spinning
         // *now*, and a resumed run deserves a clean slate.
         let noCommitStreak = 0;
+        // Same lifetime and rationale. Infra failures — provider errors,
+        // timeouts, dispatch failures (`iterationFailureClass`) — charge this
+        // dedicated budget with backoff, never the gutter and never
+        // `maxConsecutiveFailures`: on 2026-08-04 two spend-limit 429s tripped
+        // the gutter in seconds when the limit itself lasted hours. Like the
+        // gutter streak it survives an interleaved child failure and only a
+        // successful iteration resets it.
+        let infraStreak = 0;
 
         while (true) {
           const run = yield* withTransition(
@@ -1442,6 +1473,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
               if (outcome.kind === "done") {
                 noCommitStreak = 0;
+                infraStreak = 0;
                 yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });
                 return LOOP_CONTINUE;
               }
@@ -1461,6 +1493,31 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   consecutiveFailures: 0,
                 });
                 return gutter ? LOOP_STOP : LOOP_CONTINUE;
+              }
+
+              if (iterationFailureClass(outcome.kind) === "infra") {
+                // Infra failures leave `consecutiveFailures` and the gutter
+                // streak untouched: neither budget may be spent by a failure
+                // the agent never caused. `lastError` carries the real infra
+                // reason on every retry, so a run sitting in backoff reads
+                // "provider error: monthly spend limit …", not a generic
+                // failure count.
+                infraStreak += 1;
+                const infraReason = outcome.detail ?? outcome.kind;
+                const exhaustedInfra = infraStreak >= infraFailureBudget;
+                if (exhaustedInfra) liveLoops.delete(runId);
+                yield* saveRun({
+                  ...settledRun,
+                  ...(exhaustedInfra ? { status: "failed" as const } : {}),
+                  lastError: exhaustedInfra
+                    ? `infra: ${infraStreak} consecutive infrastructure failures; last: ${infraReason}`
+                    : infraReason,
+                });
+                const infraRetry: LoopBoundary = {
+                  _tag: "continue",
+                  delayMs: backoffDelayMs(infraStreak),
+                };
+                return exhaustedInfra ? LOOP_STOP : infraRetry;
               }
 
               const consecutiveFailures = currentRun.consecutiveFailures + 1;

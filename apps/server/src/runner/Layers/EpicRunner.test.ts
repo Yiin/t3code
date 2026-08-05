@@ -976,7 +976,7 @@ describe("EpicRunner", () => {
     // iteration left no commit behind — nothing to judge it by, so it fails.
     const harness = createHarness({
       script: [{ text: null, head: "head-0", turnState: "completed" }],
-      options: { maxConsecutiveFailures: 1 },
+      options: { infraFailureBudget: 1 },
     });
 
     return Effect.gen(function* () {
@@ -984,9 +984,9 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
       const failed = harness.store.runs.get(run.runId)!;
-      assert.strictEqual(failed.lastError, "turn completed without an assistant message");
+      assert.include(failed.lastError ?? "", "turn completed without an assistant message");
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, "protocol-error");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:protocol-error");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1068,14 +1068,14 @@ describe("EpicRunner", () => {
           sessionStatus: "stopped",
         },
       ],
-      options: { maxConsecutiveFailures: 1 },
+      options: { infraFailureBudget: 1 },
     });
 
     return Effect.gen(function* () {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
-      assert.strictEqual(harness.store.runs.get(run.runId)?.lastError, "turn was interrupted");
+      assert.include(harness.store.runs.get(run.runId)?.lastError ?? "", "turn was interrupted");
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
     }).pipe(Effect.provide(harness.layer));
   });
@@ -1249,7 +1249,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("retries a failing iteration with backoff and fails the run after three", () => {
+  it.live("retries infra failures with backoff and fails only at the infra budget", () => {
     const failing = {
       text: null,
       head: "head-0",
@@ -1258,6 +1258,9 @@ describe("EpicRunner", () => {
     } as const;
     const harness = createHarness({
       script: [failing, failing, failing, { text: "should never run", head: "head-9" }],
+      // Below the failure count so exhaustion is observable; the default
+      // budget (5) would have kept retrying past all three.
+      options: { infraFailureBudget: 3, maxConsecutiveFailures: 1 },
     });
 
     return Effect.gen(function* () {
@@ -1265,8 +1268,12 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
       const failed = harness.store.runs.get(run.runId)!;
-      assert.strictEqual(failed.consecutiveFailures, 3);
-      assert.strictEqual(failed.lastError, "turn ended in an error state");
+      // Errored turns are infra failures: they never consume the
+      // maxConsecutiveFailures budget (set to 1 above to prove it), and the
+      // run survives until the dedicated infra budget runs out.
+      assert.strictEqual(failed.consecutiveFailures, 0);
+      assert.include(failed.lastError ?? "", "turn ended in an error state");
+      assert.include(failed.lastError ?? "", "3 consecutive infrastructure failures");
       // The fourth scripted iteration must not have been reached.
       assert.strictEqual(harness.turnsStarted(), 3);
       assert.deepStrictEqual(
@@ -1275,8 +1282,100 @@ describe("EpicRunner", () => {
       );
       assert.deepStrictEqual(
         harness.store.iterations.map((iteration) => iteration.failureReason),
-        ["turn-error", "turn-error", "turn-error"],
+        ["infra:turn-error", "infra:turn-error", "infra:turn-error"],
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps consecutive infra failures out of the gutter and retries through them", () => {
+    // The 2026-08-04 incident shape: two provider deaths in a row must not
+    // read as "2 iterations without a commit". With the default gutter
+    // threshold of 2, an infra failure that incremented the no-commit streak
+    // would fail this run at the second provider error; instead the run backs
+    // off, retries, and still has the full gutter budget for the genuine
+    // no-commit that follows.
+    const spendLimit = "You've hit your org's monthly spend limit; it resets on the 1st";
+    const providerDeath = {
+      text: null,
+      head: "head-0",
+      turnState: "error",
+      sessionStatus: "error",
+      sessionLastError: spendLimit,
+    } as const;
+    const harness = createHarness({
+      script: [
+        providerDeath,
+        providerDeath,
+        { text: "thinking about it", head: "head-0" },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.turnsStarted(), 4);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.failureReason),
+        [
+          "infra:provider-error:spend-limit",
+          "infra:provider-error:spend-limit",
+          "child:no-commit-child-open",
+          null,
+        ],
+      );
+      // Infra failures never touched the persisted child-failure budget.
+      assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("resets the infra streak when an iteration succeeds", () => {
+    const failing = {
+      text: null,
+      head: "head-0",
+      turnState: "error",
+      sessionStatus: "error",
+    } as const;
+    const harness = createHarness({
+      script: [
+        failing,
+        { text: 'work\nRALPH_MSG: {"summary":"landed","why":"progress"}', head: "head-1" },
+        { ...failing, head: "head-1" },
+        { ...failing, head: "head-1" },
+        { text: "should never run", head: "head-9" },
+      ],
+      options: { infraFailureBudget: 2 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      // Without the reset the budget of 2 would have failed the run at the
+      // third iteration; the successful commit bought a fresh budget.
+      assert.strictEqual(harness.turnsStarted(), 4);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.turnStatus),
+        ["failed", "completed", "failed", "failed"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("charges a RALPH_BLOCKED report to the child failure budget, not the infra one", () => {
+    const harness = createHarness({
+      script: [{ text: "cannot proceed\nRALPH_BLOCKED", head: "head-0" }],
+      options: { maxConsecutiveFailures: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      const failed = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(failed.consecutiveFailures, 1);
+      assert.strictEqual(failed.lastError, "agent reported RALPH_BLOCKED");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:blocked");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1296,20 +1395,23 @@ describe("EpicRunner", () => {
           sessionLastError: spendLimit,
         },
       ],
-      options: { maxConsecutiveFailures: 1 },
+      options: { infraFailureBudget: 1 },
     });
 
     return Effect.gen(function* () {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
-      assert.strictEqual(
-        harness.store.runs.get(run.runId)!.lastError,
+      assert.include(
+        harness.store.runs.get(run.runId)!.lastError ?? "",
         `provider error: ${spendLimit}`,
       );
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
       assert.strictEqual(harness.store.iterations[0]?.summary, `provider error: ${spendLimit}`);
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, "provider-error:spend-limit");
+      assert.strictEqual(
+        harness.store.iterations[0]?.failureReason,
+        "infra:provider-error:spend-limit",
+      );
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1339,16 +1441,18 @@ describe("EpicRunner", () => {
         assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
         assert.strictEqual(
           harness.store.iterations[0]?.failureReason,
-          "provider-error:spend-limit",
+          "infra:provider-error:spend-limit",
         );
         assert.strictEqual(
           harness.store.iterations[0]?.summary,
           "provider error: You've hit your org's monthly spend limit — upgrade to continue.",
         );
 
-        // The provider error charged consecutiveFailures, not the gutter, and
-        // the failed iteration's claimed child was reopened before the next
-        // iteration selected work — which re-picked it and finished the run.
+        // The provider error charged the infra budget — neither the gutter
+        // nor consecutiveFailures — and the failed iteration's claimed child
+        // was reopened before the next iteration selected work, which
+        // re-picked it and finished the run.
+        assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
         const updates = harness.processRequests.filter(
           (request) => request.command === "bd" && request.args[0] === "update",
         );
@@ -1375,7 +1479,7 @@ describe("EpicRunner", () => {
     const harness = createHarness({
       script: [{ text: "never reached", head: "head-0" }],
       refuseCommandTypes: ["thread.turn.start"],
-      options: { maxConsecutiveFailures: 1 },
+      options: { infraFailureBudget: 1 },
     });
 
     return Effect.gen(function* () {
@@ -1383,7 +1487,7 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, "dispatch-failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:dispatch-failed");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1396,6 +1500,7 @@ describe("EpicRunner", () => {
     } as const;
     const harness = createHarness({
       script: [failing, failing, failing],
+      options: { infraFailureBudget: 3 },
       childStatuses: { "child-3": "in_progress" },
     });
 
@@ -1435,6 +1540,7 @@ describe("EpicRunner", () => {
     } as const;
     const harness = createHarness({
       script: [failing, failing, failing],
+      options: { infraFailureBudget: 3 },
       // `child-1` belongs to the FIRST iteration and `child-3` to the last.
       // Before t3code-1bk only the latest iteration was swept, so `child-1`
       // stayed claimed forever and `bd ready` could never resurface it.
@@ -1467,6 +1573,7 @@ describe("EpicRunner", () => {
     } as const;
     const harness = createHarness({
       script: [failing, failing, failing],
+      options: { infraFailureBudget: 3 },
       childStatuses: { "child-3": "closed" },
     });
 
@@ -1587,8 +1694,8 @@ describe("EpicRunner", () => {
           iteration.failureReason,
         ]),
         [
-          ["failed", "no-commit-child-open"],
-          ["failed", "no-commit-child-open"],
+          ["failed", "child:no-commit-child-open"],
+          ["failed", "child:no-commit-child-open"],
         ],
       );
     }).pipe(Effect.provide(harness.layer));
@@ -1609,7 +1716,7 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
 
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, "no-commit-child-open");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
       // The human summary stays what classification said.
       assert.strictEqual(harness.store.iterations[0]?.summary, "iteration produced no commit");
       // Run-level policy is untouched: one no-commit charges the gutter
@@ -1693,20 +1800,20 @@ describe("EpicRunner", () => {
   it.live("interrupts and fails an iteration that outlives its timeout", () => {
     const harness = createHarness({
       script: [{ text: null, head: "head-0", stall: true }],
-      options: { iterationTimeoutMs: 40, maxConsecutiveFailures: 1 },
+      options: { iterationTimeoutMs: 40, infraFailureBudget: 1 },
     });
 
     return Effect.gen(function* () {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
-      assert.strictEqual(
-        harness.store.runs.get(run.runId)!.lastError,
+      assert.include(
+        harness.store.runs.get(run.runId)!.lastError ?? "",
         "iteration exceeded its timeout",
       );
       assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 1);
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, "timeout");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:timeout");
     }).pipe(Effect.provide(harness.layer));
   });
 

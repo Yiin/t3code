@@ -196,6 +196,45 @@ export interface EpicIterationOutcome {
 }
 
 /**
+ * Which failure budget an outcome charges — the 2026-08-04 distinction: both
+ * incident runs died to "gutter: 2 iterations without a commit" when the true
+ * cause was a spend-limit 429 that would have lifted within hours.
+ *
+ * - `infra` — the failure is attributable to infrastructure, not the agent:
+ *   timeouts, dispatch failures, errored or interrupted turns (including every
+ *   provider error, which classification folds into kind `error`), and
+ *   protocol errors, whose shape — a completed turn with no readable final
+ *   message — is a projection or provider defect, not agent behavior.
+ * - `child` — the agent genuinely ran and did not deliver: it reported
+ *   `RALPH_BLOCKED`, or ended a clean turn with no commit and its child issue
+ *   still open.
+ * - `null` — not a failure.
+ *
+ * A pure function of the kind, because classification already resolves the
+ * ambiguous shapes: a "no-commit" whose final message was really a provider
+ * error, or an errored turn carrying `session.lastError`, both come out as
+ * kind `error` (see `classifyIteration`).
+ */
+export type IterationFailureClass = "infra" | "child";
+
+export const iterationFailureClass = (
+  kind: EpicIterationOutcomeKind,
+): IterationFailureClass | null => {
+  switch (kind) {
+    case "done":
+    case "backlog-empty":
+      return null;
+    case "timeout":
+    case "error":
+    case "protocol-error":
+      return "infra";
+    case "no-commit":
+    case "blocked":
+      return "child";
+  }
+};
+
+/**
  * The projected state of the iteration's turn, as read back from projections.
  * `null` means no turn row was projected at all.
  */

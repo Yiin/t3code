@@ -48,14 +48,17 @@ export const EpicRunIterationReport = Schema.Struct({
   /**
    * Why a `failed` or `abandoned` iteration was scored that way; `null` on
    * every other status, and on rows written before the column existed. A
-   * closed vocabulary — "no-commit-child-open", "turn-error", "timeout",
-   * "dispatch-failed", "protocol-error", "blocked", "cancelled",
-   * "server-restart" — so policy and UI can switch on it without parsing the
-   * human `summary`. Provider-attributed failures carry the "provider-error"
-   * prefix: bare "provider-error" when only the session's error text is
-   * known, or "provider-error:spend-limit" / "provider-error:auth" /
-   * "provider-error:rate-limit" when the text matched the runner's curated
-   * pattern table.
+   * closed vocabulary, so policy and UI can switch on it without parsing the
+   * human `summary`. Classified failures are prefixed with their failure
+   * class: "infra:" for failures attributable to infrastructure ("turn-error",
+   * "timeout", "dispatch-failed", "protocol-error", and the provider-error
+   * family) and "child:" for failures the agent itself produced
+   * ("no-commit-child-open", "blocked"). Provider-attributed failures read
+   * "infra:provider-error" when only the session's error text is known, or
+   * "infra:provider-error:spend-limit" / ":auth" / ":rate-limit" when the
+   * text matched the runner's curated pattern table. "cancelled" and
+   * "server-restart" never had a classified outcome and stay unprefixed; rows
+   * written before the class prefix existed carry the bare reasons.
    */
   failureReason: Schema.NullOr(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
