@@ -305,6 +305,9 @@ run_env_case() {
   printf 'open' > "$state/status"
   cat > "$bin/claude" <<'EOF'
 #!/usr/bin/env bash
+# The coordinator's cache warm-up also invokes claude, before any dispatch;
+# only a real worker call carries COOKEPIC_CHILD.
+[ -n "${COOKEPIC_CHILD:-}" ] || exit 0
 printf '%s' "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS-unset}" > "$COOKEPIC_RUN_DIR/ceiling"
 printf 'done\n' > claude.txt
 git add claude.txt && git commit -qm claude
@@ -332,6 +335,8 @@ run_env_preserved_case() {
   printf 'open' > "$state/status"
   cat > "$bin/claude" <<'EOF'
 #!/usr/bin/env bash
+# See run_env_case: warm-up calls carry no COOKEPIC_CHILD.
+[ -n "${COOKEPIC_CHILD:-}" ] || exit 0
 printf '%s' "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS-unset}" > "$COOKEPIC_RUN_DIR/ceiling"
 printf 'done\n' > claude.txt
 git add claude.txt && git commit -qm claude
