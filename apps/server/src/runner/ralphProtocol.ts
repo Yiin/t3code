@@ -55,7 +55,7 @@ export const hasRalphBlocked = (text: string): boolean => RALPH_BLOCKED_PATTERN.
  * reason — and the excerpt is the human-readable line it was found on.
  */
 export interface ProviderErrorMatch {
-  readonly category: "spend-limit" | "auth" | "rate-limit";
+  readonly category: "spend-limit" | "auth" | "rate-limit" | "unavailable";
   readonly excerpt: string;
 }
 
@@ -79,9 +79,34 @@ const PROVIDER_ERROR_PATTERNS: ReadonlyArray<{
   { category: "auth", pattern: /\b401\b/ },
   { category: "rate-limit", pattern: /rate limit/i },
   { category: "rate-limit", pattern: /overloaded/i },
+  { category: "unavailable", pattern: /service unavailable/i },
+  { category: "unavailable", pattern: /temporarily unavailable/i },
+  { category: "unavailable", pattern: /provider (?:is )?unavailable/i },
+  {
+    category: "unavailable",
+    pattern: /provider error.{0,80}(?:service |temporarily )?unavailable/i,
+  },
 ];
 
 const MAX_PROVIDER_ERROR_EXCERPT_LENGTH = 200;
+
+/**
+ * Assistant text is safe to use for provider switching only when it has a
+ * provider-owned shape. Broad phrase detection remains separate so reporting
+ * can still explain likely infrastructure failures without letting task prose
+ * change the configured provider.
+ */
+const PROVIDER_FALLBACK_MESSAGE_PATTERNS: ReadonlyArray<RegExp> = [
+  /^You've hit your org's monthly spend limit\b/im,
+  /^Claude AI usage limit reached(?:\||$)/im,
+  /^Error: invalid API key\b/im,
+  /^authentication_error:/im,
+  /^(?:provider[- ](?:error|failure)):\s*\S/im,
+  /^The provider (?:is )?unavailable\b/im,
+];
+
+export const isProviderFallbackMessage = (text: string): boolean =>
+  PROVIDER_FALLBACK_MESSAGE_PATTERNS.some((pattern) => pattern.test(text));
 
 /**
  * Scan text for provider-error phrasing (spend limits, auth failures, rate
@@ -193,6 +218,10 @@ export interface EpicIterationOutcome {
    * family. Absent otherwise; the runner falls back to its per-kind table.
    */
   readonly failureReason?: string;
+  /** Trusted provider evidence permits a one-way provider switch. */
+  readonly providerFallbackEligible?: boolean;
+  /** Where the provider evidence came from. This value is not persisted. */
+  readonly providerErrorSource?: "session-last-error" | "assistant-message";
 }
 
 /**
@@ -293,6 +322,8 @@ export const classifyIteration = (input: ClassifyIterationInput): EpicIterationO
           detail: `provider error: ${input.sessionLastError}`,
           report: null,
           failureReason: providerErrorFailureReason(input.sessionLastError),
+          providerFallbackEligible: true,
+          providerErrorSource: "session-last-error",
         };
   }
   if (input.turnState === "interrupted") {
@@ -361,6 +392,8 @@ export const classifyIteration = (input: ClassifyIterationInput): EpicIterationO
         detail: `provider error: ${providerError.excerpt}`,
         report: null,
         failureReason: `provider-error:${providerError.category}`,
+        providerFallbackEligible: isProviderFallbackMessage(text),
+        providerErrorSource: "assistant-message",
       };
     }
   }

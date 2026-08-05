@@ -198,6 +198,8 @@ describe("classifyIteration", () => {
       "provider error: You've hit your org's monthly spend limit; it resets on the 1st",
     );
     expect(outcome.failureReason).toBe("provider-error:spend-limit");
+    expect(outcome.providerFallbackEligible).toBe(true);
+    expect(outcome.providerErrorSource).toBe("session-last-error");
   });
 
   it("marks an uncategorised session lastError provider-error without a category", () => {
@@ -211,6 +213,8 @@ describe("classifyIteration", () => {
     });
     expect(outcome.detail).toBe("provider error: socket hang up");
     expect(outcome.failureReason).toBe("provider-error");
+    expect(outcome.providerFallbackEligible).toBe(true);
+    expect(outcome.providerErrorSource).toBe("session-last-error");
   });
 
   it("keeps the generic detail when an errored turn has no session lastError", () => {
@@ -235,6 +239,34 @@ describe("classifyIteration", () => {
       "provider error: You've hit your org's monthly spend limit — upgrade to continue.",
     );
     expect(outcome.failureReason).toBe("provider-error:spend-limit");
+    expect(outcome.providerFallbackEligible).toBe(true);
+    expect(outcome.providerErrorSource).toBe("assistant-message");
+  });
+
+  it.each([
+    "The task documents authentication handling.",
+    "The application test expects a 401 response.",
+    "Implement rate limit handling for the API client.",
+    "The status page can show overloaded during maintenance.",
+    "The domain fixture contains service unavailable.",
+  ])("does not make broad task prose eligible for provider fallback: %s", (text) => {
+    const outcome = classifyIteration(completedWith(text));
+
+    expect(outcome.providerFallbackEligible).not.toBe(true);
+  });
+
+  it.each([
+    "You've hit your org's monthly spend limit; it resets on the 1st",
+    "Claude AI usage limit reached|1754355600",
+    "Error: invalid API key supplied",
+    "authentication_error: credentials expired",
+    "provider-error: service unavailable",
+  ])("makes a canonical provider message eligible for fallback: %s", (text) => {
+    const outcome = classifyIteration(completedWith(text));
+
+    expect(outcome.failureReason).toMatch(/^provider-error/);
+    expect(outcome.providerFallbackEligible).toBe(true);
+    expect(outcome.providerErrorSource).toBe("assistant-message");
   });
 
   it("does not reclassify a RALPH_MSG report that merely mentions limits", () => {

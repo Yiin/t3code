@@ -85,6 +85,35 @@ Choose the strongest investigation mode the harness provides:
    harness as a one-shot process (`claude -p`, `codex exec`, or `kimi -p`), and
    read its output before synthesis. Do not assume shelling out is available.
 
+Always try harness-native agent dispatch first. If an investigator fails due
+to a provider limit, usage or spend limit, authentication failure, or provider
+unavailability, retry only that failed area with the next harness. Use this
+one-way order:
+
+1. The configured Claude model remains primary.
+2. Codex uses `gpt-5.6-sol` with high reasoning.
+3. Kimi uses `kimi-code/k3`.
+
+Skip a stage when its binary is missing or it exits 126 or 127. Never move
+backward. Change harnesses only when a structured harness error reports a
+rate, usage, spend, authentication, authorization, overload, or availability
+failure. An explicit `provider-error` message also qualifies. Bare words such
+as `authentication`, `service unavailable`, `401`, `429`, or `503` in task
+output do not qualify. Do not change harnesses for a generic nonzero exit,
+timeout, malformed result, protocol error, or child failure.
+
+Use self-contained prompts for cross-harness retries. These are the headless
+command shapes:
+
+```bash
+claude -p --permission-mode plan --output-format json --model <primary-model> -- "<prompt>"
+codex -a never -s danger-full-access -m gpt-5.6-sol -c 'model_reasoning_effort="high"' exec --json "<prompt>"
+kimi -p "<prompt>" --output-format stream-json -m kimi-code/k3
+```
+
+Keep successful investigation results. Retry only missing areas. Each retry
+gets the original area brief and output schema, without another area's result.
+
 Whichever mode is used, each investigator gets a self-contained brief and returns:
 
 - **Findings**: what exists today, the constraints, the risky unknowns — cited at `file:line` where it read code.
@@ -177,6 +206,13 @@ description, acceptance, priority, depends_on}` before any Beads writes.
 - The main thread verifies the returned tree read-only. When writers/linkers were
   used, send corrections back to the responsible one rather than taking over its
   mutations locally.
+
+Apply the same Claude to Codex to Kimi fallback to failed child writers and the
+linker. Retry only failed jobs. Mutation results can be ambiguous when a
+provider fails after the command runs. Before retrying a writer, check whether
+its child already exists under `$EPIC`. Before retrying the linker, inspect the
+current dependency graph. Continue from the observed Beads state so retries do
+not create duplicate children or links.
 
 Investigation agents remain read-only. Child writers are a separate phase after
 the main thread has finished synthesis.

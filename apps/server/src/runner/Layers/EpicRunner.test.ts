@@ -5,6 +5,7 @@ import {
   EpicRunId,
   EpicRunPreflightError,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
@@ -12,6 +13,7 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -36,6 +38,7 @@ import * as ProcessRunner from "../../processRunner.ts";
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { runningSubagentSettleRefusalDetail } from "../../orchestration/subagentLiveness.ts";
+import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import {
   EpicRunLock,
   EpicRunLockError,
@@ -55,6 +58,21 @@ const modelSelection = {
   model: "gpt-5-codex",
 } as const;
 const NOW = "2026-01-01T00:00:00.000Z";
+
+const provider = (instanceId: string, driver: string, model: string): ServerProvider => ({
+  instanceId: ProviderInstanceId.make(instanceId),
+  driver: ProviderDriverKind.make(driver),
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: NOW,
+  availability: "available",
+  models: [{ slug: model, name: model, isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+});
 
 /**
  * What a scripted iteration does when its turn is dispatched. `head` is what
@@ -290,6 +308,7 @@ function createHarness(input: {
   readonly lockAcquireError?: EpicRunLockError;
   readonly preflightError?: EpicRunPreflightError;
   readonly upsertDelayMs?: number;
+  readonly providers?: ReadonlyArray<ServerProvider>;
   readonly readyOutput?: string;
   readonly onEpicRunPublish?: (run: import("@t3tools/contracts").EpicRun) => Effect.Effect<void>;
   /**
@@ -671,6 +690,7 @@ function createHarness(input: {
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processRunnerLayer),
+    Layer.provide(makeProviderRegistryLayer(input.providers ?? [])),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(
       Layer.succeed(AgentAwarenessRelay, {
@@ -1593,6 +1613,108 @@ describe("EpicRunner", () => {
         harness.store.iterations[0]?.failureReason,
         "infra:provider-error:spend-limit",
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("persists a provider fallback and dispatches the next iteration on Codex", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const codexSelection = {
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    } as const;
+    const harness = createHarness({
+      script: [
+        {
+          text: null,
+          head: "head-0",
+          turnState: "error",
+          sessionStatus: "error",
+          sessionLastError: "You've hit your org's monthly spend limit",
+        },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      options: { infraFailureBudget: 1 },
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: claudeSelection,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.deepStrictEqual(harness.store.runs.get(run.runId)?.modelSelection, codexSelection);
+      assert.strictEqual(harness.turnsStarted(), 2);
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start").map((command) => command.modelSelection),
+        [claudeSelection, codexSelection],
+      );
+      assert.strictEqual(
+        harness.store.iterations[0]?.failureReason,
+        "infra:provider-error:spend-limit",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("persists a provider fallback at a paused iteration boundary", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const codexSelection = {
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    } as const;
+    const harness = createHarness({
+      script: [
+        {
+          text: null,
+          head: "head-0",
+          turnState: "error",
+          sessionStatus: "error",
+          sessionLastError: "You've hit your org's monthly spend limit",
+        },
+        { text: "should never run", head: "head-1" },
+      ],
+      options: { infraFailureBudget: 1, quietPeriodMs: 150 },
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: claudeSelection,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.iterations.length === 1);
+      yield* runner.pauseRun({ runId: run.runId });
+      yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "failed");
+      yield* settle;
+
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "paused");
+      assert.deepStrictEqual(harness.store.runs.get(run.runId)?.modelSelection, codexSelection);
+      assert.strictEqual(harness.turnsStarted(), 1);
     }).pipe(Effect.provide(harness.layer));
   });
 

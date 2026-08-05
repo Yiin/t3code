@@ -46,10 +46,11 @@
 #   COOKEPIC_IO_WEIGHT         cook-epic.slice IOWeight                (default 50)
 #   COOKEPIC_MEMORY_HIGH       cook-epic.slice MemoryHigh              (default 60%)
 #   COOKEPIC_PERMISSION_MODE   auto or bypassPermissions           (default auto)
-#   COOKEPIC_MODEL             harness-native model override; unset on claude/ccx
+#   COOKEPIC_MODEL             primary harness model override; unset on claude/ccx
 #                              means tiered defaults (sonnet workers, opus plans,
-#                              fable reviews, opus when fable is out of quota);
-#                              an explicit value pins every stage
+#                              fable reviews, opus when fable is out of quota).
+#                              Fallback stages always use Codex gpt-5.6-sol/high
+#                              and Kimi kimi-code/k3.
 #   COOKEPIC_BIN               selected harness binary override
 #   OPENCODE_BIN               OpenCode binary                     (default opencode)
 #   COOKEPIC_SPAWN_DELAY       seconds between dispatches          (default 2)
@@ -340,14 +341,74 @@ else
   }
 fi
 
-case "$HARNESS" in
-  kimi)       AGENT_BIN="${COOKEPIC_BIN:-kimi}";   COST_SUPPORTED=0 ;;
-  claude|ccx) AGENT_BIN="${COOKEPIC_BIN:-claude}"; COST_SUPPORTED=1 ;;
-  codex)      AGENT_BIN="${COOKEPIC_BIN:-codex}";  COST_SUPPORTED=0 ;;
-  opencode)   AGENT_BIN="${COOKEPIC_BIN:-${OPENCODE_BIN:-opencode}}"; COST_SUPPORTED=0 ;;
-  worker-cmd) AGENT_BIN="$WORKER_CMD";             COST_SUPPORTED=0 ;;
-esac
-command -v "$AGENT_BIN" >/dev/null 2>&1 || die "harness binary not found: $AGENT_BIN" 'install it or set COOKEPIC_BIN'
+PRIMARY_MODEL="${COOKEPIC_MODEL:-}"
+ACTIVE_MODEL=''
+CODEX_HIGH_REASONING=0
+INITIAL_PROVIDER_FALLBACK_FROM=''
+
+configure_harness() { # <harness> <is-primary: 0|1>
+  local next="$1" primary="$2"
+  HARNESS="$next"
+  CODEX_HIGH_REASONING=0
+  case "$HARNESS" in
+    kimi)
+      AGENT_BIN=$([ "$primary" -eq 1 ] && printf '%s' "${COOKEPIC_BIN:-kimi}" || printf kimi)
+      ACTIVE_MODEL=$([ "$primary" -eq 1 ] && printf '%s' "$PRIMARY_MODEL" || printf 'kimi-code/k3')
+      COST_SUPPORTED=0
+      ;;
+    claude|ccx)
+      AGENT_BIN="${COOKEPIC_BIN:-claude}"
+      ACTIVE_MODEL="$PRIMARY_MODEL"
+      COST_SUPPORTED=1
+      ;;
+    codex)
+      AGENT_BIN=$([ "$primary" -eq 1 ] && printf '%s' "${COOKEPIC_BIN:-codex}" || printf codex)
+      ACTIVE_MODEL=$([ "$primary" -eq 1 ] && printf '%s' "$PRIMARY_MODEL" || printf 'gpt-5.6-sol')
+      [ "$primary" -eq 1 ] || CODEX_HIGH_REASONING=1
+      COST_SUPPORTED=0
+      ;;
+    opencode)
+      AGENT_BIN="${COOKEPIC_BIN:-${OPENCODE_BIN:-opencode}}"
+      ACTIVE_MODEL="$PRIMARY_MODEL"
+      COST_SUPPORTED=0
+      ;;
+    worker-cmd)
+      AGENT_BIN="$WORKER_CMD"
+      ACTIVE_MODEL="$PRIMARY_MODEL"
+      COST_SUPPORTED=0
+      ;;
+  esac
+}
+
+next_installed_harness() { # <current harness> -> first installed later stage
+  local candidate
+  local -a candidates=()
+  case "$1" in
+    claude|ccx) candidates=(codex kimi) ;;
+    codex) candidates=(kimi) ;;
+    *) candidates=() ;;
+  esac
+  for candidate in "${candidates[@]}"; do
+    command -v "$candidate" >/dev/null 2>&1 && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+configure_harness "$HARNESS" 1
+if ! command -v "$AGENT_BIN" >/dev/null 2>&1; then
+  missing_harness="$HARNESS"
+  if fallback_harness=$(next_installed_harness "$HARNESS"); then
+    INITIAL_PROVIDER_FALLBACK_FROM="$missing_harness"
+    configure_harness "$fallback_harness" 0
+  else
+    die "harness binary not found: $AGENT_BIN" 'install the selected harness or a later Codex/Kimi fallback'
+  fi
+fi
+if [ -n "$INITIAL_PROVIDER_FALLBACK_FROM" ]; then
+  mbox --arg from "$INITIAL_PROVIDER_FALLBACK_FROM" --arg to "$HARNESS" --arg reason 'binary unavailable' --arg ts "$(date +%H:%M:%S)" \
+    '{event:"provider-fallback",from:$from,to:$to,reason:$reason,ts:$ts}'
+  say "provider fallback: $INITIAL_PROVIDER_FALLBACK_FROM -> $HARNESS (binary unavailable)"
+fi
 [ -n "$BUDGET" ] && [ "$COST_SUPPORTED" -eq 0 ] && say "WARNING: budget not enforceable on $HARNESS (no cost reporting); ignoring COOKEPIC_BUDGET_USD"
 
 if [ "$HARNESS" = opencode ]; then
@@ -680,11 +741,15 @@ fi
 # Opus and reviews to Fable via subagent model overrides. Reviews fall back to
 # Opus when Fable is out of quota; the worker must not echo that limit error,
 # because reap_worker reads rate-limit wording in worker output as a provider
-# limit on the whole child. An explicit COOKEPIC_MODEL pins every stage instead.
+# limit on the whole child. An explicit COOKEPIC_MODEL pins the primary stage.
 MODEL_TIER_RULE=''
-if { [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; } && [ -z "${COOKEPIC_MODEL:-}" ]; then
-  MODEL_TIER_RULE="Model tiers: your session runs on Sonnet — implement in it directly. When you dispatch a planning agent (a Plan or plan-composition subagent), pass model 'opus'; when you dispatch reviewer agents, pass model 'fable'. Mechanical work needs no subagents at all. If a 'fable' dispatch fails because the model is unavailable or its usage limit is exhausted, re-dispatch that same agent on model 'opus' and continue — never skip the review over a model limit. Report that fallback as 'reviews ran on opus' only: do NOT quote the limit error, the words 'rate limit', 'quota exceeded', 'overloaded', or the number 429 anywhere in your output, or the coordinator reads your whole child as provider rate-limited and requeues it."
-fi
+refresh_model_tier_rule() {
+  MODEL_TIER_RULE=''
+  if { [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; } && [ -z "$ACTIVE_MODEL" ]; then
+    MODEL_TIER_RULE="Model tiers: your session runs on Sonnet — implement in it directly. When you dispatch a planning agent (a Plan or plan-composition subagent), pass model 'opus'; when you dispatch reviewer agents, pass model 'fable'. Mechanical work needs no subagents at all. If a 'fable' dispatch fails because the model is unavailable or its usage limit is exhausted, re-dispatch that same agent on model 'opus' and continue — never skip the review over a model limit. Report that fallback as 'reviews ran on opus' only: do NOT quote the limit error, the words 'rate limit', 'quota exceeded', 'overloaded', or the number 429 anywhere in your output, or the coordinator reads your whole child as provider rate-limited and requeues it."
+  fi
+}
+refresh_model_tier_rule
 
 [ "$LAYOUT_MODE" -eq 1 ] || mkdir -p "$WORKTREE_ROOT"
 
@@ -803,8 +868,61 @@ worker_scope_active() { # <worker> -> 0 when that worker's scope still has tasks
   systemctl --user is-active --quiet "$(worker_unit "$1")" 2>/dev/null
 }
 
+PROVIDER_FAILURE_PHRASE_RE='rate.?limit|usage[[:space:]]+limit|spend[[:space:]]+limit|overloaded|quota[[:space:]]+exceeded|authentication|unauthorized|invalid[[:space:]]+api[[:space:]]+key|credit[[:space:]]+balance|service[[:space:]]+unavailable|temporarily[[:space:]]+unavailable|(^|[^0-9])(401|429|503)([^0-9]|$)'
+PROVIDER_RATE_PHRASE_RE='rate.?limit|usage[[:space:]]+limit|spend[[:space:]]+limit|overloaded|quota[[:space:]]+exceeded|(^|[^0-9])429([^0-9]|$)'
+PROVIDER_ERROR_LINE_RE='^[[:space:]]*provider[-_ ](error|failure):[[:space:]]*.+[[:space:]]*$'
+STRUCTURED_ERROR_RE='"is_error"[[:space:]]*:[[:space:]]*true|"type"[[:space:]]*:[[:space:]]*"(error|failure|failed)"|"subtype"[[:space:]]*:[[:space:]]*"(error|failure|failed)[^"]*"|"error"[[:space:]]*:[[:space:]]*("|\{)'
+
+structured_provider_error_text() { # <artifact> — strings only from structured harness error records
+  jq -Rrs '
+    [ split("\n")[] | fromjson?
+      | .. | objects
+      | select(
+          (.is_error? == true)
+          or (((.type? // "") | tostring) | test("^(error|failure|failed)$"; "i"))
+          or (((.subtype? // "") | tostring) | test("^(error|failure|failed)([_-]|$)"; "i"))
+          or ((.error? != null) and (.error? != false))
+        )
+      | [.. | strings] | join(" ")
+    ] | join("\n")
+  ' "$1" 2>/dev/null
+}
+
+provider_failure_evidence() { # <artifact> <bounded marker> <rc>
+  local artifact="$1" marker="$2" rc="$3" structured provider_lines
+  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+    return 0
+  fi
+  [ -n "$marker" ] && [ -f "$marker" ] && return 0
+  provider_lines="$(grep -iE "$PROVIDER_ERROR_LINE_RE" "$artifact" 2>/dev/null || true)"
+  grep -qiE "$PROVIDER_FAILURE_PHRASE_RE" <<<"$provider_lines" && return 0
+  structured="$(structured_provider_error_text "$artifact")"
+  grep -qiE "$PROVIDER_FAILURE_PHRASE_RE" <<<"$structured"
+}
+
+provider_rate_failure_evidence() { # <artifact> <bounded marker>
+  local artifact="$1" marker="$2" structured provider_lines
+  [ -n "$marker" ] && [ "$(cat "$marker" 2>/dev/null || true)" = rate ] && return 0
+  provider_lines="$(grep -iE "$PROVIDER_ERROR_LINE_RE" "$artifact" 2>/dev/null || true)"
+  grep -qiE "$PROVIDER_RATE_PHRASE_RE" <<<"$provider_lines" && return 0
+  structured="$(structured_provider_error_text "$artifact")"
+  grep -qiE "$PROVIDER_RATE_PHRASE_RE" <<<"$structured"
+}
+
+stream_has_provider_failure_evidence() { # <bounded scan text>
+  local scan="$1" evidence_lines
+  evidence_lines="$(grep -iE "$PROVIDER_ERROR_LINE_RE|$STRUCTURED_ERROR_RE" <<<"$scan" || true)"
+  grep -qiE "$PROVIDER_FAILURE_PHRASE_RE" <<<"$evidence_lines"
+}
+
+stream_has_provider_rate_failure_evidence() { # <bounded scan text>
+  local scan="$1" evidence_lines
+  evidence_lines="$(grep -iE "$PROVIDER_ERROR_LINE_RE|$STRUCTURED_ERROR_RE" <<<"$scan" || true)"
+  grep -qiE "$PROVIDER_RATE_PHRASE_RE" <<<"$evidence_lines"
+}
+
 # Keep a rolling tail while recording state that must survive truncation.
-bounded_stream() { # <path> <limit> [byte count] [rate marker] [cost path] [overflow marker]
+bounded_stream() { # <path> <limit> [byte count] [provider-failure marker] [cost path] [overflow marker]
   local path="$1" limit="$2" count_path="${3:-}" rate_path="${4:-}" cost_path="${5:-}" overflow_path="${6:-}"
   local LC_ALL=C
   local chunk='' scan='' overlap='' remaining='' cost='' total=0 retained=0 size read_rc compact_at tmp="$path.tmp.$BASHPID"
@@ -825,9 +943,10 @@ bounded_stream() { # <path> <limit> [byte count] [rate marker] [cost path] [over
       if [ -n "$rate_path$cost_path" ]; then
         scan="$overlap$chunk"
         if [ -n "$rate_path" ]; then
-          shopt -s nocasematch
-          [[ "$scan" =~ rate.?limit|(^|[^0-9])429([^0-9]|$)|overloaded|quota[[:space:]]+exceeded ]] && : > "$rate_path"
-          shopt -u nocasematch
+          if stream_has_provider_failure_evidence "$scan"; then
+            [ -f "$rate_path" ] || printf 'provider\n' > "$rate_path"
+            stream_has_provider_rate_failure_evidence "$scan" && printf 'rate\n' > "$rate_path"
+          fi
         fi
         if [ -n "$cost_path" ]; then
           remaining="$scan"
@@ -949,6 +1068,7 @@ fi
 declare -A PID2CHILD=() PID2BRANCH=() PID2WORKER=() PID2WT=() PID2ARTIFACT=() PID2OUTPUT_BYTES=() PID2RATE_LIMIT=() PID2COST=()
 declare -A PID2STOP_REASON=()
 declare -A ATTEMPTS=() REQUEUE_AT=() INFLIGHT=() PARKED=() PRECOMMENTS=() PERM_DENIALS=() CHILD_ORIENTATION=() EPIC_NOTES_LEN=()
+declare -A PENDING_FOLDS=()
 declare -A PRE_HEAD=() PRE_SIB_HEAD=() FIRST_SIG=() FIRST_HEAD=() FIRST_SIB_HEAD=() FIRST_UNTRACKED=() # sequential verification
 declare -A LIVE_STARTED=() LIVE_LAST_PROGRESS=() LIVE_OUTPUT_SIZE=() LIVE_CPU=() LIVE_IO=() LIVE_TREE=()
 declare -A LIVE_NEXT_INSPECT=() LIVE_NEXT_REPO_PROBE=() LIVE_GENERATION=() LIVE_CGROUP=()
@@ -973,6 +1093,11 @@ TOTAL_COST=0
 STOPPING=0
 FATAL_STOP=0
 STOP_REASON=''
+FALLBACK_PENDING=0
+FALLBACK_FROM=''
+FALLBACK_TO=''
+FALLBACK_REASON=''
+FALLBACK_CHILD=''
 
 trap 'STOPPING=1; say "signal received — draining"' TERM INT HUP
 
@@ -1262,11 +1387,11 @@ run_inspector_harness() { # <worker> <prompt> <result> <raw> <identity file>
     claude|ccx)
       capture_inspector "$result" "$raw" inspector_exec "$identity" \
         "$AGENT_BIN" -p --safe-mode --disable-slash-commands --tools '' --permission-mode plan \
-        --no-session-persistence --output-format text --model "${COOKEPIC_MODEL:-sonnet}" -- "$(<"$prompt")"
+        --no-session-persistence --output-format text --model "${ACTIVE_MODEL:-sonnet}" -- "$(<"$prompt")"
       ;;
     kimi)
       local -a kimi_args=(-p "$(<"$prompt")" --agent-file "$SKILL_DIR/inspector-agent.md" --output-format text)
-      [ -n "${COOKEPIC_MODEL:-}" ] && kimi_args+=(-m "$COOKEPIC_MODEL")
+      [ -n "$ACTIVE_MODEL" ] && kimi_args+=(-m "$ACTIVE_MODEL")
       capture_inspector "$result" "$raw" inspector_exec "$identity" "$AGENT_BIN" "${kimi_args[@]}"
       ;;
     codex) return 126 ;; # launch_inspector handles Codex without starting a process
@@ -1654,7 +1779,7 @@ supervise_workers() {
       continue
     fi
     idle=$((now - ${LIVE_LAST_PROGRESS[$root]}))
-    if [ "$idle" -ge "$IDLE_THRESHOLD" ] && [ "$now" -ge "${LIVE_NEXT_INSPECT[$root]}" ]; then
+    if [ "$FALLBACK_PENDING" -eq 0 ] && [ "$idle" -ge "$IDLE_THRESHOLD" ] && [ "$now" -ge "${LIVE_NEXT_INSPECT[$root]}" ]; then
       launch_inspector "$root" "$now"
     fi
   done
@@ -1672,6 +1797,42 @@ fatal_reconcile() { # <reason>
   FATAL_STOP=1
   STOP_REASON="$1"
   say "$STOP_REASON"
+}
+
+request_provider_fallback() { # <child> <reason> -> 0 when a later harness is available
+  local child="$1" reason="$2" target
+  if [ "$FALLBACK_PENDING" -eq 1 ]; then
+    return 0
+  fi
+  target=$(next_installed_harness "$HARNESS") || return 1
+  FALLBACK_PENDING=1
+  FALLBACK_FROM="$HARNESS"
+  FALLBACK_TO="$target"
+  FALLBACK_REASON="$reason"
+  FALLBACK_CHILD="$child"
+  stop_run_inspectors
+  say "provider fallback pending: $FALLBACK_FROM -> $FALLBACK_TO; draining active workers"
+}
+
+apply_provider_fallback() {
+  [ "$FALLBACK_PENDING" -eq 1 ] || return 0
+  [ "$(active_workers)" -eq 0 ] || return 0
+  stop_run_inspectors
+  configure_harness "$FALLBACK_TO" 0
+  refresh_model_tier_rule
+  mbox --arg from "$FALLBACK_FROM" --arg to "$FALLBACK_TO" --arg child "$FALLBACK_CHILD" \
+    --arg reason "$FALLBACK_REASON" --arg model "$ACTIVE_MODEL" --arg ts "$(date +%H:%M:%S)" \
+    '{event:"provider-fallback",from:$from,to:$to,child:$child,reason:$reason,model:$model,ts:$ts}'
+  say "provider fallback: $FALLBACK_FROM -> $FALLBACK_TO model=$ACTIVE_MODEL"
+  if [ -n "$BUDGET" ] && [ "$COST_SUPPORTED" -eq 0 ]; then
+    say "WARNING: budget not enforceable on $HARNESS after provider fallback"
+  fi
+  FALLBACK_PENDING=0
+  FALLBACK_FROM=''
+  FALLBACK_TO=''
+  FALLBACK_REASON=''
+  FALLBACK_CHILD=''
+  retry_pending_folds
 }
 
 # ------------------------------------------------------------- dispatch ----
@@ -1903,13 +2064,13 @@ spawn_worker() { # <child> <title>
         # kimi rejects permission flags (-y/--auto) combined with -p; prompt
         # mode already runs tools non-interactively, so PERM_MODE is a no-op.
         args=(-p "$(<"$prompt")" --output-format stream-json)
-        [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
+        [ -n "$ACTIVE_MODEL" ] && args+=(-m "$ACTIVE_MODEL")
         capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" || rc=$? ;;
       claude|ccx)
         args=(-p --permission-mode "$PERM_MODE" --output-format json)
         # Default Claude-family workers to Sonnet: implementation does not need
         # the top-tier model, and the prompt raises plan/review stages itself.
-        args+=(--model "${COOKEPIC_MODEL:-sonnet}")
+        args+=(--model "${ACTIVE_MODEL:-sonnet}")
         # Move per-machine sections (cwd, env, git status) out of the system
         # prompt so parallel workers in distinct worktrees share one
         # prompt-cache prefix instead of fragmenting it.
@@ -1921,11 +2082,12 @@ spawn_worker() { # <child> <title>
           bypassPermissions) args=(--dangerously-bypass-approvals-and-sandbox) ;;
           *) args=(-a never -s "$PERM_MODE") ;;
         esac
-        [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
+        [ -n "$ACTIVE_MODEL" ] && args+=(-m "$ACTIVE_MODEL")
+        [ "$CODEX_HIGH_REASONING" -eq 0 ] || args+=(-c 'model_reasoning_effort="high"')
         capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" exec --json "$(<"$prompt")" || rc=$? ;;
       opencode)
         args=(run --format json --auto)
-        [ -n "${COOKEPIC_MODEL:-}" ] && args+=(-m "$COOKEPIC_MODEL")
+        [ -n "$ACTIVE_MODEL" ] && args+=(-m "$ACTIVE_MODEL")
         capture_worker "$artifact" "$bytes" "$rate" "$cost" worker_exec "$identity" "$AGENT_BIN" "${args[@]}" -- "$(<"$prompt")" || rc=$? ;;
     esac
     exit "$rc"
@@ -2054,12 +2216,12 @@ run_fold_harness() { # <prompt> <raw> <identity file>
     claude|ccx)
       capture_inspector_raw "$raw" inspector_exec "$identity" \
         flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" -p --permission-mode "$PERM_MODE" \
-        --output-format text --model "${COOKEPIC_MODEL:-haiku}" --exclude-dynamic-system-prompt-sections \
+        --output-format text --model "${ACTIVE_MODEL:-haiku}" --exclude-dynamic-system-prompt-sections \
         -- "$(<"$prompt")" || rc=$?
       ;;
     kimi)
       local -a kimi_args=(-p "$(<"$prompt")" --output-format stream-json)
-      [ -n "${COOKEPIC_MODEL:-}" ] && kimi_args+=(-m "$COOKEPIC_MODEL")
+      [ -n "$ACTIVE_MODEL" ] && kimi_args+=(-m "$ACTIVE_MODEL")
       capture_inspector_raw "$raw" inspector_exec "$identity" \
         flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" "${kimi_args[@]}" || rc=$?
       ;;
@@ -2070,13 +2232,14 @@ run_fold_harness() { # <prompt> <raw> <identity file>
         bypassPermissions) codex_args=(--dangerously-bypass-approvals-and-sandbox) ;;
         *) codex_args=(-a never -s "$PERM_MODE") ;;
       esac
-      [ -n "${COOKEPIC_MODEL:-}" ] && codex_args+=(-m "$COOKEPIC_MODEL")
+      [ -n "$ACTIVE_MODEL" ] && codex_args+=(-m "$ACTIVE_MODEL")
+      [ "$CODEX_HIGH_REASONING" -eq 0 ] || codex_args+=(-c 'model_reasoning_effort="high"')
       capture_inspector_raw "$raw" inspector_exec "$identity" \
         flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" "${codex_args[@]}" exec --json "$(<"$prompt")" || rc=$?
       ;;
     opencode)
       local -a oc_args=(run --format json --auto)
-      [ -n "${COOKEPIC_MODEL:-}" ] && oc_args+=(-m "$COOKEPIC_MODEL")
+      [ -n "$ACTIVE_MODEL" ] && oc_args+=(-m "$ACTIVE_MODEL")
       capture_inspector_raw "$raw" inspector_exec "$identity" \
         flock "$HEAVY_LOCK" timeout "$FOLD_TIMEOUT" "$AGENT_BIN" "${oc_args[@]}" -- "$(<"$prompt")" || rc=$?
       ;;
@@ -2091,8 +2254,27 @@ fold_skip() { # <child> <reason> — non-fatal: log and note the epic, run conti
   bd note "$EPIC" "cook-epic: fold skipped for $child ($reason)" >/dev/null 2>>"$LOG"
 }
 
+queue_pending_fold() { # <child>
+  PENDING_FOLDS[$1]=1
+  say "fold for $1 is waiting for the provider fallback"
+}
+
+retry_pending_folds() {
+  local child
+  [ "$FALLBACK_PENDING" -eq 0 ] || return 0
+  for child in "${!PENDING_FOLDS[@]}"; do
+    unset "PENDING_FOLDS[$child]"
+    fold_epic_notes "$child"
+    [ "$FALLBACK_PENDING" -eq 0 ] || break
+  done
+}
+
 fold_epic_notes() { # <child> — no-op unless the epic notes gained DECISION:/GOTCHA: since dispatch
-  local child="$1" epic_json notes old_len new_part desc prompt raw identity before after
+  local child="$1" epic_json notes old_len new_part desc prompt raw identity before after fold_rc=0
+  if [ "$FALLBACK_PENDING" -eq 1 ]; then
+    queue_pending_fold "$child"
+    return 0
+  fi
   old_len="${EPIC_NOTES_LEN[$child]:-}"
   [ -n "$old_len" ] || return 0
   epic_json="$(bd show "$EPIC" --json 2>/dev/null)" || { fold_skip "$child" "bd show $EPIC failed"; return 0; }
@@ -2105,7 +2287,13 @@ fold_epic_notes() { # <child> — no-op unless the epic notes gained DECISION:/G
   render_fold_prompt "$desc" "$new_part" "$prompt"
   rm -f "$raw" "$identity"
   say "$child landed with DECISION:/GOTCHA: markers in the epic notes; folding into $EPIC"
-  if ! ( cd "$REPO" && run_fold_harness "$prompt" "$raw" "$identity" ); then
+  ( cd "$REPO" && run_fold_harness "$prompt" "$raw" "$identity" ) || fold_rc=$?
+  if [ "$fold_rc" -ne 0 ]; then
+    if provider_failure_evidence "$raw" '' "$fold_rc" \
+      && request_provider_fallback "$child" "provider unavailable during fold (rc=$fold_rc)"; then
+      queue_pending_fold "$child"
+      return 0
+    fi
     fold_skip "$child" "fold agent failed to run (see $raw)"
     return 0
   fi
@@ -2349,7 +2537,7 @@ reap_worker() { # <pid> <rc>
   unset "PID2STOP_REASON[$pid]"
   unset "INFLIGHT[$child]"
 
-  local cost status commits title orientation
+  local cost status commits title orientation provider_failure=0
   cost=$(extract_cost "$artifact" "$cost_path")
   [ -n "$cost" ] && TOTAL_COST=$(jq -cn --argjson t "$TOTAL_COST" --argjson c "$cost" '$t + $c')
   orientation=$(orientation_metrics "$artifact")
@@ -2361,8 +2549,29 @@ reap_worker() { # <pid> <rc>
   local perm_denied=0
   grep -q '"permission_denials":\[{' "$artifact" 2>/dev/null && perm_denied=1
 
+  if provider_failure_evidence "$artifact" "$rate_marker" "$rc"; then
+    provider_failure=1
+  fi
+
+  # Provider failures change the whole fleet. Reopen this child without an
+  # attempt, stop new dispatches, and let current workers drain before the
+  # harness, model, inspectors, and cost support change together.
+  if [ -z "$stopped_reason" ] && [ "$status" != closed ] && [ "$provider_failure" -eq 1 ] \
+    && request_provider_fallback "$child" "provider unavailable on $worker (rc=$rc)"; then
+    if [ "$SEQUENTIAL" = 1 ]; then
+      sequential_claim_recovery_if_effects "$child"
+      LAST_ACCEPTED_HEAD=$(git rev-parse HEAD)
+    fi
+    REQUEUE_AT[$child]=$(date +%s)
+    bd update "$child" --status open >/dev/null 2>>"$LOG"
+    say "$child will retry after the provider fallback"
+    cleanup_worktree "$wt"
+    return
+  fi
+
   # Rate limit: don't burn an attempt; back off before re-dispatch.
-  if [ -z "$stopped_reason" ] && [ "$status" != closed ] && { [ -f "$rate_marker" ] || grep -qiE 'rate.?limit|\b429\b|overloaded|quota exceeded' "$artifact" 2>/dev/null; }; then
+  if [ -z "$stopped_reason" ] && [ "$status" != closed ] \
+    && provider_rate_failure_evidence "$artifact" "$rate_marker"; then
     if [ "$SEQUENTIAL" = 1 ]; then
       sequential_claim_recovery_if_effects "$child"
       # A rate-limited sequential worker still owned the checkout and may have
@@ -2949,7 +3158,7 @@ if [ "$HARNESS" = claude ] || [ "$HARNESS" = ccx ]; then
     export ENABLE_PROMPT_CACHING_1H=1
   fi
   timeout 120 "$AGENT_BIN" -p --permission-mode "$PERM_MODE" --output-format json \
-    --exclude-dynamic-system-prompt-sections --model "${COOKEPIC_MODEL:-sonnet}" \
+    --exclude-dynamic-system-prompt-sections --model "${ACTIVE_MODEL:-sonnet}" \
     -- 'Reply with exactly: ok' >>"$LOG" 2>&1 \
     || say 'WARNING: cache warm-up failed; continuing'
 fi
@@ -2961,6 +3170,7 @@ while true; do
 
   supervise_workers
   reap_finished
+  apply_provider_fallback
   if sequential_main_moved_unowned; then
     fatal_reconcile "base branch $BASE_BRANCH moved while no sequential worker owned the checkout; operator must reconcile"
   fi
@@ -2991,7 +3201,7 @@ while true; do
   fi
 
   # Dispatch.
-  if [ "$STOPPING" -eq 0 ] && [ "$DISPATCHED" -lt "$MAX_DISPATCHES" ]; then
+  if [ "$STOPPING" -eq 0 ] && [ "$FALLBACK_PENDING" -eq 0 ] && [ "$DISPATCHED" -lt "$MAX_DISPATCHES" ]; then
     if [ -n "$BUDGET" ] && [ "$COST_SUPPORTED" -eq 1 ] \
       && jq -en --argjson spent "$TOTAL_COST" --argjson budget "$BUDGET" '$spent >= $budget' >/dev/null; then
       # Keep the amount out of STOP_REASON: it lands in the mailbox and is

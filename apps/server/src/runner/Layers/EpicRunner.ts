@@ -40,6 +40,7 @@ import {
   type EpicRunIterationStatus,
 } from "../../persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "../../processRunner.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import {
   EpicRunNotFoundError,
@@ -57,6 +58,7 @@ import {
   type EpicIterationOutcome,
   type IterationTurnState,
 } from "../ralphProtocol.ts";
+import { resolveEpicProviderFallback } from "../providerFallback.ts";
 import {
   EpicRunner,
   type EpicRunnerShape,
@@ -331,6 +333,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const preflight = yield* EpicRunPreflight;
     const runLock = yield* EpicRunLock;
     const agentAwarenessRelay = yield* AgentAwarenessRelay;
+    const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
     const leases = new Map<EpicRunId, EpicRunLockLease>();
     const issueTitleCache = new Map<string, string>();
 
@@ -1440,13 +1443,41 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               // the run as `running` — or bury a resume that arrived while this
               // iteration was draining.
               const currentRun = yield* requireRun(runId);
-              const settledRun = {
+              let settledRun = {
                 ...currentRun,
                 currentThreadId: null,
                 currentTurnStartedAt: null,
                 iterationsCompleted: currentRun.iterationsCompleted + 1,
                 updatedAt: yield* nowIso,
               };
+
+              if (Option.isSome(providerRegistry)) {
+                const providers = yield* providerRegistry.value.getProviders;
+                const fallback = resolveEpicProviderFallback({
+                  providers,
+                  current: currentRun.modelSelection,
+                  failureReason: outcome.failureReason,
+                  providerFallbackEligible: outcome.providerFallbackEligible === true,
+                });
+                if (fallback !== null) {
+                  infraStreak = 0;
+                  settledRun = { ...settledRun, modelSelection: fallback };
+                  yield* saveRun(settledRun);
+                  yield* Effect.logInfo("epic.runner.provider-fallback", {
+                    runId,
+                    fromInstanceId: currentRun.modelSelection.instanceId,
+                    fromModel: currentRun.modelSelection.model,
+                    toInstanceId: fallback.instanceId,
+                    toModel: fallback.model,
+                    status: currentRun.status,
+                  });
+                  if (currentRun.status !== "running") {
+                    liveLoops.delete(runId);
+                    return LOOP_STOP;
+                  }
+                  return LOOP_CONTINUE;
+                }
+              }
 
               if (currentRun.status !== "running") {
                 // Someone stopped the run mid-iteration. Record that the iteration

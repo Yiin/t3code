@@ -50,27 +50,27 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 1. **Parse the request.** The first argument after `/cook-epic` is the epic id.
    Map optional knobs:
 
-   | User says                                       | Environment variable                                                  | Default                                                                                                                                       |
-   | ----------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                                                                                                     |
-   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                                                                                                            |
-   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                                                                                                           |
-   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                                                                                                      |
-   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                                                                                                         |
-   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                                                                |
-   | "2h absolute limit per worker"                  | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                          | unset; no absolute timeout                                                                                                                    |
-   | "inspect after 45m idle"                        | `COOKEPIC_IDLE_THRESHOLD` (positive seconds)                          | 1800                                                                                                                                          |
-   | "inspector limit 90s"                           | `COOKEPIC_INSPECTOR_TIMEOUT` (positive seconds)                       | 120                                                                                                                                           |
-   | "retry failed inspections after 10m"            | `COOKEPIC_INSPECT_RETRY_DELAY` (positive seconds)                     | 300                                                                                                                                           |
-   | "bound inspector delays to 2m through 1h"       | `COOKEPIC_INSPECT_MIN_DELAY` / `COOKEPIC_INSPECT_MAX_DELAY`           | 60 / 7200                                                                                                                                     |
-   | "give stopped workers 30s to exit"              | `COOKEPIC_STOP_GRACE` (positive seconds)                              | 15                                                                                                                                            |
-   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                                                                                                        |
-   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | claude/ccx: tiered (sonnet workers, opus plans, fable reviews falling back to opus); explicit value pins every stage; others: harness default |
-   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                                                                                                 |
-   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                                                                                                            |
-   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                                                                                                             |
-   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                                                                                                         |
-   | "orientation card at docs/foo.md"               | `COOKEPIC_ORIENTATION_FILE` (path relative to repo root)              | `docs/agent-orientation.md`, then `AGENTS.md`, first match wins                                                                               |
+   | User says                                       | Environment variable                                                  | Default                                                                                                 |
+   | ----------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                               | decided by shape (step 2)                                                                               |
+   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated)                  | detected in step 2                                                                                      |
+   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS`                                                    | 3 (forces parallel)                                                                                     |
+   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                       | **required** — see below                                                                                |
+   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                  | unset                                                                                                   |
+   | "budget $40"                                    | `COOKEPIC_BUDGET_USD`                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                          |
+   | "2h absolute limit per worker"                  | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                          | unset; no absolute timeout                                                                              |
+   | "inspect after 45m idle"                        | `COOKEPIC_IDLE_THRESHOLD` (positive seconds)                          | 1800                                                                                                    |
+   | "inspector limit 90s"                           | `COOKEPIC_INSPECTOR_TIMEOUT` (positive seconds)                       | 120                                                                                                     |
+   | "retry failed inspections after 10m"            | `COOKEPIC_INSPECT_RETRY_DELAY` (positive seconds)                     | 300                                                                                                     |
+   | "bound inspector delays to 2m through 1h"       | `COOKEPIC_INSPECT_MIN_DELAY` / `COOKEPIC_INSPECT_MAX_DELAY`           | 60 / 7200                                                                                               |
+   | "give stopped workers 30s to exit"              | `COOKEPIC_STOP_GRACE` (positive seconds)                              | 15                                                                                                      |
+   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                          | `auto`                                                                                                  |
+   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                      | Primary stage only. Claude/ccx defaults to tiered models. Later fallback stages use their fixed models. |
+   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` | 60% / 50 / 50                                                                                           |
+   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)           | 50                                                                                                      |
+   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                               | 3                                                                                                       |
+   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                  | unset                                                                                                   |
+   | "orientation card at docs/foo.md"               | `COOKEPIC_ORIENTATION_FILE` (path relative to repo root)              | `docs/agent-orientation.md`, then `AGENTS.md`, first match wins                                         |
 
    `COOKEPIC_NO_PUSH=1` disables every push: the coordinator fast-forwards the
    base branch locally after each gated merge but never pushes it, workers are
@@ -196,6 +196,22 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 5. **Select the harness yourself; never ask the user.** Running in Kimi Code:
    `COOKEPIC_HARNESS=kimi`. Claude Code: `claude`. ccx: `ccx`. Codex: `codex`.
    OpenCode: `opencode`.
+
+   The selected harness is the primary stage. Structured harness errors for
+   provider limits, spend, usage, authentication, and availability trigger
+   one-way fallback. Explicit `provider-error` output also qualifies. Bare
+   task text such as `authentication`, `401`, or `service unavailable` does
+   not qualify. Claude and ccx move to Codex, then Codex moves to Kimi.
+   Missing binaries and exits 126 or 127 also mark a stage unavailable. The
+   coordinator skips an unavailable intermediate binary. It never moves
+   backward.
+
+   A fallback stops new dispatches first. Active workers and inspectors drain
+   before the coordinator changes the global harness settings. The failed
+   child returns to the ready frontier without using an attempt. Codex fallback
+   uses `gpt-5.6-sol` with high reasoning. Kimi fallback uses
+   `kimi-code/k3`. `COOKEPIC_MODEL` applies only to the primary stage. Generic
+   nonzero exits keep the normal attempt and backoff rules.
 
    claude/ccx workers automatically launch with
    `--exclude-dynamic-system-prompt-sections` and `ENABLE_PROMPT_CACHING_1H=1`
@@ -350,9 +366,10 @@ pausing a finished run). Report it; do not retry.
   positive integer to `$RUN_DIR/WORKERS` replaces it on the next tick (clamped
   to at least 1; malformed content is ignored with one logged warning per
   change).
-  Retried children back off `10s·2^(n-1)` (cap 300s); rate-limited ones wait
-  120s without consuming an attempt. `COOKEPIC_MAX_ATTEMPTS` (default 3)
-  failed attempts → child is `blocked`.
+  Retried children back off `10s·2^(n-1)` (cap 300s). Provider failures move
+  the whole fleet to the next installed harness without consuming an attempt.
+  If no later harness exists, rate-limited children wait 120s without using an
+  attempt. `COOKEPIC_MAX_ATTEMPTS` (default 3) failed attempts block the child.
 - **Sequential mode** (`COOKEPIC_SEQUENTIAL=1`): one worker at a time, in the
   main checkout on the base branch — no worktrees, no branches, no merge
   queue. The worker commits on the base branch as it goes (fix-forward, never
@@ -536,8 +553,9 @@ landed.
   into each sibling's base branch. If the user (or another agent) pushes to or
   moves any of those branches mid-run, the loop stops with a reconciliation
   error rather than guessing.
-- Budgets are soft: the cap stops NEW dispatches; in-flight workers finish.
-  Cost is only tracked on claude/ccx; kimi, codex, and opencode workers report no spend.
+- Budgets are soft: the cap stops new dispatches, and active workers finish.
+  Cost is only tracked on Claude and ccx. A Codex or Kimi fallback disables
+  further cost enforcement because those harnesses do not report spend.
 - Orientation metrics (time/tool-calls/tokens spent before a worker's first
   edit) are likewise claude/ccx-only, computed from the worker's transcript;
   other harnesses and any unresolvable transcript report `orientation: null`
