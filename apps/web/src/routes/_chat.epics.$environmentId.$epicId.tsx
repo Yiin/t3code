@@ -27,6 +27,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   epicChildren,
   epicStatusLabel,
+  issueStatusLabel,
   latestEpicThreadId,
   selectEpicDetail,
   uniqueEpicProjectSources,
@@ -694,7 +695,7 @@ function EpicDetailRouteView() {
                             {issue.title}
                           </div>
                           <div className="mt-0.5 font-mono text-xs text-muted-foreground">
-                            {issue.id} · {epicStatusLabel(issue.status)}
+                            {issue.id} · {issueStatusLabel(issue)}
                           </div>
                         </div>
                       </>

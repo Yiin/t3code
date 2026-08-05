@@ -33,6 +33,7 @@ import {
   epicProgress,
   epicRunUiState,
   isActiveRun,
+  issueStatusLabel,
   latestEpicThreadId,
   pendingAfterCommandResult,
   epicSourceKey,
@@ -506,7 +507,7 @@ export function EpicDetailScreen({ route }: StaticScreenProps<DetailParams>) {
                 key={issue.id}
                 disabled={!threadId}
                 accessibilityRole={threadId ? "button" : undefined}
-                accessibilityLabel={`${issue.title}, ${issue.status.replaceAll("_", " ")}`}
+                accessibilityLabel={`${issue.title}, ${issueStatusLabel(issue)}`}
                 accessibilityHint={threadId ? "Opens the latest iteration thread" : undefined}
                 accessibilityState={{ disabled: !threadId }}
                 className={`min-h-16 flex-row items-center gap-3 border-b border-border px-4 py-3 last:border-b-0 active:opacity-70 ${threadId ? "" : "opacity-60"}`}
@@ -526,7 +527,7 @@ export function EpicDetailScreen({ route }: StaticScreenProps<DetailParams>) {
                 <View className="min-w-0 flex-1">
                   <Text className="font-t3-bold">{issue.title}</Text>
                   <Text className="mt-0.5 font-mono text-xs text-foreground-muted">
-                    {issue.id} · {issue.status.replaceAll("_", " ")}
+                    {issue.id} · {issueStatusLabel(issue)}
                   </Text>
                 </View>
                 {threadId ? (

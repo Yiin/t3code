@@ -6,6 +6,7 @@ import {
   epicPresentationStatus,
   epicResultState,
   epicStatusLabel,
+  issueStatusLabel,
   latestEpicThreadId,
   parseEpicRouteParams,
   selectEpicDetail,
@@ -44,6 +45,21 @@ describe("epics logic", () => {
       { id: "other", parent: "app-2" },
     ] as BeadsIssueSummary[];
     expect(epicChildren("app-1", issues).map((issue) => issue.id)).toEqual(["child"]);
+  });
+
+  it("names the blockers instead of repeating the bd status", () => {
+    // bd leaves a waiting issue as "open", so the id has to carry the meaning.
+    expect(issueStatusLabel({ status: "open", blockedBy: ["app-1.9"] })).toBe("Blocked by app-1.9");
+    expect(issueStatusLabel({ status: "open", blockedBy: ["app-1.9", "app-1.4"] })).toBe(
+      "Blocked by app-1.9, app-1.4",
+    );
+    expect(
+      issueStatusLabel({ status: "open", blockedBy: ["app-1.9", "app-1.4", "app-1.2", "app-1.1"] }),
+    ).toBe("Blocked by app-1.9, app-1.4 +2 more");
+    expect(issueStatusLabel({ status: "open", blockedBy: [] })).toBe("Open");
+    expect(issueStatusLabel({ status: "blocked", blockedBy: [] })).toBe("Blocked");
+    // A closed issue reads as done even if a stale edge survived it.
+    expect(issueStatusLabel({ status: "closed", blockedBy: ["app-1.9"] })).toBe("Done");
   });
 
   it("links an issue to its newest cooking iteration", () => {

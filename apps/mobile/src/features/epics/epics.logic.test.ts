@@ -7,6 +7,7 @@ import {
   epicRunUiState,
   epicSourceKey,
   installPrefillIfEmpty,
+  issueStatusLabel,
   nextInitialPromptInstall,
   pendingAfterCommandResult,
   latestEpicThreadId,
@@ -38,6 +39,17 @@ describe("mobile epics logic", () => {
       project("c", "/other"),
     ]);
     expect(epicSourceKey(project("a"))).toBe(epicSourceKey(project("b")));
+  });
+
+  it("names the blockers instead of repeating the bd status", () => {
+    // bd leaves a waiting issue as "open", so the id has to carry the meaning.
+    expect(issueStatusLabel({ status: "open", blockedBy: ["app-1.9"] })).toBe("blocked by app-1.9");
+    expect(issueStatusLabel({ status: "open", blockedBy: ["app-1.9", "app-1.4", "app-1.2"] })).toBe(
+      "blocked by app-1.9, app-1.4 +1 more",
+    );
+    expect(issueStatusLabel({ status: "in_progress", blockedBy: [] })).toBe("in progress");
+    // A closed issue reads as done even if a stale edge survived it.
+    expect(issueStatusLabel({ status: "closed", blockedBy: ["app-1.9"] })).toBe("done");
   });
 
   it("groups all-failed and partial-failed source states", () => {

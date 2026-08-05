@@ -284,6 +284,28 @@ describe("summarizeBeadsStatus", () => {
     assert.equal(status.epics[0]?.lastActivityAt, "2026-07-27T18:23:49.000Z");
   });
 
+  it("drops closed blockers from blockedBy and keeps the ones still open", () => {
+    const dependsOn = (...ids: ReadonlyArray<string>) =>
+      ids.map((id) => ({ type: "blocks", depends_on_id: id }));
+    const status = summarizeEntries([
+      { id: "epic-1", issue_type: "epic", status: "open" },
+      // Every blocker landed, so this issue is ready however bd still records
+      // the edges.
+      { ...child("epic-1.1", "epic-1", "2026-08-03T11:00:00Z"), dependencies: dependsOn("done-1") },
+      {
+        ...child("epic-1.2", "epic-1", "2026-08-03T11:00:00Z"),
+        dependencies: dependsOn("done-1", "epic-1.1", "elsewhere"),
+      },
+      { id: "done-1", parent: "epic-1", status: "closed" },
+    ]);
+
+    const blockedBy = (id: string) =>
+      status.issues.find((issue) => issue.id === id)?.blockedBy ?? null;
+    assert.deepStrictEqual(blockedBy("epic-1.1"), []);
+    // An id the snapshot cannot resolve stays: unknown is not the same as done.
+    assert.deepStrictEqual(blockedBy("epic-1.2"), ["epic-1.1", "elsewhere"]);
+  });
+
   it("rolls direct children up into lastActivityAt, closed ones included", () => {
     const status = summarizeEntries([
       { id: "epic-1", issue_type: "epic", status: "open", updated_at: "2026-08-03T10:00:00Z" },

@@ -59,6 +59,22 @@ export function epicChildren(
   return issues.filter((issue) => issue.parent === epicId);
 }
 
+/** Ids listed before the label falls back to a count, so a row cannot run away. */
+const BLOCKER_IDS_SHOWN = 2;
+
+/**
+ * What a child row says under its title. Naming the blocker beats the bd status
+ * here: bd leaves a waiting issue as "open", so the row would otherwise read
+ * "open" next to the blocked icon and leave the reader to reconcile the two.
+ */
+export function issueStatusLabel(issue: Pick<BeadsIssueSummary, "status" | "blockedBy">): string {
+  if (issue.status === "closed" || issue.status === "done") return "done";
+  if (issue.blockedBy.length === 0) return issue.status.replaceAll("_", " ");
+  const shown = issue.blockedBy.slice(0, BLOCKER_IDS_SHOWN).join(", ");
+  const rest = issue.blockedBy.length - BLOCKER_IDS_SHOWN;
+  return rest > 0 ? `blocked by ${shown} +${rest} more` : `blocked by ${shown}`;
+}
+
 export function epicProgress(epic: BeadsEpicSummary): {
   readonly done: number;
   readonly total: number;

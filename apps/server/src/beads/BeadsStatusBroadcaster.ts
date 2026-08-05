@@ -242,6 +242,30 @@ function epicLastActivityAt(
   return latest;
 }
 
+/** The statuses bd uses for work that is finished, so it can no longer block. */
+const CLOSED_ISSUE_STATUSES: ReadonlySet<string> = new Set(["closed", "done"]);
+
+/**
+ * Drops dependencies that are already finished, so `blockedBy` means "still
+ * waiting on" rather than "was ever sequenced after".
+ *
+ * bd keeps a `blocks` edge forever, closed blocker or not, so the raw list is
+ * useless as a blocked signal: a ready issue whose blockers all landed would
+ * still read as blocked. Ids missing from the snapshot are kept — the snapshot
+ * is `--status=all` for this workspace, so an unresolvable id points somewhere
+ * we cannot see, and treating it as done would be a guess in the unsafe
+ * direction.
+ */
+function unresolvedBlockers(
+  blockedBy: ReadonlyArray<string>,
+  issuesById: ReadonlyMap<string, ParsedBeadsIssue>,
+): ReadonlyArray<string> {
+  return blockedBy.filter((id) => {
+    const blocker = issuesById.get(id);
+    return blocker === undefined || !CLOSED_ISSUE_STATUSES.has(blocker.status);
+  });
+}
+
 function summarizeEpicChildren(
   epicId: string,
   issues: ReadonlyArray<BeadsIssueSummary>,
@@ -266,9 +290,11 @@ export function summarizeBeadsStatus(input: {
   readonly fetchedAt: DateTime.Utc;
 }): BeadsStatusResult {
   const readyIds = new Set(input.readyIds);
+  const issuesById = new Map(input.issues.map((issue) => [issue.id, issue] as const));
   const issues: ReadonlyArray<BeadsIssueSummary> = input.issues.map((issue) => ({
     ...issue,
     isReady: readyIds.has(issue.id),
+    blockedBy: unresolvedBlockers(issue.blockedBy, issuesById),
     createdAt: formatTimestamp(issue.createdAt),
     updatedAt: formatTimestamp(issue.updatedAt),
   }));
