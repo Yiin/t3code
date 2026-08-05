@@ -8,6 +8,7 @@ import type {
   Options as ClaudeQueryOptions,
   PermissionMode,
   PermissionResult,
+  SDKControlGetContextUsageResponse,
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -25,6 +26,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Random from "effect/Random";
@@ -59,6 +61,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
   public closeCalls = 0;
+  /** When set, interrupt() returns this instead of resolving immediately. */
+  public interruptResult: Promise<void> | undefined;
+  /** Optional so most tests keep the "runtime without getContextUsage" shape. */
+  public getContextUsage?: () => Promise<SDKControlGetContextUsageResponse>;
 
   emit(message: SDKMessage): void {
     if (this.done) {
@@ -96,6 +102,9 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly interrupt = async (): Promise<void> => {
     this.interruptCalls.push(undefined);
+    if (this.interruptResult) {
+      return this.interruptResult;
+    }
   };
 
   readonly setModel = async (model?: string): Promise<void> => {
@@ -1429,6 +1438,117 @@ describe("ClaudeAdapterLive", () => {
     });
 
     return { runtimeEventsFiber, turn };
+  });
+
+  it.effect("completes the turn within the bound when getContextUsage never resolves", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      let markCalled: () => void = () => {};
+      const getContextUsageCalled = new Promise<void>((resolve) => {
+        markCalled = resolve;
+      });
+      harness.query.getContextUsage = () => {
+        markCalled();
+        return new Promise<never>(() => {});
+      };
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: "end_turn",
+        session_id: "sdk-session-usage-hang",
+        uuid: "result-usage-hang",
+      } as unknown as SDKMessage);
+
+      // Wait until completeTurn is inside the hanging call, then fire the
+      // control-channel timeout on the test clock.
+      yield* Effect.promise(() => getContextUsageCalled);
+      yield* TestClock.adjust("5 seconds");
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "completed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails interruptTurn within its bound and closes a wedged runtime", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.interruptResult = new Promise<never>(() => {});
+
+      const interruptFiber = yield* adapter
+        .interruptTurn(THREAD_ID)
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* TestClock.adjust("30 seconds");
+
+      const interruptExit = yield* Fiber.join(interruptFiber);
+      assert.equal(Exit.isFailure(interruptExit), true);
+      assert.equal(harness.query.interruptCalls.length, 1);
+      // Once from the interrupt-timeout fallback, once from the session
+      // teardown that the closed stream triggers.
+      assert.equal(harness.query.closeCalls, 2);
+
+      // close() ends the stream; the requested interrupt keeps the turn
+      // classified as interrupted rather than failed.
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "interrupted");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("scores an unexpected stream end with an open turn as failed", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.finish();
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.message, "Claude runtime stream ended unexpectedly.");
+      }
+
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.equal(
+          turnCompleted.payload.errorMessage,
+          "Claude runtime stream ended unexpectedly.",
+        );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
   });
 
   it.effect("scores an api-error result with subtype success as a failed turn", () => {

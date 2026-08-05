@@ -253,6 +253,12 @@ interface ClaudeSessionContext {
    * supplies the errorMessage when the result carries none.
    */
   lastProviderError: { readonly tag: string; readonly message: string } | undefined;
+  /**
+   * An interrupt was requested for the current turn. Lets handleStreamExit
+   * keep a post-interrupt stream end classified as 'interrupted' instead of
+   * 'failed'. Cleared when a turn starts or completes.
+   */
+  interruptRequested: boolean;
   stopped: boolean;
 }
 
@@ -328,6 +334,12 @@ function getEffectiveClaudeAgentEffort(
   const normalized = normalizeClaudeCliEffort(effort, model);
   return normalized ? (normalized as ClaudeSdkEffort) : null;
 }
+
+// Control-channel calls go over the subprocess's stdin/stdout control
+// protocol; a wedged subprocess never answers, so every await must be
+// time-bound or the failure path itself hangs.
+const CLAUDE_GET_CONTEXT_USAGE_TIMEOUT = "5 seconds";
+const CLAUDE_INTERRUPT_TIMEOUT = "30 seconds";
 
 function isClaudeInterruptedMessage(message: string): boolean {
   const normalized = message.toLowerCase();
@@ -1882,7 +1894,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       } catch {
         return undefined;
       }
-    });
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: CLAUDE_GET_CONTEXT_USAGE_TIMEOUT,
+        orElse: () => Effect.undefined,
+      }),
+    );
     if (!usage) {
       return undefined;
     }
@@ -1981,8 +1998,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     result?: SDKResultMessage,
   ) {
     // The provider error only spans a single turn: callers have already
-    // folded it into status/errorMessage by this point.
+    // folded it into status/errorMessage by this point. Same for a pending
+    // interrupt request — it cannot outlive the turn it targeted.
     context.lastProviderError = undefined;
+    context.interruptRequested = false;
 
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     if (resultContextWindow !== undefined) {
@@ -2880,6 +2899,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (!context.turnState) {
       const turnId = TurnId.make(yield* randomUUIDv4);
       const startedAt = yield* nowIso;
+      context.interruptRequested = false;
       context.turnState = {
         turnId,
         startedAt,
@@ -3480,7 +3500,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* completeTurn(context, "failed", message);
       }
     } else if (context.turnState) {
-      yield* completeTurn(context, "interrupted", "Claude runtime stream ended.");
+      if (context.interruptRequested) {
+        yield* completeTurn(context, "interrupted", "Claude runtime stream ended.");
+      } else {
+        // The stream ended mid-turn without anyone asking for it: that is a
+        // runtime failure, not a user-looking interruption.
+        const message = "Claude runtime stream ended unexpectedly.";
+        yield* emitRuntimeError(context, message);
+        yield* completeTurn(context, "failed", message);
+      }
     }
 
     yield* stopSessionInternal(context, {
@@ -4118,6 +4146,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
         lastProviderError: undefined,
+        interruptRequested: false,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
@@ -4259,6 +4288,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
 
       const updatedAt = yield* nowIso;
+      context.interruptRequested = false;
       context.turnState = turnState;
       context.session = {
         ...context.session,
@@ -4303,10 +4333,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
+      context.interruptRequested = true;
       yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
-      });
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: CLAUDE_INTERRUPT_TIMEOUT,
+          orElse: () =>
+            // The subprocess is wedged; closing the query ends its stream,
+            // which handleStreamExit settles as an interrupted turn.
+            Effect.suspend(() => {
+              try {
+                context.query.close();
+              } catch {
+                // close() failing on an already-dead runtime is fine.
+              }
+              return Effect.fail(
+                toRequestError(
+                  threadId,
+                  "turn/interrupt",
+                  new Error(
+                    `Claude interrupt did not respond within ${CLAUDE_INTERRUPT_TIMEOUT}; closed the runtime.`,
+                  ),
+                ),
+              );
+            }),
+        }),
+      );
     },
   );
 
