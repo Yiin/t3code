@@ -32,6 +32,13 @@ export interface TestTurnResponse {
     readonly cwd: string;
     readonly turnCount: number;
   }) => Effect.Effect<void, never>;
+  /**
+   * Leave the turn open: suppress every turn.completed for this response,
+   * fixture-provided and synthesized alike. The turn stays running until the
+   * test body resolves it via harness.resolveHangingTurn — or never does, to
+   * script a turn that goes quiet mid-flight.
+   */
+  readonly hang?: boolean;
 }
 
 export type FixtureProviderRuntimeEvent = {
@@ -187,6 +194,13 @@ export interface TestProviderAdapterHarness {
   readonly queueTurnResponseForNextSession: (
     response: TestTurnResponse,
   ) => Effect.Effect<void, never>;
+  readonly resolveHangingTurn: (
+    threadId: ThreadId,
+    resolution?: {
+      readonly state?: "completed" | "failed";
+      readonly errorMessage?: string;
+    },
+  ) => Effect.Effect<void, ProviderAdapterError>;
   readonly getStartCount: () => number;
   readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<number>;
   readonly getInterruptCalls: (threadId: ThreadId) => ReadonlyArray<TurnId | undefined>;
@@ -231,6 +245,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
     let sessionCount = 0;
     const sessions = new Map<ThreadId, SessionState>();
     const queuedResponsesForNextSession: TestTurnResponse[] = [];
+    const hangingTurnsByThread = new Map<ThreadId, TurnId>();
     const interruptCallsBySession = new Map<ThreadId, Array<TurnId | undefined>>();
     const approvalResponsesBySession = new Map<
       ThreadId,
@@ -376,7 +391,9 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           turns: [...state.snapshot.turns, nextTurn],
         };
 
-        if (deferredTurnCompletedEvents.length === 0) {
+        if (response.hang === true) {
+          hangingTurnsByThread.set(input.threadId, turnId);
+        } else if (deferredTurnCompletedEvents.length === 0) {
           yield* emit({
             type: "turn.completed",
             eventId: EventId.make(yield* randomUUIDv4(input.threadId)),
@@ -528,6 +545,35 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         queuedResponsesForNextSession.push(response);
       });
 
+    const resolveHangingTurn: TestProviderAdapterHarness["resolveHangingTurn"] = (
+      threadId,
+      resolution,
+    ) =>
+      Effect.gen(function* () {
+        const turnId = hangingTurnsByThread.get(threadId);
+        if (turnId === undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider,
+            operation: "resolveHangingTurn",
+            issue: `No hanging turn recorded for thread ${threadId}.`,
+          });
+        }
+        hangingTurnsByThread.delete(threadId);
+        const errorMessage = resolution?.errorMessage;
+        yield* emit({
+          type: "turn.completed",
+          eventId: EventId.make(yield* randomUUIDv4(threadId)),
+          provider,
+          createdAt: nowIso(),
+          threadId,
+          turnId,
+          payload: {
+            state: resolution?.state ?? "completed",
+            ...(errorMessage !== undefined ? { errorMessage } : {}),
+          },
+        });
+      });
+
     const getRollbackCalls = (threadId: ThreadId): ReadonlyArray<number> => {
       const state = sessions.get(threadId);
       if (!state) {
@@ -568,6 +614,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       provider,
       queueTurnResponse,
       queueTurnResponseForNextSession,
+      resolveHangingTurn,
       getStartCount,
       getRollbackCalls,
       getInterruptCalls,

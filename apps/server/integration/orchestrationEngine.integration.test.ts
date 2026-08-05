@@ -271,6 +271,94 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
   ),
 );
 
+it.live("holds a hanging turn open until the harness completes or fails it", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
+
+      // Turn 1 goes quiet mid-flight: deltas arrive, no turn.completed.
+      yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+        hang: true,
+        events: [
+          {
+            type: "turn.started",
+            ...runtimeBase("evt-hang-1", "2026-02-24T12:00:00.000Z"),
+            threadId: THREAD_ID,
+            turnId: FIXTURE_TURN_ID,
+          },
+          {
+            type: "message.delta",
+            ...runtimeBase("evt-hang-2", "2026-02-24T12:00:00.050Z"),
+            threadId: THREAD_ID,
+            turnId: FIXTURE_TURN_ID,
+            delta: "Hanging turn response.\n",
+          },
+        ],
+      });
+
+      yield* startTurn({
+        harness,
+        commandId: "cmd-turn-start-hang",
+        messageId: "msg-user-hang",
+        text: "Go quiet mid-turn",
+      });
+
+      // The session stays running because no turn.completed ever arrives.
+      yield* harness.waitForThread(THREAD_ID, (entry) => entry.session?.status === "running");
+
+      yield* harness.adapterHarness!.resolveHangingTurn(THREAD_ID);
+
+      const recovered = yield* harness.waitForThread(
+        THREAD_ID,
+        (entry) =>
+          entry.session?.status === "ready" &&
+          entry.messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.streaming === false &&
+              message.text === "Hanging turn response.\n",
+          ),
+      );
+      assert.equal(recovered.session?.status, "ready");
+
+      // Turn 2 hangs the same way but is failed from the test body.
+      yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+        hang: true,
+        events: [
+          {
+            type: "turn.started",
+            ...runtimeBase("evt-hang-3", "2026-02-24T12:01:00.000Z"),
+            threadId: THREAD_ID,
+            turnId: FIXTURE_TURN_ID,
+          },
+        ],
+      });
+
+      yield* startTurn({
+        harness,
+        commandId: "cmd-turn-start-hang-fail",
+        messageId: "msg-user-hang-fail",
+        text: "Go quiet again",
+      });
+
+      yield* harness.waitForThread(THREAD_ID, (entry) => entry.session?.status === "running");
+
+      yield* harness.adapterHarness!.resolveHangingTurn(THREAD_ID, {
+        state: "failed",
+        errorMessage: "Provider stream went silent.",
+      });
+
+      const failed = yield* harness.waitForThread(
+        THREAD_ID,
+        (entry) =>
+          entry.session?.status === "error" &&
+          entry.session?.lastError === "Provider stream went silent.",
+      );
+      assert.equal(failed.session?.status, "error");
+    }),
+  ),
+);
+
 it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
   "keeps the same Codex provider thread across runtime mode switches",
   () =>

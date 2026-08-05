@@ -275,6 +275,12 @@ async function readFirstPromptMessage(
   return next.value;
 }
 
+// TestClock.adjust fires due timers but does not yield to the fibers those
+// timers wake; the trailing yieldNow lets their continuations run before the
+// test asserts. Same helper as ProviderService.test.ts.
+const advanceTestClock = (ms: number) =>
+  TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
@@ -1544,6 +1550,80 @@ describe("ClaudeAdapterLive", () => {
           turnCompleted.payload.errorMessage,
           "Claude runtime stream ended unexpectedly.",
         );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  // Reference pattern for the turn-scoped idle-stream watchdog (t3code-8qw.10):
+  // script "the provider goes quiet mid-turn" and drive idle time purely on
+  // the TestClock. FakeClaudeQuery.next() hangs by default when its queue is
+  // empty, so silence needs no fake changes. IMPORTANT: TestClock.adjust only
+  // fires timers created through Effect Clock primitives (Effect.sleep,
+  // Effect.timeout, Schedule). ClaudeAdapter has no idle timer today, so
+  // advancing virtual time must leave the turn open; when the watchdog lands
+  // it MUST be built on those primitives or TestClock cannot drive it and its
+  // tests would need real sleeps.
+  it.effect("keeps a quiet turn open across virtual idle time (TestClock reference)", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber, turn } = yield* startFailureScoringTurn(adapter);
+
+      // Partial progress, then silence: one streamed text delta, nothing more.
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-idle",
+        uuid: "stream-idle-0",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-idle",
+        uuid: "stream-idle-1",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "partial" },
+        },
+      } as unknown as SDKMessage);
+
+      // Ten virtual minutes of silence — far past any plausible idle
+      // threshold — without a single real sleep.
+      yield* advanceTestClock(10 * 60 * 1000);
+
+      // No adapter-side idle timer fired, so the turn is still open: the
+      // collector fiber only finishes on turn.completed.
+      assert.equal(runtimeEventsFiber.pollUnsafe(), undefined);
+
+      // The hanging turn is still completable after the idle window.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: "end_turn",
+        session_id: "sdk-session-idle",
+        uuid: "result-idle",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const deltaEvent = runtimeEvents.find((event) => event.type === "content.delta");
+      assert.equal(deltaEvent?.type, "content.delta");
+      const turnCompleted = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(turnCompleted?.type, "turn.completed");
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(String(turnCompleted.turnId), String(turn.turnId));
+        assert.equal(turnCompleted.payload.state, "completed");
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
