@@ -20,6 +20,7 @@ import {
 import { assert, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -36,6 +37,12 @@ import {
   type OrchestrationIntegrationHarness,
 } from "./OrchestrationEngineHarness.integration.ts";
 import { checkpointRefForThreadTurn } from "../src/checkpointing/Utils.ts";
+import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
+import { makeProviderSessionReaperLive } from "../src/provider/Layers/ProviderSessionReaper.ts";
+import { ProviderSessionDirectory } from "../src/provider/Services/ProviderSessionDirectory.ts";
+import { ProviderSessionReaper } from "../src/provider/Services/ProviderSessionReaper.ts";
+import { ProviderService } from "../src/provider/Services/ProviderService.ts";
 import type {
   CheckpointDiffFinalizedReceipt,
   TurnProcessingQuiescedReceipt,
@@ -1752,5 +1759,107 @@ it.live("keeps parallel claude subagents distinct across interleaved progress", 
         assert.equal(completedActivities.length, 2);
       }),
     CLAUDE_AGENT_PROVIDER,
+  ),
+);
+
+it.live("reaps an idle session through the thread.session.stop command path", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
+
+      const turnResponse: TestTurnResponse = {
+        events: [
+          {
+            type: "turn.started",
+            ...runtimeBase("evt-reap-1", "2026-02-24T14:00:00.000Z"),
+            threadId: THREAD_ID,
+            turnId: FIXTURE_TURN_ID,
+          },
+          {
+            type: "turn.completed",
+            ...runtimeBase("evt-reap-2", "2026-02-24T14:00:00.100Z"),
+            threadId: THREAD_ID,
+            turnId: FIXTURE_TURN_ID,
+            status: "completed",
+          },
+        ],
+      };
+      yield* harness.adapterHarness!.queueTurnResponseForNextSession(turnResponse);
+      yield* startTurn({
+        harness,
+        commandId: "cmd-turn-start-reap",
+        messageId: "msg-user-reap",
+        text: "Idle after this",
+      });
+      yield* harness.waitForThread(THREAD_ID, (entry) => entry.session?.status === "ready");
+
+      // A binding whose thread the orchestration read model never saw: the
+      // stop dispatch is refused, so only the direct fallback can stop it.
+      const ghostThreadId = ThreadId.make("thread-reaper-ghost");
+      yield* harness.sessionDirectory.upsert({
+        threadId: ghostThreadId,
+        provider: CODEX_PROVIDER,
+        providerInstanceId: defaultInstanceIdForDriver(CODEX_PROVIDER),
+        adapterKey: CODEX_PROVIDER,
+        status: "running",
+        runtimeMode: "approval-required",
+      });
+
+      const reaperLayer = makeProviderSessionReaperLive({
+        inactivityThresholdMs: 1,
+        activeTurnSkipCapMs: 60_000,
+        subagentFreshnessWindowMs: 60_000,
+        sweepIntervalMs: 25,
+      }).pipe(
+        Layer.provide(Layer.succeed(ProviderService, harness.providerService)),
+        Layer.provide(Layer.succeed(ProviderSessionDirectory, harness.sessionDirectory)),
+        Layer.provide(Layer.succeed(ProjectionSnapshotQuery, harness.snapshotQuery)),
+        Layer.provide(Layer.succeed(OrchestrationEngineService, harness.engine)),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reaper = yield* Effect.service(ProviderSessionReaper).pipe(
+            Effect.provide(reaperLayer),
+          );
+          yield* reaper.start();
+
+          // The reap must land in the projection, not just the binding: the
+          // projected session reaches stopped with its turn pointer nulled.
+          const thread = yield* harness.waitForThread(
+            THREAD_ID,
+            (entry) => entry.session?.status === "stopped",
+          );
+          assert.equal(thread.session?.activeTurnId, null);
+
+          // And it got there through the command path, with the reaper's
+          // command id prefix on the intent event.
+          yield* harness.waitForDomainEvent(
+            (event) =>
+              event.type === "thread.session-stop-requested" &&
+              event.payload.threadId === THREAD_ID &&
+              String(event.commandId ?? "").startsWith("session-stop-for-reap:"),
+          );
+
+          // The ghost binding cannot take the command path, but the fallback
+          // still stops its adapter session and writes the binding stopped.
+          const readGhostStatus = harness.sessionDirectory.getBinding(ghostThreadId).pipe(
+            Effect.map((binding) => Option.getOrUndefined(binding)?.status ?? null),
+            Effect.orDie,
+          );
+          const deadline = (yield* Clock.currentTimeMillis) + 10_000;
+          while ((yield* readGhostStatus) !== "stopped") {
+            if ((yield* Clock.currentTimeMillis) >= deadline) {
+              return yield* Effect.die(
+                new IntegrationWaitTimeoutError({
+                  description: "ghost binding stopped via fallback",
+                }),
+              );
+            }
+            yield* Effect.sleep(10);
+          }
+        }),
+      );
+    }),
   ),
 );

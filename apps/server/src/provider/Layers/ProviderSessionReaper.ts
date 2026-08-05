@@ -1,10 +1,13 @@
+import { CommandId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
+import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   DEFAULT_SESSION_REAP_THRESHOLDS,
@@ -48,6 +51,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const providerService = yield* ProviderService;
     const directory = yield* ProviderSessionDirectory;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const orchestrationEngine = yield* OrchestrationEngineService;
 
     const thresholdMs = (override: number | undefined, fallback: number) =>
       Math.max(1, override ?? options?.inactivityThresholdMs ?? fallback);
@@ -167,7 +171,35 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           });
         }
 
-        const reaped = yield* providerService.stopSession({ threadId: binding.threadId }).pipe(
+        // Stop through the `thread.session.stop` command path (decider ->
+        // thread.session-stop-requested -> ProviderCommandReactor), mirroring
+        // ThreadTeardownReactor: only that path also writes the projected
+        // session to stopped and nulls its active turn pointer. A direct
+        // `providerService.stopSession` updates only the binding, so after a
+        // reap every projection consumer would keep seeing the last status —
+        // for a stale_active_turn reap, a running turn forever. A thread the
+        // orchestration read model does not know refuses the command, so the
+        // direct call stays as the fallback that still stops the adapter
+        // session.
+        const stopReapedSession = orchestrationEngine
+          .dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make(`session-stop-for-reap:${binding.threadId}:${now}`),
+            threadId: binding.threadId,
+            createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          })
+          .pipe(
+            Effect.asVoid,
+            Effect.catch((dispatchError) =>
+              Effect.logDebug("provider.session.reaper.stop-dispatch-fallback", {
+                threadId: binding.threadId,
+                provider: binding.provider,
+                detail: dispatchError.message,
+              }).pipe(Effect.andThen(providerService.stopSession({ threadId: binding.threadId }))),
+            ),
+          );
+
+        const reaped = yield* stopReapedSession.pipe(
           Effect.tap(() =>
             Effect.logInfo("provider.session.reaped", {
               threadId: binding.threadId,

@@ -36,6 +36,7 @@ import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapt
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
 import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
+import { ProviderSessionDirectory } from "../src/provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
 import { EnvironmentAuth } from "../src/auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../src/auth/environmentAuthTestStub.ts";
@@ -182,6 +183,7 @@ export interface OrchestrationIntegrationHarness {
   readonly engine: OrchestrationEngineShape;
   readonly snapshotQuery: ProjectionSnapshotQuery["Service"];
   readonly providerService: ProviderService["Service"];
+  readonly sessionDirectory: ProviderSessionDirectory["Service"];
   readonly checkpointStore: CheckpointStore.CheckpointStore["Service"];
   readonly checkpointRepository: ProjectionCheckpointRepository["Service"];
   readonly pendingApprovalRepository: ProjectionPendingApprovalRepository["Service"];
@@ -312,6 +314,9 @@ export const makeOrchestrationIntegrationHarness = (
       ProjectionPendingApprovalRepositoryLive,
       checkpointStoreLayer,
       providerLayer,
+      // Same layer value `providerLayer` consumes, so memoization exposes the
+      // one directory instance instead of building a second one.
+      providerSessionDirectoryLayer,
       RuntimeReceiptBusTest,
     );
     const serverSettingsLayer = ServerSettingsService.layerTest();
@@ -412,6 +417,9 @@ export const makeOrchestrationIntegrationHarness = (
     ).pipe(Effect.orDie);
     const providerService = yield* tryRuntimePromise("load ProviderService service", () =>
       runtime.runPromise(Effect.service(ProviderService)),
+    ).pipe(Effect.orDie);
+    const sessionDirectory = yield* tryRuntimePromise("load ProviderSessionDirectory service", () =>
+      runtime.runPromise(Effect.service(ProviderSessionDirectory)),
     ).pipe(Effect.orDie);
     const checkpointStore = yield* tryRuntimePromise("load CheckpointStore service", () =>
       runtime.runPromise(Effect.service(CheckpointStore.CheckpointStore)),
@@ -564,6 +572,7 @@ export const makeOrchestrationIntegrationHarness = (
       engine,
       snapshotQuery,
       providerService,
+      sessionDirectory,
       checkpointStore,
       checkpointRepository,
       pendingApprovalRepository,

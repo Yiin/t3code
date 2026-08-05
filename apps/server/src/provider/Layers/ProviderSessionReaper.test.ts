@@ -6,6 +6,7 @@ import {
   TurnId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type OrchestrationCommand,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -19,6 +20,11 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { OrchestrationCommandInvariantError } from "../../orchestration/Errors.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
@@ -155,9 +161,21 @@ describe("ProviderSessionReaper", () => {
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
+    readonly dispatchImplementation?: (
+      command: OrchestrationCommand,
+    ) => ReturnType<OrchestrationEngineShape["dispatch"]>;
     readonly reaperOptions?: ProviderSessionReaperLiveOptions;
   }) {
     const stoppedThreadIds = new Set<ThreadId>();
+    const dispatchedCommands: OrchestrationCommand[] = [];
+    const dispatch = vi.fn<OrchestrationEngineShape["dispatch"]>((command) => {
+      dispatchedCommands.push(command);
+      return (
+        input.dispatchImplementation
+          ? input.dispatchImplementation(command)
+          : Effect.succeed({ sequence: dispatchedCommands.length })
+      ) as ReturnType<OrchestrationEngineShape["dispatch"]>;
+    });
     const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
       (request) =>
         (input.stopSessionImplementation
@@ -208,6 +226,14 @@ describe("ProviderSessionReaper", () => {
       Layer.provideMerge(runtimeRepositoryLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, providerService)),
       Layer.provideMerge(
+        Layer.succeed(OrchestrationEngineService, {
+          readEvents: () => Stream.empty,
+          dispatch,
+          streamDomainEvents: Stream.empty,
+          latestSequence: Effect.succeed(0),
+        }),
+      ),
+      Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
@@ -249,7 +275,15 @@ describe("ProviderSessionReaper", () => {
     );
 
     runtime = ManagedRuntime.make(layer);
-    return { stopSession, stoppedThreadIds };
+    return { stopSession, stoppedThreadIds, dispatch, dispatchedCommands };
+  }
+
+  /** The `thread.session.stop` commands the reaper dispatched, in order. */
+  function dispatchedSessionStops(harness: { dispatchedCommands: OrchestrationCommand[] }) {
+    return harness.dispatchedCommands.filter(
+      (command): command is Extract<OrchestrationCommand, { type: "thread.session.stop" }> =>
+        command.type === "thread.session.stop",
+    );
   }
 
   it("reaps stale persisted sessions without active turns", async () => {
@@ -295,10 +329,13 @@ describe("ProviderSessionReaper", () => {
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
-    expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
+    const stop = dispatchedSessionStops(harness)[0]!;
+    expect(stop.threadId).toBe(threadId);
+    expect(String(stop.commandId).startsWith(`session-stop-for-reap:${threadId}:`)).toBe(true);
+    // The command path owns the stop; the direct call is only a fallback.
+    expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
   it("skips stale sessions when the thread still has an active turn", async () => {
@@ -347,6 +384,7 @@ describe("ProviderSessionReaper", () => {
     await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
     await Effect.runPromise(drainFibers);
 
+    expect(harness.dispatch).not.toHaveBeenCalled();
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
     expect(Option.isSome(remaining)).toBe(true);
@@ -398,10 +436,10 @@ describe("ProviderSessionReaper", () => {
     scope = await runtime!.runPromise(Scope.make("sequential"));
     await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
-    expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
+    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(threadId);
+    expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
   it("does not reap sessions that are still within the inactivity threshold", async () => {
@@ -448,6 +486,7 @@ describe("ProviderSessionReaper", () => {
     await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
     await Effect.runPromise(drainFibers);
 
+    expect(harness.dispatch).not.toHaveBeenCalled();
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
     expect(Option.isSome(remaining)).toBe(true);
@@ -497,6 +536,7 @@ describe("ProviderSessionReaper", () => {
     await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
     await Effect.runPromise(drainFibers);
 
+    expect(harness.dispatch).not.toHaveBeenCalled();
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
     expect(Option.isSome(remaining)).toBe(true);
@@ -533,6 +573,17 @@ describe("ProviderSessionReaper", () => {
           },
         },
       ]),
+      // Dispatch refuses the first thread, and its direct-stop fallback fails
+      // too — the sweep must still reach the second thread.
+      dispatchImplementation: (command) =>
+        command.type === "thread.session.stop" && command.threadId === failedThreadId
+          ? Effect.fail(
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "simulated dispatch refusal",
+              }),
+            )
+          : Effect.succeed({ sequence: 1 }),
       stopSessionImplementation: (request) =>
         request.threadId === failedThreadId
           ? Effect.fail(
@@ -582,11 +633,16 @@ describe("ProviderSessionReaper", () => {
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 2);
+    await waitFor(() => dispatchedSessionStops(harness).length === 2);
 
-    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
       failedThreadId,
       reapedThreadId,
+    ]);
+    // Only the refused dispatch fell back to the direct stop, and that
+    // fallback's failure did not block the second thread's reap.
+    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+      failedThreadId,
     ]);
   });
 
@@ -621,10 +677,12 @@ describe("ProviderSessionReaper", () => {
           },
         },
       ]),
-      stopSessionImplementation: (request) =>
-        request.threadId === defectThreadId
+      // A defect in one thread's stop dispatch is contained by the per-stop
+      // catchCause and must not halt the sweep.
+      dispatchImplementation: (command) =>
+        command.type === "thread.session.stop" && command.threadId === defectThreadId
           ? Effect.die(new Error("simulated stop defect"))
-          : Effect.void,
+          : Effect.succeed({ sequence: 1 }),
     });
     const repository = await runtime!.runPromise(
       Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
@@ -665,12 +723,15 @@ describe("ProviderSessionReaper", () => {
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 2);
+    await waitFor(() => dispatchedSessionStops(harness).length === 2);
 
-    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
       defectThreadId,
       reapedThreadId,
     ]);
+    // A defect is a bug, not a refusal: it is logged, and the next sweep
+    // retries — no fallback direct stop fires.
+    expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
   it("reaps an epic-run iteration thread on the short threshold while sparing a plain thread", async () => {
@@ -756,13 +817,13 @@ describe("ProviderSessionReaper", () => {
     scope = await runtime!.runPromise(Scope.make("sequential"));
     await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await waitFor(() => dispatchedSessionStops(harness).length === 1);
     await runtime!.runPromise(drainFibers);
 
-    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
       iterationThreadId,
     ]);
-    expect(harness.stoppedThreadIds.has(interactiveThreadId)).toBe(false);
+    expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
   it("spares a quiet-main-stream session whose subagent is still fresh", async () => {
@@ -819,6 +880,7 @@ describe("ProviderSessionReaper", () => {
     await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
     await runtime!.runPromise(drainFibers);
 
+    expect(harness.dispatch).not.toHaveBeenCalled();
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(
       repository.getByThreadId({ threadId: iterationThreadId }),
@@ -879,9 +941,9 @@ describe("ProviderSessionReaper", () => {
     scope = await runtime!.runPromise(Scope.make("sequential"));
     await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: iterationThreadId });
+    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(iterationThreadId);
   });
 
   it("reaps a settled thread on the short threshold", async () => {
@@ -934,8 +996,54 @@ describe("ProviderSessionReaper", () => {
     scope = await runtime!.runPromise(Scope.make("sequential"));
     await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
 
+    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+
+    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(settledThreadId);
+  });
+
+  it("falls back to a direct stop when the thread is missing from the read model", async () => {
+    const orphanThreadId = ThreadId.make("thread-reaper-orphan-binding");
+    // No thread in the read model at all: the binding outlived its thread, so
+    // the stop dispatch is refused and only the direct call can stop the
+    // adapter session.
+    const harness = await createHarness({
+      readModel: makeReadModel([]),
+      dispatchImplementation: (command) =>
+        Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Thread '${orphanThreadId}' does not exist.`,
+          }),
+        ),
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: orphanThreadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: "2026-04-14T00:00:00.000Z",
+        resumeCursor: {
+          opaque: "resume-orphan",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+
     await waitFor(() => harness.stopSession.mock.calls.length === 1);
 
-    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: settledThreadId });
+    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(orphanThreadId);
+    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: orphanThreadId });
+    expect(harness.stoppedThreadIds.has(orphanThreadId)).toBe(true);
   });
 });
