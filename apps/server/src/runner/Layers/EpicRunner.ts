@@ -1264,6 +1264,20 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           })
           .pipe(Effect.mapError(storeError("updateIteration")));
 
+        // A failed iteration usually strands its claim: the agent ran
+        // `bd update <id> --claim` and never closed the child, and `bd ready`
+        // filters on status, so the next iteration would silently skip this
+        // child — or read an empty frontier — while the run keeps looping.
+        // Reopen it here so a retry can re-select the same child.
+        // `releaseClaimedChild` re-reads the issue and no-ops when the agent
+        // closed it. `done` outcomes are left to the terminal sweep
+        // (`releaseStrandedChild`), which owns the done-with-unclosed-child
+        // case (t3code-1bk); a classified `backlog-empty` ends the run, so the
+        // same sweep covers it.
+        if (outcome.kind !== "done" && outcome.kind !== "backlog-empty") {
+          yield* releaseClaimedChild(run.cwd, issueId);
+        }
+
         yield* Effect.logInfo("epic.runner.iteration-finished", {
           runId: run.runId,
           iterationIndex: input.iterationIndex,

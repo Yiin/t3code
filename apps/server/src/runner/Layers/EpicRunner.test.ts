@@ -1363,6 +1363,79 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("reopens a claimed child mid-run so the retry re-selects the same child", () => {
+    const harness = createHarness({
+      script: [
+        { text: null, head: "head-0", turnState: "error", sessionStatus: "error" },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      // A fixed frontier: every selection returns `child-1`, which is what a
+      // real retry sees once the claim is released — `bd ready` hides an
+      // `in_progress` child, so re-selection only works if the failed
+      // iteration reopened it before the next one asked.
+      readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
+      childStatuses: { "child-1": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      yield* settle;
+
+      // The failed iteration reopened the claim itself; the terminal sweep
+      // then found it already open and stayed quiet, so exactly one update.
+      const updates = harness.processRequests.filter(
+        (request) => request.command === "bd" && request.args[0] === "update",
+      );
+      assert.strictEqual(updates.length, 1);
+      assert.deepStrictEqual(updates[0]!.args, [
+        "update",
+        "child-1",
+        "--status",
+        "open",
+        "--assignee",
+        "",
+      ]);
+      assert.strictEqual(harness.childStatus("child-1"), "open");
+
+      // The release landed before the next iteration selected its child, and
+      // that iteration picked the same child again.
+      const readyIndexes = harness.processRequests.flatMap((request, index) =>
+        request.command === "bd" && request.args[0] === "ready" ? [index] : [],
+      );
+      assert.strictEqual(readyIndexes.length, 2);
+      assert.isBelow(harness.processRequests.indexOf(updates[0]!), readyIndexes[1]!);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.issueId),
+        ["child-1", "child-1"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("leaves a child its agent already closed alone when the iteration fails mid-run", () => {
+    const harness = createHarness({
+      script: [
+        { text: null, head: "head-0", turnState: "error", sessionStatus: "error" },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
+      childStatuses: { "child-1": "closed" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      yield* settle;
+
+      assert.isFalse(
+        harness.processRequests.some(
+          (request) => request.command === "bd" && request.args[0] === "update",
+        ),
+      );
+      assert.strictEqual(harness.childStatus("child-1"), "closed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("stops a run that keeps producing no commits", () => {
     const harness = createHarness({
       script: [
