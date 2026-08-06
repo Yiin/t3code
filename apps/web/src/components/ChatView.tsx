@@ -233,6 +233,7 @@ import { resolveEffectiveEnvMode, resolveLocalCheckoutBranchMismatch } from "./B
 import { ProviderStatusBanner } from "./chat/ProviderStatusBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { EpicRunPill } from "./chat/EpicRunPill";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
@@ -1860,33 +1861,6 @@ function ChatViewContent(props: ChatViewProps) {
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
-    if (activeEpicRun) {
-      items.push({
-        id: `epic-run:${activeEpicRun.runId}`,
-        variant: "success",
-        icon: <ChefHatIcon />,
-        title: "This thread is part of an active epic run",
-        description: activeEpicRun.epicId,
-        actions: (
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={() =>
-              void navigate({
-                to: "/epics/$environmentId/$epicId",
-                params: {
-                  environmentId: activeThread?.environmentId ?? environmentId,
-                  epicId: activeEpicRun.epicId,
-                },
-                search: { project: activeEpicRun.projectId },
-              })
-            }
-          >
-            View run
-          </Button>
-        ),
-      });
-    }
     if (plannedEpic && !activeEpicRun && !plannedEpicDismissed) {
       const plannedEpicKey = plannedEpicIdentity(plannedEpic);
       const epicRoute = plannedEpicRoute(plannedEpic);
@@ -2009,14 +1983,12 @@ function ChatViewContent(props: ChatViewProps) {
     return items;
   }, [
     activeEpicRun,
-    activeThread?.environmentId,
     launchEpicRun,
     pendingPlannedEpicKey,
     plannedEpic,
     plannedEpicDismissed,
     setPlannedEpicBannerDismissed,
     activeEnvironmentUnavailableState,
-    environmentId,
     handleReconnectActiveEnvironment,
     navigate,
     setDismissedVersionMismatchKey,
@@ -5909,6 +5881,23 @@ function ChatViewContent(props: ChatViewProps) {
                             : "pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
                         )}
                       >
+                        {activeEpicRun ? (
+                          <div className="mx-auto flex w-full max-w-3xl px-2.5 pt-1.5 sm:px-3">
+                            <EpicRunPill
+                              run={activeEpicRun}
+                              onView={() =>
+                                void navigate({
+                                  to: "/epics/$environmentId/$epicId",
+                                  params: {
+                                    environmentId: activeThread.environmentId,
+                                    epicId: activeEpicRun.epicId,
+                                  },
+                                  search: { project: activeEpicRun.projectId },
+                                })
+                              }
+                            />
+                          </div>
+                        ) : null}
                         {isGitRepo && (
                           <div className="pointer-events-auto">
                             <BranchToolbar
