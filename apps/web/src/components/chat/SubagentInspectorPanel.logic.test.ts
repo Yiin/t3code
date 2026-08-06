@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { EventId, type OrchestrationThreadActivity } from "@t3tools/contracts";
+
 import type { WorkLogEntry } from "../../session-logic";
 import {
   decodeSubagentTranscriptRow,
+  selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
 } from "./SubagentInspectorPanel.logic";
 
@@ -16,6 +19,57 @@ function transcriptEntry(payload: unknown): WorkLogEntry {
     sourceActivityPayload: payload,
   };
 }
+
+function activity(
+  id: string,
+  sequence: number,
+  parentToolUseId = "spawn-1",
+): OrchestrationThreadActivity {
+  return {
+    id: EventId.make(id),
+    createdAt: `2026-08-06T12:00:${String(sequence).padStart(2, "0")}.000Z`,
+    kind: "tool.completed",
+    payload: { parentToolUseId },
+    sequence,
+    summary: id,
+    tone: "tool",
+    turnId: null,
+  };
+}
+
+describe("selectSubagentTranscriptEntries", () => {
+  it("accumulates prepended pages and merges the live tail without duplicate ids", () => {
+    const oldest = activity("oldest", 1);
+    const middle = activity("middle", 2);
+    const newestBackfill = activity("newest", 3);
+    const newestLive = { ...activity("newest", 4), summary: "newest live" };
+
+    const entries = selectSubagentTranscriptEntries({
+      backfillPages: [[middle, newestBackfill], [oldest]],
+      liveTail: [newestLive],
+      fallbackEntries: [],
+    });
+
+    expect(entries.map(({ id }) => id)).toEqual(["oldest", "middle", "newest"]);
+    expect(entries.map(({ label }) => label)).toEqual(["oldest", "middle", "newest live"]);
+  });
+
+  it("keeps the old-server capped entries when backfill is unavailable", () => {
+    const fallback = transcriptEntry({
+      parentToolUseId: "spawn-1",
+      text: "Capped live entry",
+    });
+    const fallbackEntries = [fallback];
+
+    expect(
+      selectSubagentTranscriptEntries({
+        backfillPages: null,
+        liveTail: [activity("ignored-live", 1)],
+        fallbackEntries,
+      }),
+    ).toBe(fallbackEntries);
+  });
+});
 
 describe("decodeSubagentTranscriptRow", () => {
   it("preserves the truncated marker", () => {

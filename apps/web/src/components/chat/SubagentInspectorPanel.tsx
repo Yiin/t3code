@@ -1,22 +1,31 @@
+import { useAtomValue } from "@effect/atom-react";
+import { selectLiveSubagentTail } from "@t3tools/client-runtime/state/subagent-activity";
 import type {
   CommandId,
+  OrchestrationSubagentActivityCursor,
   OrchestrationThreadActivity,
   OrchestrationThreadSubagent,
   OrchestrationThreadSubagentStatus,
   ScopedThreadRef,
   ServerProviderSkill,
 } from "@t3tools/contracts";
+import { SUBAGENT_ACTIVITY_PAGE_LIMIT } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { BotIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { formatElapsed, type SubagentGroup } from "../../session-logic";
 import { formatContextWindowTokens } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
+import { orchestrationEnvironment } from "~/state/orchestration";
 import ChatMarkdown from "../ChatMarkdown";
+import { Button } from "../ui/button";
 import { capitalizeSubagentName, SubagentElapsed } from "./SubagentCard";
 import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
 import {
   decodeSubagentTranscriptRow,
+  selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
 } from "./SubagentInspectorPanel.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
@@ -35,6 +44,101 @@ const STATUS_LABEL: Record<OrchestrationThreadSubagentStatus, string> = {
   failed: "Failed",
   stopped: "Stopped",
 };
+
+const INITIAL_BACKFILL_CURSORS = [undefined] as const;
+
+function useSubagentTranscriptBackfill(input: {
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly fallbackEntries: SubagentGroup["children"];
+  readonly subagent: OrchestrationThreadSubagent | undefined;
+  readonly threadRef: ScopedThreadRef;
+}) {
+  const targetKey = input.subagent
+    ? JSON.stringify([
+        input.threadRef.environmentId,
+        input.threadRef.threadId,
+        input.subagent.subagentId,
+      ])
+    : null;
+  const [pagination, setPagination] = useState<{
+    readonly targetKey: string | null;
+    readonly cursors: ReadonlyArray<OrchestrationSubagentActivityCursor | undefined>;
+  }>({ targetKey, cursors: INITIAL_BACKFILL_CURSORS });
+  const cursors =
+    pagination.targetKey === targetKey ? pagination.cursors : INITIAL_BACKFILL_CURSORS;
+  const pageAtoms = useMemo(
+    () =>
+      input.subagent
+        ? cursors.map((before) =>
+            orchestrationEnvironment.subagentActivities({
+              environmentId: input.threadRef.environmentId,
+              input: {
+                threadId: input.threadRef.threadId,
+                subagentId: input.subagent!.subagentId,
+                limit: SUBAGENT_ACTIVITY_PAGE_LIMIT,
+                ...(before === undefined ? {} : { before }),
+              },
+            }),
+          )
+        : [],
+    [cursors, input.subagent, input.threadRef.environmentId, input.threadRef.threadId],
+  );
+  const pagesAtom = useMemo(
+    () =>
+      Atom.make((get) => pageAtoms.map((atom) => get(atom))).pipe(
+        Atom.withLabel(`web:subagent-activity-pages:${targetKey ?? "empty"}`),
+      ),
+    [pageAtoms, targetKey],
+  );
+  const results = useAtomValue(pagesAtom);
+  const pageValues = results.flatMap((result) => {
+    const value = Option.getOrNull(AsyncResult.value(result));
+    return value === null ? [] : [value];
+  });
+  const failed = results.some((result) => result._tag === "Failure");
+  const hasBackfill = !failed && pageValues.length > 0;
+  const liveTail = input.subagent
+    ? selectLiveSubagentTail(
+        input.activities,
+        input.subagent.spawnedByItemId === undefined
+          ? { subagentId: input.subagent.subagentId }
+          : {
+              subagentId: input.subagent.subagentId,
+              spawnedByItemId: input.subagent.spawnedByItemId,
+            },
+      )
+    : [];
+  const entries = useMemo(
+    () =>
+      selectSubagentTranscriptEntries({
+        backfillPages: hasBackfill ? pageValues.map((page) => page.activities) : null,
+        liveTail,
+        fallbackEntries: input.fallbackEntries,
+      }),
+    [hasBackfill, input.fallbackEntries, liveTail, pageValues],
+  );
+  const nextBefore = hasBackfill ? (pageValues.at(-1)?.nextBefore ?? null) : null;
+  const loadEarlier = useCallback(() => {
+    if (targetKey === null || nextBefore === null) return;
+    setPagination((current) => {
+      const currentCursors =
+        current.targetKey === targetKey ? current.cursors : INITIAL_BACKFILL_CURSORS;
+      return currentCursors.includes(nextBefore)
+        ? { targetKey, cursors: currentCursors }
+        : { targetKey, cursors: [...currentCursors, nextBefore] };
+    });
+  }, [nextBefore, targetKey]);
+
+  return {
+    entries,
+    isComplete: hasBackfill && nextBefore === null,
+    isPending: results.some((result) => result.waiting),
+    liveTailLength: liveTail.length,
+    loadEarlier,
+    pageCount: pageValues.length,
+    showLoadEarlier: nextBefore !== null,
+  };
+}
 
 export function SubagentInspectorPanel({
   groups,
@@ -67,12 +171,21 @@ export function SubagentInspectorPanel({
 }) {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const shouldFollowTailRef = useRef(true);
+  const pendingPrependRef = useRef<{ pageCount: number; scrollHeight: number } | null>(null);
   const group = groups.find(
     (candidate) => (candidate.toolCallId ?? candidate.entryId) === activeSubagentKey,
   );
+  const readModel = subagents.find((subagent) => subagent.spawnedByItemId === activeSubagentKey);
+  const backfill = useSubagentTranscriptBackfill({
+    activities,
+    fallbackEntries: group?.children ?? [],
+    subagent: readModel,
+    threadRef,
+  });
 
   useEffect(() => {
     shouldFollowTailRef.current = true;
+    pendingPrependRef.current = null;
     const transcript = transcriptRef.current;
     if (transcript) transcript.scrollTop = transcript.scrollHeight;
   }, [activeSubagentKey]);
@@ -82,7 +195,25 @@ export function SubagentInspectorPanel({
     if (group?.status === "running" && transcript && shouldFollowTailRef.current) {
       transcript.scrollTop = transcript.scrollHeight;
     }
-  }, [group?.children.length, group?.status]);
+  }, [backfill.liveTailLength, group?.status]);
+
+  useLayoutEffect(() => {
+    const pending = pendingPrependRef.current;
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+
+    if (pending) {
+      if (backfill.pageCount > pending.pageCount) {
+        transcript.scrollTop += transcript.scrollHeight - pending.scrollHeight;
+        pendingPrependRef.current = null;
+      } else if (!backfill.isPending) {
+        pendingPrependRef.current = null;
+      }
+      return;
+    }
+
+    if (shouldFollowTailRef.current) transcript.scrollTop = transcript.scrollHeight;
+  }, [backfill.isPending, backfill.pageCount]);
 
   if (!group) {
     return (
@@ -92,7 +223,6 @@ export function SubagentInspectorPanel({
     );
   }
 
-  const readModel = subagents.find((subagent) => subagent.spawnedByItemId === activeSubagentKey);
   const completedAt = readModel?.completedAt ?? group.completedAt;
   const settledElapsed =
     group.status === "running" ? null : formatElapsed(group.startedAt, completedAt ?? undefined);
@@ -108,12 +238,14 @@ export function SubagentInspectorPanel({
           .filter((value): value is string => value !== null)
           .join(" · ")
       : null;
-  const toolCount = group.children.filter(
+  const toolCount = backfill.entries.filter(
     (child) =>
       child.sourceActivityKind !== "subagent.text" &&
       child.sourceActivityKind !== "subagent.thinking",
   ).length;
-  const toolCountLabel = toolCount === 1 ? "1 tool call" : toolCount + " tool calls";
+  const toolCountLabel = `${toolCount === 1 ? "1 tool call" : toolCount + " tool calls"}${
+    backfill.isComplete ? "" : " shown"
+  }`;
   const liveProgress =
     group.status === "running"
       ? [readModel?.lastProgressSummary, readModel?.lastToolName].filter(
@@ -189,15 +321,37 @@ export function SubagentInspectorPanel({
         }}
       >
         <div className="space-y-3">
-          {group.children.length > 0 ? (
+          {backfill.showLoadEarlier ? (
+            <div className="sticky top-0 z-10 flex justify-center bg-background/90 pb-2 backdrop-blur-sm">
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={backfill.isPending}
+                onClick={() => {
+                  const transcript = transcriptRef.current;
+                  if (transcript) {
+                    pendingPrependRef.current = {
+                      pageCount: backfill.pageCount,
+                      scrollHeight: transcript.scrollHeight,
+                    };
+                  }
+                  backfill.loadEarlier();
+                }}
+              >
+                {backfill.isPending ? "Loading…" : "Load earlier"}
+              </Button>
+            </div>
+          ) : null}
+
+          {backfill.entries.length > 0 ? (
             <section>
               <p className="px-0.5 pb-0.5 font-medium text-[11px] text-muted-foreground/65">
-                {group.children.length === 1
+                {backfill.entries.length === 1
                   ? "1 transcript entry"
-                  : group.children.length + " transcript entries"}
+                  : backfill.entries.length + " transcript entries"}
               </p>
               <div className="space-y-px">
-                {group.children.map((workEntry) => (
+                {backfill.entries.map((workEntry) => (
                   <SubagentTranscriptEntryRow
                     key={workEntry.id}
                     workEntry={workEntry}
@@ -230,7 +384,7 @@ export function SubagentInspectorPanel({
           ) : null}
 
           {group.prompt !== null ? (
-            <details open={group.children.length === 0}>
+            <details open={backfill.entries.length === 0}>
               <summary className="cursor-pointer select-none px-0.5 text-[11px] font-medium text-muted-foreground/65">
                 Spawn prompt
               </summary>

@@ -2,10 +2,22 @@ import {
   decodeSubagentTranscriptActivityPayload,
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
+  type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
+import { mergeSubagentActivities } from "@t3tools/client-runtime/state/subagent-activity";
 import * as Option from "effect/Option";
 
-import type { WorkLogEntry } from "../../session-logic";
+import { deriveWorkLogEntries, type WorkLogEntry } from "../../session-logic";
+
+export function selectSubagentTranscriptEntries(input: {
+  readonly backfillPages: ReadonlyArray<ReadonlyArray<OrchestrationThreadActivity>> | null;
+  readonly liveTail: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly fallbackEntries: ReadonlyArray<WorkLogEntry>;
+}): ReadonlyArray<WorkLogEntry> {
+  if (input.backfillPages === null) return input.fallbackEntries;
+
+  return deriveWorkLogEntries(mergeSubagentActivities(input.backfillPages, input.liveTail));
+}
 
 export interface SubagentTranscriptRow {
   kind: "text" | "thinking";
