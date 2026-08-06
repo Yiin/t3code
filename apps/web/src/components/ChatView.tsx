@@ -5583,7 +5583,10 @@ function ChatViewContent(props: ChatViewProps) {
         onStop={onStopSubagent}
         subagents={activeThreadSubagents}
         activeSubagentKey={activeRightPanelSurface.activeSubagentKey}
-        threadId={activeThreadRef.threadId}
+        threadRef={activeThreadRef}
+        markdownCwd={gitCwd ?? undefined}
+        workspaceRoot={activeWorkspaceRoot}
+        skills={timelineSkills}
       />
     ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
       activeProject &&
