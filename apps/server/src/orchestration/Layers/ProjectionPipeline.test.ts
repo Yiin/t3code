@@ -1448,6 +1448,153 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("keeps the first real checkpoint anchor across assistant and diff events", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = ThreadId.make("thread-stable-anchor");
+      const nullTurnId = TurnId.make("turn-null-anchor");
+      const syntheticTurnId = TurnId.make("turn-synthetic-anchor");
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-anchor-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-anchor-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-anchor-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-stable-anchor"),
+          title: "Stable anchor",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* appendAndProject({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-anchor-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T00:00:01.000Z",
+        commandId: CommandId.make("cmd-anchor-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-anchor-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: nullTurnId,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+        },
+      });
+
+      const appendAssistant = (messageId: string, turnId: TurnId, second: number) =>
+        appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make(`evt-anchor-message-${messageId}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: `2026-01-01T00:00:0${second}.000Z`,
+          commandId: CommandId.make(`cmd-anchor-message-${messageId}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-anchor-message-${messageId}`),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make(messageId),
+            role: "assistant",
+            text: "Progress",
+            turnId,
+            streaming: false,
+            createdAt: `2026-01-01T00:00:0${second}.000Z`,
+            updatedAt: `2026-01-01T00:00:0${second}.000Z`,
+          },
+        });
+
+      yield* appendAssistant("message-null-first", nullTurnId, 2);
+      yield* appendAssistant("message-null-second", nullTurnId, 3);
+
+      yield* appendAndProject({
+        type: "thread.turn-diff-completed",
+        eventId: EventId.make("evt-anchor-synthetic-diff"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T00:00:04.000Z",
+        commandId: CommandId.make("cmd-anchor-synthetic-diff"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-anchor-synthetic-diff"),
+        metadata: {},
+        payload: {
+          threadId,
+          turnId: syntheticTurnId,
+          checkpointTurnCount: 2,
+          checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-stable-anchor/turn/2"),
+          status: "missing",
+          files: [],
+          assistantMessageId: MessageId.make(`assistant:${syntheticTurnId}`),
+          completedAt: "2026-01-01T00:00:04.000Z",
+        },
+      });
+      yield* appendAssistant("message-synthetic-first", syntheticTurnId, 5);
+      yield* appendAssistant("message-synthetic-second", syntheticTurnId, 6);
+      yield* appendAndProject({
+        type: "thread.turn-diff-completed",
+        eventId: EventId.make("evt-anchor-late-synthetic-diff"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T00:00:07.000Z",
+        commandId: CommandId.make("cmd-anchor-late-synthetic-diff"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-anchor-late-synthetic-diff"),
+        metadata: {},
+        payload: {
+          threadId,
+          turnId: syntheticTurnId,
+          checkpointTurnCount: 2,
+          checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-stable-anchor/turn/2"),
+          status: "ready",
+          files: [],
+          assistantMessageId: MessageId.make(`assistant:${syntheticTurnId}`),
+          completedAt: "2026-01-01T00:00:07.000Z",
+        },
+      });
+
+      const rows = yield* sql<{ readonly turnId: string; readonly assistantMessageId: string }>`
+        SELECT turn_id AS "turnId", assistant_message_id AS "assistantMessageId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+        ORDER BY turn_id
+      `;
+      assert.deepEqual(rows, [
+        { turnId: nullTurnId, assistantMessageId: "message-null-first" },
+        { turnId: syntheticTurnId, assistantMessageId: "message-synthetic-first" },
+      ]);
+    }),
+  );
+
   it.effect("settles a superseded running turn when a new turn becomes active", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;

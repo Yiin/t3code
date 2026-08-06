@@ -59,6 +59,10 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   return left === right;
 }
 
+function isSyntheticAssistantMessageId(value: MessageId | undefined): boolean {
+  return value?.startsWith("assistant:") ?? false;
+}
+
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
     case "failed":
@@ -291,12 +295,16 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    const firstAssistantMessageId = input.thread.messages.find(
+      (entry) => entry.role === "assistant" && entry.turnId === input.turnId,
+    )?.id;
     const assistantMessageId =
-      input.assistantMessageId ??
-      input.thread.messages
-        .toReversed()
-        .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
-      MessageId.make(`assistant:${input.turnId}`);
+      input.assistantMessageId !== undefined &&
+      !isSyntheticAssistantMessageId(input.assistantMessageId)
+        ? input.assistantMessageId
+        : (firstAssistantMessageId ??
+          input.assistantMessageId ??
+          MessageId.make(`assistant:${input.turnId}`));
 
     yield* orchestrationEngine.dispatch({
       type: "thread.turn.diff.complete",

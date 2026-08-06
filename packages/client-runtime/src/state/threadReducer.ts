@@ -434,17 +434,23 @@ export function applyThreadDetailEvent(
 
     // ── Checkpoints / turn diffs ────────────────────────────────────
     case "thread.turn-diff-completed": {
+      const existing = thread.checkpoints.find((entry) => entry.turnId === event.payload.turnId);
+      const firstAssistantMessageId = thread.messages.find(
+        (message) => message.role === "assistant" && message.turnId === event.payload.turnId,
+      )?.id;
       const checkpoint: OrchestrationCheckpointSummary = {
         turnId: event.payload.turnId,
         checkpointTurnCount: event.payload.checkpointTurnCount,
         checkpointRef: event.payload.checkpointRef,
         status: event.payload.status,
         files: event.payload.files,
-        assistantMessageId: event.payload.assistantMessageId,
+        assistantMessageId: stableCheckpointAssistantMessageId(
+          existing?.assistantMessageId,
+          firstAssistantMessageId ?? event.payload.assistantMessageId,
+        ),
         completedAt: event.payload.completedAt,
       };
 
-      const existing = thread.checkpoints.find((entry) => entry.turnId === checkpoint.turnId);
       // Don't overwrite a non-missing checkpoint with a missing one.
       if (existing && existing.status !== "missing" && checkpoint.status === "missing") {
         return { kind: "unchanged" };
@@ -622,8 +628,25 @@ function rebindCheckpointAssistantMessage(
   messageId: MessageId,
 ): OrchestrationCheckpointSummary[] {
   return Arr.map(checkpoints, (entry) =>
-    entry.turnId === turnId ? { ...entry, assistantMessageId: messageId } : entry,
+    entry.turnId === turnId
+      ? {
+          ...entry,
+          assistantMessageId: stableCheckpointAssistantMessageId(
+            entry.assistantMessageId,
+            messageId,
+          ),
+        }
+      : entry,
   );
+}
+
+function stableCheckpointAssistantMessageId(
+  current: MessageId | null | undefined,
+  next: MessageId | null,
+): MessageId | null {
+  return current === null || current === undefined || current.startsWith("assistant:")
+    ? next
+    : current;
 }
 
 function retainMessagesAfterRevert(

@@ -428,6 +428,55 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it.each([
+      ["null", null],
+      ["synthetic", MessageId.make("assistant:turn-1")],
+    ] as const)("anchors a %s checkpoint to the first assistant message", (_, anchor) => {
+      const threadWithCheckpoint: OrchestrationThread = {
+        ...baseThread,
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("ref-1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: anchor,
+            completedAt: "2026-04-01T06:59:00.000Z",
+          },
+        ],
+      };
+      const assistantEvent = (messageId: string, sequence: number) => ({
+        ...baseEventFields,
+        sequence,
+        occurredAt: `2026-04-01T07:00:0${sequence}.000Z`,
+        aggregateKind: "thread" as const,
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent" as const,
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make(messageId),
+          role: "assistant" as const,
+          text: "Progress",
+          turnId: TurnId.make("turn-1"),
+          streaming: false,
+          createdAt: `2026-04-01T07:00:0${sequence}.000Z`,
+          updatedAt: `2026-04-01T07:00:0${sequence}.000Z`,
+        },
+      });
+
+      const first = applyThreadDetailEvent(threadWithCheckpoint, assistantEvent("msg-first", 1));
+      expect(first.kind).toBe("updated");
+      if (first.kind !== "updated") {
+        return;
+      }
+      const second = applyThreadDetailEvent(first.thread, assistantEvent("msg-second", 2));
+      expect(second.kind).toBe("updated");
+      if (second.kind === "updated") {
+        expect(second.thread.checkpoints[0]?.assistantMessageId).toBe("msg-first");
+      }
+    });
+
     it("keeps latestTurn running for interim assistant messages while the session runs the turn", () => {
       const threadWithRunningSession: OrchestrationThread = {
         ...baseThread,
@@ -1077,6 +1126,99 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.checkpoints).toHaveLength(1);
         expect(result.thread.latestTurn?.turnId).toBe("turn-1");
         expect(result.thread.latestTurn?.state).toBe("completed");
+      }
+    });
+
+    it("preserves a real checkpoint anchor when a synthetic diff replaces it", () => {
+      const threadWithCheckpoint: OrchestrationThread = {
+        ...baseThread,
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("ref-missing"),
+            status: "missing",
+            files: [],
+            assistantMessageId: MessageId.make("msg-first"),
+            completedAt: "2026-04-01T11:59:00.000Z",
+          },
+        ],
+      };
+      const result = applyThreadDetailEvent(threadWithCheckpoint, {
+        ...baseEventFields,
+        sequence: 13,
+        occurredAt: "2026-04-01T12:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-diff-completed",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnId: TurnId.make("turn-1"),
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("ref-ready"),
+          status: "ready",
+          files: [{ path: "README.md", kind: "modified", additions: 1, deletions: 0 }],
+          assistantMessageId: MessageId.make("assistant:turn-1"),
+          completedAt: "2026-04-01T12:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.checkpoints[0]).toMatchObject({
+          status: "ready",
+          checkpointRef: "ref-ready",
+          assistantMessageId: "msg-first",
+        });
+      }
+    });
+
+    it("uses the first stored assistant message for an initial synthetic diff", () => {
+      const messageResult = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 12,
+        occurredAt: "2026-04-01T11:59:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-first"),
+          role: "assistant",
+          text: "Progress",
+          turnId: TurnId.make("turn-1"),
+          streaming: false,
+          createdAt: "2026-04-01T11:59:00.000Z",
+          updatedAt: "2026-04-01T11:59:00.000Z",
+        },
+      });
+      expect(messageResult.kind).toBe("updated");
+      if (messageResult.kind !== "updated") {
+        return;
+      }
+
+      const diffResult = applyThreadDetailEvent(messageResult.thread, {
+        ...baseEventFields,
+        sequence: 13,
+        occurredAt: "2026-04-01T12:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-diff-completed",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnId: TurnId.make("turn-1"),
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("ref-missing"),
+          status: "missing",
+          files: [],
+          assistantMessageId: MessageId.make("assistant:turn-1"),
+          completedAt: "2026-04-01T12:00:00.000Z",
+        },
+      });
+
+      expect(diffResult.kind).toBe("updated");
+      if (diffResult.kind === "updated") {
+        expect(diffResult.thread.checkpoints[0]?.assistantMessageId).toBe("msg-first");
       }
     });
   });

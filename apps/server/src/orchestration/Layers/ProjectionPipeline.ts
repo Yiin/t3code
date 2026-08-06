@@ -102,6 +102,10 @@ function settledTurnStateForSessionStatus(
   }
 }
 
+function isUnresolvedAssistantMessageId(value: string | null | undefined): boolean {
+  return value === null || value === undefined || value.startsWith("assistant:");
+}
+
 interface ProjectorDefinition {
   readonly name: ProjectorName;
   readonly apply: (
@@ -1303,9 +1307,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             turnId: event.payload.turnId,
           });
           if (Option.isSome(existingTurn)) {
+            const assistantMessageId = isUnresolvedAssistantMessageId(
+              existingTurn.value.assistantMessageId,
+            )
+              ? event.payload.messageId
+              : existingTurn.value.assistantMessageId;
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
-              assistantMessageId: event.payload.messageId,
+              assistantMessageId,
               state: settlesTurn
                 ? existingTurn.value.state === "interrupted"
                   ? "interrupted"
@@ -1399,9 +1408,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
 
           if (Option.isSome(existingTurn)) {
+            const assistantMessageId = isUnresolvedAssistantMessageId(
+              existingTurn.value.assistantMessageId,
+            )
+              ? event.payload.assistantMessageId
+              : existingTurn.value.assistantMessageId;
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
-              assistantMessageId: event.payload.assistantMessageId,
+              assistantMessageId,
               state: turnStillRunning ? existingTurn.value.state : nextState,
               checkpointTurnCount: event.payload.checkpointTurnCount,
               checkpointRef: event.payload.checkpointRef,

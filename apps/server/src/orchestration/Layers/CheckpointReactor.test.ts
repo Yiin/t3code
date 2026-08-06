@@ -497,6 +497,55 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  it("anchors a synthetic placeholder replacement to the first assistant message", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-first-assistant");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-first-assistant"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("message-first-assistant"),
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-second-assistant"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("message-second-assistant"),
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-synthetic-diff"),
+        threadId: ThreadId.make("thread-1"),
+        turnId,
+        completedAt: "2026-01-01T00:00:03.000Z",
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+        status: "missing",
+        files: [],
+        assistantMessageId: MessageId.make(`assistant:${turnId}`),
+        checkpointTurnCount: 1,
+        createdAt: "2026-01-01T00:00:03.000Z",
+      }),
+    );
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 1),
+    );
+    expect(thread.checkpoints[0]).toMatchObject({
+      checkpointTurnCount: 1,
+      assistantMessageId: "message-first-assistant",
+    });
+  });
+
   it("refreshes local git status state on turn completion using the session cwd", async () => {
     const gitStatusRefreshCalls: string[] = [];
     const harness = await createHarness({
