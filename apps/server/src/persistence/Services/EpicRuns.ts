@@ -9,9 +9,10 @@
  *
  * The store is designed for a write-ahead discipline that the runner must
  * honour: `appendIteration` (carrying its `threadId` and `turnStatus: "running"`)
- * happens BEFORE the runner dispatches `thread.turn.start`, and the terminal
- * state is persisted after the turn resolves. A crash in between therefore
- * leaves a visible `running` iteration rather than a turn nobody knows about.
+ * happens BEFORE orchestration begins, and the terminal state is persisted
+ * after the turn resolves. Selection anomalies use the same append-then-update
+ * order without dispatching a turn. A crash in between therefore leaves a
+ * visible `running` iteration rather than work nobody knows about.
  *
  * ## Why the iteration readers exist
  *
@@ -147,7 +148,8 @@ export interface EpicRunStoreShape {
   /**
    * Append one iteration row.
    *
-   * Must be called with `turnStatus: "running"` before the turn is dispatched.
+   * Must be called with `turnStatus: "running"` before orchestration begins.
+   * Synthetic selection failures append and immediately update without a turn.
    * A duplicate `(runId, iterationIndex)` is rejected rather than merged.
    */
   readonly appendIteration: (iteration: EpicRunIteration) => Effect.Effect<void, EpicRunStoreError>;

@@ -51,8 +51,8 @@ export const EpicRunIterationReport = Schema.Struct({
    * closed vocabulary, so policy and UI can switch on it without parsing the
    * human `summary`. Classified failures are prefixed with their failure
    * class: "infra:" for failures attributable to infrastructure ("turn-error",
-   * "timeout", "dispatch-failed", "protocol-error", and the provider-error
-   * family) and "child:" for failures the agent itself produced
+   * "timeout", "dispatch-failed", "protocol-error", "ready-unrecognised", and
+   * the provider-error family) and "child:" for failures the agent itself produced
    * ("no-commit-child-open", "blocked"). Provider-attributed failures read
    * "infra:provider-error" when only the session's error text is known, or
    * "infra:provider-error:spend-limit" / ":auth" / ":rate-limit" when the

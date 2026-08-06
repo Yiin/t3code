@@ -145,14 +145,15 @@ const buildTransportRun = (
  * switch on these strings, so they must stay stable. The persisted value is
  * prefixed with the outcome's failure class (`iterationFailureClass`), e.g.
  * "infra:timeout" / "child:no-commit-child-open", so post-mortems can tell a
- * provider death from agent behavior. "dispatch-failed", "cancelled" and
- * "server-restart" are assigned at their own sites, which are the only places
- * that know the turn never started, was cancelled, or died with the server —
- * dispatch failures are infra; the other two never had a classified outcome
- * and stay unprefixed. A completed no-commit turn is only chargeable when its
- * child issue was left open, hence the suffix. Classification can override
- * this table with something more specific — the `provider-error:*` family
- * (`EpicIterationOutcome.failureReason`).
+ * provider death from agent behavior. "dispatch-failed",
+ * "ready-unrecognised", "cancelled" and "server-restart" are assigned at
+ * their own sites, which are the only places that know the turn never started,
+ * selection rejected every candidate, the turn was cancelled, or it died with
+ * the server. Dispatch and selection failures are infra; the other two never
+ * had a classified outcome and stay unprefixed. A completed no-commit turn is
+ * only chargeable when its child issue was left open, hence the suffix.
+ * Classification can override this table with something more specific — the
+ * `provider-error:*` family (`EpicIterationOutcome.failureReason`).
  */
 const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | null => {
   switch (kind) {
@@ -176,11 +177,26 @@ const ReadyChildren = Schema.fromJsonString(
   Schema.Array(
     Schema.Struct({
       id: Schema.String,
-      parent: Schema.optional(Schema.NullOr(Schema.String)),
+      parent: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
     }),
   ),
 );
 const decodeReadyChildren = Schema.decodeUnknownEffect(ReadyChildren);
+type ReadyChildSelection =
+  | { readonly _tag: "child"; readonly issueId: string }
+  | { readonly _tag: "empty" }
+  | { readonly _tag: "unrecognised"; readonly candidateIds: ReadonlyArray<string> };
+type RunIterationResult =
+  | {
+      readonly _tag: "classified";
+      readonly outcome: EpicIterationOutcome;
+      readonly noCommitChildClosed: boolean;
+    }
+  | {
+      readonly _tag: "ready-unrecognised";
+      readonly candidateIds: ReadonlyArray<string>;
+      readonly detail: string;
+    };
 const decodeIssueTitle = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Union([
@@ -601,7 +617,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           ),
         );
 
-    const selectReadyChild = (run: EpicRun): Effect.Effect<string | null, EpicRunnerError> =>
+    const selectReadyChild = (run: EpicRun): Effect.Effect<ReadyChildSelection, EpicRunnerError> =>
       processRunner
         .run({
           command: "bd",
@@ -636,17 +652,29 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   }),
               ),
               Effect.flatMap((value) => {
-                const direct = value.find((issue) => issue.parent === run.epicId);
-                return direct === undefined
-                  ? Effect.succeed(null)
-                  : direct.id.trim().length === 0
-                    ? Effect.fail(
-                        new EpicRunnerDispatchError({
-                          commandType: "bd.ready",
-                          detail: "Invalid bd ready output: first ready child has no id",
-                        }),
-                      )
-                    : Effect.succeed(direct.id);
+                if (value.length === 0)
+                  return Effect.succeed<ReadyChildSelection>({ _tag: "empty" });
+
+                // `bd ready --parent` owns the scope. Some bd rows omit the
+                // parent value, which decodes to null and is usable. Reject
+                // only an explicit parent that names another issue.
+                const direct = value.find(
+                  (issue) => issue.parent === null || issue.parent === run.epicId,
+                );
+                if (direct === undefined) {
+                  return Effect.succeed<ReadyChildSelection>({
+                    _tag: "unrecognised",
+                    candidateIds: value.map((issue) => issue.id),
+                  });
+                }
+                return direct.id.trim().length === 0
+                  ? Effect.fail(
+                      new EpicRunnerDispatchError({
+                        commandType: "bd.ready",
+                        detail: "Invalid bd ready output: first usable ready child has no id",
+                      }),
+                    )
+                  : Effect.succeed<ReadyChildSelection>({ _tag: "child", issueId: direct.id });
               }),
             );
           }),
@@ -1232,18 +1260,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const runIteration = (input: {
       readonly run: EpicRun;
       readonly iterationIndex: number;
-    }): Effect.Effect<
-      {
-        readonly outcome: EpicIterationOutcome;
-        readonly noCommitChildClosed: boolean;
-      },
-      EpicRunnerError
-    > =>
+    }): Effect.Effect<RunIterationResult, EpicRunnerError> =>
       Effect.gen(function* () {
         const run = input.run;
-        const issueId = yield* selectReadyChild(run);
-        if (issueId === null) {
+        const selection = yield* selectReadyChild(run);
+        if (selection._tag === "empty") {
           return {
+            _tag: "classified" as const,
             outcome: { kind: "backlog-empty", detail: null, report: null },
             noCommitChildClosed: false,
           };
@@ -1256,6 +1279,51 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           epicRunIterationThreadId({ runId: run.runId, iterationIndex: input.iterationIndex }),
         );
         const startedAt = yield* nowIso;
+
+        if (selection._tag === "unrecognised") {
+          const detail = `bd ready returned no usable child for ${run.epicId}; candidates: ${selection.candidateIds.join(", ")}`;
+          yield* Effect.logError("epic.runner.ready-unrecognised", {
+            runId: run.runId,
+            epicId: run.epicId,
+            iterationIndex: input.iterationIndex,
+            candidateIds: selection.candidateIds,
+          });
+          // Keep the same append-then-update discipline as an ordinary turn.
+          // This synthetic row records the failed selection, but issueId null
+          // prevents it from becoming a public thread reference.
+          yield* store
+            .appendIteration({
+              runId: run.runId,
+              iterationIndex: input.iterationIndex,
+              threadId,
+              issueId: null,
+              turnStatus: "running",
+              summary: null,
+              why: null,
+              failureReason: null,
+              startedAt,
+              finishedAt: null,
+            })
+            .pipe(Effect.mapError(storeError("appendIteration")));
+          yield* store
+            .updateIteration({
+              runId: run.runId,
+              iterationIndex: input.iterationIndex,
+              turnStatus: "failed",
+              summary: detail,
+              why: null,
+              failureReason: "infra:ready-unrecognised",
+              finishedAt: yield* nowIso,
+            })
+            .pipe(Effect.mapError(storeError("updateIteration")));
+          return {
+            _tag: "ready-unrecognised" as const,
+            candidateIds: selection.candidateIds,
+            detail,
+          };
+        }
+
+        const issueId = selection.issueId;
         const headBefore = yield* readHeadCommit(run.cwd);
         const initialWorktreeFingerprint = yield* readWorktreeFingerprint(run.cwd);
 
@@ -1471,7 +1539,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           detail: outcome.detail,
         });
 
-        return { outcome, noCommitChildClosed };
+        return { _tag: "classified", outcome, noCommitChildClosed };
       });
 
     const backoffDelayMs = (consecutiveFailures: number) =>
@@ -1525,7 +1593,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             .pipe(Effect.mapError(storeError("getLatestIteration")));
           const iterationIndex = Option.isSome(latest) ? latest.value.iterationIndex + 1 : 0;
 
-          const { outcome, noCommitChildClosed } = yield* runIteration({ run, iterationIndex });
+          const iterationResult = yield* runIteration({ run, iterationIndex });
 
           const boundary = yield* withTransition(
             Effect.gen(function* () {
@@ -1543,6 +1611,28 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 iterationsCompleted: currentRun.iterationsCompleted + 1,
                 updatedAt: yield* nowIso,
               };
+
+              if (iterationResult._tag === "ready-unrecognised") {
+                liveLoops.delete(runId);
+                if (currentRun.status !== "running") {
+                  // A concurrent pause or cancel owns the run state even
+                  // though the selection anomaly is already persisted.
+                  yield* saveRun(settledRun);
+                  yield* Effect.logInfo("epic.runner.loop-stopped", {
+                    runId,
+                    status: currentRun.status,
+                  });
+                  return LOOP_STOP;
+                }
+                yield* saveRun({
+                  ...settledRun,
+                  status: "failed",
+                  lastError: iterationResult.detail,
+                });
+                return LOOP_STOP;
+              }
+
+              const { outcome, noCommitChildClosed } = iterationResult;
 
               if (Option.isSome(providerRegistry)) {
                 const providers = yield* providerRegistry.value.getProviders;
@@ -2015,26 +2105,29 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           }
           yield* Effect.gen(function* () {
             // An iteration still recorded as `running` at boot is by definition
-            // abandoned: the restart killed its provider subprocess and nothing
-            // re-attaches. `epic_run_iterations.turn_status` is the sole
-            // in-flight marker, so no projection join is needed to know that.
+            // abandoned. A child-backed row had a provider subprocess that the
+            // restart killed. A null-issue synthetic selection row had no turn,
+            // but can occupy the append-before-update crash window. The status
+            // is the sole in-flight marker, so both rows must be reconciled.
             const latest = yield* store
               .getLatestIteration({ runId: run.runId })
               .pipe(Effect.mapError(storeError("getLatestIteration")));
             if (Option.isSome(latest) && latest.value.turnStatus === "running") {
               const abandonedAt = yield* nowIso;
-              yield* dispatchBestEffort("epic.runner.restart-interrupt-failed", {
-                type: "thread.turn.interrupt",
-                commandId: yield* commandId("restart-interrupt"),
-                threadId: latest.value.threadId,
-                createdAt: abandonedAt,
-              });
-              yield* dispatchBestEffort("epic.runner.restart-session-stop-failed", {
-                type: "thread.session.stop",
-                commandId: yield* commandId("restart-session-stop"),
-                threadId: latest.value.threadId,
-                createdAt: abandonedAt,
-              });
+              if (latest.value.issueId !== null) {
+                yield* dispatchBestEffort("epic.runner.restart-interrupt-failed", {
+                  type: "thread.turn.interrupt",
+                  commandId: yield* commandId("restart-interrupt"),
+                  threadId: latest.value.threadId,
+                  createdAt: abandonedAt,
+                });
+                yield* dispatchBestEffort("epic.runner.restart-session-stop-failed", {
+                  type: "thread.session.stop",
+                  commandId: yield* commandId("restart-session-stop"),
+                  threadId: latest.value.threadId,
+                  createdAt: abandonedAt,
+                });
+              }
               yield* store
                 .updateIteration({
                   runId: run.runId,

@@ -134,10 +134,17 @@ const settle = Effect.sleep("60 millis");
 
 const captureLogs = () => {
   const messages: ReadonlyArray<unknown>[] = [];
-  const logger = Logger.make<unknown, void>(({ message }) => {
-    messages.push(Array.isArray(message) ? message : [message]);
+  const entries: Array<{
+    readonly logLevel: string;
+    readonly message: ReadonlyArray<unknown>;
+  }> = [];
+  const logger = Logger.make<unknown, void>(({ message, logLevel }) => {
+    const normalizedMessage = Array.isArray(message) ? message : [message];
+    messages.push(normalizedMessage);
+    entries.push({ logLevel, message: normalizedMessage });
   });
   return {
+    entries,
     messages,
     layer: Logger.layer([logger], { mergeWithExisting: false }),
   };
@@ -222,9 +229,13 @@ const makeThreadDetail = (input: {
  * implementation has its own suite, and what matters here is the order the
  * runner writes in, not how the rows are stored.
  */
-const makeMemoryStore = (upsertDelayMs = 0) => {
+const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) => {
   const runs = new Map<string, EpicRun>();
   const iterations: EpicRunIteration[] = [];
+  const iterationWrites: Array<{
+    readonly method: "append" | "update";
+    readonly turnStatus: EpicRunIteration["turnStatus"];
+  }> = [];
   /** Counted so a test can prove a listing does not fan out per run. */
   const iterationReadCounts = { perRun: 0, batched: 0 };
 
@@ -255,12 +266,18 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
           );
         return limit === undefined ? matching : matching.slice(0, limit);
       }),
-    appendIteration: (iteration) =>
-      Effect.sync(() => {
+    appendIteration: (iteration) => {
+      const append = Effect.sync(() => {
+        iterationWrites.push({ method: "append", turnStatus: iteration.turnStatus });
         iterations.push(iteration);
-      }),
+      });
+      return appendIterationDelayMs === 0
+        ? append
+        : append.pipe(Effect.andThen(Effect.sleep(`${appendIterationDelayMs} millis`)));
+    },
     updateIteration: (input) =>
       Effect.sync(() => {
+        iterationWrites.push({ method: "update", turnStatus: input.turnStatus });
         const index = iterations.findIndex(
           (iteration) =>
             iteration.runId === input.runId && iteration.iterationIndex === input.iterationIndex,
@@ -303,7 +320,7 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
       }),
   };
 
-  return { shape, runs, iterations, iterationReadCounts };
+  return { shape, runs, iterations, iterationReadCounts, iterationWrites };
 };
 
 function createHarness(input: {
@@ -324,6 +341,8 @@ function createHarness(input: {
   readonly lockAcquireError?: EpicRunLockError;
   readonly preflightError?: EpicRunPreflightError;
   readonly upsertDelayMs?: number;
+  /** Hold append open after its running row is visible, for boundary-race tests. */
+  readonly appendIterationDelayMs?: number;
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly readyOutput?: string;
   readonly onEpicRunPublish?: (run: import("@t3tools/contracts").EpicRun) => Effect.Effect<void>;
@@ -340,7 +359,7 @@ function createHarness(input: {
   /** Guarded normal-stop refusals that simulate a subagent starting after the advisory read. */
   readonly guardedStopRefusals?: number;
 }) {
-  const store = makeMemoryStore(input.upsertDelayMs);
+  const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   for (const run of input.seedRuns ?? []) {
     store.runs.set(run.runId, run);
   }
@@ -832,15 +851,138 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("treats descendants without a direct child as an empty backlog", () => {
+  it.live("dispatches the first ready child when bd omits its parent", () => {
     const harness = createHarness({
-      script: [],
-      readyOutput: '[{"id":"grandchild","parent":"child-a"}]',
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      readyOutput: '[{"id":"child-a"}]',
     });
     return Effect.gen(function* () {
-      const run = yield* startRun();
+      const run = yield* startRun(1);
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
-      assert.strictEqual(harness.store.iterations.length, 0);
+      assert.strictEqual(harness.store.iterations[0]?.issueId, "child-a");
+      assert.match(
+        harness.commandsOfType("thread.turn.start")[0]!.message.text,
+        /Cook exactly `child-a` this iteration\.$/,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("dispatches the first ready child when bd reports a null parent", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      readyOutput: '[{"id":"child-a","parent":null}]',
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(1);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations[0]?.issueId, "child-a");
+      assert.match(
+        harness.commandsOfType("thread.turn.start")[0]!.message.text,
+        /Cook exactly `child-a` this iteration\.$/,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("preserves ready order while skipping children with a different parent", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      readyOutput:
+        '[{"id":"foreign-a","parent":"epic-2"},{"id":"child-a"},{"id":"child-b","parent":"epic-1"}]',
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(1);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations[0]?.issueId, "child-a");
+      assert.match(
+        harness.commandsOfType("thread.turn.start")[0]!.message.text,
+        /Cook exactly `child-a` this iteration\.$/,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("fails once when bd returns only children with different parents", () => {
+    const logs = captureLogs();
+    const harness = createHarness({
+      script: [],
+      readyOutput: '[{"id":"foreign-a","parent":"epic-2"},{"id":"foreign-b","parent":"epic-3"}]',
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      yield* waitFor(() => harness.activeLockCount() === 0);
+
+      const persistedRun = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(persistedRun.iterationsCompleted, 1);
+      assert.strictEqual(persistedRun.currentThreadId, null);
+      assert.strictEqual(persistedRun.currentTurnStartedAt, null);
+      assert.match(persistedRun.lastError ?? "", /foreign-a, foreign-b/);
+      assert.strictEqual(harness.store.iterations.length, 1);
+      assert.deepInclude(harness.store.iterations[0]!, {
+        issueId: null,
+        turnStatus: "failed",
+        failureReason: "infra:ready-unrecognised",
+      });
+      assert.deepStrictEqual(harness.store.iterationWrites, [
+        { method: "append", turnStatus: "running" },
+        { method: "update", turnStatus: "failed" },
+      ]);
+      const publicRun = yield* runner.getRun({ runId: run.runId });
+      assert.isTrue(Option.isSome(publicRun));
+      if (Option.isSome(publicRun)) {
+        assert.deepStrictEqual(publicRun.value.threadRefs, []);
+      }
+      assert.strictEqual(harness.commandsOfType("thread.create").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      assert.strictEqual(
+        harness.processRequests.filter(
+          (request) => request.command === "bd" && request.args[0] === "ready",
+        ).length,
+        1,
+      );
+      assert.strictEqual(
+        harness.processRequests.filter(
+          (request) => request.command === "bd" && request.args[0] === "update",
+        ).length,
+        0,
+      );
+      assert.strictEqual(harness.activeLockCount(), 0);
+      assert.isTrue(
+        logs.entries.some(
+          (entry) =>
+            entry.logLevel === "Error" &&
+            JSON.stringify(entry.message).includes("epic.runner.ready-unrecognised") &&
+            JSON.stringify(entry.message).includes("foreign-a") &&
+            JSON.stringify(entry.message).includes("foreign-b"),
+        ),
+      );
+    }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
+  it.live("keeps a concurrent pause when ready selection is unrecognised", () => {
+    const harness = createHarness({
+      script: [],
+      readyOutput: '[{"id":"foreign-a","parent":"epic-2"}]',
+      appendIterationDelayMs: 100,
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "running");
+      yield* runner.pauseRun({ runId: run.runId });
+      yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "failed");
+      yield* waitFor(() => harness.activeLockCount() === 0);
+
+      const paused = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(paused.status, "paused");
+      assert.strictEqual(paused.iterationsCompleted, 1);
+      assert.strictEqual(paused.currentThreadId, null);
+      assert.strictEqual(paused.currentTurnStartedAt, null);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:ready-unrecognised");
+      assert.deepStrictEqual(harness.store.iterationWrites, [
+        { method: "append", turnStatus: "running" },
+        { method: "update", turnStatus: "failed" },
+      ]);
       assert.strictEqual(harness.commandsOfType("thread.create").length, 0);
     }).pipe(Effect.provide(harness.layer));
   });
@@ -2506,6 +2648,70 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       // The resumed loop picks up at the next index, not the abandoned one.
       assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("abandons a synthetic running row on restart without orchestration cleanup", () => {
+    const runId = "run-restart-synthetic";
+    const staleRun: EpicRun = {
+      runId: runId as EpicRun["runId"],
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "running",
+      maxIterations: 10,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      seedRuns: [staleRun],
+      seedIterations: [
+        {
+          runId: staleRun.runId,
+          iterationIndex: 0,
+          threadId: ThreadId.make(`epic-run-${runId}-0`),
+          issueId: null,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: null,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+      yield* waitFor(() => harness.activeLockCount() === 0);
+
+      assert.deepInclude(harness.store.iterations[0]!, {
+        issueId: null,
+        turnStatus: "abandoned",
+        summary: "abandoned by server restart",
+        failureReason: "server-restart",
+      });
+      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      assert.strictEqual(
+        harness.processRequests.filter(
+          (request) => request.command === "bd" && request.args[0] === "update",
+        ).length,
+        0,
+      );
     }).pipe(Effect.provide(harness.layer));
   });
 
