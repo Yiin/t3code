@@ -54,7 +54,10 @@ import {
 import { EpicRunLock, type EpicRunLockLease } from "../Services/EpicRunLock.ts";
 import {
   classifyIteration,
+  hasRalphBlocked,
+  hasRalphDone,
   iterationFailureClass,
+  parseRalphReport,
   type EpicIterationOutcome,
   type IterationTurnState,
 } from "../ralphProtocol.ts";
@@ -90,6 +93,7 @@ export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work 
  * subagent batch drains, so "finished" is true when the agent reads it.
  */
 export const EPIC_RUN_CONTINUATION_PROMPT = `Your background tasks finished. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
+export const EPIC_RUN_STALLED_PROGRESS_PROMPT = `Your turn ended early while work was still in progress. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
 const GIT_HEAD_TIMEOUT_MS = 15_000;
 const MAX_SETTLE_READS = 20;
 /**
@@ -575,6 +579,28 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           ),
         );
 
+    /**
+     * The repo's current porcelain status, verbatim, or `null` when git cannot
+     * read it. Empty stdout is a valid clean-worktree fingerprint. `null`
+     * never counts as progress.
+     */
+    const readWorktreeFingerprint = (cwd: string): Effect.Effect<string | null> =>
+      processRunner
+        .run({
+          command: "git",
+          args: ["status", "--porcelain=v1"],
+          cwd,
+          timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+        })
+        .pipe(
+          Effect.map((output) => (output.code === 0 ? output.stdout : null)),
+          Effect.catchCause((cause) =>
+            Effect.logDebug("epic.runner.worktree-read-failed", { cwd, cause }).pipe(
+              Effect.as(null),
+            ),
+          ),
+        );
+
     const selectReadyChild = (run: EpicRun): Effect.Effect<string | null, EpicRunnerError> =>
       processRunner
         .run({
@@ -927,24 +953,26 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * settle, and the settle would tear down the session and kill the
      * subagents' in-flight work.
      *
-     * Runs only after a normally-settled turn. When the turn completed with no
-     * commit AND the thread still has fresh running subagents, wait (bounded)
-     * for them to drain, then dispatch a continuation turn so the agent can
-     * fold the finished background work into a real iteration ending. Repeat
-     * this cycle when that continuation starts another subagent and ends its
-     * turn. The iteration's outer timeout bounds the complete chain.
-     * Everything else — commit present, turn failed, no fresh subagents,
-     * drain timeout falls through to classification and guarded session cleanup.
+     * Runs only after a normally-settled turn with no commit. Fresh running
+     * subagents first drain within a bound, then earn a continuation. A turn
+     * without fresh subagents also earns one when it omitted the RALPH protocol
+     * and changed the worktree since the last continuation decision. Both paths
+     * share one continuation budget and message-id sequence. The iteration's
+     * outer timeout bounds the complete chain. Commits, failed turns, explicit
+     * protocol outcomes, unchanged worktrees, and drain timeouts fall through
+     * to classification and guarded session cleanup.
      */
     const graceContinuationForSubagents = (input: {
       readonly run: EpicRun;
       readonly iterationIndex: number;
       readonly threadId: ThreadId;
       readonly headBefore: string | null;
+      readonly initialWorktreeFingerprint: string | null;
     }): Effect.Effect<IterationSettleResult> =>
       Effect.gen(function* () {
         const settled: IterationSettleResult = { _tag: "settled" };
         let continuationIndex = 0;
+        let worktreeFingerprintBefore = input.initialWorktreeFingerprint;
 
         while (true) {
           const headAfter = yield* readHeadCommit(input.run.cwd);
@@ -964,7 +992,66 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             Date.parse(yield* nowIso),
           );
           if (freshRunning === 0) {
-            return settled;
+            const worktreeFingerprintAfter = yield* readWorktreeFingerprint(input.run.cwd);
+            if (
+              worktreeFingerprintBefore === null ||
+              worktreeFingerprintAfter === null ||
+              worktreeFingerprintAfter === worktreeFingerprintBefore
+            ) {
+              return settled;
+            }
+            const finalMessage = yield* readSettledFinalMessage(input.threadId);
+            const finalAssistantMessage = resolveFinalAssistantMessage(
+              finalMessage.snapshot?.thread,
+            );
+            const text = finalAssistantMessage?.text ?? null;
+            if (
+              (finalMessage.messageWaitExhausted && text === null) ||
+              (text !== null &&
+                (hasRalphDone(text) || hasRalphBlocked(text) || parseRalphReport(text) !== null))
+            ) {
+              return settled;
+            }
+            if (continuationIndex >= maxGraceContinuations) {
+              yield* Effect.logWarning("epic.runner.subagent-grace-cap", {
+                runId: input.run.runId,
+                iterationIndex: input.iterationIndex,
+                threadId: input.threadId,
+                continuationIndex,
+              });
+              return settled;
+            }
+            const priorTurnId = thread.latestTurn?.turnId ?? null;
+            worktreeFingerprintBefore = worktreeFingerprintAfter;
+            continuationIndex += 1;
+            yield* Effect.logInfo("epic.runner.progress-continuation", {
+              runId: input.run.runId,
+              iterationIndex: input.iterationIndex,
+              threadId: input.threadId,
+              continuationIndex,
+            });
+            const createdAt = yield* nowIso;
+            yield* dispatchCommand({
+              type: "thread.turn.start",
+              commandId: yield* commandId("turn-continue"),
+              threadId: input.threadId,
+              message: {
+                messageId: MessageId.make(
+                  continuationIndex === 1
+                    ? `${input.threadId}-continue`
+                    : `${input.threadId}-continue-${continuationIndex}`,
+                ),
+                role: "user",
+                text: EPIC_RUN_STALLED_PROGRESS_PROMPT,
+                attachments: [],
+              },
+              modelSelection: input.run.modelSelection,
+              runtimeMode: input.run.runtimeMode,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              createdAt,
+            });
+            yield* awaitTurnEnd(input.threadId, priorTurnId);
+            continue;
           }
           if (continuationIndex >= maxGraceContinuations) {
             yield* Effect.logWarning("epic.runner.subagent-grace-cap", {
@@ -995,6 +1082,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             return settled;
           }
 
+          worktreeFingerprintBefore = yield* readWorktreeFingerprint(input.run.cwd);
           continuationIndex += 1;
           yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
             runId: input.run.runId,
@@ -1160,6 +1248,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         );
         const startedAt = yield* nowIso;
         const headBefore = yield* readHeadCommit(run.cwd);
+        const initialWorktreeFingerprint = yield* readWorktreeFingerprint(run.cwd);
 
         // Write-ahead, per the store's crash-safe ordering contract: the
         // iteration row — carrying its threadId — exists before the turn is
@@ -1235,6 +1324,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               iterationIndex: input.iterationIndex,
               threadId,
               headBefore,
+              initialWorktreeFingerprint,
             }),
           ),
           Effect.timeoutOption(Duration.millis(iterationTimeoutMs)),

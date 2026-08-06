@@ -50,6 +50,7 @@ import { EpicRunner } from "../Services/EpicRunner.ts";
 import {
   EPIC_RUN_CONTINUATION_PROMPT,
   EPIC_RUN_ITERATION_PROMPT,
+  EPIC_RUN_STALLED_PROGRESS_PROMPT,
   makeEpicRunnerLive,
 } from "./EpicRunner.ts";
 
@@ -83,6 +84,8 @@ const provider = (instanceId: string, driver: string, model: string): ServerProv
 interface ScriptedIteration {
   readonly text: string | null;
   readonly head: string;
+  /** The porcelain fingerprint git reports after this turn settles. */
+  readonly worktreeFingerprint?: string;
   readonly turnState?: ProjectionThreadTurnStatus;
   readonly sessionStatus?: OrchestrationSessionStatus;
   /** The projected session's `lastError` once the turn settles. */
@@ -306,6 +309,7 @@ const makeMemoryStore = (upsertDelayMs = 0) => {
 function createHarness(input: {
   readonly script: ReadonlyArray<ScriptedIteration>;
   readonly initialHead?: string;
+  readonly initialWorktreeFingerprint?: string;
   readonly options?: Parameters<typeof makeEpicRunnerLive>[0];
   readonly seedRuns?: ReadonlyArray<EpicRun>;
   readonly seedIterations?: ReadonlyArray<EpicRunIteration>;
@@ -353,6 +357,7 @@ function createHarness(input: {
     }
   >();
   let head = input.initialHead ?? "head-0";
+  let worktreeFingerprint = input.initialWorktreeFingerprint ?? "";
   let turnsStarted = 0;
   let sequence = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
@@ -389,6 +394,9 @@ function createHarness(input: {
       yield* Effect.sleep("2 millis");
 
       head = scripted.head;
+      if (scripted.worktreeFingerprint !== undefined) {
+        worktreeFingerprint = scripted.worktreeFingerprint;
+      }
       details.set(
         threadId,
         makeThreadDetail({
@@ -640,7 +648,9 @@ function createHarness(input: {
           stdout:
             request.command === "bd"
               ? (input.readyOutput ?? `[{"id":"child-${turnsStarted + 1}","parent":"epic-1"}]`)
-              : `${head}\n`,
+              : request.args[0] === "status"
+                ? worktreeFingerprint
+                : `${head}\n`,
           stderr: "",
           code: 0 as never,
           timedOut: false,
@@ -1397,6 +1407,125 @@ describe("EpicRunner", () => {
         logs.messages.find((message) => message[0] === "epic.runner.subagent-grace-cap"),
       );
     }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
+  it.live("continues a protocol-silent no-commit turn when the worktree moved", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: "I am still implementing the child.",
+          head: "head-0",
+          worktreeFingerprint: " M apps/server/src/runner/Layers/EpicRunner.ts\n",
+        },
+        {
+          text: 'Finished the child.\nRALPH_MSG: {"summary":"landed stalled work","why":"the worktree showed progress"}',
+          head: "head-1",
+          worktreeFingerprint: "",
+        },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      assert.strictEqual(turnStarts.length, 2);
+      assert.strictEqual(turnStarts[1]!.message.text, EPIC_RUN_STALLED_PROGRESS_PROMPT);
+      assert.strictEqual(turnStarts[1]!.message.messageId, `${iterationThreadId}-continue`);
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.summary, "landed stalled work");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not continue a protocol-silent turn when the worktree did not move", () => {
+    const harness = createHarness({
+      script: [{ text: "I stopped before making progress.", head: "head-0" }],
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not continue RALPH_DONE with an unchanged dirty worktree", () => {
+    const fingerprint = " M apps/server/src/runner/Layers/EpicRunner.ts\n";
+    const harness = createHarness({
+      initialWorktreeFingerprint: fingerprint,
+      script: [{ text: "RALPH_DONE", head: "head-0", worktreeFingerprint: fingerprint }],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not continue a RALPH_MSG no-commit turn when the worktree moved", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"reported without commit","why":"the child failed"}',
+          head: "head-0",
+          worktreeFingerprint: " M apps/server/src/runner/Layers/EpicRunner.ts\n",
+        },
+      ],
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+      assert.strictEqual(harness.store.iterations[0]?.summary, "reported without commit");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("shares the grace cap across subagent and stalled-progress turns", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: "The subagent is still finishing.",
+          head: "head-0",
+          worktreeFingerprint: " M first.ts\n",
+          subagentDrainReads: 1,
+        },
+        {
+          text: "The resumed turn ended silently after more work.",
+          head: "head-0",
+          worktreeFingerprint: " M first.ts\n M second.ts\n",
+        },
+      ],
+      options: { maxGraceContinuations: 1, maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      assert.strictEqual(turnStarts.length, 2);
+      assert.strictEqual(turnStarts[1]!.message.text, EPIC_RUN_CONTINUATION_PROMPT);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.live("caps repeated subagent grace continuations and classifies the final turn", () => {
