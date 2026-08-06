@@ -7,6 +7,7 @@ import {
   epicRunIterationThreadId,
   type LaunchEpicRunInput,
   MessageId,
+  type ModelSelection,
   ThreadId,
   type TurnId,
   type OrchestrationSessionStatus,
@@ -87,6 +88,8 @@ const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
  */
 const DEFAULT_INFRA_FAILURE_BUDGET = 5;
 const DEFAULT_MAX_ITERATIONS = 50;
+/** A provider degradation influences automatic launches for one hour. */
+const DEFAULT_PROVIDER_DEGRADATION_TTL_MS = 60 * 60 * 1000;
 const RECENT_ITERATIONS_LIMIT = 25;
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 export const assembleIterationPrompt = (input: {
@@ -218,11 +221,13 @@ type RunIterationResult =
       readonly _tag: "classified";
       readonly outcome: EpicIterationOutcome;
       readonly noCommitChildClosed: boolean;
+      readonly providerTurnDispatched: boolean;
     }
   | {
       readonly _tag: "ready-unrecognised";
       readonly candidateIds: ReadonlyArray<string>;
       readonly detail: string;
+      readonly providerTurnDispatched: false;
     };
 const IssueEvidence = Schema.Struct({
   status: Schema.optional(Schema.String),
@@ -373,6 +378,7 @@ export interface EpicRunnerLiveOptions {
   readonly defaultMaxIterations?: number;
   readonly subagentGraceTimeoutMs?: number;
   readonly maxGraceContinuations?: number;
+  readonly providerDegradationTtlMs?: number;
 }
 
 const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
@@ -425,6 +431,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const maxGraceContinuations = Math.max(
       1,
       options?.maxGraceContinuations ?? DEFAULT_MAX_GRACE_CONTINUATIONS,
+    );
+    const providerDegradationTtlMs = Math.max(
+      0,
+      options?.providerDegradationTtlMs ?? DEFAULT_PROVIDER_DEGRADATION_TTL_MS,
     );
 
     const changes = yield* Effect.acquireRelease(PubSub.unbounded<TransportEpicRun>(), (pubsub) =>
@@ -1391,6 +1401,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             _tag: "classified" as const,
             outcome: { kind: "backlog-empty", detail: null, report: null },
             noCommitChildClosed: false,
+            providerTurnDispatched: false,
           };
         }
         // Deterministic, and unique because iteration indices are never reused:
@@ -1442,6 +1453,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             _tag: "ready-unrecognised" as const,
             candidateIds: selection.candidateIds,
             detail,
+            providerTurnDispatched: false,
           };
         }
 
@@ -1479,12 +1491,23 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           })
           .pipe(Effect.mapError(storeError("appendIteration")));
 
-        yield* saveRun({
-          ...run,
-          currentThreadId: threadId,
-          currentTurnStartedAt: startedAt,
-          updatedAt: startedAt,
-        });
+        // Charge a dispatch from a fresh row inside the transition lock. This
+        // preserves a concurrent status change and prevents restart/cancel
+        // reconciliation from charging the same provider turn again.
+        const dispatchedRun = yield* withTransition(
+          Effect.gen(function* () {
+            const current = yield* requireRun(run.runId);
+            const next = {
+              ...current,
+              currentThreadId: threadId,
+              currentTurnStartedAt: startedAt,
+              iterationsDispatched: current.iterationsDispatched + 1,
+              updatedAt: startedAt,
+            };
+            yield* saveRun(next);
+            return next;
+          }),
+        );
 
         const dispatchTurn = Effect.gen(function* () {
           // `OrchestrationEngine.dispatch` ignores a turn command's `bootstrap`
@@ -1494,10 +1517,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             type: "thread.create",
             commandId: yield* commandId("thread-create"),
             threadId,
-            projectId: run.projectId,
+            projectId: dispatchedRun.projectId,
             title: `${run.epicId} · iteration ${input.iterationIndex + 1}`,
-            modelSelection: run.modelSelection,
-            runtimeMode: run.runtimeMode,
+            modelSelection: dispatchedRun.modelSelection,
+            runtimeMode: dispatchedRun.runtimeMode,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             branch: null,
             worktreePath,
@@ -1511,15 +1534,15 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               messageId: MessageId.make(`${threadId}-prompt`),
               role: "user",
               text: assembleIterationPrompt({
-                basePrompt: run.prompt,
+                basePrompt: dispatchedRun.prompt,
                 issueId,
                 epicContext,
                 orientationCard,
               }),
               attachments: [],
             },
-            modelSelection: run.modelSelection,
-            runtimeMode: run.runtimeMode,
+            modelSelection: dispatchedRun.modelSelection,
+            runtimeMode: dispatchedRun.runtimeMode,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             createdAt: startedAt,
           });
@@ -1684,7 +1707,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           detail: outcome.detail,
         });
 
-        return { _tag: "classified", outcome, noCommitChildClosed };
+        return {
+          _tag: "classified",
+          outcome,
+          noCommitChildClosed,
+          providerTurnDispatched: true,
+        };
       });
 
     const backoffDelayMs = (consecutiveFailures: number) =>
@@ -1692,18 +1720,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
-        // In-memory on purpose: the gutter rule guards against a loop spinning
-        // *now*, and a resumed run deserves a clean slate.
-        let noCommitStreak = 0;
-        // Same lifetime and rationale. Infra failures — provider errors,
-        // timeouts, dispatch failures (`iterationFailureClass`) — charge this
-        // dedicated budget with backoff, never the gutter and never
-        // `maxConsecutiveFailures`: on 2026-08-04 two spend-limit 429s tripped
-        // the gutter in seconds when the limit itself lasted hours. Like the
-        // gutter streak it survives an interleaved child failure and only a
-        // successful iteration resets it.
-        let infraStreak = 0;
-
         while (true) {
           const run = yield* withTransition(
             Effect.gen(function* () {
@@ -1716,7 +1732,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 });
                 return null;
               }
-              if (current.iterationsCompleted >= current.maxIterations) {
+              if (current.iterationsDispatched >= current.maxIterations) {
                 liveLoops.delete(runId);
                 yield* saveRun({
                   ...current,
@@ -1777,7 +1793,20 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 return LOOP_STOP;
               }
 
-              const { outcome, noCommitChildClosed } = iterationResult;
+              const { outcome, noCommitChildClosed, providerTurnDispatched } = iterationResult;
+
+              const successfulProviderTurn =
+                providerTurnDispatched &&
+                (outcome.kind === "done" ||
+                  outcome.kind === "backlog-empty" ||
+                  noCommitChildClosed);
+              if (successfulProviderTurn) {
+                yield* store
+                  .clearProviderDegradation({
+                    providerInstanceId: currentRun.modelSelection.instanceId,
+                  })
+                  .pipe(Effect.mapError(storeError("clearProviderDegradation")));
+              }
 
               if (Option.isSome(providerRegistry)) {
                 const providers = yield* providerRegistry.value.getProviders;
@@ -1788,8 +1817,15 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   providerFallbackEligible: outcome.providerFallbackEligible === true,
                 });
                 if (fallback !== null) {
-                  infraStreak = 0;
-                  settledRun = { ...settledRun, modelSelection: fallback };
+                  const degradedAt = yield* nowIso;
+                  yield* store
+                    .upsertProviderDegradation({
+                      providerInstanceId: currentRun.modelSelection.instanceId,
+                      failureReason: outcome.failureReason ?? outcome.detail ?? outcome.kind,
+                      degradedAt,
+                    })
+                    .pipe(Effect.mapError(storeError("upsertProviderDegradation")));
+                  settledRun = { ...settledRun, modelSelection: fallback, infraStreak: 0 };
                   yield* saveRun(settledRun);
                   yield* Effect.logInfo("epic.runner.provider-fallback", {
                     runId,
@@ -1825,27 +1861,36 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   ...settledRun,
                   status: "done",
                   consecutiveFailures: 0,
+                  ...(providerTurnDispatched ? { noCommitStreak: 0, infraStreak: 0 } : {}),
                   lastError: null,
                 });
                 return LOOP_STOP;
               }
 
               if (outcome.kind === "done") {
-                noCommitStreak = 0;
-                infraStreak = 0;
-                yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });
+                yield* saveRun({
+                  ...settledRun,
+                  consecutiveFailures: 0,
+                  noCommitStreak: 0,
+                  infraStreak: 0,
+                  lastError: null,
+                });
                 return LOOP_CONTINUE;
               }
 
               if (noCommitChildClosed) {
-                noCommitStreak = 0;
-                infraStreak = 0;
-                yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });
+                yield* saveRun({
+                  ...settledRun,
+                  consecutiveFailures: 0,
+                  noCommitStreak: 0,
+                  infraStreak: 0,
+                  lastError: null,
+                });
                 return LOOP_CONTINUE;
               }
 
               if (outcome.kind === "no-commit") {
-                noCommitStreak += 1;
+                const noCommitStreak = currentRun.noCommitStreak + 1;
                 const gutter = noCommitStreak >= maxNoCommitStreak;
                 if (gutter) liveLoops.delete(runId);
                 yield* saveRun({
@@ -1857,6 +1902,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                       }
                     : { lastError: null }),
                   consecutiveFailures: 0,
+                  noCommitStreak,
                 });
                 return gutter ? LOOP_STOP : LOOP_CONTINUE;
               }
@@ -1868,7 +1914,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 // reason on every retry, so a run sitting in backoff reads
                 // "provider error: monthly spend limit …", not a generic
                 // failure count.
-                infraStreak += 1;
+                const infraStreak = currentRun.infraStreak + 1;
                 const infraReason = outcome.detail ?? outcome.kind;
                 const exhaustedInfra = infraStreak >= infraFailureBudget;
                 if (exhaustedInfra) liveLoops.delete(runId);
@@ -1878,6 +1924,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   lastError: exhaustedInfra
                     ? `infra: ${infraStreak} consecutive infrastructure failures; last: ${infraReason}`
                     : infraReason,
+                  infraStreak,
                 });
                 const infraRetry: LoopBoundary = {
                   _tag: "continue",
@@ -2016,9 +2063,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           status: "running",
           maxIterations: Math.max(1, Math.trunc(input.maxIterations ?? defaultMaxIterations)),
           iterationsCompleted: 0,
+          iterationsDispatched: 0,
           currentThreadId: null,
           currentTurnStartedAt: null,
           consecutiveFailures: 0,
+          noCommitStreak: 0,
+          infraStreak: 0,
           lastError: null,
           createdAt,
           updatedAt: createdAt,
@@ -2051,6 +2101,54 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         return yield* enrichRun(run);
       });
 
+    const resolveLaunchModelSelection = (
+      defaultSelection: ModelSelection,
+    ): Effect.Effect<ModelSelection, EpicRunnerError> =>
+      Effect.gen(function* () {
+        // Registry absence keeps the configured default. Automatic fallback
+        // needs the registry to reuse the normal eligibility checks.
+        if (Option.isNone(providerRegistry)) return defaultSelection;
+        const providers = yield* providerRegistry.value.getProviders;
+        const checkedAt = yield* DateTime.now;
+        const cutoff = DateTime.formatIso(
+          DateTime.subtractDuration(checkedAt, Duration.millis(providerDegradationTtlMs)),
+        );
+        let selection = defaultSelection;
+
+        while (true) {
+          const degradation = yield* store
+            .getProviderDegradation({ providerInstanceId: selection.instanceId })
+            .pipe(Effect.mapError(storeError("getProviderDegradation")));
+          if (Option.isNone(degradation)) return selection;
+
+          if (degradation.value.degradedAt <= cutoff) {
+            // The predicate is repeated by SQL. A newer replacement written
+            // after this read is therefore safe from this cleanup.
+            yield* store
+              .clearExpiredProviderDegradation({
+                providerInstanceId: selection.instanceId,
+                cutoff,
+              })
+              .pipe(Effect.mapError(storeError("clearExpiredProviderDegradation")));
+            return selection;
+          }
+
+          const fallback = resolveEpicProviderFallback({
+            providers,
+            current: selection,
+            failureReason: "provider-error",
+            providerFallbackEligible: true,
+          });
+          if (fallback === null) return selection;
+          yield* Effect.logInfo("epic.runner.launch-provider-fallback", {
+            fromInstanceId: selection.instanceId,
+            toInstanceId: fallback.instanceId,
+            reason: degradation.value.failureReason,
+          });
+          selection = fallback;
+        }
+      });
+
     const launchRun: EpicRunnerShape["launchRun"] = (input: LaunchEpicRunInput) =>
       Effect.gen(function* () {
         const active = yield* findActiveRun(input);
@@ -2069,11 +2167,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         if (project.value.defaultModelSelection === null) {
           return yield* new EpicRunLaunchError({ reason: "model_default_missing" });
         }
+        const modelSelection = yield* resolveLaunchModelSelection(
+          project.value.defaultModelSelection,
+        );
         return yield* startRun({
           ...input,
           prompt: EPIC_RUN_ITERATION_PROMPT,
           orientationFile: null,
-          modelSelection: project.value.defaultModelSelection,
+          modelSelection,
           runtimeMode: DEFAULT_RUNTIME_MODE,
           maxIterations: defaultMaxIterations,
         });
@@ -2116,6 +2217,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               ...run,
               status: "running",
               consecutiveFailures: 0,
+              noCommitStreak: 0,
+              infraStreak: 0,
               lastError: null,
               updatedAt: yield* nowIso,
             };
@@ -2125,9 +2228,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             // Relaunching there would run launch preflight against that lock
             // and refuse the resume as `run_in_progress`. Flip the status
             // instead and let the live loop pick it up when it looks again.
-            if (!liveLoops.has(runId)) return { run: resumed, relaunch: true } as const;
-            yield* saveRun(resumed);
-            return { run: resumed, relaunch: false } as const;
+            if (liveLoops.has(runId)) {
+              yield* saveRun(resumed);
+              return { run: resumed, relaunch: false } as const;
+            }
+            // A stopped run stays durably paused until its lease is acquired.
+            // Failed preflight or acquisition must leave it resumable.
+            return { run, relaunch: true } as const;
           }),
         );
         if (!handoff.relaunch) return yield* enrichRun(handoff.run);
@@ -2138,24 +2245,66 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             error._tag === "EpicRunLeaseHeld" ? error.mappedError : error,
           ),
         );
-        yield* saveRun(handoff.run).pipe(releaseLeaseOnFailure(runId));
-        yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
-        return yield* enrichRun(handoff.run);
+        const relaunched = yield* withTransition(
+          Effect.gen(function* () {
+            const fresh = yield* requireRun(runId);
+            if (fresh.status !== "paused") {
+              return { run: fresh, forked: false } as const;
+            }
+            const resumed: EpicRun = {
+              ...fresh,
+              status: "running",
+              consecutiveFailures: 0,
+              noCommitStreak: 0,
+              infraStreak: 0,
+              lastError: null,
+              updatedAt: yield* nowIso,
+            };
+            yield* saveRun(resumed);
+            yield* forkLoop(runId);
+            return { run: resumed, forked: true } as const;
+          }),
+        ).pipe(releaseLeaseOnFailure(runId));
+        if (!relaunched.forked) {
+          yield* releaseLease(runId);
+        }
+        return yield* enrichRun(relaunched.run);
       });
 
     const cancelRun: EpicRunnerShape["cancelRun"] = ({ runId }) =>
       Effect.gen(function* () {
-        const run = yield* requireRun(runId);
-        if (run.status === "done" || run.status === "failed" || run.status === "cancelled") {
-          return yield* new EpicRunStateError({ runId, detail: `run already ${run.status}` });
-        }
+        const transition = yield* withTransition(
+          Effect.gen(function* () {
+            const fresh = yield* requireRun(runId);
+            if (
+              fresh.status === "done" ||
+              fresh.status === "failed" ||
+              fresh.status === "cancelled"
+            ) {
+              return yield* new EpicRunStateError({
+                runId,
+                detail: `run already ${fresh.status}`,
+              });
+            }
+            const cancelledAt = yield* nowIso;
+            const cancelled: EpicRun = {
+              ...fresh,
+              status: "cancelled",
+              currentThreadId: null,
+              currentTurnStartedAt: null,
+              updatedAt: cancelledAt,
+            };
+            yield* saveRun(cancelled);
+            return { cancelled, cancelledAt, threadId: fresh.currentThreadId } as const;
+          }),
+        );
 
-        // Interrupt the loop before touching the turn, so it cannot start
-        // another iteration while this one is being torn down.
+        const { cancelled, cancelledAt, threadId } = transition;
+        // Cancellation is durable before loop interruption. The loop either
+        // observes the cancelled row at its boundary or is interrupted here,
+        // while its lease remains held until the cancelled state is visible.
         yield* FiberMap.remove(loops, runId);
 
-        const cancelledAt = yield* nowIso;
-        const threadId = run.currentThreadId;
         if (threadId !== null) {
           yield* dispatchBestEffort("epic.runner.cancel-interrupt-failed", {
             type: "thread.turn.interrupt",
@@ -2189,14 +2338,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             .pipe(Effect.mapError(storeError("updateIteration")));
         }
 
-        const cancelled: EpicRun = {
-          ...run,
-          status: "cancelled",
-          currentThreadId: null,
-          currentTurnStartedAt: null,
-          updatedAt: cancelledAt,
-        };
-        yield* saveRun(cancelled);
         yield* releaseLease(runId);
         return yield* enrichRun(cancelled);
       });

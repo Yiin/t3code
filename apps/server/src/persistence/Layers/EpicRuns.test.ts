@@ -26,10 +26,13 @@ const makeRun = (overrides: Partial<EpicRun> = {}): EpicRun => ({
   originThreadId: null,
   status: "running",
   maxIterations: 10,
+  iterationsDispatched: 0,
   iterationsCompleted: 0,
   currentThreadId: null,
   currentTurnStartedAt: null,
   consecutiveFailures: 0,
+  noCommitStreak: 0,
+  infraStreak: 0,
   lastError: null,
   createdAt: "2026-07-27T00:00:00.000Z",
   updatedAt: "2026-07-27T00:00:00.000Z",
@@ -51,6 +54,9 @@ describe("EpicRunStore", () => {
         currentTurnStartedAt: "2026-07-27T00:01:00.000Z",
         originThreadId: ThreadId.make("thread-launcher-1"),
         orientationFile: "docs/agent-orientation.md",
+        iterationsDispatched: 7,
+        noCommitStreak: 2,
+        infraStreak: 3,
       });
       yield* store.upsertRun(run);
 
@@ -88,6 +94,52 @@ describe("EpicRunStore", () => {
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 
+  it.effect("replaces degradation rows and clears them safely", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const providerInstanceId = ProviderInstanceId.make("claude-work");
+      yield* store.upsertProviderDegradation({
+        providerInstanceId,
+        failureReason: "provider-error:spend-limit",
+        degradedAt: "2026-07-27T00:00:00.000Z",
+      });
+      yield* store.upsertProviderDegradation({
+        providerInstanceId,
+        failureReason: "provider-error:rate-limit",
+        degradedAt: "2026-07-27T02:00:00.000Z",
+      });
+
+      const replaced = yield* store.getProviderDegradation({ providerInstanceId });
+      assert.deepStrictEqual(Option.getOrNull(replaced), {
+        providerInstanceId,
+        failureReason: "provider-error:rate-limit",
+        degradedAt: "2026-07-27T02:00:00.000Z",
+      });
+
+      // Cleanup based on an older observation must preserve the replacement.
+      yield* store.clearExpiredProviderDegradation({
+        providerInstanceId,
+        cutoff: "2026-07-27T01:00:00.000Z",
+      });
+      assert.isTrue(Option.isSome(yield* store.getProviderDegradation({ providerInstanceId })));
+
+      // Exact cutoff is expired.
+      yield* store.clearExpiredProviderDegradation({
+        providerInstanceId,
+        cutoff: "2026-07-27T02:00:00.000Z",
+      });
+      assert.isTrue(Option.isNone(yield* store.getProviderDegradation({ providerInstanceId })));
+
+      yield* store.upsertProviderDegradation({
+        providerInstanceId,
+        failureReason: "provider-error:auth",
+        degradedAt: "2026-07-27T03:00:00.000Z",
+      });
+      yield* store.clearProviderDegradation({ providerInstanceId });
+      assert.isTrue(Option.isNone(yield* store.getProviderDegradation({ providerInstanceId })));
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
   it.effect("upserts a run in place instead of inserting a second row", () =>
     Effect.gen(function* () {
       const store = yield* EpicRunStore;
@@ -98,7 +150,10 @@ describe("EpicRunStore", () => {
       yield* store.upsertRun({
         ...run,
         status: "done",
+        iterationsDispatched: 8,
         iterationsCompleted: 4,
+        noCommitStreak: 4,
+        infraStreak: 5,
         updatedAt: "2026-07-27T01:00:00.000Z",
       });
 
@@ -110,6 +165,9 @@ describe("EpicRunStore", () => {
       const persisted = yield* store.getRun({ runId: run.runId });
       assert.strictEqual(Option.getOrNull(persisted)?.status, "done");
       assert.strictEqual(Option.getOrNull(persisted)?.iterationsCompleted, 4);
+      assert.strictEqual(Option.getOrNull(persisted)?.iterationsDispatched, 8);
+      assert.strictEqual(Option.getOrNull(persisted)?.noCommitStreak, 4);
+      assert.strictEqual(Option.getOrNull(persisted)?.infraStreak, 5);
       assert.strictEqual(Option.getOrNull(persisted)?.updatedAt, "2026-07-27T01:00:00.000Z");
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );

@@ -15,7 +15,10 @@ import {
 import {
   EpicRun,
   EpicRunIteration,
+  EpicProviderDegradation,
+  ClearExpiredEpicProviderDegradationInput,
   EpicRunStore,
+  GetEpicProviderDegradationInput,
   GetEpicRunInput,
   GetLatestEpicRunIterationInput,
   ListEpicRunIterationsInput,
@@ -70,9 +73,12 @@ const makeEpicRunStore = Effect.gen(function* () {
           status,
           max_iterations,
           iterations_completed,
+          iterations_dispatched,
           current_thread_id,
           current_turn_started_at,
           consecutive_failures,
+          no_commit_streak,
+          infra_streak,
           last_error,
           created_at,
           updated_at
@@ -90,9 +96,12 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.status},
           ${row.maxIterations},
           ${row.iterationsCompleted},
+          ${row.iterationsDispatched},
           ${row.currentThreadId},
           ${row.currentTurnStartedAt},
           ${row.consecutiveFailures},
+          ${row.noCommitStreak},
+          ${row.infraStreak},
           ${row.lastError},
           ${row.createdAt},
           ${row.updatedAt}
@@ -110,9 +119,12 @@ const makeEpicRunStore = Effect.gen(function* () {
           status = excluded.status,
           max_iterations = excluded.max_iterations,
           iterations_completed = excluded.iterations_completed,
+          iterations_dispatched = excluded.iterations_dispatched,
           current_thread_id = excluded.current_thread_id,
           current_turn_started_at = excluded.current_turn_started_at,
           consecutive_failures = excluded.consecutive_failures,
+          no_commit_streak = excluded.no_commit_streak,
+          infra_streak = excluded.infra_streak,
           last_error = excluded.last_error,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at
@@ -132,9 +144,12 @@ const makeEpicRunStore = Effect.gen(function* () {
     status,
     max_iterations AS "maxIterations",
     iterations_completed AS "iterationsCompleted",
+    iterations_dispatched AS "iterationsDispatched",
     current_thread_id AS "currentThreadId",
     current_turn_started_at AS "currentTurnStartedAt",
     consecutive_failures AS "consecutiveFailures",
+    no_commit_streak AS "noCommitStreak",
+    infra_streak AS "infraStreak",
     last_error AS "lastError",
     created_at AS "createdAt",
     updated_at AS "updatedAt"
@@ -285,6 +300,48 @@ const makeEpicRunStore = Effect.gen(function* () {
       `,
   });
 
+  const upsertProviderDegradationRow = SqlSchema.void({
+    Request: EpicProviderDegradation,
+    execute: (row) => sql`
+      INSERT INTO epic_provider_degradations (provider_instance_id, failure_reason, degraded_at)
+      VALUES (${row.providerInstanceId}, ${row.failureReason}, ${row.degradedAt})
+      ON CONFLICT (provider_instance_id) DO UPDATE SET
+        failure_reason = excluded.failure_reason,
+        degraded_at = excluded.degraded_at
+    `,
+  });
+
+  const providerDegradationColumns = sql.literal(`
+    provider_instance_id AS "providerInstanceId",
+    failure_reason AS "failureReason",
+    degraded_at AS "degradedAt"
+  `);
+
+  const getProviderDegradationRow = SqlSchema.findOneOption({
+    Request: GetEpicProviderDegradationInput,
+    Result: EpicProviderDegradation,
+    execute: ({ providerInstanceId }) => sql`
+      SELECT ${providerDegradationColumns}
+      FROM epic_provider_degradations
+      WHERE provider_instance_id = ${providerInstanceId}
+    `,
+  });
+
+  const clearProviderDegradationRow = SqlSchema.void({
+    Request: GetEpicProviderDegradationInput,
+    execute: ({ providerInstanceId }) => sql`
+      DELETE FROM epic_provider_degradations WHERE provider_instance_id = ${providerInstanceId}
+    `,
+  });
+
+  const clearExpiredProviderDegradationRow = SqlSchema.void({
+    Request: ClearExpiredEpicProviderDegradationInput,
+    execute: ({ providerInstanceId, cutoff }) => sql`
+      DELETE FROM epic_provider_degradations
+      WHERE provider_instance_id = ${providerInstanceId} AND degraded_at <= ${cutoff}
+    `,
+  });
+
   const upsertRun: EpicRunStoreShape["upsertRun"] = (run) =>
     upsertEpicRunRow(run).pipe(
       Effect.mapError(
@@ -371,6 +428,48 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const upsertProviderDegradation: EpicRunStoreShape["upsertProviderDegradation"] = (input) =>
+    upsertProviderDegradationRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.upsertProviderDegradation:query",
+          "EpicRunStore.upsertProviderDegradation:encodeRequest",
+        ),
+      ),
+    );
+
+  const getProviderDegradation: EpicRunStoreShape["getProviderDegradation"] = (input) =>
+    getProviderDegradationRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.getProviderDegradation:query",
+          "EpicRunStore.getProviderDegradation:decodeRow",
+        ),
+      ),
+    );
+
+  const clearProviderDegradation: EpicRunStoreShape["clearProviderDegradation"] = (input) =>
+    clearProviderDegradationRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.clearProviderDegradation:query",
+          "EpicRunStore.clearProviderDegradation:encodeRequest",
+        ),
+      ),
+    );
+
+  const clearExpiredProviderDegradation: EpicRunStoreShape["clearExpiredProviderDegradation"] = (
+    input,
+  ) =>
+    clearExpiredProviderDegradationRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.clearExpiredProviderDegradation:query",
+          "EpicRunStore.clearExpiredProviderDegradation:encodeRequest",
+        ),
+      ),
+    );
+
   return {
     upsertRun,
     getRun,
@@ -380,6 +479,10 @@ const makeEpicRunStore = Effect.gen(function* () {
     listIterations,
     listRecentIterationsForRuns,
     getLatestIteration,
+    upsertProviderDegradation,
+    getProviderDegradation,
+    clearProviderDegradation,
+    clearExpiredProviderDegradation,
   } satisfies EpicRunStoreShape;
 });
 

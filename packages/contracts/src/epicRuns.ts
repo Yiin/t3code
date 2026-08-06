@@ -94,11 +94,23 @@ export const EpicRun = Schema.Struct({
    */
   originThreadId: Schema.NullOr(ThreadId),
   status: EpicRunStatus,
+  /** The maximum number of provider dispatch attempts this run can start. */
   maxIterations: PositiveInt,
+  /**
+   * Provider attempts charged before orchestration dispatch. This includes
+   * dispatch failures and turns later marked abandoned or cancelled.
+   */
+  iterationsDispatched: NonNegativeInt,
+  /**
+   * Iterations that reached a normal runner boundary. This can differ from
+   * `iterationsDispatched` when a started turn is abandoned or cancelled.
+   */
   iterationsCompleted: NonNegativeInt,
   currentThreadId: Schema.NullOr(ThreadId),
   currentTurnStartedAt: Schema.NullOr(IsoDateTime),
   consecutiveFailures: NonNegativeInt,
+  noCommitStreak: NonNegativeInt,
+  infraStreak: NonNegativeInt,
   lastError: Schema.NullOr(Schema.String),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

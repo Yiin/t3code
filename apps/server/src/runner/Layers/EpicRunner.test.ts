@@ -16,8 +16,10 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -266,6 +268,10 @@ const makeThreadDetail = (input: {
 const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) => {
   const runs = new Map<string, EpicRun>();
   const iterations: EpicRunIteration[] = [];
+  const degradations = new Map<
+    string,
+    import("../../persistence/Services/EpicRuns.ts").EpicProviderDegradation
+  >();
   const iterationWrites: Array<{
     readonly method: "append" | "update";
     readonly turnStatus: EpicRunIteration["turnStatus"];
@@ -352,9 +358,29 @@ const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) => {
         const forRun = iterations.filter((iteration) => iteration.runId === runId);
         return forRun.length === 0 ? Option.none() : Option.some(forRun[forRun.length - 1]!);
       }),
+    upsertProviderDegradation: (degradation) =>
+      Effect.sync(() => {
+        degradations.set(degradation.providerInstanceId, degradation);
+      }),
+    getProviderDegradation: ({ providerInstanceId }) =>
+      Effect.sync(() => {
+        const degradation = degradations.get(providerInstanceId);
+        return degradation === undefined ? Option.none() : Option.some(degradation);
+      }),
+    clearProviderDegradation: ({ providerInstanceId }) =>
+      Effect.sync(() => {
+        degradations.delete(providerInstanceId);
+      }),
+    clearExpiredProviderDegradation: ({ providerInstanceId, cutoff }) =>
+      Effect.sync(() => {
+        const degradation = degradations.get(providerInstanceId);
+        if (degradation !== undefined && degradation.degradedAt <= cutoff) {
+          degradations.delete(providerInstanceId);
+        }
+      }),
   };
 
-  return { shape, runs, iterations, iterationReadCounts, iterationWrites };
+  return { shape, runs, iterations, degradations, iterationReadCounts, iterationWrites };
 };
 
 function createHarness(input: {
@@ -372,12 +398,14 @@ function createHarness(input: {
   };
   readonly onLockAcquire?: () => void;
   readonly onLockRelease?: () => void;
+  readonly beforeLockAcquire?: Effect.Effect<void>;
   readonly lockAcquireError?: EpicRunLockError;
   readonly preflightError?: EpicRunPreflightError;
   readonly upsertDelayMs?: number;
   /** Hold append open after its running row is visible, for boundary-race tests. */
   readonly appendIterationDelayMs?: number;
   readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly projectDefaultModelSelection?: import("@t3tools/contracts").ModelSelection;
   readonly readyOutput?: string;
   /** Epic descriptions returned in order by per-iteration `bd show`. */
   readonly epicDescriptions?: ReadonlyArray<string>;
@@ -544,7 +572,7 @@ function createHarness(input: {
           id,
           title: "Epic project",
           workspaceRoot: input.workspaceRoot ?? "/tmp/epic-runner-repo",
-          defaultModelSelection: modelSelection,
+          defaultModelSelection: input.projectDefaultModelSelection ?? modelSelection,
           scripts: [],
           createdAt: NOW,
           updatedAt: NOW,
@@ -803,17 +831,18 @@ function createHarness(input: {
         acquire: (
           lockInput,
         ): Effect.Effect<EpicRunLockLease, EpicRunLockError | EpicRunLockHeldError> =>
-          Effect.suspend<EpicRunLockLease, EpicRunLockError | EpicRunLockHeldError, never>(() => {
+          Effect.gen(function* () {
+            yield* input.beforeLockAcquire ?? Effect.void;
             if (input.lockAcquireError !== undefined) {
-              return Effect.fail(input.lockAcquireError);
+              return yield* Effect.fail(input.lockAcquireError);
             }
             const path = `/tmp/${lockInput.epicId}`;
             if (heldLocks.has(path)) {
-              return Effect.fail(new EpicRunLockHeldError(path, undefined));
+              return yield* Effect.fail(new EpicRunLockHeldError(path, undefined));
             }
             heldLocks.add(path);
             input.onLockAcquire?.();
-            return Effect.succeed({
+            return {
               path,
               owner: {
                 owner: "t3code",
@@ -830,7 +859,7 @@ function createHarness(input: {
                 input.onLockRelease?.();
                 return true;
               }),
-            });
+            };
           }),
       }),
     ),
@@ -1372,10 +1401,13 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "done",
       maxIterations: 10,
+      iterationsDispatched: 2,
       iterationsCompleted: 2,
       currentThreadId: null,
       currentTurnStartedAt: null,
       consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
       lastError: null,
       createdAt,
       updatedAt,
@@ -2320,7 +2352,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("persists a provider fallback and dispatches the next iteration on Codex", () => {
+  it.live("persists a provider fallback and relaunches on Codex", () => {
     const claudeSelection = {
       instanceId: ProviderInstanceId.make("claude-work"),
       model: "claude-sonnet-5",
@@ -2340,8 +2372,10 @@ describe("EpicRunner", () => {
           sessionLastError: "You've hit your org's monthly spend limit",
         },
         { text: "RALPH_DONE", head: "head-0" },
+        { text: "RALPH_DONE", head: "head-0" },
       ],
       options: { infraFailureBudget: 1 },
+      projectDefaultModelSelection: claudeSelection,
       providers: [
         provider("claude-work", "claudeAgent", "claude-sonnet-5"),
         provider("codex-personal", "codex", "gpt-5.6-sol"),
@@ -2369,6 +2403,170 @@ describe("EpicRunner", () => {
       assert.strictEqual(
         harness.store.iterations[0]?.failureReason,
         "infra:provider-error:spend-limit",
+      );
+
+      const relaunched = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(relaunched.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start").map((command) => command.modelSelection),
+        [claudeSelection, codexSelection, codexSelection],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("clears only the successful provider instance degradation", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const codexInstanceId = ProviderInstanceId.make("codex-personal");
+    const harness = createHarness({ script: [{ text: "RALPH_DONE", head: "head-0" }] });
+    harness.store.degradations.set(claudeSelection.instanceId, {
+      providerInstanceId: claudeSelection.instanceId,
+      failureReason: "provider-error:spend-limit",
+      degradedAt: NOW,
+    });
+    harness.store.degradations.set(codexInstanceId, {
+      providerInstanceId: codexInstanceId,
+      failureReason: "provider-error:auth",
+      degradedAt: NOW,
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: claudeSelection,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.isFalse(harness.store.degradations.has(claudeSelection.instanceId));
+      assert.isTrue(harness.store.degradations.has(codexInstanceId));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("clears a successful provider degradation after a concurrent pause", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      options: { quietPeriodMs: 150 },
+    });
+    harness.store.degradations.set(claudeSelection.instanceId, {
+      providerInstanceId: claudeSelection.instanceId,
+      failureReason: "provider-error:spend-limit",
+      degradedAt: NOW,
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: claudeSelection,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.iterations.length === 1);
+      yield* runner.pauseRun({ runId: run.runId });
+      yield* waitFor(
+        () =>
+          harness.store.iterations[0]?.turnStatus === "completed" &&
+          harness.activeLockCount() === 0,
+      );
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "paused");
+      assert.isFalse(harness.store.degradations.has(claudeSelection.instanceId));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("ignores and conditionally clears an expired degradation", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      options: { providerDegradationTtlMs: 1_000 },
+      projectDefaultModelSelection: claudeSelection,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+      ],
+    });
+    harness.store.degradations.set(claudeSelection.instanceId, {
+      providerInstanceId: claudeSelection.instanceId,
+      failureReason: "provider-error:spend-limit",
+      degradedAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        claudeSelection,
+      );
+      assert.isFalse(harness.store.degradations.has(claudeSelection.instanceId));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("walks chained Claude and Codex degradations to Kimi", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const codexInstanceId = ProviderInstanceId.make("codex-personal");
+    const kimiSelection = {
+      instanceId: ProviderInstanceId.make("kimi-work"),
+      model: "kimi-code/k3",
+    } as const;
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: claudeSelection,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+        provider("kimi-work", "kimi", "kimi-code/k3"),
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const degradedAt = DateTime.formatIso(yield* DateTime.now);
+      harness.store.degradations.set(claudeSelection.instanceId, {
+        providerInstanceId: claudeSelection.instanceId,
+        failureReason: "provider-error:spend-limit",
+        degradedAt,
+      });
+      harness.store.degradations.set(codexInstanceId, {
+        providerInstanceId: codexInstanceId,
+        failureReason: "provider-error:rate-limit",
+        degradedAt,
+      });
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        kimiSelection,
       );
     }).pipe(Effect.provide(harness.layer));
   });
@@ -2736,6 +2934,89 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("keeps the no-commit gutter across server start", () => {
+    const runId = EpicRunId.make("run-persisted-gutter");
+    const staleRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "running",
+      maxIterations: 10,
+      iterationsDispatched: 1,
+      iterationsCompleted: 1,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 1,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [{ text: "still working", head: "head-0" }],
+      seedRuns: [staleRun],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+      const failed = harness.store.runs.get(runId)!;
+      assert.strictEqual(failed.noCommitStreak, 2);
+      assert.strictEqual(failed.lastError, "gutter: 2 iterations without a commit");
+      assert.strictEqual(harness.turnsStarted(), 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps the infrastructure budget across server start", () => {
+    const runId = EpicRunId.make("run-persisted-infra");
+    const staleRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "running",
+      maxIterations: 10,
+      iterationsDispatched: 4,
+      iterationsCompleted: 4,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 4,
+      lastError: "previous provider error",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", turnState: "error", sessionStatus: "error" }],
+      seedRuns: [staleRun],
+      options: { infraFailureBudget: 5 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+      const failed = harness.store.runs.get(runId)!;
+      assert.strictEqual(failed.infraStreak, 5);
+      assert.include(failed.lastError ?? "", "5 consecutive infrastructure failures");
+      assert.strictEqual(harness.turnsStarted(), 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("keeps consecutive closed-child no-commit iterations out of the gutter", () => {
     // Research children legitimately produce no commits, but each one must
     // add findings to its bead before its close can vouch for the iteration.
@@ -2967,9 +3248,14 @@ describe("EpicRunner", () => {
   });
 
   it.live("interrupts the turn in flight when a run is cancelled", () => {
-    const harness = createHarness({
+    let statusAtLeaseRelease: EpicRun["status"] | undefined;
+    let harness!: ReturnType<typeof createHarness>;
+    harness = createHarness({
       script: [{ text: null, head: "head-0", stall: true }],
       options: { iterationTimeoutMs: 60_000 },
+      onLockRelease: () => {
+        statusAtLeaseRelease = [...harness.store.runs.values()][0]?.status;
+      },
     });
 
     return Effect.gen(function* () {
@@ -2977,9 +3263,22 @@ describe("EpicRunner", () => {
       const run = yield* startRun();
       yield* waitFor(() => harness.turnsStarted() === 1);
 
+      const current = harness.store.runs.get(run.runId)!;
+      harness.store.runs.set(run.runId, {
+        ...current,
+        iterationsDispatched: 6,
+        iterationsCompleted: 2,
+        noCommitStreak: 3,
+        infraStreak: 4,
+      });
       const cancelled = yield* runner.cancelRun({ runId: run.runId });
       assert.strictEqual(cancelled.status, "cancelled");
       assert.strictEqual(cancelled.currentThreadId, null);
+      assert.strictEqual(statusAtLeaseRelease, "cancelled");
+      assert.strictEqual(cancelled.iterationsDispatched, 6);
+      assert.strictEqual(cancelled.iterationsCompleted, 2);
+      assert.strictEqual(cancelled.noCommitStreak, 3);
+      assert.strictEqual(cancelled.infraStreak, 4);
 
       const interrupts = harness.commandsOfType("thread.turn.interrupt");
       assert.strictEqual(interrupts.length, 1);
@@ -3043,11 +3342,14 @@ describe("EpicRunner", () => {
       runtimeMode: "full-access",
       originThreadId: null,
       status: "running",
-      maxIterations: 10,
-      iterationsCompleted: 1,
+      maxIterations: 2,
+      iterationsDispatched: 1,
+      iterationsCompleted: 0,
       currentThreadId: ThreadId.make(`epic-run-${runId}-0`),
       currentTurnStartedAt: NOW,
       consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
       lastError: null,
       createdAt: NOW,
       updatedAt: NOW,
@@ -3112,6 +3414,67 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       // The resumed loop picks up at the next index, not the abandoned one.
       assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
+      const completed = harness.store.runs.get(runId)!;
+      assert.strictEqual(completed.iterationsDispatched, 2);
+      assert.strictEqual(completed.iterationsCompleted, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("stops at the dispatch cap after repeated restart abandonment", () => {
+    const runId = EpicRunId.make("run-restart-cap");
+    const currentThreadId = ThreadId.make(`epic-run-${runId}-2`);
+    const staleRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "running",
+      maxIterations: 3,
+      iterationsDispatched: 3,
+      iterationsCompleted: 0,
+      currentThreadId,
+      currentTurnStartedAt: NOW,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const seedIterations: EpicRunIteration[] = [0, 1, 2].map((iterationIndex) => ({
+      runId,
+      iterationIndex,
+      threadId: ThreadId.make(`epic-run-${runId}-${iterationIndex}`),
+      issueId: `child-${iterationIndex}`,
+      turnStatus: iterationIndex === 2 ? "running" : "abandoned",
+      summary: iterationIndex === 2 ? null : "abandoned by server restart",
+      why: null,
+      failureReason: iterationIndex === 2 ? null : "server-restart",
+      startedAt: NOW,
+      finishedAt: iterationIndex === 2 ? null : NOW,
+    }));
+    const harness = createHarness({
+      script: [],
+      seedRuns: [staleRun],
+      seedIterations,
+      childStatuses: { "child-2": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+      const capped = harness.store.runs.get(runId)!;
+      assert.strictEqual(harness.turnsStarted(), 0);
+      assert.strictEqual(capped.iterationsDispatched, 3);
+      assert.strictEqual(capped.iterationsCompleted, 0);
+      assert.strictEqual(harness.store.iterations[2]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[2]?.failureReason, "server-restart");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -3129,10 +3492,13 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 10,
+      iterationsDispatched: 0,
       iterationsCompleted: 0,
       currentThreadId: null,
       currentTurnStartedAt: null,
       consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
       lastError: null,
       createdAt: NOW,
       updatedAt: NOW,
@@ -3197,10 +3563,13 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 10,
+      iterationsDispatched: 1,
       iterationsCompleted: 1,
       currentThreadId: null,
       currentTurnStartedAt: null,
       consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
       lastError: null,
       createdAt: NOW,
       updatedAt: NOW,
@@ -3346,6 +3715,155 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.turnsStarted(), 2);
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live("explicit resume resets both persisted streaks", () => {
+    const runId = EpicRunId.make("run-resume-streaks");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 1,
+      iterationsDispatched: 1,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 2,
+      noCommitStreak: 1,
+      infraStreak: 4,
+      lastError: "old failure",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({ script: [], seedRuns: [pausedRun] });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const resumed = yield* runner.resumeRun({ runId });
+      assert.strictEqual(resumed.consecutiveFailures, 0);
+      assert.strictEqual(resumed.noCommitStreak, 0);
+      assert.strictEqual(resumed.infraStreak, 0);
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+      assert.strictEqual(harness.turnsStarted(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps a stopped run paused when resume cannot acquire its lease", () => {
+    const runId = EpicRunId.make("run-resume-acquire-failure");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 10,
+      iterationsDispatched: 4,
+      iterationsCompleted: 2,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 2,
+      noCommitStreak: 1,
+      infraStreak: 3,
+      lastError: "old failure",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      seedRuns: [pausedRun],
+      lockAcquireError: new EpicRunLockError("lease store unavailable"),
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const exit = yield* Effect.exit(runner.resumeRun({ runId }));
+      assert.isTrue(Exit.isFailure(exit));
+      const persisted = harness.store.runs.get(runId)!;
+      assert.strictEqual(persisted.status, "paused");
+      assert.strictEqual(persisted.consecutiveFailures, 2);
+      assert.strictEqual(persisted.noCommitStreak, 1);
+      assert.strictEqual(persisted.infraStreak, 3);
+      assert.strictEqual(persisted.lastError, "old failure");
+      assert.strictEqual(harness.turnsStarted(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not overwrite cancellation while a resumed run acquires its lease", () =>
+    Effect.gen(function* () {
+      const runId = EpicRunId.make("run-resume-cancel-race");
+      const pausedRun: EpicRun = {
+        runId,
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        orientationFile: null,
+        modelSelection,
+        runtimeMode: "full-access",
+        originThreadId: null,
+        status: "paused",
+        maxIterations: 10,
+        iterationsDispatched: 4,
+        iterationsCompleted: 2,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 2,
+        noCommitStreak: 1,
+        infraStreak: 3,
+        lastError: "old failure",
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      const acquireGate = yield* Deferred.make<void>();
+      const acquireStarted = yield* Deferred.make<void>();
+      let acquired = 0;
+      let released = 0;
+      const harness = createHarness({
+        script: [],
+        seedRuns: [pausedRun],
+        beforeLockAcquire: Deferred.succeed(acquireStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(acquireGate)),
+        ),
+        onLockAcquire: () => {
+          acquired += 1;
+        },
+        onLockRelease: () => {
+          released += 1;
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const resumeFiber = yield* Effect.forkChild(runner.resumeRun({ runId }), {
+          startImmediately: true,
+        });
+        yield* Deferred.await(acquireStarted);
+        assert.strictEqual(harness.store.runs.get(runId)?.status, "paused");
+
+        const cancelled = yield* runner.cancelRun({ runId });
+        assert.strictEqual(cancelled.status, "cancelled");
+        yield* Deferred.succeed(acquireGate, undefined);
+
+        const resumeResult = yield* Fiber.join(resumeFiber);
+        assert.strictEqual(resumeResult.status, "cancelled");
+        assert.strictEqual(harness.store.runs.get(runId)?.status, "cancelled");
+        assert.strictEqual(harness.turnsStarted(), 0);
+        assert.strictEqual(acquired, 1);
+        assert.strictEqual(released, 1);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
 
   it.live("publishes every run-state change on the hot stream", () => {
     const harness = createHarness({ script: [{ text: "RALPH_DONE", head: "head-0" }] });

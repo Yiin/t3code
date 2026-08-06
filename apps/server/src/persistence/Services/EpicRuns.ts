@@ -31,6 +31,7 @@ import {
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
+  ProviderInstanceId,
   ThreadId,
   EpicRunRef,
   type EpicRunRef as EpicRunRefType,
@@ -116,6 +117,25 @@ export const UpdateEpicRunIterationInput = Schema.Struct({
 });
 export type UpdateEpicRunIterationInput = typeof UpdateEpicRunIterationInput.Type;
 
+export const EpicProviderDegradation = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  failureReason: Schema.String,
+  degradedAt: IsoDateTime,
+});
+export type EpicProviderDegradation = typeof EpicProviderDegradation.Type;
+
+export const GetEpicProviderDegradationInput = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+});
+export type GetEpicProviderDegradationInput = typeof GetEpicProviderDegradationInput.Type;
+
+export const ClearExpiredEpicProviderDegradationInput = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  cutoff: IsoDateTime,
+});
+export type ClearExpiredEpicProviderDegradationInput =
+  typeof ClearExpiredEpicProviderDegradationInput.Type;
+
 /**
  * EpicRunStoreShape - Service API for durable epic run state.
  */
@@ -197,6 +217,26 @@ export interface EpicRunStoreShape {
   readonly getLatestIteration: (
     input: GetLatestEpicRunIterationInput,
   ) => Effect.Effect<Option.Option<EpicRunIteration>, EpicRunStoreError>;
+
+  /** Insert or replace the degradation for one provider instance. */
+  readonly upsertProviderDegradation: (
+    degradation: EpicProviderDegradation,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+
+  /** Read the current degradation for one provider instance. */
+  readonly getProviderDegradation: (
+    input: GetEpicProviderDegradationInput,
+  ) => Effect.Effect<Option.Option<EpicProviderDegradation>, EpicRunStoreError>;
+
+  /** Clear one instance after a successful dispatched provider turn. */
+  readonly clearProviderDegradation: (
+    input: GetEpicProviderDegradationInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+
+  /** Clear one instance when its degradation timestamp is at or before the cutoff. */
+  readonly clearExpiredProviderDegradation: (
+    input: ClearExpiredEpicProviderDegradationInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
 }
 
 /**
