@@ -98,6 +98,7 @@ const MAX_SETTLE_READS = 20;
  * quiet for longer no longer counts as live work anywhere else either.
  */
 const DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS = 15 * 60 * 1_000;
+const DEFAULT_MAX_GRACE_CONTINUATIONS = 10;
 /**
  * The bound for the one absence worth waiting out: a completed turn whose
  * assistant row has not projected at all. Two minutes at the default quiet
@@ -321,6 +322,7 @@ export interface EpicRunnerLiveOptions {
   readonly infraFailureBudget?: number;
   readonly defaultMaxIterations?: number;
   readonly subagentGraceTimeoutMs?: number;
+  readonly maxGraceContinuations?: number;
 }
 
 const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
@@ -367,6 +369,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const subagentGraceTimeoutMs = Math.max(
       1,
       options?.subagentGraceTimeoutMs ?? DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
+    );
+    const maxGraceContinuations = Math.max(
+      1,
+      options?.maxGraceContinuations ?? DEFAULT_MAX_GRACE_CONTINUATIONS,
     );
 
     const changes = yield* Effect.acquireRelease(PubSub.unbounded<TransportEpicRun>(), (pubsub) =>
@@ -958,6 +964,15 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             Date.parse(yield* nowIso),
           );
           if (freshRunning === 0) {
+            return settled;
+          }
+          if (continuationIndex >= maxGraceContinuations) {
+            yield* Effect.logWarning("epic.runner.subagent-grace-cap", {
+              runId: input.run.runId,
+              iterationIndex: input.iterationIndex,
+              threadId: input.threadId,
+              continuationIndex,
+            });
             return settled;
           }
           const priorTurnId = thread.latestTurn?.turnId ?? null;

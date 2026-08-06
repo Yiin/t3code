@@ -19,6 +19,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
@@ -127,6 +128,17 @@ const waitFor = (predicate: () => boolean) =>
 
 /** Give already-scheduled fibers room to run, to assert that nothing else happens. */
 const settle = Effect.sleep("60 millis");
+
+const captureLogs = () => {
+  const messages: ReadonlyArray<unknown>[] = [];
+  const logger = Logger.make<unknown, void>(({ message }) => {
+    messages.push(Array.isArray(message) ? message : [message]);
+  });
+  return {
+    messages,
+    layer: Logger.layer([logger], { mergeWithExisting: false }),
+  };
+};
 
 const makeThreadDetail = (input: {
   readonly threadId: ThreadId;
@@ -1349,6 +1361,7 @@ describe("EpicRunner", () => {
       ],
       options: { iterationTimeoutMs: 60_000 },
     });
+    const logs = captureLogs();
 
     return Effect.gen(function* () {
       const run = yield* startRun();
@@ -1380,7 +1393,95 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 3);
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 2);
-    }).pipe(Effect.provide(harness.layer));
+      assert.isUndefined(
+        logs.messages.find((message) => message[0] === "epic.runner.subagent-grace-cap"),
+      );
+    }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
+  it.live("caps repeated subagent grace continuations and classifies the final turn", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: "The reviewer is still running.",
+          head: "head-0",
+          subagentDrainReads: 1,
+        },
+        {
+          text: "The implementer is still running.",
+          head: "head-0",
+          subagentDrainReads: 1,
+        },
+        {
+          text: 'Reached the continuation cap.\nRALPH_MSG: {"summary":"classified at the cap","why":"turn count stayed bounded"}',
+          head: "head-0",
+          subagentDrainReads: 1,
+        },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      options: { maxGraceContinuations: 2, iterationTimeoutMs: 60_000 },
+    });
+    const logs = captureLogs();
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      assert.strictEqual(turnStarts.length, 3);
+
+      const stop = harness
+        .commandsOfType("thread.session.stop")
+        .find((command) => command.threadId === iterationThreadId)!;
+      assert.isAbove(harness.commands.indexOf(stop), harness.commands.indexOf(turnStarts[2]!));
+      assert.strictEqual(harness.store.iterations[0]?.summary, "classified at the cap");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+
+      const capLog = logs.messages.find(
+        (message) => message[0] === "epic.runner.subagent-grace-cap",
+      );
+      assert.deepStrictEqual(capLog?.[1], {
+        runId: run.runId,
+        iterationIndex: 0,
+        threadId: iterationThreadId,
+        continuationIndex: 2,
+      });
+    }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
+  it.live("clamps the subagent grace continuation cap to one", () => {
+    const harness = createHarness({
+      script: [
+        { text: "First subagent batch.", head: "head-0", subagentDrainReads: 1 },
+        { text: "Second subagent batch.", head: "head-0", subagentDrainReads: 1 },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      options: { maxGraceContinuations: 0, iterationTimeoutMs: 60_000 },
+    });
+    const logs = captureLogs();
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      assert.strictEqual(
+        harness
+          .commandsOfType("thread.turn.start")
+          .filter((command) => command.threadId === iterationThreadId).length,
+        2,
+      );
+      const capLog = logs.messages.find(
+        (message) => message[0] === "epic.runner.subagent-grace-cap",
+      );
+      assert.strictEqual(
+        (capLog?.[1] as { readonly continuationIndex?: number } | undefined)?.continuationIndex,
+        1,
+      );
+    }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
   });
 
   it.live("resumes through reviewer and implementer subagents before the parent commits", () => {
