@@ -1091,9 +1091,31 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.flatMap((result) => {
+        if (result.steeredIntoActiveTurn !== true) {
+          return Effect.void;
+        }
+        return Effect.gen(function* () {
+          const latestThread = yield* resolveThread(event.payload.threadId);
+          const latestSession = latestThread?.session;
+          if (latestSession?.status !== "running" || latestSession.activeTurnId !== result.turnId) {
+            return;
+          }
+          yield* setThreadSession({
+            threadId: event.payload.threadId,
+            session: {
+              ...latestSession,
+              status: "running",
+              activeTurnId: result.turnId,
+            },
+            createdAt: event.payload.createdAt,
+          });
+        });
+      }),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

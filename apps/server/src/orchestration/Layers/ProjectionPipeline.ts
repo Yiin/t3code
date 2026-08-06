@@ -79,6 +79,9 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
 type ProjectorName =
   (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
 
+// Mirrors decider.ts QUEUED_TURN_START_GRACE_MS.
+const PENDING_TURN_START_GRACE_MS = 2 * 60 * 1_000;
+
 /**
  * Turn state to settle still-running turns with when their session leaves the
  * "running" status, or null while the session is (re)starting or running and
@@ -1159,6 +1162,27 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
                 threadId: event.payload.threadId,
               });
+            } else if (
+              event.payload.session.status === "ready" ||
+              event.payload.session.status === "idle"
+            ) {
+              const pendingTurnStart =
+                yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+                  threadId: event.payload.threadId,
+                });
+              if (Option.isSome(pendingTurnStart)) {
+                const pendingAgeMs =
+                  Date.parse(event.payload.session.updatedAt) -
+                  Date.parse(pendingTurnStart.value.requestedAt);
+                if (
+                  Number.isFinite(pendingAgeMs) &&
+                  Math.abs(pendingAgeMs) > PENDING_TURN_START_GRACE_MS
+                ) {
+                  yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+                    threadId: event.payload.threadId,
+                  });
+                }
+              }
             }
             // Leaving the "running" session status is the turn-end signal:
             // settle still-running turns so their duration reflects the whole
@@ -1226,19 +1250,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               state: nextState,
-              pendingMessageId:
-                existingTurn.value.pendingMessageId ??
-                (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
+              pendingMessageId: Option.isSome(pendingTurnStart)
+                ? pendingTurnStart.value.messageId
+                : existingTurn.value.pendingMessageId,
               sourceProposedPlanThreadId:
-                existingTurn.value.sourceProposedPlanThreadId ??
-                (Option.isSome(pendingTurnStart)
+                Option.isSome(pendingTurnStart) &&
+                pendingTurnStart.value.sourceProposedPlanThreadId !== null
                   ? pendingTurnStart.value.sourceProposedPlanThreadId
-                  : null),
+                  : existingTurn.value.sourceProposedPlanThreadId,
               sourceProposedPlanId:
-                existingTurn.value.sourceProposedPlanId ??
-                (Option.isSome(pendingTurnStart)
+                Option.isSome(pendingTurnStart) &&
+                pendingTurnStart.value.sourceProposedPlanId !== null
                   ? pendingTurnStart.value.sourceProposedPlanId
-                  : null),
+                  : existingTurn.value.sourceProposedPlanId,
               startedAt:
                 existingTurn.value.startedAt ??
                 (Option.isSome(pendingTurnStart)
