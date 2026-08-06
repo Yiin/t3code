@@ -5607,6 +5607,7 @@ function ChatViewContent(props: ChatViewProps) {
         activities={activeThread?.activities ?? []}
         groups={subagentGroups}
         onInterrupt={onInterrupt}
+        onSelectSubagent={onOpenSubagentInspector}
         onSteer={onSteerSubagent}
         onStop={onStopSubagent}
         subagents={activeThreadSubagents}

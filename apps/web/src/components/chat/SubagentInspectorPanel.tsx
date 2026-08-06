@@ -21,12 +21,16 @@ import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
+import { ScrollArea } from "../ui/scroll-area";
 import { capitalizeSubagentName, SubagentElapsed } from "./SubagentCard";
 import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
 import {
+  buildSubagentSwitcherItems,
   decodeSubagentTranscriptRow,
+  formatSubagentSwitcherSummary,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
+  type SubagentSwitcherItem,
 } from "./SubagentInspectorPanel.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { WorkEntryRow } from "./WorkEntryRow";
@@ -46,6 +50,57 @@ const STATUS_LABEL: Record<OrchestrationThreadSubagentStatus, string> = {
 };
 
 const INITIAL_BACKFILL_CURSORS = [undefined] as const;
+
+function SubagentSwitcher({
+  activeSubagentKey,
+  items,
+  onSelectSubagent,
+}: {
+  activeSubagentKey: string;
+  items: ReadonlyArray<SubagentSwitcherItem>;
+  onSelectSubagent: (subagentKey: string) => void;
+}) {
+  if (items.length < 2) return null;
+
+  const summary = formatSubagentSwitcherSummary(items);
+  return (
+    <div className="border-b border-border/45 py-2">
+      {summary ? (
+        <p className="px-3 pb-1.5 text-[11px] text-muted-foreground tabular-nums">{summary}</p>
+      ) : null}
+      <ScrollArea hideScrollbars scrollFade className="h-7 rounded-none">
+        <div className="flex w-max min-w-full items-center gap-1 px-3">
+          {items.map((item) => {
+            const active = item.key === activeSubagentKey;
+            const name = capitalizeSubagentName(item.name);
+            return (
+              <button
+                key={item.key}
+                type="button"
+                aria-label={`${name} · ${item.status}`}
+                aria-pressed={active}
+                title={item.description ?? name}
+                className={cn(
+                  "flex h-7 max-w-40 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+                  active
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                )}
+                onClick={() => onSelectSubagent(item.key)}
+              >
+                <span
+                  className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[item.status])}
+                  aria-hidden
+                />
+                <span className="truncate">{name}</span>
+              </button>
+            );
+          })}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
 
 function useSubagentTranscriptBackfill(input: {
   readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
@@ -152,6 +207,7 @@ export function SubagentInspectorPanel({
   onSteer,
   onStop,
   onInterrupt,
+  onSelectSubagent,
 }: {
   groups: readonly SubagentGroup[];
   subagents: readonly OrchestrationThreadSubagent[];
@@ -168,6 +224,7 @@ export function SubagentInspectorPanel({
   ) => Promise<SubagentCommandFailure | null>;
   onStop: (subagentId: string, commandId: CommandId) => Promise<SubagentCommandFailure | null>;
   onInterrupt: () => Promise<void>;
+  onSelectSubagent: (subagentKey: string) => void;
 }) {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const shouldFollowTailRef = useRef(true);
@@ -175,6 +232,7 @@ export function SubagentInspectorPanel({
   const group = groups.find(
     (candidate) => (candidate.toolCallId ?? candidate.entryId) === activeSubagentKey,
   );
+  const switcherItems = useMemo(() => buildSubagentSwitcherItems(groups), [groups]);
   const readModel = subagents.find((subagent) => subagent.spawnedByItemId === activeSubagentKey);
   const backfill = useSubagentTranscriptBackfill({
     activities,
@@ -217,8 +275,15 @@ export function SubagentInspectorPanel({
 
   if (!group) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
-        This subagent is no longer available.
+      <div className="flex h-full w-full min-h-0 flex-1 flex-col">
+        <SubagentSwitcher
+          activeSubagentKey={activeSubagentKey}
+          items={switcherItems}
+          onSelectSubagent={onSelectSubagent}
+        />
+        <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
+          This subagent is no longer available.
+        </div>
       </div>
     );
   }
@@ -275,6 +340,12 @@ export function SubagentInspectorPanel({
           </div>
         </div>
       </header>
+
+      <SubagentSwitcher
+        activeSubagentKey={activeSubagentKey}
+        items={switcherItems}
+        onSelectSubagent={onSelectSubagent}
+      />
 
       <div className="border-b border-border/45 px-3 py-2 text-xs text-muted-foreground">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 tabular-nums">

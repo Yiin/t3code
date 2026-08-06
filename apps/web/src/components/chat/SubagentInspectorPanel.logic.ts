@@ -3,11 +3,53 @@ import {
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadSubagentStatus,
 } from "@t3tools/contracts";
 import { mergeSubagentActivities } from "@t3tools/client-runtime/state/subagent-activity";
 import * as Option from "effect/Option";
 
-import { deriveWorkLogEntries, type WorkLogEntry } from "../../session-logic";
+import { deriveWorkLogEntries, type SubagentGroup, type WorkLogEntry } from "../../session-logic";
+
+export interface SubagentSwitcherItem {
+  key: string;
+  name: string;
+  description: string | null;
+  status: OrchestrationThreadSubagentStatus;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export function buildSubagentSwitcherItems(
+  groups: ReadonlyArray<SubagentGroup>,
+): SubagentSwitcherItem[] {
+  return groups.map((group) => ({
+    key: group.toolCallId ?? group.entryId,
+    name: group.name,
+    description: group.description,
+    status: group.status,
+    startedAt: group.startedAt,
+    completedAt: group.completedAt,
+  }));
+}
+
+export function formatSubagentSwitcherSummary(
+  items: ReadonlyArray<Pick<SubagentSwitcherItem, "status">>,
+): string {
+  const counts = { running: 0, completed: 0, failed: 0 };
+  for (const item of items) {
+    if (item.status === "running") counts.running += 1;
+    if (item.status === "completed") counts.completed += 1;
+    if (item.status === "failed") counts.failed += 1;
+  }
+
+  return [
+    counts.running > 0 ? `${counts.running} running` : null,
+    counts.completed > 0 ? `${counts.completed} done` : null,
+    counts.failed > 0 ? `${counts.failed} failed` : null,
+  ]
+    .filter((segment): segment is string => segment !== null)
+    .join(" · ");
+}
 
 export function selectSubagentTranscriptEntries(input: {
   readonly backfillPages: ReadonlyArray<ReadonlyArray<OrchestrationThreadActivity>> | null;
