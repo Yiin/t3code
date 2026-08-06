@@ -9,6 +9,32 @@ Common reasons:
 - switch to another account when one account hits limits
 - keep one shared Codex history instead of maintaining two separate Codex setups
 
+## Turn lifecycle
+
+These rules were tested against `codex-cli 0.146.1` on 2026-08-06.
+
+Do not use a second `turn/start` response as the active turn ID. When a turn is running,
+`turn/start` accepts the new input but returns a different turn ID. Codex adds the input to the
+running turn. It does not start or queue a turn with the returned ID. No `turn/started` notification
+arrives for that ID after the active turn completes. Treat this returned ID as a phantom turn ID.
+
+Use `turn/steer` to add input to a running turn. Set `expectedTurnId` to the ID from the active
+`turn/started` notification. A successful response returns that same ID in `turnId`. A wrong ID
+fails with JSON-RPC code `-32600` and reports both the expected and active IDs. Steered input emits
+the normal `item/started` and `item/completed` user-message notifications on the active turn. It
+does not emit a separate steer notification.
+
+Use the active turn ID for `turn/interrupt`. A wrong or phantom ID fails with JSON-RPC code
+`-32600`; it is not a silent no-op. A successful interrupt returns `{}`. Codex then emits
+`turn/completed` with status `interrupted`. It does not emit `turn/aborted`.
+
+Normal turns emit `turn/completed` with status `completed`. This happens for both fresh threads and
+threads opened with `thread/resume` on `0.146.1`.
+
+`turn/steer` first appears in prerelease `0.99.0-alpha.4` and stable `0.99.0`. A method probe on
+`0.98.0` returns JSON-RPC code `-32600` with an unknown-variant message. Clients that support older
+binaries must treat this response as an unsupported method.
+
 ## I Only Use One Codex Account
 
 Use the default provider.
