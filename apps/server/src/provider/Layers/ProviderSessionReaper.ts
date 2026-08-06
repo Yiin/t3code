@@ -16,6 +16,7 @@ import {
   type SessionReapThresholds,
 } from "../sessionReapPolicy.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
+import type { ProviderRuntimeBindingWithMetadata } from "../Services/ProviderSessionDirectory.ts";
 import {
   ProviderSessionReaper,
   type ProviderSessionReaperShape,
@@ -23,6 +24,8 @@ import {
 import { ProviderService } from "../Services/ProviderService.ts";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const BOOT_RECONCILE_STOP_TIMEOUT = Duration.seconds(15);
+const BOOT_RECONCILE_STOP_POLL_INTERVAL = Duration.millis(50);
 
 export interface ProviderSessionReaperLiveOptions {
   /** Back-compat shorthand: sets every per-kind threshold that is not set on its own. */
@@ -101,6 +104,137 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         ),
       );
     });
+
+    const bindingIsStillDead = Effect.fn("ProviderSessionReaper.bindingIsStillDead")(function* (
+      binding: ProviderRuntimeBindingWithMetadata,
+    ) {
+      const bindingStillMatches = (current: ProviderRuntimeBindingWithMetadata | undefined) =>
+        current !== undefined &&
+        current.status !== "stopped" &&
+        current.provider === binding.provider &&
+        current.providerInstanceId === binding.providerInstanceId &&
+        current.adapterKey === binding.adapterKey &&
+        current.lastSeenAt === binding.lastSeenAt;
+
+      if (
+        !bindingStillMatches(Option.getOrUndefined(yield* directory.getBinding(binding.threadId)))
+      ) {
+        return false;
+      }
+
+      const currentLiveSession = yield* readLiveSession(binding.threadId);
+      if (Option.isNone(currentLiveSession) || currentLiveSession.value) {
+        return false;
+      }
+
+      // The liveness read can yield while a recovery replaces this binding.
+      // Re-read its identity before dispatching the stop.
+      return bindingStillMatches(
+        Option.getOrUndefined(yield* directory.getBinding(binding.threadId)),
+      );
+    });
+
+    const stopBinding = Effect.fn("ProviderSessionReaper.stopBinding")(function* (input: {
+      readonly binding: ProviderRuntimeBindingWithMetadata;
+      readonly commandId: string;
+      readonly now: number;
+    }) {
+      const { binding, commandId, now } = input;
+      // Stop through the `thread.session.stop` command path (decider ->
+      // thread.session-stop-requested -> ProviderCommandReactor). Only that
+      // path also stops the projected session and settles its active turn. A
+      // thread absent from the read model refuses the command, so retain the
+      // direct adapter stop as the fallback.
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make(commandId),
+          threadId: binding.threadId,
+          createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+        })
+        .pipe(
+          Effect.asVoid,
+          Effect.catch((dispatchError) =>
+            Effect.logDebug("provider.session.reaper.stop-dispatch-fallback", {
+              threadId: binding.threadId,
+              provider: binding.provider,
+              detail: dispatchError.message,
+            }).pipe(Effect.andThen(providerService.stopSession({ threadId: binding.threadId }))),
+          ),
+        );
+    });
+
+    const waitForProjectedStop = Effect.fn("ProviderSessionReaper.waitForProjectedStop")(function* (
+      threadId: ThreadId,
+    ) {
+      yield* projectionSnapshotQuery.getThreadSessionById(threadId).pipe(
+        Effect.map(
+          Option.match({
+            onNone: () => false,
+            onSome: (session) => session.status !== "stopped",
+          }),
+        ),
+        Effect.repeat({
+          while: (isRunning) => isRunning,
+          schedule: Schedule.spaced(BOOT_RECONCILE_STOP_POLL_INTERVAL),
+        }),
+        Effect.timeout(BOOT_RECONCILE_STOP_TIMEOUT),
+      );
+    });
+
+    const stopBindingIfStillDead = Effect.fn("ProviderSessionReaper.stopBindingIfStillDead")(
+      function* (binding: ProviderRuntimeBindingWithMetadata) {
+        // A stale projection can already say stopped. In that case the command
+        // reactor skips its adapter stop, so settle the unchanged dead binding
+        // directly after the projected stop is confirmed.
+        if (yield* bindingIsStillDead(binding)) {
+          yield* providerService.stopSession({ threadId: binding.threadId });
+        }
+      },
+    );
+
+    const reconcileBootBindings = Effect.fn("ProviderSessionReaper.reconcileBootBindings")(
+      function* () {
+        const bindings = yield* directory.listBindings();
+        const now = yield* Clock.currentTimeMillis;
+        let reconciledCount = 0;
+
+        for (const binding of bindings) {
+          if (binding.status === "stopped" || !(yield* bindingIsStillDead(binding))) {
+            continue;
+          }
+
+          const reconciled = yield* stopBinding({
+            binding,
+            commandId: `session-stop-for-boot-reconcile:${binding.threadId}:${now}`,
+            now,
+          }).pipe(
+            Effect.andThen(waitForProjectedStop(binding.threadId)),
+            Effect.andThen(stopBindingIfStillDead(binding)),
+            Effect.tap(() =>
+              Effect.logInfo("provider.session.boot-reconciled", {
+                threadId: binding.threadId,
+                provider: binding.provider,
+              }),
+            ),
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("provider.session.reaper.boot-reconcile-stop-failed", {
+                threadId: binding.threadId,
+                provider: binding.provider,
+                cause,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+
+          if (reconciled) {
+            reconciledCount += 1;
+          }
+        }
+
+        return reconciledCount;
+      },
+    );
 
     const sweep = Effect.gen(function* () {
       const bindings = yield* directory.listBindings();
@@ -189,18 +323,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         if (decision.reason === "no_live_session") {
           // A session can resume while the sweep reads the thread shell. Check
           // both persisted and in-memory state again before dispatching a stop.
-          const currentBinding = Option.getOrUndefined(
-            yield* directory.getBinding(binding.threadId),
-          );
-          if (
-            currentBinding === undefined ||
-            currentBinding.status === "stopped" ||
-            currentBinding.lastSeenAt !== binding.lastSeenAt
-          ) {
-            continue;
-          }
-          const currentLiveSession = yield* readLiveSession(binding.threadId);
-          if (Option.isNone(currentLiveSession) || currentLiveSession.value) {
+          if (!(yield* bindingIsStillDead(binding))) {
             continue;
           }
         }
@@ -217,35 +340,11 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           });
         }
 
-        // Stop through the `thread.session.stop` command path (decider ->
-        // thread.session-stop-requested -> ProviderCommandReactor), mirroring
-        // ThreadTeardownReactor: only that path also writes the projected
-        // session to stopped and nulls its active turn pointer. A direct
-        // `providerService.stopSession` updates only the binding, so after a
-        // reap every projection consumer would keep seeing the last status —
-        // for a stale_active_turn reap, a running turn forever. A thread the
-        // orchestration read model does not know refuses the command, so the
-        // direct call stays as the fallback that still stops the adapter
-        // session.
-        const stopReapedSession = orchestrationEngine
-          .dispatch({
-            type: "thread.session.stop",
-            commandId: CommandId.make(`session-stop-for-reap:${binding.threadId}:${now}`),
-            threadId: binding.threadId,
-            createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
-          })
-          .pipe(
-            Effect.asVoid,
-            Effect.catch((dispatchError) =>
-              Effect.logDebug("provider.session.reaper.stop-dispatch-fallback", {
-                threadId: binding.threadId,
-                provider: binding.provider,
-                detail: dispatchError.message,
-              }).pipe(Effect.andThen(providerService.stopSession({ threadId: binding.threadId }))),
-            ),
-          );
-
-        const reaped = yield* stopReapedSession.pipe(
+        const reaped = yield* stopBinding({
+          binding,
+          commandId: `session-stop-for-reap:${binding.threadId}:${now}`,
+          now,
+        }).pipe(
           Effect.tap(() =>
             Effect.logInfo("provider.session.reaped", {
               threadId: binding.threadId,
@@ -282,6 +381,17 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
     const start: ProviderSessionReaperShape["start"] = () =>
       Effect.gen(function* () {
+        const reconciledCount = yield* reconcileBootBindings().pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider.session.reaper.boot-reconcile-failed", { cause }).pipe(
+              Effect.as(0),
+            ),
+          ),
+        );
+        yield* Effect.logInfo("provider.session.reaper.boot-reconcile-complete", {
+          reconciledCount,
+        });
+
         yield* Effect.forkScoped(
           sweep.pipe(
             Effect.catch((error: unknown) =>

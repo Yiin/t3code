@@ -346,6 +346,8 @@ export const make = Effect.gen(function* () {
       "reactors.start",
       Effect.gen(function* () {
         yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
+        // Keep this order: the reaper's synchronous boot pass dispatches
+        // session-stop requests, and EpicRunner must observe their honest state.
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
         // Owns its own fibers (layer-scoped), so unlike the reactors above it
         // needs no scope here — it only reconciles run state left by a restart
