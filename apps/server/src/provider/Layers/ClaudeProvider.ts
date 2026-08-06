@@ -677,7 +677,6 @@ function raceWithTimeout<A>(promise: Promise<A>, timeoutMs: number): Promise<A |
       // @effect-diagnostics-next-line globalTimers:off
       timer = setTimeout(() => resolve(undefined), timeoutMs);
     }),
-    // @effect-diagnostics-next-line globalTimers:off
   ]).finally(() => clearTimeout(timer));
 }
 
