@@ -224,6 +224,7 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { resolveFirstRunningSubagentRowId } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -1506,7 +1507,6 @@ function ChatViewContent(props: ChatViewProps) {
   const activeRightPanelSurface = useRightPanelStore((state) =>
     selectActiveRightPanelSurface(state.byThreadKey, activeThreadRef),
   );
-  const openSubagentInspector = useRightPanelStore((state) => state.openSubagent);
   const activeFileSurface =
     activeRightPanelSurface?.kind === "file" ? activeRightPanelSurface : null;
   const activePreviewState = useThreadPreviewState(activeThreadRef);
@@ -2389,10 +2389,10 @@ function ChatViewContent(props: ChatViewProps) {
     () => activeThreadSubagents.filter((subagent) => subagent.status === "running").length,
     [activeThreadSubagents],
   );
-  const firstRunningSubagentKey = useMemo(() => {
-    const group = subagentGroups.find((candidate) => candidate.status === "running");
-    return group ? (group.toolCallId ?? group.entryId) : null;
-  }, [subagentGroups]);
+  const firstRunningSubagentRowId = useMemo(
+    () => resolveFirstRunningSubagentRowId(timelineEntries, subagentGroups),
+    [subagentGroups, timelineEntries],
+  );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -4069,16 +4069,15 @@ function ChatViewContent(props: ChatViewProps) {
           runningSubagentCount === 1
             ? "1 subagent working"
             : `${runningSubagentCount} subagents working`,
-        actions:
-          firstRunningSubagentKey && activeThreadRef ? (
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => openSubagentInspector(activeThreadRef, firstRunningSubagentKey)}
-            >
-              View
-            </Button>
-          ) : undefined,
+        actions: firstRunningSubagentRowId ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => timelineScrollToRowRef.current?.(firstRunningSubagentRowId)}
+          >
+            View
+          </Button>
+        ) : undefined,
       });
     }
     if (!localCheckoutBranchMismatch) {
@@ -4134,13 +4133,11 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeThread?.id,
     activeThreadId,
-    activeThreadRef,
     branchRepairAction,
-    firstRunningSubagentKey,
+    firstRunningSubagentRowId,
     handleSwitchCheckoutToThread,
     handleUpdateThreadToCheckout,
     localCheckoutBranchMismatch,
-    openSubagentInspector,
     runningSubagentCount,
     systemComposerBannerItems,
   ]);
