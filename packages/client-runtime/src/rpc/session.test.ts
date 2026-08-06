@@ -124,6 +124,7 @@ const SERVER_CONFIG: ServerConfigType = {
   issues: [],
   providers: [],
   availableEditors: [],
+  serverSlashCommands: [],
   observability: {
     logsDirectoryPath: "/tmp/logs",
     localTracingEnabled: false,
@@ -229,6 +230,7 @@ describe("RpcSessionFactory", () => {
 
       const config = yield* session.initialConfig;
       expect(config).toEqual(SERVER_CONFIG);
+      expect(config.serverSlashCommands).toEqual([]);
       expect(socket.sent).toHaveLength(1);
 
       const probeFiber = yield* Effect.forkChild(session.probe);
