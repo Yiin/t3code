@@ -508,6 +508,32 @@ export const SubagentTaskCompletedActivityPayload = Schema.Struct({
 });
 export type SubagentTaskCompletedActivityPayload = typeof SubagentTaskCompletedActivityPayload.Type;
 
+export const SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND = "subagent.steer.requested";
+export const SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND = "subagent.steer.delivered";
+export const PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND = "provider.subagent.steer.failed";
+
+export const SubagentSteerRequestedActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString,
+  steerId: CommandId,
+});
+export type SubagentSteerRequestedActivityPayload =
+  typeof SubagentSteerRequestedActivityPayload.Type;
+
+export const SubagentSteerDeliveredActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  steerId: CommandId,
+});
+export type SubagentSteerDeliveredActivityPayload =
+  typeof SubagentSteerDeliveredActivityPayload.Type;
+
+export const SubagentSteerFailedActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  steerId: CommandId,
+  detail: TrimmedNonEmptyString,
+});
+export type SubagentSteerFailedActivityPayload = typeof SubagentSteerFailedActivityPayload.Type;
+
 export const SUBAGENT_TEXT_ACTIVITY_KIND = "subagent.text";
 export const SUBAGENT_THINKING_ACTIVITY_KIND = "subagent.thinking";
 
@@ -685,6 +711,23 @@ export const applySubagentActivity = (
       return subagents;
   }
 };
+
+/** How recently a running subagent must have reported server-observed activity. */
+export const RUNNING_SUBAGENT_FRESHNESS_MS = 15 * 60 * 1_000;
+
+export const isFreshRunningSubagent = (
+  subagent: Pick<OrchestrationThreadSubagent, "status" | "updatedAt">,
+  nowMs: number,
+): boolean => {
+  if (subagent.status !== "running") return false;
+  const updatedAtMs = Date.parse(subagent.updatedAt);
+  return !Number.isNaN(updatedAtMs) && nowMs - updatedAtMs <= RUNNING_SUBAGENT_FRESHNESS_MS;
+};
+
+export const countFreshRunningSubagents = (
+  subagents: ReadonlyArray<Pick<OrchestrationThreadSubagent, "status" | "updatedAt">>,
+  nowMs: number,
+): number => subagents.filter((subagent) => isFreshRunningSubagent(subagent, nowMs)).length;
 
 /**
  * The terminal subagent status a session status forces, or `null` when the
@@ -1084,6 +1127,15 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadSubagentSteerCommand = Schema.Struct({
+  type: Schema.Literal("thread.subagent.steer"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  subagentId: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
 const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
@@ -1132,6 +1184,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadSubagentSteerCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -1155,6 +1208,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
+  ThreadSubagentSteerCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,

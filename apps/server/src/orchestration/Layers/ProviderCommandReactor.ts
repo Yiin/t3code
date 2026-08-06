@@ -4,12 +4,16 @@ import {
   EventId,
   type ModelSelection,
   type OrchestrationEvent,
+  PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
+  SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND,
+  SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+  SubagentSteerRequestedActivityPayload,
   type TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
@@ -57,6 +61,7 @@ type ProviderIntentEvent = Extract<
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
       | "thread.turn-interrupt-requested"
+      | "thread.activity-appended"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested";
@@ -214,6 +219,11 @@ const make = Effect.gen(function* () {
     timeToLive: HANDLED_TURN_START_KEY_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const handledSubagentSteerIds = yield* Cache.make<string, true>({
+    capacity: HANDLED_TURN_START_KEY_MAX,
+    timeToLive: HANDLED_TURN_START_KEY_TTL,
+    lookup: () => Effect.succeed(true),
+  });
 
   const hasHandledTurnStartRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
@@ -256,6 +266,40 @@ const make = Effect.gen(function* () {
               detail: input.detail,
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
+            turnId: input.turnId,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendSubagentSteerActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly kind:
+      | typeof SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND
+      | typeof PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND;
+    readonly tone: "info" | "error";
+    readonly summary: string;
+    readonly payload: Record<string, unknown>;
+    readonly turnId: TurnId | null;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("subagent-steer-activity"),
+      eventId: serverEventId(),
+    }).pipe(
+      Effect.flatMap(({ commandId, eventId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: eventId,
+            tone: input.tone,
+            kind: input.kind,
+            summary: input.summary,
+            payload: input.payload,
             turnId: input.turnId,
             createdAt: input.createdAt,
           },
@@ -683,6 +727,7 @@ const make = Effect.gen(function* () {
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
     readonly createdAt: string;
+    readonly existingSessionOnly?: boolean;
   }) {
     const thread = yield* resolveThread(input.threadId);
     if (!thread) {
@@ -690,10 +735,12 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(input.threadId, input.createdAt, {
-      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-      pendingTurnStart: true,
-    });
+    if (input.existingSessionOnly !== true) {
+      yield* ensureSessionForThread(input.threadId, input.createdAt, {
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        pendingTurnStart: true,
+      });
+    }
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
@@ -704,6 +751,13 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.map((sessions) => sessions.find((session) => session.threadId === input.threadId)),
       );
+    if (input.existingSessionOnly === true && activeSession === undefined) {
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(thread.session?.providerName ?? undefined),
+        method: "thread.turn.start",
+        detail: "No live provider session is bound to this thread.",
+      });
+    }
     let providerInput = normalizedInput;
     if (providerInput !== undefined && activeSession !== undefined) {
       providerInput = yield* resolveSkillProviderInput({

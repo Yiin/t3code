@@ -1,5 +1,6 @@
 import {
   EventId,
+  SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -23,6 +24,7 @@ import {
 import { projectEvent } from "./projector.ts";
 import {
   countFreshRunningSubagents,
+  isFreshRunningSubagent,
   runningSubagentSettleRefusalDetail,
 } from "./subagentLiveness.ts";
 
@@ -723,6 +725,48 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.subagent.steer": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const subagent = thread.subagents.find((row) => row.subagentId === command.subagentId);
+      const occurredAt = yield* nowIso;
+      if (!subagent || !isFreshRunningSubagent(subagent, Date.parse(occurredAt))) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `subagent ${command.subagentId} is not running or is stale`,
+        });
+      }
+      const eventBase = yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt,
+        commandId: command.commandId,
+      });
+      return {
+        ...eventBase,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: eventBase.eventId,
+            tone: "info",
+            kind: SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+            summary: `Queued user follow-up for subagent ${command.subagentId}`,
+            payload: {
+              subagentId: command.subagentId,
+              text: command.text,
+              steerId: command.commandId,
+            },
+            turnId: subagent.turnId,
+            createdAt: occurredAt,
+          },
         },
       };
     }
