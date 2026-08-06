@@ -224,7 +224,10 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
-import { resolveFirstRunningSubagentRowId } from "./chat/MessagesTimeline.logic";
+import {
+  resolveFirstRunningSubagentKey,
+  resolveFirstRunningSubagentRowId,
+} from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -2365,6 +2368,18 @@ function ChatViewContent(props: ChatViewProps) {
     () => resolveFirstRunningSubagentRowId(timelineEntries, subagentGroups),
     [subagentGroups, timelineEntries],
   );
+  const firstRunningSubagentKey = useMemo(
+    () => resolveFirstRunningSubagentKey(subagentGroups),
+    [subagentGroups],
+  );
+  const onOpenSubagentInspector = useCallback(
+    (subagentKey: string) => {
+      if (activeThreadRef) {
+        useRightPanelStore.getState().openSubagent(activeThreadRef, subagentKey);
+      }
+    },
+    [activeThreadRef],
+  );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -4041,15 +4056,26 @@ function ChatViewContent(props: ChatViewProps) {
           runningSubagentCount === 1
             ? "1 subagent working"
             : `${runningSubagentCount} subagents working`,
-        actions: firstRunningSubagentRowId ? (
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={() => timelineScrollToRowRef.current?.(firstRunningSubagentRowId)}
-          >
-            View
-          </Button>
-        ) : undefined,
+        actions:
+          firstRunningSubagentKey || firstRunningSubagentRowId ? (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => {
+                if (firstRunningSubagentKey && activeThreadRef) {
+                  useRightPanelStore
+                    .getState()
+                    .openSubagent(activeThreadRef, firstRunningSubagentKey);
+                  return;
+                }
+                if (firstRunningSubagentRowId) {
+                  timelineScrollToRowRef.current?.(firstRunningSubagentRowId);
+                }
+              }}
+            >
+              View
+            </Button>
+          ) : undefined,
       });
     }
     if (!localCheckoutBranchMismatch) {
@@ -4104,8 +4130,10 @@ function ChatViewContent(props: ChatViewProps) {
     ];
   }, [
     activeThread?.id,
+    activeThreadRef,
     activeThreadId,
     branchRepairAction,
+    firstRunningSubagentKey,
     firstRunningSubagentRowId,
     handleSwitchCheckoutToThread,
     handleUpdateThreadToCheckout,
@@ -5696,6 +5724,7 @@ function ChatViewContent(props: ChatViewProps) {
                 activeThreadEnvironmentId={activeThread.environmentId}
                 routeThreadKey={routeThreadKey}
                 onOpenTurnDiff={onOpenTurnDiff}
+                onOpenSubagentInspector={onOpenSubagentInspector}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}

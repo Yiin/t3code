@@ -1,5 +1,12 @@
 import { memo, useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
-import { BotIcon, CheckIcon, ChevronDownIcon, MinusIcon, XIcon } from "lucide-react";
+import {
+  BotIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  MinusIcon,
+  PanelRightIcon,
+  XIcon,
+} from "lucide-react";
 import { formatDuration, formatElapsed, type SubagentGroup } from "../../session-logic";
 import { cn } from "~/lib/utils";
 
@@ -20,12 +27,14 @@ export const SubagentCard = memo(function SubagentCard({
   liveActivity,
   expanded = false,
   onToggleExpanded,
+  onOpenInspector,
   expandedBody,
 }: {
   group: SubagentGroup;
   liveActivity?: ReactNode;
   expanded?: boolean;
   onToggleExpanded?: (anchorElement?: HTMLElement) => void;
+  onOpenInspector?: () => void;
   expandedBody?: ReactNode;
 }) {
   const toolCount = group.children.length;
@@ -136,6 +145,20 @@ export const SubagentCard = memo(function SubagentCard({
                 aria-hidden
               />
             </span>
+          ) : null}
+          {onOpenInspector ? (
+            <button
+              type="button"
+              className="inline-flex size-4 items-center justify-center rounded-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+              aria-label="Open subagent panel"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenInspector();
+              }}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
+              <PanelRightIcon className="block size-4 shrink-0 opacity-70" aria-hidden />
+            </button>
           ) : null}
         </div>
       </div>

@@ -129,6 +129,7 @@ interface TimelineRowSharedState {
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
   onToggleSubagentExpanded: (subagentKey: string, anchorElement?: HTMLElement) => void;
+  onOpenSubagentInspector: (subagentKey: string) => void;
   onScrollToTimelineRow: (rowId: string) => void;
 }
 
@@ -162,6 +163,7 @@ interface MessagesTimelineProps {
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   routeThreadKey: string;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onOpenSubagentInspector: (subagentKey: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
@@ -202,6 +204,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   turnDiffSummaryByAssistantMessageId,
   routeThreadKey,
   onOpenTurnDiff,
+  onOpenSubagentInspector,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
   isRevertingCheckpoint,
@@ -494,6 +497,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleTurnFold,
       onToggleWorkGroup,
       onToggleSubagentExpanded,
+      onOpenSubagentInspector,
       onScrollToTimelineRow,
     }),
     [
@@ -510,6 +514,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleTurnFold,
       onToggleWorkGroup,
       onToggleSubagentExpanded,
+      onOpenSubagentInspector,
       onScrollToTimelineRow,
     ],
   );
@@ -1349,7 +1354,7 @@ const SUBAGENT_FLEET_STATUS_LABEL: Record<
 /**
  * One summary line above the unsettled turn's subagent cards when 2+ run
  * concurrently: aggregate counts plus one status dot per agent, ordered
- * attention-first. Clicking a dot scrolls the list to that agent's card.
+ * attention-first. Clicking a dot opens that agent in the inspector.
  */
 function SubagentFleetTimelineRow({
   row,
@@ -1371,9 +1376,9 @@ function SubagentFleetTimelineRow({
                   <button
                     type="button"
                     role="listitem"
-                    aria-label={`Scroll to subagent: ${label}`}
+                    aria-label={`Open subagent: ${label}`}
                     className="flex size-4 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-                    onClick={() => ctx.onScrollToTimelineRow(agent.rowId)}
+                    onClick={() => ctx.onOpenSubagentInspector(agent.key)}
                   />
                 }
               >
@@ -1404,7 +1409,7 @@ const SubagentTimelineRow = memo(function SubagentTimelineRow({
   row: Extract<TimelineRow, { kind: "subagent" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  const { workspaceRoot, routeThreadKey, onToggleSubagentExpanded } = ctx;
+  const { workspaceRoot, routeThreadKey, onToggleSubagentExpanded, onOpenSubagentInspector } = ctx;
   const subagentKey = row.group.toolCallId ?? row.group.entryId;
   const expanded = useUiStateStore(
     (store) => store.threadSubagentExpandedById[routeThreadKey]?.[subagentKey] ?? false,
@@ -1419,6 +1424,10 @@ const SubagentTimelineRow = memo(function SubagentTimelineRow({
     },
     [onToggleSubagentExpanded, subagentKey],
   );
+  const onOpenInspector = useCallback(
+    () => onOpenSubagentInspector(subagentKey),
+    [onOpenSubagentInspector, subagentKey],
+  );
   const newestChild = row.group.status === "running" ? row.group.children.at(-1) : undefined;
 
   return (
@@ -1431,6 +1440,7 @@ const SubagentTimelineRow = memo(function SubagentTimelineRow({
       }
       expanded={expanded}
       onToggleExpanded={onToggleExpanded}
+      onOpenInspector={onOpenInspector}
       expandedBody={expanded ? <SubagentExpandedBody group={row.group} /> : undefined}
     />
   );

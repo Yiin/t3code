@@ -502,6 +502,18 @@ export function resolveFirstRunningSubagentRowId(
   return null;
 }
 
+/** Inspector key of the first running subagent in read-model order. */
+export function resolveFirstRunningSubagentKey(
+  subagentGroups: ReadonlyArray<SubagentGroup>,
+): string | null {
+  for (const group of subagentGroups) {
+    if (group.status === "running") {
+      return group.toolCallId ?? group.entryId;
+    }
+  }
+  return null;
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   activitiesTruncated?: OrchestrationThreadActivityTruncation | null;
