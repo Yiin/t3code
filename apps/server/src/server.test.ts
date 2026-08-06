@@ -763,6 +763,8 @@ const buildAppUnderTest = (options?: {
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadSubagentLiveness: () =>
             Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
+          getSubagentActivities: () =>
+            Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
           listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
@@ -5792,6 +5794,23 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         layers: {
           projectionSnapshotQuery: {
             getSnapshot: () => Effect.succeed(snapshot),
+            getSubagentActivities: () =>
+              Effect.succeed({
+                activities: [
+                  {
+                    id: EventId.make("activity-subagent-1"),
+                    tone: "tool" as const,
+                    kind: "tool.completed",
+                    summary: "Subagent tool completed",
+                    payload: { parentToolUseId: "toolu-spawn-1" },
+                    turnId: null,
+                    sequence: 1,
+                    createdAt: now,
+                  },
+                ],
+                hasMore: false,
+                nextBefore: null,
+              }),
           },
           orchestrationEngine: {
             dispatch: () => Effect.succeed({ sequence: 7 }),
@@ -5839,6 +5858,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(turnDiffResult.diff, "turn-diff");
+
+      const subagentActivitiesResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getSubagentActivities]({
+            threadId: ThreadId.make("thread-1"),
+            subagentId: "task-1",
+          }),
+        ),
+      );
+      assert.deepStrictEqual(
+        subagentActivitiesResult.activities.map((activity) => activity.id),
+        [EventId.make("activity-subagent-1")],
+      );
 
       const fullDiffResult = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
@@ -7647,11 +7679,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           Effect.all([
             client[WS_METHODS.epicRunList]({}),
             client[WS_METHODS.subscribeEpicRuns]({}).pipe(Stream.runHead),
+            client[ORCHESTRATION_WS_METHODS.getSubagentActivities]({
+              threadId: ThreadId.make("thread-1"),
+              subagentId: "task-1",
+            }),
           ]),
         ),
       );
       assert.equal(readWs[0][0]?.runId, readableRun.runId);
       assert.equal(Option.getOrThrow(readWs[1]).run.runId, readableRun.runId);
+      assert.deepStrictEqual(readWs[2], {
+        activities: [],
+        hasMore: false,
+        nextBefore: null,
+      });
       const callsBeforeDenied = mutationCalls.length;
       const deniedErrors = yield* Effect.forEach(
         ["start", "pause", "resume", "cancel"] as const,

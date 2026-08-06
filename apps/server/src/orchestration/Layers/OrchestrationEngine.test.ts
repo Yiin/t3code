@@ -205,6 +205,8 @@ describe("OrchestrationEngine", () => {
           getThreadSessionById: () => Effect.succeed(Option.none()),
           getThreadSubagentLiveness: () =>
             Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
+          getSubagentActivities: () =>
+            Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
           listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),

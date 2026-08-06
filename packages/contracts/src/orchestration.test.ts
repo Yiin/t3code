@@ -9,6 +9,7 @@ import {
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationGetFullThreadDiffInput,
+  OrchestrationGetSubagentActivitiesInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
   OrchestrationThreadActivity,
@@ -31,6 +32,9 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
+const decodeSubagentActivitiesInput = Schema.decodeUnknownEffect(
+  OrchestrationGetSubagentActivitiesInput,
+);
 const decodeThreadTurnDiff = Schema.decodeUnknownEffect(ThreadTurnDiff);
 const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateCommand);
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
@@ -89,6 +93,36 @@ it.effect("parses full thread diff input with whitespace ignoring enabled", () =
       ignoreWhitespace: true,
     });
     assert.strictEqual(parsed.ignoreWhitespace, true);
+  }),
+);
+
+it.effect("parses a bounded subagent activity cursor", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeSubagentActivitiesInput({
+      threadId: "thread-1",
+      subagentId: "task-1",
+      limit: 200,
+      before: {
+        sequence: null,
+        createdAt: "2026-08-05T00:00:00.000Z",
+        activityId: "activity-1",
+      },
+    });
+    assert.strictEqual(parsed.limit, 200);
+    assert.strictEqual(parsed.before?.sequence, null);
+  }),
+);
+
+it.effect("rejects a subagent activity page above the limit", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeSubagentActivitiesInput({
+        threadId: "thread-1",
+        subagentId: "task-1",
+        limit: 201,
+      }),
+    );
+    assert.strictEqual(result._tag, "Failure");
   }),
 );
 

@@ -532,6 +532,8 @@ function createHarness(input: {
       }),
     getThreadSubagentLiveness: () =>
       Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
+    getSubagentActivities: () =>
+      Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
     listAutoSettleCandidates: () => Effect.succeed([]),
     getThreadDetailById: () => Effect.die("unused"),
     getThreadDetailSnapshot: (threadId) =>

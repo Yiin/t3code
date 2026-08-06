@@ -12,6 +12,8 @@ import type {
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
+  OrchestrationGetSubagentActivitiesInput,
+  OrchestrationGetSubagentActivitiesResult,
   OrchestrationSession,
   OrchestrationShellSnapshot,
   OrchestrationThread,
@@ -224,6 +226,18 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadSubagentLiveness: (
     threadId: ThreadId,
   ) => Effect.Effect<ProjectionThreadSubagentLiveness, ProjectionRepositoryError>;
+
+  /**
+   * Page one subagent transcript newest-first, while returning each page in
+   * ascending `(sequence, createdAt, activityId)` order for prepend merging.
+   *
+   * Rows match the subagent's spawning item through `parentToolUseId`, or the
+   * subagent id through `taskId`. A subagent without a spawning item returns
+   * only `taskId` rows.
+   */
+  readonly getSubagentActivities: (
+    input: OrchestrationGetSubagentActivitiesInput,
+  ) => Effect.Effect<OrchestrationGetSubagentActivitiesResult, ProjectionRepositoryError>;
 
   /**
    * List the threads an auto-settle sweep may settle.

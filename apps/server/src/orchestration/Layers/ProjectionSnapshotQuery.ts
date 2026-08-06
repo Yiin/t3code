@@ -8,12 +8,14 @@ import {
   OrchestrationCheckpointFile,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
+  OrchestrationGetSubagentActivitiesInput,
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   ProjectScript,
   THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
   THREAD_DETAIL_ACTIVITY_LIMIT,
+  SUBAGENT_ACTIVITY_PAGE_LIMIT,
   TrimmedNonEmptyString,
   TurnId,
   type OrchestrationCheckpointSummary,
@@ -428,6 +430,7 @@ const THREAD_DETAIL_LIST_ACTIVITIES = "ProjectionSnapshotQuery.getThreadDetailBy
 const THREAD_DETAIL_LIST_CHECKPOINTS =
   "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints";
 const THREAD_DETAIL_LIST_SUBAGENTS = "ProjectionSnapshotQuery.getThreadDetailById:listSubagents";
+const SUBAGENT_ACTIVITY_LIST = "ProjectionSnapshotQuery.getSubagentActivities:listActivities";
 
 const decodeThreadRow = Schema.decodeUnknownEffect(ProjectionThreadDbRowSchema);
 const decodeThreadMessageRows = tracedDecodeRows(ProjectionThreadMessageDbRowSchema);
@@ -1237,6 +1240,60 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at ASC,
           activity_id ASC
       `,
+  });
+
+  const listSubagentActivityRawRows = tracedFindAllRaw({
+    Request: OrchestrationGetSubagentActivitiesInput,
+    execute: ({ threadId, subagentId, limit, before }) => {
+      const pageLimit = Math.max(
+        1,
+        Math.min(limit ?? SUBAGENT_ACTIVITY_PAGE_LIMIT, SUBAGENT_ACTIVITY_PAGE_LIMIT),
+      );
+      const hasCursor = before === undefined ? 0 : 1;
+
+      return sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND EXISTS (
+            SELECT 1
+            FROM projection_thread_subagents
+            WHERE thread_id = ${threadId}
+              AND subagent_id = ${subagentId}
+          )
+          AND (
+            (
+              parent_tool_use_id IS NOT NULL
+              AND parent_tool_use_id = (
+                SELECT spawned_by_item_id
+                FROM projection_thread_subagents
+                WHERE thread_id = ${threadId}
+                  AND subagent_id = ${subagentId}
+              )
+            )
+            OR task_id = ${subagentId}
+          )
+          AND (
+            ${hasCursor} = 0
+            OR (COALESCE(sequence, -1), created_at, activity_id) < (
+              COALESCE(${before?.sequence ?? null}, -1),
+              ${before?.createdAt ?? ""},
+              ${before?.activityId ?? ""}
+            )
+          )
+        ORDER BY COALESCE(sequence, -1) DESC, created_at DESC, activity_id DESC
+        LIMIT ${pageLimit + 1}
+      `;
+    },
   });
 
   // How many activities the thread actually holds, so the capped read above can
@@ -2708,6 +2765,49 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       ),
     );
 
+  const getSubagentActivities: ProjectionSnapshotQueryShape["getSubagentActivities"] = Effect.fn(
+    "ProjectionSnapshotQuery.getSubagentActivities",
+  )(function* (input) {
+    const requestedLimit = Math.max(
+      1,
+      Math.min(input.limit ?? SUBAGENT_ACTIVITY_PAGE_LIMIT, SUBAGENT_ACTIVITY_PAGE_LIMIT),
+    );
+    const rawRows = yield* listSubagentActivityRawRows(
+      { ...input, limit: requestedLimit },
+      SUBAGENT_ACTIVITY_LIST,
+    );
+    const decodedRows = yield* decodeThreadActivityRows(rawRows, SUBAGENT_ACTIVITY_LIST);
+    const hasMore = decodedRows.length > requestedLimit;
+    const pageRows = decodedRows.slice(0, requestedLimit);
+    const oldestRow = pageRows.at(-1);
+
+    return {
+      activities: pageRows.toReversed().map((row) => {
+        const activity = {
+          id: row.activityId,
+          tone: row.tone,
+          kind: row.kind,
+          summary: row.summary,
+          payload: row.payload,
+          turnId: row.turnId,
+          createdAt: row.createdAt,
+        };
+        return row.sequence === null
+          ? activity
+          : Object.assign(activity, { sequence: row.sequence });
+      }),
+      hasMore,
+      nextBefore:
+        hasMore && oldestRow !== undefined
+          ? {
+              sequence: oldestRow.sequence,
+              createdAt: oldestRow.createdAt,
+              activityId: oldestRow.activityId,
+            }
+          : null,
+    };
+  });
+
   return {
     getCommandReadModel,
     getSnapshot,
@@ -2723,6 +2823,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadShellById,
     getThreadSessionById,
     getThreadSubagentLiveness,
+    getSubagentActivities,
     listAutoSettleCandidates,
     getThreadDetailById,
     getThreadDetailSnapshot,

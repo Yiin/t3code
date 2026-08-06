@@ -37,6 +37,7 @@ import {
   type OrchestrationThreadStreamItem,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
+  OrchestrationGetSubagentActivitiesError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
   type ProjectId,
@@ -312,6 +313,7 @@ const SHELL_RESUME_MAX_GAP = 1_000;
 const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.dispatchCommand, AuthOrchestrationOperateScope],
   [ORCHESTRATION_WS_METHODS.getTurnDiff, AuthOrchestrationReadScope],
+  [ORCHESTRATION_WS_METHODS.getSubagentActivities, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.getFullThreadDiff, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.replayEvents, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.subscribeShell, AuthOrchestrationReadScope],
@@ -1292,6 +1294,23 @@ const makeWsRpcLayer = (
                 (cause) =>
                   new OrchestrationGetTurnDiffError({
                     message: "Failed to load turn diff",
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getSubagentActivities]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getSubagentActivities,
+            projectionSnapshotQuery.getSubagentActivities(input).pipe(
+              Effect.tapError((cause) =>
+                Effect.logError("failed to load subagent activities", { cause }),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSubagentActivitiesError({
+                    message: "Failed to load subagent activities",
                     cause,
                   }),
               ),

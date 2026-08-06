@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  SUBAGENT_ACTIVITY_PAGE_LIMIT,
   THREAD_DETAIL_ACTIVITY_LIMIT,
   ThreadId,
   TurnId,
@@ -140,6 +141,53 @@ const insertFillerActivities = (count: number) =>
       FROM filler
     `;
   });
+
+const seedSubagentActivityFixture = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+
+  yield* sql`DELETE FROM projection_thread_activities`;
+  yield* sql`DELETE FROM projection_thread_subagents`;
+
+  yield* sql`
+    INSERT INTO projection_thread_subagents (
+      subagent_id,
+      thread_id,
+      turn_id,
+      status,
+      spawned_by_item_id,
+      started_at,
+      updated_at
+    )
+    VALUES
+      (
+        'task-1',
+        'thread-1',
+        NULL,
+        'running',
+        'toolu-spawn-1',
+        '2026-08-05T00:00:00.000Z',
+        '2026-08-05T00:00:00.000Z'
+      ),
+      (
+        'task-null-parent',
+        'thread-1',
+        NULL,
+        'running',
+        NULL,
+        '2026-08-05T00:00:00.000Z',
+        '2026-08-05T00:00:00.000Z'
+      ),
+      (
+        'task-other',
+        'thread-1',
+        NULL,
+        'running',
+        'toolu-spawn-other',
+        '2026-08-05T00:00:00.000Z',
+        '2026-08-05T00:00:00.000Z'
+      )
+  `;
+});
 
 /**
  * Timestamps for the auto-settle candidate reads. The window is three days
@@ -488,6 +536,220 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("pages all activities linked to one subagent without overlap", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedSubagentActivityFixture;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        WITH RECURSIVE child_tool(n) AS (
+          SELECT 1
+          UNION ALL
+          SELECT n + 1 FROM child_tool WHERE n < 205
+        )
+        SELECT
+          'activity-child-' || printf('%03d', n),
+          'thread-1',
+          NULL,
+          'tool',
+          'tool.completed',
+          'Child tool ' || n,
+          '{"parentToolUseId":"toolu-spawn-1"}',
+          n,
+          '2026-08-05T00:00:00.000Z'
+        FROM child_tool
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary,
+          payload_json, sequence, created_at
+        )
+        VALUES
+          (
+            'activity-task-started', 'thread-1', NULL, 'info', 'task.started',
+            'Task started', '{"taskId":"task-1"}', 206, '2026-08-05T00:00:00.000Z'
+          ),
+          (
+            'activity-task-progress', 'thread-1', NULL, 'info', 'task.progress',
+            'Task progress', '{"taskId":"task-1"}', 207, '2026-08-05T00:00:00.000Z'
+          ),
+          (
+            'activity-task-completed', 'thread-1', NULL, 'info', 'task.completed',
+            'Task completed', '{"taskId":"task-1"}', 208, '2026-08-05T00:00:00.000Z'
+          ),
+          (
+            'activity-parent', 'thread-1', NULL, 'info', 'runtime.note',
+            'Parent activity', '{}', 209, '2026-08-05T00:00:00.000Z'
+          ),
+          (
+            'activity-other-parent', 'thread-1', NULL, 'tool', 'tool.completed',
+            'Other child', '{"parentToolUseId":"toolu-spawn-other"}', 210,
+            '2026-08-05T00:00:00.000Z'
+          ),
+          (
+            'activity-other-task', 'thread-1', NULL, 'info', 'task.progress',
+            'Other task', '{"taskId":"task-other"}', 211, '2026-08-05T00:00:00.000Z'
+          )
+      `;
+
+      const firstPage = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "task-1",
+        limit: SUBAGENT_ACTIVITY_PAGE_LIMIT + 100,
+      });
+      assert.equal(firstPage.activities.length, SUBAGENT_ACTIVITY_PAGE_LIMIT);
+      assert.equal(firstPage.hasMore, true);
+      assert.deepStrictEqual(firstPage.nextBefore, {
+        sequence: 9,
+        createdAt: "2026-08-05T00:00:00.000Z",
+        activityId: asEventId("activity-child-009"),
+      });
+      assert.deepStrictEqual(
+        firstPage.activities.map((activity) => activity.sequence),
+        Array.from({ length: SUBAGENT_ACTIVITY_PAGE_LIMIT }, (_, index) => index + 9),
+      );
+
+      const secondPage = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "task-1",
+        before: firstPage.nextBefore!,
+      });
+      assert.equal(secondPage.activities.length, 8);
+      assert.equal(secondPage.hasMore, false);
+      assert.equal(secondPage.nextBefore, null);
+      assert.deepStrictEqual(
+        secondPage.activities.map((activity) => activity.sequence),
+        [1, 2, 3, 4, 5, 6, 7, 8],
+      );
+
+      const allIds = [...secondPage.activities, ...firstPage.activities].map(
+        (activity) => activity.id,
+      );
+      assert.equal(new Set(allIds).size, 208);
+      assert.ok(allIds.includes(asEventId("activity-task-started")));
+      assert.ok(allIds.includes(asEventId("activity-task-progress")));
+      assert.ok(allIds.includes(asEventId("activity-task-completed")));
+      assert.ok(!allIds.includes(asEventId("activity-parent")));
+      assert.ok(!allIds.includes(asEventId("activity-other-parent")));
+      assert.ok(!allIds.includes(asEventId("activity-other-task")));
+    }),
+  );
+
+  it.effect("handles missing spawn links, unknown subagents, and null sequences", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedSubagentActivityFixture;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary,
+          payload_json, sequence, created_at
+        )
+        VALUES
+          (
+            'activity-null-parent-task', 'thread-1', NULL, 'info', 'task.progress',
+            'Task activity', '{"taskId":"task-null-parent"}', 1,
+            '2026-08-05T00:00:01.000Z'
+          ),
+          (
+            'activity-unlinked-child', 'thread-1', NULL, 'tool', 'tool.completed',
+            'Unlinked child', '{"parentToolUseId":"toolu-unlinked"}', 2,
+            '2026-08-05T00:00:02.000Z'
+          ),
+          (
+            'activity-unknown-task', 'thread-1', NULL, 'info', 'task.progress',
+            'Unknown task', '{"taskId":"task-unknown"}', 3,
+            '2026-08-05T00:00:03.000Z'
+          ),
+          (
+            'activity-null-sequence-1', 'thread-1', NULL, 'tool', 'tool.completed',
+            'Null sequence 1', '{"parentToolUseId":"toolu-spawn-1"}', NULL,
+            '2026-08-05T00:00:04.000Z'
+          ),
+          (
+            'activity-null-sequence-2', 'thread-1', NULL, 'tool', 'tool.completed',
+            'Null sequence 2', '{"parentToolUseId":"toolu-spawn-1"}', NULL,
+            '2026-08-05T00:00:05.000Z'
+          ),
+          (
+            'activity-null-sequence-3', 'thread-1', NULL, 'tool', 'tool.completed',
+            'Null sequence 3', '{"parentToolUseId":"toolu-spawn-1"}', NULL,
+            '2026-08-05T00:00:06.000Z'
+          )
+      `;
+
+      const noSpawnLink = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "task-null-parent",
+      });
+      assert.deepStrictEqual(
+        noSpawnLink.activities.map((activity) => activity.id),
+        [asEventId("activity-null-parent-task")],
+      );
+
+      const unknown = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "task-unknown",
+      });
+      assert.deepStrictEqual(unknown, { activities: [], hasMore: false, nextBefore: null });
+
+      const firstNullPage = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "task-1",
+        limit: 2,
+      });
+      assert.deepStrictEqual(
+        firstNullPage.activities.map((activity) => activity.id),
+        [asEventId("activity-null-sequence-2"), asEventId("activity-null-sequence-3")],
+      );
+      assert.equal(firstNullPage.hasMore, true);
+      assert.deepStrictEqual(firstNullPage.nextBefore, {
+        sequence: null,
+        createdAt: "2026-08-05T00:00:05.000Z",
+        activityId: asEventId("activity-null-sequence-2"),
+      });
+
+      const secondNullPage = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "task-1",
+        limit: 2,
+        before: firstNullPage.nextBefore!,
+      });
+      assert.deepStrictEqual(
+        secondNullPage.activities.map((activity) => activity.id),
+        [asEventId("activity-null-sequence-1")],
+      );
+      assert.equal(secondNullPage.hasMore, false);
+      assert.equal(secondNullPage.nextBefore, null);
+
+      const unknownThread = yield* snapshotQuery.getSubagentActivities({
+        threadId: ThreadId.make("thread-unknown"),
+        subagentId: "task-1",
+      });
+      assert.deepStrictEqual(unknownThread, {
+        activities: [],
+        hasMore: false,
+        nextBefore: null,
+      });
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_thread_subagents`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

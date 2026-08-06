@@ -25,6 +25,7 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
   getTurnDiff: "orchestration.getTurnDiff",
+  getSubagentActivities: "orchestration.getSubagentActivities",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   replayEvents: "orchestration.replayEvents",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
@@ -361,6 +362,35 @@ export type OrchestrationThreadActivityTruncation =
  * of this window, however old they are.
  */
 export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+
+/** Maximum number of activities returned by one subagent transcript page. */
+export const SUBAGENT_ACTIVITY_PAGE_LIMIT = 200;
+
+export const OrchestrationSubagentActivityCursor = Schema.Struct({
+  sequence: Schema.NullOr(NonNegativeInt),
+  createdAt: IsoDateTime,
+  activityId: EventId,
+});
+export type OrchestrationSubagentActivityCursor = typeof OrchestrationSubagentActivityCursor.Type;
+
+export const OrchestrationGetSubagentActivitiesInput = Schema.Struct({
+  threadId: ThreadId,
+  subagentId: TrimmedNonEmptyString,
+  limit: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: SUBAGENT_ACTIVITY_PAGE_LIMIT })),
+  ),
+  before: Schema.optionalKey(OrchestrationSubagentActivityCursor),
+});
+export type OrchestrationGetSubagentActivitiesInput =
+  typeof OrchestrationGetSubagentActivitiesInput.Type;
+
+export const OrchestrationGetSubagentActivitiesResult = Schema.Struct({
+  activities: Schema.Array(OrchestrationThreadActivity),
+  hasMore: Schema.Boolean,
+  nextBefore: Schema.NullOr(OrchestrationSubagentActivityCursor),
+});
+export type OrchestrationGetSubagentActivitiesResult =
+  typeof OrchestrationGetSubagentActivitiesResult.Type;
 
 /**
  * Activity kinds that a capped activity list must never drop.
@@ -1665,6 +1695,10 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationGetTurnDiffInput,
     output: OrchestrationGetTurnDiffResult,
   },
+  getSubagentActivities: {
+    input: OrchestrationGetSubagentActivitiesInput,
+    output: OrchestrationGetSubagentActivitiesResult,
+  },
   getFullThreadDiff: {
     input: OrchestrationGetFullThreadDiffInput,
     output: OrchestrationGetFullThreadDiffResult,
@@ -1705,6 +1739,14 @@ export class OrchestrationDispatchCommandError extends Schema.TaggedErrorClass<O
 
 export class OrchestrationGetTurnDiffError extends Schema.TaggedErrorClass<OrchestrationGetTurnDiffError>()(
   "OrchestrationGetTurnDiffError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationGetSubagentActivitiesError extends Schema.TaggedErrorClass<OrchestrationGetSubagentActivitiesError>()(
+  "OrchestrationGetSubagentActivitiesError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
