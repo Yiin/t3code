@@ -396,6 +396,9 @@ describe("ProviderSessionReaper", () => {
     expect(String(stops[0]?.commandId)).toMatch(
       new RegExp(`^session-stop-for-boot-reconcile:${threadId}:\\d+$`),
     );
+    expect(stops[0]?.reason).toBe(
+      "session interrupted: server restarted while the session was running",
+    );
     expect(harness.hasLiveSession).toHaveBeenCalledTimes(2);
     expect(harness.stopSession).toHaveBeenCalledWith({ threadId });
 
@@ -848,6 +851,9 @@ describe("ProviderSessionReaper", () => {
       );
       expect(session?.status).toBe("stopped");
       expect(session?.activeTurnId).toBeNull();
+      expect(session?.lastError).toBe(
+        "session interrupted: server restarted while the session was running",
+      );
       const projectedTurns = await integratedRuntime.runPromise(turns.listByThreadId({ threadId }));
       expect(projectedTurns).toHaveLength(1);
       expect(projectedTurns[0]?.turnId).toBe(turnId);
@@ -926,6 +932,7 @@ describe("ProviderSessionReaper", () => {
     const stop = dispatchedSessionStops(harness)[0]!;
     expect(stop.threadId).toBe(threadId);
     expect(String(stop.commandId).startsWith(`session-stop-for-reap:${threadId}:`)).toBe(true);
+    expect(stop.reason).toBe("session reaped: interactive session exceeded its idle limit");
     // The command path owns the stop; the direct call is only a fallback.
     expect(harness.stopSession).not.toHaveBeenCalled();
   });
@@ -1031,6 +1038,9 @@ describe("ProviderSessionReaper", () => {
     await waitFor(() => dispatchedSessionStops(harness).length === 1);
 
     expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(threadId);
+    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+      "session reaped: active turn exceeded its inactivity limit",
+    );
     expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
@@ -1415,6 +1425,9 @@ describe("ProviderSessionReaper", () => {
     expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
       iterationThreadId,
     ]);
+    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+      "session reaped: epic run iteration exceeded its idle limit",
+    );
     expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
@@ -1591,6 +1604,63 @@ describe("ProviderSessionReaper", () => {
     await waitFor(() => dispatchedSessionStops(harness).length === 1);
 
     expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(settledThreadId);
+    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+      "session reaped: settled session exceeded its idle limit",
+    );
+  });
+
+  it("reports the keep-active backstop when it reaps a pinned session", async () => {
+    const pinnedThreadId = ThreadId.make("thread-reaper-active-pin");
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: pinnedThreadId,
+          settledOverride: "active",
+          session: {
+            threadId: pinnedThreadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+      reaperOptions: {
+        interactiveIdleThresholdMs: 1_000,
+        sweepIntervalMs: 60_000,
+      },
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: pinnedThreadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        resumeCursor: { opaque: "resume-active-pin" },
+        runtimePayload: null,
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+
+    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+
+    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(pinnedThreadId);
+    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+      "session reaped: keep-active session exceeded its idle limit",
+    );
   });
 
   it("falls back to a direct stop when the thread is missing from the read model", async () => {
@@ -1717,6 +1787,7 @@ describe("ProviderSessionReaper", () => {
     expect(String(stops[0]?.commandId)).toMatch(
       new RegExp(`^session-stop-for-reap:${deadThreadId}:\\d+$`),
     );
+    expect(stops[0]?.reason).toBe("session reaped: no live provider process");
     expect(harness.stopSession).not.toHaveBeenCalled();
 
     const deadBinding = await runtime!.runPromise(

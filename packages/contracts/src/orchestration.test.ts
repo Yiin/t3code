@@ -434,7 +434,7 @@ it.effect("decodes thread settle and unsettle commands", () =>
   }),
 );
 
-it.effect("decodes the optional running-subagent session-stop guard", () =>
+it.effect("decodes optional session-stop fields and trims the stop reason", () =>
   Effect.gen(function* () {
     const guarded = yield* decodeOrchestrationCommand({
       type: "thread.session.stop",
@@ -449,14 +449,84 @@ it.effect("decodes the optional running-subagent session-stop guard", () =>
       threadId: "thread-1",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
+    const reasoned = yield* decodeOrchestrationCommand({
+      type: "thread.session.stop",
+      commandId: "cmd-stop-reasoned",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      reason: "  session reaped: no live provider process  ",
+    });
 
     assert.strictEqual(guarded.type, "thread.session.stop");
     if (guarded.type === "thread.session.stop") {
       assert.strictEqual(guarded.preserveRunningSubagents, true);
+      assert.strictEqual(guarded.reason, undefined);
     }
     assert.strictEqual(forced.type, "thread.session.stop");
     if (forced.type === "thread.session.stop") {
       assert.strictEqual(forced.preserveRunningSubagents, undefined);
+      assert.strictEqual(forced.reason, undefined);
+    }
+    assert.strictEqual(reasoned.type, "thread.session.stop");
+    if (reasoned.type === "thread.session.stop") {
+      assert.strictEqual(reasoned.reason, "session reaped: no live provider process");
+    }
+  }),
+);
+
+it.effect("validates session-stop reason content and length", () =>
+  Effect.gen(function* () {
+    const acceptedReason = "a".repeat(1_024);
+    const accepted = yield* decodeOrchestrationCommand({
+      type: "thread.session.stop",
+      commandId: "cmd-stop-max-reason",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      reason: acceptedReason,
+    });
+    assert.strictEqual(accepted.type, "thread.session.stop");
+    if (accepted.type === "thread.session.stop") {
+      assert.strictEqual(accepted.reason, acceptedReason);
+    }
+
+    for (const reason of ["   ", "a".repeat(1_025)]) {
+      const rejected = yield* Effect.exit(
+        decodeOrchestrationCommand({
+          type: "thread.session.stop",
+          commandId: "cmd-stop-invalid-reason",
+          threadId: "thread-1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          reason,
+        }),
+      );
+      assert.strictEqual(rejected._tag, "Failure");
+    }
+  }),
+);
+
+it.effect("decodes session-stop-requested event reasons", () =>
+  Effect.gen(function* () {
+    const event = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "event-stop-requested",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.session-stop-requested",
+      payload: {
+        threadId: "thread-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        reason: "  session interrupted: server restarted  ",
+      },
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      commandId: "cmd-stop-requested",
+      causationEventId: null,
+      correlationId: "cmd-stop-requested",
+      metadata: {},
+    });
+
+    assert.strictEqual(event.type, "thread.session-stop-requested");
+    if (event.type === "thread.session-stop-requested") {
+      assert.strictEqual(event.payload.reason, "session interrupted: server restarted");
     }
   }),
 );

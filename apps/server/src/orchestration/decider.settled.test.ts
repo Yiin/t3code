@@ -293,6 +293,42 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
     }),
   );
 
+  it.effect("copies optional stop reasons into session-stop-requested events", () =>
+    Effect.gen(function* () {
+      const reasoned = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-reasoned"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+          reason: "session reaped: no live provider process",
+        },
+        readModel: makeReadModel(null),
+      });
+      const reasonedEvents = Array.isArray(reasoned) ? reasoned : [reasoned];
+      expect(reasonedEvents[0]?.type).toBe("thread.session-stop-requested");
+      if (reasonedEvents[0]?.type === "thread.session-stop-requested") {
+        expect(reasonedEvents[0].payload.reason).toBe("session reaped: no live provider process");
+      }
+
+      const unreasoned = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-unreasoned"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null),
+      });
+      const unreasonedEvents = Array.isArray(unreasoned) ? unreasoned : [unreasoned];
+      expect(unreasonedEvents[0]?.type).toBe("thread.session-stop-requested");
+      if (unreasonedEvents[0]?.type === "thread.session-stop-requested") {
+        expect(unreasonedEvents[0].payload.reason).toBeUndefined();
+        expect(unreasonedEvents[0].payload).not.toHaveProperty("reason");
+      }
+    }),
+  );
+
   it.effect("rejects settling a thread with an open approval or user-input request", () =>
     Effect.gen(function* () {
       const requestActivity = (kind: string, requestId: string, at: string) =>
