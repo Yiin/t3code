@@ -25,6 +25,12 @@ import {
   ProjectCreateCommand,
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
+  PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
+  SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND,
+  SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+  SubagentSteerDeliveredActivityPayload,
+  SubagentSteerFailedActivityPayload,
+  SubagentSteerRequestedActivityPayload,
   decodeSubagentTranscriptActivityPayload,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
@@ -641,6 +647,59 @@ it("keeps the subagent read model unchanged for transcript activities", () => {
 
   assert.strictEqual(applySubagentActivity(subagents, textActivity), subagents);
   assert.strictEqual(applySubagentActivity(subagents, thinkingActivity), subagents);
+});
+
+it.effect("round-trips subagent steer activity payloads", () =>
+  Effect.gen(function* () {
+    const fixtures = [
+      {
+        schema: SubagentSteerRequestedActivityPayload,
+        payload: { subagentId: "subagent-1", text: "Check the parser", steerId: "steer-1" },
+      },
+      {
+        schema: SubagentSteerDeliveredActivityPayload,
+        payload: { subagentId: "subagent-1", steerId: "steer-1" },
+      },
+      {
+        schema: SubagentSteerFailedActivityPayload,
+        payload: { subagentId: "subagent-1", steerId: "steer-1", detail: "Session ended" },
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const decoded = yield* Schema.decodeUnknownEffect(fixture.schema)(fixture.payload);
+      const encoded = yield* Schema.encode(fixture.schema)(decoded);
+      assert.deepStrictEqual(encoded, fixture.payload);
+    }
+  }),
+);
+
+it("keeps the subagent read model reference for steer activities", () => {
+  const rows = applySubagentActivity([], subagentStarted);
+  const activities = [
+    subagentActivity({
+      id: "evt-steer-requested",
+      kind: SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+      payload: { subagentId: "subagent-1", text: "Check the parser", steerId: "steer-1" },
+      createdAt: "2026-01-01T00:00:06.000Z",
+    }),
+    subagentActivity({
+      id: "evt-steer-delivered",
+      kind: SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND,
+      payload: { subagentId: "subagent-1", steerId: "steer-1" },
+      createdAt: "2026-01-01T00:00:07.000Z",
+    }),
+    subagentActivity({
+      id: "evt-steer-failed",
+      kind: PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
+      payload: { subagentId: "subagent-1", steerId: "steer-1", detail: "Session ended" },
+      createdAt: "2026-01-01T00:00:08.000Z",
+    }),
+  ];
+
+  for (const activity of activities) {
+    assert.strictEqual(applySubagentActivity(rows, activity), rows);
+  }
 });
 
 it("folds a started->progress->completed sequence into one subagent row", () => {

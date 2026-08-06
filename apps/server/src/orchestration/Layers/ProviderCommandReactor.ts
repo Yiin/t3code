@@ -68,6 +68,18 @@ type ProviderIntentEvent = Extract<
   }
 >;
 
+type SubagentSteerRequestedEvent = Extract<
+  ProviderIntentEvent,
+  { type: "thread.activity-appended" }
+>;
+
+type ProviderIntent =
+  | Exclude<ProviderIntentEvent, SubagentSteerRequestedEvent>
+  | {
+      readonly event: SubagentSteerRequestedEvent;
+      readonly steer: SubagentSteerRequestedActivityPayload;
+    };
+
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized && normalized.length > 0 ? normalized : undefined;
@@ -229,6 +241,13 @@ const make = Effect.gen(function* () {
     Cache.getOption(handledTurnStartKeys, key).pipe(
       Effect.flatMap((cached) =>
         Cache.set(handledTurnStartKeys, key, true).pipe(Effect.as(Option.isSome(cached))),
+      ),
+    );
+
+  const hasHandledSubagentSteerRecently = (steerId: string) =>
+    Cache.getOption(handledSubagentSteerIds, steerId).pipe(
+      Effect.flatMap((cached) =>
+        Cache.set(handledSubagentSteerIds, steerId, true).pipe(Effect.as(Option.isSome(cached))),
       ),
     );
 
@@ -1038,6 +1057,79 @@ const make = Effect.gen(function* () {
     yield* providerService.interruptTurn({ threadId: event.payload.threadId });
   });
 
+  const processSubagentSteerRequested = Effect.fn("processSubagentSteerRequested")(function* (
+    event: SubagentSteerRequestedEvent,
+    steer: SubagentSteerRequestedActivityPayload,
+  ) {
+    if (yield* hasHandledSubagentSteerRecently(steer.steerId)) {
+      return;
+    }
+
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    const turnId = event.payload.activity.turnId;
+    const appendFailed = (detail: string) =>
+      appendSubagentSteerActivity({
+        threadId: event.payload.threadId,
+        kind: PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
+        tone: "error",
+        summary: "Subagent follow-up queue failed",
+        payload: {
+          subagentId: steer.subagentId,
+          steerId: steer.steerId,
+          detail,
+        },
+        turnId,
+        createdAt: event.occurredAt,
+      });
+
+    if (!thread.session || thread.session.status === "stopped") {
+      return yield* appendFailed("No active provider session is bound to this thread.");
+    }
+
+    const description =
+      thread.subagents.find((subagent) => subagent.subagentId === steer.subagentId)?.description ??
+      "unknown task";
+    const messageText = `[Queued user follow-up for subagent ${steer.subagentId} (${description})]\nThis message arrived while that subagent was running. Apply it to the returned result, or resume the subagent if more work is needed:\n${steer.text}`;
+    const sendTurnRequest = yield* buildSendTurnRequestForThread({
+      threadId: event.payload.threadId,
+      messageText,
+      createdAt: event.occurredAt,
+      existingSessionOnly: true,
+    }).pipe(
+      Effect.map(Option.some),
+      Effect.catchCause((cause) =>
+        appendFailed(formatFailureDetail(cause)).pipe(Effect.as(Option.none())),
+      ),
+    );
+    if (Option.isNone(sendTurnRequest)) {
+      return;
+    }
+
+    const sent = yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.as(true),
+      Effect.catchCause((cause) => appendFailed(formatFailureDetail(cause)).pipe(Effect.as(false))),
+    );
+    if (!sent) {
+      return;
+    }
+
+    yield* appendSubagentSteerActivity({
+      threadId: event.payload.threadId,
+      kind: SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND,
+      tone: "info",
+      summary: "Queued for parent",
+      payload: {
+        subagentId: steer.subagentId,
+        steerId: steer.steerId,
+      },
+      turnId,
+      createdAt: event.occurredAt,
+    });
+  });
+
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.approval-response-requested" }>,
   ) {
@@ -1157,9 +1249,8 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const processDomainEvent = Effect.fn("processDomainEvent")(function* (
-    event: ProviderIntentEvent,
-  ) {
+  const processDomainEvent = Effect.fn("processDomainEvent")(function* (input: ProviderIntent) {
+    const event = "event" in input ? input.event : input;
     yield* Effect.annotateCurrentSpan({
       "orchestration.event_type": event.type,
       "orchestration.thread_id": event.payload.threadId,
@@ -1188,6 +1279,9 @@ const make = Effect.gen(function* () {
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
         return;
+      case "thread.activity-appended":
+        yield* processSubagentSteerRequested(event, input.steer);
+        return;
       case "thread.approval-response-requested":
         yield* processApprovalResponseRequested(event);
         return;
@@ -1200,12 +1294,13 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const processDomainEventSafely = (event: ProviderIntentEvent) =>
-    processDomainEvent(event).pipe(
+  const processDomainEventSafely = (input: ProviderIntent) =>
+    processDomainEvent(input).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.failCause(cause);
         }
+        const event = "event" in input ? input.event : input;
         return Effect.logWarning("provider command reactor failed to process event", {
           eventType: event.type,
           cause: Cause.pretty(cause),
@@ -1217,6 +1312,18 @@ const make = Effect.gen(function* () {
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+      if (
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.kind === SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND
+      ) {
+        const steer = Schema.decodeUnknownOption(SubagentSteerRequestedActivityPayload)(
+          event.payload.activity.payload,
+        );
+        if (Option.isSome(steer)) {
+          return yield* worker.enqueue({ event, steer: steer.value });
+        }
+        return;
+      }
       if (
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||

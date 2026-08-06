@@ -712,9 +712,22 @@ export const applySubagentActivity = (
   }
 };
 
-/** How recently a running subagent must have reported server-observed activity. */
+/**
+ * How recently a `running` subagent row must have been touched to count as
+ * live work. Rows only leave `running` via `task.completed`/`task.progress`
+ * activities or a terminal session status (`closeRunningSubagentsForSession`),
+ * so a row stranded by a crashed server would otherwise block its consumers
+ * forever. The freshness bound lets consumers trust the read model.
+ *
+ * Shared by every consumer of running-subagent state so "still working" has
+ * one meaning across the server and clients.
+ *
+ * The bound trades against long tool calls. `task.progress` arrives at
+ * tool-call cadence, so one quiet call longer than this window reads as stale.
+ */
 export const RUNNING_SUBAGENT_FRESHNESS_MS = 15 * 60 * 1_000;
 
+/** Whether a subagent is running and has server-observed activity in the freshness window. */
 export const isFreshRunningSubagent = (
   subagent: Pick<OrchestrationThreadSubagent, "status" | "updatedAt">,
   nowMs: number,
