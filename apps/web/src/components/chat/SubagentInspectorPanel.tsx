@@ -1,12 +1,16 @@
 import type {
+  CommandId,
+  OrchestrationThreadActivity,
   OrchestrationThreadSubagent,
   OrchestrationThreadSubagentStatus,
+  ThreadId,
 } from "@t3tools/contracts";
 import { BotIcon } from "lucide-react";
 
 import { formatElapsed, type SubagentGroup } from "../../session-logic";
 import { cn } from "~/lib/utils";
 import { capitalizeSubagentName, SubagentElapsed } from "./SubagentCard";
+import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
 
 const STATUS_DOT_CLASS: Record<OrchestrationThreadSubagentStatus, string> = {
   running: "bg-sky-500 dark:bg-sky-300/80 animate-status-pulse motion-reduce:animate-none",
@@ -26,10 +30,24 @@ export function SubagentInspectorPanel({
   groups,
   subagents,
   activeSubagentKey,
+  threadId,
+  activities,
+  onSteer,
+  onStop,
+  onInterrupt,
 }: {
   groups: readonly SubagentGroup[];
   subagents: readonly OrchestrationThreadSubagent[];
   activeSubagentKey: string;
+  threadId: ThreadId;
+  activities: ReadonlyArray<OrchestrationThreadActivity>;
+  onSteer: (
+    subagentId: string,
+    text: string,
+    commandId: CommandId,
+  ) => Promise<SubagentCommandFailure | null>;
+  onStop: (subagentId: string, commandId: CommandId) => Promise<SubagentCommandFailure | null>;
+  onInterrupt: () => Promise<void>;
 }) {
   const group = groups.find(
     (candidate) => (candidate.toolCallId ?? candidate.entryId) === activeSubagentKey,
@@ -81,6 +99,16 @@ export function SubagentInspectorPanel({
           </div>
         </div>
       </header>
+      {readModel ? (
+        <SubagentInspectorFooter
+          activities={activities}
+          onInterrupt={onInterrupt}
+          onSteer={(text, commandId) => onSteer(readModel.subagentId, text, commandId)}
+          onStop={(commandId) => onStop(readModel.subagentId, commandId)}
+          subagent={readModel}
+          threadId={threadId}
+        />
+      ) : null}
     </div>
   );
 }

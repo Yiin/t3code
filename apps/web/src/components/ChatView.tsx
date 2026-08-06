@@ -1,5 +1,6 @@
 import {
   type ApprovalRequestId,
+  type CommandId,
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
@@ -137,6 +138,7 @@ import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { RightPanelTabs } from "./RightPanelTabs";
 import { SubagentInspectorPanel } from "./chat/SubagentInspectorPanel";
+import type { SubagentCommandFailure } from "./chat/SubagentInspectorFooter";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
@@ -222,7 +224,6 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
-import { resolveFirstRunningSubagentRowId } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -1100,6 +1101,16 @@ function chatActionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An error occurred.";
 }
 
+function subagentCommandFailure(error: unknown, fallback: string): SubagentCommandFailure {
+  const message = error instanceof Error ? error.message : fallback;
+  return {
+    message,
+    unsupported: /(?:schema|decode|parse|method.*not found|unknown.*command|unsupported)/i.test(
+      message,
+    ),
+  };
+}
+
 function ChatViewContent(props: ChatViewProps) {
   const {
     environmentId,
@@ -1136,6 +1147,12 @@ function ChatViewContent(props: ChatViewProps) {
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
+    reportFailure: false,
+  });
+  const steerSubagent = useAtomCommand(threadEnvironment.steerSubagent, {
+    reportFailure: false,
+  });
+  const stopSubagent = useAtomCommand(threadEnvironment.stopSubagent, {
     reportFailure: false,
   });
   const respondToThreadApproval = useAtomCommand(threadEnvironment.respondToApproval, {
@@ -1489,6 +1506,7 @@ function ChatViewContent(props: ChatViewProps) {
   const activeRightPanelSurface = useRightPanelStore((state) =>
     selectActiveRightPanelSurface(state.byThreadKey, activeThreadRef),
   );
+  const openSubagentInspector = useRightPanelStore((state) => state.openSubagent);
   const activeFileSurface =
     activeRightPanelSurface?.kind === "file" ? activeRightPanelSurface : null;
   const activePreviewState = useThreadPreviewState(activeThreadRef);
@@ -2371,10 +2389,10 @@ function ChatViewContent(props: ChatViewProps) {
     () => activeThreadSubagents.filter((subagent) => subagent.status === "running").length,
     [activeThreadSubagents],
   );
-  const firstRunningSubagentRowId = useMemo(
-    () => resolveFirstRunningSubagentRowId(timelineEntries, subagentGroups),
-    [subagentGroups, timelineEntries],
-  );
+  const firstRunningSubagentKey = useMemo(() => {
+    const group = subagentGroups.find((candidate) => candidate.status === "running");
+    return group ? (group.toolCallId ?? group.entryId) : null;
+  }, [subagentGroups]);
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -4051,15 +4069,16 @@ function ChatViewContent(props: ChatViewProps) {
           runningSubagentCount === 1
             ? "1 subagent working"
             : `${runningSubagentCount} subagents working`,
-        actions: firstRunningSubagentRowId ? (
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={() => timelineScrollToRowRef.current?.(firstRunningSubagentRowId)}
-          >
-            View
-          </Button>
-        ) : undefined,
+        actions:
+          firstRunningSubagentKey && activeThreadRef ? (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => openSubagentInspector(activeThreadRef, firstRunningSubagentKey)}
+            >
+              View
+            </Button>
+          ) : undefined,
       });
     }
     if (!localCheckoutBranchMismatch) {
@@ -4115,11 +4134,13 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeThread?.id,
     activeThreadId,
+    activeThreadRef,
     branchRepairAction,
-    firstRunningSubagentRowId,
+    firstRunningSubagentKey,
     handleSwitchCheckoutToThread,
     handleUpdateThreadToCheckout,
     localCheckoutBranchMismatch,
+    openSubagentInspector,
     runningSubagentCount,
     systemComposerBannerItems,
   ]);
@@ -4812,6 +4833,38 @@ function ChatViewContent(props: ChatViewProps) {
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
     }
+  };
+
+  const onSteerSubagent = async (
+    subagentId: string,
+    text: string,
+    commandId: CommandId,
+  ): Promise<SubagentCommandFailure | null> => {
+    if (!activeThread)
+      return { message: "This thread is no longer available.", unsupported: false };
+    const result = await steerSubagent({
+      environmentId,
+      input: { threadId: activeThread.id, subagentId, text, commandId },
+    });
+    if (result._tag === "Success" || isAtomCommandInterrupted(result)) return null;
+    return subagentCommandFailure(
+      squashAtomCommandFailure(result),
+      "Failed to send the message to the subagent.",
+    );
+  };
+
+  const onStopSubagent = async (
+    subagentId: string,
+    commandId: CommandId,
+  ): Promise<SubagentCommandFailure | null> => {
+    if (!activeThread)
+      return { message: "This thread is no longer available.", unsupported: false };
+    const result = await stopSubagent({
+      environmentId,
+      input: { threadId: activeThread.id, subagentId, commandId },
+    });
+    if (result._tag === "Success" || isAtomCommandInterrupted(result)) return null;
+    return subagentCommandFailure(squashAtomCommandFailure(result), "Failed to stop the subagent.");
   };
 
   const onRespondToApproval = useCallback(
@@ -5554,9 +5607,14 @@ function ChatViewContent(props: ChatViewProps) {
       />
     ) : activeRightPanelSurface?.kind === "subagent" ? (
       <SubagentInspectorPanel
+        activities={activeThread?.activities ?? []}
         groups={subagentGroups}
+        onInterrupt={onInterrupt}
+        onSteer={onSteerSubagent}
+        onStop={onStopSubagent}
         subagents={activeThreadSubagents}
         activeSubagentKey={activeRightPanelSurface.activeSubagentKey}
+        threadId={activeThreadRef.threadId}
       />
     ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
       activeProject &&

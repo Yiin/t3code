@@ -21,6 +21,7 @@ import {
   findSidebarProposedPlan,
   hasActionableProposedPlan,
   isLatestTurnSettled,
+  selectSubagentSteerStates,
   workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
@@ -50,6 +51,106 @@ function makeActivity(overrides: {
     ...(overrides.sequence !== undefined ? { sequence: overrides.sequence } : {}),
   };
 }
+
+describe("selectSubagentSteerStates", () => {
+  it("folds distinct steers and stop states even when terminal events arrive first", () => {
+    const activities = [
+      makeActivity({
+        createdAt: "2026-08-06T00:00:04.000Z",
+        kind: "subagent.steer.delivered",
+        payload: { subagentId: "agent-1", steerId: "steer-1" },
+      }),
+      makeActivity({
+        createdAt: "2026-08-06T00:00:01.000Z",
+        kind: "subagent.steer.requested",
+        payload: { subagentId: "agent-1", steerId: "steer-1", text: "Check the parser" },
+      }),
+      makeActivity({
+        createdAt: "2026-08-06T00:00:02.000Z",
+        kind: "subagent.steer.requested",
+        payload: { subagentId: "agent-1", steerId: "steer-2", text: "Run its test" },
+      }),
+      makeActivity({
+        createdAt: "2026-08-06T00:00:05.000Z",
+        kind: "provider.subagent.steer.failed",
+        payload: {
+          subagentId: "agent-1",
+          steerId: "steer-2",
+          detail: "Parent session closed",
+        },
+      }),
+      makeActivity({
+        createdAt: "2026-08-06T00:00:08.000Z",
+        kind: "subagent.stop.escalated",
+        payload: { subagentId: "agent-1", stopId: "stop-1" },
+      }),
+      makeActivity({
+        createdAt: "2026-08-06T00:00:06.000Z",
+        kind: "subagent.stop.requested",
+        payload: { subagentId: "agent-1", stopId: "stop-1" },
+      }),
+      makeActivity({
+        kind: "subagent.steer.requested",
+        payload: { subagentId: "agent-2", steerId: "other", text: "Ignore me" },
+      }),
+      makeActivity({
+        kind: "subagent.steer.requested",
+        payload: { subagentId: "agent-1", steerId: "invalid" },
+      }),
+    ];
+
+    expect(selectSubagentSteerStates(activities, "agent-1")).toEqual({
+      steers: [
+        {
+          steerId: "steer-1",
+          text: "Check the parser",
+          createdAt: "2026-08-06T00:00:01.000Z",
+          status: "delivered",
+          detail: null,
+        },
+        {
+          steerId: "steer-2",
+          text: "Run its test",
+          createdAt: "2026-08-06T00:00:02.000Z",
+          status: "failed",
+          detail: "Parent session closed",
+        },
+      ],
+      stops: [
+        {
+          stopId: "stop-1",
+          createdAt: "2026-08-06T00:00:06.000Z",
+          status: "escalated",
+          detail: null,
+        },
+      ],
+    });
+  });
+
+  it("folds stop failures", () => {
+    const activities = [
+      makeActivity({
+        createdAt: "2026-08-06T00:00:01.000Z",
+        kind: "subagent.stop.requested",
+        payload: { subagentId: "agent-1", stopId: "stop-2" },
+      }),
+      makeActivity({
+        createdAt: "2026-08-06T00:00:02.000Z",
+        kind: "provider.subagent.stop.failed",
+        payload: { subagentId: "agent-1", stopId: "stop-2", detail: "Stop failed" },
+      }),
+    ];
+
+    expect(selectSubagentSteerStates(activities, "agent-1").stops).toEqual([
+      {
+        stopId: "stop-2",
+        createdAt: "2026-08-06T00:00:01.000Z",
+        status: "failed",
+        detail: "Stop failed",
+      },
+    ]);
+  });
+});
 
 describe("derivePendingApprovals", () => {
   it("tracks open approvals and removes resolved ones", () => {

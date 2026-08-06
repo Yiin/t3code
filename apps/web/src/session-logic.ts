@@ -1,5 +1,6 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
+import * as Schema from "effect/Schema";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
@@ -9,6 +10,12 @@ import {
   type OrchestrationThreadSubagentStatus,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  SubagentSteerDeliveredActivityPayload,
+  SubagentSteerFailedActivityPayload,
+  SubagentSteerRequestedActivityPayload,
+  SubagentStopEscalatedActivityPayload,
+  SubagentStopFailedActivityPayload,
+  SubagentStopRequestedActivityPayload,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -941,6 +948,126 @@ export interface SubagentGroup {
   resultText: string | null;
   /** The Task tool input prompt; shown as a fallback when no children/result exist yet. */
   prompt: string | null;
+}
+
+export interface SubagentSteerState {
+  steerId: string;
+  text: string | null;
+  createdAt: string;
+  status: "queued" | "delivered" | "failed";
+  detail: string | null;
+}
+
+export interface SubagentStopState {
+  stopId: string;
+  createdAt: string;
+  status: "stopping" | "escalated" | "failed";
+  detail: string | null;
+}
+
+export interface SubagentInteractionStates {
+  steers: SubagentSteerState[];
+  stops: SubagentStopState[];
+}
+
+const decodeSteerRequested = Schema.decodeUnknownOption(SubagentSteerRequestedActivityPayload);
+const decodeSteerDelivered = Schema.decodeUnknownOption(SubagentSteerDeliveredActivityPayload);
+const decodeSteerFailed = Schema.decodeUnknownOption(SubagentSteerFailedActivityPayload);
+const decodeStopRequested = Schema.decodeUnknownOption(SubagentStopRequestedActivityPayload);
+const decodeStopEscalated = Schema.decodeUnknownOption(SubagentStopEscalatedActivityPayload);
+const decodeStopFailed = Schema.decodeUnknownOption(SubagentStopFailedActivityPayload);
+
+/** Fold steer and stop delivery activities for one subagent into UI-ready states. */
+export function selectSubagentSteerStates(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  subagentId: string,
+): SubagentInteractionStates {
+  const steers = new Map<string, SubagentSteerState>();
+  const stops = new Map<string, SubagentStopState>();
+
+  for (const activity of activities) {
+    if (activity.kind === "subagent.steer.requested") {
+      const payload = Option.getOrUndefined(decodeSteerRequested(activity.payload));
+      if (!payload || payload.subagentId !== subagentId) continue;
+      const existing = steers.get(payload.steerId);
+      steers.set(payload.steerId, {
+        steerId: payload.steerId,
+        text: payload.text,
+        createdAt: activity.createdAt,
+        status: existing?.status ?? "queued",
+        detail: existing?.detail ?? null,
+      });
+      continue;
+    }
+    if (activity.kind === "subagent.steer.delivered") {
+      const payload = Option.getOrUndefined(decodeSteerDelivered(activity.payload));
+      if (!payload || payload.subagentId !== subagentId) continue;
+      const existing = steers.get(payload.steerId);
+      steers.set(payload.steerId, {
+        steerId: payload.steerId,
+        text: existing?.text ?? null,
+        createdAt: existing?.createdAt ?? activity.createdAt,
+        status: "delivered",
+        detail: null,
+      });
+      continue;
+    }
+    if (activity.kind === "provider.subagent.steer.failed") {
+      const payload = Option.getOrUndefined(decodeSteerFailed(activity.payload));
+      if (!payload || payload.subagentId !== subagentId) continue;
+      const existing = steers.get(payload.steerId);
+      steers.set(payload.steerId, {
+        steerId: payload.steerId,
+        text: existing?.text ?? null,
+        createdAt: existing?.createdAt ?? activity.createdAt,
+        status: "failed",
+        detail: payload.detail,
+      });
+      continue;
+    }
+    if (activity.kind === "subagent.stop.requested") {
+      const payload = Option.getOrUndefined(decodeStopRequested(activity.payload));
+      if (!payload || payload.subagentId !== subagentId) continue;
+      const existing = stops.get(payload.stopId);
+      stops.set(payload.stopId, {
+        stopId: payload.stopId,
+        createdAt: activity.createdAt,
+        status: existing?.status ?? "stopping",
+        detail: existing?.detail ?? null,
+      });
+      continue;
+    }
+    if (activity.kind === "subagent.stop.escalated") {
+      const payload = Option.getOrUndefined(decodeStopEscalated(activity.payload));
+      if (!payload || payload.subagentId !== subagentId) continue;
+      const existing = stops.get(payload.stopId);
+      stops.set(payload.stopId, {
+        stopId: payload.stopId,
+        createdAt: existing?.createdAt ?? activity.createdAt,
+        status: "escalated",
+        detail: null,
+      });
+      continue;
+    }
+    if (activity.kind === "provider.subagent.stop.failed") {
+      const payload = Option.getOrUndefined(decodeStopFailed(activity.payload));
+      if (!payload || payload.subagentId !== subagentId) continue;
+      const existing = stops.get(payload.stopId);
+      stops.set(payload.stopId, {
+        stopId: payload.stopId,
+        createdAt: existing?.createdAt ?? activity.createdAt,
+        status: "failed",
+        detail: payload.detail,
+      });
+    }
+  }
+
+  return {
+    steers: [...steers.values()].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    ),
+    stops: [...stops.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+  };
 }
 
 /**
