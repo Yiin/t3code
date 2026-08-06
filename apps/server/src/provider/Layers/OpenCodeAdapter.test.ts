@@ -761,6 +761,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         },
       });
       NodeAssert.equal(String(steeredTurn.turnId), String(turn.turnId));
+      NodeAssert.equal(steeredTurn.steeredIntoActiveTurn, true);
 
       const sessions = yield* adapter.listSessions();
       const session = sessions.find((entry) => entry.threadId === threadId);

@@ -27,6 +27,9 @@ import {
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeLoggedRequest = Schema.decodeUnknownSync(
+  Schema.Struct({ method: Schema.String, params: Schema.Unknown }),
+);
 
 function quoteShellArgument(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -452,8 +455,10 @@ describe("openCodexThread", () => {
   );
 });
 
-it.layer(NodeServices.layer)("CodexSessionRuntime interrupts", (it) => {
-  const makeHarness = Effect.fn("makeCodexSessionRuntimeTestHarness")(function* () {
+it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
+  const makeHarness = Effect.fn("makeCodexSessionRuntimeTestHarness")(function* (
+    scenario = "steer-success",
+  ) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const tempDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -479,19 +484,20 @@ it.layer(NodeServices.layer)("CodexSessionRuntime interrupts", (it) => {
       environment: {
         ...process.env,
         T3_CODEX_RUNTIME_REQUEST_LOG_PATH: requestLogPath,
+        T3_CODEX_RUNTIME_SCENARIO: scenario,
       },
     });
     yield* runtime.start();
 
     return {
       runtime,
-      readInterruptRequests: fileSystem.readFileString(requestLogPath).pipe(
+      readRequests: fileSystem.readFileString(requestLogPath).pipe(
         Effect.map((content) =>
           content
             .trim()
             .split("\n")
             .filter(Boolean)
-            .map((line) => decodeUnknownJson(line)),
+            .map((line) => decodeLoggedRequest(decodeUnknownJson(line))),
         ),
       ),
     };
@@ -499,30 +505,111 @@ it.layer(NodeServices.layer)("CodexSessionRuntime interrupts", (it) => {
 
   it.effect("uses the last started turn id after a normal turn start", () =>
     Effect.gen(function* () {
-      const { runtime, readInterruptRequests } = yield* makeHarness();
+      const { runtime, readRequests } = yield* makeHarness();
       yield* runtime.sendTurn({ input: "start" });
       yield* runtime.interruptTurn();
 
-      NodeAssert.deepStrictEqual(yield* readInterruptRequests, [
-        { threadId: "provider-thread-1", turnId: "started-turn-1" },
-      ]);
+      const requests = yield* readRequests;
+      NodeAssert.deepStrictEqual(requests.at(-1), {
+        method: "turn/interrupt",
+        params: { threadId: "provider-thread-1", turnId: "started-turn-1" },
+      });
       yield* runtime.close;
     }),
   );
 
-  it.effect("keeps the last started turn id after a divergent turn/start response", () =>
+  it.effect("steers into the confirmed active turn", () =>
     Effect.gen(function* () {
-      const { runtime, readInterruptRequests } = yield* makeHarness();
-      yield* runtime.sendTurn({ input: "start" });
+      const { runtime, readRequests } = yield* makeHarness();
+      const first = yield* runtime.sendTurn({ input: "start" });
       const second = yield* runtime.sendTurn({ input: "mid-turn input" });
-      NodeAssert.equal(second.turnId, TurnId.make("phantom-turn-2"));
-      NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("phantom-turn-2"));
 
-      yield* runtime.interruptTurn();
+      NodeAssert.equal(first.turnId, TurnId.make("started-turn-1"));
+      NodeAssert.equal(first.steeredIntoActiveTurn, undefined);
+      NodeAssert.equal(second.turnId, TurnId.make("started-turn-1"));
+      NodeAssert.equal(second.steeredIntoActiveTurn, true);
+      NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("started-turn-1"));
 
-      NodeAssert.deepStrictEqual(yield* readInterruptRequests, [
-        { threadId: "provider-thread-1", turnId: "started-turn-1" },
-      ]);
+      const requests = yield* readRequests;
+      NodeAssert.deepStrictEqual(
+        requests.map((request) => request.method),
+        ["turn/start", "turn/steer"],
+      );
+      NodeAssert.deepStrictEqual(requests[1], {
+        method: "turn/steer",
+        params: {
+          threadId: "provider-thread-1",
+          expectedTurnId: "started-turn-1",
+          input: [{ type: "text", text: "mid-turn input" }],
+        },
+      });
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("keeps the confirmed id when an older app-server absorbs turn/start", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeHarness("steer-unsupported");
+      yield* runtime.sendTurn({ input: "start" });
+      const result = yield* runtime.sendTurn({ input: "fallback input" });
+
+      NodeAssert.equal(result.turnId, TurnId.make("started-turn-1"));
+      NodeAssert.equal(result.steeredIntoActiveTurn, true);
+      NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("started-turn-1"));
+      NodeAssert.deepStrictEqual(
+        (yield* readRequests).map((request) => request.method),
+        ["turn/start", "turn/steer", "turn/start"],
+      );
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("never promotes an unsupported fallback response without turn/started", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeHarness("steer-unsupported-completed");
+      yield* runtime.sendTurn({ input: "start" });
+      const result = yield* runtime.sendTurn({ input: "fallback near completion" });
+
+      NodeAssert.equal(result.turnId, TurnId.make("started-turn-1"));
+      NodeAssert.equal(result.steeredIntoActiveTurn, true);
+      NodeAssert.equal((yield* runtime.getSession).activeTurnId, undefined);
+      NodeAssert.deepStrictEqual(
+        (yield* readRequests).map((request) => request.method),
+        ["turn/start", "turn/steer", "turn/start"],
+      );
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("starts fresh when the active turn ended before the steer response", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeHarness("steer-no-active");
+      yield* runtime.sendTurn({ input: "start" });
+      const result = yield* runtime.sendTurn({ input: "fresh input" });
+
+      NodeAssert.equal(result.turnId, TurnId.make("fresh-turn-2"));
+      NodeAssert.equal(result.steeredIntoActiveTurn, undefined);
+      NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("fresh-turn-2"));
+      NodeAssert.deepStrictEqual(
+        (yield* readRequests).map((request) => request.method),
+        ["turn/start", "turn/steer", "turn/start"],
+      );
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("does not start a phantom turn when another active id is reported", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeHarness("steer-different-active");
+      yield* runtime.sendTurn({ input: "start" });
+      const error = yield* runtime.sendTurn({ input: "do not replay" }).pipe(Effect.flip);
+
+      NodeAssert.ok(isCodexAppServerRequestError(error));
+      NodeAssert.match(error.errorMessage, /but found `different-turn`/);
+      NodeAssert.deepStrictEqual(
+        (yield* readRequests).map((request) => request.method),
+        ["turn/start", "turn/steer"],
+      );
       yield* runtime.close;
     }),
   );

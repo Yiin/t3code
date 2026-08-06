@@ -473,6 +473,37 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect("surfaces the runtime steering result", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-steered-result");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.sendTurnImpl.mockResolvedValueOnce({
+        threadId,
+        turnId: asTurnId("active-turn"),
+        steeredIntoActiveTurn: true,
+      });
+
+      const result = yield* adapter.sendTurn({
+        threadId,
+        input: "steer",
+        attachments: [],
+      });
+
+      NodeAssert.deepStrictEqual(result, {
+        threadId,
+        turnId: asTurnId("active-turn"),
+        steeredIntoActiveTurn: true,
+      });
+    }),
+  );
+
   it.effect("passes configured launch args into the session runtime", () => {
     const runtimeFactory = makeRuntimeFactory();
     const layer = Layer.effect(

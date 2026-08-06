@@ -1604,6 +1604,7 @@ export function makeOpenCodeAdapter(
       return {
         threadId: input.threadId,
         turnId,
+        ...(steeringTurnId !== undefined ? { steeredIntoActiveTurn: true } : {}),
         // Re-surface the durable cursor on every turn so the persisted binding
         // is refreshed alongside last-seen/runtime state (mirrors Grok/Codex).
         ...(context.session.resumeCursor !== undefined

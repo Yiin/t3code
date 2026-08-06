@@ -3,6 +3,7 @@
 import * as NodeFS from "node:fs";
 
 const requestLogPath = process.env.T3_CODEX_RUNTIME_REQUEST_LOG_PATH;
+const scenario = process.env.T3_CODEX_RUNTIME_SCENARIO ?? "steer-success";
 const providerThreadId = "provider-thread-1";
 const startedTurnId = "started-turn-1";
 let turnStartCount = 0;
@@ -13,6 +14,16 @@ function writeMessage(message: unknown): void {
 
 function respond(id: number | string, result: unknown): void {
   writeMessage({ id, result });
+}
+
+function respondError(id: number | string, code: number, message: string): void {
+  writeMessage({ id, error: { code, message } });
+}
+
+function logRequest(method: string, params: unknown): void {
+  if (requestLogPath) {
+    NodeFS.appendFileSync(requestLogPath, `${JSON.stringify({ method, params })}\n`, "utf8");
+  }
 }
 
 function makeTurn(id: string) {
@@ -61,24 +72,61 @@ function handleRequest(message: Record<string, unknown>): void {
       });
       return;
     case "turn/start": {
+      logRequest(method, message.params);
       turnStartCount += 1;
-      const responseTurnId = turnStartCount === 1 ? startedTurnId : "phantom-turn-2";
-      if (turnStartCount === 1) {
+      const responseTurnId =
+        turnStartCount === 1
+          ? startedTurnId
+          : scenario.startsWith("steer-unsupported")
+            ? "phantom-turn-2"
+            : "fresh-turn-2";
+      if (turnStartCount === 1 || !scenario.startsWith("steer-unsupported")) {
         writeMessage({
           method: "turn/started",
           params: {
             threadId: providerThreadId,
-            turn: makeTurn(startedTurnId),
+            turn: makeTurn(responseTurnId),
+          },
+        });
+      }
+      if (turnStartCount === 2 && scenario === "steer-unsupported-completed") {
+        writeMessage({
+          method: "turn/completed",
+          params: {
+            threadId: providerThreadId,
+            turn: { ...makeTurn(startedTurnId), status: "completed" },
           },
         });
       }
       respond(id, { turn: makeTurn(responseTurnId) });
       return;
     }
-    case "turn/interrupt":
-      if (requestLogPath) {
-        NodeFS.appendFileSync(requestLogPath, `${JSON.stringify(message.params)}\n`, "utf8");
+    case "turn/steer":
+      logRequest(method, message.params);
+      if (scenario.startsWith("steer-unsupported")) {
+        respondError(
+          id,
+          -32600,
+          "Invalid request: unknown variant `turn/steer`, expected one of `initialize`, `thread/start`",
+        );
+        return;
       }
+      if (scenario === "steer-no-active") {
+        respondError(id, -32600, `no active turn found for thread ${providerThreadId}`);
+        return;
+      }
+      if (scenario === "steer-different-active") {
+        respondError(
+          id,
+          -32600,
+          `expected active turn id \`${startedTurnId}\` but found \`different-turn\``,
+        );
+        return;
+      }
+      respond(id, { turnId: startedTurnId });
+      return;
+    case "turn/interrupt":
+      logRequest(method, message.params);
       respond(id, {});
       return;
     default:

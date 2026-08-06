@@ -27,6 +27,7 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -59,6 +60,26 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "unknown thread",
   "does not exist",
 ];
+
+function isUnsupportedTurnSteerError(error: CodexSessionRuntimeError): boolean {
+  if (error._tag !== "CodexAppServerRequestError") {
+    return false;
+  }
+  if (error.code === -32601) {
+    return true;
+  }
+  const message = error.errorMessage.toLowerCase();
+  return (
+    error.code === -32600 && message.includes("unknown variant") && message.includes("turn/steer")
+  );
+}
+
+function isNoActiveTurnSteerError(error: CodexSessionRuntimeError): boolean {
+  if (error._tag !== "CodexAppServerRequestError" || error.code !== -32600) {
+    return false;
+  }
+  return /^no active turn\b/i.test(error.errorMessage);
+}
 
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
@@ -709,6 +730,7 @@ export const makeCodexSessionRuntime = (
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const lastStartedTurnIdRef = yield* Ref.make<TurnId | undefined>(undefined);
+    const sendTurnSemaphore = yield* Semaphore.make(1);
     const closedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
@@ -925,15 +947,26 @@ export const makeCodexSessionRuntime = (
           if (providerThreadId && payload.threadId !== providerThreadId) {
             return Effect.void;
           }
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
-            activeTurnId: undefined,
-            ...(lastError ? { lastError } : {}),
-          });
+          return Ref.get(lastStartedTurnIdRef).pipe(
+            Effect.flatMap((lastStartedTurnId) => {
+              if (lastStartedTurnId !== TurnId.make(payload.turn.id)) {
+                return Effect.void;
+              }
+              const lastError =
+                payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
+                  ? payload.turn.error.message
+                  : undefined;
+              return Ref.set(lastStartedTurnIdRef, undefined).pipe(
+                Effect.andThen(
+                  updateSession(sessionRef, {
+                    status: payload.turn.status === "failed" ? "error" : "ready",
+                    activeTurnId: undefined,
+                    ...(lastError ? { lastError } : {}),
+                  }),
+                ),
+              );
+            }),
+          );
         }),
       ),
     );
@@ -1251,6 +1284,7 @@ export const makeCodexSessionRuntime = (
       }
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
+      yield* Ref.set(lastStartedTurnIdRef, undefined);
       yield* updateSession(sessionRef, {
         status: "closed",
         activeTurnId: undefined,
@@ -1293,31 +1327,74 @@ export const makeCodexSessionRuntime = (
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
           });
-          const rawResponse = yield* client.raw.request("turn/start", params);
-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-                "decode-response-payload",
-                error,
-                { method: "turn/start" },
+          const requestTurnStart = Effect.gen(function* () {
+            const rawResponse = yield* client.raw.request("turn/start", params);
+            const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
+              Effect.mapError((error) =>
+                CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                  "decode-response-payload",
+                  error,
+                  { method: "turn/start" },
+                ),
               ),
-            ),
-          );
-          const turnId = TurnId.make(response.turn.id);
-          yield* updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: turnId,
-            ...(normalizedModel ? { model: normalizedModel } : {}),
+            );
+            return TurnId.make(response.turn.id);
           });
-          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
-          return {
-            threadId: options.threadId,
-            turnId,
-            ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
-              : {}),
-          } satisfies ProviderTurnStartResult;
-        }),
+          const makeResult = (turnId: TurnId, steeredIntoActiveTurn = false) =>
+            Effect.gen(function* () {
+              const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+              return {
+                threadId: options.threadId,
+                turnId,
+                ...(steeredIntoActiveTurn ? { steeredIntoActiveTurn: true } : {}),
+                ...(resumedProviderThreadId
+                  ? { resumeCursor: { threadId: resumedProviderThreadId } }
+                  : {}),
+              } satisfies ProviderTurnStartResult;
+            });
+          const finishFreshTurn = (turnId: TurnId) =>
+            updateSession(sessionRef, {
+              status: "running",
+              activeTurnId: turnId,
+              ...(normalizedModel ? { model: normalizedModel } : {}),
+            }).pipe(Effect.andThen(makeResult(turnId)));
+          const startFreshTurn = requestTurnStart.pipe(Effect.flatMap(finishFreshTurn));
+
+          const session = yield* Ref.get(sessionRef);
+          const lastStartedTurnId = yield* Ref.get(lastStartedTurnIdRef);
+          if (session.status !== "running" || lastStartedTurnId === undefined) {
+            return yield* startFreshTurn;
+          }
+
+          return yield* client
+            .request("turn/steer", {
+              threadId: providerThreadId,
+              expectedTurnId: lastStartedTurnId,
+              input: params.input,
+            })
+            .pipe(
+              Effect.flatMap(() => makeResult(lastStartedTurnId, true)),
+              Effect.catch((error) => {
+                if (isUnsupportedTurnSteerError(error)) {
+                  return requestTurnStart.pipe(
+                    Effect.flatMap((responseTurnId) =>
+                      Ref.get(lastStartedTurnIdRef).pipe(
+                        Effect.flatMap((currentTurnId) =>
+                          currentTurnId === responseTurnId
+                            ? makeResult(responseTurnId)
+                            : makeResult(lastStartedTurnId, true),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+                if (isNoActiveTurnSteerError(error)) {
+                  return startFreshTurn;
+                }
+                return Effect.fail(error);
+              }),
+            );
+        }).pipe((effect) => sendTurnSemaphore.withPermit(effect)),
       interruptTurn: (turnId) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
@@ -1347,6 +1424,7 @@ export const makeCodexSessionRuntime = (
             threadId: providerThreadId,
             numTurns,
           });
+          yield* Ref.set(lastStartedTurnIdRef, undefined);
           yield* updateSession(sessionRef, {
             status: "ready",
             activeTurnId: undefined,
