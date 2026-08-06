@@ -1173,6 +1173,54 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("replaces ready checkpoint files without changing its identity", () => {
+      const threadWithCheckpoint: OrchestrationThread = {
+        ...baseThread,
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("ref-1"),
+            status: "ready",
+            files: [{ path: "OLD.md", kind: "modified", additions: 1, deletions: 0 }],
+            assistantMessageId: MessageId.make("msg-first"),
+            completedAt: "2026-04-01T11:59:00.000Z",
+          },
+        ],
+      };
+      const result = applyThreadDetailEvent(threadWithCheckpoint, {
+        ...baseEventFields,
+        sequence: 13,
+        occurredAt: "2026-04-01T12:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-diff-completed",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnId: TurnId.make("turn-1"),
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("ref-1"),
+          status: "ready",
+          files: [{ path: "NEW.md", kind: "modified", additions: 2, deletions: 0 }],
+          assistantMessageId: MessageId.make("msg-later"),
+          completedAt: "2026-04-01T12:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.checkpoints).toEqual([
+          expect.objectContaining({
+            turnId: "turn-1",
+            checkpointTurnCount: 1,
+            checkpointRef: "ref-1",
+            assistantMessageId: "msg-first",
+            files: [{ path: "NEW.md", kind: "modified", additions: 2, deletions: 0 }],
+          }),
+        ]);
+      }
+    });
+
     it("uses the first stored assistant message for an initial synthetic diff", () => {
       const messageResult = applyThreadDetailEvent(baseThread, {
         ...baseEventFields,

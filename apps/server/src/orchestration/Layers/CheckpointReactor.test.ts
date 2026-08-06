@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -28,6 +29,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { TestClock } from "effect/testing";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
@@ -49,6 +51,10 @@ import {
 } from "../Services/OrchestrationEngine.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  RuntimeReceiptBus,
+  type OrchestrationRuntimeReceipt,
+} from "../Services/RuntimeReceiptBus.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -282,6 +288,9 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly receiptCalls?: Array<OrchestrationRuntimeReceipt>;
+    readonly startReactor?: boolean;
+    readonly useTestClock?: boolean;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -327,10 +336,19 @@ describe("CheckpointReactor", () => {
       streamStatus: () => Stream.empty,
     });
 
-    const layer = CheckpointReactorLive.pipe(
+    const receiptBusLayer = options?.receiptCalls
+      ? Layer.succeed(RuntimeReceiptBus, {
+          publish: (receipt) =>
+            Effect.sync(() => {
+              options.receiptCalls?.push(receipt);
+            }),
+          streamEventsForTest: Stream.empty,
+        })
+      : RuntimeReceiptBusLive;
+    const liveLayer = CheckpointReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
-      Layer.provideMerge(RuntimeReceiptBusLive),
+      Layer.provideMerge(receiptBusLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
@@ -345,6 +363,9 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(ServerConfigLayer),
       Layer.provideMerge(NodeServices.layer),
     );
+    const layer = options?.useTestClock
+      ? liveLayer.pipe(Layer.provideMerge(TestClock.layer()))
+      : liveLayer;
 
     runtime = ManagedRuntime.make(layer);
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
@@ -354,7 +375,10 @@ describe("CheckpointReactor", () => {
       Effect.service(CheckpointStore.CheckpointStore),
     );
     scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    const start = () => Effect.runPromise(reactor.start().pipe(Scope.provide(scope!)));
+    if (options?.startReactor ?? true) {
+      await start();
+    }
     const drain = () => Effect.runPromise(reactor.drain);
 
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -419,8 +443,101 @@ describe("CheckpointReactor", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       provider,
       cwd,
+      start,
       drain,
+      adjustClock: (duration: Duration.Input) => runtime!.runPromise(TestClock.adjust(duration)),
     };
+  }
+
+  type Harness = Awaited<ReturnType<typeof createHarness>>;
+
+  async function setThreadSession(
+    harness: Harness,
+    input: {
+      readonly status: "ready" | "running";
+      readonly activeTurnId: TurnId | null;
+      readonly commandId: string;
+    },
+  ) {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(input.commandId),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: input.status,
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: input.activeTurnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+  }
+
+  async function seedCheckpoint(
+    harness: Harness,
+    input: {
+      readonly turnId: TurnId;
+      readonly status: "ready" | "missing";
+      readonly assistantMessageId: MessageId;
+      readonly commandId: string;
+    },
+  ) {
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make(input.commandId),
+        threadId: ThreadId.make("thread-1"),
+        turnId: input.turnId,
+        completedAt: "2026-01-01T00:00:01.000Z",
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+        status: input.status,
+        files: [],
+        assistantMessageId: input.assistantMessageId,
+        checkpointTurnCount: 1,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+  }
+
+  async function sendAssistantMessage(
+    harness: Harness,
+    input: { readonly turnId: TurnId; readonly messageId: string; readonly commandId: string },
+  ) {
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make(input.commandId),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make(input.messageId),
+        turnId: input.turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+  }
+
+  async function readEvents(harness: Harness) {
+    return Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((events) => Array.from(events)),
+      ),
+    );
+  }
+
+  async function settleReactor(harness: Harness) {
+    await Effect.runPromise(Effect.sleep("5 millis"));
+    await harness.drain();
+  }
+
+  async function advanceRefreshTimer(harness: Harness) {
+    await Effect.runPromise(Effect.sleep("5 millis"));
+    await harness.adjustClock("25 seconds");
+    await harness.drain();
   }
 
   it("captures pre-turn baseline on turn.started and post-turn checkpoint on turn.completed", async () => {
@@ -545,6 +662,239 @@ describe("CheckpointReactor", () => {
     expect(thread.checkpoints[0]).toMatchObject({
       checkpointTurnCount: 1,
       assistantMessageId: "message-first-assistant",
+    });
+  });
+
+  it("coalesces assistant messages into one trailing checkpoint refresh", async () => {
+    const receipts: OrchestrationRuntimeReceipt[] = [];
+    const harness = await createHarness({
+      receiptCalls: receipts,
+      useTestClock: true,
+    });
+    const turnId = asTurnId("turn-refresh");
+    const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1);
+    const assistantMessageId = MessageId.make("message-anchor");
+
+    await setThreadSession(harness, {
+      status: "running",
+      activeTurnId: turnId,
+      commandId: "cmd-refresh-running",
+    });
+    await seedCheckpoint(harness, {
+      turnId,
+      status: "ready",
+      assistantMessageId,
+      commandId: "cmd-refresh-seed",
+    });
+    await settleReactor(harness);
+    receipts.length = 0;
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "NEW.md"), "new\n", "utf8");
+    for (const index of [1, 2, 3]) {
+      await sendAssistantMessage(harness, {
+        turnId,
+        messageId: `message-refresh-${index}`,
+        commandId: `cmd-refresh-message-${index}`,
+      });
+      await Effect.runPromise(Effect.sleep("5 millis"));
+      await harness.adjustClock("1 second");
+    }
+    await advanceRefreshTimer(harness);
+
+    const events = await readEvents(harness);
+    const refreshEvents = events.filter(
+      (event) => event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId,
+    );
+    expect(refreshEvents).toHaveLength(2);
+    expect(refreshEvents[1]?.payload).toMatchObject({
+      checkpointTurnCount: 1,
+      checkpointRef,
+      assistantMessageId,
+      status: "ready",
+    });
+    expect(refreshEvents[1]).toMatchObject({
+      payload: {
+        files: expect.arrayContaining([
+          { path: "NEW.md", kind: "modified", additions: 1, deletions: 0 },
+        ]),
+      },
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.checkpoints).toEqual([
+      expect.objectContaining({
+        turnId,
+        checkpointTurnCount: 1,
+        checkpointRef,
+        assistantMessageId,
+        status: "ready",
+      }),
+    ]);
+    expect(thread?.checkpoints[0]?.files).toContainEqual({
+      path: "NEW.md",
+      kind: "modified",
+      additions: 1,
+      deletions: 0,
+    });
+    expect(gitShowFileAtRef(harness.cwd, checkpointRef, "NEW.md")).toBe("new\n");
+    expect(
+      thread?.activities.filter((activity) => activity.kind === "checkpoint.captured"),
+    ).toEqual([]);
+    expect(receipts).toEqual([]);
+  });
+
+  it("cancels a pending refresh when the active turn settles", async () => {
+    const harness = await createHarness({ useTestClock: true });
+    const turnId = asTurnId("turn-settles");
+    const assistantMessageId = MessageId.make("message-settles-anchor");
+
+    await setThreadSession(harness, {
+      status: "running",
+      activeTurnId: turnId,
+      commandId: "cmd-settles-running",
+    });
+    await seedCheckpoint(harness, {
+      turnId,
+      status: "ready",
+      assistantMessageId,
+      commandId: "cmd-settles-seed",
+    });
+    await advanceRefreshTimer(harness);
+    await sendAssistantMessage(harness, {
+      turnId,
+      messageId: "message-before-settle",
+      commandId: "cmd-message-before-settle",
+    });
+    await Effect.runPromise(Effect.sleep("5 millis"));
+    await setThreadSession(harness, {
+      status: "ready",
+      activeTurnId: null,
+      commandId: "cmd-settles-ready",
+    });
+    await settleReactor(harness);
+    await harness.adjustClock("25 seconds");
+    await harness.drain();
+
+    const events = await readEvents(harness);
+    expect(
+      events.filter(
+        (event) => event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not refresh a missing checkpoint", async () => {
+    const harness = await createHarness({
+      startReactor: false,
+      useTestClock: true,
+    });
+    const turnId = asTurnId("turn-missing-refresh");
+
+    await setThreadSession(harness, {
+      status: "running",
+      activeTurnId: turnId,
+      commandId: "cmd-missing-running",
+    });
+    await seedCheckpoint(harness, {
+      turnId,
+      status: "missing",
+      assistantMessageId: MessageId.make("message-missing-anchor"),
+      commandId: "cmd-missing-seed",
+    });
+    await harness.start();
+    await sendAssistantMessage(harness, {
+      turnId,
+      messageId: "message-missing-refresh",
+      commandId: "cmd-message-missing-refresh",
+    });
+    await advanceRefreshTimer(harness);
+
+    const events = await readEvents(harness);
+    expect(
+      events.filter(
+        (event) => event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not refresh a checkpoint for a message from another turn", async () => {
+    const harness = await createHarness({ useTestClock: true });
+    const turnId = asTurnId("turn-primary-refresh");
+
+    await setThreadSession(harness, {
+      status: "running",
+      activeTurnId: turnId,
+      commandId: "cmd-primary-running",
+    });
+    await seedCheckpoint(harness, {
+      turnId,
+      status: "ready",
+      assistantMessageId: MessageId.make("message-primary-anchor"),
+      commandId: "cmd-primary-seed",
+    });
+    await advanceRefreshTimer(harness);
+    await sendAssistantMessage(harness, {
+      turnId: asTurnId("turn-other-refresh"),
+      messageId: "message-other-turn",
+      commandId: "cmd-message-other-turn",
+    });
+    await advanceRefreshTimer(harness);
+
+    const events = await readEvents(harness);
+    expect(
+      events.filter(
+        (event) => event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the primary refresh when an auxiliary turn completes", async () => {
+    const harness = await createHarness({ useTestClock: true });
+    const turnId = asTurnId("turn-primary-completion");
+
+    await setThreadSession(harness, {
+      status: "running",
+      activeTurnId: turnId,
+      commandId: "cmd-primary-completion-running",
+    });
+    await seedCheckpoint(harness, {
+      turnId,
+      status: "ready",
+      assistantMessageId: MessageId.make("message-primary-completion-anchor"),
+      commandId: "cmd-primary-completion-seed",
+    });
+    await advanceRefreshTimer(harness);
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "AUX.md"), "kept\n", "utf8");
+    await sendAssistantMessage(harness, {
+      turnId,
+      messageId: "message-before-aux-completion",
+      commandId: "cmd-message-before-aux-completion",
+    });
+    await Effect.runPromise(Effect.sleep("5 millis"));
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-aux-completed-during-refresh"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-aux-completion"),
+      payload: { state: "completed" },
+    });
+    await advanceRefreshTimer(harness);
+
+    const events = await readEvents(harness);
+    const refreshEvents = events.filter(
+      (event) => event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId,
+    );
+    expect(refreshEvents).toHaveLength(2);
+    expect(refreshEvents[1]).toMatchObject({
+      payload: {
+        files: expect.arrayContaining([
+          { path: "AUX.md", kind: "modified", additions: 1, deletions: 0 },
+        ]),
+      },
     });
   });
 

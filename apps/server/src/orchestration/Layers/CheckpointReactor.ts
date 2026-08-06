@@ -13,9 +13,11 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as PlatformError from "effect/PlatformError";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -37,6 +39,12 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const CHECKPOINT_REFRESH_DEBOUNCE = "25 seconds";
+
+interface PendingRefresh {
+  readonly turnId: TurnId;
+  readonly token: string;
+}
 
 type ReactorInput =
   | {
@@ -46,6 +54,12 @@ type ReactorInput =
   | {
       readonly source: "domain";
       readonly event: OrchestrationEvent;
+    }
+  | {
+      readonly source: "refresh";
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly token: string;
     };
 
 function toTurnId(value: string | undefined): TurnId | null {
@@ -89,6 +103,9 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const refreshTimers = yield* FiberMap.make<ThreadId, void, never>();
+  const pendingRefreshes = yield* Ref.make<ReadonlyMap<ThreadId, PendingRefresh>>(new Map());
+  let enqueueInternalRefresh: (input: ReactorInput) => Effect.Effect<void> = () => Effect.void;
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -233,11 +250,14 @@ const make = Effect.gen(function* () {
     readonly turnCount: number;
     readonly status: "ready" | "missing" | "error";
     readonly assistantMessageId: MessageId | undefined;
+    readonly mode: "initial" | "refresh";
+    readonly targetCheckpointRef?: CheckpointRef;
     readonly createdAt: string;
   }) {
     const fromTurnCount = Math.max(0, input.turnCount - 1);
     const fromCheckpointRef = checkpointRefForThreadTurn(input.threadId, fromTurnCount);
-    const targetCheckpointRef = checkpointRefForThreadTurn(input.threadId, input.turnCount);
+    const targetCheckpointRef =
+      input.targetCheckpointRef ?? checkpointRefForThreadTurn(input.threadId, input.turnCount);
 
     const fromCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: input.cwd,
@@ -319,41 +339,43 @@ const make = Effect.gen(function* () {
       checkpointTurnCount: input.turnCount,
       createdAt: input.createdAt,
     });
-    yield* receiptBus.publish({
-      type: "checkpoint.diff.finalized",
-      threadId: input.threadId,
-      turnId: input.turnId,
-      checkpointTurnCount: input.turnCount,
-      checkpointRef: targetCheckpointRef,
-      status: input.status,
-      createdAt: input.createdAt,
-    });
-    yield* receiptBus.publish({
-      type: "turn.processing.quiesced",
-      threadId: input.threadId,
-      turnId: input.turnId,
-      checkpointTurnCount: input.turnCount,
-      createdAt: input.createdAt,
-    });
-
-    yield* orchestrationEngine.dispatch({
-      type: "thread.activity.append",
-      commandId: yield* serverCommandId("checkpoint-captured-activity"),
-      threadId: input.threadId,
-      activity: {
-        id: EventId.make(yield* randomUUID),
-        tone: "info",
-        kind: "checkpoint.captured",
-        summary: "Checkpoint captured",
-        payload: {
-          turnCount: input.turnCount,
-          status: input.status,
-        },
+    if (input.mode === "initial") {
+      yield* receiptBus.publish({
+        type: "checkpoint.diff.finalized",
+        threadId: input.threadId,
         turnId: input.turnId,
+        checkpointTurnCount: input.turnCount,
+        checkpointRef: targetCheckpointRef,
+        status: input.status,
         createdAt: input.createdAt,
-      },
-      createdAt: input.createdAt,
-    });
+      });
+      yield* receiptBus.publish({
+        type: "turn.processing.quiesced",
+        threadId: input.threadId,
+        turnId: input.turnId,
+        checkpointTurnCount: input.turnCount,
+        createdAt: input.createdAt,
+      });
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: yield* serverCommandId("checkpoint-captured-activity"),
+        threadId: input.threadId,
+        activity: {
+          id: EventId.make(yield* randomUUID),
+          tone: "info",
+          kind: "checkpoint.captured",
+          summary: "Checkpoint captured",
+          payload: {
+            turnCount: input.turnCount,
+            status: input.status,
+          },
+          turnId: input.turnId,
+          createdAt: input.createdAt,
+        },
+        createdAt: input.createdAt,
+      });
+    }
   });
 
   // Captures a real git checkpoint when a turn completes via a runtime event.
@@ -417,6 +439,7 @@ const make = Effect.gen(function* () {
         turnCount: nextTurnCount,
         status: checkpointStatusFromRuntime(event.payload.state),
         assistantMessageId: undefined,
+        mode: "initial",
         createdAt: event.createdAt,
       });
     },
@@ -480,7 +503,143 @@ const make = Effect.gen(function* () {
       turnCount: checkpointTurnCount,
       status: "ready",
       assistantMessageId: event.payload.assistantMessageId ?? undefined,
+      mode: "initial",
       createdAt: event.payload.completedAt,
+    });
+  });
+
+  const cancelPendingRefresh = Effect.fn("cancelPendingRefresh")(function* (
+    threadId: ThreadId,
+    turnId?: TurnId,
+  ) {
+    const pending = (yield* Ref.get(pendingRefreshes)).get(threadId);
+    if (!pending || (turnId !== undefined && !sameId(pending.turnId, turnId))) {
+      return;
+    }
+    yield* Ref.update(pendingRefreshes, (current) => {
+      const currentPending = current.get(threadId);
+      if (!currentPending || currentPending.token !== pending.token) {
+        return current;
+      }
+      const next = new Map(current);
+      next.delete(threadId);
+      return next;
+    });
+    yield* FiberMap.remove(refreshTimers, threadId);
+  });
+
+  const scheduleCheckpointRefresh = Effect.fn("scheduleCheckpointRefresh")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.message-sent" }>,
+  ) {
+    if (
+      event.payload.role !== "assistant" ||
+      event.payload.streaming ||
+      event.payload.turnId === null
+    ) {
+      return;
+    }
+
+    const thread = yield* resolveThreadDetail(event.payload.threadId);
+    if (
+      !thread ||
+      thread.session?.status !== "running" ||
+      !sameId(thread.session.activeTurnId, event.payload.turnId)
+    ) {
+      return;
+    }
+
+    const checkpoint = thread.checkpoints.find(
+      (entry) => entry.turnId === event.payload.turnId && entry.status === "ready",
+    );
+    if (
+      !checkpoint ||
+      checkpoint.assistantMessageId === null ||
+      isSyntheticAssistantMessageId(checkpoint.assistantMessageId)
+    ) {
+      return;
+    }
+
+    const token = yield* randomUUID;
+    yield* Ref.update(pendingRefreshes, (current) => {
+      const next = new Map(current);
+      next.set(event.payload.threadId, { turnId: event.payload.turnId!, token });
+      return next;
+    });
+    yield* FiberMap.run(
+      refreshTimers,
+      event.payload.threadId,
+      Effect.sleep(CHECKPOINT_REFRESH_DEBOUNCE).pipe(
+        Effect.andThen(
+          enqueueInternalRefresh({
+            source: "refresh",
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+            token,
+          }),
+        ),
+      ),
+    );
+  });
+
+  const refreshCheckpoint = Effect.fn("refreshCheckpoint")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly token: string;
+  }) {
+    const pending = (yield* Ref.get(pendingRefreshes)).get(input.threadId);
+    if (!pending || pending.token !== input.token || !sameId(pending.turnId, input.turnId)) {
+      return;
+    }
+
+    yield* Ref.update(pendingRefreshes, (current) => {
+      const currentPending = current.get(input.threadId);
+      if (currentPending?.token !== input.token) {
+        return current;
+      }
+      const next = new Map(current);
+      next.delete(input.threadId);
+      return next;
+    });
+
+    const thread = yield* resolveThreadDetail(input.threadId);
+    if (
+      !thread ||
+      thread.session?.status !== "running" ||
+      !sameId(thread.session.activeTurnId, input.turnId)
+    ) {
+      return;
+    }
+
+    const checkpoint = thread.checkpoints.find(
+      (entry) => entry.turnId === input.turnId && entry.status === "ready",
+    );
+    const assistantMessageId = checkpoint?.assistantMessageId ?? undefined;
+    if (!checkpoint || !assistantMessageId || isSyntheticAssistantMessageId(assistantMessageId)) {
+      return;
+    }
+
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const checkpointCwd = yield* resolveCheckpointCwd({
+      threadId: input.threadId,
+      thread,
+      projects,
+      preferSessionRuntime: true,
+    });
+    if (!checkpointCwd) {
+      return;
+    }
+
+    yield* captureAndDispatchCheckpoint({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      thread,
+      cwd: checkpointCwd,
+      turnCount: checkpoint.checkpointTurnCount,
+      status: "ready",
+      assistantMessageId,
+      mode: "refresh",
+      targetCheckpointRef: checkpoint.checkpointRef,
+      createdAt: yield* nowIso,
     });
   });
 
@@ -748,10 +907,26 @@ const make = Effect.gen(function* () {
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
+      if (event.type === "thread.message-sent") {
+        yield* scheduleCheckpointRefresh(event);
+      }
+      return;
+    }
+
+    if (event.type === "thread.session-set") {
+      const pending = (yield* Ref.get(pendingRefreshes)).get(event.payload.threadId);
+      if (
+        pending &&
+        (event.payload.session.status !== "running" ||
+          !sameId(event.payload.session.activeTurnId, pending.turnId))
+      ) {
+        yield* cancelPendingRefresh(event.payload.threadId);
+      }
       return;
     }
 
     if (event.type === "thread.checkpoint-revert-requested") {
+      yield* cancelPendingRefresh(event.payload.threadId);
       yield* handleRevertRequested(event).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
@@ -798,6 +973,9 @@ const make = Effect.gen(function* () {
 
     if (event.type === "turn.completed") {
       const turnId = toTurnId(event.turnId);
+      if (turnId) {
+        yield* cancelPendingRefresh(event.threadId, turnId);
+      }
       yield* refreshLocalGitStatusFromTurnCompletion(event);
       yield* captureCheckpointFromTurnCompletion(event).pipe(
         Effect.catch((error) =>
@@ -821,8 +999,26 @@ const make = Effect.gen(function* () {
     void,
     CheckpointStoreError | OrchestrationDispatchError | PlatformError.PlatformError,
     never
-  > =>
-    input.source === "domain" ? processDomainEvent(input.event) : processRuntimeEvent(input.event);
+  > => {
+    if (input.source === "domain") {
+      return processDomainEvent(input.event);
+    }
+    if (input.source === "runtime") {
+      return processRuntimeEvent(input.event);
+    }
+    return refreshCheckpoint(input).pipe(
+      Effect.catch((error) =>
+        Effect.flatMap(nowIso, (createdAt) =>
+          appendCaptureFailureActivity({
+            threadId: input.threadId,
+            turnId: input.turnId,
+            detail: error.message,
+            createdAt,
+          }).pipe(Effect.catch(() => Effect.void)),
+        ),
+      ),
+    );
+  };
 
   const processInputSafely = (input: ReactorInput) =>
     processInput(input).pipe(
@@ -832,13 +1028,14 @@ const make = Effect.gen(function* () {
         }
         return Effect.logWarning("checkpoint reactor failed to process input", {
           source: input.source,
-          eventType: input.event.type,
+          eventType: input.source === "refresh" ? "checkpoint.refresh" : input.event.type,
           cause: Cause.pretty(cause),
         });
       }),
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
+  enqueueInternalRefresh = worker.enqueue;
 
   const start: CheckpointReactorShape["start"] = Effect.fn("start")(function* () {
     yield* Effect.forkScoped(
@@ -846,6 +1043,7 @@ const make = Effect.gen(function* () {
         if (
           event.type !== "thread.turn-start-requested" &&
           event.type !== "thread.message-sent" &&
+          event.type !== "thread.session-set" &&
           event.type !== "thread.checkpoint-revert-requested" &&
           event.type !== "thread.turn-diff-completed"
         ) {
@@ -865,9 +1063,15 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const drain = Effect.gen(function* () {
+    yield* worker.drain;
+    yield* FiberMap.awaitEmpty(refreshTimers);
+    yield* worker.drain;
+  });
+
   return {
     start,
-    drain: worker.drain,
+    drain,
   } satisfies CheckpointReactorShape;
 });
 

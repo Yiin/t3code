@@ -26,7 +26,7 @@ export interface CheckpointReactorShape {
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
 
   /**
-   * Resolves when the internal processing queue is empty and idle.
+   * Resolves when scheduled refreshes finish and the processing queue is idle.
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
