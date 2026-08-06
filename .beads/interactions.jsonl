@@ -191,3 +191,5 @@
 {"id":"int-e8e431da2fe48ca21f705f43dd406cee","kind":"field_change","created_at":"2026-08-06T01:26:30.528138221Z","actor":"Yiin","issue_id":"t3code-66x.16","extra":{"field":"assignee","new_value":"","old_value":"Yiin"}}
 {"id":"int-ab39d3eb6a7c8c62591012eec4bb57d6","kind":"field_change","created_at":"2026-08-06T01:32:16.325529552Z","actor":"Yiin","issue_id":"t3code-66x.16","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-b9a7a180bd91ab18fc2ac3476f316d8e","kind":"field_change","created_at":"2026-08-06T01:32:16.326383494Z","actor":"Yiin","issue_id":"t3code-66x.16","extra":{"field":"assignee","new_value":"","old_value":"Yiin"}}
+{"id":"int-3a141c64290868740908b556d4158f6c","kind":"field_change","created_at":"2026-08-06T01:36:32.675077387Z","actor":"Yiin","issue_id":"t3code-66x.16","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
+{"id":"int-f344dd68f28c1d89fbc5d004c6d9eac0","kind":"field_change","created_at":"2026-08-06T01:36:32.675224906Z","actor":"Yiin","issue_id":"t3code-66x.16","extra":{"field":"assignee","new_value":"","old_value":"Yiin"}}
