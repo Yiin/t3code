@@ -27,6 +27,7 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -1260,7 +1261,7 @@ const make = Effect.gen(function* () {
       if (!currentSubagent || !isFreshRunningSubagent(currentSubagent, currentTimeMillis)) {
         return;
       }
-      const createdAt = new Date(currentTimeMillis).toISOString();
+      const createdAt = DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis));
       yield* appendSubagentStopActivity({
         threadId: event.payload.threadId,
         kind: SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND,

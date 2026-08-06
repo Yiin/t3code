@@ -4,6 +4,7 @@ import {
   ProviderInstanceId,
   RUNNING_SUBAGENT_FRESHNESS_MS,
   SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+  SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND,
   ThreadId,
   TurnId,
   type OrchestrationReadModel,
@@ -93,6 +94,14 @@ const steerCommand = (createdAt: string) => ({
   createdAt,
 });
 
+const stopCommand = (createdAt: string) => ({
+  type: "thread.subagent.stop" as const,
+  commandId: CommandId.make("stop-1"),
+  threadId: THREAD_ID,
+  subagentId: SUBAGENT_ID,
+  createdAt,
+});
+
 it.layer(NodeServices.layer)("subagent steer decider", (it) => {
   it.effect("emits only the requested activity for a fresh running subagent", () =>
     Effect.gen(function* () {
@@ -158,6 +167,76 @@ it.layer(NodeServices.layer)("subagent steer decider", (it) => {
       const now = DateTime.formatIso(yield* DateTime.now);
       const error = yield* decideOrchestrationCommand({
         command: steerCommand(now),
+        readModel: makeReadModel({ archivedAt: now, subagentUpdatedAt: now }),
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("subagent stop decider", (it) => {
+  it.effect("emits the requested activity for a fresh running subagent", () =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const result = yield* decideOrchestrationCommand({
+        command: stopCommand("2001-01-01T00:00:00.000Z"),
+        readModel: makeReadModel({ subagentUpdatedAt: now }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe("thread.activity-appended");
+      if (events[0]?.type === "thread.activity-appended") {
+        expect(events[0].payload.activity.kind).toBe(SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND);
+        expect(events[0].payload.activity.payload).toEqual({
+          subagentId: SUBAGENT_ID,
+          stopId: CommandId.make("stop-1"),
+        });
+        expect(events[0].payload.activity.turnId).toBe(TURN_ID);
+      }
+    }),
+  );
+
+  it.effect("rejects a missing subagent", () =>
+    Effect.gen(function* () {
+      const error = yield* decideOrchestrationCommand({
+        command: stopCommand(DateTime.formatIso(yield* DateTime.now)),
+        readModel: makeReadModel({ includeSubagent: false }),
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
+  it.effect("rejects a completed subagent", () =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const error = yield* decideOrchestrationCommand({
+        command: stopCommand(now),
+        readModel: makeReadModel({ subagentStatus: "completed", subagentUpdatedAt: now }),
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
+  it.effect("uses the server clock to reject a stale subagent", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const staleAt = DateTime.formatIso(
+        DateTime.subtractDuration(now, Duration.millis(RUNNING_SUBAGENT_FRESHNESS_MS + 1)),
+      );
+      const error = yield* decideOrchestrationCommand({
+        command: stopCommand("2099-01-01T00:00:00.000Z"),
+        readModel: makeReadModel({ subagentUpdatedAt: staleAt }),
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
+  it.effect("rejects an archived thread", () =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const error = yield* decideOrchestrationCommand({
+        command: stopCommand(now),
         readModel: makeReadModel({ archivedAt: now, subagentUpdatedAt: now }),
       }).pipe(Effect.flip);
       expect(error._tag).toBe("OrchestrationCommandInvariantError");

@@ -10,6 +10,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  SUBAGENT_STOP_ESCALATION_GRACE_MS,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -24,12 +25,14 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -154,6 +157,7 @@ describe("ProviderCommandReactor", () => {
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
     readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
+    readonly useTestClock?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -361,7 +365,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
-    const layer = ProviderCommandReactorLive.pipe(
+    const liveLayer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -395,6 +399,10 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
+    const layer =
+      input?.useTestClock === true
+        ? liveLayer.pipe(Layer.provideMerge(TestClock.layer()))
+        : liveLayer;
     runtime = ManagedRuntime.make(layer);
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
@@ -450,6 +458,9 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions,
       stateDir,
       drain,
+      adjustClock: (duration: Duration.Input) =>
+        managedRuntime.runPromise(TestClock.adjust(duration)),
+      setClock: (instant: number) => managedRuntime.runPromise(TestClock.setTime(instant)),
     };
   }
 
@@ -517,6 +528,195 @@ describe("ProviderCommandReactor", () => {
 
     return { harness, now };
   }
+
+  async function prepareSubagentStopHarness(input?: {
+    readonly includeProjectedSession?: boolean;
+  }) {
+    const harness = await createHarness({ useTestClock: true });
+    const nowMillis = Date.parse("2026-01-01T00:00:00.000Z");
+    await harness.setClock(nowMillis);
+    const now = DateTime.formatIso(DateTime.makeUnsafe(nowMillis));
+
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "ready",
+      runtimeMode: "approval-required",
+      model: "gpt-5-codex",
+      threadId: ThreadId.make("thread-1"),
+      resumeCursor: { opaque: "resume-stop" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    if (input?.includeProjectedSession !== false) {
+      await harness.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-subagent-stop"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+    }
+
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-stop-subagent-started"),
+      threadId: ThreadId.make("thread-1"),
+      activity: {
+        id: EventId.make("activity-stop-subagent-started"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Inspect parser task started",
+        payload: { taskId: "subagent-1", taskType: "subagent", detail: "Inspect parser" },
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      },
+      createdAt: now,
+    });
+
+    return { harness, now };
+  }
+
+  it("delivers a stop instruction and escalates a still-running subagent", async () => {
+    const { harness, now } = await prepareSubagentStopHarness();
+
+    await harness.dispatch({
+      type: "thread.subagent.stop",
+      commandId: CommandId.make("stop-1"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: ThreadId.make("thread-1"),
+      input:
+        "[Stop request for subagent subagent-1 (Inspect parser)]\n" +
+        "The user asked to stop this subagent now. End that work, collect what it completed, and report it. If it is still running in 30 seconds the whole turn will be interrupted.",
+    });
+
+    await harness.adjustClock(Duration.millis(SUBAGENT_STOP_ESCALATION_GRACE_MS));
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "subagent.stop.escalated"),
+    ).toMatchObject({
+      tone: "info",
+      payload: { subagentId: "subagent-1", stopId: "stop-1" },
+      turnId: asTurnId("turn-1"),
+    });
+  });
+
+  it("does not escalate when the subagent completes during the grace period", async () => {
+    const { harness, now } = await prepareSubagentStopHarness();
+    await harness.dispatch({
+      type: "thread.subagent.stop",
+      commandId: CommandId.make("stop-completed"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-stop-subagent-completed"),
+      threadId: ThreadId.make("thread-1"),
+      activity: {
+        id: EventId.make("activity-stop-subagent-completed"),
+        tone: "info",
+        kind: "task.completed",
+        summary: "Subagent completed",
+        payload: { taskId: "subagent-1", status: "completed" },
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      },
+      createdAt: now,
+    });
+
+    await harness.adjustClock(Duration.millis(SUBAGENT_STOP_ESCALATION_GRACE_MS));
+    await harness.drain();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.activities.some((activity) => activity.kind === "subagent.stop.escalated")).toBe(
+      false,
+    );
+  });
+
+  it("appends a failed stop activity when the thread has no projected session", async () => {
+    const { harness, now } = await prepareSubagentStopHarness({ includeProjectedSession: false });
+    await harness.dispatch({
+      type: "thread.subagent.stop",
+      commandId: CommandId.make("stop-no-session"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.subagent.stop.failed") ??
+        false
+      );
+    });
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.subagent.stop.failed"),
+    ).toMatchObject({
+      tone: "error",
+      payload: {
+        subagentId: "subagent-1",
+        stopId: "stop-no-session",
+        detail: "No active provider session is bound to this thread.",
+      },
+    });
+  });
+
+  it("arms one escalation timer for duplicate stop activity events", async () => {
+    const { harness, now } = await prepareSubagentStopHarness();
+    const appendRequested = (suffix: string) =>
+      harness.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`cmd-stop-duplicate-${suffix}`),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make(`activity-stop-duplicate-${suffix}`),
+          tone: "info",
+          kind: "subagent.stop.requested",
+          summary: "Stop requested",
+          payload: { subagentId: "subagent-1", stopId: "duplicate-stop" },
+          turnId: asTurnId("turn-1"),
+          createdAt: now,
+        },
+        createdAt: now,
+      });
+
+    await appendRequested("one");
+    await appendRequested("two");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.adjustClock(Duration.millis(SUBAGENT_STOP_ESCALATION_GRACE_MS));
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
+  });
 
   it("queues a subagent follow-up on the live parent session and appends delivery", async () => {
     const { harness, now } = await prepareSubagentSteerHarness();
