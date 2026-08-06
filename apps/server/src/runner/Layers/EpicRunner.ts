@@ -1232,12 +1232,21 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const runIteration = (input: {
       readonly run: EpicRun;
       readonly iterationIndex: number;
-    }): Effect.Effect<EpicIterationOutcome, EpicRunnerError> =>
+    }): Effect.Effect<
+      {
+        readonly outcome: EpicIterationOutcome;
+        readonly noCommitChildClosed: boolean;
+      },
+      EpicRunnerError
+    > =>
       Effect.gen(function* () {
         const run = input.run;
         const issueId = yield* selectReadyChild(run);
         if (issueId === null) {
-          return { kind: "backlog-empty", detail: null, report: null };
+          return {
+            outcome: { kind: "backlog-empty", detail: null, report: null },
+            noCommitChildClosed: false,
+          };
         }
         // Deterministic, and unique because iteration indices are never reused:
         // a crash cannot leave two threads competing for one iteration row. The
@@ -1462,7 +1471,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           detail: outcome.detail,
         });
 
-        return outcome;
+        return { outcome, noCommitChildClosed };
       });
 
     const backoffDelayMs = (consecutiveFailures: number) =>
@@ -1516,7 +1525,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             .pipe(Effect.mapError(storeError("getLatestIteration")));
           const iterationIndex = Option.isSome(latest) ? latest.value.iterationIndex + 1 : 0;
 
-          const outcome = yield* runIteration({ run, iterationIndex });
+          const { outcome, noCommitChildClosed } = yield* runIteration({ run, iterationIndex });
 
           const boundary = yield* withTransition(
             Effect.gen(function* () {
@@ -1587,6 +1596,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               }
 
               if (outcome.kind === "done") {
+                noCommitStreak = 0;
+                infraStreak = 0;
+                yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });
+                return LOOP_CONTINUE;
+              }
+
+              if (noCommitChildClosed) {
                 noCommitStreak = 0;
                 infraStreak = 0;
                 yield* saveRun({ ...settledRun, consecutiveFailures: 0, lastError: null });

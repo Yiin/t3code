@@ -2279,19 +2279,22 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("keeps a no-commit iteration completed when its child was closed in the turn", () => {
-    // A knowledge-only child ("Research: ...") legitimately produces no
-    // commit; the agent closing it is what vouches for the iteration.
+  it.live("keeps consecutive closed-child no-commit iterations out of the gutter", () => {
+    // Knowledge-only children ("Research: ...") legitimately produce no
+    // commits; closing each child is what vouches for both iterations.
     const harness = createHarness({
       script: [
         {
-          text: 'researched it\nRALPH_MSG: {"summary":"wrote findings","why":"knowledge child"}',
+          text: 'researched one\nRALPH_MSG: {"summary":"wrote first findings","why":"knowledge child"}',
+          head: "head-0",
+        },
+        {
+          text: 'researched two\nRALPH_MSG: {"summary":"wrote second findings","why":"knowledge child"}',
           head: "head-0",
         },
         { text: "RALPH_DONE", head: "head-0" },
       ],
-      readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
-      childStatuses: { "child-1": "closed" },
+      childStatuses: { "child-1": "closed", "child-2": "closed" },
     });
 
     return Effect.gen(function* () {
@@ -2299,16 +2302,62 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
       yield* settle;
 
-      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, null);
-      assert.strictEqual(harness.store.iterations[0]?.summary, "wrote findings");
-      // The closed child is left alone, mid-run and at the terminal sweep.
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "done");
+      assert.isFalse(harness.store.runs.get(run.runId)?.lastError?.startsWith("gutter:") ?? false);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => [
+          iteration.turnStatus,
+          iteration.failureReason,
+        ]),
+        [
+          ["completed", null],
+          ["completed", null],
+          ["completed", null],
+        ],
+      );
+      assert.deepStrictEqual(
+        harness.store.iterations.slice(0, 2).map((iteration) => iteration.summary),
+        ["wrote first findings", "wrote second findings"],
+      );
+      // Both closed children are left alone, mid-run and at the terminal sweep.
       assert.isFalse(
         harness.processRequests.some(
           (request) => request.command === "bd" && request.args[0] === "update",
         ),
       );
       assert.strictEqual(harness.childStatus("child-1"), "closed");
+      assert.strictEqual(harness.childStatus("child-2"), "closed");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("restarts the gutter streak after a closed-child no-commit iteration", () => {
+    const harness = createHarness({
+      script: [
+        { text: "closed research child", head: "head-0" },
+        { text: "first open child", head: "head-0" },
+        { text: "second open child", head: "head-0" },
+        { text: "should never run", head: "head-9" },
+      ],
+      childStatuses: {
+        "child-1": "closed",
+        "child-2": "in_progress",
+        "child-3": "in_progress",
+      },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(
+        harness.store.runs.get(run.runId)?.lastError,
+        "gutter: 2 iterations without a commit",
+      );
+      assert.strictEqual(harness.turnsStarted(), 3);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.turnStatus),
+        ["completed", "failed", "failed"],
+      );
     }).pipe(Effect.provide(harness.layer));
   });
 
