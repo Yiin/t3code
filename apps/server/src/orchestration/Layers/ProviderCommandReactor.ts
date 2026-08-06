@@ -1433,7 +1433,7 @@ const make = Effect.gen(function* () {
           : {}),
         runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
         activeTurnId: null,
-        lastError: thread.session?.lastError ?? null,
+        lastError: event.payload.reason ?? thread.session?.lastError ?? null,
         updatedAt: now,
       },
       createdAt: now,

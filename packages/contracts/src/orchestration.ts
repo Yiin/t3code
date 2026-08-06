@@ -1206,12 +1206,17 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const OptionalThreadSessionStopReason = Schema.optionalKey(
+  TrimmedNonEmptyString.check(Schema.isMaxLength(1_024)),
+);
+
 const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,
   createdAt: IsoDateTime,
   preserveRunningSubagents: Schema.optionalKey(Schema.Literal(true)),
+  reason: OptionalThreadSessionStopReason,
 });
 
 const DispatchableClientOrchestrationCommand = Schema.Union([
@@ -1530,6 +1535,7 @@ export const ThreadRevertedPayload = Schema.Struct({
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   createdAt: IsoDateTime,
+  reason: OptionalThreadSessionStopReason,
 });
 
 export const ThreadSessionSetPayload = Schema.Struct({

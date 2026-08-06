@@ -13,6 +13,7 @@ import {
   DEFAULT_SESSION_REAP_THRESHOLDS,
   decideSessionReap,
   minSessionReapThresholdMs,
+  type SessionReapReason,
   type SessionReapThresholds,
 } from "../sessionReapPolicy.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
@@ -26,6 +27,30 @@ import { ProviderService } from "../Services/ProviderService.ts";
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const BOOT_RECONCILE_STOP_TIMEOUT = Duration.seconds(15);
 const BOOT_RECONCILE_STOP_POLL_INTERVAL = Duration.millis(50);
+const BOOT_RECONCILE_STOP_REASON =
+  "session interrupted: server restarted while the session was running";
+
+const periodicStopReason = (reason: SessionReapReason): string => {
+  switch (reason) {
+    case "no_live_session":
+      return "session reaped: no live provider process";
+    case "stale_active_turn":
+      return "session reaped: active turn exceeded its inactivity limit";
+    case "interactive_idle_threshold":
+      return "session reaped: interactive session exceeded its idle limit";
+    case "epic_run_iteration_idle_threshold":
+      return "session reaped: epic run iteration exceeded its idle limit";
+    case "settled_idle_threshold":
+      return "session reaped: settled session exceeded its idle limit";
+    case "active_pin_idle_threshold":
+      return "session reaped: keep-active session exceeded its idle limit";
+    case "session_stopped":
+    case "within_idle_threshold":
+    case "active_turn":
+    case "active_subagent":
+      throw new Error(`Cannot create a stop reason for non-reap decision: ${reason}`);
+  }
+};
 
 export interface ProviderSessionReaperLiveOptions {
   /** Back-compat shorthand: sets every per-kind threshold that is not set on its own. */
@@ -138,8 +163,9 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       readonly binding: ProviderRuntimeBindingWithMetadata;
       readonly commandId: string;
       readonly now: number;
+      readonly reason: string;
     }) {
-      const { binding, commandId, now } = input;
+      const { binding, commandId, now, reason } = input;
       // Stop through the `thread.session.stop` command path (decider ->
       // thread.session-stop-requested -> ProviderCommandReactor). Only that
       // path also stops the projected session and settles its active turn. A
@@ -151,6 +177,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           commandId: CommandId.make(commandId),
           threadId: binding.threadId,
           createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          reason,
         })
         .pipe(
           Effect.asVoid,
@@ -208,6 +235,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
             binding,
             commandId: `session-stop-for-boot-reconcile:${binding.threadId}:${now}`,
             now,
+            reason: BOOT_RECONCILE_STOP_REASON,
           }).pipe(
             Effect.andThen(waitForProjectedStop(binding.threadId)),
             Effect.andThen(stopBindingIfStillDead(binding)),
@@ -344,6 +372,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           binding,
           commandId: `session-stop-for-reap:${binding.threadId}:${now}`,
           now,
+          reason: periodicStopReason(decision.reason),
         }).pipe(
           Effect.tap(() =>
             Effect.logInfo("provider.session.reaped", {
