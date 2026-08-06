@@ -119,6 +119,7 @@ export function activeEpicRunForThread(
     }
     const referencesThread =
       candidate.currentThreadId === threadId ||
+      candidate.originThreadId === threadId ||
       candidate.threadRefs.some((reference) => reference.threadId === threadId);
     if (!referencesThread) {
       return latest;
