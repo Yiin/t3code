@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-skills=(plan-epic cook-epic cook-it ralph)
+skills=(plan-epic cook-epic cook-it ralph deploy)
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 agents_skills_dir="${HOME}/.agents/skills"
 

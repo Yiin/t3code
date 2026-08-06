@@ -1,0 +1,4 @@
+interface:
+  display_name: "T3 Code Deploy"
+  short_description: "Deploy T3 Code across all available hosts"
+  default_prompt: "Use $deploy to commit, push, build, and restart T3 Code on every available host."
