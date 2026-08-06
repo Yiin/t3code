@@ -1,6 +1,35 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { summarizeSubagentUsage } from "./SubagentInspectorPanel.logic";
+import type { WorkLogEntry } from "../../session-logic";
+import {
+  decodeSubagentTranscriptRow,
+  summarizeSubagentUsage,
+} from "./SubagentInspectorPanel.logic";
+
+function transcriptEntry(payload: unknown): WorkLogEntry {
+  return {
+    id: "text-1",
+    createdAt: "2026-08-06T12:00:00.000Z",
+    label: "Subagent text",
+    tone: "info",
+    sourceActivityKind: "subagent.text",
+    sourceActivityPayload: payload,
+  };
+}
+
+describe("decodeSubagentTranscriptRow", () => {
+  it("preserves the truncated marker", () => {
+    expect(
+      decodeSubagentTranscriptRow(
+        transcriptEntry({ parentToolUseId: "task-1", text: "Partial answer", truncated: true }),
+      ),
+    ).toEqual({ kind: "text", text: "Partial answer", truncated: true });
+  });
+
+  it("returns null for malformed payloads so the caller can render a generic row", () => {
+    expect(decodeSubagentTranscriptRow(transcriptEntry({ text: "Missing parent id" }))).toBeNull();
+  });
+});
 
 describe("summarizeSubagentUsage", () => {
   it("sums snake_case input and cache token fields", () => {

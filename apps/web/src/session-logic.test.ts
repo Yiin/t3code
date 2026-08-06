@@ -1915,6 +1915,50 @@ describe("deriveSubagentGroups", () => {
     expect(group?.prompt).toBe("Find every usage of deriveWorkLogEntries");
   });
 
+  it("keeps prose, thinking, and tool rows interleaved by sequence", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      ...makeClaudeSubagentSpawnActivities(),
+      makeActivity({
+        id: "subagent-text",
+        kind: "subagent.text",
+        sequence: 1,
+        payload: { parentToolUseId: "toolu_task", text: "I found the parser." },
+      }),
+      makeActivity({
+        id: "child-tool",
+        kind: "tool.completed",
+        sequence: 2,
+        payload: {
+          itemType: "command_execution",
+          parentToolUseId: "toolu_task",
+          title: "Terminal",
+          detail: "rg parser",
+        },
+      }),
+      makeActivity({
+        id: "subagent-thinking",
+        kind: "subagent.thinking",
+        sequence: 3,
+        payload: { parentToolUseId: "toolu_task", text: "Checking edge cases." },
+      }),
+    ];
+
+    const [group] = deriveSubagentGroups(deriveWorkLogEntries(activities), {
+      turnSettled: true,
+    });
+
+    expect(group?.children.map((child) => child.id)).toEqual([
+      "subagent-text",
+      "child-tool",
+      "subagent-thinking",
+    ]);
+    expect(group?.children.map((child) => child.sourceActivityKind)).toEqual([
+      "subagent.text",
+      "tool.completed",
+      "subagent.thinking",
+    ]);
+  });
+
   it("still produces a group with empty children when linkage fields are absent", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

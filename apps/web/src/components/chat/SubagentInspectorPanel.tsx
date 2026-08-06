@@ -15,7 +15,10 @@ import { cn } from "~/lib/utils";
 import ChatMarkdown from "../ChatMarkdown";
 import { capitalizeSubagentName, SubagentElapsed } from "./SubagentCard";
 import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
-import { summarizeSubagentUsage } from "./SubagentInspectorPanel.logic";
+import {
+  decodeSubagentTranscriptRow,
+  summarizeSubagentUsage,
+} from "./SubagentInspectorPanel.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { WorkEntryRow } from "./WorkEntryRow";
 
@@ -105,8 +108,12 @@ export function SubagentInspectorPanel({
           .filter((value): value is string => value !== null)
           .join(" · ")
       : null;
-  const toolCountLabel =
-    group.children.length === 1 ? "1 tool call" : group.children.length + " tool calls";
+  const toolCount = group.children.filter(
+    (child) =>
+      child.sourceActivityKind !== "subagent.text" &&
+      child.sourceActivityKind !== "subagent.thinking",
+  ).length;
+  const toolCountLabel = toolCount === 1 ? "1 tool call" : toolCount + " tool calls";
   const liveProgress =
     group.status === "running"
       ? [readModel?.lastProgressSummary, readModel?.lastToolName].filter(
@@ -186,14 +193,17 @@ export function SubagentInspectorPanel({
             <section>
               <p className="px-0.5 pb-0.5 font-medium text-[11px] text-muted-foreground/65">
                 {group.children.length === 1
-                  ? "1 tool call shown"
-                  : group.children.length + " tool calls shown"}
+                  ? "1 transcript entry"
+                  : group.children.length + " transcript entries"}
               </p>
               <div className="space-y-px">
                 {group.children.map((workEntry) => (
-                  <WorkEntryRow
+                  <SubagentTranscriptEntryRow
                     key={workEntry.id}
                     workEntry={workEntry}
+                    markdownCwd={markdownCwd}
+                    skills={skills}
+                    threadRef={threadRef}
                     workspaceRoot={workspaceRoot}
                     turnSettled={group.status !== "running"}
                   />
@@ -244,6 +254,62 @@ export function SubagentInspectorPanel({
           threadId={threadRef.threadId}
         />
       ) : null}
+    </div>
+  );
+}
+
+export function SubagentTranscriptEntryRow({
+  workEntry,
+  markdownCwd,
+  skills,
+  threadRef,
+  workspaceRoot,
+  turnSettled,
+}: {
+  workEntry: SubagentGroup["children"][number];
+  markdownCwd: string | undefined;
+  skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  threadRef: ScopedThreadRef;
+  workspaceRoot: string | undefined;
+  turnSettled: boolean;
+}) {
+  const transcriptRow = decodeSubagentTranscriptRow(workEntry);
+  if (!transcriptRow) {
+    return (
+      <WorkEntryRow workEntry={workEntry} workspaceRoot={workspaceRoot} turnSettled={turnSettled} />
+    );
+  }
+
+  const truncatedMarker = transcriptRow.truncated ? (
+    <span className="ms-1 text-[11px] italic text-muted-foreground/65">… truncated</span>
+  ) : null;
+
+  if (transcriptRow.kind === "thinking") {
+    return (
+      <details className="border-s border-border/45 ps-3 text-muted-foreground">
+        <summary className="cursor-pointer select-none py-1 text-xs italic">Thinking</summary>
+        <div className="pb-1 text-sm italic">
+          <ChatMarkdown
+            text={transcriptRow.text}
+            cwd={markdownCwd}
+            threadRef={threadRef}
+            skills={skills}
+          />
+          {truncatedMarker}
+        </div>
+      </details>
+    );
+  }
+
+  return (
+    <div className="border-s border-border/45 py-1 ps-3 text-sm text-muted-foreground">
+      <ChatMarkdown
+        text={transcriptRow.text}
+        cwd={markdownCwd}
+        threadRef={threadRef}
+        skills={skills}
+      />
+      {truncatedMarker}
     </div>
   );
 }

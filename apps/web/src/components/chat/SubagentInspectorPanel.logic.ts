@@ -1,3 +1,38 @@
+import {
+  decodeSubagentTranscriptActivityPayload,
+  SUBAGENT_TEXT_ACTIVITY_KIND,
+  SUBAGENT_THINKING_ACTIVITY_KIND,
+} from "@t3tools/contracts";
+import * as Option from "effect/Option";
+
+import type { WorkLogEntry } from "../../session-logic";
+
+export interface SubagentTranscriptRow {
+  kind: "text" | "thinking";
+  text: string;
+  truncated: boolean;
+}
+
+export function decodeSubagentTranscriptRow(entry: WorkLogEntry): SubagentTranscriptRow | null {
+  if (
+    entry.sourceActivityKind !== SUBAGENT_TEXT_ACTIVITY_KIND &&
+    entry.sourceActivityKind !== SUBAGENT_THINKING_ACTIVITY_KIND
+  ) {
+    return null;
+  }
+
+  const payload = Option.getOrUndefined(
+    decodeSubagentTranscriptActivityPayload(entry.sourceActivityPayload),
+  );
+  if (!payload) return null;
+
+  return {
+    kind: entry.sourceActivityKind === SUBAGENT_TEXT_ACTIVITY_KIND ? "text" : "thinking",
+    text: payload.text,
+    truncated: payload.truncated === true,
+  };
+}
+
 export interface SubagentUsageSummary {
   inputTokens: number | null;
   outputTokens: number | null;

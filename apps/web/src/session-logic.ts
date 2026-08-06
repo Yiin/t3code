@@ -93,6 +93,8 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /** Original activity payload for activity-specific transcript rendering. */
+  sourceActivityPayload?: unknown;
   /**
    * Provider tool-call id, from `payload.data.toolCallId` or (for subagent
    * spawns) parsed from the coalesced `tool-updated:{threadId}:{itemId}`
@@ -748,6 +750,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           ? "info"
           : activity.tone,
     activityKind: activity.kind,
+    sourceActivityPayload: activity.payload,
   };
   const requestKind = extractWorkLogRequestKind(payload);
   if (detail) {
@@ -943,7 +946,7 @@ export interface SubagentGroup {
   status: OrchestrationThreadSubagentStatus;
   startedAt: string;
   completedAt: string | null;
-  /** Tool rows that ran inside this subagent (via `parentToolUseId`); empty when linkage is absent. */
+  /** Transcript rows emitted inside this subagent (via `parentToolUseId`); empty when linkage is absent. */
   children: WorkLogEntry[];
   resultText: string | null;
   /** The Task tool input prompt; shown as a fallback when no children/result exist yet. */
