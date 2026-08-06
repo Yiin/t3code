@@ -22,6 +22,7 @@ import Animated, { FadeInDown, FadeOut } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
+import { ControlPill } from "../../components/ControlPill";
 import type { StatusTone } from "../../components/StatusPill";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
 import { CHAT_CONTENT_MAX_WIDTH, type LayoutVariant } from "../../lib/layout";
@@ -66,6 +67,8 @@ export interface ThreadDetailScreenProps {
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
   readonly selectedThreadQueueCount: number;
+  readonly runningSubagentCount: number;
+  readonly onOpenSubagents: (() => void) | null;
   readonly serverConfig: T3ServerConfig | null;
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
@@ -412,6 +415,21 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       onSubmit={props.onSubmitUserInput}
                     />
                   ) : null}
+                </Animated.View>
+              ) : null}
+              {props.runningSubagentCount > 0 ? (
+                <Animated.View
+                  className="items-center px-4 pb-3"
+                  entering={FadeInDown.duration(220)}
+                  exiting={FadeOut.duration(140)}
+                >
+                  <ControlPill
+                    icon={{ ios: "sparkles", android: "auto_awesome" }}
+                    label={`${props.runningSubagentCount} subagent${props.runningSubagentCount === 1 ? "" : "s"} working`}
+                    onPress={props.onOpenSubagents ?? undefined}
+                    disabled={props.onOpenSubagents === null}
+                    variant="pill"
+                  />
                 </Animated.View>
               ) : null}
             </View>

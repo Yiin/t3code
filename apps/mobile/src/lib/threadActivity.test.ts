@@ -13,10 +13,56 @@ import {
 
 import {
   buildThreadFeed,
+  deriveSubagentInspectorGroups,
   deriveThreadFeedPresentation,
+  deriveWorkLogEntries,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
+
+function makeSubagentParent(
+  overrides: Partial<OrchestrationThreadActivity> = {},
+): OrchestrationThreadActivity {
+  return makeActivity({
+    id: EventId.make("tool-updated:thread-1:tool-parent"),
+    kind: "tool.updated",
+    tone: "tool",
+    summary: "Task",
+    createdAt: "2026-04-01T00:00:01.000Z",
+    turnId: TurnId.make("turn-1"),
+    payload: {
+      itemType: "collab_agent_tool_call",
+      title: "Task",
+      status: "inProgress",
+      data: {
+        toolCallId: "tool-parent",
+        toolName: "Task",
+        input: {
+          prompt: "  Inspect the mobile feed  ",
+          subagent_type: "Explore",
+        },
+      },
+    },
+    ...overrides,
+  });
+}
+
+function makeSubagentChild(id: string, createdAt: string): OrchestrationThreadActivity {
+  return makeActivity({
+    id: EventId.make(id),
+    kind: "tool.completed",
+    tone: "tool",
+    summary: id,
+    createdAt,
+    turnId: TurnId.make("turn-1"),
+    payload: {
+      itemType: "command_execution",
+      title: id,
+      detail: `Run ${id}`,
+      parentToolUseId: "tool-parent",
+    },
+  });
+}
 
 function makeActivity(
   input: Partial<OrchestrationThreadActivity> &
@@ -57,6 +103,36 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("drops subagent child rows without affecting parent work rows", () => {
+    const parent = makeSubagentParent();
+    const child = makeSubagentChild("child-command", "2026-04-01T00:00:02.000Z");
+
+    expect(deriveWorkLogEntries([parent, child]).map((entry) => entry.id)).toEqual([parent.id]);
+    expect(
+      deriveWorkLogEntries([parent, child], { includeSubagentChildren: true }).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([parent.id, child.id]);
+  });
+
+  it("does not emit subagent child rows as top-level feed activities", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-child-filter"),
+      projectId: ProjectId.make("project-1"),
+      title: "Filtered child rows",
+      activities: [
+        makeSubagentParent(),
+        makeSubagentChild("child-command", "2026-04-01T00:00:02.000Z"),
+      ],
+    });
+
+    const topLevelActivityIds = buildThreadFeed(thread).flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities.map((activity) => activity.id) : [],
+    );
+    expect(topLevelActivityIds).toContain("tool-updated:thread-1:tool-parent");
+    expect(topLevelActivityIds).not.toContain("child-command");
+  });
+
   it("opens the feed with a truncation notice when activities were omitted", () => {
     const activity = makeActivity({
       id: EventId.make("activity-newest"),
@@ -510,5 +586,114 @@ describe("buildThreadFeed", () => {
       type: "work-toggle",
       expanded: true,
     });
+  });
+});
+
+describe("deriveSubagentInspectorGroups", () => {
+  it("joins the read model parent with mapped child tool activities", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-subagents"),
+      projectId: ProjectId.make("project-1"),
+      title: "Subagents",
+      activities: [
+        makeSubagentParent(),
+        makeSubagentChild("child-one", "2026-04-01T00:00:02.000Z"),
+        makeSubagentChild("child-two", "2026-04-01T00:00:03.000Z"),
+      ],
+      subagents: [
+        {
+          subagentId: "agent-1",
+          turnId: TurnId.make("turn-1"),
+          agentType: "Reviewer",
+          description: "Review the implementation",
+          status: "running",
+          lastProgressSummary: "Reading tests",
+          lastToolName: "exec_command",
+          spawnedByItemId: "tool-parent",
+          startedAt: "2026-04-01T00:00:01.000Z",
+          updatedAt: "2026-04-01T00:00:03.000Z",
+          completedAt: null,
+        },
+      ],
+    });
+
+    expect(deriveSubagentInspectorGroups(thread)).toMatchObject([
+      {
+        toolCallId: "tool-parent",
+        name: "Reviewer",
+        description: "Review the implementation",
+        status: "running",
+        prompt: "Inspect the mobile feed",
+        lastProgressSummary: "Reading tests",
+        lastToolName: "exec_command",
+        children: [{ id: "child-one" }, { id: "child-two" }],
+      },
+    ]);
+  });
+
+  it("falls back to the tool input when no read-model row exists", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-fallback"),
+      projectId: ProjectId.make("project-1"),
+      title: "Fallback subagent",
+      activities: [makeSubagentParent()],
+    });
+
+    expect(deriveSubagentInspectorGroups(thread)[0]).toMatchObject({
+      name: "Explore",
+      description: null,
+    });
+
+    const unnamed = makeSubagentParent({
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        data: { toolCallId: "tool-parent", input: {} },
+      },
+    });
+    expect(
+      deriveSubagentInspectorGroups(
+        makeThread({
+          id: ThreadId.make("thread-unnamed"),
+          projectId: ProjectId.make("project-1"),
+          title: "Unnamed subagent",
+          activities: [unnamed],
+        }),
+      )[0]?.name,
+    ).toBe("Subagent");
+  });
+
+  it("keeps a parent group when capped activities contain no children", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-capped"),
+      projectId: ProjectId.make("project-1"),
+      title: "Capped subagent",
+      activities: [makeSubagentParent()],
+      activitiesTruncated: { omittedCount: 500 },
+    });
+
+    expect(deriveSubagentInspectorGroups(thread)[0]?.children).toEqual([]);
+  });
+
+  it("marks a lingering running subagent stopped after the turn settles", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-settled"),
+      projectId: ProjectId.make("project-1"),
+      title: "Settled subagent",
+      activities: [makeSubagentParent()],
+      subagents: [
+        {
+          subagentId: "agent-1",
+          turnId: TurnId.make("turn-1"),
+          status: "running",
+          spawnedByItemId: "tool-parent",
+          startedAt: "2026-04-01T00:00:01.000Z",
+          updatedAt: "2026-04-01T00:00:02.000Z",
+          completedAt: null,
+        },
+      ],
+    });
+
+    expect(deriveSubagentInspectorGroups(thread, true)[0]?.status).toBe("stopped");
   });
 });

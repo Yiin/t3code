@@ -3,6 +3,8 @@ import type {
   OrchestrationLatestTurn,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  OrchestrationThreadSubagent,
+  OrchestrationThreadSubagentStatus,
   ToolLifecycleItemType,
   TurnId,
   UserInputQuestion,
@@ -55,6 +57,21 @@ export interface ThreadFeedActivity {
   readonly status: "success" | "failure" | "neutral" | null;
 }
 
+export interface SubagentInspectorGroup {
+  readonly entryId: string;
+  readonly toolCallId: string | null;
+  readonly name: string;
+  readonly description: string | null;
+  readonly status: OrchestrationThreadSubagentStatus;
+  readonly startedAt: string;
+  readonly completedAt: string | null;
+  readonly children: ReadonlyArray<ThreadFeedActivity>;
+  readonly lastProgressSummary: string | null;
+  readonly lastToolName: string | null;
+  readonly prompt: string | null;
+  readonly resultText: string | null;
+}
+
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 
 type WorkLogToolLifecycleStatus = "inProgress" | "completed" | "failed" | "declined" | "stopped";
@@ -74,6 +91,8 @@ interface WorkLogEntry {
   requestKind?: PendingApproval["requestKind"];
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   toolData?: unknown;
+  toolCallId?: string;
+  parentToolUseId?: string;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -242,8 +261,9 @@ function resolvePendingUserInputAnswer(
   return normalizeDraftAnswer(draft?.selectedOptionLabel);
 }
 
-function deriveWorkLogEntries(
+export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
+  options?: { readonly includeSubagentChildren?: boolean },
 ): DerivedWorkLogEntry[] {
   const ordered = Arr.sort(activities, activityOrder);
   const entries: DerivedWorkLogEntry[] = [];
@@ -253,6 +273,8 @@ function deriveWorkLogEntries(
     if (activity.kind === "context-window.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
+    const payload = asRecord(activity.payload);
+    if (!options?.includeSubagentChildren && asTrimmedString(payload?.parentToolUseId)) continue;
     entries.push(toDerivedWorkLogEntry(activity));
   }
   return collapseDerivedWorkLogEntries(entries);
@@ -305,6 +327,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     activityKind: activity.kind,
   };
   const itemType = extractWorkLogItemType(payload);
+  let toolCallId = extractToolCallId(payload);
+  if (!toolCallId && itemType === "collab_agent_tool_call") {
+    toolCallId = toolCallIdFromCoalescedActivityId(activity);
+  }
   const requestKind = extractWorkLogRequestKind(payload);
   if (
     !taskDetailAsLabel &&
@@ -335,11 +361,21 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       entry.toolData = data.item;
     }
   }
+  if (itemType === "collab_agent_tool_call" && payload?.data !== undefined) {
+    entry.toolData = payload.data;
+  }
   if (itemType) {
     entry.itemType = itemType;
   }
   if (requestKind) {
     entry.requestKind = requestKind;
+  }
+  if (toolCallId) {
+    entry.toolCallId = toolCallId;
+  }
+  const parentToolUseId = asTrimmedString(payload?.parentToolUseId);
+  if (parentToolUseId) {
+    entry.parentToolUseId = parentToolUseId;
   }
   let toolLifecycleStatus = extractWorkLogToolLifecycleStatus(payload);
   if (!toolLifecycleStatus && activity.kind === "tool.completed") {
@@ -383,7 +419,16 @@ function shouldCollapseToolLifecycleEntries(
   if (previous.activityKind === "tool.completed") {
     return false;
   }
-  return previous.collapseKey !== undefined && previous.collapseKey === next.collapseKey;
+  if (previous.collapseKey !== undefined && previous.collapseKey === next.collapseKey) {
+    return true;
+  }
+  return (
+    previous.toolCallId !== undefined &&
+    next.toolCallId === undefined &&
+    previous.itemType === next.itemType &&
+    normalizeCompactToolLabel(previous.toolTitle ?? previous.label) ===
+      normalizeCompactToolLabel(next.toolTitle ?? next.label)
+  );
 }
 
 function mergeDerivedWorkLogEntries(
@@ -400,6 +445,8 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  const toolCallId = next.toolCallId ?? previous.toolCallId;
+  const parentToolUseId = next.parentToolUseId ?? previous.parentToolUseId;
   return {
     ...previous,
     ...next,
@@ -411,6 +458,8 @@ function mergeDerivedWorkLogEntries(
     ...(itemType ? { itemType } : {}),
     ...(requestKind ? { requestKind } : {}),
     ...(collapseKey ? { collapseKey } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(parentToolUseId ? { parentToolUseId } : {}),
     ...(toolLifecycleStatus ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
   };
@@ -431,6 +480,9 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
   if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
     return undefined;
   }
+  if (entry.toolCallId) {
+    return `tool:${entry.toolCallId}`;
+  }
   const normalizedLabel = normalizeCompactToolLabel(entry.toolTitle ?? entry.label);
   const detail = entry.detail?.trim() ?? "";
   const itemType = entry.itemType ?? "";
@@ -438,6 +490,16 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
     return undefined;
   }
   return [itemType, normalizedLabel, detail].join("\u001f");
+}
+
+const COALESCED_TOOL_UPDATED_ID_PREFIX = "tool-updated:";
+
+function toolCallIdFromCoalescedActivityId(activity: OrchestrationThreadActivity): string | null {
+  if (activity.kind !== "tool.updated") return null;
+  if (!activity.id.startsWith(COALESCED_TOOL_UPDATED_ID_PREFIX)) return null;
+  const rest = activity.id.slice(COALESCED_TOOL_UPDATED_ID_PREFIX.length);
+  const separator = rest.lastIndexOf(":");
+  return separator > 0 ? asTrimmedString(rest.slice(separator + 1)) : null;
 }
 
 function normalizeCompactToolLabel(value: string): string {
@@ -787,6 +849,10 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
 
 function extractToolTitle(payload: Record<string, unknown> | null): string | null {
   return asTrimmedString(payload?.title);
+}
+
+function extractToolCallId(payload: Record<string, unknown> | null): string | null {
+  return asTrimmedString(asRecord(payload?.data)?.toolCallId);
 }
 
 function extractWorkLogToolLifecycleStatus(
@@ -1331,6 +1397,150 @@ export function buildPendingUserInputAnswers(
   return answers;
 }
 
+export function deriveSubagentInspectorGroups(
+  thread: OrchestrationThread,
+  turnSettled = false,
+): SubagentInspectorGroup[] {
+  const workEntries = deriveWorkLogEntries(thread.activities, { includeSubagentChildren: true });
+  const childrenByParent = new Map<string, DerivedWorkLogEntry[]>();
+  for (const entry of workEntries) {
+    if (!entry.parentToolUseId) continue;
+    const children = childrenByParent.get(entry.parentToolUseId);
+    if (children) {
+      children.push(entry);
+    } else {
+      childrenByParent.set(entry.parentToolUseId, [entry]);
+    }
+  }
+
+  const groups: SubagentInspectorGroup[] = [];
+  const groupIndexByToolCallId = new Map<string, number>();
+  for (const entry of workEntries) {
+    if (entry.itemType !== "collab_agent_tool_call") continue;
+    const group = toSubagentInspectorGroup(entry, childrenByParent, thread.subagents, turnSettled);
+    if (group.toolCallId !== null) {
+      const existingIndex = groupIndexByToolCallId.get(group.toolCallId);
+      const existing = existingIndex === undefined ? undefined : groups[existingIndex];
+      if (existingIndex !== undefined && existing !== undefined) {
+        groups[existingIndex] = mergeSubagentInspectorGroups(existing, group);
+        continue;
+      }
+      groupIndexByToolCallId.set(group.toolCallId, groups.length);
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+function toSubagentInspectorGroup(
+  entry: DerivedWorkLogEntry,
+  childrenByParent: ReadonlyMap<string, DerivedWorkLogEntry[]>,
+  subagents: ReadonlyArray<OrchestrationThreadSubagent>,
+  turnSettled: boolean,
+): SubagentInspectorGroup {
+  const toolCallId = entry.toolCallId ?? null;
+  const data = asRecord(entry.toolData);
+  const input = asRecord(data?.input);
+  const readModel =
+    toolCallId === null
+      ? undefined
+      : subagents.find((subagent) => subagent.spawnedByItemId === toolCallId);
+  return {
+    entryId: entry.id,
+    toolCallId,
+    name: readModel?.agentType ?? asTrimmedString(input?.subagent_type) ?? "Subagent",
+    description: readModel?.description ?? asTrimmedString(input?.description),
+    status: deriveSubagentInspectorStatus(entry, readModel, turnSettled),
+    startedAt: readModel?.startedAt ?? entry.createdAt,
+    completedAt: readModel?.completedAt ?? null,
+    children:
+      toolCallId === null ? [] : (childrenByParent.get(toolCallId) ?? []).map(toThreadFeedActivity),
+    lastProgressSummary: readModel?.lastProgressSummary ?? null,
+    lastToolName: readModel?.lastToolName ?? null,
+    prompt: asTrimmedString(input?.prompt),
+    resultText: extractSubagentResultText(data?.result),
+  };
+}
+
+function deriveSubagentInspectorStatus(
+  entry: WorkLogEntry,
+  readModel: OrchestrationThreadSubagent | undefined,
+  turnSettled: boolean,
+): OrchestrationThreadSubagentStatus {
+  if (readModel && readModel.status !== "running") return readModel.status;
+  const entryStatus = subagentStatusFromEntry(entry);
+  if (entryStatus !== "running") return entryStatus;
+  return turnSettled ? "stopped" : "running";
+}
+
+function subagentStatusFromEntry(entry: WorkLogEntry): OrchestrationThreadSubagentStatus {
+  const result = asRecord(asRecord(entry.toolData)?.result);
+  if (result?.is_error === true || result?.isError === true) return "failed";
+  if (workEntryIndicatesToolFailure(entry)) return "failed";
+  if (entry.toolLifecycleStatus === "completed") return "completed";
+  if (entry.toolLifecycleStatus === "stopped") return "stopped";
+  return "running";
+}
+
+function extractSubagentResultText(result: unknown): string | null {
+  return collectSubagentResultText(result, 0);
+}
+
+function collectSubagentResultText(value: unknown, depth: number): string | null {
+  if (depth > 3) return null;
+  if (typeof value === "string") return asTrimmedString(value);
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => collectSubagentResultText(item, depth + 1))
+      .filter((text): text is string => text !== null);
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+  const record = asRecord(value);
+  if (!record) return null;
+  if (record.type === "text") return asTrimmedString(record.text);
+  return "content" in record ? collectSubagentResultText(record.content, depth + 1) : null;
+}
+
+function mergeSubagentInspectorGroups(
+  first: SubagentInspectorGroup,
+  second: SubagentInspectorGroup,
+): SubagentInspectorGroup {
+  return {
+    ...first,
+    name: second.name !== "Subagent" ? second.name : first.name,
+    description: second.description ?? first.description,
+    status: second.status !== "running" ? second.status : first.status,
+    completedAt: second.completedAt ?? first.completedAt,
+    children: second.children.length > 0 ? second.children : first.children,
+    lastProgressSummary: second.lastProgressSummary ?? first.lastProgressSummary,
+    lastToolName: second.lastToolName ?? first.lastToolName,
+    prompt: second.prompt ?? first.prompt,
+    resultText: second.resultText ?? first.resultText,
+  };
+}
+
+function toThreadFeedActivity(entry: DerivedWorkLogEntry): ThreadFeedActivity {
+  const summary = workEntryHeading(entry);
+  const detail = workEntryPreview(entry);
+  const fullDetail = buildWorkEntryExpandedBody(entry);
+  return {
+    id: entry.id,
+    createdAt: entry.createdAt,
+    turnId: entry.turnId,
+    summary,
+    detail,
+    fullDetail,
+    icon: workEntryIcon(entry),
+    copyText: [summary, detail, fullDetail]
+      .filter((value, index, values): value is string => {
+        return Boolean(value) && values.indexOf(value) === index;
+      })
+      .join("\n"),
+    toolLike: workLogEntryIsToolLike(entry),
+    status: workEntryStatus(entry),
+  };
+}
+
 export function buildThreadFeed(
   thread: OrchestrationThread,
   options?: {
@@ -1359,30 +1569,12 @@ export function buildThreadFeed(
           );
         })
         .map<RawThreadFeedEntry>((entry) => {
-          const summary = workEntryHeading(entry);
-          const detail = workEntryPreview(entry);
-          const fullDetail = buildWorkEntryExpandedBody(entry);
           return {
             type: "activity",
             id: entry.id,
             createdAt: entry.createdAt,
             turnId: entry.turnId,
-            activity: {
-              id: entry.id,
-              createdAt: entry.createdAt,
-              turnId: entry.turnId,
-              summary,
-              detail,
-              fullDetail,
-              icon: workEntryIcon(entry),
-              copyText: [summary, detail, fullDetail]
-                .filter((value, index, values): value is string => {
-                  return Boolean(value) && values.indexOf(value) === index;
-                })
-                .join("\n"),
-              toolLike: workLogEntryIsToolLike(entry),
-              status: workEntryStatus(entry),
-            },
+            activity: toThreadFeedActivity(entry),
           };
         }),
     ],
