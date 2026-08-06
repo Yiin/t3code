@@ -534,13 +534,20 @@ export function deriveMessagesTimelineRows(input: {
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
-  const turnIdByRowId = new Map<string, TurnId>();
-  const pushRow = (row: MessagesTimelineRow, turnId?: TurnId | null) => {
-    nextRows.push(row);
+  const turnIdByTimelineRowId = new Map<string, TurnId>();
+  for (const entry of input.timelineEntries) {
+    const turnId =
+      entry.kind === "message"
+        ? entry.message.turnId
+        : entry.kind === "proposed-plan"
+          ? entry.proposedPlan.turnId
+          : entry.entry.turnId;
     if (turnId) {
-      turnIdByRowId.set(row.id, turnId);
+      turnIdByTimelineRowId.set(entry.id, turnId);
     }
-  };
+  }
+  const turnIdsByWorkToggleRowId = new Map<string, ReadonlySet<TurnId>>();
+  const turnIdByFleetRowId = new Map<string, TurnId>();
   const durationStartByMessageId = computeMessageDurationStart(
     input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
   );
@@ -560,7 +567,7 @@ export function deriveMessagesTimelineRows(input: {
   // older tool rows disappear behind messages that survived.
   const omittedActivityCount = input.activitiesTruncated?.omittedCount ?? 0;
   if (omittedActivityCount > 0) {
-    pushRow({
+    nextRows.push({
       kind: "activities-truncated",
       id: ACTIVITIES_TRUNCATED_ROW_ID,
       createdAt: input.timelineEntries[0]?.createdAt ?? "",
@@ -661,17 +668,14 @@ export function deriveMessagesTimelineRows(input: {
 
     const turnFold = foldsByAnchorEntryId.get(timelineEntry.id);
     if (turnFold) {
-      pushRow(
-        {
-          kind: "turn-fold",
-          id: `turn-fold:${turnFold.turnId}`,
-          createdAt: turnFold.createdAt,
-          turnId: turnFold.turnId,
-          label: turnFold.label,
-          expanded: input.expandedTurnIds?.has(turnFold.turnId) ?? false,
-        },
-        turnFold.turnId,
-      );
+      nextRows.push({
+        kind: "turn-fold",
+        id: `turn-fold:${turnFold.turnId}`,
+        createdAt: turnFold.createdAt,
+        turnId: turnFold.turnId,
+        label: turnFold.label,
+        expanded: input.expandedTurnIds?.has(turnFold.turnId) ?? false,
+      });
     }
 
     if (collapsedEntryIds.has(timelineEntry.id)) {
@@ -682,17 +686,17 @@ export function deriveMessagesTimelineRows(input: {
       const subagentGroup = subagentGroupByEntryId.get(timelineEntry.entry.id);
       if (subagentGroup) {
         if (fleetRow !== null && timelineEntry.id === firstFleetCandidate?.rowId) {
-          pushRow(fleetRow, unsettledTurnId);
+          nextRows.push(fleetRow);
+          if (unsettledTurnId !== null) {
+            turnIdByFleetRowId.set(fleetRow.id, unsettledTurnId);
+          }
         }
-        pushRow(
-          {
-            kind: "subagent",
-            id: timelineEntry.id,
-            createdAt: timelineEntry.createdAt,
-            group: subagentGroup,
-          },
-          timelineEntry.entry.turnId,
-        );
+        nextRows.push({
+          kind: "subagent",
+          id: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          group: subagentGroup,
+        });
         continue;
       }
       if (isHiddenSubagentWorkEntry(timelineEntry.entry)) {
@@ -724,15 +728,12 @@ export function deriveMessagesTimelineRows(input: {
       );
       if (visibleGroupedEntries.length > 0) {
         if (visibleGroupedEntries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES) {
-          pushRow(
-            {
-              kind: "work",
-              id: timelineEntry.id,
-              createdAt: timelineEntry.createdAt,
-              groupedEntries: visibleGroupedEntries,
-            },
-            timelineEntry.entry.turnId,
-          );
+          nextRows.push({
+            kind: "work",
+            id: timelineEntry.id,
+            createdAt: timelineEntry.createdAt,
+            groupedEntries: visibleGroupedEntries,
+          });
         } else {
           const groupId = `work-group:${timelineEntry.id}`;
           const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
@@ -741,30 +742,27 @@ export function deriveMessagesTimelineRows(input: {
           const renderedEntries = expanded ? [...hiddenEntries, ...visibleEntries] : visibleEntries;
 
           for (const workEntry of renderedEntries) {
-            pushRow(
-              {
-                kind: "work",
-                id: workEntry.id,
-                createdAt: workEntry.createdAt,
-                groupedEntries: [workEntry],
-              },
-              workEntry.turnId ?? timelineEntry.entry.turnId,
-            );
+            nextRows.push({
+              kind: "work",
+              id: workEntry.id,
+              createdAt: workEntry.createdAt,
+              groupedEntries: [workEntry],
+            });
           }
 
-          pushRow(
-            {
-              kind: "work-toggle",
-              id: `work-toggle:${timelineEntry.id}`,
-              createdAt: timelineEntry.createdAt,
-              groupId,
-              hiddenCount: hiddenEntries.length,
-              expanded,
-              onlyToolEntries: visibleGroupedEntries.every((entry) =>
-                workLogEntryIsToolLike(entry),
-              ),
-            },
-            timelineEntry.entry.turnId,
+          const toggleRowId = `work-toggle:${timelineEntry.id}`;
+          nextRows.push({
+            kind: "work-toggle",
+            id: toggleRowId,
+            createdAt: timelineEntry.createdAt,
+            groupId,
+            hiddenCount: hiddenEntries.length,
+            expanded,
+            onlyToolEntries: visibleGroupedEntries.every((entry) => workLogEntryIsToolLike(entry)),
+          });
+          turnIdsByWorkToggleRowId.set(
+            toggleRowId,
+            new Set(visibleGroupedEntries.flatMap((entry) => (entry.turnId ? [entry.turnId] : []))),
           );
         }
       }
@@ -773,15 +771,12 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.kind === "proposed-plan") {
-      pushRow(
-        {
-          kind: "proposed-plan",
-          id: timelineEntry.id,
-          createdAt: timelineEntry.createdAt,
-          proposedPlan: timelineEntry.proposedPlan,
-        },
-        timelineEntry.proposedPlan.turnId,
-      );
+      nextRows.push({
+        kind: "proposed-plan",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        proposedPlan: timelineEntry.proposedPlan,
+      });
       continue;
     }
 
@@ -801,27 +796,24 @@ export function deriveMessagesTimelineRows(input: {
       terminalAssistantMessageIds.has(timelineEntry.message.id) &&
       !assistantTurnStillInProgress;
 
-    pushRow(
-      {
-        kind: "message",
-        id: timelineEntry.id,
-        createdAt: timelineEntry.createdAt,
-        message: timelineEntry.message,
-        durationStart,
-        showAssistantMeta,
-        showAssistantCopyButton: showAssistantMeta,
-        assistantCopyStreaming: timelineEntry.message.streaming || assistantTurnStillInProgress,
-        revertTurnCount:
-          timelineEntry.message.role === "user"
-            ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
-            : undefined,
-      },
-      timelineEntry.message.turnId,
-    );
+    nextRows.push({
+      kind: "message",
+      id: timelineEntry.id,
+      createdAt: timelineEntry.createdAt,
+      message: timelineEntry.message,
+      durationStart,
+      showAssistantMeta,
+      showAssistantCopyButton: showAssistantMeta,
+      assistantCopyStreaming: timelineEntry.message.streaming || assistantTurnStillInProgress,
+      revertTurnCount:
+        timelineEntry.message.role === "user"
+          ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
+          : undefined,
+    });
   }
 
   if (input.isWorking) {
-    pushRow({
+    nextRows.push({
       kind: "working",
       id: "working-indicator-row",
       createdAt: input.activeTurnStartedAt,
@@ -844,7 +836,16 @@ export function deriveMessagesTimelineRows(input: {
     if (anchorIndex < 0) {
       for (let index = nextRows.length - 1; index >= 0; index -= 1) {
         const row = nextRows[index];
-        if (row && turnIdByRowId.get(row.id) === turnSummary.turnId) {
+        if (
+          row &&
+          timelineRowBelongsToTurn({
+            row,
+            turnId: turnSummary.turnId,
+            turnIdByTimelineRowId,
+            turnIdsByWorkToggleRowId,
+            turnIdByFleetRowId,
+          })
+        ) {
           anchorIndex = index;
           break;
         }
@@ -876,6 +877,35 @@ export function deriveMessagesTimelineRows(input: {
     }
   }
   return rowsWithChangedFiles;
+}
+
+function timelineRowBelongsToTurn(input: {
+  row: MessagesTimelineRow;
+  turnId: TurnId;
+  turnIdByTimelineRowId: ReadonlyMap<string, TurnId>;
+  turnIdsByWorkToggleRowId: ReadonlyMap<string, ReadonlySet<TurnId>>;
+  turnIdByFleetRowId: ReadonlyMap<string, TurnId>;
+}): boolean {
+  switch (input.row.kind) {
+    case "message":
+      return input.row.message.turnId === input.turnId;
+    case "proposed-plan":
+      return input.row.proposedPlan.turnId === input.turnId;
+    case "turn-fold":
+      return input.row.turnId === input.turnId;
+    case "work":
+      return input.row.groupedEntries.some((entry) => entry.turnId === input.turnId);
+    case "subagent":
+      return input.turnIdByTimelineRowId.get(input.row.id) === input.turnId;
+    case "subagent-fleet":
+      return input.turnIdByFleetRowId.get(input.row.id) === input.turnId;
+    case "work-toggle":
+      return input.turnIdsByWorkToggleRowId.get(input.row.id)?.has(input.turnId) ?? false;
+    case "activities-truncated":
+    case "changed-files":
+    case "working":
+      return false;
+  }
 }
 
 export function computeStableMessagesTimelineRows(

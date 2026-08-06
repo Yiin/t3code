@@ -160,7 +160,7 @@ interface MessagesTimelineProps {
   activitiesTruncated: OrchestrationThreadActivityTruncation | null;
   latestTurn: TimelineLatestTurn | null;
   runningTurnId: TurnId | null;
-  turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
+  turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onOpenSubagentInspector: (subagentKey: string) => void;
@@ -201,7 +201,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activitiesTruncated,
   latestTurn,
   runningTurnId,
-  turnDiffSummaryByAssistantMessageId,
+  turnDiffSummaries,
   routeThreadKey,
   onOpenTurnDiff,
   onOpenSubagentInspector,
@@ -346,7 +346,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         subagentGroups,
         isWorking,
         activeTurnStartedAt,
-        turnDiffSummaryByAssistantMessageId,
+        turnDiffSummaries,
         revertTurnCountByUserMessageId,
       }),
     [
@@ -359,7 +359,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       subagentGroups,
       isWorking,
       activeTurnStartedAt,
-      turnDiffSummaryByAssistantMessageId,
+      turnDiffSummaries,
       revertTurnCountByUserMessageId,
     ],
   );
@@ -932,6 +932,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
+      {row.kind === "changed-files" ? <ChangedFilesTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "activities-truncated" ? <ActivitiesTruncatedTimelineRow row={row} /> : null}
@@ -1101,12 +1102,6 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           threadRef={ctx.threadRef ?? undefined}
           isStreaming={Boolean(row.message.streaming)}
           skills={ctx.skills}
-        />
-        <AssistantChangedFilesSection
-          turnSummary={row.assistantTurnDiffSummary}
-          routeThreadKey={ctx.routeThreadKey}
-          resolvedTheme={ctx.resolvedTheme}
-          onOpenTurnDiff={ctx.onOpenTurnDiff}
         />
         {row.showAssistantMeta ? (
           <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
@@ -1505,33 +1500,22 @@ function SubagentExpandedBody({ group }: { group: SubagentGroup }) {
   );
 }
 
-/** Subscribes directly to the UI state store for expand/collapse state,
- *  so toggling re-renders only this component — not the entire list. */
-const AssistantChangedFilesSection = memo(function AssistantChangedFilesSection({
-  turnSummary,
-  routeThreadKey,
-  resolvedTheme,
-  onOpenTurnDiff,
+function ChangedFilesTimelineRow({
+  row,
 }: {
-  turnSummary: TurnDiffSummary | undefined;
-  routeThreadKey: string;
-  resolvedTheme: "light" | "dark";
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  row: Extract<TimelineRow, { kind: "changed-files" }>;
 }) {
-  if (!turnSummary) return null;
-  const checkpointFiles = turnSummary.files;
-  if (checkpointFiles.length === 0) return null;
-
+  const ctx = use(TimelineRowCtx);
   return (
     <AssistantChangedFilesSectionInner
-      turnSummary={turnSummary}
-      checkpointFiles={checkpointFiles}
-      routeThreadKey={routeThreadKey}
-      resolvedTheme={resolvedTheme}
-      onOpenTurnDiff={onOpenTurnDiff}
+      turnSummary={row.turnSummary}
+      checkpointFiles={row.turnSummary.files}
+      routeThreadKey={ctx.routeThreadKey}
+      resolvedTheme={ctx.resolvedTheme}
+      onOpenTurnDiff={ctx.onOpenTurnDiff}
     />
   );
-});
+}
 
 /** Inner component that only mounts when there are actual changed files,
  *  so the store subscription is unconditional (no hooks after early return). */

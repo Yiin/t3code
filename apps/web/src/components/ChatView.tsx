@@ -5721,7 +5721,7 @@ function ChatViewContent(props: ChatViewProps) {
                     ? activeThread.session.activeTurnId
                     : null
                 }
-                turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
+                turnDiffSummaries={turnDiffSummaries}
                 activeThreadEnvironmentId={activeThread.environmentId}
                 routeThreadKey={routeThreadKey}
                 onOpenTurnDiff={onOpenTurnDiff}
