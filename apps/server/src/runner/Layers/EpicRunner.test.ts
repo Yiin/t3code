@@ -1334,66 +1334,120 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live(
-    "waits out running subagents after a no-commit turn and sends exactly one continuation",
-    () => {
-      // The 2026-08-04 incident shape: the agent backgrounded its work and
-      // ended the turn with no commit while a Task subagent was still running.
-      // Settling here would tear the session down and kill the subagent, so
-      // the runner must wait for the drain and grant one continuation turn.
-      const harness = createHarness({
-        script: [
-          {
-            text: "Watchdog running. Waiting for the workflow to complete...",
-            head: "head-0",
-            subagentDrainReads: 3,
-          },
-          // The continuation, dispatched only after the subagent drained.
-          {
-            text: 'folded it in\nRALPH_MSG: {"summary":"landed after grace","why":"subagent finished"}',
-            head: "head-1",
-          },
-          // A plain iteration with zero subagents settles exactly as today.
-          { text: "RALPH_DONE", head: "head-1" },
+  it.live("waits out running subagents after a no-commit turn and sends a continuation", () => {
+    // The 2026-08-04 incident shape: the agent backgrounded its work and
+    // ended the turn with no commit while a Task subagent was still running.
+    // Settling here would tear the session down and kill the subagent, so
+    // the runner must wait for the drain and grant one continuation turn.
+    const harness = createHarness({
+      script: [
+        {
+          text: "Watchdog running. Waiting for the workflow to complete...",
+          head: "head-0",
+          subagentDrainReads: 3,
+        },
+        // The continuation, dispatched only after the subagent drained.
+        {
+          text: 'folded it in\nRALPH_MSG: {"summary":"landed after grace","why":"subagent finished"}',
+          head: "head-1",
+        },
+        // A plain iteration with zero subagents settles exactly as today.
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const created = harness.commandsOfType("thread.create");
+      assert.strictEqual(created.length, 2);
+      const iterationThreadId = created[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      // The original turn plus exactly ONE continuation, never more.
+      assert.strictEqual(turnStarts.length, 2);
+      const continuation = turnStarts[1]!;
+      assert.strictEqual(continuation.message.text, EPIC_RUN_CONTINUATION_PROMPT);
+      assert.strictEqual(continuation.message.messageId, `${iterationThreadId}-continue`);
+
+      // The thread was NOT settled on the original turn's end: its settle
+      // came only after the continuation turn was dispatched and finished.
+      const settles = harness.commandsOfType("thread.settle");
+      const settle = settles.find((command) => command.threadId === iterationThreadId)!;
+      assert.isAbove(harness.commands.indexOf(settle), harness.commands.indexOf(continuation));
+
+      // The continuation's commit and report classified the iteration.
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.summary, "landed after grace");
+      assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+
+      // The zero-subagent iteration got one turn and one settle — no
+      // continuation, no session stop anywhere.
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 3);
+      assert.strictEqual(settles.length, 2);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("resumes through reviewer and implementer subagents before the parent commits", () => {
+    // A cook-it parent can delegate a review, resume to delegate implementation,
+    // then need another resume to integrate and commit. Every delegation ends
+    // the parent turn while its new subagent is still running.
+    const harness = createHarness({
+      script: [
+        {
+          text: "The reviewer is checking the plan.",
+          head: "head-0",
+          subagentDrainReads: 2,
+        },
+        {
+          text: "The implementer is applying the reviewed plan.",
+          head: "head-0",
+          subagentDrainReads: 2,
+        },
+        {
+          text: 'Integrated the implementation.\nRALPH_MSG: {"summary":"nested chain landed","why":"review and implementation finished"}',
+          head: "head-1",
+        },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      assert.strictEqual(turnStarts.length, 3);
+      assert.deepStrictEqual(
+        turnStarts.map((command) => command.message.messageId),
+        [
+          `${iterationThreadId}-prompt`,
+          `${iterationThreadId}-continue`,
+          `${iterationThreadId}-continue-2`,
         ],
-        options: { iterationTimeoutMs: 60_000 },
-      });
+      );
+      assert.deepStrictEqual(
+        turnStarts.slice(1).map((command) => command.message.text),
+        [EPIC_RUN_CONTINUATION_PROMPT, EPIC_RUN_CONTINUATION_PROMPT],
+      );
 
-      return Effect.gen(function* () {
-        const run = yield* startRun();
-        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
-
-        const created = harness.commandsOfType("thread.create");
-        assert.strictEqual(created.length, 2);
-        const iterationThreadId = created[0]!.threadId;
-        const turnStarts = harness
-          .commandsOfType("thread.turn.start")
-          .filter((command) => command.threadId === iterationThreadId);
-        // The original turn plus exactly ONE continuation, never more.
-        assert.strictEqual(turnStarts.length, 2);
-        const continuation = turnStarts[1]!;
-        assert.strictEqual(continuation.message.text, EPIC_RUN_CONTINUATION_PROMPT);
-        assert.strictEqual(continuation.message.messageId, `${iterationThreadId}-continue`);
-
-        // The thread was NOT settled on the original turn's end: its settle
-        // came only after the continuation turn was dispatched and finished.
-        const settles = harness.commandsOfType("thread.settle");
-        const settle = settles.find((command) => command.threadId === iterationThreadId)!;
-        assert.isAbove(harness.commands.indexOf(settle), harness.commands.indexOf(continuation));
-
-        // The continuation's commit and report classified the iteration.
-        assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
-        assert.strictEqual(harness.store.iterations[0]?.summary, "landed after grace");
-        assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
-
-        // The zero-subagent iteration got one turn and one settle — no
-        // continuation, no session stop anywhere.
-        assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 3);
-        assert.strictEqual(settles.length, 2);
-        assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
-      }).pipe(Effect.provide(harness.layer));
-    },
-  );
+      const settle = harness
+        .commandsOfType("thread.settle")
+        .find((command) => command.threadId === iterationThreadId)!;
+      assert.isAbove(harness.commands.indexOf(settle), harness.commands.indexOf(turnStarts[2]!));
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.summary, "nested chain landed");
+      assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
 
   it.live("gives up the subagent grace wait at its bound and classifies as today", () => {
     // A subagent that never drains must not wedge the iteration: the grace

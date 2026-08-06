@@ -85,9 +85,9 @@ const DEFAULT_MAX_ITERATIONS = 50;
 const RECENT_ITERATIONS_LIMIT = 25;
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 /**
- * The one follow-up turn an iteration gets when its agent ended the turn with
- * subagents still running (despite the prompt contract above). Sent only after
- * the subagents have drained, so "finished" is true when the agent reads it.
+ * The follow-up turn an iteration gets when its agent ended the turn with
+ * subagents still running (despite the prompt contract above). Sent after each
+ * subagent batch drains, so "finished" is true when the agent reads it.
  */
 export const EPIC_RUN_CONTINUATION_PROMPT = `Your background tasks finished. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
 const GIT_HEAD_TIMEOUT_MS = 15_000;
@@ -922,10 +922,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      *
      * Runs only after a normally-settled turn. When the turn completed with no
      * commit AND the thread still has fresh running subagents, wait (bounded)
-     * for them to drain, then dispatch exactly one continuation turn so the
-     * agent can fold the finished background work into a real iteration
-     * ending. Everything else — commit present, turn failed, no fresh
-     * subagents, drain timeout — falls through to today's classify-and-settle.
+     * for them to drain, then dispatch a continuation turn so the agent can
+     * fold the finished background work into a real iteration ending. Repeat
+     * this cycle when that continuation starts another subagent and ends its
+     * turn. The iteration's outer timeout bounds the complete chain.
+     * Everything else — commit present, turn failed, no fresh subagents,
+     * drain timeout — falls through to today's classify-and-settle.
      */
     const graceContinuationForSubagents = (input: {
       readonly run: EpicRun;
@@ -935,81 +937,87 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     }): Effect.Effect<IterationSettleResult> =>
       Effect.gen(function* () {
         const settled: IterationSettleResult = { _tag: "settled" };
-        const headAfter = yield* readHeadCommit(input.run.cwd);
-        if (headAfter !== null && headAfter !== input.headBefore) {
-          return settled;
-        }
-        const snapshot = yield* readThreadDetail(input.threadId);
-        const thread = snapshot?.thread;
-        // Only a COMPLETED turn earns a continuation: an errored turn's
-        // failure must reach classification untouched, or a provider error
-        // with a live subagent would silently retry in place.
-        if (thread === undefined || iterationTurnState(thread) !== "completed") {
-          return settled;
-        }
-        const freshRunning = countFreshRunningSubagents(
-          thread.subagents,
-          Date.parse(yield* nowIso),
-        );
-        if (freshRunning === 0) {
-          return settled;
-        }
-        const priorTurnId = thread.latestTurn?.turnId ?? null;
+        let continuationIndex = 0;
 
-        yield* Effect.logInfo("epic.runner.subagent-grace-started", {
-          runId: input.run.runId,
-          iterationIndex: input.iterationIndex,
-          threadId: input.threadId,
-          freshRunning,
-        });
-        const drained = yield* awaitSubagentDrain(input.threadId);
-        if (!drained) {
-          yield* Effect.logWarning("epic.runner.subagent-grace-timeout", {
+        while (true) {
+          const headAfter = yield* readHeadCommit(input.run.cwd);
+          if (headAfter !== null && headAfter !== input.headBefore) {
+            return settled;
+          }
+          const snapshot = yield* readThreadDetail(input.threadId);
+          const thread = snapshot?.thread;
+          // Only a COMPLETED turn earns a continuation: an errored turn's
+          // failure must reach classification untouched, or a provider error
+          // with a live subagent would silently retry in place.
+          if (thread === undefined || iterationTurnState(thread) !== "completed") {
+            return settled;
+          }
+          const freshRunning = countFreshRunningSubagents(
+            thread.subagents,
+            Date.parse(yield* nowIso),
+          );
+          if (freshRunning === 0) {
+            return settled;
+          }
+          const priorTurnId = thread.latestTurn?.turnId ?? null;
+
+          yield* Effect.logInfo("epic.runner.subagent-grace-started", {
             runId: input.run.runId,
             iterationIndex: input.iterationIndex,
             threadId: input.threadId,
+            continuationIndex,
+            freshRunning,
           });
-          return settled;
-        }
+          const drained = yield* awaitSubagentDrain(input.threadId);
+          if (!drained) {
+            yield* Effect.logWarning("epic.runner.subagent-grace-timeout", {
+              runId: input.run.runId,
+              iterationIndex: input.iterationIndex,
+              threadId: input.threadId,
+              continuationIndex,
+            });
+            return settled;
+          }
 
-        yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
-          runId: input.run.runId,
-          iterationIndex: input.iterationIndex,
-          threadId: input.threadId,
-        });
-        const createdAt = yield* nowIso;
-        return yield* dispatchCommand({
-          type: "thread.turn.start",
-          commandId: yield* commandId("turn-continue"),
-          threadId: input.threadId,
-          message: {
-            // Distinct from the original `${threadId}-prompt`: message rows
-            // and pending-turn-start replacement key on the messageId, so
-            // reuse would overwrite the original prompt row.
-            messageId: MessageId.make(`${input.threadId}-continue`),
-            role: "user",
-            text: EPIC_RUN_CONTINUATION_PROMPT,
-            attachments: [],
-          },
-          modelSelection: input.run.modelSelection,
-          runtimeMode: input.run.runtimeMode,
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          createdAt,
-        }).pipe(
-          Effect.flatMap(() => awaitTurnEnd(input.threadId, priorTurnId)),
-          Effect.timeoutOption(Duration.millis(iterationTimeoutMs)),
-          Effect.map(
-            (result): IterationSettleResult =>
-              Option.isNone(result) ? { _tag: "timeout" } : settled,
-          ),
-          Effect.catch((error: EpicRunnerError) =>
-            Effect.succeed<IterationSettleResult>({
-              _tag: "dispatch-failed",
-              detail: error.message,
-            }),
-          ),
-        );
-      });
+          continuationIndex += 1;
+          yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
+            runId: input.run.runId,
+            iterationIndex: input.iterationIndex,
+            threadId: input.threadId,
+            continuationIndex,
+          });
+          const createdAt = yield* nowIso;
+          yield* dispatchCommand({
+            type: "thread.turn.start",
+            commandId: yield* commandId("turn-continue"),
+            threadId: input.threadId,
+            message: {
+              // Every continuation needs its own message id. Otherwise a later
+              // cycle replaces the earlier continuation in the projection.
+              messageId: MessageId.make(
+                continuationIndex === 1
+                  ? `${input.threadId}-continue`
+                  : `${input.threadId}-continue-${continuationIndex}`,
+              ),
+              role: "user",
+              text: EPIC_RUN_CONTINUATION_PROMPT,
+              attachments: [],
+            },
+            modelSelection: input.run.modelSelection,
+            runtimeMode: input.run.runtimeMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            createdAt,
+          });
+          yield* awaitTurnEnd(input.threadId, priorTurnId);
+        }
+      }).pipe(
+        Effect.catch((error: EpicRunnerError) =>
+          Effect.succeed<IterationSettleResult>({
+            _tag: "dispatch-failed",
+            detail: error.message,
+          }),
+        ),
+      );
 
     /**
      * Read the turn's final assistant message once it has stopped changing.
@@ -1199,12 +1207,24 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           });
         });
 
-        const turnSettleResult: IterationSettleResult = yield* dispatchTurn.pipe(
+        const settleResult: IterationSettleResult = yield* dispatchTurn.pipe(
           Effect.flatMap(() => awaitTurnEnd(threadId)),
+          // A normally-settled turn may still have subagents working because
+          // the agent ended its turn early. Drain and resume as many times as
+          // the nested workflow needs. One timeout covers the original turn
+          // and every continuation, so each cycle cannot reset the bound.
+          Effect.flatMap(() =>
+            graceContinuationForSubagents({
+              run,
+              iterationIndex: input.iterationIndex,
+              threadId,
+              headBefore,
+            }),
+          ),
           Effect.timeoutOption(Duration.millis(iterationTimeoutMs)),
           Effect.map(
             (result): IterationSettleResult =>
-              Option.isNone(result) ? { _tag: "timeout" } : { _tag: "settled" },
+              Option.isNone(result) ? { _tag: "timeout" } : result.value,
           ),
           Effect.catch((error: EpicRunnerError) =>
             Effect.succeed<IterationSettleResult>({
@@ -1213,21 +1233,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             }),
           ),
         );
-
-        // A normally-settled turn may still have subagents working (the agent
-        // ended its turn early) — give it the bounded grace-and-continuation
-        // before anything classifies or settles. Timed-out and dispatch-failed
-        // turns skip it: an interrupt leaves subagent rows open until the
-        // session stop below closes them, so draining would only stall.
-        const settleResult: IterationSettleResult =
-          turnSettleResult._tag === "settled"
-            ? yield* graceContinuationForSubagents({
-                run,
-                iterationIndex: input.iterationIndex,
-                threadId,
-                headBefore,
-              })
-            : turnSettleResult;
 
         if (settleResult._tag === "timeout") {
           yield* dispatchBestEffort("epic.runner.interrupt-failed", {
