@@ -1174,10 +1174,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 const pendingAgeMs =
                   Date.parse(event.payload.session.updatedAt) -
                   Date.parse(pendingTurnStart.value.requestedAt);
-                if (
-                  Number.isFinite(pendingAgeMs) &&
-                  Math.abs(pendingAgeMs) > PENDING_TURN_START_GRACE_MS
-                ) {
+                if (Number.isFinite(pendingAgeMs) && pendingAgeMs > PENDING_TURN_START_GRACE_MS) {
                   yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
                     threadId: event.payload.threadId,
                   });

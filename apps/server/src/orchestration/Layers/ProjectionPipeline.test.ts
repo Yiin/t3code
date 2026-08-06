@@ -3328,6 +3328,187 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
 it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(
   "OrchestrationProjectionPipeline pending turn cleanup",
   (it) => {
+    it.effect("adopts a pending steer onto an already-running turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-pending-steer-adoption");
+        const turnId = TurnId.make("turn-pending-steer-adoption");
+
+        const appendPendingStart = (suffix: string, messageId: MessageId, occurredAt: string) =>
+          eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-pending-steer-${suffix}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: CommandId.make(`cmd-pending-steer-${suffix}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-pending-steer-${suffix}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId,
+              runtimeMode: "approval-required",
+              createdAt: occurredAt,
+            },
+          });
+        const appendRunningSession = (suffix: string, occurredAt: string) =>
+          eventStore.append({
+            type: "thread.session-set",
+            eventId: EventId.make(`evt-running-steer-${suffix}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: CommandId.make(`cmd-running-steer-${suffix}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-running-steer-${suffix}`),
+            metadata: {},
+            payload: {
+              threadId,
+              session: {
+                threadId,
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: turnId,
+                lastError: null,
+                updatedAt: occurredAt,
+              },
+            },
+          });
+
+        yield* appendPendingStart(
+          "initial",
+          MessageId.make("message-initial-turn"),
+          "2026-02-26T14:00:00.000Z",
+        );
+        yield* appendRunningSession("initial", "2026-02-26T14:00:01.000Z");
+        yield* appendPendingStart(
+          "absorbed",
+          MessageId.make("message-absorbed-steer"),
+          "2026-02-26T14:00:02.000Z",
+        );
+        yield* appendRunningSession("absorbed", "2026-02-26T14:00:03.000Z");
+
+        yield* projectionPipeline.bootstrap;
+
+        const rows = yield* sql<{
+          readonly turnId: string | null;
+          readonly pendingMessageId: string | null;
+        }>`
+          SELECT turn_id AS "turnId", pending_message_id AS "pendingMessageId"
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(rows, [
+          {
+            turnId,
+            pendingMessageId: "message-absorbed-steer",
+          },
+        ]);
+      }),
+    );
+
+    it.effect("clears only pending turn starts older than the clean-terminal grace window", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const terminalAt = "2026-02-26T14:03:00.000Z";
+
+        for (const pending of [
+          {
+            suffix: "stale",
+            requestedAt: "2026-02-26T14:00:00.000Z",
+          },
+          {
+            suffix: "fresh",
+            requestedAt: "2026-02-26T14:02:30.000Z",
+          },
+        ]) {
+          const threadId = ThreadId.make(`thread-clean-terminal-${pending.suffix}`);
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-clean-terminal-pending-${pending.suffix}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: pending.requestedAt,
+            commandId: CommandId.make(`cmd-clean-terminal-pending-${pending.suffix}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-clean-terminal-pending-${pending.suffix}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(`message-clean-terminal-${pending.suffix}`),
+              runtimeMode: "approval-required",
+              createdAt: pending.requestedAt,
+            },
+          });
+          yield* eventStore.append({
+            type: "thread.session-set",
+            eventId: EventId.make(`evt-clean-terminal-session-${pending.suffix}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: terminalAt,
+            commandId: CommandId.make(`cmd-clean-terminal-session-${pending.suffix}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-clean-terminal-session-${pending.suffix}`),
+            metadata: {},
+            payload: {
+              threadId,
+              session: {
+                threadId,
+                status: "ready",
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: terminalAt,
+              },
+            },
+          });
+        }
+
+        yield* projectionPipeline.bootstrap;
+
+        const pendingRows = yield* sql<{ readonly threadId: string }>`
+          SELECT thread_id AS "threadId"
+          FROM projection_turns
+          WHERE turn_id IS NULL
+            AND state = 'pending'
+          ORDER BY thread_id
+        `;
+        assert.deepEqual(pendingRows, [{ threadId: "thread-clean-terminal-fresh" }]);
+
+        const cleanupEvent = yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-clean-terminal-fresh-cleanup"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-clean-terminal-fresh"),
+          occurredAt: terminalAt,
+          commandId: CommandId.make("cmd-clean-terminal-fresh-cleanup"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-clean-terminal-fresh-cleanup"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-clean-terminal-fresh"),
+            session: {
+              threadId: ThreadId.make("thread-clean-terminal-fresh"),
+              status: "stopped",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: terminalAt,
+            },
+          },
+        });
+        yield* projectionPipeline.projectEvent(cleanupEvent);
+      }),
+    );
+
     it.effect("clears pending turn starts when startup reaches a terminal session state", () =>
       Effect.gen(function* () {
         const projectionPipeline = yield* OrchestrationProjectionPipeline;

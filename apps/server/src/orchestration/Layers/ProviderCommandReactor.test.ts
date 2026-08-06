@@ -944,6 +944,138 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("adopts a steered turn result through the current running session", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-active-steer");
+    const sessionUpdatedAt = "2026-01-01T00:00:01.000Z";
+    const harness = await createHarness({
+      sendTurnEffect: () =>
+        Effect.succeed({
+          threadId,
+          turnId,
+          steeredIntoActiveTurn: true,
+        }),
+    });
+    const session = {
+      threadId,
+      status: "running" as const,
+      providerName: "codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "approval-required" as const,
+      activeTurnId: turnId,
+      lastError: "preserve this",
+      updatedAt: sessionUpdatedAt,
+    };
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: turnId,
+      cwd: "/tmp/provider-project",
+      createdAt: sessionUpdatedAt,
+      updatedAt: sessionUpdatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-seed-active-steer"),
+      threadId,
+      session,
+      createdAt: sessionUpdatedAt,
+    });
+    const dispatchSpy = vi.spyOn(harness.engine, "dispatch");
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-adopt-active-steer"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-active-steer"),
+        role: "user",
+        text: "use the running turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    await waitFor(() =>
+      dispatchSpy.mock.calls.some(
+        ([command]) =>
+          command.type === "thread.session.set" && command.commandId !== "cmd-seed-active-steer",
+      ),
+    );
+    const adoptedSessionSet = dispatchSpy.mock.calls
+      .map(([command]) => command)
+      .find((command) => command.type === "thread.session.set");
+    expect(adoptedSessionSet).toMatchObject({
+      type: "thread.session.set",
+      threadId,
+      session,
+      createdAt: sessionUpdatedAt,
+    });
+  });
+
+  it("does not dispatch a session update for a fresh turn result", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-active-non-steer");
+    const now = "2026-01-01T00:00:01.000Z";
+    const harness = await createHarness({
+      sendTurnEffect: () => Effect.succeed({ threadId, turnId }),
+    });
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: turnId,
+      cwd: "/tmp/provider-project",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-seed-non-steer"),
+      threadId,
+      session: {
+        threadId,
+        status: "running",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "approval-required",
+        activeTurnId: turnId,
+        lastError: null,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+    const dispatchSpy = vi.spyOn(harness.engine, "dispatch");
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-non-steer-result"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-non-steer-result"),
+        role: "user",
+        text: "start normally",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    expect(
+      dispatchSpy.mock.calls.filter(([command]) => command.type === "thread.session.set"),
+    ).toHaveLength(0);
+  });
+
   it("expands registered slash skills only for OpenCode while preserving turn metadata and display", async () => {
     const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
     createdBaseDirs.add(skillsRoot);

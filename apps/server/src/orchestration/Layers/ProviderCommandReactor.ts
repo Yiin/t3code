@@ -1099,19 +1099,35 @@ const make = Effect.gen(function* () {
         return Effect.gen(function* () {
           const latestThread = yield* resolveThread(event.payload.threadId);
           const latestSession = latestThread?.session;
-          if (latestSession?.status !== "running" || latestSession.activeTurnId !== result.turnId) {
+          const providerSession = (yield* providerService.listSessions()).find(
+            (session) => session.threadId === event.payload.threadId,
+          );
+          if (
+            latestSession?.status !== "running" ||
+            latestSession.activeTurnId !== result.turnId ||
+            providerSession?.status !== "running" ||
+            providerSession.activeTurnId !== result.turnId
+          ) {
             return;
           }
           yield* setThreadSession({
             threadId: event.payload.threadId,
             session: {
               ...latestSession,
-              status: "running",
               activeTurnId: result.turnId,
             },
-            createdAt: event.payload.createdAt,
+            createdAt: latestSession.updatedAt,
           });
-        });
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider command reactor failed to adopt steered turn", {
+              eventType: event.type,
+              threadId: event.payload.threadId,
+              turnId: result.turnId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
       }),
       Effect.catchCause(recoverTurnStartFailure),
       Effect.forkScoped,

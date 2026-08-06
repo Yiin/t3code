@@ -1743,6 +1743,93 @@ describe("ProviderRuntimeIngestion", () => {
     expect(threadAfterSteer.latestTurn?.state).toBe("running");
   });
 
+  it("keeps the real active turn after a Codex steer is absorbed without turn.started", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const activeTurnId = asTurnId("turn-codex-active");
+    const phantomTurnId = asTurnId("turn-codex-phantom");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      createdAt,
+      updatedAt: createdAt,
+      activeTurnId,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-codex-active-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId: activeTurnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session.activeTurnId === activeTurnId,
+      2_000,
+      threadId,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-codex-absorbed-steer"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-codex-absorbed-steer"),
+          role: "user",
+          text: "adjust the running turn",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    // Codex emits no second turn.started for an absorbed steer. A stale
+    // response id must not pass the pending-turn exception in the guard.
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-codex-phantom-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId: phantomTurnId,
+    });
+    await harness.drain();
+
+    let thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.activeTurnId === activeTurnId,
+      2_000,
+      threadId,
+    );
+    expect(thread.latestTurn?.turnId).toBe(activeTurnId);
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-codex-active-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId: activeTurnId,
+      payload: { state: "completed" },
+    });
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "ready" && entry.session.activeTurnId === null,
+      2_000,
+      threadId,
+    );
+    expect(thread.session?.lastError).toBeNull();
+  });
+
   it("does not mark the source proposed plan implemented for an unrelated turn.started when no thread active turn is tracked", async () => {
     const harness = await createHarness();
     const sourceThreadId = asThreadId("thread-plan");
