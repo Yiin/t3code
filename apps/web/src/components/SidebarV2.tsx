@@ -1213,6 +1213,16 @@ export default function SidebarV2() {
     };
   }, [changeRequestStateByKey, scopedProject, serverConfigs, threads]);
 
+  const settledThreadKeys = useMemo(
+    () =>
+      new Set(
+        settledThreads.map((thread) =>
+          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        ),
+      ),
+    [settledThreads],
+  );
+
   // The settled tail renders in pages: history shouldn't dominate the
   // sidebar, and the common lookups are recent. Expansion resets when the
   // filter context changes so a scope/search flip never inherits a deep
@@ -1291,15 +1301,20 @@ export default function SidebarV2() {
     [beadsSnapshots, epicRunsByEnvironment],
   );
   // The rendered list: iteration threads folded into one node per run, every
-  // other thread left exactly where the sort put it.
+  // other thread left exactly where the sort put it. The settled predicate
+  // keeps a run group from nesting across the settled boundary: the divider is
+  // placed once by index, so a cross-boundary nest would strand active rows
+  // under the Settled heading.
   const threadNodes = useMemo(
     () =>
       groupEpicRunIterationThreads({
         threads: orderedThreads,
         runs: epicRuns,
         titlesByRunId: epicRunTitlesByRunId,
+        isThreadSettled: (thread) =>
+          settledThreadKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
       }),
-    [epicRunTitlesByRunId, epicRuns, orderedThreads],
+    [epicRunTitlesByRunId, epicRuns, orderedThreads, settledThreadKeys],
   );
   const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
   const setEpicRunGroupExpanded = useUiStateStore((state) => state.setEpicRunGroupExpanded);
@@ -1389,15 +1404,6 @@ export default function SidebarV2() {
   // a ref keeps it out of attemptSettle's dependency array.
   const handleNewThreadRef = useRef(newThreadContext.handleNewThread);
   handleNewThreadRef.current = newThreadContext.handleNewThread;
-  const settledThreadKeys = useMemo(
-    () =>
-      new Set(
-        settledThreads.map((thread) =>
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-        ),
-      ),
-    [settledThreads],
-  );
   const settledThreadKeysRef = useRef(settledThreadKeys);
   settledThreadKeysRef.current = settledThreadKeys;
 
@@ -1898,7 +1904,7 @@ export default function SidebarV2() {
       ))}
       {beadsSources.map((source) => (
         <SidebarV2BeadsQuery
-          key={`${source.environmentId} ${source.workspaceRoot}`}
+          key={`${source.environmentId}:${source.workspaceRoot}`}
           environmentId={source.environmentId}
           workspaceRoot={source.workspaceRoot}
           onSnapshot={handleBeadsSnapshot}

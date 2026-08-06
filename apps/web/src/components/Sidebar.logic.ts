@@ -697,6 +697,11 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
   /** Human titles per run, from `sidebarEpicRunTitlesByRunId`. Optional for the
       same reason `runs` is: grouping never waits on a read model. */
   titlesByRunId?: ReadonlyMap<string, SidebarEpicRunTitles> | undefined;
+  /** Settled-ness of one thread, as the caller partitions the list. When
+      given, a group nests under its launcher only when both sit on the same
+      side of the settled boundary. When omitted, nesting is unconditional —
+      callers without a settled boundary (the v1 sidebar) keep that behavior. */
+  isThreadSettled?: ((thread: T) => boolean) | undefined;
 }): Array<SidebarThreadNode<T>> {
   const issueIdByThreadId = new Map<string, string>();
   const runsById = new Map<string, SidebarEpicRunSummary>();
@@ -752,6 +757,7 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
 
   const groupsByOriginThreadId = new Map<string, Array<MutableSidebarEpicRunGroup<T>>>();
   const threadIds = new Set(input.threads.map((thread) => thread.id));
+  const threadsById = new Map(input.threads.map((thread) => [thread.id, thread] as const));
   for (const group of groupsByRunId.values()) {
     const originThreadId = runsById.get(group.runId)?.originThreadId ?? null;
     // No launcher on screen means no row to hang under, so the group keeps its
@@ -759,6 +765,17 @@ export function groupEpicRunIterationThreads<T extends { readonly id: string }>(
     // tree does not have.
     if (originThreadId === null || !threadIds.has(originThreadId)) continue;
     if (parseEpicRunIterationThreadId(originThreadId) !== null) continue;
+    // A group only follows its launcher when both sit on the same side of the
+    // settled boundary (the group's side follows the same "every iteration
+    // settled" rule as `isSettledSidebarNode`). Cross-boundary nesting would
+    // strand active nodes under the Settled heading: SidebarV2 places that
+    // divider once by index, not per row.
+    const isThreadSettled = input.isThreadSettled;
+    if (isThreadSettled !== undefined) {
+      const launcher = threadsById.get(originThreadId);
+      const groupSettled = group.iterations.every((iteration) => isThreadSettled(iteration.thread));
+      if (launcher === undefined || groupSettled !== isThreadSettled(launcher)) continue;
+    }
     group.nestedUnderThreadId = originThreadId;
     const siblings = groupsByOriginThreadId.get(originThreadId);
     if (siblings === undefined) {

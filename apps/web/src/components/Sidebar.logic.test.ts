@@ -979,6 +979,71 @@ describe("groupEpicRunIterationThreads", () => {
 
     expect(nodeIds(nodes)).toEqual(["launcher", `group:${secondRunId}`, `group:${runId}`]);
   });
+
+  // The settled divider is placed once by index in SidebarV2, so a group may
+  // only follow its launcher when both sit on the same side of the settled
+  // boundary. A cross-boundary nest would strand active rows under the
+  // Settled heading.
+  const settledPredicate = (settledIds: ReadonlySet<string>) => (entry: { readonly id: string }) =>
+    settledIds.has(entry.id);
+
+  it("does not nest an all-settled group under an active launcher", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [thread("launcher"), iterationThread(0), iterationThread(1)],
+      runs: [{ ...run, originThreadId: "launcher" }],
+      isThreadSettled: settledPredicate(new Set([iterationThread(0).id, iterationThread(1).id])),
+    });
+
+    expect(nodeIds(nodes)).toEqual(["launcher", `group:${runId}`]);
+    expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: null });
+  });
+
+  it("does not nest a group with an unsettled iteration under a settled launcher", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [iterationThread(0), iterationThread(1), thread("launcher")],
+      runs: [{ ...run, originThreadId: "launcher" }],
+      isThreadSettled: settledPredicate(new Set([iterationThread(1).id, "launcher"])),
+    });
+
+    expect(nodeIds(nodes)).toEqual([`group:${runId}`, "launcher"]);
+    expect(nodes[0]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: null });
+  });
+
+  it("nests a group with an unsettled iteration under an active launcher", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [thread("launcher"), iterationThread(0), iterationThread(1)],
+      runs: [{ ...run, originThreadId: "launcher" }],
+      isThreadSettled: settledPredicate(new Set([iterationThread(1).id])),
+    });
+
+    expect(nodeIds(nodes)).toEqual(["launcher", `group:${runId}`]);
+    expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
+
+  it("nests an all-settled group under a settled launcher", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [thread("launcher"), iterationThread(0), iterationThread(1)],
+      runs: [{ ...run, originThreadId: "launcher" }],
+      isThreadSettled: settledPredicate(
+        new Set(["launcher", iterationThread(0).id, iterationThread(1).id]),
+      ),
+    });
+
+    expect(nodeIds(nodes)).toEqual(["launcher", `group:${runId}`]);
+    expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
+
+  // The v1 sidebar has no settled boundary and calls without the predicate:
+  // nesting stays unconditional there.
+  it("always nests when no settled predicate is given", () => {
+    const nodes = groupEpicRunIterationThreads({
+      threads: [thread("launcher"), iterationThread(0), iterationThread(1)],
+      runs: [{ ...run, originThreadId: "launcher" }],
+    });
+
+    expect(nodeIds(nodes)).toEqual(["launcher", `group:${runId}`]);
+    expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
 });
 
 describe("epic run group row rendering decisions", () => {
