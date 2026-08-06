@@ -508,6 +508,28 @@ export const SubagentTaskCompletedActivityPayload = Schema.Struct({
 });
 export type SubagentTaskCompletedActivityPayload = typeof SubagentTaskCompletedActivityPayload.Type;
 
+export const SUBAGENT_TEXT_ACTIVITY_KIND = "subagent.text";
+export const SUBAGENT_THINKING_ACTIVITY_KIND = "subagent.thinking";
+
+/**
+ * Accumulated prose or thinking emitted by one subagent.
+ *
+ * Transcript activities key by `parentToolUseId`, while the subagent read
+ * model keys by `subagentId`, sourced from the `task.started` payload's
+ * `taskId`. Clients join the activity to a subagent when `parentToolUseId`
+ * equals the `spawnedByItemId` carried from that payload.
+ */
+export const SubagentTranscriptActivityPayload = Schema.Struct({
+  /** The spawning Task tool_use id; joins to `OrchestrationThreadSubagent.spawnedByItemId`. */
+  parentToolUseId: TrimmedNonEmptyString,
+  /** Accumulated block text (server truncates; see `truncated`). */
+  text: TrimmedNonEmptyString,
+  subagentType: Schema.optional(TrimmedNonEmptyString),
+  /** True when the server cut the accumulated text at its cap. */
+  truncated: Schema.optional(Schema.Boolean),
+});
+export type SubagentTranscriptActivityPayload = typeof SubagentTranscriptActivityPayload.Type;
+
 const decodeSubagentTaskStartedPayload = Schema.decodeUnknownOption(
   SubagentTaskStartedActivityPayload,
 );
@@ -516,6 +538,9 @@ const decodeSubagentTaskProgressPayload = Schema.decodeUnknownOption(
 );
 const decodeSubagentTaskCompletedPayload = Schema.decodeUnknownOption(
   SubagentTaskCompletedActivityPayload,
+);
+export const decodeSubagentTranscriptActivityPayload = Schema.decodeUnknownOption(
+  SubagentTranscriptActivityPayload,
 );
 
 const replaceSubagentAt = (

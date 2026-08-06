@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
@@ -22,6 +23,9 @@ import {
   OrchestrationThread,
   OrchestrationThreadShell,
   ProjectCreateCommand,
+  SUBAGENT_TEXT_ACTIVITY_KIND,
+  SUBAGENT_THINKING_ACTIVITY_KIND,
+  decodeSubagentTranscriptActivityPayload,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
@@ -582,6 +586,61 @@ const subagentCompleted = subagentActivity({
     usage: { total_tokens: 17486 },
   },
   createdAt: "2026-01-01T00:00:09.000Z",
+});
+
+it("decodes subagent transcript activity payloads", () => {
+  const minimal = decodeSubagentTranscriptActivityPayload({
+    parentToolUseId: "toolu_01TAkofjCxTj5rN3WCrNKgf8",
+    text: "Inspecting the repository",
+  });
+  assert.ok(Option.isSome(minimal));
+  assert.strictEqual(minimal.value.parentToolUseId, "toolu_01TAkofjCxTj5rN3WCrNKgf8");
+  assert.strictEqual(minimal.value.text, "Inspecting the repository");
+  assert.strictEqual(minimal.value.subagentType, undefined);
+  assert.strictEqual(minimal.value.truncated, undefined);
+
+  const full = decodeSubagentTranscriptActivityPayload({
+    parentToolUseId: "toolu_01TAkofjCxTj5rN3WCrNKgf8",
+    text: "Inspecting the repository",
+    subagentType: "Explore",
+    truncated: true,
+  });
+  assert.ok(Option.isSome(full));
+  assert.strictEqual(full.value.subagentType, "Explore");
+  assert.strictEqual(full.value.truncated, true);
+
+  assert.ok(
+    Option.isNone(
+      decodeSubagentTranscriptActivityPayload({
+        parentToolUseId: "toolu_01TAkofjCxTj5rN3WCrNKgf8",
+      }),
+    ),
+  );
+});
+
+it("keeps the subagent read model unchanged for transcript activities", () => {
+  const subagents = applySubagentActivity([], subagentStarted);
+  const textActivity = subagentActivity({
+    id: "evt-subagent-text",
+    kind: SUBAGENT_TEXT_ACTIVITY_KIND,
+    payload: {
+      parentToolUseId: "toolu_01TAkofjCxTj5rN3WCrNKgf8",
+      text: "Inspecting the repository",
+    },
+    createdAt: "2026-01-01T00:00:06.000Z",
+  });
+  const thinkingActivity = subagentActivity({
+    id: "evt-subagent-thinking",
+    kind: SUBAGENT_THINKING_ACTIVITY_KIND,
+    payload: {
+      parentToolUseId: "toolu_01TAkofjCxTj5rN3WCrNKgf8",
+      text: "Finding the relevant contract",
+    },
+    createdAt: "2026-01-01T00:00:07.000Z",
+  });
+
+  assert.strictEqual(applySubagentActivity(subagents, textActivity), subagents);
+  assert.strictEqual(applySubagentActivity(subagents, thinkingActivity), subagents);
 });
 
 it("folds a started->progress->completed sequence into one subagent row", () => {
