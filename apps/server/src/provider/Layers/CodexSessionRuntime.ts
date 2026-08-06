@@ -708,6 +708,7 @@ export const makeCodexSessionRuntime = (
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
+    const lastStartedTurnIdRef = yield* Ref.make<TurnId | undefined>(undefined);
     const closedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
@@ -905,10 +906,15 @@ export const makeCodexSessionRuntime = (
           if (providerThreadId && payload.threadId !== providerThreadId) {
             return Effect.void;
           }
-          return updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: TurnId.make(payload.turn.id),
-          });
+          const startedTurnId = TurnId.make(payload.turn.id);
+          return Ref.set(lastStartedTurnIdRef, startedTurnId).pipe(
+            Effect.andThen(
+              updateSession(sessionRef, {
+                status: "running",
+                activeTurnId: startedTurnId,
+              }),
+            ),
+          );
         }),
       ),
     );
@@ -1316,7 +1322,8 @@ export const makeCodexSessionRuntime = (
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
-          const effectiveTurnId = turnId ?? session.activeTurnId;
+          const lastStartedTurnId = yield* Ref.get(lastStartedTurnIdRef);
+          const effectiveTurnId = turnId ?? lastStartedTurnId ?? session.activeTurnId;
           if (!effectiveTurnId) {
             return;
           }

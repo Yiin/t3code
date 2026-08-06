@@ -1,10 +1,14 @@
 import * as NodeAssert from "node:assert/strict";
+import * as NodeOS from "node:os";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
-import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_MODEL, ThreadId, TurnId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -18,9 +22,15 @@ import {
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  makeCodexSessionRuntime,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+
+function quoteShellArgument(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
@@ -438,6 +448,82 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("CodexSessionRuntime interrupts", (it) => {
+  const makeHarness = Effect.fn("makeCodexSessionRuntimeTestHarness")(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const tempDir = yield* fileSystem.makeTempDirectoryScoped({
+      directory: NodeOS.tmpdir(),
+      prefix: "codex-session-runtime-",
+    });
+    const requestLogPath = path.join(tempDir, "requests.jsonl");
+    const wrapperPath = path.join(tempDir, "codex-mock.sh");
+    const mockPeerPath = yield* path.fromFileUrl(
+      new URL("../../../scripts/codex-session-runtime-mock-peer.ts", import.meta.url),
+    );
+    yield* fileSystem.writeFileString(
+      wrapperPath,
+      `#!/bin/sh\nexec ${quoteShellArgument(process.execPath)} ${quoteShellArgument(mockPeerPath)} "$@"\n`,
+    );
+    yield* fileSystem.chmod(wrapperPath, 0o755);
+
+    const runtime = yield* makeCodexSessionRuntime({
+      threadId: ThreadId.make("thread-1"),
+      binaryPath: wrapperPath,
+      cwd: tempDir,
+      runtimeMode: "full-access",
+      environment: {
+        ...process.env,
+        T3_CODEX_RUNTIME_REQUEST_LOG_PATH: requestLogPath,
+      },
+    });
+    yield* runtime.start();
+
+    return {
+      runtime,
+      readInterruptRequests: fileSystem.readFileString(requestLogPath).pipe(
+        Effect.map((content) =>
+          content
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => decodeUnknownJson(line)),
+        ),
+      ),
+    };
+  });
+
+  it.effect("uses the last started turn id after a normal turn start", () =>
+    Effect.gen(function* () {
+      const { runtime, readInterruptRequests } = yield* makeHarness();
+      yield* runtime.sendTurn({ input: "start" });
+      yield* runtime.interruptTurn();
+
+      NodeAssert.deepStrictEqual(yield* readInterruptRequests, [
+        { threadId: "provider-thread-1", turnId: "started-turn-1" },
+      ]);
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("keeps the last started turn id after a divergent turn/start response", () =>
+    Effect.gen(function* () {
+      const { runtime, readInterruptRequests } = yield* makeHarness();
+      yield* runtime.sendTurn({ input: "start" });
+      const second = yield* runtime.sendTurn({ input: "mid-turn input" });
+      NodeAssert.equal(second.turnId, TurnId.make("phantom-turn-2"));
+      NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("phantom-turn-2"));
+
+      yield* runtime.interruptTurn();
+
+      NodeAssert.deepStrictEqual(yield* readInterruptRequests, [
+        { threadId: "provider-thread-1", turnId: "started-turn-1" },
+      ]);
+      yield* runtime.close;
     }),
   );
 });
