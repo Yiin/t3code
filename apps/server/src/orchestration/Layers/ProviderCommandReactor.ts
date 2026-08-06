@@ -4,6 +4,7 @@ import {
   EventId,
   type ModelSelection,
   type OrchestrationEvent,
+  PROVIDER_SUBAGENT_STOP_FAILED_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
   ProviderDriverKind,
   type ProjectId,
@@ -11,14 +12,20 @@ import {
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
+  SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND,
+  SUBAGENT_STOP_ESCALATION_GRACE_MS,
+  SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND,
   SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND,
   SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+  SubagentStopRequestedActivityPayload,
   SubagentSteerRequestedActivityPayload,
   type TurnId,
+  isFreshRunningSubagent,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -68,20 +75,24 @@ type ProviderIntentEvent = Extract<
   }
 >;
 
-type SubagentSteerRequestedEvent = Extract<
-  ProviderIntentEvent,
-  { type: "thread.activity-appended" }
->;
+type SubagentRequestedEvent = Extract<ProviderIntentEvent, { type: "thread.activity-appended" }>;
 
 type ProviderIntent =
-  | Exclude<ProviderIntentEvent, SubagentSteerRequestedEvent>
+  | Exclude<ProviderIntentEvent, SubagentRequestedEvent>
   | {
-      readonly event: SubagentSteerRequestedEvent;
+      readonly event: SubagentRequestedEvent;
       readonly steer: SubagentSteerRequestedActivityPayload;
+    }
+  | {
+      readonly event: SubagentRequestedEvent;
+      readonly stop: SubagentStopRequestedActivityPayload;
     };
 
 const decodeSubagentSteerRequestedActivity = Schema.decodeUnknownOption(
   SubagentSteerRequestedActivityPayload,
+);
+const decodeSubagentStopRequestedActivity = Schema.decodeUnknownOption(
+  SubagentStopRequestedActivityPayload,
 );
 
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
@@ -240,6 +251,11 @@ const make = Effect.gen(function* () {
     timeToLive: HANDLED_TURN_START_KEY_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const handledSubagentStopIds = yield* Cache.make<string, true>({
+    capacity: HANDLED_TURN_START_KEY_MAX,
+    timeToLive: HANDLED_TURN_START_KEY_TTL,
+    lookup: () => Effect.succeed(true),
+  });
 
   const hasHandledTurnStartRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
@@ -252,6 +268,13 @@ const make = Effect.gen(function* () {
     Cache.getOption(handledSubagentSteerIds, steerId).pipe(
       Effect.flatMap((cached) =>
         Cache.set(handledSubagentSteerIds, steerId, true).pipe(Effect.as(Option.isSome(cached))),
+      ),
+    );
+
+  const hasHandledSubagentStopRecently = (stopId: string) =>
+    Cache.getOption(handledSubagentStopIds, stopId).pipe(
+      Effect.flatMap((cached) =>
+        Cache.set(handledSubagentStopIds, stopId, true).pipe(Effect.as(Option.isSome(cached))),
       ),
     );
 
@@ -310,6 +333,40 @@ const make = Effect.gen(function* () {
   }) =>
     Effect.all({
       commandId: serverCommandId("subagent-steer-activity"),
+      eventId: serverEventId(),
+    }).pipe(
+      Effect.flatMap(({ commandId, eventId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: eventId,
+            tone: input.tone,
+            kind: input.kind,
+            summary: input.summary,
+            payload: input.payload,
+            turnId: input.turnId,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendSubagentStopActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly kind:
+      | typeof SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND
+      | typeof PROVIDER_SUBAGENT_STOP_FAILED_ACTIVITY_KIND;
+    readonly tone: "info" | "error";
+    readonly summary: string;
+    readonly payload: Record<string, unknown>;
+    readonly turnId: TurnId | null;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("subagent-stop-activity"),
       eventId: serverEventId(),
     }).pipe(
       Effect.flatMap(({ commandId, eventId }) =>
@@ -1062,7 +1119,7 @@ const make = Effect.gen(function* () {
   });
 
   const processSubagentSteerRequested = Effect.fn("processSubagentSteerRequested")(function* (
-    event: SubagentSteerRequestedEvent,
+    event: SubagentRequestedEvent,
     steer: SubagentSteerRequestedActivityPayload,
   ) {
     if (yield* hasHandledSubagentSteerRecently(steer.steerId)) {
@@ -1132,6 +1189,97 @@ const make = Effect.gen(function* () {
       turnId,
       createdAt: event.occurredAt,
     });
+  });
+
+  const processSubagentStopRequested = Effect.fn("processSubagentStopRequested")(function* (
+    event: SubagentRequestedEvent,
+    stop: SubagentStopRequestedActivityPayload,
+  ) {
+    if (yield* hasHandledSubagentStopRecently(stop.stopId)) {
+      return;
+    }
+
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    const turnId = event.payload.activity.turnId;
+    const appendFailed = (detail: string) =>
+      appendSubagentStopActivity({
+        threadId: event.payload.threadId,
+        kind: PROVIDER_SUBAGENT_STOP_FAILED_ACTIVITY_KIND,
+        tone: "error",
+        summary: "Subagent stop request failed",
+        payload: {
+          subagentId: stop.subagentId,
+          stopId: stop.stopId,
+          detail,
+        },
+        turnId,
+        createdAt: event.occurredAt,
+      });
+
+    if (!thread.session || thread.session.status === "stopped") {
+      return yield* appendFailed("No active provider session is bound to this thread.");
+    }
+
+    const description =
+      thread.subagents.find((subagent) => subagent.subagentId === stop.subagentId)?.description ??
+      "unknown task";
+    const messageText = `[Stop request for subagent ${stop.subagentId} (${description})]\nThe user asked to stop this subagent now. End that work, collect what it completed, and report it. If it is still running in 30 seconds the whole turn will be interrupted.`;
+    const sendTurnRequest = yield* buildSendTurnRequestForThread({
+      threadId: event.payload.threadId,
+      messageText,
+      createdAt: event.occurredAt,
+      existingSessionOnly: true,
+    }).pipe(
+      Effect.map(Option.some),
+      Effect.catchCause((cause) =>
+        appendFailed(formatFailureDetail(cause)).pipe(Effect.as(Option.none())),
+      ),
+    );
+    if (Option.isNone(sendTurnRequest)) {
+      return;
+    }
+
+    const sent = yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.as(true),
+      Effect.catchCause((cause) => appendFailed(formatFailureDetail(cause)).pipe(Effect.as(false))),
+    );
+    if (!sent) {
+      return;
+    }
+
+    yield* Effect.gen(function* () {
+      yield* Effect.sleep(SUBAGENT_STOP_ESCALATION_GRACE_MS);
+      const currentThread = yield* resolveThread(event.payload.threadId);
+      const currentSubagent = currentThread?.subagents.find(
+        (subagent) => subagent.subagentId === stop.subagentId,
+      );
+      const currentTimeMillis = yield* Clock.currentTimeMillis;
+      if (!currentSubagent || !isFreshRunningSubagent(currentSubagent, currentTimeMillis)) {
+        return;
+      }
+      const createdAt = new Date(currentTimeMillis).toISOString();
+      yield* appendSubagentStopActivity({
+        threadId: event.payload.threadId,
+        kind: SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND,
+        tone: "info",
+        summary: "Subagent stop request escalated",
+        payload: {
+          subagentId: stop.subagentId,
+          stopId: stop.stopId,
+        },
+        turnId,
+        createdAt,
+      });
+      yield* orchestrationEngine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: yield* serverCommandId("subagent-stop-escalation"),
+        threadId: event.payload.threadId,
+        createdAt,
+      });
+    }).pipe(Effect.forkScoped);
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
@@ -1284,8 +1432,11 @@ const make = Effect.gen(function* () {
         yield* processTurnInterruptRequested(event);
         return;
       case "thread.activity-appended":
-        if (!("steer" in input)) return;
-        yield* processSubagentSteerRequested(event, input.steer);
+        if ("steer" in input) {
+          yield* processSubagentSteerRequested(event, input.steer);
+        } else if ("stop" in input) {
+          yield* processSubagentStopRequested(event, input.stop);
+        }
         return;
       case "thread.approval-response-requested":
         yield* processApprovalResponseRequested(event);
@@ -1324,6 +1475,16 @@ const make = Effect.gen(function* () {
         const steer = decodeSubagentSteerRequestedActivity(event.payload.activity.payload);
         if (Option.isSome(steer)) {
           return yield* worker.enqueue({ event, steer: steer.value });
+        }
+        return;
+      }
+      if (
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.kind === SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND
+      ) {
+        const stop = decodeSubagentStopRequestedActivity(event.payload.activity.payload);
+        if (Option.isSome(stop)) {
+          return yield* worker.enqueue({ event, stop: stop.value });
         }
         return;
       }

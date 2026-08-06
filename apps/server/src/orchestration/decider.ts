@@ -1,6 +1,7 @@
 import {
   EventId,
   SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
+  SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -764,6 +765,44 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               text: command.text,
               steerId: command.commandId,
             },
+            turnId: subagent.turnId,
+            createdAt: occurredAt,
+          },
+        },
+      };
+    }
+
+    case "thread.subagent.stop": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const subagent = thread.subagents.find((row) => row.subagentId === command.subagentId);
+      const occurredAt = yield* nowIso;
+      if (!subagent || !isFreshRunningSubagent(subagent, Date.parse(occurredAt))) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `subagent ${command.subagentId} is not running or is stale`,
+        });
+      }
+      const eventBase = yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt,
+        commandId: command.commandId,
+      });
+      return {
+        ...eventBase,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: eventBase.eventId,
+            tone: "info",
+            kind: SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND,
+            summary: `Stop requested for subagent ${command.subagentId}`,
+            payload: { subagentId: command.subagentId, stopId: command.commandId },
             turnId: subagent.turnId,
             createdAt: occurredAt,
           },

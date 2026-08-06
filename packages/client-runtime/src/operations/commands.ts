@@ -43,6 +43,7 @@ export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mod
 export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
 export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
 export type SteerThreadSubagentInput = CommandInput<"thread.subagent.steer">;
+export type StopThreadSubagentInput = CommandInput<"thread.subagent.stop">;
 export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
@@ -240,6 +241,18 @@ export const steerThreadSubagent: (input: SteerThreadSubagentInput) => CommandEf
   return yield* dispatch({
     ...input,
     type: "thread.subagent.steer",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const stopThreadSubagent: (input: StopThreadSubagentInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.stopThreadSubagent",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.subagent.stop",
     commandId: metadata.commandId,
     createdAt: metadata.createdAt,
   });

@@ -511,6 +511,9 @@ export type SubagentTaskCompletedActivityPayload = typeof SubagentTaskCompletedA
 export const SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND = "subagent.steer.requested";
 export const SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND = "subagent.steer.delivered";
 export const PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND = "provider.subagent.steer.failed";
+export const SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND = "subagent.stop.requested";
+export const SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND = "subagent.stop.escalated";
+export const PROVIDER_SUBAGENT_STOP_FAILED_ACTIVITY_KIND = "provider.subagent.stop.failed";
 
 export const SubagentSteerRequestedActivityPayload = Schema.Struct({
   subagentId: TrimmedNonEmptyString,
@@ -533,6 +536,25 @@ export const SubagentSteerFailedActivityPayload = Schema.Struct({
   detail: TrimmedNonEmptyString,
 });
 export type SubagentSteerFailedActivityPayload = typeof SubagentSteerFailedActivityPayload.Type;
+
+export const SubagentStopRequestedActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  stopId: CommandId,
+});
+export type SubagentStopRequestedActivityPayload = typeof SubagentStopRequestedActivityPayload.Type;
+
+export const SubagentStopEscalatedActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  stopId: CommandId,
+});
+export type SubagentStopEscalatedActivityPayload = typeof SubagentStopEscalatedActivityPayload.Type;
+
+export const SubagentStopFailedActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  stopId: CommandId,
+  detail: TrimmedNonEmptyString,
+});
+export type SubagentStopFailedActivityPayload = typeof SubagentStopFailedActivityPayload.Type;
 
 export const SUBAGENT_TEXT_ACTIVITY_KIND = "subagent.text";
 export const SUBAGENT_THINKING_ACTIVITY_KIND = "subagent.thinking";
@@ -726,6 +748,7 @@ export const applySubagentActivity = (
  * tool-call cadence, so one quiet call longer than this window reads as stale.
  */
 export const RUNNING_SUBAGENT_FRESHNESS_MS = 15 * 60 * 1_000;
+export const SUBAGENT_STOP_ESCALATION_GRACE_MS = 30_000;
 
 /** Whether a subagent is running and has server-observed activity in the freshness window. */
 export const isFreshRunningSubagent = (
@@ -1149,6 +1172,14 @@ const ThreadSubagentSteerCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadSubagentStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.subagent.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  subagentId: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
 const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
@@ -1198,6 +1229,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadSubagentSteerCommand,
+  ThreadSubagentStopCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
@@ -1222,6 +1254,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadSubagentSteerCommand,
+  ThreadSubagentStopCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
