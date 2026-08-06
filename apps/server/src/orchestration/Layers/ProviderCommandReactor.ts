@@ -80,6 +80,10 @@ type ProviderIntent =
       readonly steer: SubagentSteerRequestedActivityPayload;
     };
 
+const decodeSubagentSteerRequestedActivity = Schema.decodeUnknownOption(
+  SubagentSteerRequestedActivityPayload,
+);
+
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized && normalized.length > 0 ? normalized : undefined;
@@ -1280,6 +1284,7 @@ const make = Effect.gen(function* () {
         yield* processTurnInterruptRequested(event);
         return;
       case "thread.activity-appended":
+        if (!("steer" in input)) return;
         yield* processSubagentSteerRequested(event, input.steer);
         return;
       case "thread.approval-response-requested":
@@ -1316,9 +1321,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.activity-appended" &&
         event.payload.activity.kind === SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND
       ) {
-        const steer = Schema.decodeUnknownOption(SubagentSteerRequestedActivityPayload)(
-          event.payload.activity.payload,
-        );
+        const steer = decodeSubagentSteerRequestedActivity(event.payload.activity.payload);
         if (Option.isSome(steer)) {
           return yield* worker.enqueue({ event, steer: steer.value });
         }

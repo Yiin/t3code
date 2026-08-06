@@ -59,6 +59,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -152,6 +153,7 @@ describe("ProviderCommandReactor", () => {
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -228,11 +230,13 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn(
+      input?.sendTurnEffect ??
+        ((_: unknown) =>
+          Effect.succeed({
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-1"),
+          })),
     );
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
@@ -448,6 +452,255 @@ describe("ProviderCommandReactor", () => {
       drain,
     };
   }
+
+  async function prepareSubagentSteerHarness(input?: {
+    readonly includeProjectedSession?: boolean;
+    readonly includeRuntimeSession?: boolean;
+    readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
+  }) {
+    const harness = await createHarness(
+      input?.sendTurnEffect !== undefined ? { sendTurnEffect: input.sendTurnEffect } : undefined,
+    );
+    const now = await Effect.runPromise(DateTime.now.pipe(Effect.map(DateTime.formatIso)));
+
+    if (input?.includeRuntimeSession !== false) {
+      harness.runtimeSessions.push({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "ready",
+        runtimeMode: "approval-required",
+        model: "gpt-5-codex",
+        threadId: ThreadId.make("thread-1"),
+        resumeCursor: { opaque: "resume-steer" },
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    if (input?.includeProjectedSession !== false) {
+      await harness.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-subagent-steer"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+    }
+
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-subagent-started"),
+      threadId: ThreadId.make("thread-1"),
+      activity: {
+        id: EventId.make("activity-subagent-started"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Inspect parser task started",
+        payload: {
+          taskId: "subagent-1",
+          taskType: "subagent",
+          detail: "Inspect parser",
+        },
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      },
+      createdAt: now,
+    });
+
+    return { harness, now };
+  }
+
+  it("queues a subagent follow-up on the live parent session and appends delivery", async () => {
+    const { harness, now } = await prepareSubagentSteerHarness();
+
+    await harness.dispatch({
+      type: "thread.subagent.steer",
+      commandId: CommandId.make("steer-1"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      text: "Check the parser edge case",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: ThreadId.make("thread-1"),
+      input:
+        "[Queued user follow-up for subagent subagent-1 (Inspect parser)]\n" +
+        "This message arrived while that subagent was running. Apply it to the returned result, or resume the subagent if more work is needed:\n" +
+        "Check the parser edge case",
+    });
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.activities.some((activity) => activity.kind === "subagent.steer.delivered") ?? false
+      );
+    });
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "subagent.steer.delivered"),
+    ).toMatchObject({
+      tone: "info",
+      summary: "Queued for parent",
+      payload: { subagentId: "subagent-1", steerId: "steer-1" },
+      turnId: asTurnId("turn-1"),
+    });
+  });
+
+  it("appends a failed steer activity when the thread has no projected session", async () => {
+    const { harness, now } = await prepareSubagentSteerHarness({
+      includeProjectedSession: false,
+      includeRuntimeSession: false,
+    });
+
+    await harness.dispatch({
+      type: "thread.subagent.steer",
+      commandId: CommandId.make("steer-no-session"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      text: "Check the parser",
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.subagent.steer.failed") ??
+        false
+      );
+    });
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.subagent.steer.failed"),
+    ).toMatchObject({
+      tone: "error",
+      payload: {
+        subagentId: "subagent-1",
+        steerId: "steer-no-session",
+        detail: "No active provider session is bound to this thread.",
+      },
+      turnId: asTurnId("turn-1"),
+    });
+  });
+
+  it("does not create a provider session when the projected session is stale", async () => {
+    const { harness, now } = await prepareSubagentSteerHarness({ includeRuntimeSession: false });
+
+    await harness.dispatch({
+      type: "thread.subagent.steer",
+      commandId: CommandId.make("steer-stale-session"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      text: "Check the parser",
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.subagent.steer.failed") ??
+        false
+      );
+    });
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("delivers duplicate steer activity events only once", async () => {
+    const { harness, now } = await prepareSubagentSteerHarness();
+    const appendRequested = (suffix: string) =>
+      harness.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`cmd-steer-duplicate-${suffix}`),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make(`activity-steer-duplicate-${suffix}`),
+          tone: "info",
+          kind: "subagent.steer.requested",
+          summary: "Queued user follow-up",
+          payload: {
+            subagentId: "subagent-1",
+            text: "Check the parser",
+            steerId: "duplicate-steer",
+          },
+          turnId: asTurnId("turn-1"),
+          createdAt: now,
+        },
+        createdAt: now,
+      });
+
+    await appendRequested("one");
+    await appendRequested("two");
+    await harness.drain();
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("appends exact failure details when the provider rejects a steer", async () => {
+    const { harness, now } = await prepareSubagentSteerHarness({
+      sendTurnEffect: () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: ProviderDriverKind.make("codex"),
+            method: "thread.turn.start",
+            detail: "parent turn ended",
+          }),
+        ),
+    });
+
+    await harness.dispatch({
+      type: "thread.subagent.steer",
+      commandId: CommandId.make("steer-provider-failure"),
+      threadId: ThreadId.make("thread-1"),
+      subagentId: "subagent-1",
+      text: "Check the parser",
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.subagent.steer.failed") ??
+        false
+      );
+    });
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.subagent.steer.failed"),
+    ).toMatchObject({
+      tone: "error",
+      payload: {
+        subagentId: "subagent-1",
+        steerId: "steer-provider-failure",
+        detail: expect.stringContaining("parent turn ended"),
+      },
+      turnId: asTurnId("turn-1"),
+    });
+  });
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();

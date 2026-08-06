@@ -59,6 +59,16 @@ const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSessi
 const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
 const decodeOrchestrationThreadShell = Schema.decodeUnknownEffect(OrchestrationThreadShell);
 const encodeThreadCreatedPayload = Schema.encodeEffect(ThreadCreatedPayload);
+const decodeSubagentSteerRequested = Schema.decodeUnknownEffect(
+  SubagentSteerRequestedActivityPayload,
+);
+const decodeSubagentSteerDelivered = Schema.decodeUnknownEffect(
+  SubagentSteerDeliveredActivityPayload,
+);
+const decodeSubagentSteerFailed = Schema.decodeUnknownEffect(SubagentSteerFailedActivityPayload);
+const encodeSubagentSteerRequested = Schema.encodeEffect(SubagentSteerRequestedActivityPayload);
+const encodeSubagentSteerDelivered = Schema.encodeEffect(SubagentSteerDeliveredActivityPayload);
+const encodeSubagentSteerFailed = Schema.encodeEffect(SubagentSteerFailedActivityPayload);
 
 function getOptionValue(
   options: ReadonlyArray<{ id: string; value: unknown }> | undefined,
@@ -651,26 +661,25 @@ it("keeps the subagent read model unchanged for transcript activities", () => {
 
 it.effect("round-trips subagent steer activity payloads", () =>
   Effect.gen(function* () {
-    const fixtures = [
-      {
-        schema: SubagentSteerRequestedActivityPayload,
-        payload: { subagentId: "subagent-1", text: "Check the parser", steerId: "steer-1" },
-      },
-      {
-        schema: SubagentSteerDeliveredActivityPayload,
-        payload: { subagentId: "subagent-1", steerId: "steer-1" },
-      },
-      {
-        schema: SubagentSteerFailedActivityPayload,
-        payload: { subagentId: "subagent-1", steerId: "steer-1", detail: "Session ended" },
-      },
-    ] as const;
+    const requested = {
+      subagentId: "subagent-1",
+      text: "Check the parser",
+      steerId: "steer-1",
+    };
+    const delivered = { subagentId: "subagent-1", steerId: "steer-1" };
+    const failed = {
+      subagentId: "subagent-1",
+      steerId: "steer-1",
+      detail: "Session ended",
+    };
 
-    for (const fixture of fixtures) {
-      const decoded = yield* Schema.decodeUnknownEffect(fixture.schema)(fixture.payload);
-      const encoded = yield* Schema.encode(fixture.schema)(decoded);
-      assert.deepStrictEqual(encoded, fixture.payload);
-    }
+    const decodedRequested = yield* decodeSubagentSteerRequested(requested);
+    const decodedDelivered = yield* decodeSubagentSteerDelivered(delivered);
+    const decodedFailed = yield* decodeSubagentSteerFailed(failed);
+
+    assert.deepStrictEqual(yield* encodeSubagentSteerRequested(decodedRequested), requested);
+    assert.deepStrictEqual(yield* encodeSubagentSteerDelivered(decodedDelivered), delivered);
+    assert.deepStrictEqual(yield* encodeSubagentSteerFailed(decodedFailed), failed);
   }),
 );
 
