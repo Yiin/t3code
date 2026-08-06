@@ -39,6 +39,16 @@ type ScopedSidebarThread = ThreadSortInput & {
 
 export type ThreadTraversalDirection = "previous" | "next";
 
+export function filterHiddenEpicRunIterationThreads<T extends { readonly id: string }>(input: {
+  threads: readonly T[];
+  hiddenByRunId: Readonly<Record<string, boolean>>;
+}): T[] {
+  return input.threads.filter((thread) => {
+    const parsed = parseEpicRunIterationThreadId(thread.id);
+    return parsed === null || input.hiddenByRunId[parsed.runId] !== true;
+  });
+}
+
 export async function archiveSelectedThreadEntries<
   TEntry extends { readonly threadKey: string },
   TResult extends { readonly _tag: "Success" | "Failure" },

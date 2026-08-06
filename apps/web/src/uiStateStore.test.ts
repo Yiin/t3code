@@ -15,6 +15,7 @@ import {
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
   setEpicRunGroupExpanded,
+  setEpicRunGroupHidden,
   setEpicsProjectGroupCollapsed,
   setPlannedEpicBannerDismissed,
   setProjectExpanded,
@@ -32,6 +33,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadSubagentExpandedById: {},
     epicsLastVisitedAt: null,
     epicRunGroupExpandedByRunId: {},
+    epicRunGroupHiddenByRunId: {},
     plannedEpicBannerDismissedByIdentity: {},
     epicsProjectGroupCollapsedByKey: {},
     defaultAdvertisedEndpointKey: null,
@@ -205,6 +207,46 @@ describe("uiStateStore pure functions", () => {
     ).toEqual({ [runId]: false });
   });
 
+  it("stores only hidden epic run groups, one run at a time", () => {
+    const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+    const otherRunId = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+    const initial = makeUiState();
+    const otherHidden = setEpicRunGroupHidden(initial, otherRunId, true);
+    const hidden = setEpicRunGroupHidden(otherHidden, runId, true);
+
+    expect(hidden.epicRunGroupHiddenByRunId).toEqual({ [otherRunId]: true, [runId]: true });
+    expect(setEpicRunGroupHidden(hidden, runId, true)).toBe(hidden);
+    expect(setEpicRunGroupHidden(initial, runId, false)).toBe(initial);
+    expect(setEpicRunGroupHidden(makeUiState(), "", true)).toEqual(makeUiState());
+    expect(setEpicRunGroupHidden(hidden, runId, false).epicRunGroupHiddenByRunId).toEqual({
+      [otherRunId]: true,
+    });
+    expect(
+      setEpicRunGroupHidden(
+        makeUiState({ epicRunGroupHiddenByRunId: { [runId]: false } }),
+        runId,
+        false,
+      ).epicRunGroupHiddenByRunId,
+    ).toEqual({});
+  });
+
+  it("sanitizes hidden epic run groups during a persisted-state round trip", () => {
+    const runId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+    expect(
+      parsePersistedState({
+        epicRunGroupHiddenByRunId: {
+          [runId]: true,
+          visible: false,
+          "": true,
+        },
+      }).epicRunGroupHiddenByRunId,
+    ).toEqual({ [runId]: true });
+    expect(
+      parsePersistedState({ epicRunGroupHiddenByRunId: null as unknown as Record<string, boolean> })
+        .epicRunGroupHiddenByRunId,
+    ).toEqual({});
+  });
+
   it("records only dismissed planned-epic notices, one identity at a time", () => {
     const dismissedKey = "env-1:project-1:t3code-abc";
     const otherKey = "env-1:project-1:t3code-xyz";
@@ -297,6 +339,7 @@ describe("parsePersistedState", () => {
       epicsLastVisitedAt: null,
       threadSubagentExpandedById: {},
       epicRunGroupExpandedByRunId: {},
+      epicRunGroupHiddenByRunId: {},
       plannedEpicBannerDismissedByIdentity: {},
       epicsProjectGroupCollapsedByKey: {},
       projectExpandedById: {
@@ -397,6 +440,7 @@ describe("uiStateStore persistence", () => {
         },
       },
       epicRunGroupExpandedByRunId: { "run-1": true },
+      epicRunGroupHiddenByRunId: { "run-hidden": true, "run-visible": false },
       plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
       epicsProjectGroupCollapsedByKey: {
         [epicSourceKey({ environmentId: "env-local", workspaceRoot: "/repo/t3code" })]: true,
@@ -425,6 +469,7 @@ describe("uiStateStore persistence", () => {
       },
       threadSubagentExpandedById: {},
       epicRunGroupExpandedByRunId: { "run-1": true },
+      epicRunGroupHiddenByRunId: { "run-hidden": true },
       plannedEpicBannerDismissedByIdentity: { "env-1:project-1:t3code-abc": true },
       epicsProjectGroupCollapsedByKey: {
         [epicSourceKey({ environmentId: "env-local", workspaceRoot: "/repo/t3code" })]: true,
@@ -438,6 +483,7 @@ describe("uiStateStore persistence", () => {
           "turn-1": false,
         },
       },
+      epicRunGroupHiddenByRunId: { "run-hidden": true },
     });
   });
 

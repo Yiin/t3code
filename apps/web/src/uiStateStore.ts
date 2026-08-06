@@ -28,6 +28,7 @@ export interface PersistedUiState {
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   threadSubagentExpandedById?: Record<string, Record<string, boolean>>;
   epicRunGroupExpandedByRunId?: Record<string, boolean>;
+  epicRunGroupHiddenByRunId?: Record<string, boolean>;
   plannedEpicBannerDismissedByIdentity?: Record<string, boolean>;
   epicsProjectGroupCollapsedByKey?: Record<string, boolean>;
 }
@@ -54,6 +55,11 @@ export interface UiThreadState {
    * (see `resolveEpicRunGroupExpanded`), so this does not grow with every run.
    */
   epicRunGroupExpandedByRunId: Record<string, boolean>;
+  /**
+   * Epic runs hidden from the sidebar, keyed by run id. An absent key means
+   * the run remains visible, so only explicit hides (`true`) are persisted.
+   */
+  epicRunGroupHiddenByRunId: Record<string, boolean>;
   /**
    * Planned-epic composer notices the user dismissed, keyed by
    * `plannedEpicIdentity` (`environmentId:projectId:epicId`). Only dismissals
@@ -87,6 +93,7 @@ const initialState: UiState = {
   threadChangedFilesExpandedById: {},
   threadSubagentExpandedById: {},
   epicRunGroupExpandedByRunId: {},
+  epicRunGroupHiddenByRunId: {},
   plannedEpicBannerDismissedByIdentity: {},
   epicsProjectGroupCollapsedByKey: {},
   defaultAdvertisedEndpointKey: null,
@@ -183,6 +190,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
       parsed.threadSubagentExpandedById,
     ),
     epicRunGroupExpandedByRunId: sanitizeBooleanRecord(parsed.epicRunGroupExpandedByRunId),
+    epicRunGroupHiddenByRunId: sanitizeDismissedRecord(parsed.epicRunGroupHiddenByRunId),
     plannedEpicBannerDismissedByIdentity: sanitizeDismissedRecord(
       parsed.plannedEpicBannerDismissedByIdentity,
     ),
@@ -302,6 +310,7 @@ export function persistState(state: UiState): void {
         threadChangedFilesExpandedById,
         threadSubagentExpandedById: state.threadSubagentExpandedById,
         epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
+        epicRunGroupHiddenByRunId: sanitizeDismissedRecord(state.epicRunGroupHiddenByRunId),
         plannedEpicBannerDismissedByIdentity: state.plannedEpicBannerDismissedByIdentity,
         epicsProjectGroupCollapsedByKey: state.epicsProjectGroupCollapsedByKey,
       } satisfies PersistedUiState),
@@ -488,6 +497,26 @@ export function setEpicRunGroupExpanded(state: UiState, runId: string, expanded:
   };
 }
 
+export function setEpicRunGroupHidden(state: UiState, runId: string, hidden: boolean): UiState {
+  if (runId.length === 0) {
+    return state;
+  }
+  const hasEntry = Object.hasOwn(state.epicRunGroupHiddenByRunId, runId);
+  if ((hidden && state.epicRunGroupHiddenByRunId[runId] === true) || (!hidden && !hasEntry)) {
+    return state;
+  }
+  const epicRunGroupHiddenByRunId = { ...state.epicRunGroupHiddenByRunId };
+  if (hidden) {
+    epicRunGroupHiddenByRunId[runId] = true;
+  } else {
+    delete epicRunGroupHiddenByRunId[runId];
+  }
+  return {
+    ...state,
+    epicRunGroupHiddenByRunId,
+  };
+}
+
 export function setPlannedEpicBannerDismissed(
   state: UiState,
   identity: string,
@@ -621,6 +650,7 @@ interface UiStateStore extends UiState {
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setThreadSubagentExpanded: (threadId: string, subagentKey: string, expanded: boolean) => void;
   setEpicRunGroupExpanded: (runId: string, expanded: boolean) => void;
+  setEpicRunGroupHidden: (runId: string, hidden: boolean) => void;
   setPlannedEpicBannerDismissed: (identity: string, dismissed: boolean) => void;
   setEpicsProjectGroupCollapsed: (sourceKey: string, collapsed: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
@@ -645,6 +675,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setThreadSubagentExpanded(state, threadId, subagentKey, expanded)),
   setEpicRunGroupExpanded: (runId, expanded) =>
     set((state) => setEpicRunGroupExpanded(state, runId, expanded)),
+  setEpicRunGroupHidden: (runId, hidden) =>
+    set((state) => setEpicRunGroupHidden(state, runId, hidden)),
   setPlannedEpicBannerDismissed: (identity, dismissed) =>
     set((state) => setPlannedEpicBannerDismissed(state, identity, dismissed)),
   setEpicsProjectGroupCollapsed: (sourceKey, collapsed) =>

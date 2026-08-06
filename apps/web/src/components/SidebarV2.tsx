@@ -88,6 +88,7 @@ import {
   epicRunGroupRowLabel,
   epicRunIterationCountLabel,
   epicRunIterationRowLabel,
+  filterHiddenEpicRunIterationThreads,
   firstValidTimestampMs,
   groupEpicRunIterationThreads,
   hasUnseenCompletion,
@@ -789,11 +790,13 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
   nested: boolean;
   routeThreadKey: string | null;
   onToggle: (runId: string, expanded: boolean) => void;
+  onSettle: (runId: string) => void;
   onOpenRun: (group: SidebarEpicRunGroup<EnvironmentThreadShell>) => void;
   onIterationClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
   onIterationActivate: (threadRef: ScopedThreadRef) => void;
 }) {
-  const { expanded, group, onIterationActivate, onIterationClick, onOpenRun, onToggle } = props;
+  const { expanded, group, onIterationActivate, onIterationClick, onOpenRun, onSettle, onToggle } =
+    props;
   const statusPill = resolveEpicRunStatusPill(group.status);
   const countLabel = epicRunIterationCountLabel(group.iterations.length);
   const rowLabel = epicRunGroupRowLabel(group);
@@ -811,6 +814,14 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
       onToggle(group.runId, !expanded);
     },
     [expanded, group.runId, onToggle],
+  );
+  const handleSettle = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onSettle(group.runId);
+    },
+    [group.runId, onSettle],
   );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
@@ -870,25 +881,36 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
               </span>
             ) : null}
           </span>
-          {statusPill ? (
-            <span
-              role="status"
-              className={cn(
-                "inline-flex shrink-0 items-center gap-1 text-xs font-medium",
-                statusPill.colorClass,
-              )}
-            >
+          <span className="relative ml-auto flex h-6 min-w-[4.5rem] shrink-0 items-center justify-end">
+            {statusPill ? (
               <span
-                aria-hidden
+                role="status"
                 className={cn(
-                  "size-1.5 rounded-full",
-                  statusPill.dotClass,
-                  statusPill.pulse && "animate-status-pulse motion-reduce:animate-none",
+                  "inline-flex shrink-0 items-center gap-1 text-xs font-medium transition-opacity group-hover/v2-run:opacity-0 group-focus-within/v2-run:opacity-0 pointer-coarse:opacity-0",
+                  statusPill.colorClass,
                 )}
-              />
-              {statusPill.label}
-            </span>
-          ) : null}
+              >
+                <span
+                  aria-hidden
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    statusPill.dotClass,
+                    statusPill.pulse && "animate-status-pulse motion-reduce:animate-none",
+                  )}
+                />
+                {statusPill.label}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              aria-label={`Settle epic run ${rowLabel.primary} (${group.runId})`}
+              onClick={handleSettle}
+              className="absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md border border-sidebar-border bg-sidebar-row-hover px-2 text-xs text-muted-foreground opacity-0 transition-opacity pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-ring group-hover/v2-run:opacity-100 group-focus-within/v2-run:opacity-100 pointer-coarse:opacity-100 dark:border-transparent dark:inset-ring-1 dark:inset-ring-white/5"
+            >
+              <CheckIcon className="size-3" />
+              Settle
+            </button>
+          </span>
         </div>
       </li>
       {expanded
@@ -1077,6 +1099,7 @@ export default function SidebarV2() {
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((s) => s.rangeSelectTo);
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
+  const epicRunGroupHiddenByRunId = useUiStateStore((state) => state.epicRunGroupHiddenByRunId);
   const routeThreadRef = useParams({
     strict: false,
     select: (params) => resolveThreadRouteRef(params),
@@ -1179,13 +1202,17 @@ export default function SidebarV2() {
     // shell, a new PR state — already retriggers this memo. No ticker: idle
     // auto-settle is the server's job now and arrives as settledOverride.
     const now = new Date().toISOString();
-    const visible = threads.filter(
+    const scopedThreads = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
         (scopedProject === null ||
           (thread.environmentId === scopedProject.environmentId &&
             thread.projectId === scopedProject.id)),
     );
+    const visible = filterHiddenEpicRunIterationThreads({
+      threads: scopedThreads,
+      hiddenByRunId: epicRunGroupHiddenByRunId,
+    });
     const active: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
     for (const thread of visible) {
@@ -1211,7 +1238,7 @@ export default function SidebarV2() {
           firstValidTimestampMs(left.latestUserMessageAt, left.updatedAt),
       ),
     };
-  }, [changeRequestStateByKey, scopedProject, serverConfigs, threads]);
+  }, [changeRequestStateByKey, epicRunGroupHiddenByRunId, scopedProject, serverConfigs, threads]);
 
   const settledThreadKeys = useMemo(
     () =>
@@ -1318,6 +1345,11 @@ export default function SidebarV2() {
   );
   const epicRunGroupExpandedByRunId = useUiStateStore((state) => state.epicRunGroupExpandedByRunId);
   const setEpicRunGroupExpanded = useUiStateStore((state) => state.setEpicRunGroupExpanded);
+  const setEpicRunGroupHidden = useUiStateStore((state) => state.setEpicRunGroupHidden);
+  const settleEpicRunGroup = useCallback(
+    (runId: string) => setEpicRunGroupHidden(runId, true),
+    [setEpicRunGroupHidden],
+  );
   const openEpicRun = useCallback(
     (group: SidebarEpicRunGroup<EnvironmentThreadShell>) => {
       clearSelection();
@@ -2075,6 +2107,7 @@ export default function SidebarV2() {
                       expanded={isEpicRunGroupExpanded(node)}
                       routeThreadKey={routeThreadKey}
                       onToggle={setEpicRunGroupExpanded}
+                      onSettle={settleEpicRunGroup}
                       onOpenRun={openEpicRun}
                       onIterationClick={handleThreadClick}
                       onIterationActivate={navigateToThread}

@@ -9,6 +9,7 @@ import {
   epicRunIterationCountLabel,
   epicRunIterationLabel,
   epicRunIterationRowLabel,
+  filterHiddenEpicRunIterationThreads,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
   groupEpicRunIterationThreads,
@@ -1043,6 +1044,37 @@ describe("groupEpicRunIterationThreads", () => {
 
     expect(nodeIds(nodes)).toEqual(["launcher", `group:${runId}`]);
     expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
+});
+
+describe("filterHiddenEpicRunIterationThreads", () => {
+  const hiddenRunId = "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19";
+  const visibleRunId = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+  const iteration = (runId: string, iterationIndex: number) => ({
+    id: epicRunIterationThreadId({ runId, iterationIndex }),
+  });
+
+  it("removes every iteration of a hidden run before sidebar derivation", () => {
+    const ordinary = { id: "ordinary-thread" };
+    const visibleIteration = iteration(visibleRunId, 0);
+
+    expect(
+      filterHiddenEpicRunIterationThreads({
+        threads: [iteration(hiddenRunId, 0), ordinary, visibleIteration, iteration(hiddenRunId, 1)],
+        hiddenByRunId: { [hiddenRunId]: true },
+      }),
+    ).toEqual([ordinary, visibleIteration]);
+  });
+
+  it("keeps all threads when no matching run is hidden", () => {
+    const threads = [{ id: "ordinary-thread" }, iteration(visibleRunId, 0)];
+
+    expect(
+      filterHiddenEpicRunIterationThreads({
+        threads,
+        hiddenByRunId: { [hiddenRunId]: true, [visibleRunId]: false },
+      }),
+    ).toEqual(threads);
   });
 });
 
