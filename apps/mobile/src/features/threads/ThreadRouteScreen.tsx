@@ -364,6 +364,15 @@ function ThreadRouteContent(
     selectedThreadCwd,
     showAuxiliaryPane,
   ]);
+  const handleOpenSubagents = useCallback(() => {
+    if (selectedThread === null) {
+      return;
+    }
+    navigation.navigate("ThreadSubagents", {
+      environmentId: String(selectedThread.environmentId),
+      threadId: String(selectedThread.id),
+    });
+  }, [navigation, selectedThread]);
   const inspectorToggleActionRef = useRef({
     inspectorMode,
     openFilesInspector: handleOpenFilesInspector,
@@ -774,7 +783,7 @@ function ThreadRouteContent(
           threadCwd={selectedThreadCwd}
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
           runningSubagentCount={runningSubagentCount}
-          onOpenSubagents={null}
+          onOpenSubagents={handleOpenSubagents}
           layoutVariant={layout.variant}
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}

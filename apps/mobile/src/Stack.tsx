@@ -31,6 +31,7 @@ import { GitCommitSheet } from "./features/threads/git/GitCommitSheet";
 import { GitConfirmSheet } from "./features/threads/git/GitConfirmSheet";
 import { GitOverviewSheet } from "./features/threads/git/GitOverviewSheet";
 import { ThreadRouteScreen } from "./features/threads/ThreadRouteScreen";
+import { ThreadSubagentsSheet } from "./features/threads/ThreadSubagentsSheet";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { HomeRouteScreen } from "./features/home/HomeRouteScreen";
@@ -269,6 +270,7 @@ const WORKSPACE_OVERLAY_ROUTES = new Set([
   "SettingsLegal",
   "SettingsSheet",
   "ThreadReviewComment",
+  "ThreadSubagents",
 ]);
 
 /**
@@ -411,6 +413,15 @@ export const RootStack = createNativeStackNavigator({
       screen: ReviewSheet,
       linking: `${THREAD_LINKING_PREFIX}/review`,
       options: SOLID_HEADER_OPTIONS,
+    }),
+    ThreadSubagents: createNativeStackScreen({
+      screen: ThreadSubagentsSheet,
+      linking: `${THREAD_LINKING_PREFIX}/subagents`,
+      options: {
+        presentation: "formSheet",
+        sheetAllowedDetents: [0.55, 0.92],
+        sheetGrabberVisible: true,
+      },
     }),
     ThreadReviewComment: createNativeStackScreen({
       screen: ReviewCommentComposerSheet,
