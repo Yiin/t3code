@@ -10,6 +10,14 @@ import {
 import { formatDuration, formatElapsed, type SubagentGroup } from "../../session-logic";
 import { cn } from "~/lib/utils";
 
+export function SubagentUnavailableData({ className }: { className?: string }) {
+  return (
+    <p className={cn("text-sm text-muted-foreground", className)}>
+      No subagent details are available for this run.
+    </p>
+  );
+}
+
 /**
  * Inline card for one ad-hoc subagent (Agent/Task spawn) in the messages
  * timeline, replacing the flat `collab_agent_tool_call` tool row. Purely

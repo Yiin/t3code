@@ -1915,6 +1915,185 @@ describe("deriveSubagentGroups", () => {
     expect(group?.prompt).toBe("Find every usage of deriveWorkLogEntries");
   });
 
+  it("normalizes Codex spawns into one non-empty group per child and ignores later collab tools", () => {
+    const codexCollabActivity = (
+      id: string,
+      sequence: number,
+      toolCallId: string,
+      collabTool: "spawnAgent" | "wait" | "sendInput" | "resumeAgent" | "closeAgent",
+      prompt?: string,
+      receiverThreadIds: string[] = [],
+    ) =>
+      makeActivity({
+        id,
+        createdAt: `2026-02-23T00:00:${String(sequence).padStart(2, "0")}.000Z`,
+        kind: "tool.completed",
+        summary: "Subagent task",
+        sequence,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "completed",
+          title: "Subagent task",
+          data: {
+            toolCallId,
+            toolName: collabTool === "spawnAgent" ? "Task" : collabTool,
+            collabTool,
+            receiverThreadIds,
+            input: {
+              subagent_type: "gpt-5.3-codex",
+              ...(prompt ? { prompt, description: prompt } : {}),
+            },
+          },
+        },
+      });
+    const activities: OrchestrationThreadActivity[] = [
+      codexCollabActivity("spawn-1", 1, "collab-spawn-1", "spawnAgent", "Review parser.ts", [
+        "child-thread-1",
+      ]),
+      makeActivity({
+        id: "progress-1",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "task.progress",
+        sequence: 2,
+        summary: "Reading parser.ts",
+        payload: { taskId: "child-thread-1", summary: "Reading parser.ts" },
+      }),
+      codexCollabActivity("wait-1", 3, "collab-wait-1", "wait"),
+      codexCollabActivity("send-1", 4, "collab-send-1", "sendInput"),
+      codexCollabActivity("resume-1", 5, "collab-resume-1", "resumeAgent"),
+      codexCollabActivity("close-1", 6, "collab-close-1", "closeAgent"),
+      makeActivity({
+        id: "complete-1",
+        createdAt: "2026-02-23T00:00:07.000Z",
+        kind: "task.completed",
+        sequence: 7,
+        summary: "Parser review complete",
+        payload: {
+          taskId: "child-thread-1",
+          status: "completed",
+          summary: "Parser review complete",
+        },
+      }),
+      codexCollabActivity("spawn-2", 8, "collab-spawn-2", "spawnAgent", "Review lexer.ts", [
+        "child-thread-2",
+      ]),
+    ];
+    const subagents: OrchestrationThreadSubagent[] = [
+      {
+        subagentId: "child-thread-1",
+        turnId: null,
+        agentType: "gpt-5.3-codex",
+        description: "Review parser.ts",
+        status: "completed",
+        lastProgressSummary: "Parser review complete",
+        spawnedByItemId: "collab-spawn-1",
+        startedAt: "2026-02-23T00:00:01.000Z",
+        updatedAt: "2026-02-23T00:00:07.000Z",
+        completedAt: "2026-02-23T00:00:07.000Z",
+      },
+      {
+        subagentId: "child-thread-2",
+        turnId: null,
+        agentType: "gpt-5.3-codex",
+        description: "Review lexer.ts",
+        status: "running",
+        spawnedByItemId: "collab-spawn-2",
+        startedAt: "2026-02-23T00:00:08.000Z",
+        updatedAt: "2026-02-23T00:00:08.000Z",
+        completedAt: null,
+      },
+    ];
+
+    const groups = deriveSubagentGroups(deriveWorkLogEntries(activities), {
+      turnSettled: false,
+      subagents,
+    });
+
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.toolCallId)).toEqual(["collab-spawn-1", "collab-spawn-2"]);
+    expect(groups[0]).toMatchObject({
+      name: "gpt-5.3-codex",
+      description: "Review parser.ts",
+      prompt: "Review parser.ts",
+      resultText: "Parser review complete",
+      status: "completed",
+    });
+    expect(groups[0]?.children.map((child) => child.id)).toEqual(["progress-1", "complete-1"]);
+    expect(groups[1]).toMatchObject({
+      name: "gpt-5.3-codex",
+      prompt: "Review lexer.ts",
+      status: "running",
+    });
+
+    const groupsWithoutReadModel = deriveSubagentGroups(deriveWorkLogEntries(activities), {
+      turnSettled: true,
+    });
+    expect(groupsWithoutReadModel[0]?.children.map((child) => child.id)).toEqual([
+      "progress-1",
+      "complete-1",
+    ]);
+    expect(groupsWithoutReadModel[0]?.status).toBe("completed");
+  });
+
+  it("keeps a failed Codex spawn failed when no child row exists", () => {
+    const [group] = deriveSubagentGroups(
+      deriveWorkLogEntries([
+        makeActivity({
+          id: "failed-codex-spawn",
+          kind: "tool.completed",
+          payload: {
+            itemType: "collab_agent_tool_call",
+            status: "failed",
+            data: {
+              toolCallId: "collab-failed",
+              collabTool: "spawnAgent",
+              receiverThreadIds: [],
+              input: { subagent_type: "spawnAgent" },
+            },
+          },
+        }),
+      ]),
+      { turnSettled: true },
+    );
+
+    expect(group?.status).toBe("failed");
+  });
+
+  it("reads legacy nested Codex spawn data", () => {
+    const groups = deriveSubagentGroups(
+      deriveWorkLogEntries([
+        makeActivity({
+          id: "legacy-codex-spawn",
+          kind: "tool.completed",
+          payload: {
+            itemType: "collab_agent_tool_call",
+            data: {
+              item: {
+                id: "collab-legacy-1",
+                type: "collabAgentToolCall",
+                tool: "spawnAgent",
+                model: "gpt-5.2-codex",
+                prompt: "Inspect the legacy path",
+                agentsStates: {
+                  "child-legacy": { status: "completed", message: "Legacy path is safe." },
+                },
+              },
+            },
+          },
+        }),
+      ]),
+      { turnSettled: true },
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      toolCallId: "collab-legacy-1",
+      name: "gpt-5.2-codex",
+      prompt: "Inspect the legacy path",
+      resultText: "Legacy path is safe.",
+    });
+  });
+
   it("keeps prose, thinking, and tool rows interleaved by sequence", () => {
     const activities: OrchestrationThreadActivity[] = [
       ...makeClaudeSubagentSpawnActivities(),

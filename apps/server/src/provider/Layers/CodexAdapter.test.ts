@@ -14,7 +14,6 @@ import {
   ProviderItemId,
   type ProviderApprovalDecision,
   type ProviderEvent,
-  type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
@@ -1414,6 +1413,38 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             NodeAssert.equal(itemEvent.payload.title, "Subagent task");
           }
         }
+        const spawnItemEvent = itemEvents[0];
+        NodeAssert.ok(
+          spawnItemEvent?.type === "item.started" || spawnItemEvent?.type === "item.completed",
+        );
+        if (spawnItemEvent?.type === "item.started" || spawnItemEvent?.type === "item.completed") {
+          NodeAssert.deepEqual(spawnItemEvent.payload.data, {
+            toolCallId: "collab_1",
+            toolName: "Task",
+            collabTool: "spawnAgent",
+            receiverThreadIds: ["child-thread-1"],
+            agentsStates: {
+              "child-thread-1": { status: "pendingInit" },
+            },
+            input: {
+              prompt: "Investigate the flaky test suite and report back with findings.",
+              description: "Investigate the flaky test suite and report back with findings.",
+              subagent_type: "gpt-5.3-codex",
+            },
+          });
+          NodeAssert.equal(
+            (spawnItemEvent.raw?.payload as { item?: { type?: string } } | undefined)?.item?.type,
+            "collabAgentToolCall",
+          );
+        }
+        const waitItemEvent = itemEvents[2];
+        if (waitItemEvent?.type === "item.started" || waitItemEvent?.type === "item.completed") {
+          NodeAssert.equal(
+            (waitItemEvent.payload.data as { collabTool?: string }).collabTool,
+            "wait",
+          );
+          NodeAssert.equal((waitItemEvent.payload.data as { toolName?: string }).toolName, "wait");
+        }
 
         const started = runtimeEvents.find((event) => event.type === "task.started");
         NodeAssert.equal(started?.type, "task.started");
@@ -1513,6 +1544,48 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.equal(shutdown?.type, "task.completed");
       if (shutdown?.type === "task.completed") {
         NodeAssert.equal(shutdown.payload.status, "stopped");
+      }
+    }),
+  );
+
+  it.effect("preserves a failed spawn status without a receiver thread", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventFiber = yield* Stream.take(adapter.streamEvents, 1).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-spawn-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("collab-failed"),
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-failed",
+            tool: "spawnAgent",
+            status: "failed",
+            senderThreadId: "thread-1",
+            receiverThreadIds: [],
+            prompt: "Try to start an unavailable agent",
+            agentsStates: {},
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const [event] = Array.from(yield* Fiber.join(runtimeEventFiber));
+      NodeAssert.equal(event?.type, "item.completed");
+      if (event?.type === "item.completed") {
+        NodeAssert.equal(event.payload.status, "failed");
       }
     }),
   );

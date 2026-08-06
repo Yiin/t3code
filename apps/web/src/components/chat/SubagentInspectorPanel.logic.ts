@@ -61,6 +61,18 @@ export function selectSubagentTranscriptEntries(input: {
   return deriveWorkLogEntries(mergeSubagentActivities(input.backfillPages, input.liveTail));
 }
 
+export function selectSubagentInspectorPlaceholder(input: {
+  readonly entryCount: number;
+  readonly isPending: boolean;
+  readonly prompt: string | null;
+  readonly resultText: string | null;
+}): "loading" | "unavailable" | null {
+  if (input.entryCount > 0 || input.prompt !== null || input.resultText !== null) {
+    return null;
+  }
+  return input.isPending ? "loading" : "unavailable";
+}
+
 export interface SubagentTranscriptRow {
   kind: "text" | "thinking";
   text: string;

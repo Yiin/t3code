@@ -22,12 +22,13 @@ import { orchestrationEnvironment } from "~/state/orchestration";
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
-import { capitalizeSubagentName, SubagentElapsed } from "./SubagentCard";
+import { capitalizeSubagentName, SubagentElapsed, SubagentUnavailableData } from "./SubagentCard";
 import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
 import {
   buildSubagentSwitcherItems,
   decodeSubagentTranscriptRow,
   formatSubagentSwitcherSummary,
+  selectSubagentInspectorPlaceholder,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
   type SubagentSwitcherItem,
@@ -50,6 +51,16 @@ const STATUS_LABEL: Record<OrchestrationThreadSubagentStatus, string> = {
 };
 
 const INITIAL_BACKFILL_CURSORS = [undefined] as const;
+
+export function SubagentInspectorPlaceholder({ state }: { state: "loading" | "unavailable" }) {
+  return state === "loading" ? (
+    <p role="status" className="py-2 text-center text-sm text-muted-foreground">
+      Loading subagent details…
+    </p>
+  ) : (
+    <SubagentUnavailableData className="py-2 text-center" />
+  );
+}
 
 function SubagentSwitcher({
   activeSubagentKey,
@@ -317,6 +328,12 @@ export function SubagentInspectorPanel({
           (value): value is string => value !== undefined,
         )
       : [];
+  const placeholder = selectSubagentInspectorPlaceholder({
+    entryCount: backfill.entries.length,
+    isPending: backfill.isPending,
+    prompt: group.prompt,
+    resultText: group.resultText,
+  });
 
   return (
     <div className="flex h-full w-full min-h-0 flex-1 flex-col">
@@ -466,6 +483,8 @@ export function SubagentInspectorPanel({
               </div>
             </details>
           ) : null}
+
+          {placeholder !== null ? <SubagentInspectorPlaceholder state={placeholder} /> : null}
         </div>
       </div>
 

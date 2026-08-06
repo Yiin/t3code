@@ -51,7 +51,7 @@ import {
 import { Button } from "../ui/button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
-import { capitalizeSubagentName, SubagentCard } from "./SubagentCard";
+import { capitalizeSubagentName, SubagentCard, SubagentUnavailableData } from "./SubagentCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
@@ -1446,7 +1446,14 @@ const SubagentTimelineRow = memo(function SubagentTimelineRow({
  * area, the final result as rendered markdown with a copy button, and the
  * spawn prompt as a fallback when neither exists yet.
  */
-function SubagentExpandedBody({ group }: { group: SubagentGroup }) {
+export function SubagentExpandedBody({ group }: { group: SubagentGroup }) {
+  if (group.children.length === 0 && group.resultText === null && group.prompt === null) {
+    return <SubagentUnavailableData className="px-0.5 py-1" />;
+  }
+  return <SubagentExpandedContent group={group} />;
+}
+
+function SubagentExpandedContent({ group }: { group: SubagentGroup }) {
   const ctx = use(TimelineRowCtx);
   const childCount = group.children.length;
 

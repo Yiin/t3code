@@ -7,6 +7,7 @@ import {
   buildSubagentSwitcherItems,
   decodeSubagentTranscriptRow,
   formatSubagentSwitcherSummary,
+  selectSubagentInspectorPlaceholder,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
 } from "./SubagentInspectorPanel.logic";
@@ -133,6 +134,49 @@ describe("selectSubagentTranscriptEntries", () => {
         fallbackEntries,
       }),
     ).toBe(fallbackEntries);
+  });
+
+  it("renders Codex task rows returned by child-thread backfill", () => {
+    const completed = {
+      ...activity("codex-completed", 2),
+      kind: "task.completed",
+      payload: { taskId: "child-thread-1", summary: "Found the cause" },
+    };
+
+    const entries = selectSubagentTranscriptEntries({
+      backfillPages: [[completed]],
+      liveTail: [],
+      fallbackEntries: [],
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "codex-completed",
+      label: "Found the cause",
+      sourceActivityKind: "task.completed",
+    });
+  });
+});
+
+describe("selectSubagentInspectorPlaceholder", () => {
+  const empty = { entryCount: 0, prompt: null, resultText: null };
+
+  it("shows loading before empty backfill settles", () => {
+    expect(selectSubagentInspectorPlaceholder({ ...empty, isPending: true })).toBe("loading");
+  });
+
+  it("shows unavailable only after empty backfill settles", () => {
+    expect(selectSubagentInspectorPlaceholder({ ...empty, isPending: false })).toBe("unavailable");
+  });
+
+  it("shows no placeholder when any useful detail exists", () => {
+    expect(
+      selectSubagentInspectorPlaceholder({
+        ...empty,
+        isPending: true,
+        prompt: "Inspect the parser",
+      }),
+    ).toBeNull();
   });
 });
 

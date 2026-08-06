@@ -482,8 +482,12 @@ function mapItemLifecycle(
     lifecycle === "item.started"
       ? "inProgress"
       : lifecycle === "item.completed"
-        ? "completed"
+        ? item.type === "collabAgentToolCall" && item.status === "failed"
+          ? "failed"
+          : "completed"
         : undefined;
+  const data =
+    item.type === "collabAgentToolCall" ? normalizeCollabAgentActivityData(item) : event.payload;
 
   return {
     ...runtimeEventBase(event, canonicalThreadId),
@@ -493,7 +497,7 @@ function mapItemLifecycle(
       ...(status ? { status } : {}),
       ...(itemTitle(itemType, item) ? { title: itemTitle(itemType, item) } : {}),
       ...(detail ? { detail } : {}),
-      ...(event.payload !== undefined ? { data: event.payload } : {}),
+      ...(data !== undefined ? { data } : {}),
     },
   };
 }
@@ -515,6 +519,39 @@ function promptExcerpt(prompt: string | null | undefined): string | undefined {
 
 function collabAgentSubagentType(item: CollabAgentToolCallItem): string {
   return trimText(item.model ?? undefined) ?? item.tool;
+}
+
+function collabAgentResult(item: CollabAgentToolCallItem): string | undefined {
+  const summaries = item.receiverThreadIds.flatMap((childThreadId) => {
+    const summary = trimText(item.agentsStates[childThreadId]?.message ?? undefined);
+    return summary ? [summary] : [];
+  });
+  return summaries.length > 0 ? summaries.join("\n") : undefined;
+}
+
+/**
+ * Codex nests collab fields under the V2 notification's `item`. The web
+ * subagent projection consumes the provider-neutral Task shape instead, so
+ * normalize only this item type while the untouched notification remains in
+ * `ProviderRuntimeEvent.raw.payload` for diagnostics.
+ */
+function normalizeCollabAgentActivityData(item: CollabAgentToolCallItem) {
+  const prompt = trimText(item.prompt ?? undefined);
+  const description = promptExcerpt(item.prompt);
+  const result = collabAgentResult(item);
+  return {
+    toolCallId: item.id,
+    toolName: item.tool === "spawnAgent" ? "Task" : item.tool,
+    collabTool: item.tool,
+    receiverThreadIds: item.receiverThreadIds,
+    agentsStates: item.agentsStates,
+    input: {
+      ...(prompt ? { prompt } : {}),
+      ...(description ? { description } : {}),
+      subagent_type: collabAgentSubagentType(item),
+    },
+    ...(result ? { result } : {}),
+  };
 }
 
 // Maps the collab tool call's per-thread agent status onto a terminal task

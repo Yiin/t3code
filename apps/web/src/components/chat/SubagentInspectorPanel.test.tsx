@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { WorkLogEntry } from "../../session-logic";
-import { SubagentTranscriptEntryRow } from "./SubagentInspectorPanel";
+import { SubagentInspectorPlaceholder, SubagentTranscriptEntryRow } from "./SubagentInspectorPanel";
 
 const commonProps = {
   markdownCwd: undefined,
@@ -33,6 +33,16 @@ function entry(
 }
 
 describe("SubagentTranscriptEntryRow", () => {
+  it("renders loading and explicit unavailable-data states", () => {
+    const loadingMarkup = renderToStaticMarkup(<SubagentInspectorPlaceholder state="loading" />);
+    const unavailableMarkup = renderToStaticMarkup(
+      <SubagentInspectorPlaceholder state="unavailable" />,
+    );
+
+    expect(loadingMarkup).toContain("Loading subagent details…");
+    expect(unavailableMarkup).toContain("No subagent details are available for this run.");
+  });
+
   it("renders thinking collapsed with a truncated marker", () => {
     const markup = renderToStaticMarkup(
       <SubagentTranscriptEntryRow

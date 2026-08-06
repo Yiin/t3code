@@ -1090,16 +1090,26 @@ export function deriveSubagentGroups(
     subagents?: ReadonlyArray<OrchestrationThreadSubagent>;
   },
 ): SubagentGroup[] {
+  const workEntryOrder = new Map(workEntries.map((entry, index) => [entry.id, index]));
   const childrenByParent = new Map<string, WorkLogEntry[]>();
+  const childrenByTaskId = new Map<string, WorkLogEntry[]>();
   for (const entry of workEntries) {
-    if (!entry.parentToolUseId) {
-      continue;
+    if (entry.parentToolUseId) {
+      const bucket = childrenByParent.get(entry.parentToolUseId);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        childrenByParent.set(entry.parentToolUseId, [entry]);
+      }
     }
-    const bucket = childrenByParent.get(entry.parentToolUseId);
-    if (bucket) {
-      bucket.push(entry);
-    } else {
-      childrenByParent.set(entry.parentToolUseId, [entry]);
+    const taskId = asTrimmedString(asRecord(entry.sourceActivityPayload)?.taskId);
+    if (taskId) {
+      const bucket = childrenByTaskId.get(taskId);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        childrenByTaskId.set(taskId, [entry]);
+      }
     }
   }
 
@@ -1113,7 +1123,17 @@ export function deriveSubagentGroups(
     if (entry.itemType !== "collab_agent_tool_call") {
       continue;
     }
-    const group = toSubagentGroup(entry, childrenByParent, options);
+    const operation = subagentCollabOperation(entry);
+    if (operation !== null && operation !== "spawnAgent") {
+      continue;
+    }
+    const group = toSubagentGroup(
+      entry,
+      childrenByParent,
+      childrenByTaskId,
+      workEntryOrder,
+      options,
+    );
     if (group.toolCallId !== null) {
       const existingIndex = groupIndexByToolCallId.get(group.toolCallId);
       const existing = existingIndex === undefined ? undefined : groups[existingIndex];
@@ -1128,9 +1148,50 @@ export function deriveSubagentGroups(
   return groups;
 }
 
+function subagentCollabOperation(entry: WorkLogEntry): string | null {
+  const data = asRecord(entry.toolData);
+  return asTrimmedString(data?.collabTool) ?? asTrimmedString(asRecord(data?.item)?.tool);
+}
+
+function uniqueOrderedWorkEntries(
+  entries: ReadonlyArray<WorkLogEntry>,
+  workEntryOrder: ReadonlyMap<string, number>,
+): WorkLogEntry[] {
+  const byId = new Map<string, WorkLogEntry>();
+  for (const entry of entries) {
+    byId.set(entry.id, entry);
+  }
+  return [...byId.values()].toSorted(
+    (left, right) => (workEntryOrder.get(left.id) ?? 0) - (workEntryOrder.get(right.id) ?? 0),
+  );
+}
+
+function codexCollabResult(
+  item: Record<string, unknown> | null,
+  subagentId: string | undefined,
+): string | null {
+  const states = asRecord(item?.agentsStates);
+  if (!states) {
+    return null;
+  }
+  const selectedSummary = subagentId
+    ? asTrimmedString(asRecord(states[subagentId])?.message)
+    : null;
+  if (selectedSummary) {
+    return selectedSummary;
+  }
+  const summaries = Object.values(states).flatMap((state) => {
+    const summary = asTrimmedString(asRecord(state)?.message);
+    return summary ? [summary] : [];
+  });
+  return summaries.length > 0 ? summaries.join("\n") : null;
+}
+
 function toSubagentGroup(
   entry: WorkLogEntry,
   childrenByParent: ReadonlyMap<string, WorkLogEntry[]>,
+  childrenByTaskId: ReadonlyMap<string, WorkLogEntry[]>,
+  workEntryOrder: ReadonlyMap<string, number>,
   options: {
     turnSettled: boolean;
     subagents?: ReadonlyArray<OrchestrationThreadSubagent>;
@@ -1138,22 +1199,53 @@ function toSubagentGroup(
 ): SubagentGroup {
   const toolCallId = entry.toolCallId ?? null;
   const data = asRecord(entry.toolData);
+  const codexItem = asRecord(data?.item);
   const input = asRecord(data?.input);
   const readModel =
     toolCallId !== null
       ? options.subagents?.find((subagent) => subagent.spawnedByItemId === toolCallId)
       : undefined;
+  const prompt = asTrimmedString(input?.prompt) ?? asTrimmedString(codexItem?.prompt);
+  const directResult =
+    extractSubagentResultText(data?.result) ?? codexCollabResult(codexItem, readModel?.subagentId);
+  const resultText =
+    directResult ??
+    (readModel !== undefined && readModel.status !== "running"
+      ? (readModel.lastProgressSummary ?? null)
+      : null);
+  const parentChildren = toolCallId !== null ? (childrenByParent.get(toolCallId) ?? []) : [];
+  const receiverThreadIds = (
+    Array.isArray(data?.receiverThreadIds)
+      ? data.receiverThreadIds
+      : Array.isArray(codexItem?.receiverThreadIds)
+        ? codexItem.receiverThreadIds
+        : []
+  ).flatMap((value) => {
+    const threadId = asTrimmedString(value);
+    return threadId ? [threadId] : [];
+  });
+  const taskIds = readModel !== undefined ? [readModel.subagentId] : receiverThreadIds;
+  const taskChildren = taskIds.flatMap((taskId) => childrenByTaskId.get(taskId) ?? []);
   return {
     entryId: entry.id,
     toolCallId,
-    name: readModel?.agentType ?? asTrimmedString(input?.subagent_type) ?? "Subagent",
-    description: readModel?.description ?? asTrimmedString(input?.description),
-    status: deriveSubagentGroupStatus(entry, readModel, options.turnSettled),
+    name:
+      readModel?.agentType ??
+      asTrimmedString(input?.subagent_type) ??
+      asTrimmedString(codexItem?.model) ??
+      "Subagent",
+    description: readModel?.description ?? asTrimmedString(input?.description) ?? prompt,
+    status: deriveSubagentGroupStatus(
+      entry,
+      readModel,
+      options.turnSettled,
+      subagentCollabOperation(entry) !== null,
+    ),
     startedAt: readModel?.startedAt ?? entry.createdAt,
     completedAt: readModel?.completedAt ?? null,
-    children: toolCallId !== null ? (childrenByParent.get(toolCallId) ?? []) : [],
-    resultText: extractSubagentResultText(data?.result),
-    prompt: asTrimmedString(input?.prompt),
+    children: uniqueOrderedWorkEntries([...parentChildren, ...taskChildren], workEntryOrder),
+    resultText,
+    prompt,
   };
 }
 
@@ -1161,11 +1253,17 @@ function deriveSubagentGroupStatus(
   entry: WorkLogEntry,
   readModel: OrchestrationThreadSubagent | undefined,
   turnSettled: boolean,
+  spawnCompletesBeforeTask: boolean,
 ): OrchestrationThreadSubagentStatus {
   // A settled read-model status is authoritative; a row still "running"
   // may just lag the tool result that already arrived on the activity side.
   if (readModel !== undefined && readModel.status !== "running") {
     return readModel.status;
+  }
+  // A Codex spawnAgent item completes once the child starts. The task row,
+  // not the collab tool row, owns the child's later lifecycle.
+  if (readModel !== undefined && spawnCompletesBeforeTask) {
+    return turnSettled ? "stopped" : "running";
   }
   const entryStatus = subagentStatusFromEntry(entry);
   if (entryStatus !== "running") {
@@ -1465,7 +1563,7 @@ function extractToolTitle(payload: Record<string, unknown> | null): string | nul
 
 function extractToolCallId(payload: Record<string, unknown> | null): string | null {
   const data = asRecord(payload?.data);
-  return asTrimmedString(data?.toolCallId);
+  return asTrimmedString(data?.toolCallId) ?? asTrimmedString(asRecord(data?.item)?.id);
 }
 
 function normalizeInlinePreview(value: string): string {

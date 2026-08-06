@@ -637,4 +637,26 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
   });
+
+  it("renders an explicit empty state for a legacy blank subagent", async () => {
+    const { SubagentExpandedBody } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <SubagentExpandedBody
+        group={{
+          entryId: "legacy-spawn",
+          toolCallId: null,
+          name: "Subagent",
+          description: null,
+          status: "completed",
+          startedAt: "2026-03-17T19:12:28.000Z",
+          completedAt: "2026-03-17T19:12:29.000Z",
+          children: [],
+          resultText: null,
+          prompt: null,
+        }}
+      />,
+    );
+
+    expect(markup).toContain("No subagent details are available for this run.");
+  });
 });
