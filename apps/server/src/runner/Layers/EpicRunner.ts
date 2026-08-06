@@ -159,10 +159,10 @@ const buildTransportRun = (
  * their own sites, which are the only places that know the turn never started,
  * selection rejected every candidate, the turn was cancelled, or it died with
  * the server. Dispatch and selection failures are infra; the other two never
- * had a classified outcome and stay unprefixed. A completed no-commit turn is
- * only chargeable when its child issue was left open, hence the suffix.
- * Classification can override this table with something more specific — the
- * `provider-error:*` family (`EpicIterationOutcome.failureReason`).
+ * had a classified outcome and stay unprefixed. No-commit evidence checks can
+ * override the default suffix with "closed-without-findings" or
+ * "no-commit-no-evidence". Classification can also override this table with
+ * the `provider-error:*` family (`EpicIterationOutcome.failureReason`).
  */
 const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | null => {
   switch (kind) {
@@ -180,6 +180,24 @@ const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | n
     case "blocked":
       return "blocked";
   }
+};
+
+const noCommitEvidenceVerdict = (input: {
+  readonly status: string | null;
+  readonly isResearch: boolean;
+  readonly commentsBefore: number;
+  readonly commentsAfter: number;
+}): { readonly accepted: boolean; readonly failureReason: string | null } => {
+  if (input.status !== "closed") {
+    return { accepted: false, failureReason: "no-commit-child-open" };
+  }
+  if (input.commentsAfter <= input.commentsBefore) {
+    return {
+      accepted: false,
+      failureReason: input.isResearch ? "closed-without-findings" : "no-commit-no-evidence",
+    };
+  }
+  return { accepted: true, failureReason: null };
 };
 
 const ReadyChildren = Schema.fromJsonString(
@@ -206,21 +224,13 @@ type RunIterationResult =
       readonly candidateIds: ReadonlyArray<string>;
       readonly detail: string;
     };
-const decodeIssueTitle = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Union([
-      Schema.Struct({ title: Schema.String }),
-      Schema.Array(Schema.Struct({ title: Schema.String })),
-    ]),
-  ),
-);
-const decodeIssueStatus = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Union([
-      Schema.Struct({ status: Schema.String }),
-      Schema.Array(Schema.Struct({ status: Schema.String })),
-    ]),
-  ),
+const IssueEvidence = Schema.Struct({
+  status: Schema.optional(Schema.String),
+  title: Schema.optional(Schema.String),
+  comment_count: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+});
+const decodeIssueEvidence = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Union([IssueEvidence, Schema.Array(IssueEvidence)])),
 );
 const decodeEpicDescription = Schema.decodeUnknownOption(
   Schema.fromJsonString(
@@ -540,7 +550,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         Effect.flatMap((output) =>
           Effect.try({
             try: () => {
-              const decoded = decodeIssueTitle(output.stdout);
+              const decoded = decodeIssueEvidence(output.stdout);
               if (Option.isNone(decoded)) return issueId;
               const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
               const title = value?.title.trim() ?? "";
@@ -720,26 +730,67 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * Never fails the caller: this runs from terminal paths (finalizers,
      * restart bookkeeping) that have nowhere useful to send an error.
      */
+    const emptyIssueEvidence = {
+      status: null,
+      title: null,
+      commentCount: 0,
+    } as const;
+
     /**
-     * The child issue's current `bd` status, or `null` when it cannot be read
-     * — a failing `bd show`, output the status decoder does not recognise.
-     * Callers must treat `null` conservatively; it is "unknown", not "open".
+     * The child issue evidence available from one `bd show`, with conservative
+     * defaults when the command fails or its output cannot be decoded. Never
+     * fails the caller: unknown status and comment count cannot prove work.
      */
-    const readIssueStatus = (cwd: string, issueId: string): Effect.Effect<string | null> =>
+    const readIssueEvidence = (
+      cwd: string,
+      issueId: string,
+    ): Effect.Effect<{
+      readonly status: string | null;
+      readonly title: string | null;
+      readonly commentCount: number;
+    }> =>
       processRunner.run({ command: "bd", args: ["show", issueId, "--json"], cwd }).pipe(
         Effect.map((shown) => {
-          if (shown.code !== 0) return null;
-          const decoded = decodeIssueStatus(shown.stdout);
-          if (Option.isNone(decoded)) return null;
+          if (shown.code !== 0) return emptyIssueEvidence;
+          const decoded = decodeIssueEvidence(shown.stdout);
+          if (Option.isNone(decoded)) return emptyIssueEvidence;
           const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
-          return value?.status ?? null;
+          if (value === undefined) return emptyIssueEvidence;
+          return {
+            status: value.status ?? null,
+            title: value.title ?? null,
+            commentCount: value.comment_count,
+          };
         }),
         Effect.catchCause((cause) =>
-          Effect.logWarning("epic.runner.issue-status-read-failed", { cwd, issueId, cause }).pipe(
-            Effect.as(null),
+          Effect.logWarning("epic.runner.issue-evidence-read-failed", { cwd, issueId, cause }).pipe(
+            Effect.as(emptyIssueEvidence),
           ),
         ),
       );
+
+    /**
+     * Whether findings in the bead are this child's deliverable. A title
+     * prefix is authoritative; otherwise a failed label read means false.
+     */
+    const readIssueIsResearch = (
+      cwd: string,
+      issueId: string,
+      title: string | null,
+    ): Effect.Effect<boolean> => {
+      if (title?.startsWith("Research:") === true) return Effect.succeed(true);
+      return processRunner.run({ command: "bd", args: ["label", "list", issueId], cwd }).pipe(
+        Effect.map((listed) => listed.code === 0 && /^\s*-\s*research\s*$/imu.test(listed.stdout)),
+        Effect.catchCause(() => Effect.succeed(false)),
+      );
+    };
+
+    /**
+     * The child issue's current `bd` status, or `null` when it cannot be read.
+     * Callers must treat `null` conservatively; it is "unknown", not "open".
+     */
+    const readIssueStatus = (cwd: string, issueId: string): Effect.Effect<string | null> =>
+      readIssueEvidence(cwd, issueId).pipe(Effect.map((evidence) => evidence.status));
 
     const readEpicDescription = (cwd: string, epicId: string): Effect.Effect<string | null> =>
       processRunner.run({ command: "bd", args: ["show", epicId, "--json"], cwd }).pipe(
@@ -1401,6 +1452,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         const orientationCard = yield* readOrientationCard(checkoutPath, run.orientationFile);
         const headBefore = yield* readHeadCommit(run.cwd);
         const initialWorktreeFingerprint = yield* readWorktreeFingerprint(run.cwd);
+        const issueEvidenceBefore = yield* readIssueEvidence(run.cwd, issueId);
+        const commentsBefore = issueEvidenceBefore.commentCount;
+        const isResearchChild = yield* readIssueIsResearch(
+          run.cwd,
+          issueId,
+          issueEvidenceBefore.title,
+        );
 
         // Write-ahead, per the store's crash-safe ordering contract: the
         // iteration row — carrying its threadId — exists before the turn is
@@ -1556,16 +1614,23 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           );
         }
 
-        // A turn that ends cleanly with no commit only counts as a completed
-        // iteration when its child no longer needs one: knowledge-only
-        // children legitimately close without touching the repo. A child
-        // still open after such a turn means the work did not land — scoring
-        // that "completed" is how silent provider deaths masqueraded as
-        // progress on 2026-08-04. An unreadable status counts as open: the
-        // failure mode being defended against is exactly one where nothing
-        // can vouch for the iteration.
-        const noCommitChildClosed =
-          outcome.kind === "no-commit" && (yield* readIssueStatus(run.cwd, issueId)) === "closed";
+        // A turn that ends cleanly with no commit only counts as completed
+        // when the agent both closed its child and added bead evidence after
+        // dispatch. Research children use a distinct failure reason because
+        // findings are their required deliverable. An unreadable settlement
+        // cannot prove either condition and is rejected conservatively.
+        const issueEvidenceAfter =
+          outcome.kind === "no-commit" ? yield* readIssueEvidence(run.cwd, issueId) : null;
+        const evidenceVerdict =
+          issueEvidenceAfter === null
+            ? null
+            : noCommitEvidenceVerdict({
+                status: issueEvidenceAfter.status,
+                isResearch: isResearchChild,
+                commentsBefore,
+                commentsAfter: issueEvidenceAfter.commentCount,
+              });
+        const noCommitChildClosed = evidenceVerdict?.accepted ?? false;
 
         const iterationStatus: EpicRunIterationStatus =
           outcome.kind === "backlog-empty" || outcome.kind === "done" || noCommitChildClosed
@@ -1575,7 +1640,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         const baseFailureReason =
           settleResult._tag === "dispatch-failed"
             ? "dispatch-failed"
-            : (outcome.failureReason ?? failureReasonForOutcome(outcome.kind));
+            : (evidenceVerdict?.failureReason ??
+              outcome.failureReason ??
+              failureReasonForOutcome(outcome.kind));
         // A failed status implies a failure kind, and every failure kind has a
         // class and a reason — the null guards only close the type.
         const failureReason =

@@ -126,6 +126,13 @@ interface ScriptedIteration {
   readonly subagentDrainReads?: number;
 }
 
+interface ScriptedIssueEvidence {
+  readonly status?: string;
+  readonly title?: string;
+  readonly commentCount?: number;
+  readonly exitCode?: number;
+}
+
 const waitFor = (predicate: () => boolean) =>
   Effect.gen(function* () {
     while (!predicate()) {
@@ -144,6 +151,7 @@ const makeTempWorkspace = Effect.gen(function* () {
 const encodeEpicDescription = Schema.encodeSync(
   Schema.fromJsonString(Schema.Array(Schema.Struct({ description: Schema.String }))),
 );
+const encodeUnknownJson = Schema.encodeSync(Schema.UnknownFromJsonString);
 
 const writeWorkspaceFiles = Effect.fn("EpicRunner.test.writeWorkspaceFiles")(function* (
   workspace: string,
@@ -383,6 +391,10 @@ function createHarness(input: {
    * `releaseClaimedChild` treats them as unknown and leaves them alone).
    */
   readonly childStatuses?: Record<string, string>;
+  /** Ordered `bd show` evidence reads for each child, clamped at the final entry. */
+  readonly childEvidence?: Record<string, ReadonlyArray<ScriptedIssueEvidence>>;
+  /** `bd label list <id>` output for children whose title is not research-prefixed. */
+  readonly childLabels?: Record<string, string>;
   /** Command types the stub engine refuses. The command is still recorded. */
   readonly refuseCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
   /** Guarded normal-stop refusals that simulate a subagent starting after the advisory read. */
@@ -394,6 +406,7 @@ function createHarness(input: {
   }
   store.iterations.push(...(input.seedIterations ?? []));
   const childStatuses = new Map(Object.entries(input.childStatuses ?? {}));
+  const childEvidenceReads = new Map<string, number>();
 
   const dispatched: OrchestrationCommand[] = [];
   const details = new Map<string, OrchestrationThread>();
@@ -684,10 +697,52 @@ function createHarness(input: {
           request.command === "bd" &&
           subcommand === "show" &&
           issueId !== undefined &&
+          input.childEvidence?.[issueId] !== undefined
+        ) {
+          const evidence = input.childEvidence[issueId];
+          const readIndex = childEvidenceReads.get(issueId) ?? 0;
+          childEvidenceReads.set(issueId, readIndex + 1);
+          const value = evidence[Math.min(readIndex, evidence.length - 1)];
+          return {
+            stdout:
+              value === undefined
+                ? "[]"
+                : encodeUnknownJson([
+                    {
+                      ...(value.status === undefined ? {} : { status: value.status }),
+                      ...(value.title === undefined ? {} : { title: value.title }),
+                      ...(value.commentCount === undefined
+                        ? {}
+                        : { comment_count: value.commentCount }),
+                    },
+                  ]),
+            stderr: value?.exitCode === undefined ? "" : "bd unavailable",
+            code: (value?.exitCode ?? 0) as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
+        if (
+          request.command === "bd" &&
+          subcommand === "show" &&
+          issueId !== undefined &&
           childStatuses.has(issueId)
         ) {
           return {
             stdout: `[{"status":"${childStatuses.get(issueId)}"}]`,
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
+        if (request.command === "bd" && subcommand === "label" && request.args[1] === "list") {
+          const labelledIssueId = request.args[2];
+          return {
+            stdout:
+              labelledIssueId === undefined ? "" : (input.childLabels?.[labelledIssueId] ?? ""),
             stderr: "",
             code: 0 as never,
             timedOut: false,
@@ -2682,8 +2737,8 @@ describe("EpicRunner", () => {
   });
 
   it.live("keeps consecutive closed-child no-commit iterations out of the gutter", () => {
-    // Knowledge-only children ("Research: ...") legitimately produce no
-    // commits; closing each child is what vouches for both iterations.
+    // Research children legitimately produce no commits, but each one must
+    // add findings to its bead before its close can vouch for the iteration.
     const harness = createHarness({
       script: [
         {
@@ -2696,7 +2751,16 @@ describe("EpicRunner", () => {
         },
         { text: "RALPH_DONE", head: "head-0" },
       ],
-      childStatuses: { "child-1": "closed", "child-2": "closed" },
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Research: first", commentCount: 2 },
+          { status: "closed", title: "Research: first", commentCount: 3 },
+        ],
+        "child-2": [
+          { status: "open", title: "Research: second", commentCount: 5 },
+          { status: "closed", title: "Research: second", commentCount: 6 },
+        ],
+      },
     });
 
     return Effect.gen(function* () {
@@ -2727,23 +2791,141 @@ describe("EpicRunner", () => {
           (request) => request.command === "bd" && request.args[0] === "update",
         ),
       );
-      assert.strictEqual(harness.childStatus("child-1"), "closed");
-      assert.strictEqual(harness.childStatus("child-2"), "closed");
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("restarts the gutter streak after a closed-child no-commit iteration", () => {
+  it.live("resets the gutter streak after a research child adds findings", () => {
     const harness = createHarness({
       script: [
-        { text: "closed research child", head: "head-0" },
         { text: "first open child", head: "head-0" },
+        { text: "closed research child", head: "head-0" },
         { text: "second open child", head: "head-0" },
-        { text: "should never run", head: "head-9" },
+        { text: "RALPH_DONE", head: "head-0" },
       ],
-      childStatuses: {
-        "child-1": "closed",
-        "child-2": "in_progress",
-        "child-3": "in_progress",
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Implement first", commentCount: 0 },
+          { status: "open", title: "Implement first", commentCount: 0 },
+        ],
+        "child-2": [
+          { status: "open", title: "Research: answer question", commentCount: 4 },
+          { status: "closed", title: "Research: answer question", commentCount: 5 },
+        ],
+        "child-3": [
+          { status: "open", title: "Implement second", commentCount: 0 },
+          { status: "open", title: "Implement second", commentCount: 0 },
+        ],
+      },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.store.runs.get(run.runId)?.lastError, null);
+      assert.strictEqual(harness.turnsStarted(), 4);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.turnStatus),
+        ["failed", "completed", "failed", "completed"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("accepts a research-labelled child that adds findings without a commit", () => {
+    const harness = createHarness({
+      script: [
+        { text: "labelled research findings", head: "head-0" },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Investigate provider behavior", commentCount: 1 },
+          { status: "closed", title: "Investigate provider behavior", commentCount: 2 },
+        ],
+      },
+      childLabels: { "child-1": "- research\n" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, null);
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) =>
+            request.command === "bd" &&
+            request.args[0] === "label" &&
+            request.args[1] === "list" &&
+            request.args[2] === "child-1",
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("rejects a closed research child without new findings", () => {
+    const harness = createHarness({
+      script: [{ text: "closed without findings", head: "head-0" }],
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Research: unanswered", commentCount: 7 },
+          { status: "closed", title: "Research: unanswered", commentCount: 7 },
+        ],
+      },
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(
+        harness.store.iterations[0]?.failureReason,
+        "child:closed-without-findings",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("accepts a non-research child with no commit when its bead gains evidence", () => {
+    const harness = createHarness({
+      script: [
+        { text: "verified existing implementation", head: "head-0" },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Verify existing behavior", commentCount: 0 },
+          { status: "closed", title: "Verify existing behavior", commentCount: 1 },
+        ],
+      },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, null);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("trips the gutter when closed non-research children add no evidence", () => {
+    const harness = createHarness({
+      script: [
+        { text: "closed without proof", head: "head-0" },
+        { text: "closed without proof again", head: "head-0" },
+      ],
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Implement first", commentCount: 0 },
+          { status: "closed", title: "Implement first", commentCount: 0 },
+        ],
+        "child-2": [
+          { status: "open", title: "Implement second", commentCount: 3 },
+          { status: "closed", title: "Implement second", commentCount: 3 },
+        ],
       },
     });
 
@@ -2751,15 +2933,36 @@ describe("EpicRunner", () => {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
 
+      assert.strictEqual(harness.turnsStarted(), 2);
       assert.strictEqual(
         harness.store.runs.get(run.runId)?.lastError,
         "gutter: 2 iterations without a commit",
       );
-      assert.strictEqual(harness.turnsStarted(), 3);
       assert.deepStrictEqual(
-        harness.store.iterations.map((iteration) => iteration.turnStatus),
-        ["completed", "failed", "failed"],
+        harness.store.iterations.map((iteration) => iteration.failureReason),
+        ["child:no-commit-no-evidence", "child:no-commit-no-evidence"],
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("rejects a no-commit iteration when settlement evidence cannot be read", () => {
+    const harness = createHarness({
+      script: [{ text: "closed but unreadable", head: "head-0" }],
+      childEvidence: {
+        "child-1": [
+          { status: "open", title: "Verify unreadable close", commentCount: 0 },
+          { exitCode: 1 },
+        ],
+      },
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
     }).pipe(Effect.provide(harness.layer));
   });
 

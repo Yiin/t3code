@@ -53,10 +53,11 @@ export const EpicRunIterationReport = Schema.Struct({
    * human `summary`. Classified failures are prefixed with their failure
    * class: "infra:" for failures attributable to infrastructure ("turn-error",
    * "timeout", "dispatch-failed", "protocol-error", "ready-unrecognised", and
-   * the provider-error family) and "child:" for failures the agent itself produced
-   * ("no-commit-child-open", "blocked"). Provider-attributed failures read
-   * "infra:provider-error" when only the session's error text is known, or
-   * "infra:provider-error:spend-limit" / ":auth" / ":rate-limit" when the
+   * the provider-error family) and "child:" for failures the agent itself
+   * produced ("no-commit-child-open", "no-commit-no-evidence",
+   * "closed-without-findings", and "blocked"). Provider-attributed failures
+   * read "infra:provider-error" when only the session's error text is known,
+   * or "infra:provider-error:spend-limit" / ":auth" / ":rate-limit" when the
    * text matched the runner's curated pattern table. "cancelled" and
    * "server-restart" never had a classified outcome and stay unprefixed; rows
    * written before the class prefix existed carry the bare reasons.
