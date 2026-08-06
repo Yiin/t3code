@@ -9,6 +9,8 @@ import {
   type OrchestrationProposedPlanId,
   CheckpointRef,
   isToolLifecycleItemType,
+  SUBAGENT_TEXT_ACTIVITY_KIND,
+  SUBAGENT_THINKING_ACTIVITY_KIND,
   type RuntimeItemId,
   ThreadId,
   type ThreadTokenUsageSnapshot,
@@ -47,6 +49,32 @@ const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${t
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
 const toolUpdateThrottleKey = (threadId: ThreadId, itemId: RuntimeItemId) =>
   `${threadId}:${itemId}`;
+const transcriptParentKey = (threadId: ThreadId, parentToolUseId: string) =>
+  `${threadId}:${parentToolUseId}`;
+
+type SubagentTranscriptStreamKind = "assistant_text" | "reasoning_text";
+
+const transcriptKey = (
+  threadId: ThreadId,
+  parentToolUseId: string,
+  streamKind: SubagentTranscriptStreamKind,
+  segment: number,
+) => `${threadId}:${parentToolUseId}:${streamKind}:${segment}`;
+
+interface SubagentTranscriptState {
+  readonly threadId: ThreadId;
+  readonly parentToolUseId: string;
+  readonly streamKind: SubagentTranscriptStreamKind;
+  readonly segment: number;
+  readonly text: string;
+  readonly truncated: boolean;
+}
+
+interface PendingTranscriptActivity {
+  readonly event: ProviderRuntimeEvent;
+  readonly activity: OrchestrationThreadActivity;
+  readonly state: SubagentTranscriptState;
+}
 
 // A coalesced-but-not-yet-dispatched tool.updated activity, held for at most
 // TOOL_UPDATE_THROTTLE_WINDOW_MILLIS before the trailing-edge flush fires.
@@ -149,6 +177,7 @@ const PENDING_TOOL_UPDATE_CACHE_CAPACITY = 10_000;
 const PENDING_TOOL_UPDATE_TTL = Duration.minutes(120);
 const LAST_TOOL_UPDATE_DISPATCH_CACHE_CAPACITY = 10_000;
 const LAST_TOOL_UPDATE_DISPATCH_TTL = Duration.minutes(120);
+const MAX_SUBAGENT_TRANSCRIPT_CHARS = 4_000;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
@@ -173,6 +202,12 @@ type RuntimeIngestionInput =
       // processes runtime/domain events and never races them over the
       // pending/last-dispatch throttle caches.
       source: "tool-update-flush";
+      key: string;
+    }
+  | {
+      // Synthetic input for the subagent transcript trailing-edge timer. It
+      // shares the worker queue with runtime events to serialize cache access.
+      source: "transcript-flush";
       key: string;
     };
 
@@ -933,6 +968,15 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed({}),
   });
 
+  // content.delta identifies a subagent by its spawning Task tool_use id, not
+  // by taskId. Keep the subagent type under that wire join key as well.
+  const subagentTypeByTranscriptParentKey = yield* Cache.make<string, string>({
+    capacity: TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY,
+    timeToLive: TASK_DESCRIPTION_BY_TASK_TTL,
+    lookup: () =>
+      Effect.die(new Error("subagent type must be read through getOption before initialization")),
+  });
+
   // Merges with the remembered entry: a later event that carries only one of
   // the fields (e.g. a task.progress without subagentType) must not wipe the
   // other one remembered from task.started.
@@ -1085,6 +1129,198 @@ const make = Effect.gen(function* () {
           Effect.asVoid,
         ),
       );
+    });
+
+  const transcriptSegmentByParentKey = yield* Cache.make<string, number>({
+    capacity: PENDING_TOOL_UPDATE_CACHE_CAPACITY,
+    timeToLive: PENDING_TOOL_UPDATE_TTL,
+    lookup: () => Effect.succeed(0),
+  });
+
+  const transcriptStateByKey = yield* Cache.make<string, SubagentTranscriptState>({
+    capacity: PENDING_TOOL_UPDATE_CACHE_CAPACITY,
+    timeToLive: PENDING_TOOL_UPDATE_TTL,
+    lookup: () =>
+      Effect.die(
+        new Error("transcript state must be read through getOption before initialization"),
+      ),
+  });
+
+  const pendingTranscriptActivityByKey = yield* Cache.make<string, PendingTranscriptActivity>({
+    capacity: PENDING_TOOL_UPDATE_CACHE_CAPACITY,
+    timeToLive: PENDING_TOOL_UPDATE_TTL,
+    lookup: () =>
+      Effect.die(new Error("pending transcript activity must be set before it is looked up")),
+  });
+
+  const lastTranscriptDispatchAtByKey = yield* Cache.make<string, number>({
+    capacity: LAST_TOOL_UPDATE_DISPATCH_CACHE_CAPACITY,
+    timeToLive: LAST_TOOL_UPDATE_DISPATCH_TTL,
+    lookup: () => Effect.succeed(0),
+  });
+
+  const dispatchTranscriptActivity = (pending: PendingTranscriptActivity) =>
+    providerCommandId(pending.event, "thread-activity-append-subagent-transcript").pipe(
+      Effect.flatMap((commandId) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: pending.state.threadId,
+          activity: pending.activity,
+          createdAt: pending.activity.createdAt,
+        }),
+      ),
+    );
+
+  const flushPendingTranscriptActivity = (key: string) =>
+    Cache.getOption(pendingTranscriptActivityByKey, key).pipe(
+      Effect.flatMap((pendingOption) =>
+        Option.match(pendingOption, {
+          onNone: () => Effect.void,
+          onSome: (pending) =>
+            Cache.invalidate(pendingTranscriptActivityByKey, key).pipe(
+              Effect.andThen(Clock.currentTimeMillis),
+              Effect.tap((dispatchedAt) =>
+                Cache.set(lastTranscriptDispatchAtByKey, key, dispatchedAt),
+              ),
+              Effect.andThen(dispatchTranscriptActivity(pending)),
+            ),
+        }),
+      ),
+    );
+
+  const flushPendingTranscriptActivities = (
+    predicate: (pending: PendingTranscriptActivity) => boolean,
+  ) =>
+    Cache.entries(pendingTranscriptActivityByKey).pipe(
+      Effect.flatMap((entries) =>
+        Effect.forEach(
+          Array.from(entries).filter(([, pending]) => predicate(pending)),
+          ([key]) => flushPendingTranscriptActivity(key),
+          { concurrency: 1 },
+        ),
+      ),
+      Effect.asVoid,
+    );
+
+  const flushPendingTranscriptActivitiesForThread = (threadId: ThreadId) =>
+    flushPendingTranscriptActivities((pending) => pending.state.threadId === threadId);
+
+  const flushPendingTranscriptActivitiesForParent = (threadId: ThreadId, parentToolUseId: string) =>
+    flushPendingTranscriptActivities(
+      (pending) =>
+        pending.state.threadId === threadId && pending.state.parentToolUseId === parentToolUseId,
+    );
+
+  const rotateTranscriptSegment = (threadId: ThreadId, parentToolUseId: string) => {
+    const parentKey = transcriptParentKey(threadId, parentToolUseId);
+    return Cache.get(transcriptSegmentByParentKey, parentKey).pipe(
+      Effect.flatMap((segment) => Cache.set(transcriptSegmentByParentKey, parentKey, segment + 1)),
+    );
+  };
+
+  const dispatchOrCoalesceTranscriptActivity = (key: string, pending: PendingTranscriptActivity) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const lastDispatchedAt = yield* Cache.get(lastTranscriptDispatchAtByKey, key);
+      const elapsed = now - lastDispatchedAt;
+
+      if (elapsed >= TOOL_UPDATE_THROTTLE_WINDOW_MILLIS) {
+        yield* Cache.invalidate(pendingTranscriptActivityByKey, key);
+        yield* Cache.set(lastTranscriptDispatchAtByKey, key, now);
+        yield* dispatchTranscriptActivity(pending);
+        return;
+      }
+
+      const hadPendingBeforeSet = yield* Cache.has(pendingTranscriptActivityByKey, key);
+      yield* Cache.set(pendingTranscriptActivityByKey, key, pending);
+      if (hadPendingBeforeSet) {
+        return;
+      }
+
+      const remaining = Math.max(TOOL_UPDATE_THROTTLE_WINDOW_MILLIS - elapsed, 0);
+      yield* Effect.forkScoped(
+        Effect.sleep(Duration.millis(remaining)).pipe(
+          Effect.andThen(() => worker.enqueue({ source: "transcript-flush", key })),
+          Effect.asVoid,
+        ),
+      );
+    });
+
+  const ingestSubagentTranscriptDelta = (
+    event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>,
+  ) =>
+    Effect.gen(function* () {
+      const parentToolUseId = event.payload.parentToolUseId;
+      const streamKind = event.payload.streamKind;
+      const delta = event.payload.delta;
+      if (
+        parentToolUseId === undefined ||
+        (streamKind !== "assistant_text" && streamKind !== "reasoning_text") ||
+        delta.length === 0
+      ) {
+        return;
+      }
+
+      const parentKey = transcriptParentKey(event.threadId, parentToolUseId);
+      const segment = yield* Cache.get(transcriptSegmentByParentKey, parentKey);
+      const key = transcriptKey(event.threadId, parentToolUseId, streamKind, segment);
+      const previousOption = yield* Cache.getOption(transcriptStateByKey, key);
+      const previous = Option.getOrUndefined(previousOption);
+      const previousText = previous?.text ?? "";
+      const combinedLength = previousText.length + delta.length;
+      const text = previous?.truncated
+        ? previousText
+        : `${previousText}${delta}`.slice(0, MAX_SUBAGENT_TRANSCRIPT_CHARS);
+      const state: SubagentTranscriptState = {
+        threadId: event.threadId,
+        parentToolUseId,
+        streamKind,
+        segment,
+        text,
+        truncated: previous?.truncated === true || combinedLength > MAX_SUBAGENT_TRANSCRIPT_CHARS,
+      };
+      yield* Cache.set(transcriptStateByKey, key, state);
+
+      // The shared payload schema rejects whitespace-only text. Keep such
+      // chunks buffered so a later visible token still includes them.
+      if (text.trim().length === 0) {
+        return;
+      }
+
+      const subagentType = yield* Cache.getOption(
+        subagentTypeByTranscriptParentKey,
+        parentKey,
+      ).pipe(Effect.map(Option.getOrUndefined));
+      const kind =
+        streamKind === "assistant_text"
+          ? SUBAGENT_TEXT_ACTIVITY_KIND
+          : SUBAGENT_THINKING_ACTIVITY_KIND;
+      const idPrefix = streamKind === "assistant_text" ? "subagent-text" : "subagent-thinking";
+      const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
+      const activity: OrchestrationThreadActivity = {
+        id: EventId.make(`${idPrefix}:${event.threadId}:${parentToolUseId}:${segment}`),
+        createdAt: event.createdAt,
+        tone: "info",
+        kind,
+        summary: truncateDetail(text, 120),
+        payload: {
+          parentToolUseId,
+          text,
+          ...(state.truncated ? { truncated: true } : {}),
+          ...(subagentType ? { subagentType } : {}),
+        },
+        turnId: toTurnId(event.turnId) ?? null,
+        ...(eventWithSequence.sessionSequence !== undefined
+          ? { sequence: eventWithSequence.sessionSequence }
+          : {}),
+      };
+
+      // Claude normally emits one complete block, but can defensively emit
+      // token-cadence deltas too. Stable ids and this throttle coalesce both;
+      // deduplicating a provider that sends both forms is intentionally out of
+      // scope because the wire events carry no safe identity for that join.
+      yield* dispatchOrCoalesceTranscriptActivity(key, { event, activity, state });
     });
 
   // Entries are left in place after completion so replayed or duplicate
@@ -1525,6 +1761,10 @@ const make = Effect.gen(function* () {
       const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
       const proposedPlanKeys = Array.from(yield* Cache.keys(bufferedProposedPlanById));
       const taskMetadataKeys = Array.from(yield* Cache.keys(taskMetadataByTaskKey));
+      const transcriptParentKeys = Array.from(yield* Cache.keys(transcriptSegmentByParentKey));
+      const transcriptStateKeys = Array.from(yield* Cache.keys(transcriptStateByKey));
+      const transcriptTypeKeys = Array.from(yield* Cache.keys(subagentTypeByTranscriptParentKey));
+      const transcriptDispatchKeys = Array.from(yield* Cache.keys(lastTranscriptDispatchAtByKey));
       // Nothing should be left pending here: the processRuntimeEvent
       // accelerator flushes every pending tool.updated for this thread (via
       // flushPendingToolUpdatesForThread) before this function runs. Only the
@@ -1578,6 +1818,36 @@ const make = Effect.gen(function* () {
         (key) =>
           key.startsWith(prefix)
             ? Cache.invalidate(lastToolUpdateDispatchAtByThrottleKey, key)
+            : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        transcriptParentKeys,
+        (key) =>
+          key.startsWith(prefix)
+            ? Cache.invalidate(transcriptSegmentByParentKey, key)
+            : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        transcriptStateKeys,
+        (key) =>
+          key.startsWith(prefix) ? Cache.invalidate(transcriptStateByKey, key) : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        transcriptTypeKeys,
+        (key) =>
+          key.startsWith(prefix)
+            ? Cache.invalidate(subagentTypeByTranscriptParentKey, key)
+            : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        transcriptDispatchKeys,
+        (key) =>
+          key.startsWith(prefix)
+            ? Cache.invalidate(lastTranscriptDispatchAtByKey, key)
             : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
@@ -1674,9 +1944,25 @@ const make = Effect.gen(function* () {
       // paths this switch also covers, and any path it doesn't (e.g. this
       // event itself throwing before reaching here).
       switch (event.type) {
+        case "item.started":
+          if (event.payload.parentToolUseId !== undefined) {
+            // Flush the prior prose/thinking segment before tool.started gets
+            // its sequence, then rotate so later text lands after the tool.
+            yield* flushPendingTranscriptActivitiesForParent(
+              thread.id,
+              event.payload.parentToolUseId,
+            );
+            yield* rotateTranscriptSegment(thread.id, event.payload.parentToolUseId);
+          }
+          break;
         case "item.completed":
           if (event.itemId !== undefined) {
             yield* flushPendingToolUpdate(toolUpdateThrottleKey(thread.id, event.itemId));
+          }
+          break;
+        case "task.completed":
+          if (event.payload.toolUseId !== undefined) {
+            yield* flushPendingTranscriptActivitiesForParent(thread.id, event.payload.toolUseId);
           }
           break;
         case "turn.completed":
@@ -1684,6 +1970,7 @@ const make = Effect.gen(function* () {
         case "session.exited":
         case "runtime.error":
           yield* flushPendingToolUpdatesForThread(thread.id);
+          yield* flushPendingTranscriptActivitiesForThread(thread.id);
           break;
         default:
           break;
@@ -1855,6 +2142,10 @@ const make = Effect.gen(function* () {
           : undefined;
       const proposedPlanDelta =
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
+
+      if (event.type === "content.delta") {
+        yield* ingestSubagentTranscriptDelta(event);
+      }
 
       if (assistantDelta && assistantDelta.length > 0) {
         const turnId = toTurnId(event.turnId);
@@ -2154,6 +2445,13 @@ const make = Effect.gen(function* () {
             ...(subagentType ? { subagentType } : {}),
           });
         }
+        if (event.payload.toolUseId && subagentType) {
+          yield* Cache.set(
+            subagentTypeByTranscriptParentKey,
+            transcriptParentKey(thread.id, event.payload.toolUseId),
+            subagentType,
+          );
+        }
       }
       if (event.type === "task.updated" && event.payload.patch.description) {
         yield* rememberTaskMetadata(thread.id, event.payload.taskId, {
@@ -2216,6 +2514,8 @@ const make = Effect.gen(function* () {
         return processDomainEvent(input.event);
       case "tool-update-flush":
         return flushPendingToolUpdate(input.key);
+      case "transcript-flush":
+        return flushPendingTranscriptActivity(input.key);
     }
   };
 
@@ -2229,7 +2529,9 @@ const make = Effect.gen(function* () {
           source: input.source,
           ...(input.source === "tool-update-flush"
             ? { toolUpdateThrottleKey: input.key }
-            : { eventId: input.event.eventId, eventType: input.event.type }),
+            : input.source === "transcript-flush"
+              ? { transcriptThrottleKey: input.key }
+              : { eventId: input.event.eventId, eventType: input.event.type }),
           cause: Cause.pretty(cause),
         });
       }),

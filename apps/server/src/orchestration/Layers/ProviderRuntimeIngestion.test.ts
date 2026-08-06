@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  decodeSubagentTranscriptActivityPayload,
   OrchestrationReadModel,
   ProviderDriverKind,
   ProviderRuntimeEvent,
@@ -27,6 +28,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -4183,6 +4185,285 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+
+  describe("subagent transcript ingestion", () => {
+    function emitTranscriptDelta(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      options: {
+        eventId: string;
+        delta: string;
+        streamKind?: "assistant_text" | "reasoning_text";
+        parentToolUseId?: string;
+        sessionSequence?: number;
+      },
+    ) {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(options.eventId),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-subagent-transcript"),
+        itemId: asItemId("item-parent-assistant"),
+        ...(options.sessionSequence !== undefined
+          ? { sessionSequence: options.sessionSequence }
+          : {}),
+        payload: {
+          streamKind: options.streamKind ?? "assistant_text",
+          delta: options.delta,
+          ...(options.parentToolUseId ? { parentToolUseId: options.parentToolUseId } : {}),
+        },
+      });
+    }
+
+    it("projects parent-tagged assistant text without changing the parent assistant message", async () => {
+      const harness = await createHarness();
+      harness.emit({
+        type: "task.started",
+        eventId: asEventId("evt-subagent-text-task-started"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-subagent-transcript"),
+        payload: {
+          taskId: "subagent-text-task",
+          toolUseId: "toolu-subagent-text",
+          subagentType: "Explore",
+        },
+      });
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-text",
+        delta: "Found the relevant module.",
+        parentToolUseId: "toolu-subagent-text",
+      });
+
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.text",
+        ),
+      );
+      const activity = thread.activities.find(
+        (entry: ProviderRuntimeTestActivity) => entry.kind === "subagent.text",
+      );
+      const decoded = decodeSubagentTranscriptActivityPayload(activity?.payload);
+
+      expect(Option.isSome(decoded)).toBe(true);
+      expect(Option.getOrUndefined(decoded)).toMatchObject({
+        parentToolUseId: "toolu-subagent-text",
+        text: "Found the relevant module.",
+        subagentType: "Explore",
+      });
+      expect(thread.messages).toHaveLength(0);
+    });
+
+    it("projects only parent-tagged reasoning text", async () => {
+      const harness = await createHarness();
+      emitTranscriptDelta(harness, {
+        eventId: "evt-parent-reasoning",
+        delta: "Check the cache lifetime.",
+        streamKind: "reasoning_text",
+        parentToolUseId: "toolu-subagent-thinking",
+      });
+      emitTranscriptDelta(harness, {
+        eventId: "evt-parentless-reasoning",
+        delta: "Parent reasoning remains ignored.",
+        streamKind: "reasoning_text",
+      });
+      await harness.drain();
+
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.thinking",
+        ),
+      );
+      const thinking = thread.activities.filter(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.thinking",
+      );
+      expect(thinking).toHaveLength(1);
+      expect(thinking[0]?.payload).toMatchObject({
+        parentToolUseId: "toolu-subagent-thinking",
+        text: "Check the cache lifetime.",
+      });
+    });
+
+    it("coalesces a burst into one transcript row with concatenated text", async () => {
+      const harness = await createHarness();
+      for (const [index, delta] of ["one ", "two ", "three"].entries()) {
+        emitTranscriptDelta(harness, {
+          eventId: `evt-subagent-burst-${index}`,
+          delta,
+          parentToolUseId: "toolu-subagent-burst",
+        });
+      }
+
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "subagent-text:thread-1:toolu-subagent-burst:0" &&
+            (activity.payload as Record<string, unknown>).text === "one two three",
+        ),
+      );
+      const rows = thread.activities.filter(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "subagent-text:thread-1:toolu-subagent-burst:0",
+      );
+      expect(rows).toHaveLength(1);
+
+      const events = await Effect.runPromise(
+        Stream.runCollect(harness.engine.readEvents(0)).pipe(
+          Effect.map((chunk) => Array.from(chunk)),
+        ),
+      );
+      const transcriptDispatches = events.filter(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          event.payload.activity.id === "subagent-text:thread-1:toolu-subagent-burst:0",
+      );
+      // One leading-edge dispatch plus one trailing-edge flush. The middle
+      // delta only replaces the pending snapshot and dispatches no command.
+      expect(transcriptDispatches).toHaveLength(2);
+    });
+
+    it("rotates transcript segments around a nested tool", async () => {
+      const harness = await createHarness();
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-before-tool",
+        delta: "Before tool.",
+        parentToolUseId: "toolu-subagent-segments",
+        sessionSequence: 1,
+      });
+      harness.emit({
+        type: "item.started",
+        eventId: asEventId("evt-subagent-nested-tool"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-subagent-transcript"),
+        itemId: asItemId("item-subagent-nested-tool"),
+        sessionSequence: 2,
+        payload: {
+          itemType: "command_execution",
+          title: "Inspect files",
+          parentToolUseId: "toolu-subagent-segments",
+        },
+      });
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-after-tool",
+        delta: "After tool.",
+        parentToolUseId: "toolu-subagent-segments",
+        sessionSequence: 3,
+      });
+
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "subagent-text:thread-1:toolu-subagent-segments:1",
+        ),
+      );
+      const orderedIds = thread.activities
+        .filter((activity: ProviderRuntimeTestActivity) =>
+          [
+            "subagent-text:thread-1:toolu-subagent-segments:0",
+            "evt-subagent-nested-tool",
+            "subagent-text:thread-1:toolu-subagent-segments:1",
+          ].includes(activity.id),
+        )
+        .map((activity: ProviderRuntimeTestActivity) => activity.id);
+      expect(orderedIds).toEqual([
+        "subagent-text:thread-1:toolu-subagent-segments:0",
+        "evt-subagent-nested-tool",
+        "subagent-text:thread-1:toolu-subagent-segments:1",
+      ]);
+    });
+
+    it("flushes pending transcript text when the session exits", async () => {
+      const harness = await createHarness();
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-exit-first",
+        delta: "first ",
+        parentToolUseId: "toolu-subagent-exit",
+      });
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-exit-second",
+        delta: "second",
+        parentToolUseId: "toolu-subagent-exit",
+      });
+      harness.emit({
+        type: "session.exited",
+        eventId: asEventId("evt-subagent-session-exited"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId: asThreadId("thread-1"),
+      });
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) =>
+          entry.session?.status === "stopped" &&
+          entry.activities.some(
+            (activity: ProviderRuntimeTestActivity) =>
+              activity.id === "subagent-text:thread-1:toolu-subagent-exit:0" &&
+              (activity.payload as Record<string, unknown>).text === "first second",
+          ),
+      );
+      expect(thread.session?.status).toBe("stopped");
+    });
+
+    it("flushes pending transcript text when the matching task completes", async () => {
+      const harness = await createHarness();
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-task-first",
+        delta: "first ",
+        parentToolUseId: "toolu-subagent-task-flush",
+      });
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-task-second",
+        delta: "second",
+        parentToolUseId: "toolu-subagent-task-flush",
+      });
+      harness.emit({
+        type: "task.completed",
+        eventId: asEventId("evt-subagent-task-flush-completed"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-subagent-transcript"),
+        payload: {
+          taskId: "subagent-task-flush",
+          status: "completed",
+          toolUseId: "toolu-subagent-task-flush",
+        },
+      });
+
+      await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "subagent-text:thread-1:toolu-subagent-task-flush:0" &&
+            (activity.payload as Record<string, unknown>).text === "first second",
+        ),
+      );
+    });
+
+    it("caps transcript text and marks the payload truncated", async () => {
+      const harness = await createHarness();
+      emitTranscriptDelta(harness, {
+        eventId: "evt-subagent-capped",
+        delta: "x".repeat(4_001),
+        parentToolUseId: "toolu-subagent-capped",
+      });
+
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.text",
+        ),
+      );
+      const payload = thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.text",
+      )?.payload as Record<string, unknown>;
+      expect(payload.truncated).toBe(true);
+      expect((payload.text as string).length).toBeLessThanOrEqual(4_000);
+    });
   });
 
   describe("tool.updated throttling", () => {
