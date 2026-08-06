@@ -19,8 +19,10 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FiberMap from "effect/FiberMap";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -87,6 +89,13 @@ const DEFAULT_INFRA_FAILURE_BUDGET = 5;
 const DEFAULT_MAX_ITERATIONS = 50;
 const RECENT_ITERATIONS_LIMIT = 25;
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
+export const assembleIterationPrompt = (input: {
+  readonly basePrompt: string;
+  readonly issueId: string;
+  readonly epicContext: string | null;
+  readonly orientationCard: string | null;
+}): string =>
+  `${input.basePrompt}\n\nCook exactly \`${input.issueId}\` this iteration.\n\n## Epic context (resolved at dispatch)\n\n${input.epicContext ?? "(epic description unavailable)"}\n\n${input.orientationCard ?? "(no orientation card in this repo)"}`;
 /**
  * The follow-up turn an iteration gets when its agent ended the turn with
  * subagents still running (despite the prompt contract above). Sent after each
@@ -213,6 +222,17 @@ const decodeIssueStatus = Schema.decodeUnknownOption(
     ]),
   ),
 );
+const decodeEpicDescription = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Union([
+      Schema.Struct({ description: Schema.String }),
+      Schema.Array(Schema.Struct({ description: Schema.String })),
+    ]),
+  ),
+);
+
+const isValidOrientationFile = (value: string): boolean =>
+  !/^(?:[A-Za-z]:[\\/]|[\\/])/u.test(value) && !value.split(/[\\/]/u).includes("..");
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -351,6 +371,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const store = yield* EpicRunStore;
     const processRunner = yield* ProcessRunner.ProcessRunner;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
     const preflight = yield* EpicRunPreflight;
     const runLock = yield* EpicRunLock;
@@ -718,6 +740,55 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           ),
         ),
       );
+
+    const readEpicDescription = (cwd: string, epicId: string): Effect.Effect<string | null> =>
+      processRunner.run({ command: "bd", args: ["show", epicId, "--json"], cwd }).pipe(
+        Effect.flatMap((shown) => {
+          if (shown.code !== 0) {
+            return Effect.logWarning("epic.runner.epic-description-read-failed", {
+              cwd,
+              epicId,
+              detail: shown.stderr.trim() || `bd show exited with code ${shown.code}`,
+            }).pipe(Effect.as(null));
+          }
+          const decoded = decodeEpicDescription(shown.stdout);
+          const value = Option.isSome(decoded)
+            ? Array.isArray(decoded.value)
+              ? decoded.value[0]
+              : decoded.value
+            : undefined;
+          if (value === undefined) {
+            return Effect.logWarning("epic.runner.epic-description-decode-failed", {
+              cwd,
+              epicId,
+            }).pipe(Effect.as(null));
+          }
+          return Effect.succeed<string | null>(value.description);
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.epic-description-read-failed", {
+            cwd,
+            epicId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+
+    const readOrientationCard = (
+      checkoutPath: string,
+      orientationFile: string | null,
+    ): Effect.Effect<string | null> =>
+      Effect.gen(function* () {
+        const candidates =
+          orientationFile === null ? ["docs/agent-orientation.md", "AGENTS.md"] : [orientationFile];
+        for (const candidate of candidates) {
+          const contents = yield* fileSystem
+            .readFileString(path.join(checkoutPath, candidate))
+            .pipe(Effect.option);
+          if (Option.isSome(contents)) return contents.value;
+        }
+        return null;
+      });
 
     const releaseClaimedChild = (cwd: string, issueId: string): Effect.Effect<void> =>
       readIssueStatus(cwd, issueId).pipe(
@@ -1324,6 +1395,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         }
 
         const issueId = selection.issueId;
+        const worktreePath = yield* resolveIterationWorktreePath(run);
+        const checkoutPath = worktreePath ?? run.cwd;
+        const epicContext = yield* readEpicDescription(run.cwd, run.epicId);
+        const orientationCard = yield* readOrientationCard(checkoutPath, run.orientationFile);
         const headBefore = yield* readHeadCommit(run.cwd);
         const initialWorktreeFingerprint = yield* readWorktreeFingerprint(run.cwd);
 
@@ -1353,8 +1428,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           updatedAt: startedAt,
         });
 
-        const worktreePath = yield* resolveIterationWorktreePath(run);
-
         const dispatchTurn = Effect.gen(function* () {
           // `OrchestrationEngine.dispatch` ignores a turn command's `bootstrap`
           // block — that path lives only in the websocket handler (`ws.ts:844`)
@@ -1379,7 +1452,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             message: {
               messageId: MessageId.make(`${threadId}-prompt`),
               role: "user",
-              text: `${run.prompt}\n\nCook exactly \`${issueId}\` this iteration.`,
+              text: assembleIterationPrompt({
+                basePrompt: run.prompt,
+                issueId,
+                epicContext,
+                orientationCard,
+              }),
               attachments: [],
             },
             modelSelection: run.modelSelection,
@@ -1845,6 +1923,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const startRun: EpicRunnerShape["startRun"] = (input: StartEpicRunInput) =>
       Effect.gen(function* () {
+        const orientationFile = input.orientationFile ?? null;
+        if (orientationFile !== null && !isValidOrientationFile(orientationFile)) {
+          return yield* new EpicRunLaunchError({ reason: "orientation_file_invalid" });
+        }
         const active = yield* findActiveRun(input);
         if (active !== undefined) {
           return yield* enrichRun(active);
@@ -1858,6 +1940,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           projectId: input.projectId,
           cwd: input.cwd,
           prompt: input.prompt,
+          orientationFile,
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode ?? DEFAULT_RUNTIME_MODE,
           // Only ever what the launcher supplied: the run's own iteration
@@ -1922,6 +2005,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         return yield* startRun({
           ...input,
           prompt: EPIC_RUN_ITERATION_PROMPT,
+          orientationFile: null,
           modelSelection: project.value.defaultModelSelection,
           runtimeMode: DEFAULT_RUNTIME_MODE,
           maxIterations: defaultMaxIterations,

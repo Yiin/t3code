@@ -20,6 +20,7 @@ const makeRun = (overrides: Partial<EpicRun> = {}): EpicRun => ({
   projectId: ProjectId.make("project-epic"),
   cwd: "/tmp/project-epic",
   prompt: "Cook the epic.",
+  orientationFile: null,
   modelSelection,
   runtimeMode: "full-access",
   originThreadId: null,
@@ -49,6 +50,7 @@ describe("EpicRunStore", () => {
         currentThreadId: ThreadId.make("thread-epic-1"),
         currentTurnStartedAt: "2026-07-27T00:01:00.000Z",
         originThreadId: ThreadId.make("thread-launcher-1"),
+        orientationFile: "docs/agent-orientation.md",
       });
       yield* store.upsertRun(run);
 

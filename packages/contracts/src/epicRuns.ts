@@ -20,6 +20,7 @@ export const EpicRunInput = Schema.Struct({
   projectId: ProjectId,
   cwd: TrimmedNonEmptyString,
   prompt: Schema.String,
+  orientationFile: Schema.optional(Schema.NullOr(Schema.String)),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed("full-access"))),
   maxIterations: Schema.optional(PositiveInt),
@@ -82,6 +83,7 @@ export const EpicRun = Schema.Struct({
   projectId: ProjectId,
   cwd: TrimmedNonEmptyString,
   prompt: Schema.String,
+  orientationFile: Schema.NullOr(Schema.String),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   /**
@@ -218,7 +220,12 @@ export class EpicRunPreflightBlockedError extends Schema.TaggedErrorClass<EpicRu
 export class EpicRunLaunchError extends Schema.TaggedErrorClass<EpicRunLaunchError>()(
   "EpicRunLaunchError",
   {
-    reason: Schema.Literals(["project_not_found", "cwd_mismatch", "model_default_missing"]),
+    reason: Schema.Literals([
+      "project_not_found",
+      "cwd_mismatch",
+      "model_default_missing",
+      "orientation_file_invalid",
+    ]),
   },
 ) {}
 

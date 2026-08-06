@@ -284,6 +284,7 @@ describe("persistence error correlation", () => {
         projectId: ProjectId.make("project-correlation"),
         cwd,
         prompt,
+        orientationFile: null,
         modelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5.4",

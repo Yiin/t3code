@@ -52,6 +52,7 @@ describe("EpicRun contracts", () => {
     const run = decodeEpicRun({
       ...input,
       runtimeMode: "full-access",
+      orientationFile: "docs/agent-orientation.md",
       runId: EpicRunId.make("run-1"),
       originThreadId: ThreadId.make("thread-origin"),
       status: "running",

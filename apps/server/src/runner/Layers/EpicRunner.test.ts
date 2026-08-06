@@ -18,9 +18,12 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import {
@@ -51,6 +54,7 @@ import {
   EPIC_RUN_CONTINUATION_PROMPT,
   EPIC_RUN_ITERATION_PROMPT,
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
+  assembleIterationPrompt,
   makeEpicRunnerLive,
 } from "./EpicRunner.ts";
 
@@ -131,6 +135,28 @@ const waitFor = (predicate: () => boolean) =>
 
 /** Give already-scheduled fibers room to run, to assert that nothing else happens. */
 const settle = Effect.sleep("60 millis");
+
+const makeTempWorkspace = Effect.gen(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-epic-prompt-test-" });
+});
+
+const encodeEpicDescription = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Array(Schema.Struct({ description: Schema.String }))),
+);
+
+const writeWorkspaceFiles = Effect.fn("EpicRunner.test.writeWorkspaceFiles")(function* (
+  workspace: string,
+  files: Readonly<Record<string, string>>,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  for (const [relativePath, contents] of Object.entries(files)) {
+    const absolutePath = path.join(workspace, relativePath);
+    yield* fileSystem.makeDirectory(path.dirname(absolutePath), { recursive: true });
+    yield* fileSystem.writeFileString(absolutePath, contents);
+  }
+});
 
 const captureLogs = () => {
   const messages: ReadonlyArray<unknown>[] = [];
@@ -345,6 +371,9 @@ function createHarness(input: {
   readonly appendIterationDelayMs?: number;
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly readyOutput?: string;
+  /** Epic descriptions returned in order by per-iteration `bd show`. */
+  readonly epicDescriptions?: ReadonlyArray<string>;
+  readonly epicDescriptionExitCode?: number;
   readonly onEpicRunPublish?: (run: import("@t3tools/contracts").EpicRun) => Effect.Effect<void>;
   /**
    * Seeds `bd show <id> --json`'s status for specific issue ids, and lets
@@ -390,6 +419,7 @@ function createHarness(input: {
   const subagentDrainReads = new Map<string, number>();
   const stopsWithRunningSubagents: ThreadId[] = [];
   let guardedStopRefusals = input.guardedStopRefusals ?? 0;
+  let epicDescriptionReads = 0;
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -635,6 +665,21 @@ function createHarness(input: {
         processRequests.push(request);
         const subcommand = request.args[0];
         const issueId = request.args[1];
+        if (request.command === "bd" && subcommand === "show" && issueId === "epic-1") {
+          const description =
+            input.epicDescriptions?.[
+              Math.min(turnsStarted, (input.epicDescriptions?.length ?? 1) - 1)
+            ];
+          epicDescriptionReads += 1;
+          return {
+            stdout: description === undefined ? "[]" : encodeEpicDescription([{ description }]),
+            stderr: input.epicDescriptionExitCode === undefined ? "" : "bd unavailable",
+            code: (input.epicDescriptionExitCode ?? 0) as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
         if (
           request.command === "bd" &&
           subcommand === "show" &&
@@ -756,6 +801,7 @@ function createHarness(input: {
     activeLockCount: () => heldLocks.size,
     stopsWithRunningSubagents: () => stopsWithRunningSubagents,
     processRequests,
+    epicDescriptionReads: () => epicDescriptionReads,
     childStatus: (issueId: string) => childStatuses.get(issueId),
     commands: dispatched,
     commandsOfType: <T extends OrchestrationCommand["type"]>(type: T) =>
@@ -773,6 +819,7 @@ const startRun = (maxIterations = 10) =>
       projectId,
       cwd: "/tmp/epic-runner-repo",
       prompt: "do one unit of work",
+      orientationFile: null,
       modelSelection,
       maxIterations,
     }),
@@ -782,6 +829,31 @@ const startRun = (maxIterations = 10) =>
 // between attempts, so it needs the real clock rather than a virtual one that
 // only advances when a test tells it to.
 describe("EpicRunner", () => {
+  it("assembles fallback context without changing the base prompt", () => {
+    assert.strictEqual(
+      assembleIterationPrompt({
+        basePrompt: "Base prompt",
+        issueId: "child-1",
+        epicContext: null,
+        orientationCard: null,
+      }),
+      "Base prompt\n\nCook exactly `child-1` this iteration.\n\n## Epic context (resolved at dispatch)\n\n(epic description unavailable)\n\n(no orientation card in this repo)",
+    );
+  });
+
+  it("splices epic and orientation text verbatim", () => {
+    const epicContext = "Goal with `backticks` | pipes\n  and indentation";
+    const orientationCard = "# Agent card\n\nKeep | literal text.";
+    const prompt = assembleIterationPrompt({
+      basePrompt: "Base prompt",
+      issueId: "child-1",
+      epicContext,
+      orientationCard,
+    });
+    assert.include(prompt, epicContext);
+    assert.include(prompt, orientationCard);
+  });
+
   // The runner stops the session as soon as the turn ends — no notification
   // ever re-invokes the agent. Agents that backgrounded work and yielded
   // ("waiting for the workflow to notify me") lost that work when the session
@@ -796,6 +868,192 @@ describe("EpicRunner", () => {
     // The RALPH protocol markers the runner parses must stay intact.
     assert.include(EPIC_RUN_ITERATION_PROMPT, "RALPH_DONE");
     assert.include(EPIC_RUN_ITERATION_PROMPT, 'RALPH_MSG: {"summary":');
+  });
+
+  it.live("dispatches fresh epic context and the AGENTS orientation card", () =>
+    Effect.gen(function* () {
+      const workspace = yield* makeTempWorkspace;
+      yield* writeWorkspaceFiles(workspace, { "AGENTS.md": "# Repo orientation\n" });
+      const epicContext = "Goal with `backticks` | pipes\n  and indentation";
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: workspace,
+        epicDescriptions: [epicContext],
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: workspace,
+          prompt: "Base prompt",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const text = harness.commandsOfType("thread.turn.start")[0]!.message.text;
+        assert.include(text, "Base prompt\n\nCook exactly `child-1` this iteration.");
+        assert.include(text, epicContext);
+        assert.include(text, "# Repo orientation\n");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("prefers docs/agent-orientation.md over AGENTS.md", () =>
+    Effect.gen(function* () {
+      const workspace = yield* makeTempWorkspace;
+      yield* writeWorkspaceFiles(workspace, {
+        "docs/agent-orientation.md": "docs card",
+        "AGENTS.md": "agents card",
+      });
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: workspace,
+        epicDescriptions: ["Epic goal"],
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: workspace,
+          prompt: "Base prompt",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const text = harness.commandsOfType("thread.turn.start")[0]!.message.text;
+        assert.include(text, "docs card");
+        assert.notInclude(text, "agents card");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("uses only the configured orientation override", () =>
+    Effect.gen(function* () {
+      const workspace = yield* makeTempWorkspace;
+      yield* writeWorkspaceFiles(workspace, {
+        "custom.md": "custom card",
+        "docs/agent-orientation.md": "docs card",
+        "AGENTS.md": "agents card",
+      });
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: workspace,
+        epicDescriptions: ["Epic goal"],
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: workspace,
+          prompt: "Base prompt",
+          orientationFile: "custom.md",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const text = harness.commandsOfType("thread.turn.start")[0]!.message.text;
+        assert.strictEqual(harness.store.runs.get(run.runId)?.orientationFile, "custom.md");
+        assert.include(text, "custom card");
+        assert.notInclude(text, "docs card");
+        assert.notInclude(text, "agents card");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("uses the orientation fallback when no candidate exists", () =>
+    Effect.gen(function* () {
+      const workspace = yield* makeTempWorkspace;
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: workspace,
+        epicDescriptions: ["Epic goal"],
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: workspace,
+          prompt: "Base prompt",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        assert.include(
+          harness.commandsOfType("thread.turn.start")[0]!.message.text,
+          "(no orientation card in this repo)",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("dispatches with the epic fallback when bd show fails", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      epicDescriptionExitCode: 1,
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(1);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.include(
+        harness.commandsOfType("thread.turn.start")[0]!.message.text,
+        "(epic description unavailable)",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("reads the epic description again for each iteration", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"first","why":"needed"}',
+          head: "head-1",
+        },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      epicDescriptions: ["First epic context", "Second epic context"],
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(2);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      const prompts = harness
+        .commandsOfType("thread.turn.start")
+        .map((command) => command.message.text);
+      assert.isAtLeast(harness.epicDescriptionReads(), 2);
+      assert.include(prompts[0]!, "First epic context");
+      assert.notInclude(prompts[0]!, "Second epic context");
+      assert.include(prompts[1]!, "Second epic context");
+      assert.notInclude(prompts[1]!, "First epic context");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("rejects orientation paths that can escape the checkout", () => {
+    const harness = createHarness({ script: [] });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      for (const orientationFile of ["/tmp/card.md", "docs/../card.md", "C:\\card.md"]) {
+        const error = yield* Effect.flip(
+          runner.startRun({
+            epicId: "epic-1",
+            projectId,
+            cwd: "/tmp/epic-runner-repo",
+            prompt: "Base prompt",
+            orientationFile,
+            modelSelection,
+          }),
+        );
+        assert.strictEqual(error._tag, "EpicRunLaunchError");
+        if (error._tag === "EpicRunLaunchError") {
+          assert.strictEqual(error.reason, "orientation_file_invalid");
+        }
+      }
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.live("publishes each persisted run transition", () => {
@@ -841,7 +1099,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.iterations[0]?.issueId, "direct-a");
       assert.match(
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
-        /Cook exactly `direct-a` this iteration\.$/,
+        /Cook exactly `direct-a` this iteration\./,
       );
       const readyRequest = harness.processRequests.find(
         (request) => request.command === "bd" && request.args[0] === "ready",
@@ -862,7 +1120,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.iterations[0]?.issueId, "child-a");
       assert.match(
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
-        /Cook exactly `child-a` this iteration\.$/,
+        /Cook exactly `child-a` this iteration\./,
       );
     }).pipe(Effect.provide(harness.layer));
   });
@@ -878,7 +1136,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.iterations[0]?.issueId, "child-a");
       assert.match(
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
-        /Cook exactly `child-a` this iteration\.$/,
+        /Cook exactly `child-a` this iteration\./,
       );
     }).pipe(Effect.provide(harness.layer));
   });
@@ -895,7 +1153,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.iterations[0]?.issueId, "child-a");
       assert.match(
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
-        /Cook exactly `child-a` this iteration\.$/,
+        /Cook exactly `child-a` this iteration\./,
       );
     }).pipe(Effect.provide(harness.layer));
   });
@@ -1016,6 +1274,7 @@ describe("EpicRunner", () => {
       });
       assert.deepStrictEqual(launched.modelSelection, modelSelection);
       assert.strictEqual(launched.runtimeMode, "full-access");
+      assert.strictEqual(launched.orientationFile, null);
       assert.match(launched.prompt, /RALPH_MSG:/);
 
       for (let iterationIndex = 0; iterationIndex < 30; iterationIndex += 1) {
@@ -1052,6 +1311,7 @@ describe("EpicRunner", () => {
       projectId,
       cwd: "/tmp/epic-runner-repo",
       prompt: "do one unit of work",
+      orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
       originThreadId: null,
@@ -1189,7 +1449,7 @@ describe("EpicRunner", () => {
       );
       assert.match(
         harness.commandsOfType("thread.turn.start")[0]!.message.text,
-        /Cook exactly `child-1` this iteration\.$/,
+        /Cook exactly `child-1` this iteration\./,
       );
     }).pipe(Effect.provide(harness.layer));
   });
@@ -2575,6 +2835,7 @@ describe("EpicRunner", () => {
       projectId,
       cwd: "/tmp/epic-runner-repo",
       prompt: "do one unit of work",
+      orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
       originThreadId: null,
@@ -2659,6 +2920,7 @@ describe("EpicRunner", () => {
       projectId,
       cwd: "/tmp/epic-runner-repo",
       prompt: "do one unit of work",
+      orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
       originThreadId: null,
@@ -2726,6 +2988,7 @@ describe("EpicRunner", () => {
       projectId,
       cwd: "/tmp/epic-runner-repo",
       prompt: "do one unit of work",
+      orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
       originThreadId: null,

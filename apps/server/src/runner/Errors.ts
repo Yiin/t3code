@@ -88,7 +88,12 @@ export class EpicRunPreflightBlockedError extends Schema.TaggedErrorClass<EpicRu
 export class EpicRunLaunchError extends Schema.TaggedErrorClass<EpicRunLaunchError>()(
   "EpicRunLaunchError",
   {
-    reason: Schema.Literals(["project_not_found", "cwd_mismatch", "model_default_missing"]),
+    reason: Schema.Literals([
+      "project_not_found",
+      "cwd_mismatch",
+      "model_default_missing",
+      "orientation_file_invalid",
+    ]),
   },
 ) {
   override get message(): string {

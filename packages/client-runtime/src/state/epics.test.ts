@@ -63,6 +63,7 @@ function run(
     projectId: overrides.projectId ?? "project-1",
     cwd: overrides.cwd ?? "/repo",
     prompt: "Cook one child.",
+    orientationFile: null,
     modelSelection: {
       provider: "codex",
       model: "gpt-5",
