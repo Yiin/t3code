@@ -3,7 +3,7 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { MenuAction } from "@react-native-menu/menu";
-import { memo, useCallback, useEffect, useMemo, type ComponentProps } from "react";
+import { memo, useCallback, useMemo, type ComponentProps } from "react";
 import { Platform, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
@@ -117,12 +117,6 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly settlementSupported: boolean;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
-  /** Reports this row's live PR state up so the partition can auto-settle
-      merged/closed work (mirrors web's onChangeRequestState). */
-  readonly onChangeRequestState?: (
-    threadKey: string,
-    state: "open" | "closed" | "merged" | null,
-  ) => void;
   readonly projectCwd?: string | null;
   readonly simultaneousSwipeGesture?: ComponentProps<
     typeof ThreadSwipeable
@@ -137,16 +131,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     onSettleThread,
     onUnsettleThread,
     onArchiveThread,
-    onChangeRequestState,
   } = props;
 
   const pr = useThreadPr(thread, props.projectCwd ?? props.project?.workspaceRoot ?? null);
-  const prState = pr?.state ?? null;
-  const threadKey = `${thread.environmentId}:${thread.id}`;
-  useEffect(() => {
-    onChangeRequestState?.(threadKey, prState);
-  }, [onChangeRequestState, prState, threadKey]);
-
   const screenColor = useThemeColor("--color-screen");
   const drawerColor = useThemeColor("--color-drawer");
   const pressedBackgroundColor = useThemeColor("--color-subtle");
@@ -173,8 +160,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
 
   // Swipe: the v2 primary action is the lifecycle transition. Every settled
-  // row can un-settle — explicit settles clear the override, auto-settled
-  // rows get pinned active until real activity clears the pin.
+  // row can un-settle.
   const canUnsettle = variant === "slim";
   const primaryAction = useMemo(() => {
     // Pre-settlement server: archive is the swipe action, as in v1. (Slim

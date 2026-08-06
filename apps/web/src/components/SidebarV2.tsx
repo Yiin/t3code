@@ -287,11 +287,9 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   onContextMenu: (threadRef: ScopedThreadRef, position: { x: number; y: number }) => void;
   onSettle: (threadRef: ScopedThreadRef) => void;
   onUnsettle: (threadRef: ScopedThreadRef) => void;
-  onChangeRequestState: (threadKey: string, state: "open" | "closed" | "merged" | null) => void;
 }) {
   const {
     isRenaming,
-    onChangeRequestState,
     onCancelRename,
     onCommitRename,
     onContextMenu,
@@ -394,13 +392,6 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
     hasDedicatedWorktree: thread.worktreePath !== null,
   });
   const prStatus = prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
-  // Report the PR state up: the parent partitions rows with effectiveSettled,
-  // and a merged/closed PR auto-settles a thread — data only rows have.
-  const prState = pr?.state ?? null;
-  useEffect(() => {
-    onChangeRequestState(threadKey, prState);
-  }, [onChangeRequestState, prState, threadKey]);
-
   const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
   const providerEntry = props.providerEntryByInstanceId.get(modelInstanceId) ?? null;
   const driverKind = providerEntry?.driverKind ?? null;
@@ -1144,27 +1135,6 @@ export default function SidebarV2() {
     [projects],
   );
 
-  // PR states stream in per-row (rows own the VCS subscriptions); a merged or
-  // closed PR auto-settles its thread on the next partition.
-  const [changeRequestStateByKey, setChangeRequestStateByKey] = useState<
-    ReadonlyMap<string, "open" | "closed" | "merged">
-  >(() => new Map());
-  const handleChangeRequestState = useCallback(
-    (threadKey: string, state: "open" | "closed" | "merged" | null) => {
-      setChangeRequestStateByKey((current) => {
-        if ((current.get(threadKey) ?? null) === state) return current;
-        const next = new Map(current);
-        if (state === null) {
-          next.delete(threadKey);
-        } else {
-          next.set(threadKey, state);
-        }
-        return next;
-      });
-    },
-    [],
-  );
-
   // Project scope: one menu above the list. Scoping filters the list without
   // making the header width depend on the number or length of project names.
   const [projectScopeKey, setProjectScopeKey] = useState<string | null>(null);
@@ -1197,10 +1167,8 @@ export default function SidebarV2() {
   // archive keeps its original "remove from sidebar" meaning.
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
   const { activeThreads, settledThreads } = useMemo(() => {
-    // Read live: `now` only feeds effectiveSettled's queued-turn grace window
-    // (2 minutes), and every input that can open or close that window — a new
-    // shell, a new PR state — already retriggers this memo. No ticker: idle
-    // auto-settle is the server's job now and arrives as settledOverride.
+    // `now` only feeds effectiveSettled's queued-turn grace window. Shell
+    // updates reopen or close that window, so this partition needs no ticker.
     const now = new Date().toISOString();
     const scopedThreads = threads.filter(
       (thread) =>
@@ -1217,14 +1185,11 @@ export default function SidebarV2() {
     const settled: EnvironmentThreadShell[] = [];
     for (const thread of visible) {
       // Threads on servers without the settlement capability (old server,
-      // or descriptor not loaded yet) never classify as settled: the user
-      // could neither un-settle nor pin them, so auto-settling them would
-      // strand rows in a tail with no working affordances.
+      // or descriptor not loaded yet) never classify as settled. The user
+      // could not un-settle them.
       const supportsSettlement =
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSettlement === true;
-      const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      const changeRequestState = changeRequestStateByKey.get(threadKey) ?? null;
-      if (supportsSettlement && effectiveSettled(thread, { now, changeRequestState })) {
+      if (supportsSettlement && effectiveSettled(thread, { now })) {
         settled.push(thread);
       } else {
         active.push(thread);
@@ -1238,7 +1203,7 @@ export default function SidebarV2() {
           firstValidTimestampMs(left.latestUserMessageAt, left.updatedAt),
       ),
     };
-  }, [changeRequestStateByKey, epicRunGroupHiddenByRunId, scopedProject, serverConfigs, threads]);
+  }, [epicRunGroupHiddenByRunId, scopedProject, serverConfigs, threads]);
 
   const settledThreadKeys = useMemo(
     () =>
@@ -1743,10 +1708,8 @@ export default function SidebarV2() {
         }
         const thread = threadByKeyRef.current.get(threadKey);
         if (!thread) return;
-        // Un-settle works on every settled row: for explicit settles it
-        // clears the override, for auto-settled rows it pins the thread
-        // active until real activity clears the pin. Environments without
-        // the settlement capability get no lifecycle items at all.
+        // Un-settle works on every settled row. Environments without the
+        // settlement capability get no lifecycle items.
         const supportsSettlement =
           serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSettlement ===
           true;
@@ -2120,7 +2083,7 @@ export default function SidebarV2() {
                 const isSettledRow = settledThreadKeys.has(threadKey);
                 // Settled is the ONLY thing that collapses a row: every
                 // not-settled thread is a full card. Density comes from users
-                // (or the auto rules) actually settling work, not from the
+                // actually settling work, not from the
                 // sidebar second-guessing what still matters.
                 const isCard = !isSettledRow;
                 const row = (
@@ -2133,8 +2096,7 @@ export default function SidebarV2() {
                     key={`${threadKey}:${isCard ? "card" : "slim"}`}
                     thread={thread}
                     variant={isCard ? "card" : "slim"}
-                    // Every settled row can un-settle: explicit settles clear
-                    // the override, auto-settled rows get pinned active.
+                    // Every settled row can un-settle.
                     variantAction={isSettledRow ? "unsettle" : "settle"}
                     settlementSupported={
                       serverConfigs.get(thread.environmentId)?.environment.capabilities
@@ -2162,7 +2124,6 @@ export default function SidebarV2() {
                     onContextMenu={handleThreadContextMenu}
                     onSettle={attemptSettle}
                     onUnsettle={attemptUnsettle}
-                    onChangeRequestState={handleChangeRequestState}
                   />
                 );
                 if (!showSettledDivider) return [row];

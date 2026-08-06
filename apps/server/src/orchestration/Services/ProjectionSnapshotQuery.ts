@@ -46,27 +46,6 @@ export interface ProjectionThreadCheckpointContext {
 }
 
 /**
- * One thread the auto-settle sweeper may settle.
- *
- * Deliberately not an `OrchestrationThreadShell`: every reason to refuse a
- * settle is already applied in SQL, so the sweeper needs the id to dispatch
- * on, the activity timestamp to log, and just enough of the workspace to ask
- * the VCS status cache whether this thread's change request is merged —
- * `worktreePath ?? workspaceRoot` is the cwd, and `branch` is what a thread
- * sharing the workspace root has to still be on before that cwd's PR counts
- * as its own. Returning a shell would mean hydrating a session and a latest
- * turn the caller never reads.
- */
-export interface ProjectionAutoSettleCandidate {
-  readonly threadId: ThreadId;
-  readonly projectId: ProjectId;
-  readonly lastActivityAt: string;
-  readonly branch: string | null;
-  readonly worktreePath: string | null;
-  readonly workspaceRoot: string;
-}
-
-/**
  * The running-subagent slice of one thread, for liveness consumers.
  */
 export interface ProjectionThreadSubagentLiveness {
@@ -238,39 +217,6 @@ export interface ProjectionSnapshotQueryShape {
   readonly getSubagentActivities: (
     input: OrchestrationGetSubagentActivitiesInput,
   ) => Effect.Effect<OrchestrationGetSubagentActivitiesResult, ProjectionRepositoryError>;
-
-  /**
-   * List the threads an auto-settle sweep may settle.
-   *
-   * Every blocker the settled partition applies is applied here in SQL, so a
-   * returned row is already a settle candidate: not deleted, not archived, no
-   * settled override (neither the "settled" the runner or a user already set
-   * nor the "active" pin that means keep it), no pending approval or
-   * user-input request, no starting/running session, and a last activity
-   * timestamp — the newest of the latest user message and the latest turn's
-   * requested/started/completed times — that exists. A thread with no activity
-   * at all is never a candidate.
-   *
-   * The decider still adjudicates each settle: this narrows the sweep, it does
-   * not replace the command's guards.
-   *
-   * @param idleBefore - Keep only candidates whose last activity predates this
-   *   timestamp, or null for every candidate whatever its age. The merged-PR
-   *   sweep passes null: a merged change request finishes a thread no matter
-   *   how recently someone typed in it.
-   * @param limit - Maximum rows to return, so one sweep of a long-neglected
-   *   database cannot dispatch unboundedly many commands.
-   * @param runningSubagentFreshAfter - Exclude threads with a `running`
-   *   subagent row updated at or after this timestamp: fresh running
-   *   subagents are in-flight work the settle decider refuses, so the sweep
-   *   must not even read those threads as candidates. Callers derive it as
-   *   now minus `RUNNING_SUBAGENT_FRESHNESS_MS` (`subagentLiveness.ts`).
-   */
-  readonly listAutoSettleCandidates: (input: {
-    readonly idleBefore: string | null;
-    readonly limit: number;
-    readonly runningSubagentFreshAfter: string;
-  }) => Effect.Effect<ReadonlyArray<ProjectionAutoSettleCandidate>, ProjectionRepositoryError>;
 
   /**
    * Read a single active thread detail snapshot by id.

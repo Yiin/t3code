@@ -188,8 +188,8 @@ function useThreadActionExecutor(
         }
         const result =
           action === "unsettle"
-            ? // reason "user" pins the thread active: auto-settle stays
-              // suppressed until real activity clears the pin server-side.
+            ? // reason "user" records an explicit active override. Real
+              // activity clears the override server-side.
               await unsettleMutation({
                 environmentId: thread.environmentId,
                 input: { threadId: thread.id, reason: "user" },

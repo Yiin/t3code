@@ -39,9 +39,8 @@ describe("ClientSettings sidebar v2", () => {
   });
 
   it("drops the retired per-device auto-settle key without disturbing the rest", () => {
-    // Auto-settle moved to the server (`threadAutoSettleAfterDays`). Stored
-    // blobs on disk still carry the old key, and decoding one must not reset
-    // every other setting to its default.
+    // Stored blobs on disk can still carry the old key. Decoding one must not
+    // reset every other setting to its default.
     const decoded = decodeClientSettings({
       sidebarAutoSettleAfterDays: 7,
       sidebarV2Enabled: true,
@@ -152,27 +151,32 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
-describe("ServerSettings idle auto-settle window", () => {
-  it("defaults to three days for configs written before the setting existed", () => {
-    expect(decodeServerSettings({}).threadAutoSettleAfterDays).toBe(3);
-  });
+describe("ServerSettings retired auto-settle window", () => {
+  it.each([3, null, 0, 91, "invalid"])(
+    "ignores legacy full-setting value %j while preserving other settings",
+    (legacyValue) => {
+      const decoded = decodeServerSettings({
+        threadAutoSettleAfterDays: legacyValue,
+        enableAssistantStreaming: true,
+      });
 
-  it("accepts null as the disabled window", () => {
-    expect(
-      decodeServerSettings({ threadAutoSettleAfterDays: null }).threadAutoSettleAfterDays,
-    ).toBe(null);
-    expect(
-      decodeServerSettingsPatch({ threadAutoSettleAfterDays: null }).threadAutoSettleAfterDays,
-    ).toBe(null);
-  });
+      expect(decoded).not.toHaveProperty("threadAutoSettleAfterDays");
+      expect(decoded.enableAssistantStreaming).toBe(true);
+    },
+  );
 
-  it("rejects a window outside one to ninety days", () => {
-    expect(() => decodeServerSettings({ threadAutoSettleAfterDays: 0 })).toThrow();
-    expect(() => decodeServerSettings({ threadAutoSettleAfterDays: 91 })).toThrow();
-    expect(decodeServerSettings({ threadAutoSettleAfterDays: 90 }).threadAutoSettleAfterDays).toBe(
-      90,
-    );
-  });
+  it.each([3, null, 0, 91, "invalid"])(
+    "ignores legacy patch value %j while preserving other settings",
+    (legacyValue) => {
+      const decoded = decodeServerSettingsPatch({
+        threadAutoSettleAfterDays: legacyValue,
+        enableAssistantStreaming: true,
+      });
+
+      expect(decoded).not.toHaveProperty("threadAutoSettleAfterDays");
+      expect(decoded.enableAssistantStreaming).toBe(true);
+    },
+  );
 });
 
 describe("ServerSettings skills root", () => {

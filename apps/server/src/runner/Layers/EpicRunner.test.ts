@@ -28,6 +28,7 @@ import {
 } from "../../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { runningSubagentLivenessRefusalDetail } from "../../orchestration/subagentLiveness.ts";
 import {
   EpicRunStore,
   type EpicRun,
@@ -37,7 +38,6 @@ import {
 import * as ProcessRunner from "../../processRunner.ts";
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
-import { runningSubagentSettleRefusalDetail } from "../../orchestration/subagentLiveness.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import {
   EpicRunLock,
@@ -319,18 +319,10 @@ function createHarness(input: {
    * `releaseClaimedChild` treats them as unknown and leaves them alone).
    */
   readonly childStatuses?: Record<string, string>;
-  /**
-   * Command types the stub engine refuses, the way the real decider refuses a
-   * `thread.settle` for a thread whose session is still `starting`/`running`.
-   * The command is still recorded, so a test can assert it was attempted.
-   */
+  /** Command types the stub engine refuses. The command is still recorded. */
   readonly refuseCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
-  /**
-   * Details for successive `thread.settle` refusals, consumed one per settle;
-   * once exhausted, settles succeed. Lets a test hand the runner the decider's
-   * running-subagent refusal and observe the drain-and-retry branch.
-   */
-  readonly settleRefusalDetails?: ReadonlyArray<string>;
+  /** Guarded normal-stop refusals that simulate a subagent starting after the advisory read. */
+  readonly guardedStopRefusals?: number;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs);
   for (const run of input.seedRuns ?? []) {
@@ -360,7 +352,8 @@ function createHarness(input: {
   // Remaining detail reads, per thread, that report a fresh running subagent —
   // see `ScriptedIteration.subagentDrainReads`.
   const subagentDrainReads = new Map<string, number>();
-  const settleRefusalDetails = [...(input.settleRefusalDetails ?? [])];
+  const stopsWithRunningSubagents: ThreadId[] = [];
+  let guardedStopRefusals = input.guardedStopRefusals ?? 0;
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -421,11 +414,23 @@ function createHarness(input: {
     ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
       Effect.gen(function* () {
         dispatched.push(command);
-        if (command.type === "thread.settle" && settleRefusalDetails.length > 0) {
+        if (
+          command.type === "thread.session.stop" &&
+          command.preserveRunningSubagents === true &&
+          guardedStopRefusals > 0
+        ) {
+          guardedStopRefusals -= 1;
+          subagentDrainReads.set(command.threadId, 2);
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
-            detail: settleRefusalDetails.shift()!,
+            detail: runningSubagentLivenessRefusalDetail(command.threadId, 1, "stopped"),
           });
+        }
+        if (
+          command.type === "thread.session.stop" &&
+          (subagentDrainReads.get(command.threadId) ?? 0) > 0
+        ) {
+          stopsWithRunningSubagents.push(command.threadId);
         }
         if (input.refuseCommandTypes?.includes(command.type) === true) {
           return yield* new OrchestrationCommandInvariantError({
@@ -534,7 +539,6 @@ function createHarness(input: {
       Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
     getSubagentActivities: () =>
       Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
-    listAutoSettleCandidates: () => Effect.succeed([]),
     getThreadDetailById: () => Effect.die("unused"),
     getThreadDetailSnapshot: (threadId) =>
       Effect.gen(function* () {
@@ -709,6 +713,7 @@ function createHarness(input: {
     store,
     turnsStarted: () => turnsStarted,
     activeLockCount: () => heldLocks.size,
+    stopsWithRunningSubagents: () => stopsWithRunningSubagents,
     processRequests,
     childStatus: (issueId: string) => childStatuses.get(issueId),
     commands: dispatched,
@@ -736,7 +741,7 @@ const startRun = (maxIterations = 10) =>
 // between attempts, so it needs the real clock rather than a virtual one that
 // only advances when a test tells it to.
 describe("EpicRunner", () => {
-  // The runner settles the thread as soon as the turn ends — no notification
+  // The runner stops the session as soon as the turn ends — no notification
   // ever re-invokes the agent. Agents that backgrounded work and yielded
   // ("waiting for the workflow to notify me") lost that work when the session
   // was killed, so the prompt must state the contract explicitly.
@@ -1275,10 +1280,10 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("settles each finished iteration thread instead of leaving it to the reaper", () => {
+  it.live("keeps each finished iteration active and stops its session once", () => {
     const harness = createHarness({
       script: [
-        { text: "work", head: "head-1" },
+        { text: "work", head: "head-1", subagentDrainReads: 3 },
         { text: "RALPH_DONE", head: "head-1" },
       ],
     });
@@ -1287,50 +1292,38 @@ describe("EpicRunner", () => {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
 
-      const settles = harness.commandsOfType("thread.settle");
-      assert.strictEqual(settles.length, 2);
+      const stops = harness.commandsOfType("thread.session.stop");
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
+      assert.strictEqual(stops.length, 2);
       assert.deepStrictEqual(
-        settles.map((command) => command.threadId),
+        stops.map((command) => command.threadId),
         harness.commandsOfType("thread.create").map((command) => command.threadId),
       );
-      // Teardown is the settle reactor's job now, so a healthy run never
-      // reaches for the provider itself.
-      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      assert.isTrue(stops.every((command) => command.preserveRunningSubagents === true));
+      assert.deepStrictEqual(harness.stopsWithRunningSubagents(), []);
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("falls back to stopping the session when the settle is refused", () => {
+  it.live("drains and retries once when the atomic normal-stop guard refuses", () => {
     const harness = createHarness({
       script: [
         { text: "work", head: "head-1" },
         { text: "RALPH_DONE", head: "head-1" },
       ],
-      refuseCommandTypes: ["thread.settle"],
+      guardedStopRefusals: 1,
     });
 
     return Effect.gen(function* () {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
 
-      const settles = harness.commandsOfType("thread.settle");
       const stops = harness.commandsOfType("thread.session.stop");
-      assert.strictEqual(settles.length, 2);
-      // One stop per refused settle, for the same thread: the refusal must not
-      // leave the iteration's provider subprocess resident.
-      assert.deepStrictEqual(
-        stops.map((command) => command.threadId),
-        settles.map((command) => command.threadId),
-      );
-      for (const settle of settles) {
-        const settleIndex = harness.commands.indexOf(settle);
-        const stopIndex = harness.commands.findIndex(
-          (command) =>
-            command.type === "thread.session.stop" && command.threadId === settle.threadId,
-        );
-        assert.isAbove(stopIndex, settleIndex);
-      }
-      // A refused settle is ordinary traffic, not a run failure.
-      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "done");
+      assert.strictEqual(stops.length, 3);
+      assert.strictEqual(stops[0]!.threadId, stops[1]!.threadId);
+      assert.notStrictEqual(stops[0]!.commandId, stops[1]!.commandId);
+      assert.isTrue(stops.every((command) => command.preserveRunningSubagents === true));
+      assert.deepStrictEqual(harness.stopsWithRunningSubagents(), []);
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1351,7 +1344,7 @@ describe("EpicRunner", () => {
           text: 'folded it in\nRALPH_MSG: {"summary":"landed after grace","why":"subagent finished"}',
           head: "head-1",
         },
-        // A plain iteration with zero subagents settles exactly as today.
+        // A plain iteration with zero subagents stops normally.
         { text: "RALPH_DONE", head: "head-1" },
       ],
       options: { iterationTimeoutMs: 60_000 },
@@ -1373,22 +1366,20 @@ describe("EpicRunner", () => {
       assert.strictEqual(continuation.message.text, EPIC_RUN_CONTINUATION_PROMPT);
       assert.strictEqual(continuation.message.messageId, `${iterationThreadId}-continue`);
 
-      // The thread was NOT settled on the original turn's end: its settle
-      // came only after the continuation turn was dispatched and finished.
-      const settles = harness.commandsOfType("thread.settle");
-      const settle = settles.find((command) => command.threadId === iterationThreadId)!;
-      assert.isAbove(harness.commands.indexOf(settle), harness.commands.indexOf(continuation));
+      const stop = harness
+        .commandsOfType("thread.session.stop")
+        .find((command) => command.threadId === iterationThreadId)!;
+      assert.isAbove(harness.commands.indexOf(stop), harness.commands.indexOf(continuation));
 
       // The continuation's commit and report classified the iteration.
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
       assert.strictEqual(harness.store.iterations[0]?.summary, "landed after grace");
       assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
 
-      // The zero-subagent iteration got one turn and one settle — no
-      // continuation, no session stop anywhere.
+      // The zero-subagent iteration got one turn and one stop.
       assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 3);
-      assert.strictEqual(settles.length, 2);
-      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 2);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -1439,10 +1430,10 @@ describe("EpicRunner", () => {
         [EPIC_RUN_CONTINUATION_PROMPT, EPIC_RUN_CONTINUATION_PROMPT],
       );
 
-      const settle = harness
-        .commandsOfType("thread.settle")
+      const stop = harness
+        .commandsOfType("thread.session.stop")
         .find((command) => command.threadId === iterationThreadId)!;
-      assert.isAbove(harness.commands.indexOf(settle), harness.commands.indexOf(turnStarts[2]!));
+      assert.isAbove(harness.commands.indexOf(stop), harness.commands.indexOf(turnStarts[2]!));
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
       assert.strictEqual(harness.store.iterations[0]?.summary, "nested chain landed");
       assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
@@ -1471,40 +1462,10 @@ describe("EpicRunner", () => {
       // No continuation was ever dispatched.
       assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
       assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
-      assert.strictEqual(harness.commandsOfType("thread.settle").length, 1);
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 1);
     }).pipe(Effect.provide(harness.layer));
   });
-
-  it.live(
-    "retries a subagent-refused settle after the drain instead of stopping the session",
-    () => {
-      // The decider refuses a settle naming running subagents (e.g. the
-      // continuation turn spawned new ones). That refusal is real in-flight
-      // work, not a dead session: the runner must wait it out and settle again
-      // rather than falling straight through to the session stop that would
-      // kill the subagent.
-      const harness = createHarness({
-        script: [
-          { text: 'work\nRALPH_MSG: {"summary":"landed","why":"progress"}', head: "head-1" },
-          { text: "RALPH_DONE", head: "head-1" },
-        ],
-        settleRefusalDetails: [runningSubagentSettleRefusalDetail(ThreadId.make("thread-any"), 1)],
-      });
-
-      return Effect.gen(function* () {
-        const run = yield* startRun();
-        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
-
-        const settles = harness.commandsOfType("thread.settle");
-        // Iteration 1: the refused settle plus its retry; iteration 2: one.
-        assert.strictEqual(settles.length, 3);
-        assert.strictEqual(settles[0]!.threadId, settles[1]!.threadId);
-        // Receipts remember the refused commandId, so the retry needs its own.
-        assert.notStrictEqual(settles[0]!.commandId, settles[1]!.commandId);
-        assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
-      }).pipe(Effect.provide(harness.layer));
-    },
-  );
 
   it.live("retries infra failures with backoff and fails only at the infra budget", () => {
     const failing = {
@@ -1847,6 +1808,8 @@ describe("EpicRunner", () => {
 
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
       assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:dispatch-failed");
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 1);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -2143,6 +2106,7 @@ describe("EpicRunner", () => {
       const stops = harness.commandsOfType("thread.session.stop");
       assert.strictEqual(stops.length, 1);
       assert.strictEqual(stops[0]?.threadId, harness.store.iterations[0]?.threadId);
+      assert.strictEqual(stops[0]?.preserveRunningSubagents, undefined);
       assert.isAbove(harness.commands.indexOf(stops[0]!), harness.commands.indexOf(interrupts[0]!));
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       // The abandoned iteration is closed out rather than left `running` forever.
@@ -2170,7 +2134,13 @@ describe("EpicRunner", () => {
         harness.store.runs.get(run.runId)!.lastError ?? "",
         "iteration exceeded its timeout",
       );
-      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 1);
+      const interrupts = harness.commandsOfType("thread.turn.interrupt");
+      const stops = harness.commandsOfType("thread.session.stop");
+      assert.strictEqual(interrupts.length, 1);
+      assert.strictEqual(stops.length, 1);
+      assert.isAbove(harness.commands.indexOf(stops[0]!), harness.commands.indexOf(interrupts[0]!));
+      assert.strictEqual(stops[0]?.preserveRunningSubagents, undefined);
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
       assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:timeout");
     }).pipe(Effect.provide(harness.layer));
@@ -2254,13 +2224,7 @@ describe("EpicRunner", () => {
       assert.isAtLeast(interruptIndex, 0);
       assert.isAbove(stopIndex, interruptIndex);
       assert.isAbove(nextCreateIndex, stopIndex);
-      // Same reasoning as the cancel path: the thread the dead server left
-      // behind is abandoned, so it is stopped rather than settled.
-      assert.isTrue(
-        harness
-          .commandsOfType("thread.settle")
-          .every((command) => command.threadId !== staleThreadId),
-      );
+      assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
       // The resumed loop picks up at the next index, not the abandoned one.
       assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
     }).pipe(Effect.provide(harness.layer));
@@ -2333,7 +2297,7 @@ describe("EpicRunner", () => {
   });
 
   it.live("lets a paused run finish its iteration and then stops", () => {
-    // A slow settle so the pause lands while the first iteration is in flight,
+    // A slow session stop so the pause lands while the first iteration is in flight,
     // which is the case worth pinning: the turn must not be cut short, and the
     // loop's own write must not resurrect the run as `running`.
     const harness = createHarness({
@@ -2404,7 +2368,7 @@ describe("EpicRunner", () => {
         { text: "RALPH_DONE", head: "head-1" },
       ],
       // Wide enough that the pause and the resume both land inside the first
-      // iteration's settle window.
+      // iteration's completion window.
       options: { quietPeriodMs: 300 },
       onLockAcquire: () => {
         acquired += 1;

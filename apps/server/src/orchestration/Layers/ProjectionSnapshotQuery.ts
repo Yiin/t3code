@@ -172,20 +172,6 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   latestCheckpointTurnCount: Schema.NullOr(NonNegativeInt),
   toCheckpointRef: Schema.NullOr(CheckpointRef),
 });
-const AutoSettleCandidateLookupInput = Schema.Struct({
-  idleBefore: Schema.NullOr(IsoDateTime),
-  limit: NonNegativeInt,
-  runningSubagentFreshAfter: IsoDateTime,
-});
-const ProjectionAutoSettleCandidateRowSchema = Schema.Struct({
-  threadId: ThreadId,
-  projectId: ProjectId,
-  lastActivityAt: IsoDateTime,
-  branch: Schema.NullOr(Schema.String),
-  worktreePath: Schema.NullOr(Schema.String),
-  workspaceRoot: Schema.String,
-});
-
 const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.projects,
   ORCHESTRATION_PROJECTOR_NAMES.threads,
@@ -1357,75 +1343,6 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  // `MAX(a, b, ...)` with more than one argument is SQLite's scalar max, not
-  // the aggregate, so this needs no GROUP BY. Every argument is coalesced to
-  // the empty string because scalar MAX returns NULL if any argument is NULL,
-  // and '' sorts below every ISO timestamp — so an all-NULL row yields '',
-  // which the outer WHERE rejects. Comparing timestamps as text matches the
-  // rest of this module (see `maxIso`).
-  //
-  // A null `idleBefore` drops the age filter and nothing else, so the
-  // merged-PR sweep reads the same already-settleable partition as the idle
-  // sweep. The projects join is what gives that sweep a cwd to peek at.
-  const listAutoSettleCandidateRows = SqlSchema.findAll({
-    Request: AutoSettleCandidateLookupInput,
-    Result: ProjectionAutoSettleCandidateRowSchema,
-    execute: ({ idleBefore, limit, runningSubagentFreshAfter }) =>
-      sql`
-        SELECT
-          "threadId",
-          "projectId",
-          "lastActivityAt",
-          "branch",
-          "worktreePath",
-          "workspaceRoot"
-        FROM (
-          SELECT
-            threads.thread_id AS "threadId",
-            threads.project_id AS "projectId",
-            threads.branch AS "branch",
-            threads.worktree_path AS "worktreePath",
-            projects.workspace_root AS "workspaceRoot",
-            MAX(
-              COALESCE(threads.latest_user_message_at, ''),
-              COALESCE(turns.requested_at, ''),
-              COALESCE(turns.started_at, ''),
-              COALESCE(turns.completed_at, '')
-            ) AS "lastActivityAt"
-          FROM projection_threads threads
-          INNER JOIN projection_projects projects
-            ON projects.project_id = threads.project_id
-          LEFT JOIN projection_thread_sessions sessions
-            ON sessions.thread_id = threads.thread_id
-          LEFT JOIN projection_turns turns
-            ON turns.thread_id = threads.thread_id
-            AND turns.turn_id = threads.latest_turn_id
-          WHERE threads.deleted_at IS NULL
-            AND threads.archived_at IS NULL
-            AND threads.settled_override IS NULL
-            AND threads.pending_approval_count = 0
-            AND threads.pending_user_input_count = 0
-            AND (sessions.status IS NULL OR sessions.status NOT IN ('starting', 'running'))
-            -- A fresh running subagent is in-flight work the settle decider
-            -- would refuse anyway; keeping the thread out of the candidate
-            -- read means neither sweep pass even peeks at it. Stale running
-            -- rows (updated_at before the cutoff) do not block, mirroring the
-            -- decider's freshness bound.
-            AND NOT EXISTS (
-              SELECT 1
-              FROM projection_thread_subagents subagents
-              WHERE subagents.thread_id = threads.thread_id
-                AND subagents.status = 'running'
-                AND subagents.updated_at >= ${runningSubagentFreshAfter}
-            )
-        )
-        WHERE "lastActivityAt" <> ''
-          AND (${idleBefore} IS NULL OR "lastActivityAt" < ${idleBefore})
-        ORDER BY "lastActivityAt" ASC, "threadId" ASC
-        LIMIT ${limit}
-      `,
-  });
-
   const listCheckpointRawRowsByThread = tracedFindAllRaw({
     Request: ThreadIdLookupInput,
     execute: ({ threadId }) =>
@@ -2536,19 +2453,6 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.withSpan("ProjectionSnapshotQuery.getThreadSessionById"),
     );
 
-  const listAutoSettleCandidates: ProjectionSnapshotQueryShape["listAutoSettleCandidates"] = (
-    input,
-  ) =>
-    listAutoSettleCandidateRows(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "ProjectionSnapshotQuery.listAutoSettleCandidates:query",
-          "ProjectionSnapshotQuery.listAutoSettleCandidates:decodeRows",
-        ),
-      ),
-      Effect.withSpan("ProjectionSnapshotQuery.listAutoSettleCandidates"),
-    );
-
   /**
    * The SQL half of a thread-detail read: every statement it needs, and not one
    * byte of decoding.
@@ -2824,7 +2728,6 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadSessionById,
     getThreadSubagentLiveness,
     getSubagentActivities,
-    listAutoSettleCandidates,
     getThreadDetailById,
     getThreadDetailSnapshot,
   } satisfies ProjectionSnapshotQueryShape;

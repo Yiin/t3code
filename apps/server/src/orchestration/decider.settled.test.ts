@@ -21,7 +21,7 @@ import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 import {
   RUNNING_SUBAGENT_FRESHNESS_MS,
-  isRunningSubagentSettleRefusal,
+  isRunningSubagentLivenessRefusal,
 } from "./subagentLiveness.ts";
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -223,7 +223,7 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           readModel: makeReadModel(null, null, null, [], [], [makeSubagent("running", freshAt)]),
         }).pipe(Effect.flip);
         expect(error._tag).toBe("OrchestrationCommandInvariantError");
-        expect(isRunningSubagentSettleRefusal(error.message)).toBe(true);
+        expect(isRunningSubagentLivenessRefusal(error.message)).toBe(true);
         expect(error.message).toContain("thread-1");
 
         // Completed subagent: settleable, however fresh the row is.
@@ -251,6 +251,46 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
         const staleEvents = Array.isArray(stale) ? stale : [stale];
         expect(staleEvents[0]?.type).toBe("thread.settled");
       }),
+  );
+
+  it.effect("guards normal session stops while forced stops remain unguarded", () =>
+    Effect.gen(function* () {
+      const freshAt = DateTime.formatIso(yield* DateTime.now);
+      const subagent: OrchestrationThread["subagents"][number] = {
+        subagentId: "subagent-running",
+        turnId: null,
+        status: "running",
+        startedAt: freshAt,
+        updatedAt: freshAt,
+        completedAt: null,
+      };
+      const readModel = makeReadModel(null, null, null, [], [], [subagent]);
+
+      const guardedError = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-guarded"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+          preserveRunningSubagents: true,
+        },
+        readModel,
+      }).pipe(Effect.flip);
+      expect(guardedError._tag).toBe("OrchestrationCommandInvariantError");
+      expect(isRunningSubagentLivenessRefusal(guardedError.message)).toBe(true);
+
+      const forced = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-forced"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const forcedEvents = Array.isArray(forced) ? forced : [forced];
+      expect(forcedEvents[0]?.type).toBe("thread.session-stop-requested");
+    }),
   );
 
   it.effect("rejects settling a thread with an open approval or user-input request", () =>
@@ -600,8 +640,8 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           session: makeSession("running"),
           createdAt: NOW,
         },
-        // A keep-active pin is also an override: real activity clears it
-        // back to neutral so auto-settle can apply again later.
+        // An explicit active value is also an override. Real activity clears
+        // it back to neutral.
         readModel: makeReadModel("active"),
       });
       const sessionEvents = Array.isArray(sessionResult) ? sessionResult : [sessionResult];

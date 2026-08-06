@@ -26,7 +26,7 @@ import { projectEvent } from "./projector.ts";
 import {
   countFreshRunningSubagents,
   isFreshRunningSubagent,
-  runningSubagentSettleRefusalDetail,
+  runningSubagentLivenessRefusalDetail,
 } from "./subagentLiveness.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -424,8 +424,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // (`ThreadTeardownReactor`) and kill them mid-flight. Only FRESH rows
       // refuse — a row stranded at `running` by a dead session ages past the
       // window and stops blocking, so settlement can never be wedged forever.
-      // The detail carries a stable marker (`subagentLiveness.ts`) that the
-      // EpicRunner branches on to wait instead of stopping the session.
+      // The detail carries the stable lifecycle marker shared with guarded
+      // session stops.
       const freshRunningSubagents = countFreshRunningSubagents(
         thread.subagents,
         Date.parse(occurredAt),
@@ -433,7 +433,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       if (freshRunningSubagents > 0) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: runningSubagentSettleRefusalDetail(command.threadId, freshRunningSubagents),
+          detail: runningSubagentLivenessRefusalDetail(
+            command.threadId,
+            freshRunningSubagents,
+            "settled",
+          ),
         });
       }
       // A queued turn start — a user message no turn has picked up yet — is
@@ -685,9 +689,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
-      // Real activity resets ANY override: it wakes an explicitly settled
-      // thread, and it clears a keep-active pin back to neutral so the
-      // thread can auto-settle again after this burst of work goes stale.
+      // Real activity resets any override. It wakes an explicitly settled
+      // thread and clears an explicit active override.
       if (targetThread.settledOverride === null) {
         return [userMessageEvent, turnStartRequestedEvent];
       }
@@ -885,11 +888,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.session.stop": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      // Normal EpicRunner cleanup opts into this atomic guard. Forced stops
+      // omit it, so cancellation, timeout, restart, teardown, and the reaper
+      // can still terminate the complete session tree.
+      if (command.preserveRunningSubagents === true) {
+        const occurredAt = yield* nowIso;
+        const freshRunningSubagents = countFreshRunningSubagents(
+          thread.subagents,
+          Date.parse(occurredAt),
+        );
+        if (freshRunningSubagents > 0) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: runningSubagentLivenessRefusalDetail(
+              command.threadId,
+              freshRunningSubagents,
+              "stopped",
+            ),
+          });
+        }
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",

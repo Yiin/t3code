@@ -262,7 +262,6 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
             Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
           getSubagentActivities: () =>
             Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
-          listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
         }),
@@ -331,7 +330,6 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
           Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
         getSubagentActivities: () =>
           Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
-        listAutoSettleCandidates: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
       }),
@@ -381,7 +379,6 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
           Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
         getSubagentActivities: () =>
           Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
-        listAutoSettleCandidates: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
       }),
@@ -437,7 +434,6 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
           Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
         getSubagentActivities: () =>
           Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
-        listAutoSettleCandidates: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
       }),

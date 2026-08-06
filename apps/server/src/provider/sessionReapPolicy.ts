@@ -3,15 +3,15 @@ import { parseEpicRunIterationThreadId } from "@t3tools/contracts";
 import { RUNNING_SUBAGENT_FRESHNESS_MS } from "../orchestration/subagentLiveness.ts";
 
 /**
- * Idle backstop for an ordinary interactive thread. Long on purpose: teardown
- * is settle-driven now, so the reaper only has to catch a session nobody ever
- * settles. Long-running work is protected by the active-turn skip, not by this.
+ * Idle backstop for an ordinary interactive thread. Long on purpose: manual
+ * settlement and explicit stops handle normal cleanup. Long-running work is
+ * protected by the active-turn skip, not by this.
  */
 export const DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS = 36 * 60 * 60 * 1000;
 
 /**
  * Idle backstop for an epic-runner iteration thread. Short, because the runner
- * settles each finished iteration itself and an unattended run would otherwise
+ * stops each finished iteration session and an unattended run would otherwise
  * hold one resident subprocess per iteration.
  */
 export const DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
@@ -48,8 +48,7 @@ export const DEFAULT_DEAD_SESSION_GRACE_MS = 2 * 60 * 1000;
 /**
  * How recently a `running` subagent row must have been touched for the session
  * to count as actively working. Sourced from the shared liveness bound so
- * "still working" means the same thing to the settle decider, the auto-settle
- * sweep and the reaper.
+ * "still working" means the same thing to lifecycle guards and the reaper.
  */
 export const DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS = RUNNING_SUBAGENT_FRESHNESS_MS;
 

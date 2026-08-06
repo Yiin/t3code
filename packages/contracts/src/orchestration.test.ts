@@ -434,6 +434,33 @@ it.effect("decodes thread settle and unsettle commands", () =>
   }),
 );
 
+it.effect("decodes the optional running-subagent session-stop guard", () =>
+  Effect.gen(function* () {
+    const guarded = yield* decodeOrchestrationCommand({
+      type: "thread.session.stop",
+      commandId: "cmd-stop-guarded",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      preserveRunningSubagents: true,
+    });
+    const forced = yield* decodeOrchestrationCommand({
+      type: "thread.session.stop",
+      commandId: "cmd-stop-forced",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(guarded.type, "thread.session.stop");
+    if (guarded.type === "thread.session.stop") {
+      assert.strictEqual(guarded.preserveRunningSubagents, true);
+    }
+    assert.strictEqual(forced.type, "thread.session.stop");
+    if (forced.type === "thread.session.stop") {
+      assert.strictEqual(forced.preserveRunningSubagents, undefined);
+    }
+  }),
+);
+
 it.effect("defaults settled fields when decoding historical thread data", () =>
   Effect.gen(function* () {
     const common = {

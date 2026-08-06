@@ -1211,6 +1211,7 @@ const ThreadSessionStopCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   createdAt: IsoDateTime,
+  preserveRunningSubagents: Schema.optionalKey(Schema.Literal(true)),
 });
 
 const DispatchableClientOrchestrationCommand = Schema.Union([

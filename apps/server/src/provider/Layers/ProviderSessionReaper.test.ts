@@ -277,7 +277,6 @@ describe("ProviderSessionReaper", () => {
           },
           getSubagentActivities: () =>
             Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
-          listAutoSettleCandidates: () => Effect.succeed([]),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshot: () => Effect.die("unused"),
         }),

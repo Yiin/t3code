@@ -356,26 +356,6 @@ export function HomeScreen(props: HomeScreenProps) {
   // Settled threads stay in the live shell stream (settled ≠ archived), so
   // the partition works directly off live shells — no snapshot merging or
   // optimistic holds.
-  // PR states stream in per-row (rows own the VCS subscriptions); a merged or
-  // closed PR auto-settles its thread on the next partition (mirrors web).
-  const [changeRequestStateByKey, setChangeRequestStateByKey] = useState<
-    ReadonlyMap<string, "open" | "closed" | "merged">
-  >(() => new Map());
-  const handleChangeRequestState = useCallback(
-    (threadKey: string, state: "open" | "closed" | "merged" | null) => {
-      setChangeRequestStateByKey((current) => {
-        if ((current.get(threadKey) ?? null) === state) return current;
-        const next = new Map(current);
-        if (state === null) {
-          next.delete(threadKey);
-        } else {
-          next.set(threadKey, state);
-        }
-        return next;
-      });
-    },
-    [],
-  );
   const handleSettleThread = useCallback(
     (thread: EnvironmentThreadShell) => {
       void props.onSettleThread(thread);
@@ -400,7 +380,7 @@ export function HomeScreen(props: HomeScreenProps) {
     [],
   );
   // Threads on servers without the settlement capability never classify as
-  // settled (the user could neither un-settle nor pin them).
+  // settled because the user could not un-settle them.
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
   const settlementEnvironmentIds = useMemo(() => {
     const supported = new Set<EnvironmentId>();
@@ -426,12 +406,10 @@ export function HomeScreen(props: HomeScreenProps) {
               projectId: v2ScopedProject.id,
             },
       searchQuery: props.searchQuery,
-      changeRequestStateByKey,
       settlementEnvironmentIds,
       settledLimit: settledVisibleCount,
     });
   }, [
-    changeRequestStateByKey,
     settledVisibleCount,
     settlementEnvironmentIds,
     props.searchQuery,
@@ -472,7 +450,6 @@ export function HomeScreen(props: HomeScreenProps) {
         settlementSupported={settlementEnvironmentIds.has(item.thread.environmentId)}
         onSettleThread={handleSettleThread}
         onUnsettleThread={handleUnsettleThread}
-        onChangeRequestState={handleChangeRequestState}
         projectCwd={
           projectCwdByKey.get(scopedProjectKey(item.thread.environmentId, item.thread.projectId)) ??
           null
@@ -482,7 +459,6 @@ export function HomeScreen(props: HomeScreenProps) {
       />
     ),
     [
-      handleChangeRequestState,
       handleDeleteThread,
       handleSettleThread,
       handleSwipeableClose,

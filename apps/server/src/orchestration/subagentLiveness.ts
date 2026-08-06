@@ -7,16 +7,18 @@ export {
 } from "@t3tools/contracts";
 
 /**
- * The stable marker consumers match on to distinguish "settle refused because
- * subagents are still working" from every other settle refusal. The EpicRunner
- * branches on it (wait for the subagents instead of stopping the session), so
- * changing this string is a behavior change, not a wording tweak.
+ * The stable marker consumers match on to distinguish a lifecycle refusal
+ * caused by running subagents. Changing this string is a behavior change.
  */
-export const RUNNING_SUBAGENT_SETTLE_REFUSAL_MARKER = "running subagents still working";
+export const RUNNING_SUBAGENT_LIVENESS_REFUSAL_MARKER = "running subagents still working";
 
-export const runningSubagentSettleRefusalDetail = (threadId: ThreadId, count: number): string =>
-  `thread ${threadId} has ${count} ${RUNNING_SUBAGENT_SETTLE_REFUSAL_MARKER} and cannot be settled`;
+export const runningSubagentLivenessRefusalDetail = (
+  threadId: ThreadId,
+  count: number,
+  action: "settled" | "stopped",
+): string =>
+  `thread ${threadId} has ${count} ${RUNNING_SUBAGENT_LIVENESS_REFUSAL_MARKER} and cannot be ${action}`;
 
-/** Whether a settle refusal (its `detail` or full error message) names running subagents. */
-export const isRunningSubagentSettleRefusal = (message: string): boolean =>
-  message.includes(RUNNING_SUBAGENT_SETTLE_REFUSAL_MARKER);
+/** Whether a lifecycle refusal names fresh running subagents. */
+export const isRunningSubagentLivenessRefusal = (message: string): boolean =>
+  message.includes(RUNNING_SUBAGENT_LIVENESS_REFUSAL_MARKER);

@@ -30,7 +30,7 @@ import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   countFreshRunningSubagents,
-  isRunningSubagentSettleRefusal,
+  isRunningSubagentLivenessRefusal,
 } from "../../orchestration/subagentLiveness.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -876,8 +876,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     /**
      * The thread detail read every subagent-liveness check shares. `undefined`
-     * (missing thread, read failure) reads as "no subagents", so a broken read
-     * degrades to today's behavior instead of wedging the iteration.
+     * (missing thread, read failure) reads as "no subagents" for the advisory
+     * drain. The guarded stop still checks liveness atomically, so a broken
+     * read cannot authorize a destructive stop.
      */
     const readThreadDetail = (threadId: ThreadId) =>
       projectionSnapshotQuery.getThreadDetailSnapshot(threadId).pipe(
@@ -927,7 +928,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * this cycle when that continuation starts another subagent and ends its
      * turn. The iteration's outer timeout bounds the complete chain.
      * Everything else — commit present, turn failed, no fresh subagents,
-     * drain timeout — falls through to today's classify-and-settle.
+     * drain timeout falls through to classification and guarded session cleanup.
      */
     const graceContinuationForSubagents = (input: {
       readonly run: EpicRun;
@@ -1255,72 +1256,45 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
         const finishedAt = yield* nowIso;
 
-        // The iteration thread is genuinely finished, so it is *settled* and the
-        // session teardown flows through the settle path like every other
-        // settle (`orchestration/Layers/ThreadTeardownReactor.ts`) instead of the
-        // runner reaching for the provider directly. The reaper
-        // (`provider/Layers/ProviderSessionReaper.ts`) stays a backstop, not the
-        // mechanism: an unattended run must not accumulate one idle provider
-        // subprocess per iteration while it waits for a sweep.
-        //
-        // The stop fallback is mandatory, not belt-and-braces. The decider
-        // refuses a settle while the session is still `starting`/`running`
-        // (`orchestration/decider.ts`), which is exactly where the timeout path
-        // above leaves it after dispatching `thread.turn.interrupt`. A refused
-        // settle with no fallback would leave the subprocess resident.
-        yield* dispatchCommand({
-          type: "thread.settle",
-          commandId: yield* commandId("settle"),
+        // Settlement is user-owned. EpicRunner only releases the provider
+        // session after an iteration ends. Normal cleanup uses an atomic
+        // subagent guard. The advisory drain reduces refusals, but cannot
+        // authorize the stop. A subagent can start after any read.
+        // Timeout and dispatch-failure paths remain forced stops; the timeout
+        // interrupt above always precedes its stop.
+        if (settleResult._tag === "settled") {
+          yield* awaitSubagentDrain(threadId);
+        }
+        const normalStop = {
+          type: "thread.session.stop",
+          commandId: yield* commandId("session-stop"),
           threadId,
-        }).pipe(
-          Effect.catch((error) =>
-            Effect.gen(function* () {
-              yield* Effect.logInfo("epic.runner.settle-refused", {
-                runId: run.runId,
-                iterationIndex: input.iterationIndex,
-                threadId,
-                detail: error.message,
-              });
-              // A refusal naming running subagents is real in-flight work
-              // (e.g. the continuation turn spawned new subagents): wait for
-              // it (bounded) and retry the settle ONCE — with a fresh
-              // commandId, because receipts remember the refused one — before
-              // conceding to the stop fallback. Only for normally-settled
-              // turns: after a timeout's interrupt, subagent rows stay open
-              // until the stop itself closes them, so draining would stall.
-              if (
-                settleResult._tag === "settled" &&
-                isRunningSubagentSettleRefusal(error.message)
-              ) {
-                yield* awaitSubagentDrain(threadId);
-                const retried = yield* dispatchCommand({
-                  type: "thread.settle",
-                  commandId: yield* commandId("settle-retry"),
-                  threadId,
-                }).pipe(
-                  Effect.as(true),
-                  Effect.catch((retryError) =>
-                    Effect.logInfo("epic.runner.settle-retry-refused", {
-                      runId: run.runId,
-                      iterationIndex: input.iterationIndex,
-                      threadId,
-                      detail: retryError.message,
-                    }).pipe(Effect.as(false)),
-                  ),
-                );
-                if (retried) {
-                  return;
-                }
+          createdAt: finishedAt,
+          preserveRunningSubagents: true,
+        } as const;
+        if (settleResult._tag !== "settled") {
+          yield* dispatchBestEffort("epic.runner.session-stop-failed", {
+            type: "thread.session.stop",
+            commandId: normalStop.commandId,
+            threadId,
+            createdAt: finishedAt,
+          });
+        } else {
+          yield* dispatchCommand(normalStop).pipe(
+            Effect.catch((error) => {
+              if (!isRunningSubagentLivenessRefusal(error.message)) {
+                return Effect.logWarning("epic.runner.session-stop-failed", { cause: error });
               }
-              yield* dispatchBestEffort("epic.runner.session-stop-failed", {
-                type: "thread.session.stop",
-                commandId: yield* commandId("session-stop"),
-                threadId,
-                createdAt: finishedAt,
+              return Effect.gen(function* () {
+                yield* awaitSubagentDrain(threadId);
+                yield* dispatchBestEffort("epic.runner.guarded-session-stop-retry-failed", {
+                  ...normalStop,
+                  commandId: yield* commandId("session-stop-retry"),
+                });
               });
             }),
-          ),
-        );
+          );
+        }
 
         // A turn that ends cleanly with no commit only counts as a completed
         // iteration when its child no longer needs one: knowledge-only

@@ -1,7 +1,5 @@
 import type { OrchestrationThreadShell } from "@t3tools/contracts";
 
-export type ChangeRequestStateLike = "open" | "closed" | "merged";
-
 /**
  * A queued turn start lives for at most this long: session adoption takes
  * seconds, so a user message still unadopted after the grace window is a
@@ -65,8 +63,8 @@ export function canSettle(
 ): boolean {
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
   if (shell.session?.status === "starting" || shell.session?.status === "running") return false;
-  // Queued work is as blocked-on-progress as a live session: settling it
-  // (or auto-settling it on a closed PR) would hide a just-requested turn.
+  // Queued work is as blocked-on-progress as a live session. Settling it
+  // would hide a just-requested turn.
   if (hasQueuedTurnStart(shell, options)) return false;
   // Running subagents are in-flight work even after the main turn ends; the
   // server refuses the settle (decider subagent invariant), so gate the UI
@@ -81,23 +79,14 @@ export function canSettle(
 /**
  * Settled resolution over the server-backed settled lifecycle. The explicit
  * user override (thread.settle / thread.unsettle commands, projected into
- * settledOverride + settledAt) wins in both directions; without one, a
- * thread auto-settles on a merged/closed PR.
+ * settledOverride + settledAt) controls the lifecycle.
  * The server un-settles on real activity (user message, session start,
  * approval/user-input request), so an override never goes stale silently.
  *
- * Idle auto-settle is NOT here: the server sweeps idle threads and emits a
- * real thread.settled event (settings key `threadAutoSettleAfterDays`), which
- * arrives as `settledOverride === "settled"` below. A client-side twin of that
- * rule could only drift — it would paint a thread settled while the server
- * still holds its provider session open.
  */
 export function effectiveSettled(
   shell: OrchestrationThreadShell,
-  options: {
-    readonly now: string;
-    readonly changeRequestState?: ChangeRequestStateLike | null;
-  },
+  options: { readonly now: string },
 ): boolean {
   // Blocked work must remain visible even when a user explicitly settled it.
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
@@ -119,8 +108,5 @@ export function effectiveSettled(
     if (!serverAdjudicated) return false;
   }
   if (shell.settledOverride === "settled") return true;
-  // "active" is the explicit keep-active pin: it suppresses auto-settle
-  // until real activity clears it server-side.
-  if (shell.settledOverride === "active") return false;
-  return options.changeRequestState === "merged" || options.changeRequestState === "closed";
+  return false;
 }
