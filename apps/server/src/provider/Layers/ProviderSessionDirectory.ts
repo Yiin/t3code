@@ -9,7 +9,6 @@ import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntim
 import { ProviderSessionDirectoryPersistenceError, ProviderValidationError } from "../Errors.ts";
 import {
   ProviderSessionDirectory,
-  type ProviderRuntimeBinding,
   type ProviderRuntimeBindingWithMetadata,
   type ProviderSessionDirectoryShape,
 } from "../Services/ProviderSessionDirectory.ts";
@@ -91,7 +90,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       Effect.mapError(toPersistenceError("ProviderSessionDirectory.getBinding:getByThreadId")),
       Effect.flatMap((runtime) =>
         Option.match(runtime, {
-          onNone: () => Effect.succeed(Option.none<ProviderRuntimeBinding>()),
+          onNone: () => Effect.succeed(Option.none<ProviderRuntimeBindingWithMetadata>()),
           onSome: (value) =>
             toRuntimeBinding(value, "ProviderSessionDirectory.getBinding").pipe(
               Effect.map((binding) => Option.some(binding)),

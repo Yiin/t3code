@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -30,6 +30,8 @@ export interface ProviderSessionReaperLiveOptions {
   readonly interactiveIdleThresholdMs?: number;
   readonly epicRunIterationIdleThresholdMs?: number;
   readonly settledIdleThresholdMs?: number;
+  /** Grace for ingestion to persist an adapter session's normal exit. */
+  readonly deadSessionGraceMs?: number;
   /**
    * How long the active-turn skip may hold a session before the turn counts as
    * dead. Deliberately not covered by `inactivityThresholdMs`: the shorthand
@@ -73,6 +75,10 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         1,
         options?.activeTurnSkipCapMs ?? DEFAULT_SESSION_REAP_THRESHOLDS.activeTurnSkipCapMs,
       ),
+      deadSessionGraceMs: Math.max(
+        1,
+        options?.deadSessionGraceMs ?? DEFAULT_SESSION_REAP_THRESHOLDS.deadSessionGraceMs,
+      ),
       subagentFreshnessWindowMs: Math.max(
         1,
         options?.subagentFreshnessWindowMs ??
@@ -81,6 +87,20 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     };
     const shortestThresholdMs = minSessionReapThresholdMs(thresholds);
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
+
+    const readLiveSession = Effect.fn("ProviderSessionReaper.readLiveSession")(function* (
+      threadId: ThreadId,
+    ) {
+      return yield* providerService.hasLiveSession(threadId).pipe(
+        Effect.map(Option.some),
+        Effect.catch((error) =>
+          Effect.logWarning("provider.session.reaper.liveness-check-failed", {
+            threadId,
+            error,
+          }).pipe(Effect.as(Option.none<boolean>())),
+        ),
+      );
+    });
 
     const sweep = Effect.gen(function* () {
       const bindings = yield* directory.listBindings();
@@ -109,6 +129,12 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           continue;
         }
 
+        const liveSession = yield* readLiveSession(binding.threadId);
+        if (Option.isNone(liveSession)) {
+          continue;
+        }
+        const hasLiveAdapterSession = liveSession.value;
+
         const thread = yield* projectionSnapshotQuery
           .getThreadShellById(binding.threadId)
           .pipe(Effect.map(Option.getOrUndefined));
@@ -132,6 +158,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         const decision = decideSessionReap({
           threadId: binding.threadId,
           status: binding.status,
+          hasLiveAdapterSession,
           idleDurationMs,
           settledOverride: thread?.settledOverride ?? null,
           activeTurnId: thread?.session?.activeTurnId ?? null,
@@ -157,6 +184,25 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
             });
           }
           continue;
+        }
+
+        if (decision.reason === "no_live_session") {
+          // A session can resume while the sweep reads the thread shell. Check
+          // both persisted and in-memory state again before dispatching a stop.
+          const currentBinding = Option.getOrUndefined(
+            yield* directory.getBinding(binding.threadId),
+          );
+          if (
+            currentBinding === undefined ||
+            currentBinding.status === "stopped" ||
+            currentBinding.lastSeenAt !== binding.lastSeenAt
+          ) {
+            continue;
+          }
+          const currentLiveSession = yield* readLiveSession(binding.threadId);
+          if (Option.isNone(currentLiveSession) || currentLiveSession.value) {
+            continue;
+          }
         }
 
         if (decision.reason === "stale_active_turn") {

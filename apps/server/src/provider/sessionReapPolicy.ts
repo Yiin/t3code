@@ -40,6 +40,12 @@ export const DEFAULT_SETTLED_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
 export const DEFAULT_ACTIVE_TURN_SKIP_CAP_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Allows ingestion to persist a normal adapter exit before the reaper treats
+ * the missing in-memory session as dead.
+ */
+export const DEFAULT_DEAD_SESSION_GRACE_MS = 2 * 60 * 1000;
+
+/**
  * How recently a `running` subagent row must have been touched for the session
  * to count as actively working. Sourced from the shared liveness bound so
  * "still working" means the same thing to the settle decider, the auto-settle
@@ -52,6 +58,7 @@ export interface SessionReapThresholds {
   readonly epicRunIterationIdleThresholdMs: number;
   readonly settledIdleThresholdMs: number;
   readonly activeTurnSkipCapMs: number;
+  readonly deadSessionGraceMs: number;
   /**
    * Freshness window for the subagent skip, not an idle threshold: it never
    * reaps anything on its own, so `minSessionReapThresholdMs` excludes it.
@@ -64,6 +71,7 @@ export const DEFAULT_SESSION_REAP_THRESHOLDS: SessionReapThresholds = {
   epicRunIterationIdleThresholdMs: DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
   settledIdleThresholdMs: DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
   activeTurnSkipCapMs: DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+  deadSessionGraceMs: DEFAULT_DEAD_SESSION_GRACE_MS,
   subagentFreshnessWindowMs: DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS,
 };
 
@@ -80,6 +88,8 @@ export type SessionReapReason =
   | "active_subagent"
   /** Reap: a turn is still attached, but it outlived the skip cap, so it is dead. */
   | "stale_active_turn"
+  /** Reap: the binding has no corresponding in-memory adapter session. */
+  | "no_live_session"
   /** Reap: idle past the interactive backstop. */
   | "interactive_idle_threshold"
   /** Reap: idle past the epic-runner iteration backstop. */
@@ -102,6 +112,7 @@ export interface SessionReapInput {
   readonly threadId: string;
   /** `binding.status` from the provider session directory. */
   readonly status: string | undefined;
+  readonly hasLiveAdapterSession: boolean;
   readonly idleDurationMs: number;
   /** `settledOverride` from the thread shell: an explicit settle or keep-active pin. */
   readonly settledOverride: "settled" | "active" | null;
@@ -130,7 +141,7 @@ export const sessionReapThreadKind = (threadId: string): SessionReapThreadKind =
 /**
  * The smallest idle age that can reap anything. A caller can skip the thread
  * shell read below this, because every value a decision compares the idle age
- * against is one of these four and so can never be smaller.
+ * against is one of these thresholds and so can never be smaller.
  */
 export const minSessionReapThresholdMs = (
   thresholds: SessionReapThresholds = DEFAULT_SESSION_REAP_THRESHOLDS,
@@ -140,6 +151,7 @@ export const minSessionReapThresholdMs = (
     thresholds.epicRunIterationIdleThresholdMs,
     thresholds.settledIdleThresholdMs,
     thresholds.activeTurnSkipCapMs,
+    thresholds.deadSessionGraceMs,
   );
 
 /**
@@ -176,6 +188,22 @@ export const decideSessionReap = (input: SessionReapInput): SessionReapDecision 
 
   if (input.status === "stopped") {
     return { reap: false, reason: "session_stopped", threadKind, thresholdMs };
+  }
+
+  if (!input.hasLiveAdapterSession) {
+    return input.idleDurationMs < thresholds.deadSessionGraceMs
+      ? {
+          reap: false,
+          reason: "within_idle_threshold",
+          threadKind,
+          thresholdMs: thresholds.deadSessionGraceMs,
+        }
+      : {
+          reap: true,
+          reason: "no_live_session",
+          threadKind,
+          thresholdMs: thresholds.deadSessionGraceMs,
+        };
   }
 
   // Before the idle compare, because the cap can be shorter than the kind's

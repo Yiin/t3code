@@ -87,6 +87,11 @@ export interface ProviderServiceShape {
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
 
   /**
+   * Check whether the adapter still holds a session without recovering it.
+   */
+  readonly hasLiveSession: (threadId: ThreadId) => Effect.Effect<boolean, ProviderServiceError>;
+
+  /**
    * Read capabilities for the adapter bound to a configured provider instance.
    */
   readonly getCapabilities: (

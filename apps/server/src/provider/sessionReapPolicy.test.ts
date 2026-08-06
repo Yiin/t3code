@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   DEFAULT_ACTIVE_TURN_SKIP_CAP_MS,
+  DEFAULT_DEAD_SESSION_GRACE_MS,
   DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS,
   DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
   DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
@@ -25,6 +26,7 @@ const INJECTED_THRESHOLDS = {
   epicRunIterationIdleThresholdMs: 1_000,
   settledIdleThresholdMs: 500,
   activeTurnSkipCapMs: 2_000,
+  deadSessionGraceMs: 200,
   subagentFreshnessWindowMs: 300,
 } as const;
 
@@ -32,6 +34,7 @@ const decide = (overrides: Partial<SessionReapInput>): SessionReapDecision =>
   decideSessionReap({
     threadId: INTERACTIVE_THREAD_ID,
     status: "running",
+    hasLiveAdapterSession: true,
     idleDurationMs: 0,
     settledOverride: null,
     activeTurnId: null,
@@ -54,6 +57,68 @@ describe("decideSessionReap", () => {
     readonly threadKind: SessionReapDecision["threadKind"];
     readonly thresholdMs: number;
   }> = [
+    {
+      name: "reaps a dead session past grace even when an active turn remains",
+      input: {
+        hasLiveAdapterSession: false,
+        activeTurnId: "turn-that-died",
+        idleDurationMs: 3 * 60 * 1000,
+      },
+      reap: true,
+      reason: "no_live_session",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_DEAD_SESSION_GRACE_MS,
+    },
+    {
+      name: "keeps a dead session inside the grace window",
+      input: {
+        hasLiveAdapterSession: false,
+        idleDurationMs: DEFAULT_DEAD_SESSION_GRACE_MS - 1,
+      },
+      reap: false,
+      reason: "within_idle_threshold",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_DEAD_SESSION_GRACE_MS,
+    },
+    {
+      name: "keeps a dead session inside grace when its idle threshold is shorter",
+      input: {
+        hasLiveAdapterSession: false,
+        idleDurationMs: 150,
+        thresholds: {
+          ...INJECTED_THRESHOLDS,
+          interactiveIdleThresholdMs: 100,
+          deadSessionGraceMs: 200,
+        },
+      },
+      reap: false,
+      reason: "within_idle_threshold",
+      threadKind: "interactive",
+      thresholdMs: 200,
+    },
+    {
+      name: "lets a live session fall through to the existing idle rule",
+      input: {
+        hasLiveAdapterSession: true,
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+      },
+      reap: true,
+      reason: "interactive_idle_threshold",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "keeps a stopped dead binding",
+      input: {
+        status: "stopped",
+        hasLiveAdapterSession: false,
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS * 10,
+      },
+      reap: false,
+      reason: "session_stopped",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+    },
     {
       name: "keeps an interactive session idle just under 36 hours",
       input: { idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS - 1 },
@@ -508,9 +573,9 @@ describe("decideSessionReap", () => {
 });
 
 describe("minSessionReapThresholdMs", () => {
-  it("is the shortest of the four thresholds", () => {
-    expect(minSessionReapThresholdMs()).toBe(DEFAULT_EPIC_RUN_ITERATION_IDLE_THRESHOLD_MS);
-    expect(minSessionReapThresholdMs(INJECTED_THRESHOLDS)).toBe(500);
+  it("includes the dead-session grace threshold", () => {
+    expect(minSessionReapThresholdMs()).toBe(DEFAULT_DEAD_SESSION_GRACE_MS);
+    expect(minSessionReapThresholdMs(INJECTED_THRESHOLDS)).toBe(200);
   });
 
   it("counts the active-turn skip cap when the cap is the shortest", () => {
@@ -520,6 +585,7 @@ describe("minSessionReapThresholdMs", () => {
         epicRunIterationIdleThresholdMs: 1_000,
         settledIdleThresholdMs: 500,
         activeTurnSkipCapMs: 100,
+        deadSessionGraceMs: 200,
         subagentFreshnessWindowMs: 50,
       }),
     ).toBe(100);
@@ -536,6 +602,7 @@ describe("minSessionReapThresholdMs", () => {
               threadId,
               settledOverride,
               activeTurnId,
+              hasLiveAdapterSession: true,
               thresholds: INJECTED_THRESHOLDS,
               idleDurationMs: minimum - 1,
             }).reap,

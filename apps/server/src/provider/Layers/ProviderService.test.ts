@@ -1336,6 +1336,27 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("checks adapter session liveness without recovery", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const initial = yield* provider.startSession(asThreadId("thread-liveness"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-liveness"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(yield* provider.hasLiveSession(initial.threadId), true);
+
+      yield* routing.codex.stopSession(initial.threadId);
+      routing.codex.startSession.mockClear();
+
+      assert.equal(yield* provider.hasLiveSession(initial.threadId), false);
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("preserves the persisted binding when stopping a session", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -2689,6 +2710,7 @@ lastSeenRefresh.layer("ProviderServiceLive lastSeenAt refresh", (it) => {
         const decision = decideSessionReap({
           threadId,
           status: runtime.status,
+          hasLiveAdapterSession: true,
           idleDurationMs: nowMs - Date.parse(runtime.lastSeenAt),
           settledOverride: null,
           activeTurnId: null,
@@ -2703,6 +2725,7 @@ lastSeenRefresh.layer("ProviderServiceLive lastSeenAt refresh", (it) => {
         const staleDecision = decideSessionReap({
           threadId,
           status: runtime.status,
+          hasLiveAdapterSession: true,
           idleDurationMs: nowMs - startedAtMs,
           settledOverride: null,
           activeTurnId: null,

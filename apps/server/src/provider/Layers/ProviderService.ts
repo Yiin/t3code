@@ -1420,6 +1420,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const hasLiveSession: ProviderServiceMethod<"hasLiveSession"> = Effect.fn("hasLiveSession")(
+    function* (threadId) {
+      const routed = yield* resolveRoutableSession({
+        threadId,
+        operation: "ProviderService.hasLiveSession",
+        allowRecovery: false,
+      });
+      return routed.isActive;
+    },
+  );
+
   const getCapabilities: ProviderServiceMethod<"getCapabilities"> = (instanceId) =>
     registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
 
@@ -1538,6 +1549,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     respondToUserInput,
     stopSession,
     listSessions,
+    hasLiveSession,
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,

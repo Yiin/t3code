@@ -110,6 +110,8 @@ function createProviderServiceHarness(
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions,
+    hasLiveSession: (threadId) =>
+      Effect.succeed(hasSession && threadId === ThreadId.make("thread-1")),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     getInstanceInfo: (instanceId) =>
       Effect.succeed({

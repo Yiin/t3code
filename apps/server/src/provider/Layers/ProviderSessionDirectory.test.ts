@@ -6,7 +6,6 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import { it, assert } from "@effect/vitest";
-import { assertSome } from "@effect/vitest/utils";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -45,12 +44,10 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       const provider = yield* directory.getProvider(initialThreadId);
       assert.equal(provider, "codex");
       const resolvedBinding = yield* directory.getBinding(initialThreadId);
-      assertSome(resolvedBinding, {
-        threadId: initialThreadId,
-        provider: ProviderDriverKind.make("codex"),
-      });
+      assert.equal(Option.isSome(resolvedBinding), true);
       if (Option.isSome(resolvedBinding)) {
         assert.equal(resolvedBinding.value.threadId, initialThreadId);
+        assert.equal(resolvedBinding.value.provider, ProviderDriverKind.make("codex"));
       }
 
       const nextThreadId = ThreadId.make("thread-2");
@@ -250,12 +247,10 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
         assert.equal(provider, "codex");
 
         const resolvedBinding = yield* directory.getBinding(threadId);
-        assertSome(resolvedBinding, {
-          threadId,
-          provider: ProviderDriverKind.make("codex"),
-        });
+        assert.equal(Option.isSome(resolvedBinding), true);
         if (Option.isSome(resolvedBinding)) {
           assert.equal(resolvedBinding.value.threadId, threadId);
+          assert.equal(resolvedBinding.value.provider, ProviderDriverKind.make("codex"));
         }
 
         const legacyTableRows = yield* sql<{ readonly name: string }>`
