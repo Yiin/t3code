@@ -34,6 +34,119 @@ function makeTurn(id: string) {
   };
 }
 
+function emitSubAgentActivityScenario(): void {
+  writeMessage({
+    method: "item/started",
+    params: {
+      item: {
+        agentPath: "root/child",
+        agentThreadId: "child-thread-1",
+        id: "child-activity-1",
+        kind: "started",
+        type: "subAgentActivity",
+      },
+      startedAtMs: 1,
+      threadId: providerThreadId,
+      turnId: startedTurnId,
+    },
+  });
+  writeMessage({
+    method: "turn/started",
+    params: {
+      threadId: "child-thread-1",
+      turn: makeTurn("child-turn-1"),
+    },
+  });
+  writeMessage({
+    method: "item/started",
+    params: {
+      item: {
+        agentPath: "root/child/nested",
+        agentThreadId: "nested-thread-1",
+        id: "nested-activity-1",
+        kind: "started",
+        type: "subAgentActivity",
+      },
+      startedAtMs: 2,
+      threadId: "child-thread-1",
+      turnId: "child-turn-1",
+    },
+  });
+  writeMessage({
+    method: "turn/started",
+    params: {
+      threadId: "nested-thread-1",
+      turn: makeTurn("nested-turn-1"),
+    },
+  });
+  writeMessage({
+    method: "turn/diff/updated",
+    params: {
+      diff: "nested diff",
+      threadId: "nested-thread-1",
+      turnId: "nested-turn-1",
+    },
+  });
+  writeMessage({
+    method: "turn/diff/updated",
+    params: {
+      diff: "child diff",
+      threadId: "child-thread-1",
+      turnId: "child-turn-1",
+    },
+  });
+  writeMessage({
+    method: "turn/diff/updated",
+    params: {
+      diff: "root diff",
+      threadId: providerThreadId,
+      turnId: startedTurnId,
+    },
+  });
+  writeMessage({
+    method: "turn/completed",
+    params: {
+      threadId: "child-thread-1",
+      turn: { ...makeTurn("child-turn-1"), status: "completed" },
+    },
+  });
+  writeMessage({
+    method: "turn/completed",
+    params: {
+      threadId: "nested-thread-1",
+      turn: { ...makeTurn("nested-turn-1"), status: "completed" },
+    },
+  });
+}
+
+function emitNonStartingSubAgentActivityScenario(): void {
+  for (const [index, kind] of ["interacted", "interrupted"].entries()) {
+    const agentThreadId = `${kind}-thread-1`;
+    writeMessage({
+      method: "item/started",
+      params: {
+        item: {
+          agentPath: `root/${kind}`,
+          agentThreadId,
+          id: `${kind}-activity-1`,
+          kind,
+          type: "subAgentActivity",
+        },
+        startedAtMs: index + 1,
+        threadId: providerThreadId,
+        turnId: startedTurnId,
+      },
+    });
+    writeMessage({
+      method: "turn/started",
+      params: {
+        threadId: agentThreadId,
+        turn: makeTurn(`${kind}-turn-1`),
+      },
+    });
+  }
+}
+
 function handleRequest(message: Record<string, unknown>): void {
   const id = message.id as number | string;
   const method = message.method;
@@ -88,6 +201,12 @@ function handleRequest(message: Record<string, unknown>): void {
             turn: makeTurn(responseTurnId),
           },
         });
+      }
+      if (turnStartCount === 1 && scenario === "sub-agent-activity") {
+        emitSubAgentActivityScenario();
+      }
+      if (turnStartCount === 1 && scenario === "non-starting-sub-agent-activity") {
+        emitNonStartingSubAgentActivityScenario();
       }
       if (turnStartCount === 2 && scenario === "steer-unsupported-completed") {
         writeMessage({

@@ -4,9 +4,11 @@ import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId, TurnId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -514,6 +516,62 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
         method: "turn/interrupt",
         params: { threadId: "provider-thread-1", turnId: "started-turn-1" },
       });
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("keeps nested sub-agent activity on the root turn", () =>
+    Effect.gen(function* () {
+      const { runtime } = yield* makeHarness("sub-agent-activity");
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.filter((event) => event.kind === "notification"),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.sendTurn({ input: "start" });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      NodeAssert.deepStrictEqual(
+        events.map((event) => [event.method, event.turnId]),
+        [
+          ["turn/started", TurnId.make("started-turn-1")],
+          ["item/started", TurnId.make("started-turn-1")],
+          ["item/started", TurnId.make("started-turn-1")],
+          ["turn/diff/updated", TurnId.make("started-turn-1")],
+          ["turn/diff/updated", TurnId.make("started-turn-1")],
+          ["turn/diff/updated", TurnId.make("started-turn-1")],
+        ],
+      );
+      NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("started-turn-1"));
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("does not map non-starting sub-agent activity", () =>
+    Effect.gen(function* () {
+      const { runtime } = yield* makeHarness("non-starting-sub-agent-activity");
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.filter((event) => event.kind === "notification"),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.sendTurn({ input: "start" });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      NodeAssert.deepStrictEqual(
+        events.map((event) => [event.method, event.turnId]),
+        [
+          ["turn/started", TurnId.make("started-turn-1")],
+          ["item/started", TurnId.make("started-turn-1")],
+          ["turn/started", TurnId.make("interacted-turn-1")],
+          ["item/started", TurnId.make("started-turn-1")],
+          ["turn/started", TurnId.make("interrupted-turn-1")],
+        ],
+      );
       yield* runtime.close;
     }),
   );

@@ -619,11 +619,17 @@ function rememberCollabReceiverTurns(
     return;
   }
 
-  if (notification.params.item.type !== "collabAgentToolCall") {
+  const item = notification.params.item;
+  if (item.type === "subAgentActivity" && item.kind === "started") {
+    collabReceiverTurns.set(item.agentThreadId, parentTurnId);
     return;
   }
 
-  for (const receiverThreadId of notification.params.item.receiverThreadIds) {
+  if (item.type !== "collabAgentToolCall") {
+    return;
+  }
+
+  for (const receiverThreadId of item.receiverThreadIds) {
     collabReceiverTurns.set(receiverThreadId, parentTurnId);
   }
 }
@@ -859,7 +865,11 @@ export const makeCodexSessionRuntime = (
             : undefined;
         })();
 
-        rememberCollabReceiverTurns(collabReceiverTurns, notification, route.turnId);
+        rememberCollabReceiverTurns(
+          collabReceiverTurns,
+          notification,
+          childParentTurnId ?? route.turnId,
+        );
         if (childParentTurnId && shouldSuppressChildConversationNotification(notification.method)) {
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
           return;
