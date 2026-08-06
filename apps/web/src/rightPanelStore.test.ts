@@ -102,6 +102,54 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("drops persisted subagent surfaces without a usable key", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "subagent",
+            surfaces: [
+              { id: "subagent", kind: "subagent" },
+              { id: "subagent", kind: "subagent", activeSubagentKey: "" },
+              { id: "subagent", kind: "subagent", activeSubagentKey: "   " },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: null,
+          surfaces: [],
+        },
+      },
+    });
+  });
+
+  it("keeps a persisted subagent surface with a valid key", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "subagent",
+            surfaces: [{ id: "subagent", kind: "subagent", activeSubagentKey: "tool-call-1" }],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "subagent",
+          surfaces: [{ id: "subagent", kind: "subagent", activeSubagentKey: "tool-call-1" }],
+        },
+      },
+    });
+  });
+
   it("open sets the active panel for a thread", () => {
     useRightPanelStore.getState().open(refA, "preview");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("preview");
@@ -139,6 +187,27 @@ describe("rightPanelStore", () => {
       isOpen: true,
       activeSurfaceId: "files",
       surfaces: [{ id: "files", kind: "files" }],
+    });
+  });
+
+  it("opens a singleton subagent surface", () => {
+    useRightPanelStore.getState().openSubagent(refA, "tool-call-1");
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "subagent",
+      surfaces: [{ id: "subagent", kind: "subagent", activeSubagentKey: "tool-call-1" }],
+    });
+  });
+
+  it("replaces the active subagent key without adding another surface", () => {
+    useRightPanelStore.getState().openSubagent(refA, "tool-call-1");
+    useRightPanelStore.getState().openSubagent(refA, "tool-call-2");
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "subagent",
+      surfaces: [{ id: "subagent", kind: "subagent", activeSubagentKey: "tool-call-2" }],
     });
   });
 

@@ -179,7 +179,7 @@ function firstNonEmptyLine(text: string | null): string | null {
  * Live elapsed label for a running subagent. Updates its own text node so the
  * per-second tick never causes a React commit (WorkingTimer pattern).
  */
-function SubagentElapsed({ startedAt }: { startedAt: string }) {
+export function SubagentElapsed({ startedAt }: { startedAt: string }) {
   const textRef = useRef<HTMLSpanElement>(null);
   const initialText = formatSubagentElapsedNow(startedAt);
 
