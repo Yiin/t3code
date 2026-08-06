@@ -83,6 +83,49 @@ export async function archiveSelectedThreadEntries<
   return { archivedThreadKeys, mutationFailure: null, followupFailures };
 }
 
+export async function settleSidebarThreadBatch<
+  TEntry,
+  TResult extends { readonly _tag: "Success" | "Failure" },
+>(input: {
+  entries: readonly TEntry[];
+  getThreadKey: (entry: TEntry) => string;
+  reservedThreadKeys: Set<string>;
+  settle: (entry: TEntry) => Promise<TResult>;
+  onFailure: (failure: Extract<TResult, { readonly _tag: "Failure" }>, entry: TEntry) => void;
+}): Promise<{ readonly primaryResult: TResult | null; readonly skipped: boolean }> {
+  const primary = input.entries[0];
+  if (primary === undefined) return { primaryResult: null, skipped: true };
+
+  const primaryKey = input.getThreadKey(primary);
+  if (input.reservedThreadKeys.has(primaryKey)) {
+    return { primaryResult: null, skipped: true };
+  }
+
+  const ownedEntries = input.entries.filter(
+    (entry) => !input.reservedThreadKeys.has(input.getThreadKey(entry)),
+  );
+  const ownedKeys = ownedEntries.map(input.getThreadKey);
+  for (const key of ownedKeys) input.reservedThreadKeys.add(key);
+
+  try {
+    const results = await Promise.all(
+      ownedEntries.map(async (entry) => ({ entry, result: await input.settle(entry) })),
+    );
+    for (const { entry, result } of results) {
+      if (result._tag === "Failure") {
+        input.onFailure(result as Extract<TResult, { readonly _tag: "Failure" }>, entry);
+      }
+    }
+    return {
+      primaryResult:
+        results.find(({ entry }) => input.getThreadKey(entry) === primaryKey)?.result ?? null,
+      skipped: false,
+    };
+  } finally {
+    for (const key of ownedKeys) input.reservedThreadKeys.delete(key);
+  }
+}
+
 export function buildMultiSelectThreadContextMenuItems(input: {
   count: number;
   hasRunningThread: boolean;
@@ -567,6 +610,41 @@ export function sidebarNodeThreads<T>(node: SidebarThreadNode<T>): readonly T[] 
   return node.kind === "thread"
     ? [node.thread]
     : node.iterations.map((iteration) => iteration.thread);
+}
+
+/** Snapshot one user settle plus every run iteration visibly assigned below it. */
+export function resolveSidebarThreadSettleBatch<
+  T extends { readonly id: string; readonly environmentId: string },
+>(input: {
+  primary: T;
+  threads: readonly T[];
+  runs: ReadonlyArray<Pick<SidebarEpicRunSummary, "runId" | "originThreadId">>;
+  settledThreadKeys: ReadonlySet<string>;
+  getThreadKey: (thread: T) => string;
+}): readonly T[] {
+  const primaryKey = input.getThreadKey(input.primary);
+  const seen = new Set([primaryKey]);
+  const batch: T[] = [input.primary];
+  const linkedRunIds = new Set(
+    input.runs.filter((run) => run.originThreadId === input.primary.id).map((run) => run.runId),
+  );
+
+  for (const thread of input.threads) {
+    const iteration = parseEpicRunIterationThreadId(thread.id);
+    if (
+      iteration === null ||
+      !linkedRunIds.has(iteration.runId) ||
+      thread.environmentId !== input.primary.environmentId
+    ) {
+      continue;
+    }
+    const threadKey = input.getThreadKey(thread);
+    if (seen.has(threadKey) || input.settledThreadKeys.has(threadKey)) continue;
+    seen.add(threadKey);
+    batch.push(thread);
+  }
+
+  return batch;
 }
 
 /** The slice of `EpicRun` the sidebar needs; the caller feeds it from the

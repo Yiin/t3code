@@ -27,6 +27,7 @@ import {
   resolveRenderedSidebarThreadNodes,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
+  resolveSidebarThreadSettleBatch,
   resolveSidebarStageBadgeLabel,
   resolveThreadRowClassName,
   resolveSidebarV2Status,
@@ -42,6 +43,7 @@ import {
   sortProjectsForSidebar,
   threadStatusPillText,
   sortScopedProjectsForSidebar,
+  settleSidebarThreadBatch,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
 } from "./Sidebar.logic";
 import {
@@ -1044,6 +1046,118 @@ describe("groupEpicRunIterationThreads", () => {
 
     expect(nodeIds(nodes)).toEqual(["launcher", `group:${runId}`]);
     expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
+});
+
+describe("resolveSidebarThreadSettleBatch", () => {
+  type BatchThread = { readonly id: string; readonly environmentId: string };
+  const keyOf = (thread: BatchThread) => `${thread.environmentId}:${thread.id}`;
+  const thread = (id: string, environmentId = "env-a"): BatchThread => ({ id, environmentId });
+  const run = (runId: string, originThreadId: string) => ({ runId, originThreadId });
+  const iteration = (runId: string, iterationIndex: number, environmentId = "env-a") =>
+    thread(epicRunIterationThreadId({ runId, iterationIndex }), environmentId);
+
+  it("includes hidden iterations from every linked run and skips settled duplicates", () => {
+    const launcher = thread("launcher");
+    const first = iteration("run-1", 0);
+    const settled = iteration("run-1", 1);
+    const secondRunIteration = iteration("run-2", 0);
+
+    const batch = resolveSidebarThreadSettleBatch({
+      primary: launcher,
+      // The resolver receives live scoped shells before hidden-run filtering.
+      threads: [launcher, first, settled, first, secondRunIteration],
+      runs: [run("run-1", launcher.id), run("run-2", launcher.id)],
+      settledThreadKeys: new Set([keyOf(settled)]),
+      getThreadKey: keyOf,
+    });
+
+    expect(batch.map(keyOf)).toEqual([keyOf(launcher), keyOf(first), keyOf(secondRunIteration)]);
+  });
+
+  it("does not pull a same-id launcher group from another environment", () => {
+    const launcher = thread("launcher", "env-a");
+    const localIteration = iteration("local-run", 0, "env-a");
+    const remoteIteration = iteration("remote-run", 0, "env-b");
+
+    const batch = resolveSidebarThreadSettleBatch({
+      primary: launcher,
+      threads: [launcher, localIteration, remoteIteration],
+      runs: [run("local-run", launcher.id), run("remote-run", launcher.id)],
+      settledThreadKeys: new Set(),
+      getThreadKey: keyOf,
+    });
+
+    expect(batch.map(keyOf)).toEqual([keyOf(launcher), keyOf(localIteration)]);
+  });
+});
+
+describe("settleSidebarThreadBatch", () => {
+  const success = { _tag: "Success" as const };
+  const failure = (id: string) => ({ _tag: "Failure" as const, id });
+  const keyOf = (entry: { readonly key: string }) => entry.key;
+
+  it("reserves the full owned batch, preserves foreign reservations, and releases its own", async () => {
+    const entries = [{ key: "launcher" }, { key: "foreign" }, { key: "child" }];
+    const reserved = new Set(["foreign"]);
+    const reservationsDuringSettle: string[][] = [];
+    const settle = vi.fn(async () => {
+      reservationsDuringSettle.push([...reserved].toSorted());
+      return success;
+    });
+
+    const outcome = await settleSidebarThreadBatch({
+      entries,
+      getThreadKey: keyOf,
+      reservedThreadKeys: reserved,
+      settle,
+      onFailure: vi.fn(),
+    });
+
+    expect(settle).toHaveBeenCalledTimes(2);
+    expect(reservationsDuringSettle).toEqual([
+      ["child", "foreign", "launcher"],
+      ["child", "foreign", "launcher"],
+    ]);
+    expect(reserved).toEqual(new Set(["foreign"]));
+    expect(outcome).toEqual({ primaryResult: success, skipped: false });
+  });
+
+  it("continues after failures and returns the primary failure for navigation", async () => {
+    const entries = [{ key: "launcher" }, { key: "child-1" }, { key: "child-2" }];
+    const reserved = new Set<string>();
+    const failures: string[] = [];
+    const settle = vi.fn(async (entry: (typeof entries)[number]) =>
+      entry.key === "child-1" ? success : failure(entry.key),
+    );
+
+    const outcome = await settleSidebarThreadBatch({
+      entries,
+      getThreadKey: keyOf,
+      reservedThreadKeys: reserved,
+      settle,
+      onFailure: (result) => failures.push(result.id),
+    });
+
+    expect(settle).toHaveBeenCalledTimes(3);
+    expect(failures).toEqual(["launcher", "child-2"]);
+    expect(outcome).toEqual({ primaryResult: failure("launcher"), skipped: false });
+    expect(reserved.size).toBe(0);
+  });
+
+  it("does not dispatch when another invocation owns the primary", async () => {
+    const settle = vi.fn(async () => success);
+
+    const outcome = await settleSidebarThreadBatch({
+      entries: [{ key: "launcher" }, { key: "child" }],
+      getThreadKey: keyOf,
+      reservedThreadKeys: new Set(["launcher"]),
+      settle,
+      onFailure: vi.fn(),
+    });
+
+    expect(settle).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ primaryResult: null, skipped: true });
   });
 });
 

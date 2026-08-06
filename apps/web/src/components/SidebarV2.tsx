@@ -96,6 +96,8 @@ import {
   resolveAdjacentThreadId,
   resolveEpicRunStatusPill,
   resolveSidebarV2Status,
+  resolveSidebarThreadSettleBatch,
+  settleSidebarThreadBatch,
   sidebarEpicRunBeadsSources,
   sidebarEpicRunTitlesByRunId,
   sidebarNodeThreads,
@@ -1166,44 +1168,57 @@ export default function SidebarV2() {
   // merging, no optimistic holds. Archived threads remain hidden here —
   // archive keeps its original "remove from sidebar" meaning.
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
-  const { activeThreads, settledThreads } = useMemo(() => {
+  const scopedThreads = useMemo(
+    () =>
+      threads.filter(
+        (thread) =>
+          thread.archivedAt === null &&
+          (scopedProject === null ||
+            (thread.environmentId === scopedProject.environmentId &&
+              thread.projectId === scopedProject.id)),
+      ),
+    [scopedProject, threads],
+  );
+  const { activeThreads, allSettledThreadKeys, settledThreads } = useMemo(() => {
     // `now` only feeds effectiveSettled's queued-turn grace window. Shell
     // updates reopen or close that window, so this partition needs no ticker.
     const now = new Date().toISOString();
-    const scopedThreads = threads.filter(
-      (thread) =>
-        thread.archivedAt === null &&
-        (scopedProject === null ||
-          (thread.environmentId === scopedProject.environmentId &&
-            thread.projectId === scopedProject.id)),
-    );
     const visible = filterHiddenEpicRunIterationThreads({
       threads: scopedThreads,
       hiddenByRunId: epicRunGroupHiddenByRunId,
     });
     const active: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
-    for (const thread of visible) {
+    const allSettledKeys = new Set<string>();
+    const visibleKeys = new Set(
+      visible.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+    );
+    for (const thread of scopedThreads) {
       // Threads on servers without the settlement capability (old server,
       // or descriptor not loaded yet) never classify as settled. The user
       // could not un-settle them.
       const supportsSettlement =
         serverConfigs.get(thread.environmentId)?.environment.capabilities.threadSettlement === true;
       if (supportsSettlement && effectiveSettled(thread, { now })) {
-        settled.push(thread);
-      } else {
+        const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        allSettledKeys.add(threadKey);
+        if (visibleKeys.has(threadKey)) settled.push(thread);
+      } else if (
+        visibleKeys.has(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
+      ) {
         active.push(thread);
       }
     }
     return {
       activeThreads: sortThreadsForSidebarV2(active),
+      allSettledThreadKeys: allSettledKeys,
       settledThreads: settled.toSorted(
         (left, right) =>
           firstValidTimestampMs(right.latestUserMessageAt, right.updatedAt) -
           firstValidTimestampMs(left.latestUserMessageAt, left.updatedAt),
       ),
     };
-  }, [epicRunGroupHiddenByRunId, scopedProject, serverConfigs, threads]);
+  }, [epicRunGroupHiddenByRunId, scopedThreads, serverConfigs]);
 
   const settledThreadKeys = useMemo(
     () =>
@@ -1260,6 +1275,12 @@ export default function SidebarV2() {
     () => [...epicRunsByEnvironment.values()].flatMap((runs) => runs ?? []),
     [epicRunsByEnvironment],
   );
+  const epicRunsRef = useRef(epicRuns);
+  epicRunsRef.current = epicRuns;
+  const scopedThreadsRef = useRef(scopedThreads);
+  scopedThreadsRef.current = scopedThreads;
+  const allSettledThreadKeysRef = useRef(allSettledThreadKeys);
+  allSettledThreadKeysRef.current = allSettledThreadKeys;
   // Beads snapshots are the only source of human titles, and only workspaces
   // that actually have a run are worth subscribing to — so the source list
   // follows the runs rather than the project list.
@@ -1522,8 +1543,19 @@ export default function SidebarV2() {
       void (async () => {
         const threadKey = scopedThreadKey(threadRef);
         if (settlingThreadKeysRef.current.has(threadKey)) return;
-        settlingThreadKeysRef.current.add(threadKey);
-        try {
+        const primaryThread = threadByKeyRef.current.get(threadKey);
+        const settleBatch = primaryThread
+          ? resolveSidebarThreadSettleBatch({
+              primary: primaryThread,
+              threads: scopedThreadsRef.current,
+              runs: epicRunsRef.current,
+              settledThreadKeys: allSettledThreadKeysRef.current,
+              getThreadKey: threadKeyOf,
+            })
+          : [];
+        const batchThreadKeys = new Set(settleBatch.map(threadKeyOf));
+        const coSettlingKeys = new Set([...(opts.coSettlingKeys ?? []), ...batchThreadKeys]);
+        {
           // Settling the thread you're looking at moves you forward: the next
           // remaining card (never a settled row, never one settling in the
           // same batch), or a fresh draft in this project when it was the
@@ -1541,7 +1573,7 @@ export default function SidebarV2() {
                 : ([
                     ...orderedKeys.slice(currentIndex + 1),
                     ...orderedKeys.slice(0, currentIndex),
-                  ].find((key) => !settledKeys.has(key) && !opts.coSettlingKeys?.has(key)) ?? null);
+                  ].find((key) => !settledKeys.has(key) && !coSettlingKeys.has(key)) ?? null);
             const nextThread = nextCardKey ? threadByKeyRef.current.get(nextCardKey) : null;
             navigateAfterSettle = nextThread
               ? () => navigateToThread(scopeThreadRef(nextThread.environmentId, nextThread.id))
@@ -1552,11 +1584,14 @@ export default function SidebarV2() {
                     )
                 : () => void router.navigate({ to: "/" });
           }
-          const result = await settleThread(threadRef);
-          if (result._tag === "Failure") {
-            // Never navigate away from a thread that did not settle.
-            if (!isAtomCommandInterrupted(result)) {
-              const error = squashAtomCommandFailure(result);
+          const outcome = await settleSidebarThreadBatch({
+            entries: settleBatch,
+            getThreadKey: threadKeyOf,
+            reservedThreadKeys: settlingThreadKeysRef.current,
+            settle: (thread) => settleThread(scopeThreadRef(thread.environmentId, thread.id)),
+            onFailure: (failure) => {
+              if (isAtomCommandInterrupted(failure)) return;
+              const error = squashAtomCommandFailure(failure);
               toastManager.add(
                 stackedThreadToast({
                   type: "error",
@@ -1564,20 +1599,20 @@ export default function SidebarV2() {
                   description: error instanceof Error ? error.message : "An error occurred.",
                 }),
               );
-            }
-            return;
-          }
+            },
+          });
+          const result = outcome.primaryResult;
+          // Never navigate away from a thread that did not settle.
+          if (outcome.skipped || result?._tag !== "Success") return;
           // Only move forward if the user is still on the settled thread —
           // a navigation made during the await wins over ours.
           if (routeThreadKeyRef.current === threadKey) {
             navigateAfterSettle?.();
           }
-        } finally {
-          settlingThreadKeysRef.current.delete(threadKey);
         }
       })();
     },
-    [navigateToThread, routeThreadKey, router, settleThread],
+    [navigateToThread, routeThreadKey, router, settleThread, threadKeyOf],
   );
   const attemptUnsettle = useCallback(
     (threadRef: ScopedThreadRef) => {
@@ -1628,7 +1663,19 @@ export default function SidebarV2() {
         // batch — they are all leaving the card block together. Rows that
         // are already explicitly settled are skipped: nothing to do on a
         // valid mixed selection.
-        const coSettlingKeys = new Set(threadKeys);
+        const coSettlingKeys = new Set(
+          threadKeys.flatMap((threadKey) => {
+            const thread = threadByKeyRef.current.get(threadKey);
+            if (!thread) return [];
+            return resolveSidebarThreadSettleBatch({
+              primary: thread,
+              threads: scopedThreadsRef.current,
+              runs: epicRunsRef.current,
+              settledThreadKeys: allSettledThreadKeysRef.current,
+              getThreadKey: threadKeyOf,
+            }).map(threadKeyOf);
+          }),
+        );
         for (const threadKey of threadKeys) {
           const thread = threadByKeyRef.current.get(threadKey);
           if (!thread || thread.settledOverride === "settled") continue;
