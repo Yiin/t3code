@@ -1,5 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
+import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -199,6 +201,30 @@ function mockCommandSpawnerLayer(
       return Effect.succeed(mockHandle(handler(cmd.command, cmd.args)));
     }),
   );
+}
+
+// Poll an effect with a wall-clock deadline and real sleeps between reads.
+// The settings → reconcile → rebuild → reprobe pipeline crosses a real async
+// boundary (libuv delivers the ENOENT from the spawned process), so under
+// full-suite load a fixed number of `Effect.yieldNow` turns can complete
+// before the pipeline does. `TestClock.adjust` moves the test clock only; it
+// does not give the event loop real time, so poll on the live clock.
+const liveClock = Clock.Clock.defaultValue();
+
+function pollUntil<A>(
+  read: Effect.Effect<A>,
+  predicate: (value: A) => boolean,
+  timeoutMs = 10_000,
+): Effect.Effect<A> {
+  return Effect.gen(function* () {
+    const deadline = liveClock.currentTimeMillisUnsafe() + timeoutMs;
+    let value = yield* read;
+    while (!predicate(value) && liveClock.currentTimeMillisUnsafe() < deadline) {
+      yield* liveClock.sleep(Duration.millis(25));
+      value = yield* read;
+    }
+    return value;
+  });
 }
 
 function failingSpawnerLayer(description: string) {
@@ -1563,18 +1589,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             // Boot-time probe: the default codex instance is enabled with
             // `firstMissing`, so the real spawner yields ENOENT and the
             // snapshot should be `status: "error"`.
-            let initialProviders = yield* registry.getProviders;
-            for (
-              let attempts = 0;
-              attempts < 50 &&
-              initialProviders.find((provider) => provider.instanceId === "codex")?.status !==
-                "error";
-              attempts += 1
-            ) {
-              yield* TestClock.adjust("10 millis");
-              yield* Effect.yieldNow;
-              initialProviders = yield* registry.getProviders;
-            }
+            const initialProviders = yield* pollUntil(
+              registry.getProviders,
+              (providers) =>
+                providers.find((provider) => provider.instanceId === "codex")?.status === "error",
+            );
             const initialCodex = initialProviders.find(
               (provider) => provider.instanceId === "codex",
             );
@@ -1598,22 +1617,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
 
             // Poll until the injected process boundary observes the new
             // executable. This verifies the public settings-to-probe behavior
-            // without depending on timestamps assigned by TestClock.
-            const refreshed = yield* Effect.gen(function* () {
-              for (let attempts = 0; attempts < 60; attempts += 1) {
-                const providers = yield* registry.getProviders;
-                const codex = providers.find((provider) => provider.instanceId === "codex");
-                if (
-                  codex !== undefined &&
-                  codex.status === "error" &&
-                  spawnedCommands.includes(secondMissing)
-                ) {
-                  return providers;
-                }
-                yield* TestClock.adjust("50 millis");
-                yield* Effect.yieldNow;
-              }
-              return yield* registry.getProviders;
+            // on wall-clock time, so full-suite load cannot outrun the fixed
+            // iteration budget.
+            const refreshed = yield* pollUntil(registry.getProviders, (providers) => {
+              const codex = providers.find((provider) => provider.instanceId === "codex");
+              return (
+                codex !== undefined &&
+                codex.status === "error" &&
+                spawnedCommands.includes(secondMissing)
+              );
             });
 
             const reprobedCodex = refreshed.find((provider) => provider.instanceId === "codex");
