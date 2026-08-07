@@ -59,7 +59,7 @@ const prepare = (platform: NodeJS.Platform, runner: ProcessRunner.ProcessRunner[
   );
 
 describe("workerScope", () => {
-  it("derives the run.sh scope identity hash", () => {
+  it("derives the run-legacy.sh scope identity hash", () => {
     const expected = NodeCrypto.createHash("sha256")
       .update("/repo\0/repo/.git/t3code/epic-runs/run-1\0epic-1\0run-1\0")
       .digest("hex")
@@ -68,7 +68,7 @@ describe("workerScope", () => {
     expect(deriveWorkerScopeId(identity)).toMatch(/^[0-9a-f]{24}$/);
   });
 
-  it("builds run.sh-shaped unit names and sanitizes worker components", () => {
+  it("builds run-legacy.sh-shaped unit names and sanitizes worker components", () => {
     expect(workerScopeUnitName("abc123", "worker-1")).toBe("cook-epic-abc123-worker-1.scope");
     expect(workerScopeUnitName("abc123", "t3code 06s/29")).toBe(
       "cook-epic-abc123-t3code-06s-29.scope",

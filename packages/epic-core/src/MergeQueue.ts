@@ -82,7 +82,7 @@ const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(functi
     sequence: entry.sequence,
     fixIssueId: fix.id,
   });
-  // Terminal parity: `skills/cook-epic/run.sh:3053-3055`.
+  // Terminal parity: `skills/cook-epic/run-legacy.sh:2887-2889`.
   yield* ports.backlog.writeNotes({
     issueId: input.epicId,
     note: `cook-epic: merge of ${entry.branch} parked (${reason}); merge-fix child ${fix.id} created`,
@@ -111,7 +111,7 @@ const parkEntry = Effect.fn("MergeQueue.parkEntry")(function* (
   yield* reconcileParkedEntry(input, ports, snapshot, entry, reason);
 });
 
-/** Serialized single-repository landing loop. Terminal parity: `run.sh:3059-3235`. */
+/** Serialized single-repository landing loop. Terminal parity: `run-legacy.sh:2893-3069`. */
 export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function* (
   input: DrainMergeQueueInput,
   ports: MergeQueuePorts,
@@ -125,7 +125,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
   const beforeDrain = activeEntries(snapshot.entries);
   if (beforeDrain.length === 0) return { _tag: "idle", queueLength: 0 };
 
-  // Terminal parity: `skills/cook-epic/run.sh:3062-3065`.
+  // Terminal parity: `skills/cook-epic/run-legacy.sh:2896-2899`.
   const currentHead = yield* ports.git.head(snapshot.repositoryPath);
   if (currentHead !== snapshot.lastAcceptedHead) {
     return {
@@ -135,7 +135,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     };
   }
 
-  // Terminal parity: `skills/cook-epic/run.sh:3078-3084`.
+  // Terminal parity: `skills/cook-epic/run-legacy.sh:2912-2918`.
   const lease = yield* ports.slot.tryAcquire(input.holder);
   if (Option.isNone(lease)) return { _tag: "deferred", queueLength: beforeDrain.length };
 
@@ -146,7 +146,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
 
     for (let index = 0; index < queue.length; index += 1) {
       const entry = queue[index]!;
-      // Terminal parity: `skills/cook-epic/run.sh:3090-3105`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2924-2939`.
       const commits = yield* ports.git.commitsAhead({
         repositoryPath: snapshot.repositoryPath,
         baseBranch: snapshot.baseBranch,
@@ -160,12 +160,12 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         continue;
       }
 
-      // Terminal parity: `skills/cook-epic/run.sh:3108-3112`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2942-2946`.
       yield* ports.git.resetHard(snapshot.integrationWorktreePath, snapshot.baseBranch);
       yield* ports.git.clean(snapshot.integrationWorktreePath);
       yield* ports.git.setupWorktree(snapshot.integrationWorktreePath);
 
-      // Terminal parity: `skills/cook-epic/run.sh:3121-3140`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2955-2974`.
       const trial = yield* ports.git.trialMerge({
         cwd: snapshot.integrationWorktreePath,
         branch: entry.branch,
@@ -178,7 +178,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         continue;
       }
 
-      // Terminal parity: `skills/cook-epic/run.sh:3143-3156`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2977-2990`.
       if (input.gateCommand !== null) {
         const gate = yield* ports.gate.run({
           command: input.gateCommand,
@@ -201,7 +201,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         }
       }
 
-      // Terminal parity: `skills/cook-epic/run.sh:3158-3187`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2992-3021`.
       const landed = yield* ports.git.fastForward({
         cwd: snapshot.repositoryPath,
         ref: snapshot.integrationBranch,
@@ -230,7 +230,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         }
       }
 
-      // Terminal parity: `skills/cook-epic/run.sh:3203-3231`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:3037-3065`.
       const head = yield* ports.git.head(snapshot.repositoryPath);
       yield* ports.store.complete({
         runId: input.runId,

@@ -1,6 +1,6 @@
 {
   "name": "parallel-worktrees",
-  "description": "Two ready children dispatch into separate worktrees.",
+  "description": "Two ready children dispatch into separate worktrees. Narrowed to the legacy terminal adapter: the shared core's terminal cook loop is sequential, so this parallel scenario has no core leg; the gap is tracked by t3code-06s.41.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",

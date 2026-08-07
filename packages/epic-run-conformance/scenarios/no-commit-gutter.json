@@ -1,6 +1,6 @@
 {
   "name": "no-commit-gutter",
-  "description": "Two no-commit child failures stop at maxNoCommitStreak 2.",
+  "description": "Two no-commit child failures stop at maxNoCommitStreak 2. Narrowed: no terminal leg yet; terminal driver coverage is tracked by t3code-06s.41.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",

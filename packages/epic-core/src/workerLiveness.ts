@@ -1,9 +1,9 @@
 /**
  * Per-worker liveness supervision as a pure state machine.
  *
- * Ported from the terminal coordinator (`skills/cook-epic/run.sh`,
- * `liveness_start` at run.sh:1876-1894 and `supervise_workers` at
- * run.sh:1909-1960). The machine never touches /proc, cgroups, git, or a
+ * Ported from the terminal coordinator (`skills/cook-epic/run-legacy.sh`,
+ * `liveness_start` at run-legacy.sh:1710-1728 and `supervise_workers` at
+ * run-legacy.sh:1743-1794). The machine never touches /proc, cgroups, git, or a
  * provider process: every platform fact arrives through `WorkerTickEvidence`
  * (gathered by `ports/WorkerEvidence.ts`) and every side effect leaves as a
  * `WorkerLivenessAction` for the driving adapter to perform.
@@ -11,46 +11,46 @@
  * The conservatism is the design: sampling can only request an inspection,
  * and only a high-confidence inspector verdict, confirmed twice against
  * unchanged fingerprints and an unchanged progress generation, ever stops a
- * worker (run.sh:1280-1282).
+ * worker (run-legacy.sh:1114-1116).
  */
 
-/** Every default cites its run.sh source line. */
+/** Every default cites its run-legacy.sh source line. */
 export interface WorkerLivenessConfig {
-  /** Absolute per-worker wall-clock cap; null means no deadline (run.sh:298). */
+  /** Absolute per-worker wall-clock cap; null means no deadline (run-legacy.sh:132). */
   readonly workerTimeoutSeconds: number | null;
-  /** Idle seconds before the first inspection (run.sh:299). */
+  /** Idle seconds before the first inspection (run-legacy.sh:133). */
   readonly idleThresholdSeconds: number;
-  /** Inspector wall-clock budget before a forced rc 124 (run.sh:300). */
+  /** Inspector wall-clock budget before a forced rc 124 (run-legacy.sh:134). */
   readonly inspectorTimeoutSeconds: number;
-  /** Delay after an uncertain inspection (run.sh:301). */
+  /** Delay after an uncertain inspection (run-legacy.sh:135). */
   readonly inspectRetryDelaySeconds: number;
-  /** Minimum delay between inspections (run.sh:302). */
+  /** Minimum delay between inspections (run-legacy.sh:136). */
   readonly inspectMinDelaySeconds: number;
-  /** Maximum delay between inspections (run.sh:303). */
+  /** Maximum delay between inspections (run-legacy.sh:137). */
   readonly inspectMaxDelaySeconds: number;
-  /** Stop escalation grace; the stop mechanism is adapter-owned (run.sh:304). */
+  /** Stop escalation grace; the stop mechanism is adapter-owned (run-legacy.sh:138). */
   readonly stopGraceSeconds: number;
-  /** Driver tick cadence (run.sh:305). */
+  /** Driver tick cadence (run-legacy.sh:139). */
   readonly supervisionTickSeconds: number;
-  /** Quiet-tick repository probe interval (run.sh:306). */
+  /** Quiet-tick repository probe interval (run-legacy.sh:140). */
   readonly repoProbeIntervalSeconds: number;
-  /** Bounded probe timeout; the probe itself is port-owned (run.sh:307). */
+  /** Bounded probe timeout; the probe itself is port-owned (run-legacy.sh:141). */
   readonly repoProbeTimeoutSeconds: number;
-  /** Worker artifact cap; the byte counter never truncates (run.sh:308). */
+  /** Worker artifact cap; the byte counter never truncates (run-legacy.sh:142). */
   readonly workerArtifactBytes: number;
-  /** Inspector result byte cap (run.sh:309). */
+  /** Inspector result byte cap (run-legacy.sh:143). */
   readonly inspectorResultBytes: number;
-  /** Inspector raw-log byte cap; port-owned (run.sh:310). */
+  /** Inspector raw-log byte cap; port-owned (run-legacy.sh:144). */
   readonly inspectorLogBytes: number;
-  /** Repository evidence byte cap; port-owned (run.sh:311). */
+  /** Repository evidence byte cap; port-owned (run-legacy.sh:145). */
   readonly repoEvidenceBytes: number;
-  /** CPU delta that counts as progress (run.sh:312). */
+  /** CPU delta that counts as progress (run-legacy.sh:146). */
   readonly cpuProgressUsec: number;
-  /** IO delta that counts as progress (run.sh:313). */
+  /** IO delta that counts as progress (run-legacy.sh:147). */
   readonly ioProgressBytes: number;
   /**
    * false under Codex, which cannot enforce the no-tool contract and so never
-   * launches an inspector (run.sh:1593-1596).
+   * launches an inspector (run-legacy.sh:1427-1430).
    */
   readonly inspectorSupported: boolean;
 }
@@ -75,19 +75,19 @@ export const DEFAULT_WORKER_LIVENESS_CONFIG = {
   inspectorSupported: true,
 } satisfies WorkerLivenessConfig;
 
-/** The literal the bounded repository probe yields on timeout (run.sh:1398). */
+/** The literal the bounded repository probe yields on timeout (run-legacy.sh:1232). */
 export const REPO_PROBE_TIMEOUT_MARKER = "probe-timeout";
-/** The fingerprint a worker with no live process reports (run.sh:1471). */
+/** The fingerprint a worker with no live process reports (run-legacy.sh:1305). */
 export const PROCESS_FINGERPRINT_UNAVAILABLE = "unavailable";
 
-/** The uncertain reason recorded instead of launching under Codex (run.sh:1594). */
+/** The uncertain reason recorded instead of launching under Codex (run-legacy.sh:1428). */
 export const CODEX_INSPECTION_DISABLED_REASON =
   "Codex inspection is disabled because Codex cannot enforce the no-tool contract";
 
 /**
  * Per-tick signals. `outputBytes` is the never-truncated cumulative counter
  * maintained by the output capture path — the rolling tail file is compacted,
- * the counter is not (run.sh:1112-1115).
+ * the counter is not (run-legacy.sh:946-949).
  */
 export interface WorkerSignalSample {
   readonly isActive: boolean;
@@ -96,11 +96,11 @@ export interface WorkerSignalSample {
   readonly ioBytes: number;
 }
 
-/** The inspector result as captured by the bounded stream (run.sh:1522-1533). */
+/** The inspector result as captured by the bounded stream (run-legacy.sh:1356-1367). */
 export interface InspectorResultEvidence {
   readonly text: string;
   readonly byteSize: number;
-  /** The overflow marker exists once the result exceeded its cap (run.sh:1135). */
+  /** The overflow marker exists once the result exceeded its cap (run-legacy.sh:969). */
   readonly overflowed: boolean;
 }
 
@@ -116,17 +116,17 @@ export type InspectorRunEvidence =
 /**
  * Everything the machine may learn in one tick. The probes are lazy: the
  * machine calls each one only when a rule requires it, so a quiet early tick
- * never pays for a repository probe (run.sh:1934).
+ * never pays for a repository probe (run-legacy.sh:1768).
  */
 export interface WorkerTickEvidence {
-  /** Wall-clock seconds from the injected clock (run.sh:1283-1292). */
+  /** Wall-clock seconds from the injected clock (run-legacy.sh:1117-1126). */
   readonly now: number;
   readonly providerFallbackPending: boolean;
   readonly signals: WorkerSignalSample;
   readonly inspector: InspectorRunEvidence;
-  /** Bounded repository probe; contains `probe-timeout` on timeout (run.sh:1395-1406). */
+  /** Bounded repository probe; contains `probe-timeout` on timeout (run-legacy.sh:1229-1240). */
   readonly probeRepository: () => string;
-  /** sha256 of the process comm histogram, or `unavailable` (run.sh:1468-1481). */
+  /** sha256 of the process comm histogram, or `unavailable` (run-legacy.sh:1302-1315). */
   readonly processFingerprint: () => string;
 }
 
@@ -174,17 +174,17 @@ export type WorkerLivenessEvent =
 
 /** Decisions the driving adapter must act on, in emission order. */
 export type WorkerLivenessAction =
-  /** Worker left its scope; the adapter reaps any in-flight inspector (run.sh:1914-1917). */
+  /** Worker left its scope; the adapter reaps any in-flight inspector (run-legacy.sh:1748-1751). */
   | { readonly _tag: "worker-inactive" }
   | { readonly _tag: "stop-worker"; readonly reason: string }
-  /** Inspector exceeded its budget; the adapter kills it and the machine reaps rc 124 (run.sh:1948-1951). */
+  /** Inspector exceeded its budget; the adapter kills it and the machine reaps rc 124 (run-legacy.sh:1782-1785). */
   | { readonly _tag: "force-stop-inspector" }
   | { readonly _tag: "launch-inspector"; readonly timeoutSeconds: number }
   | { readonly _tag: "emit"; readonly event: WorkerLivenessEvent };
 
 interface InspectorInFlight {
   readonly startedAt: number;
-  /** Progress generation captured at launch (run.sh:1612). */
+  /** Progress generation captured at launch (run-legacy.sh:1446). */
   readonly generation: number;
   readonly processFingerprint: string;
   readonly repoFingerprint: string;
@@ -208,7 +208,7 @@ export interface WorkerLivenessState {
   readonly repoHash: string | null;
   readonly nextInspectAt: number;
   readonly nextRepoProbeAt: number;
-  /** Increments on every progress tick; makes a two-step stop safe (run.sh:1945). */
+  /** Increments on every progress tick; makes a two-step stop safe (run-legacy.sh:1779). */
   readonly generation: number;
   readonly deadlineAt: number | null;
   readonly inspector: InspectorInFlight | null;
@@ -220,7 +220,7 @@ export interface WorkerLivenessTick {
   readonly actions: ReadonlyArray<WorkerLivenessAction>;
 }
 
-/** `liveness_start` (run.sh:1876-1894). */
+/** `liveness_start` (run-legacy.sh:1710-1728). */
 export const startWorkerLiveness = (input: {
   readonly worker: string;
   readonly child: string;
@@ -248,7 +248,7 @@ export const startWorkerLiveness = (input: {
 });
 
 /**
- * `bounded_delay` (run.sh:1294-1300): a non-positive-integer request falls
+ * `bounded_delay` (run-legacy.sh:1128-1134): a non-positive-integer request falls
  * back to the idle threshold, then clamps into [min, max].
  */
 export const boundedInspectDelay = (
@@ -277,15 +277,15 @@ const INSPECTOR_RESULT_KEYS = new Set([
 ]);
 
 /**
- * `valid_inspector_decision` (run.sh:1629-1643). Every rule is required; any
+ * `valid_inspector_decision` (run-legacy.sh:1463-1477). Every rule is required; any
  * violation rejects the result as malformed.
  */
 export const parseInspectorDecision = (
   result: InspectorResultEvidence,
   config: WorkerLivenessConfig,
 ): InspectorDecision | null => {
-  if (result.overflowed) return null; // run.sh:1630
-  if (result.byteSize > config.inspectorResultBytes) return null; // run.sh:1631
+  if (result.overflowed) return null; // run-legacy.sh:1464
+  if (result.byteSize > config.inspectorResultBytes) return null; // run-legacy.sh:1465
   let value: unknown;
   try {
     value = JSON.parse(result.text);
@@ -295,21 +295,21 @@ export const parseInspectorDecision = (
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
-  if (!keys.every((key) => INSPECTOR_RESULT_KEYS.has(key))) return null; // run.sh:1635
+  if (!keys.every((key) => INSPECTOR_RESULT_KEYS.has(key))) return null; // run-legacy.sh:1469
   if (!("decision" in record) || !("confidence" in record) || !("rationale" in record)) {
-    return null; // run.sh:1636
+    return null; // run-legacy.sh:1470
   }
   const { decision, confidence, rationale, next_check_seconds: nextCheck } = record;
-  if (decision !== "continue" && decision !== "stop" && decision !== "uncertain") return null; // run.sh:1637
-  if (confidence !== "high" && confidence !== "medium" && confidence !== "low") return null; // run.sh:1638
-  if (typeof rationale !== "string" || !/\S/.test(rationale)) return null; // run.sh:1639
-  if ([...rationale].length > 240) return null; // jq length counts codepoints (run.sh:1639)
+  if (decision !== "continue" && decision !== "stop" && decision !== "uncertain") return null; // run-legacy.sh:1471
+  if (confidence !== "high" && confidence !== "medium" && confidence !== "low") return null; // run-legacy.sh:1472
+  if (typeof rationale !== "string" || !/\S/.test(rationale)) return null; // run-legacy.sh:1473
+  if ([...rationale].length > 240) return null; // jq length counts codepoints (run-legacy.sh:1473)
   if (nextCheck !== undefined) {
     if (typeof nextCheck !== "number" || !Number.isInteger(nextCheck) || nextCheck <= 0) {
-      return null; // run.sh:1640
+      return null; // run-legacy.sh:1474
     }
   }
-  if (decision === "stop" && nextCheck !== undefined) return null; // run.sh:1641
+  if (decision === "stop" && nextCheck !== undefined) return null; // run-legacy.sh:1475
   return {
     decision,
     confidence,
@@ -320,13 +320,13 @@ export const parseInspectorDecision = (
 
 const uncertainReason = (rc: number, config: WorkerLivenessConfig): string =>
   rc === 124
-    ? `inspector timed out after ${config.inspectorTimeoutSeconds}s` // run.sh:1814
-    : `inspector failed with rc=${rc}`; // run.sh:1815
+    ? `inspector timed out after ${config.inspectorTimeoutSeconds}s` // run-legacy.sh:1648
+    : `inspector failed with rc=${rc}`; // run-legacy.sh:1649
 
 /**
  * One supervision tick: `supervise_workers` for a single worker
- * (run.sh:1909-1960), with the inspector reap inlined from `reap_inspector`
- * (run.sh:1801-1874). Rule order is part of the parity contract.
+ * (run-legacy.sh:1743-1794), with the inspector reap inlined from `reap_inspector`
+ * (run-legacy.sh:1635-1708). Rule order is part of the parity contract.
  */
 export const tickWorkerLiveness = (
   state: WorkerLivenessState,
@@ -339,7 +339,7 @@ export const tickWorkerLiveness = (
     actions.push({ _tag: "emit", event });
   };
 
-  // 1. Worker not active: clear inspector state and skip (run.sh:1914-1917).
+  // 1. Worker not active: clear inspector state and skip (run-legacy.sh:1748-1751).
   if (!evidence.signals.isActive) {
     const hadInspector = state.inspector !== null;
     return {
@@ -348,7 +348,7 @@ export const tickWorkerLiveness = (
     };
   }
 
-  // 2. Absolute deadline (run.sh:1918-1923).
+  // 2. Absolute deadline (run-legacy.sh:1752-1757).
   if (state.deadlineAt !== null && now >= state.deadlineAt) {
     return {
       state,
@@ -356,14 +356,14 @@ export const tickWorkerLiveness = (
     };
   }
 
-  // 3. Progress from signal deltas (run.sh:1924-1932).
+  // 3. Progress from signal deltas (run-legacy.sh:1758-1766).
   const outputDelta = evidence.signals.outputBytes - state.lastOutputBytes;
   const cpuDelta = evidence.signals.cpuUsec - state.lastCpuUsec;
   const ioDelta = evidence.signals.ioBytes - state.lastIoBytes;
   let progress =
     outputDelta > 0 || cpuDelta >= config.cpuProgressUsec || ioDelta >= config.ioProgressBytes;
 
-  // 4. Bounded repository probe, only when quiet and due (run.sh:1933-1938).
+  // 4. Bounded repository probe, only when quiet and due (run-legacy.sh:1767-1772).
   let repoHash = state.repoHash;
   let nextRepoProbeAt = state.nextRepoProbeAt;
   if (!progress && now >= nextRepoProbeAt) {
@@ -382,7 +382,7 @@ export const tickWorkerLiveness = (
     nextRepoProbeAt,
   };
 
-  // 5. Progress clears a pending stop and bumps the generation (run.sh:1941-1946).
+  // 5. Progress clears a pending stop and bumps the generation (run-legacy.sh:1775-1780).
   if (progress) {
     next = {
       ...next,
@@ -393,7 +393,7 @@ export const tickWorkerLiveness = (
     };
   }
 
-  /** `inspection_uncertain` (run.sh:1790-1799). */
+  /** `inspection_uncertain` (run-legacy.sh:1624-1633). */
   const uncertain = (reason: string): WorkerLivenessState => {
     const delay = boundedInspectDelay(config.inspectRetryDelaySeconds, config);
     emit({
@@ -406,7 +406,7 @@ export const tickWorkerLiveness = (
     return { ...next, pendingStop: null, nextInspectAt: now + delay };
   };
 
-  // 6. Inspector in flight: force rc 124 past its timeout, then reap (run.sh:1947-1954).
+  // 6. Inspector in flight: force rc 124 past its timeout, then reap (run-legacy.sh:1781-1788).
   if (next.inspector !== null) {
     const inspector = next.inspector;
     let finished: { readonly rc: number; readonly result: InspectorResultEvidence | null } | null =
@@ -414,28 +414,28 @@ export const tickWorkerLiveness = (
     if (evidence.inspector._tag === "finished") {
       finished = { rc: evidence.inspector.rc, result: evidence.inspector.result };
     } else if (now - inspector.startedAt >= config.inspectorTimeoutSeconds) {
-      actions.push({ _tag: "force-stop-inspector" }); // run.sh:1949-1950
+      actions.push({ _tag: "force-stop-inspector" }); // run-legacy.sh:1783-1784
       finished = { rc: 124, result: null };
     }
     if (finished === null) return { state: next, actions };
 
     next = { ...next, inspector: null };
     if (finished.rc !== 0) {
-      return { state: uncertain(uncertainReason(finished.rc, config)), actions }; // run.sh:1813-1817
+      return { state: uncertain(uncertainReason(finished.rc, config)), actions }; // run-legacy.sh:1647-1651
     }
     const parsed =
       finished.result === null ? null : parseInspectorDecision(finished.result, config);
     if (parsed === null) {
-      return { state: uncertain("inspector returned malformed output"), actions }; // run.sh:1818-1821
+      return { state: uncertain("inspector returned malformed output"), actions }; // run-legacy.sh:1652-1655
     }
 
     if (parsed.decision === "stop" && parsed.confidence === "high") {
-      // run.sh:1827-1862
+      // run-legacy.sh:1661-1696
       if (next.generation !== inspector.generation) {
         return {
           state: uncertain("worker made progress while inspection was running; stale stop ignored"),
           actions,
-        }; // run.sh:1828-1831
+        }; // run-legacy.sh:1662-1665
       }
       const currentProcessFingerprint = evidence.processFingerprint();
       const currentRepoFingerprint = evidence.probeRepository();
@@ -450,16 +450,16 @@ export const tickWorkerLiveness = (
             "worker fingerprint changed during inspection; stop confirmation cleared",
           ),
           actions,
-        }; // run.sh:1832-1838
+        }; // run-legacy.sh:1666-1672
       }
       const pending = next.pendingStop;
       const pendingMatches =
         pending !== null &&
         pending.processFingerprint === inspector.processFingerprint &&
         pending.repoFingerprint === inspector.repoFingerprint &&
-        pending.generation === inspector.generation; // run.sh:1839-1844
+        pending.generation === inspector.generation; // run-legacy.sh:1673-1678
       if (!pendingMatches) {
-        const delay = boundedInspectDelay(config.inspectMinDelaySeconds, config); // run.sh:1849
+        const delay = boundedInspectDelay(config.inspectMinDelaySeconds, config); // run-legacy.sh:1683
         emit({
           type: "inspection-stop-pending",
           worker: next.worker,
@@ -478,7 +478,7 @@ export const tickWorkerLiveness = (
             },
           },
           actions,
-        }; // run.sh:1845-1855
+        }; // run-legacy.sh:1679-1689
       }
       emit({
         type: "inspection-stop",
@@ -492,11 +492,11 @@ export const tickWorkerLiveness = (
           ...actions,
           { _tag: "stop-worker", reason: `inspector requested stop: ${parsed.rationale}` },
         ],
-      }; // run.sh:1856-1862
+      }; // run-legacy.sh:1690-1696
     }
 
     if (parsed.decision === "continue") {
-      // run.sh:1863-1870
+      // run-legacy.sh:1697-1704
       const delay = boundedInspectDelay(parsed.nextCheckSeconds, config);
       emit({
         type: "inspection-continue",
@@ -511,7 +511,7 @@ export const tickWorkerLiveness = (
       };
     }
 
-    // stop:medium, stop:low and uncertain:* all keep the worker alive (run.sh:1871).
+    // stop:medium, stop:low and uncertain:* all keep the worker alive (run-legacy.sh:1705).
     return {
       state: uncertain(
         `decision=${parsed.decision} confidence=${parsed.confidence}: ${parsed.rationale}`,
@@ -520,7 +520,7 @@ export const tickWorkerLiveness = (
     };
   }
 
-  // 7. Launch one inspector when idle past the threshold (run.sh:1955-1958).
+  // 7. Launch one inspector when idle past the threshold (run-legacy.sh:1789-1792).
   const idle = now - next.lastProgressAt;
   if (
     !evidence.providerFallbackPending &&
@@ -533,9 +533,9 @@ export const tickWorkerLiveness = (
       child: next.child,
       idleSeconds: idle,
       elapsedSeconds: now - next.startedAt,
-    }); // run.sh:1590-1592
+    }); // run-legacy.sh:1424-1426
     if (!config.inspectorSupported) {
-      return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions }; // run.sh:1593-1596
+      return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions }; // run-legacy.sh:1427-1430
     }
     next = {
       ...next,
@@ -545,14 +545,14 @@ export const tickWorkerLiveness = (
         processFingerprint: evidence.processFingerprint(),
         repoFingerprint: evidence.probeRepository(),
       },
-    }; // run.sh:1597-1598, 1611-1612
+    }; // run-legacy.sh:1431-1432, 1611-1612
     actions.push({ _tag: "launch-inspector", timeoutSeconds: config.inspectorTimeoutSeconds });
     emit({
       type: "inspection-started",
       worker: next.worker,
       child: next.child,
       timeoutSeconds: config.inspectorTimeoutSeconds,
-    }); // run.sh:1625-1626
+    }); // run-legacy.sh:1459-1460
   }
 
   return { state: next, actions };

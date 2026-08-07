@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNNER="$SKILL_DIR/run.sh"
+RUNNER="$SKILL_DIR/run-legacy.sh" # legacy engine: the shim (run.sh) execs the shared core by default
 TMP_ROOT="$(cd "$(mktemp -d /var/tmp/cook-epic-parallel-siblings-test.XXXXXX)" && pwd -P)"
 trap '[ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ] || rm -rf "$TMP_ROOT"' EXIT
 

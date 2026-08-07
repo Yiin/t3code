@@ -11,7 +11,7 @@ import { EpicRunLock, EpicRunLockHeldError, type EpicRunLockLease } from "../por
 import { layer, makeLayer } from "./NodeEpicRunLock.ts";
 
 const repositoryRoot = NodePath.resolve(import.meta.dirname, "../../../..");
-const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run.sh");
+const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run-legacy.sh");
 const requiredCommands = ["bash", "flock", "git", "jq", "setsid", "sha256sum", "timeout"];
 const unsupportedReason =
   !NodeFS.existsSync("/proc/self/stat") ||

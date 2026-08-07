@@ -1,8 +1,8 @@
 /**
  * Optional systemd scope governance for epic workers.
  *
- * Ported from the terminal coordinator (`skills/cook-epic/run.sh`, resource
- * governance at run.sh:929-956 and `fleet_run` at run.sh:958-970), following
+ * Ported from the terminal coordinator (`skills/cook-epic/run-legacy.sh`, resource
+ * governance at run-legacy.sh:763-790 and `fleet_run` at run-legacy.sh:792-804), following
  * the supervision research verdict on t3code-06s.20: each worker leaves the
  * coordinator's cgroup for a named scope under the machine-global
  * `cook-epic.slice`, so the interactive session always wins CPU contention.
@@ -17,7 +17,7 @@
  * spawn proceeds unwrapped. The one fatal case is an identity collision — a
  * pre-existing scope matching this run's identity means a crashed run's
  * workers (or a live identity clash) must be reconciled, mirroring
- * run.sh:943-947.
+ * run-legacy.sh:777-781.
  */
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
@@ -29,10 +29,10 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { ProcessRunner } from "./processRunner.ts";
 
-/** run.sh passes `--slice=cook-epic`; systemd resolves it to cook-epic.slice. */
+/** run-legacy.sh passes `--slice=cook-epic`; systemd resolves it to cook-epic.slice. */
 export const WORKER_SCOPE_SLICE = "cook-epic";
 export const WORKER_SCOPE_SLICE_UNIT = "cook-epic.slice";
-/** Defaults mirror run.sh `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_MEMORY_HIGH`. */
+/** Defaults mirror run-legacy.sh `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_MEMORY_HIGH`. */
 export const WORKER_SCOPE_CPU_WEIGHT = 50;
 export const WORKER_SCOPE_MEMORY_HIGH = "60%";
 
@@ -48,7 +48,7 @@ export interface WorkerScopeIdentity {
 /**
  * The run-identity hash that keeps scope names unique without collapsing
  * distinct repositories or run paths onto a lossy basename. NUL separators
- * make the tuple unambiguous (run.sh:452-457).
+ * make the tuple unambiguous (run-legacy.sh:286-291).
  */
 export const deriveWorkerScopeId = (identity: WorkerScopeIdentity): string =>
   NodeCrypto.createHash("sha256")
@@ -61,11 +61,11 @@ export const deriveWorkerScopeId = (identity: WorkerScopeIdentity): string =>
 const sanitizeUnitComponent = (worker: string): string =>
   worker.replaceAll(/[^a-zA-Z0-9_.-]/g, "-");
 
-/** run.sh `worker_unit` (run.sh:1302): `cook-epic-<scopeId>-<worker>.scope`. */
+/** run.sh `worker_unit` (run-legacy.sh:1136): `cook-epic-<scopeId>-<worker>.scope`. */
 export const workerScopeUnitName = (scopeId: string, worker: string): string =>
   `cook-epic-${scopeId}-${sanitizeUnitComponent(worker)}.scope`;
 
-/** A pre-existing scope already uses this run identity (run.sh:943-947). */
+/** A pre-existing scope already uses this run identity (run-legacy.sh:777-781). */
 export class WorkerScopeCollisionError extends Schema.TaggedErrorClass<WorkerScopeCollisionError>()(
   "WorkerScopeCollisionError",
   {
@@ -102,7 +102,7 @@ export const prepareWorkerScope = Effect.fn("workerScope.prepare")(function* (
   }
   const runner = yield* ProcessRunner;
 
-  // The probe mirrors run.sh:941-942: `systemd-run --user --scope --quiet --
+  // The probe mirrors run-legacy.sh:775-776: `systemd-run --user --scope --quiet --
   // true` must succeed, which covers both a missing binary and a missing user
   // manager.
   const probe = yield* runner
@@ -175,7 +175,7 @@ export const prepareWorkerScope = Effect.fn("workerScope.prepare")(function* (
 });
 
 /**
- * Wrap a worker spawn in its named scope (run.sh `fleet_run`, run.sh:958-970).
+ * Wrap a worker spawn in its named scope (run.sh `fleet_run`, run-legacy.sh:792-804).
  * The unit name is the ownership seam: it lets a supervisor later ask systemd
  * whether this exact worker is alive and stop it rather than orphan it.
  */

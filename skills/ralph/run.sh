@@ -193,7 +193,7 @@ if [ "$HARNESS" = codex ]; then
 fi
 
 # --------------------------------------------------------------- run lock ----
-# MIRRORED BLOCK — cook-epic/run.sh and ralph/run.sh carry an identical copy.
+# MIRRORED BLOCK — cook-epic/run-legacy.sh and ralph/run.sh carry an identical copy.
 # Both runners are standalone, copyable single scripts with no library to
 # source, so this is duplicated on purpose: edit both or neither.
 #

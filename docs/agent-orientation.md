@@ -1,7 +1,7 @@
 # Agent orientation
 
 Operational facts for agents working in this repo. `cook-epic` splices this file
-into every worker prompt (`skills/cook-epic/run.sh:2011-2024` prefers it over
+into every worker prompt (`skills/cook-epic/run-legacy.sh:2016-2025` prefers it over
 `AGENTS.md`). Keep it short and literal.
 
 ## Check commands
@@ -38,12 +38,17 @@ call a change done. Do not assume CI will catch anything.
 ## Epic runner
 
 The server runner is a thin adapter over the shared loop in `packages/epic-core`;
-the terminal's `t3 epic local` entry uses the same core. `run.sh` remains the
-canonical terminal coordinator until it is reduced to a shim.
+the terminal's `t3 epic cook` entry uses the same core. `run.sh` is now a shim
+that execs `t3 epic cook`; the legacy Bash coordinator survives one release as
+`run-legacy.sh` behind `COOKEPIC_CORE=legacy`.
 
-- `skills/cook-epic/run.sh` (3238 lines) — the terminal coordinator. This copy is
-  canonical; `skills/install.sh` symlinks it into `~/.agents/skills`. Edit it
-  here, then run `./skills/install.sh`. Never edit the installed symlink target.
+- `skills/cook-epic/run.sh` (189 lines) — the terminal shim: usage validation,
+  harness detection, t3 entrypoint resolution, COOKEPIC\_\* mapping, exec. This
+  copy is canonical; `skills/install.sh` symlinks it into `~/.agents/skills`.
+  Edit it here, then run `./skills/install.sh`. Never edit the installed
+  symlink target.
+- `skills/cook-epic/run-legacy.sh` — the deprecated Bash coordinator, removed
+  by t3code-06s.42 after one release. Do not add features here.
 - `skills/cook-epic/SKILL.md` — the terminal coordinator's contract.
 - `packages/epic-core` — the shared loop, policy, ports, and conformance core.
 - `apps/server/src/runner/Layers/EpicRunner.ts` — the server adapter: lifecycle
@@ -55,13 +60,13 @@ canonical terminal coordinator until it is reduced to a shim.
   the outcome kinds.
 - `packages/epic-core/src/providerFallback.ts` — claude to codex to kimi.
 - `packages/epic-core/src/ports/EpicRunLock.ts` — the run lock port, shared with
-  `run.sh`. Both owners take the same file.
+  `run-legacy.sh`. Both owners take the same file.
 - `packages/epic-core/src/EpicRunPreflight.ts` — blockers and warnings. The lock
   is observed before all other checks; parallel mode warns on untracked files,
   exempts clean registered nested worktrees, and blocks integration leftovers.
 - `packages/epic-core/src/workerLiveness.ts` — the pure per-worker liveness
   state machine (progress signals, repo probe, inspector stop gating), fed by
-  `ports/WorkerEvidence.ts`. Ported from `run.sh` `supervise_workers`.
+  `ports/WorkerEvidence.ts`. Ported from `run-legacy.sh` `supervise_workers`.
 - `packages/epic-core/src/workerScope.ts` — optional systemd scope governance
   for worker spawns (named scopes under `cook-epic.slice`, CPUWeight and
   MemoryHigh only). Fail-soft except for a run-identity collision. Server runs

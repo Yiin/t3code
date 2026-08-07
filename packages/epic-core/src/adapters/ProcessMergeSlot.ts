@@ -7,7 +7,7 @@ import { MergeQueuePortError, type MergeSlotShape } from "../ports/MergeQueue.ts
 
 const isMergeQueuePortError = Schema.is(MergeQueuePortError);
 
-/** Nonblocking bd merge-slot adapter. Terminal parity: `run.sh:3078-3084,3234`. */
+/** Nonblocking bd merge-slot adapter. Terminal parity: `run-legacy.sh:2912-2918,3234`. */
 export const makeProcessMergeSlot = (input: {
   readonly repositoryPath: string;
   readonly processRunner: ProcessRunner["Service"];

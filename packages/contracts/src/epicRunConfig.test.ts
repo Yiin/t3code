@@ -13,7 +13,7 @@ const encodeConfig = Schema.encodeSync(EpicRunConfig);
 const decodeOverride = Schema.decodeUnknownSync(EpicRunConfigOverride);
 
 const DEFAULT_CONFIG = {
-  engine: "legacy",
+  engine: "core",
   budget: { usd: null },
   gate: { command: null, disabled: false },
   supervision: {

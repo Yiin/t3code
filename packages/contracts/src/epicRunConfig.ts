@@ -151,7 +151,7 @@ const ServerConfig = Schema.Struct({
 });
 
 export const EpicRunConfig = Schema.Struct({
-  engine: defaultTo(EpicRunEngine, "legacy"),
+  engine: defaultTo(EpicRunEngine, "core"),
   budget: defaultStruct(BudgetConfig),
   gate: defaultStruct(GateConfig),
   supervision: defaultStruct(SupervisionConfig),

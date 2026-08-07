@@ -211,7 +211,7 @@ export const layer = Layer.effect(
         const warnings: Array<EpicRunPreflightWarning> = [];
 
         // The run lock is observed BEFORE the ordinary preflight, mirroring
-        // run.sh:676-685: a live sequential holder legitimately has a dirty
+        // run-legacy.sh:510-519: a live sequential holder legitimately has a dirty
         // checkout, so a contender must report the held lock rather than fail
         // on the holder's dirtiness.
         const held = yield* lock
@@ -275,10 +275,10 @@ export const layer = Layer.effect(
           }
         } else {
           // Parallel workers commit in their own worktrees and the main
-          // checkout is only ever fast-forwarded (run.sh:694-697): tracked
+          // checkout is only ever fast-forwarded (run-legacy.sh:528-531): tracked
           // modifications still block, untracked files only warn, and a clean
           // registered nested worktree must not make the checkout look dirty
-          // (run.sh registered_nested_worktree_dirty /
+          // (run-legacy.sh registered_nested_worktree_dirty /
           // sequential_untracked_paths).
           const worktreeList = yield* runGit(input.workspaceRoot, [
             "worktree",
@@ -321,7 +321,7 @@ export const layer = Layer.effect(
           }
 
           // A leftover integration branch or worktree from a crashed parallel
-          // run must be reconciled, not silently reused (run.sh:1039-1047).
+          // run must be reconciled, not silently reused (run-legacy.sh:873-881).
           const branchList = yield* runGit(input.workspaceRoot, [
             "branch",
             "--list",

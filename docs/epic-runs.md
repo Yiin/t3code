@@ -9,13 +9,15 @@ state and launches work; it does not keep a second copy of issue status.
 | State                                         | Location                                                                                                    | Owner                                 |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------- |
 | Issue status, claims, dependencies, and notes | The repository's `.beads` database                                                                          | Workers using `bd`                    |
-| Commits and branches                          | Git; parallel cook-epic workers use `epic/<child-id>` branches and worktrees                                | Workers and cook-epic                 |
+| Commits and branches                          | Git; parallel workers (legacy terminal engine, server runs) use `epic/<child-id>` branches and worktrees    | Workers and cook-epic                 |
 | Loop prompt and reports                       | A Ralph `RUN_DIR` under `/var/tmp`, including `prompt.md`, `mailbox.jsonl`, `summary.md`, and `iter-N.json` | Ralph                                 |
 | Epic run lock                                 | `<repo>/.beads/run-lock.<epic-id>.json`                                                                     | The active terminal or T3 Code runner |
 | T3 Code run recovery state                    | `epic_runs` rows in `~/.t3/userdata/state.sqlite`                                                           | T3 Code server                        |
 
-The branch and worktree rules come from
-[`skills/cook-epic/SKILL.md:14-20`](../skills/cook-epic/SKILL.md#L14-L20).
+The branch and worktree rules live in
+[`skills/cook-epic/SKILL.md`](../skills/cook-epic/SKILL.md) under **How it
+works** (Isolation and Landing); they describe the legacy terminal engine and
+the server runner's parallel loop.
 Ralph's run artifacts are listed in
 [`skills/ralph/SKILL.md:17-21`](../skills/ralph/SKILL.md#L17-L21).
 The server derives `state.sqlite` in
@@ -38,8 +40,14 @@ own the epic run lock and is not an epic mode to switch into or out of.
 
 ## Engine selection
 
+The default engine is `core`. The terminal `run.sh` is a shim that validates
+the launch and execs `t3 epic cook`; the hosted runner drives the same shared
+core. The deprecated Bash coordinator (`skills/cook-epic/run-legacy.sh`) stays
+reachable for one release through `COOKEPIC_CORE=legacy` (or `0`) and prints a
+deprecation notice on every start.
+
 Set `engine` in `.t3code/epic-run.json` or in a run input. The default is
-`legacy`. Config layers apply in this order, with the last value winning:
+`core`. Config layers apply in this order, with the last value winning:
 
 1. Built-in defaults.
 2. `.t3code/epic-run.json` from the base checkout.
@@ -61,10 +69,11 @@ Shadow core is observation-only. It consumes each legacy iteration's head,
 worktree fingerprint, child status, and classified outcome. It does not start
 agents, write Beads, change Git, run gates, or push.
 
-The selector is persisted before adapter migration. The hosted runner still
-uses its legacy loop. `t3 epic cook` is the explicit core entry point. The Bash
-adapter still uses its existing `COOKEPIC_CORE` delegation switch. Later adapter
-migration work will route these entry points from the persisted selector.
+The selector is persisted on the run for provenance and rollout auditing.
+Entry points choose the adapter themselves: `run.sh` and `t3 epic cook` run
+the shared core, the hosted runner runs the same core, and
+`COOKEPIC_CORE=legacy` selects the legacy terminal coordinator for one more
+release.
 
 Config is strict. An unknown engine value rejects the launch like any other
 invalid config value. It does not silently select a different engine.
@@ -106,9 +115,11 @@ sequence is structural drift and makes the command fail. Changes only to
 Only one runner may own an epic. Epic-targeted `ralph`, `cook-epic`, and the T3
 Code server runner use the same run-lock file. If the lock is live, the second
 runner reports that the run is already in progress instead of claiming another
-child. The canonical terminal lock behavior is covered by the regression tests
-installed with the `cook-epic` and `ralph` skills; the server integration test
-covers the shared file format and exclusive-create behavior.
+child. `NodeEpicRunLock` in `packages/epic-core` is the shared implementation
+for the terminal core and the hosted runner; the legacy Bash coordinator and
+ralph keep their own holders on the same file. The `run-lock.sh` suite covers
+the legacy holder, and the `NodeEpicRunLock` interop test covers the shared
+file format and exclusive-create behavior across implementations.
 
 ## Lifecycle
 

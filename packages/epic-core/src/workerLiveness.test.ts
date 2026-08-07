@@ -73,7 +73,7 @@ const stopActions = (actions: ReadonlyArray<WorkerLivenessAction>) =>
   actions.filter((action) => action._tag === "stop-worker");
 
 describe("tickWorkerLiveness signal progress", () => {
-  it("counts any output byte delta as progress (run.sh:1930)", () => {
+  it("counts any output byte delta as progress (run-legacy.sh:1764)", () => {
     const { state } = tickWorkerLiveness(
       start(),
       makeEvidence({ now: 10, signals: { outputBytes: 1 } }),
@@ -84,7 +84,7 @@ describe("tickWorkerLiveness signal progress", () => {
     expect(state.nextInspectAt).toBe(10 + CONFIG.idleThresholdSeconds);
   });
 
-  it("counts CPU at exactly 100000 usec as progress, but not below (run.sh:312, 1931)", () => {
+  it("counts CPU at exactly 100000 usec as progress, but not below (run-legacy.sh:146, 1931)", () => {
     const progressed = tickWorkerLiveness(
       start(),
       makeEvidence({ now: 10, signals: { cpuUsec: 100000 } }),
@@ -99,7 +99,7 @@ describe("tickWorkerLiveness signal progress", () => {
     expect(quiet.state.generation).toBe(0);
   });
 
-  it("counts IO at exactly 4096 bytes as progress, but not below (run.sh:313, 1932)", () => {
+  it("counts IO at exactly 4096 bytes as progress, but not below (run-legacy.sh:147, 1932)", () => {
     const progressed = tickWorkerLiveness(
       start(),
       makeEvidence({ now: 10, signals: { ioBytes: 4096 } }),
@@ -116,14 +116,14 @@ describe("tickWorkerLiveness signal progress", () => {
 });
 
 describe("tickWorkerLiveness repository probe", () => {
-  it("does not probe while quiet before repoProbeInterval elapses (run.sh:1934)", () => {
+  it("does not probe while quiet before repoProbeInterval elapses (run-legacy.sh:1768)", () => {
     const probe = { calls: 0 };
     const { state } = tickWorkerLiveness(start(), makeEvidence({ now: 59 }, probe), CONFIG);
     expect(probe.calls).toBe(0);
     expect(state.repoHash).toBeNull();
   });
 
-  it("records a baseline hash on the first probe without counting progress (run.sh:1936)", () => {
+  it("records a baseline hash on the first probe without counting progress (run-legacy.sh:1770)", () => {
     const probe = { calls: 0 };
     const { state } = tickWorkerLiveness(
       start(),
@@ -136,7 +136,7 @@ describe("tickWorkerLiveness repository probe", () => {
     expect(state.nextRepoProbeAt).toBe(60 + CONFIG.repoProbeIntervalSeconds);
   });
 
-  it("counts a changed repo hash as progress and resets the probe interval (run.sh:1936-1937)", () => {
+  it("counts a changed repo hash as progress and resets the probe interval (run-legacy.sh:1770-1771)", () => {
     const first = tickWorkerLiveness(
       start(),
       makeEvidence({ now: 60, repoHash: "main hash=1:1" }),
@@ -152,7 +152,7 @@ describe("tickWorkerLiveness repository probe", () => {
     expect(state.nextRepoProbeAt).toBe(120 + CONFIG.repoProbeIntervalSeconds);
   });
 
-  it("never probes on a tick where the signals already show progress (run.sh:1934)", () => {
+  it("never probes on a tick where the signals already show progress (run-legacy.sh:1768)", () => {
     const probe = { calls: 0 };
     tickWorkerLiveness(
       start(),
@@ -166,7 +166,7 @@ describe("tickWorkerLiveness repository probe", () => {
 describe("tickWorkerLiveness absolute deadline", () => {
   const deadlineConfig: WorkerLivenessConfig = { ...CONFIG, workerTimeoutSeconds: 100 };
 
-  it("stops with the timeout reason once the deadline is reached (run.sh:1918-1923)", () => {
+  it("stops with the timeout reason once the deadline is reached (run-legacy.sh:1752-1757)", () => {
     const { actions } = tickWorkerLiveness(
       start(0, deadlineConfig),
       makeEvidence({ now: 100 }),
@@ -186,7 +186,7 @@ describe("tickWorkerLiveness absolute deadline", () => {
 });
 
 describe("tickWorkerLiveness inspector launch", () => {
-  it("launches one inspector once idle passes the threshold (run.sh:1956-1958)", () => {
+  it("launches one inspector once idle passes the threshold (run-legacy.sh:1790-1792)", () => {
     const { state, actions } = tickWorkerLiveness(start(), makeEvidence({ now: 1800 }), CONFIG);
     expect(actions).toContainEqual({ _tag: "launch-inspector", timeoutSeconds: 120 });
     expect(emitted(actions, "worker-idle")).toEqual([
@@ -215,7 +215,7 @@ describe("tickWorkerLiveness inspector launch", () => {
     expect(actions).toEqual([]);
   });
 
-  it("does not launch while a provider fallback is pending (run.sh:1956)", () => {
+  it("does not launch while a provider fallback is pending (run-legacy.sh:1790)", () => {
     const { actions } = tickWorkerLiveness(
       start(),
       makeEvidence({ now: 1800, providerFallbackPending: true }),
@@ -224,7 +224,7 @@ describe("tickWorkerLiveness inspector launch", () => {
     expect(actions).toEqual([]);
   });
 
-  it("records uncertain without launching under Codex (run.sh:1593-1596)", () => {
+  it("records uncertain without launching under Codex (run-legacy.sh:1427-1430)", () => {
     const codexConfig: WorkerLivenessConfig = { ...CONFIG, inspectorSupported: false };
     const { state, actions } = tickWorkerLiveness(
       start(0, codexConfig),
@@ -254,7 +254,7 @@ describe("tickWorkerLiveness inspector reap", () => {
   const launch = (state: WorkerLivenessState, now = 1800): WorkerLivenessState =>
     tickWorkerLiveness(state, makeEvidence({ now }), CONFIG).state;
 
-  it("forces rc 124 past the inspector timeout, then reaps (run.sh:1948-1951)", () => {
+  it("forces rc 124 past the inspector timeout, then reaps (run-legacy.sh:1782-1785)", () => {
     const launched = launch(start());
     const early = tickWorkerLiveness(
       launched,
@@ -285,7 +285,7 @@ describe("tickWorkerLiveness inspector reap", () => {
     expect(late.state.inspector).toBeNull();
   });
 
-  it("treats any nonzero inspector rc as uncertain (run.sh:1813-1817)", () => {
+  it("treats any nonzero inspector rc as uncertain (run-legacy.sh:1647-1651)", () => {
     const launched = launch(start());
     const { actions } = tickWorkerLiveness(
       launched,
@@ -298,7 +298,7 @@ describe("tickWorkerLiveness inspector reap", () => {
     });
   });
 
-  it("rejects malformed output as uncertain (run.sh:1818-1821)", () => {
+  it("rejects malformed output as uncertain (run-legacy.sh:1652-1655)", () => {
     const launched = launch(start());
     const { actions } = tickWorkerLiveness(
       launched,
@@ -311,7 +311,7 @@ describe("tickWorkerLiveness inspector reap", () => {
     });
   });
 
-  it("schedules the next check from a continue verdict (run.sh:1863-1870)", () => {
+  it("schedules the next check from a continue verdict (run-legacy.sh:1697-1704)", () => {
     const launched = launch(start());
     const { state, actions } = tickWorkerLiveness(
       launched,
@@ -345,7 +345,7 @@ describe("tickWorkerLiveness stop gating", () => {
   const launchAt = (state: WorkerLivenessState, now: number): WorkerLivenessState =>
     tickWorkerLiveness(state, makeEvidence({ now }), CONFIG).state;
 
-  it("never stops on a single stop:high; it records a pending stop (run.sh:1845-1855)", () => {
+  it("never stops on a single stop:high; it records a pending stop (run-legacy.sh:1679-1689)", () => {
     const launched = launchAt(start(), 1800);
     const { state, actions } = tickWorkerLiveness(
       launched,
@@ -373,7 +373,7 @@ describe("tickWorkerLiveness stop gating", () => {
     expect(state.nextInspectAt).toBe(1805 + 60);
   });
 
-  it("stops on a second stop:high whose fingerprints and generation match (run.sh:1839-1862)", () => {
+  it("stops on a second stop:high whose fingerprints and generation match (run-legacy.sh:1673-1696)", () => {
     let state = launchAt(start(), 1800);
     state = tickWorkerLiveness(
       state,
@@ -392,7 +392,7 @@ describe("tickWorkerLiveness stop gating", () => {
     ]);
   });
 
-  it("clears the pending stop when progress lands between two stop:high verdicts (run.sh:1941-1946)", () => {
+  it("clears the pending stop when progress lands between two stop:high verdicts (run-legacy.sh:1775-1780)", () => {
     let state = launchAt(start(), 1800);
     state = tickWorkerLiveness(
       state,
@@ -417,7 +417,7 @@ describe("tickWorkerLiveness stop gating", () => {
     expect(after.pendingStop).toMatchObject({ generation: 1 });
   });
 
-  it("ignores a stop:high whose inspection generation went stale (run.sh:1828-1831)", () => {
+  it("ignores a stop:high whose inspection generation went stale (run-legacy.sh:1662-1665)", () => {
     let state = launchAt(start(), 1800);
     state = tickWorkerLiveness(
       state,
@@ -437,7 +437,7 @@ describe("tickWorkerLiveness stop gating", () => {
     });
   });
 
-  it("clears the pending stop when the process fingerprint changes (run.sh:1832-1838)", () => {
+  it("clears the pending stop when the process fingerprint changes (run-legacy.sh:1666-1672)", () => {
     let state = launchAt(start(), 1800);
     state = tickWorkerLiveness(
       state,
@@ -458,7 +458,7 @@ describe("tickWorkerLiveness stop gating", () => {
     });
   });
 
-  it("never satisfies the stop gate with a probe-timeout repo fingerprint (run.sh:1834)", () => {
+  it("never satisfies the stop gate with a probe-timeout repo fingerprint (run-legacy.sh:1668)", () => {
     let state = tickWorkerLiveness(
       start(),
       makeEvidence({ now: 1800, repoHash: "main hash=probe-timeout" }),
@@ -475,7 +475,7 @@ describe("tickWorkerLiveness stop gating", () => {
   });
 
   it.each(["medium", "low"] as const)(
-    "treats stop:%s as uncertain and keeps the worker alive (run.sh:1871)",
+    "treats stop:%s as uncertain and keeps the worker alive (run-legacy.sh:1705)",
     (confidence) => {
       const launched = launchAt(start(), 1800);
       const { state, actions } = tickWorkerLiveness(
@@ -496,7 +496,7 @@ describe("tickWorkerLiveness stop gating", () => {
   );
 });
 
-describe("parseInspectorDecision (run.sh:1629-1643)", () => {
+describe("parseInspectorDecision (run-legacy.sh:1463-1477)", () => {
   const result = (text: string, overrides = {}) => ({
     text,
     byteSize: text.length,
@@ -579,7 +579,7 @@ describe("parseInspectorDecision (run.sh:1629-1643)", () => {
   });
 });
 
-describe("boundedInspectDelay (run.sh:1294-1300)", () => {
+describe("boundedInspectDelay (run-legacy.sh:1128-1134)", () => {
   it("clamps into [inspectMinDelay, inspectMaxDelay]", () => {
     expect(boundedInspectDelay(30, CONFIG)).toBe(60);
     expect(boundedInspectDelay(500, CONFIG)).toBe(500);
@@ -595,7 +595,7 @@ describe("boundedInspectDelay (run.sh:1294-1300)", () => {
 });
 
 describe("tickWorkerLiveness inactive worker", () => {
-  it("clears inspector state and skips when the worker is not active (run.sh:1914-1917)", () => {
+  it("clears inspector state and skips when the worker is not active (run-legacy.sh:1748-1751)", () => {
     const launched = tickWorkerLiveness(start(), makeEvidence({ now: 1800 }), CONFIG).state;
     expect(launched.inspector).not.toBeNull();
     const { state, actions } = tickWorkerLiveness(

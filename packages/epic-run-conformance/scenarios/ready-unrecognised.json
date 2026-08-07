@@ -1,6 +1,6 @@
 {
   "name": "ready-unrecognised",
-  "description": "A nonempty ready response with only foreign-parent rows fails instead of reporting completion.",
+  "description": "A nonempty ready response with only foreign-parent rows fails instead of reporting completion. Narrowed: server-only; core and terminal applicability is tracked by t3code-06s.41.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",

@@ -1,6 +1,6 @@
 {
   "name": "park-merge-conflict",
-  "description": "A merge conflict parks the branch and creates a merge-fix child.",
+  "description": "A merge conflict parks the branch and creates a merge-fix child. Narrowed to the legacy terminal adapter: the shared core's terminal cook loop is sequential, so this parallel scenario has no core leg; the gap is tracked by t3code-06s.41.",
   "repo": {
     "files": [],
     "detachedHead": false,

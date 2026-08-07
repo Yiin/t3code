@@ -27,7 +27,7 @@ import { EpicRunLock, EpicRunLockHeldError } from "@t3tools/epic-core/ports/Epic
 import * as BeadsStatusBroadcaster from "../src/beads/BeadsStatusBroadcaster.ts";
 
 const repositoryRoot = NodePath.resolve(import.meta.dirname, "../../..");
-const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run.sh");
+const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run-legacy.sh");
 
 const execFile = (
   command: string,

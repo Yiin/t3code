@@ -12,7 +12,7 @@ describe("resolveEpicRunConfig", () => {
       override: null,
       harness: null,
     });
-    expect(result.config.engine).toBe("legacy");
+    expect(result.config.engine).toBe("core");
     expect(result.config.parallel.workers).toBe(3);
     expect(result.violations).toEqual([]);
     expect(Object.keys(result.provenance).toSorted()).toEqual(
@@ -43,7 +43,7 @@ describe("resolveEpicRunConfig", () => {
       file: null,
       environment: null,
       override: null,
-      expected: "legacy",
+      expected: "core",
       source: "default",
     },
     {

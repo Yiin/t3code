@@ -6,7 +6,7 @@
 set -euo pipefail
 
 COOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COOK_RUNNER="$COOK_DIR/run.sh"
+COOK_RUNNER="$COOK_DIR/run-legacy.sh" # legacy engine: the shim (run.sh) execs the shared core by default
 RALPH_RUNNER="$(cd "$COOK_DIR/../ralph" && pwd)/run.sh"
 TMP_ROOT="$(cd "$(mktemp -d /var/tmp/run-lock-test.XXXXXX)" && pwd -P)"
 trap '[ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ] || rm -rf "$TMP_ROOT"' EXIT

@@ -20,7 +20,7 @@ export const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
 export const DEFAULT_INFRA_FAILURE_BUDGET = 5;
 export const DEFAULT_MAX_ITERATIONS = 50;
 
-/** Terminal parity: `skills/cook-epic/run.sh:3219-3222`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:3053-3056`. */
 export const landingDescription = (input: {
   readonly pushEnabled: boolean;
   readonly verified: boolean;
@@ -35,17 +35,17 @@ export const landingDescription = (input: {
   return input.verified ? "gated, landed locally" : "landed unverified locally";
 };
 
-/** Terminal parity: `skills/cook-epic/run.sh:2841-2847`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2675-2681`. */
 export const childBranch = (childId: string): string => `epic/${childId}`;
 
-/** Terminal parity: `skills/cook-epic/run.sh:3011-3056`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2845-2890`. */
 export type MergeParkReason = "conflict" | "gate-failed";
 
-/** Terminal parity: `skills/cook-epic/run.sh:3048`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2882`. */
 export const mergeFixTitle = (branch: string, reason: MergeParkReason): string =>
   `Merge fix: land ${branch} (${reason})`;
 
-/** Terminal parity: `skills/cook-epic/run.sh:2841-2845`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2675-2679`. */
 const MERGE_FIX_TITLE_PATTERN = /^Merge fix: land ([^ ]+) \((conflict|gate-failed)\)$/;
 
 export const parseMergeFixTitle = (
@@ -56,10 +56,10 @@ export const parseMergeFixTitle = (
   return { branch: match[1], reason: match[2] as MergeParkReason };
 };
 
-/** Terminal parity: `skills/cook-epic/run.sh:3051`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2885`. */
 export const parkedBranchKey = (branch: string): string => branch.replaceAll("/", "_");
 
-/** Terminal parity: `skills/cook-epic/run.sh:3029-3047`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2863-2881`. */
 export const mergeFixDescription = (input: {
   readonly childId: string;
   readonly branch: string;
@@ -79,11 +79,11 @@ export const mergeFixDescription = (input: {
   return `${description} Do NOT merge into ${input.baseBranch} yourself.`;
 };
 
-/** Terminal parity: `skills/cook-epic/run.sh:3124`. */
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2958`. */
 export const trialMergeMessage = (branch: string, childId: string): string =>
   `cook-epic: merge ${branch} (${childId})`;
 
-/** Terminal parity: integration branch creation near `skills/cook-epic/run.sh:1039-1047`. */
+/** Terminal parity: integration branch creation near `skills/cook-epic/run-legacy.sh:873-881`. */
 export const INTEGRATION_BRANCH_PREFIX = "cook-epic-integration-";
 export const integrationBranch = (runId: string): string => `${INTEGRATION_BRANCH_PREFIX}${runId}`;
 

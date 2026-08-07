@@ -1,6 +1,6 @@
 {
   "name": "serialized-trial-merge",
-  "description": "Parallel results enter one serialized trial-merge queue.",
+  "description": "Parallel results enter one serialized trial-merge queue. Narrowed to the legacy terminal adapter: the shared core's terminal cook loop is sequential, so this parallel scenario has no core leg; the gap is tracked by t3code-06s.41.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",

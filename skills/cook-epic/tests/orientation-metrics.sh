@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yiin-n7j.6: per-worker orientation metrics (time/tools/tokens before first
 # edit). Part 1 unit-tests orientation_metrics()/append_orientation_summary()
-# in isolation (extracted verbatim from run.sh, so this drifts with the real
+# in isolation (extracted verbatim from run-legacy.sh, so this drifts with the real
 # code rather than a hand-copied duplicate). Part 2 is a fixture end-to-end
 # sequential run confirming the mailbox/summary wiring survives real reaping,
 # including the non-claude harness (orientation:null) and a truncated-artifact
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNNER="$SKILL_DIR/run.sh"
+RUNNER="$SKILL_DIR/run-legacy.sh" # legacy engine: the shim (run.sh) execs the shared core by default
 TMP_ROOT="$(cd "$(mktemp -d /var/tmp/cook-epic-orientation-test.XXXXXX)" && pwd -P)"
 trap '[ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ] || rm -rf "$TMP_ROOT"' EXIT
 
@@ -19,13 +19,13 @@ assert_not_contains() { ! grep -Fq -- "$2" "$1" || fail "expected $1 not to cont
 
 # ---------------------------------------------------- 1. unit: the helper ----
 # Extract the shipped functions verbatim rather than reimplementing them, so
-# this test fails the moment run.sh's behavior drifts from what's asserted here.
+# this test fails the moment run-legacy.sh's behavior drifts from what's asserted here.
 HELPERS="$TMP_ROOT/helpers.sh"
 {
   awk '/^orientation_metrics\(\) \{/,/^}/' "$RUNNER"
   awk '/^append_orientation_summary\(\) \{/,/^}/' "$RUNNER"
 } > "$HELPERS"
-[ -s "$HELPERS" ] || fail 'could not extract orientation_metrics/append_orientation_summary from run.sh'
+[ -s "$HELPERS" ] || fail 'could not extract orientation_metrics/append_orientation_summary from run-legacy.sh'
 # shellcheck source=/dev/null
 source "$HELPERS"
 

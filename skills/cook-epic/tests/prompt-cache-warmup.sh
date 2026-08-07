@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUNNER="$SKILL_DIR/run.sh"
+RUNNER="$SKILL_DIR/run-legacy.sh" # legacy engine: the shim (run.sh) execs the shared core by default
 TMP_ROOT="$(mktemp -d)"
 trap '[ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ] || rm -rf "$TMP_ROOT"' EXIT
 
@@ -89,7 +89,7 @@ run_case() { # <name> <warmup-fails: 0|1>
       COOKEPIC_MODEL=test-model COOKEPIC_PERMISSION_MODE=bypassPermissions \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 \
       COOKEPIC_SPAWN_DELAY=0 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
-  ) >"$root.stdout" 2>&1 || fail "$name: run.sh exited nonzero — see $root.stdout"
+  ) >"$root.stdout" 2>&1 || fail "$name: run-legacy.sh exited nonzero — see $root.stdout"
 
   [ -f "$calls" ] || fail "$name: fake claude was never invoked (no warm-up call happened)"
   local warmup_call
@@ -124,7 +124,7 @@ run_worker_cmd_never_invokes_claude() {
       COOKEPIC_MODEL=test-model COOKEPIC_PERMISSION_MODE=bypassPermissions \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 \
       COOKEPIC_SPAWN_DELAY=0 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
-  ) >"$root.stdout" 2>&1 || fail "worker-cmd: run.sh exited nonzero — see $root.stdout"
+  ) >"$root.stdout" 2>&1 || fail "worker-cmd: run-legacy.sh exited nonzero — see $root.stdout"
   [ ! -f "$calls" ] || fail "worker-cmd: COOKEPIC_WORKER_CMD run invoked the fake claude binary — flag/warm-up leaked into the test-hook path"
 }
 

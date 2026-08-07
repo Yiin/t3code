@@ -83,7 +83,7 @@ export const makeProcessGate = (input: {
         maxOutputBytes,
         outputMode: "truncate",
         truncatedMarker: "",
-        // The terminal gate itself is unbounded (`run.sh:972-986`). Server
+        // The terminal gate itself is unbounded (`run-legacy.sh:806-820`). Server
         // hosting needs a finite process lifetime, so keep the shared lock and
         // environment contract while applying a generous adapter bound.
         timeout: Duration.millis(input.timeoutMs ?? 2 * 60 * 60 * 1_000),

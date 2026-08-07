@@ -542,7 +542,7 @@ export const makeServerPoolVcs = (
   /**
    * The repo's `HEAD`, or `null` when it cannot be read (no repo, no commits,
    * git missing). `null` never counts as movement, mirroring terminal ralph's
-   * `head_after != none` guard (`run.sh:321`).
+   * `head_after != none` guard (`run-legacy.sh:155`).
    */
   headCommit: (cwd: string) =>
     processRunner
@@ -1174,7 +1174,7 @@ export const makeServerMergeDrain = (deps: {
       if (run.config.execution.sequential) return { _tag: "idle" } as const;
       const restoreIntegrationWorktreeAssets = (cwd: string) =>
         Effect.gen(function* () {
-          // Terminal parity: `skills/cook-epic/run.sh:1173-1185,3110-3112`.
+          // Terminal parity: `skills/cook-epic/run-legacy.sh:1007-1019,3110-3112`.
           yield* writeBeadsRedirect(run.cwd, cwd);
           const sourceNodeModules = path.join(run.cwd, "node_modules");
           const targetNodeModules = path.join(cwd, "node_modules");
@@ -1184,7 +1184,7 @@ export const makeServerMergeDrain = (deps: {
           ) {
             yield* fileSystem.symlink(sourceNodeModules, targetNodeModules);
           }
-          // Terminal parity: `skills/cook-epic/run.sh:1164-1169`.
+          // Terminal parity: `skills/cook-epic/run-legacy.sh:998-1003`.
           for (const name of [
             ".env",
             ".env.local",
@@ -2098,7 +2098,7 @@ export const makeAbandonRunningIterations = (deps: {
 
 /**
  * The orientation card spliced into every iteration prompt. Candidate
- * resolution matches the terminal coordinator (`run.sh:2011-2024`): the
+ * resolution matches the terminal coordinator (`run-legacy.sh:1845-1858`): the
  * configured file, then `docs/agent-orientation.md`, then `AGENTS.md`.
  */
 export const makeReadOrientation = (deps: {

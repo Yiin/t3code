@@ -10,7 +10,7 @@ const outputDetail = (output: ProcessRunOutput): string =>
     .join("\n")
     .trim();
 
-/** Process adapter for the single-repository landing operations in `run.sh:3059-3235`. */
+/** Process adapter for the single-repository landing operations in `run-legacy.sh:2893-3069`. */
 export const makeProcessMergeGit = (input: {
   readonly processRunner: ProcessRunner["Service"];
   readonly setupWorktree?: (cwd: string) => Effect.Effect<void, MergeQueuePortError>;
@@ -97,7 +97,7 @@ export const makeProcessMergeGit = (input: {
         Effect.map((output) => output.stdout.trim()),
       ),
     commitsAhead: ({ repositoryPath, baseBranch, branch }) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3092-3100`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2926-2934`.
       Effect.gen(function* () {
         const exists = yield* run({
           operation: "branchExists",
@@ -113,7 +113,7 @@ export const makeProcessMergeGit = (input: {
         return ahead.code === 0 ? Number.parseInt(ahead.stdout.trim(), 10) || 0 : 0;
       }),
     resetHard: (cwd, ref) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3108-3112`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2942-2946`.
       mutate(
         cwd,
         requireSuccess({ operation: "resetHard", cwd, args: ["reset", "--hard", ref] }).pipe(
@@ -121,14 +121,14 @@ export const makeProcessMergeGit = (input: {
         ),
       ),
     clean: (cwd) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3111`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2945`.
       mutate(
         cwd,
         requireSuccess({ operation: "clean", cwd, args: ["clean", "-fdx"] }).pipe(Effect.asVoid),
       ),
     setupWorktree: input.setupWorktree ?? (() => Effect.void),
     trialMerge: ({ cwd, branch, message }) =>
-      // Exact message parity: `skills/cook-epic/run.sh:3124`.
+      // Exact message parity: `skills/cook-epic/run-legacy.sh:2958`.
       mutate(
         cwd,
         run({ operation: "trialMerge", cwd, args: ["merge", "--no-ff", branch, "-m", message] }),
@@ -141,17 +141,17 @@ export const makeProcessMergeGit = (input: {
         ),
       ),
     fastForward: ({ cwd, ref }) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3158-3166`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2992-3000`.
       mutate(cwd, run({ operation: "fastForward", cwd, args: ["merge", "--ff-only", ref] })).pipe(
         Effect.map((output) => ({ landed: output.code === 0, output: outputDetail(output) })),
       ),
     push: ({ cwd, remote, refspec }) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3180-3187`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:3014-3021`.
       mutate(cwd, run({ operation: "push", cwd, args: ["push", remote, refspec] })).pipe(
         Effect.map((output) => ({ pushed: output.code === 0, output: outputDetail(output) })),
       ),
     deleteLocalBranch: (cwd, branch) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3230`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:3064`.
       mutate(
         cwd,
         requireSuccess({
@@ -161,7 +161,7 @@ export const makeProcessMergeGit = (input: {
         }).pipe(Effect.asVoid),
       ),
     deleteRemoteBranch: (cwd, remote, branch) =>
-      // Terminal parity: `skills/cook-epic/run.sh:3231`.
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:3065`.
       mutate(
         cwd,
         requireSuccess({

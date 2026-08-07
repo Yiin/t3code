@@ -104,7 +104,7 @@ describe("conformance scenarios", () => {
   it("maps each terminal event and server iteration field exactly once", () => {
     const repository = NodePath.resolve(packageDirectory, "../..");
     const runner = NodeFS.readFileSync(
-      NodePath.join(repository, "skills/cook-epic/run.sh"),
+      NodePath.join(repository, "skills/cook-epic/run-legacy.sh"),
       "utf8",
     );
     const docs = NodeFS.readFileSync(
