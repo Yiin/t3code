@@ -8,6 +8,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -234,7 +235,16 @@ describe("shared Beads state", () => {
               const streamScope = yield* Scope.make();
               const sawClaim = yield* Deferred.make<void>();
               yield* Stream.runForEach(
-                broadcaster.streamStatus({ workspaceRoot: value.cwd }),
+                // A short poll backstop keeps this bound deterministic: the
+                // production default is 45s, and the fs.watch fast path has an
+                // attach window (between the attach refresh and the watcher
+                // registration) that full-suite load widens past the 10s
+                // await below. The broadcaster observing the terminal update
+                // is the assertion; which signal path delivers it is not.
+                broadcaster.streamStatus(
+                  { workspaceRoot: value.cwd },
+                  { pollInterval: Duration.millis(500) },
+                ),
                 (snapshot) =>
                   issueStatus(snapshot, value.firstId) === "in_progress"
                     ? Deferred.succeed(sawClaim, undefined).pipe(Effect.ignore)
