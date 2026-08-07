@@ -342,6 +342,11 @@ const LOOP_STOP: LoopBoundary = { _tag: "stop" };
 /** How long a resume waits for a dying loop to release the run's own lock. */
 const LOOP_EXIT_WAIT_MS = 5_000;
 
+/**
+ * The loop-policy fields are internal default seeds. A persisted non-default
+ * run config replaces each matching seed when the loop freezes its policy.
+ * Provider degradation lifetime remains a layer-wide launch policy.
+ */
 export interface EpicRunnerLiveOptions {
   readonly iterationTimeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -355,6 +360,100 @@ export interface EpicRunnerLiveOptions {
   readonly maxGraceContinuations?: number;
   readonly providerDegradationTtlMs?: number;
 }
+
+interface EpicRunnerPolicySeed {
+  readonly iterationTimeoutMs: number;
+  readonly pollIntervalMs: number;
+  readonly quietPeriodMs: number;
+  readonly retryBaseDelayMs: number;
+  readonly retryMaxDelayMs: number;
+  readonly maxConsecutiveFailures: number;
+  readonly maxNoCommitStreak: number;
+  readonly infraFailureBudget: number;
+  readonly subagentGraceTimeoutMs: number;
+  readonly maxGraceContinuations: number;
+}
+
+interface EpicRunnerPolicy extends Omit<EpicRunnerPolicySeed, "iterationTimeoutMs"> {
+  /** `null` means the persisted run explicitly disabled the worker timeout. */
+  readonly iterationTimeoutMs: number | null;
+  readonly maxIterations: number;
+}
+
+const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
+  provenance[key] !== undefined && provenance[key] !== "default";
+
+/** Freeze all loop policy from the persisted row that starts this loop. */
+const makeEpicRunnerPolicy = (seed: EpicRunnerPolicySeed, run: EpicRun): EpicRunnerPolicy => {
+  const configured = <Value>(key: string, value: Value, fallback: Value): Value =>
+    hasConfiguredValue(run.configProvenance, key) ? value : fallback;
+  const retryBaseDelayMs = configured(
+    "server.retryBaseDelayMs",
+    run.config.server.retryBaseDelayMs,
+    seed.retryBaseDelayMs,
+  );
+  const retryMaxDelayMs = Math.max(
+    retryBaseDelayMs,
+    configured("server.retryMaxDelayMs", run.config.server.retryMaxDelayMs, seed.retryMaxDelayMs),
+  );
+  const configuredWorkerTimeout = hasConfiguredValue(
+    run.configProvenance,
+    "supervision.workerTimeoutSeconds",
+  )
+    ? run.config.supervision.workerTimeoutSeconds
+    : undefined;
+
+  return Object.freeze({
+    iterationTimeoutMs:
+      configuredWorkerTimeout === undefined
+        ? seed.iterationTimeoutMs
+        : configuredWorkerTimeout === null
+          ? null
+          : configuredWorkerTimeout * 1_000,
+    pollIntervalMs: configured(
+      "server.pollIntervalMs",
+      run.config.server.pollIntervalMs,
+      seed.pollIntervalMs,
+    ),
+    quietPeriodMs: configured(
+      "server.quietPeriodMs",
+      run.config.server.quietPeriodMs,
+      seed.quietPeriodMs,
+    ),
+    retryBaseDelayMs,
+    retryMaxDelayMs,
+    maxConsecutiveFailures: configured(
+      "server.maxConsecutiveFailures",
+      run.config.server.maxConsecutiveFailures,
+      seed.maxConsecutiveFailures,
+    ),
+    maxNoCommitStreak: configured(
+      "server.maxNoCommitStreak",
+      run.config.server.maxNoCommitStreak,
+      seed.maxNoCommitStreak,
+    ),
+    infraFailureBudget: configured(
+      "server.infraFailureBudget",
+      run.config.server.infraFailureBudget,
+      seed.infraFailureBudget,
+    ),
+    subagentGraceTimeoutMs: configured(
+      "server.subagentGraceTimeoutMs",
+      run.config.server.subagentGraceTimeoutMs,
+      seed.subagentGraceTimeoutMs,
+    ),
+    maxGraceContinuations: configured(
+      "server.maxGraceContinuations",
+      run.config.server.maxGraceContinuations,
+      seed.maxGraceContinuations,
+    ),
+    maxIterations: configured(
+      "limits.maxIterations",
+      run.config.limits.maxIterations,
+      run.maxIterations,
+    ),
+  });
+};
 
 const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
   Effect.gen(function* () {
@@ -373,37 +472,34 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const leases = new Map<EpicRunId, EpicRunLockLease>();
     const issueTitleCache = new Map<string, string>();
 
-    const iterationTimeoutMs = Math.max(
+    const seedRetryBaseDelayMs = Math.max(
       1,
-      options?.iterationTimeoutMs ?? DEFAULT_ITERATION_TIMEOUT_MS,
+      options?.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS,
     );
-    const pollIntervalMs = Math.max(1, options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS);
-    const quietPeriodMs = Math.max(1, options?.quietPeriodMs ?? DEFAULT_QUIET_PERIOD_MS);
-    const retryBaseDelayMs = Math.max(1, options?.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS);
-    const retryMaxDelayMs = Math.max(
-      retryBaseDelayMs,
-      options?.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS,
-    );
-    const maxConsecutiveFailures = Math.max(
-      1,
-      options?.maxConsecutiveFailures ?? DEFAULT_MAX_CONSECUTIVE_FAILURES,
-    );
-    const maxNoCommitStreak = Math.max(
-      1,
-      options?.maxNoCommitStreak ?? DEFAULT_MAX_NO_COMMIT_STREAK,
-    );
-    const infraFailureBudget = Math.max(
-      1,
-      options?.infraFailureBudget ?? DEFAULT_INFRA_FAILURE_BUDGET,
-    );
-    const subagentGraceTimeoutMs = Math.max(
-      1,
-      options?.subagentGraceTimeoutMs ?? DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
-    );
-    const maxGraceContinuations = Math.max(
-      1,
-      options?.maxGraceContinuations ?? DEFAULT_MAX_GRACE_CONTINUATIONS,
-    );
+    const policySeed: EpicRunnerPolicySeed = Object.freeze({
+      iterationTimeoutMs: Math.max(1, options?.iterationTimeoutMs ?? DEFAULT_ITERATION_TIMEOUT_MS),
+      pollIntervalMs: Math.max(1, options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS),
+      quietPeriodMs: Math.max(1, options?.quietPeriodMs ?? DEFAULT_QUIET_PERIOD_MS),
+      retryBaseDelayMs: seedRetryBaseDelayMs,
+      retryMaxDelayMs: Math.max(
+        seedRetryBaseDelayMs,
+        options?.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS,
+      ),
+      maxConsecutiveFailures: Math.max(
+        1,
+        options?.maxConsecutiveFailures ?? DEFAULT_MAX_CONSECUTIVE_FAILURES,
+      ),
+      maxNoCommitStreak: Math.max(1, options?.maxNoCommitStreak ?? DEFAULT_MAX_NO_COMMIT_STREAK),
+      infraFailureBudget: Math.max(1, options?.infraFailureBudget ?? DEFAULT_INFRA_FAILURE_BUDGET),
+      subagentGraceTimeoutMs: Math.max(
+        1,
+        options?.subagentGraceTimeoutMs ?? DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
+      ),
+      maxGraceContinuations: Math.max(
+        1,
+        options?.maxGraceContinuations ?? DEFAULT_MAX_GRACE_CONTINUATIONS,
+      ),
+    });
     const providerDegradationTtlMs = Math.max(
       0,
       options?.providerDegradationTtlMs ?? DEFAULT_PROVIDER_DEGRADATION_TTL_MS,
@@ -1019,7 +1115,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * for the case where the provider dies before a turn row ever exists, which
      * would otherwise be indistinguishable from "still starting".
      */
-    const awaitTurnEnd = (threadId: ThreadId, priorTurnId: TurnId | null = null) =>
+    const awaitTurnEnd = (
+      threadId: ThreadId,
+      policy: EpicRunnerPolicy,
+      priorTurnId: TurnId | null = null,
+    ) =>
       Effect.gen(function* () {
         let observedActive = false;
         while (true) {
@@ -1049,7 +1149,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             return;
           }
 
-          yield* Effect.sleep(Duration.millis(pollIntervalMs));
+          yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
         }
       });
 
@@ -1077,7 +1177,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * waiting on them would burn the whole bound for work that no longer
      * exists. Returns whether the drain completed inside the bound.
      */
-    const awaitSubagentDrain = (threadId: ThreadId) =>
+    const awaitSubagentDrain = (threadId: ThreadId, policy: EpicRunnerPolicy) =>
       Effect.gen(function* () {
         while (true) {
           const snapshot = yield* readThreadDetail(threadId);
@@ -1086,10 +1186,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           if (countFreshRunningSubagents(subagents, nowMs) === 0) {
             return;
           }
-          yield* Effect.sleep(Duration.millis(pollIntervalMs));
+          yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
         }
       }).pipe(
-        Effect.timeoutOption(Duration.millis(subagentGraceTimeoutMs)),
+        Effect.timeoutOption(Duration.millis(policy.subagentGraceTimeoutMs)),
         Effect.map(Option.isSome),
       );
 
@@ -1115,6 +1215,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       readonly threadId: ThreadId;
       readonly headBefore: string | null;
       readonly initialWorktreeFingerprint: string | null;
+      readonly policy: EpicRunnerPolicy;
     }): Effect.Effect<IterationSettleResult> =>
       Effect.gen(function* () {
         const settled: IterationSettleResult = { _tag: "settled" };
@@ -1134,7 +1235,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               finalMessageMissing: false,
               finalMessageWaitExhausted: false,
               continuationsUsed: continuationIndex,
-              maxGraceContinuations,
+              maxGraceContinuations: input.policy.maxGraceContinuations,
             });
             if (decision.action === "settle") return settled;
           }
@@ -1152,7 +1253,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               finalMessageMissing: false,
               finalMessageWaitExhausted: false,
               continuationsUsed: continuationIndex,
-              maxGraceContinuations,
+              maxGraceContinuations: input.policy.maxGraceContinuations,
             });
             if (decision.action === "settle") return settled;
           }
@@ -1182,11 +1283,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 finalMessageMissing,
                 finalMessageWaitExhausted,
                 continuationsUsed: continuationIndex,
-                maxGraceContinuations,
+                maxGraceContinuations: input.policy.maxGraceContinuations,
               });
               if (decision.action === "settle") return settled;
             }
-            const finalMessage = yield* readSettledFinalMessage(input.threadId);
+            const finalMessage = yield* readSettledFinalMessage(input.threadId, input.policy);
             const finalAssistantMessage = resolveFinalAssistantMessage(
               finalMessage.snapshot?.thread,
             );
@@ -1207,7 +1308,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             finalMessageMissing,
             finalMessageWaitExhausted,
             continuationsUsed: continuationIndex,
-            maxGraceContinuations,
+            maxGraceContinuations: input.policy.maxGraceContinuations,
           });
           if (decision.action === "settle") {
             if (decision.reason === "continuation-cap") {
@@ -1230,7 +1331,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               continuationIndex,
               freshRunning,
             });
-            const drained = yield* awaitSubagentDrain(input.threadId);
+            const drained = yield* awaitSubagentDrain(input.threadId, input.policy);
             if (!drained) {
               yield* Effect.logWarning("epic.runner.subagent-grace-timeout", {
                 runId: input.run.runId,
@@ -1280,7 +1381,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             createdAt,
           });
-          yield* awaitTurnEnd(input.threadId, priorTurnId);
+          yield* awaitTurnEnd(input.threadId, input.policy, priorTurnId);
         }
       }).pipe(
         Effect.catch((error: EpicRunnerError) =>
@@ -1323,7 +1424,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * something: when even that runs out, the absence has been watched for as
      * long as it is worth watching.
      */
-    const readSettledFinalMessage = (threadId: ThreadId) =>
+    const readSettledFinalMessage = (threadId: ThreadId, policy: EpicRunnerPolicy) =>
       Effect.gen(function* () {
         const read = projectionSnapshotQuery.getThreadDetailSnapshot(threadId).pipe(
           Effect.map(Option.getOrUndefined),
@@ -1340,7 +1441,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         let maxReads = MAX_SETTLE_READS;
         let watchedCompletedTurnWithoutMessage = false;
         for (let attempt = 0; attempt < maxReads; attempt += 1) {
-          yield* Effect.sleep(Duration.millis(quietPeriodMs));
+          yield* Effect.sleep(Duration.millis(policy.quietPeriodMs));
           const current = yield* read;
           const previousMessage = resolveFinalAssistantMessage(previous?.thread);
           const currentMessage = resolveFinalAssistantMessage(current?.thread);
@@ -1373,6 +1474,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       readonly cwd: string;
       readonly headBefore: string | null;
       readonly timedOut: boolean;
+      readonly policy: EpicRunnerPolicy;
     }) =>
       Effect.gen(function* () {
         const headAfter = yield* readHeadCommit(input.cwd);
@@ -1382,7 +1484,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // message for a timeout anyway.
         const settled = input.timedOut
           ? { snapshot: undefined, messageWaitExhausted: false }
-          : yield* readSettledFinalMessage(input.threadId);
+          : yield* readSettledFinalMessage(input.threadId, input.policy);
         const thread = settled.snapshot?.thread;
 
         return classifyIteration({
@@ -1400,6 +1502,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const runIteration = (input: {
       readonly run: EpicRun;
       readonly iterationIndex: number;
+      readonly policy: EpicRunnerPolicy;
     }): Effect.Effect<RunIterationResult, EpicRunnerError> =>
       Effect.gen(function* () {
         const run = input.run;
@@ -1556,8 +1659,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           });
         });
 
-        const settleResult: IterationSettleResult = yield* dispatchTurn.pipe(
-          Effect.flatMap(() => awaitTurnEnd(threadId)),
+        const settleIteration = dispatchTurn.pipe(
+          Effect.flatMap(() => awaitTurnEnd(threadId, input.policy)),
           // A normally-settled turn may still have subagents working because
           // the agent ended its turn early. Drain and resume as many times as
           // the nested workflow needs. One timeout covers the original turn
@@ -1569,13 +1672,21 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               threadId,
               headBefore,
               initialWorktreeFingerprint,
+              policy: input.policy,
             }),
           ),
-          Effect.timeoutOption(Duration.millis(iterationTimeoutMs)),
-          Effect.map(
-            (result): IterationSettleResult =>
-              Option.isNone(result) ? { _tag: "timeout" } : result.value,
-          ),
+        );
+        const boundedIteration =
+          input.policy.iterationTimeoutMs === null
+            ? settleIteration
+            : settleIteration.pipe(
+                Effect.timeoutOption(Duration.millis(input.policy.iterationTimeoutMs)),
+                Effect.map(
+                  (result): IterationSettleResult =>
+                    Option.isNone(result) ? { _tag: "timeout" } : result.value,
+                ),
+              );
+        const settleResult: IterationSettleResult = yield* boundedIteration.pipe(
           Effect.catch((error: EpicRunnerError) =>
             Effect.succeed<IterationSettleResult>({
               _tag: "dispatch-failed",
@@ -1601,6 +1712,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 cwd: run.cwd,
                 headBefore,
                 timedOut: settleResult._tag === "timeout",
+                policy: input.policy,
               });
 
         const finishedAt = yield* nowIso;
@@ -1612,7 +1724,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // Timeout and dispatch-failure paths remain forced stops; the timeout
         // interrupt above always precedes its stop.
         if (settleResult._tag === "settled") {
-          yield* awaitSubagentDrain(threadId);
+          yield* awaitSubagentDrain(threadId, input.policy);
         }
         const normalStop = {
           type: "thread.session.stop",
@@ -1635,7 +1747,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 return Effect.logWarning("epic.runner.session-stop-failed", { cause: error });
               }
               return Effect.gen(function* () {
-                yield* awaitSubagentDrain(threadId);
+                yield* awaitSubagentDrain(threadId, input.policy);
                 yield* dispatchBestEffort("epic.runner.guarded-session-stop-retry-failed", {
                   ...normalStop,
                   commandId: yield* commandId("session-stop-retry"),
@@ -1718,6 +1830,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
+        const initialRun = yield* requireRun(runId);
+        const policy = makeEpicRunnerPolicy(policySeed, initialRun);
         while (true) {
           const run = yield* withTransition(
             Effect.gen(function* () {
@@ -1730,14 +1844,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 });
                 return null;
               }
-              if (current.iterationsDispatched >= current.maxIterations) {
+              if (current.iterationsDispatched >= policy.maxIterations) {
                 liveLoops.delete(runId);
                 yield* saveRun({
                   ...current,
                   status: "done",
                   currentThreadId: null,
                   currentTurnStartedAt: null,
-                  lastError: `max iterations (${current.maxIterations}) reached`,
+                  lastError: `max iterations (${policy.maxIterations}) reached`,
                   updatedAt: yield* nowIso,
                 });
                 return null;
@@ -1752,7 +1866,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             .pipe(Effect.mapError(storeError("getLatestIteration")));
           const iterationIndex = Option.isSome(latest) ? latest.value.iterationIndex + 1 : 0;
 
-          const iterationResult = yield* runIteration({ run, iterationIndex });
+          const iterationResult = yield* runIteration({ run, iterationIndex, policy });
 
           const boundary = yield* withTransition(
             Effect.gen(function* () {
@@ -1849,11 +1963,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 providerFallbackApplied,
                 providerTurnDispatched,
                 limits: {
-                  maxConsecutiveFailures,
-                  maxNoCommitStreak,
-                  infraFailureBudget,
-                  retryBaseDelayMs,
-                  retryMaxDelayMs,
+                  maxConsecutiveFailures: policy.maxConsecutiveFailures,
+                  maxNoCommitStreak: policy.maxNoCommitStreak,
+                  infraFailureBudget: policy.infraFailureBudget,
+                  retryBaseDelayMs: policy.retryBaseDelayMs,
+                  retryMaxDelayMs: policy.retryMaxDelayMs,
                 },
               });
               yield* saveRun({
@@ -1985,9 +2099,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       provenance: run.configProvenance,
       violations: [],
     });
-
-    const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
-      provenance[key] !== undefined && provenance[key] !== "default";
 
     const applyLegacyIterationCap = (
       configSnapshot: EpicRunConfigSnapshot,
@@ -2464,8 +2575,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
         yield* Effect.logInfo("epic.runner.started", {
           resumedRuns: running.length,
-          iterationTimeoutMs,
-          maxConsecutiveFailures,
+          iterationTimeoutMs: policySeed.iterationTimeoutMs,
+          maxConsecutiveFailures: policySeed.maxConsecutiveFailures,
         });
       }).pipe(
         Effect.catch((error: EpicRunnerError) =>

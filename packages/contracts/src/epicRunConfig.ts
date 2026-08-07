@@ -442,7 +442,7 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     key: "server.infraFailureBudget",
     scope: "server-only",
     label: "Infrastructure failure budget",
-    doc: "Absorbs infrastructure failures before the hosted run fails.",
+    doc: "Allows more infrastructure failures than ordinary child failures before the hosted run stops.",
     control: "number",
   },
   {

@@ -140,6 +140,8 @@ interface ScriptedIteration {
   readonly streaming?: boolean;
   /** Leave the turn hanging so the iteration has to be cancelled or time out. */
   readonly stall?: boolean;
+  /** Keep the turn active for this long before projecting its result. */
+  readonly settleDelayMs?: number;
   /**
    * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
    * that report no assistant message before the scripted one appears —
@@ -325,7 +327,7 @@ function createHarness(input: {
       }
 
       // A beat of "the turn is live" before it settles.
-      yield* Effect.sleep("2 millis");
+      yield* Effect.sleep(`${scripted.settleDelayMs ?? 2} millis`);
 
       head = scripted.head;
       if (scripted.worktreeFingerprint !== undefined) {
@@ -638,7 +640,8 @@ function createHarness(input: {
         return {
           stdout:
             request.command === "bd"
-              ? (input.readyOutput ?? `[{"id":"child-${turnsStarted + 1}","parent":"epic-1"}]`)
+              ? (input.readyOutput ??
+                `[{"id":"child-${turnsStarted + 1}","parent":"${request.args[2] ?? "epic-1"}"}]`)
               : request.args[0] === "status"
                 ? worktreeFingerprint
                 : `${head}\n`,
@@ -2270,7 +2273,8 @@ describe("EpicRunner", () => {
       script: [failing, failing, failing, { text: "should never run", head: "head-9" }],
       // Below the failure count so exhaustion is observable; the default
       // budget (5) would have kept retrying past all three.
-      options: { infraFailureBudget: 3, maxConsecutiveFailures: 1 },
+      configFileResult: loadedConfigFile({ server: { infraFailureBudget: 3 } }),
+      options: { maxConsecutiveFailures: 1 },
     });
 
     return Effect.gen(function* () {
@@ -2294,6 +2298,95 @@ describe("EpicRunner", () => {
         harness.store.iterations.map((iteration) => iteration.failureReason),
         ["infra:turn-error", "infra:turn-error", "infra:turn-error"],
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps each simultaneous run on its own persisted failure policy", () => {
+    const blocked = { text: "cannot proceed\nRALPH_BLOCKED", head: "head-0" } as const;
+    const harness = createHarness({ script: [blocked, blocked, blocked, blocked] });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const [oneFailureRun, twoFailureRun] = yield* Effect.all(
+        [
+          runner.startRun({
+            epicId: "epic-one-failure",
+            projectId,
+            cwd: "/tmp/epic-runner-repo",
+            prompt: "do one unit of work",
+            orientationFile: null,
+            modelSelection,
+            config: { server: { maxConsecutiveFailures: 1 } },
+          }),
+          runner.startRun({
+            epicId: "epic-two-failures",
+            projectId,
+            cwd: "/tmp/epic-runner-repo",
+            prompt: "do one unit of work",
+            orientationFile: null,
+            modelSelection,
+            config: { server: { maxConsecutiveFailures: 2 } },
+          }),
+        ],
+        { concurrency: "unbounded" },
+      );
+      yield* waitFor(
+        () =>
+          harness.store.runs.get(oneFailureRun.runId)?.status === "failed" &&
+          harness.store.runs.get(twoFailureRun.runId)?.status === "failed",
+      );
+
+      assert.strictEqual(
+        harness.store.iterations.filter((row) => row.runId === oneFailureRun.runId).length,
+        1,
+      );
+      assert.strictEqual(
+        harness.store.iterations.filter((row) => row.runId === twoFailureRun.runId).length,
+        2,
+      );
+      assert.strictEqual(harness.store.runs.get(oneFailureRun.runId)?.consecutiveFailures, 1);
+      assert.strictEqual(harness.store.runs.get(twoFailureRun.runId)?.consecutiveFailures, 2);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps the initial persisted policy after the stored config changes", () => {
+    const blocked = { text: "cannot proceed\nRALPH_BLOCKED", head: "head-0" } as const;
+    const harness = createHarness({
+      script: [{ ...blocked, settleDelayMs: 40 }, blocked, blocked],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-frozen-policy",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        orientationFile: null,
+        modelSelection,
+        config: { server: { maxConsecutiveFailures: 2 } },
+      });
+      yield* waitFor(() => harness.turnsStarted() === 1);
+
+      const active = harness.store.runs.get(run.runId)!;
+      harness.store.runs.set(run.runId, {
+        ...active,
+        config: {
+          ...active.config,
+          server: { ...active.config.server, maxConsecutiveFailures: 1 },
+        },
+        configProvenance: {
+          ...active.configProvenance,
+          "server.maxConsecutiveFailures": "override",
+        },
+      });
+
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      assert.strictEqual(
+        harness.store.iterations.filter((row) => row.runId === run.runId).length,
+        2,
+      );
+      assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 2);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -3405,6 +3498,35 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("disables the layer timeout when persisted worker timeout is explicitly null", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", stall: true }],
+      options: { iterationTimeoutMs: 40, infraFailureBudget: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-no-timeout",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        orientationFile: null,
+        modelSelection,
+        config: { supervision: { workerTimeoutSeconds: null } },
+      });
+      yield* waitFor(() => harness.turnsStarted() === 1);
+      yield* Effect.sleep("80 millis");
+
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "running");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "running");
+
+      yield* runner.cancelRun({ runId: run.runId });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "cancelled");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "cancelled");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("marks an iteration left running by a restart as abandoned and resumes", () => {
     const runId = "run-restart";
     const staleRun: EpicRun = {
@@ -3499,7 +3621,7 @@ describe("EpicRunner", () => {
 
   it.live("stops at the dispatch cap after repeated restart abandonment", () => {
     const runId = EpicRunId.make("run-restart-cap");
-    const currentThreadId = ThreadId.make(`epic-run-${runId}-2`);
+    const currentThreadId = ThreadId.make(`epic-run-${runId}-1`);
     const staleRun: EpicRun = {
       runId,
       epicId: "epic-1",
@@ -3509,11 +3631,18 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
-      ...defaultConfigSnapshot,
+      config: {
+        ...DEFAULT_EPIC_RUN_CONFIG,
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 2 },
+      },
+      configProvenance: {
+        ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+        "limits.maxIterations": "file",
+      },
       originThreadId: null,
       status: "running",
       maxIterations: 3,
-      iterationsDispatched: 3,
+      iterationsDispatched: 2,
       iterationsCompleted: 0,
       currentThreadId,
       currentTurnStartedAt: NOW,
@@ -3524,23 +3653,23 @@ describe("EpicRunner", () => {
       createdAt: NOW,
       updatedAt: NOW,
     };
-    const seedIterations: EpicRunIteration[] = [0, 1, 2].map((iterationIndex) => ({
+    const seedIterations: EpicRunIteration[] = [0, 1].map((iterationIndex) => ({
       runId,
       iterationIndex,
       threadId: ThreadId.make(`epic-run-${runId}-${iterationIndex}`),
       issueId: `child-${iterationIndex}`,
-      turnStatus: iterationIndex === 2 ? "running" : "abandoned",
-      summary: iterationIndex === 2 ? null : "abandoned by server restart",
+      turnStatus: iterationIndex === 1 ? "running" : "abandoned",
+      summary: iterationIndex === 1 ? null : "abandoned by server restart",
       why: null,
-      failureReason: iterationIndex === 2 ? null : "server-restart",
+      failureReason: iterationIndex === 1 ? null : "server-restart",
       startedAt: NOW,
-      finishedAt: iterationIndex === 2 ? null : NOW,
+      finishedAt: iterationIndex === 1 ? null : NOW,
     }));
     const harness = createHarness({
       script: [],
       seedRuns: [staleRun],
       seedIterations,
-      childStatuses: { "child-2": "in_progress" },
+      childStatuses: { "child-1": "in_progress" },
     });
 
     return Effect.gen(function* () {
@@ -3549,10 +3678,11 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
       const capped = harness.store.runs.get(runId)!;
       assert.strictEqual(harness.turnsStarted(), 0);
-      assert.strictEqual(capped.iterationsDispatched, 3);
+      assert.strictEqual(capped.iterationsDispatched, 2);
       assert.strictEqual(capped.iterationsCompleted, 0);
-      assert.strictEqual(harness.store.iterations[2]?.turnStatus, "abandoned");
-      assert.strictEqual(harness.store.iterations[2]?.failureReason, "server-restart");
+      assert.strictEqual(capped.lastError, "max iterations (2) reached");
+      assert.strictEqual(harness.store.iterations[1]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[1]?.failureReason, "server-restart");
     }).pipe(Effect.provide(harness.layer));
   });
 
