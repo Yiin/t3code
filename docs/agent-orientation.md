@@ -57,6 +57,9 @@ canonical terminal coordinator until it is reduced to a shim.
 - `packages/epic-core/src/ports/EpicRunLock.ts` — the run lock port, shared with
   `run.sh`. Both owners take the same file.
 - `packages/epic-core/src/EpicRunPreflight.ts` — blockers and warnings.
+- `packages/epic-core/src/workerLiveness.ts` — the pure per-worker liveness
+  state machine (progress signals, repo probe, inspector stop gating), fed by
+  `ports/WorkerEvidence.ts`. Ported from `run.sh` `supervise_workers`.
 - `apps/server/integration/epicRunnerConformance.integration.test.ts` — runs
   every conformance scenario whose `appliesTo` includes "server" through the
   server adapter.

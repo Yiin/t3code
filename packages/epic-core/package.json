@@ -79,6 +79,14 @@
       "types": "./src/ports/RunEvents.ts",
       "import": "./src/ports/RunEvents.ts"
     },
+    "./workerLiveness": {
+      "types": "./src/workerLiveness.ts",
+      "import": "./src/workerLiveness.ts"
+    },
+    "./ports/WorkerEvidence": {
+      "types": "./src/ports/WorkerEvidence.ts",
+      "import": "./src/ports/WorkerEvidence.ts"
+    },
     "./ports/WorkerSupervisor": {
       "types": "./src/ports/WorkerSupervisor.ts",
       "import": "./src/ports/WorkerSupervisor.ts"
