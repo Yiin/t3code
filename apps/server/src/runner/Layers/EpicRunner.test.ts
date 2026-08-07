@@ -1,6 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunConfig as EpicRunConfigSchema,
   EpicRunId,
   EpicRunPreflightError,
   ProjectId,
@@ -21,7 +24,14 @@ import {
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
+import {
+  EpicRunPreflight,
+  formatEpicRunPreflightBlocker,
+} from "@t3tools/epic-core/EpicRunPreflight";
+import {
+  EpicRunConfigSource,
+  type EpicRunConfigFileResult,
+} from "@t3tools/epic-core/EpicRunConfigSource";
 import {
   EpicRunLock,
   EpicRunLockError,
@@ -68,6 +78,35 @@ const modelSelection = {
   model: "gpt-5-codex",
 } as const;
 const NOW = "2026-01-01T00:00:00.000Z";
+const defaultConfigSnapshot = {
+  config: DEFAULT_EPIC_RUN_CONFIG,
+  configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+} as const;
+const persistedSequentialConfigSnapshot = {
+  config: {
+    ...DEFAULT_EPIC_RUN_CONFIG,
+    limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 7 },
+    execution: { sequential: true },
+    parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: 1 },
+  },
+  configProvenance: {
+    ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+    "limits.maxIterations": "file" as const,
+    "execution.sequential": "file" as const,
+    "parallel.workers": "policy" as const,
+  },
+} as const;
+const decodeEpicRunConfig = Schema.decodeUnknownSync(EpicRunConfigSchema);
+const loadedConfigFile = (
+  override: import("@t3tools/contracts").EpicRunConfigOverride,
+): EpicRunConfigFileResult => ({
+  _tag: "loaded",
+  configPath: "/tmp/epic-runner-repo/.t3code/epic-run.json",
+  override,
+  config: decodeEpicRunConfig(override),
+  presentKeys: [],
+  unknownKeys: [],
+});
 
 const provider = (instanceId: string, driver: string, model: string): ServerProvider => ({
   instanceId: ProviderInstanceId.make(instanceId),
@@ -197,11 +236,13 @@ function createHarness(input: {
   readonly seedIterations?: ReadonlyArray<EpicRunIteration>;
   readonly workspaceRoot?: string;
   readonly preflightResult?: EpicRunPreflightResult;
+  readonly preflightResults?: ReadonlyArray<EpicRunPreflightResult>;
   readonly onLockAcquire?: () => void;
   readonly onLockRelease?: () => void;
   readonly beforeLockAcquire?: Effect.Effect<void>;
   readonly lockAcquireError?: EpicRunLockError | EpicRunLockHeldError;
   readonly preflightError?: EpicRunPreflightError;
+  readonly configFileResult?: EpicRunConfigFileResult;
   readonly upsertDelayMs?: number;
   /** Hold append open after its running row is visible, for boundary-race tests. */
   readonly appendIterationDelayMs?: number;
@@ -262,6 +303,8 @@ function createHarness(input: {
   const stopsWithRunningSubagents: ThreadId[] = [];
   let guardedStopRefusals = input.guardedStopRefusals ?? 0;
   let epicDescriptionReads = 0;
+  const configReadRoots: string[] = [];
+  const preflightModes: Array<"parallel" | "sequential"> = [];
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -619,10 +662,25 @@ function createHarness(input: {
   }).pipe(
     Layer.provide(
       Layer.succeed(EpicRunPreflight, {
-        check: () =>
-          input.preflightError === undefined
-            ? Effect.succeed(input.preflightResult ?? { ok: true, blockers: [], warnings: [] })
-            : Effect.fail(input.preflightError),
+        check: (preflightInput) => {
+          const callIndex = preflightModes.length;
+          preflightModes.push(preflightInput.mode);
+          return input.preflightError === undefined
+            ? Effect.succeed(
+                input.preflightResults?.[Math.min(callIndex, input.preflightResults.length - 1)] ??
+                  input.preflightResult ?? { ok: true, blockers: [], warnings: [] },
+              )
+            : Effect.fail(input.preflightError);
+        },
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(EpicRunConfigSource, {
+        read: ({ repoRoot }) =>
+          Effect.sync(() => {
+            configReadRoots.push(repoRoot);
+            return input.configFileResult ?? { _tag: "absent" };
+          }),
       }),
     ),
     Layer.provide(
@@ -687,6 +745,8 @@ function createHarness(input: {
     stopsWithRunningSubagents: () => stopsWithRunningSubagents,
     processRequests,
     epicDescriptionReads: () => epicDescriptionReads,
+    configReadRoots,
+    preflightModes,
     childStatus: (issueId: string) => childStatuses.get(issueId),
     commands: dispatched,
     commandsOfType: <T extends OrchestrationCommand["type"]>(type: T) =>
@@ -1188,6 +1248,133 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("persists default config and reads the exact run cwd once", () => {
+    const harness = createHarness({ script: [], readyOutput: "[]" });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-default",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "Cook.",
+        modelSelection,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const stored = harness.store.runs.get(run.runId)!;
+      assert.deepStrictEqual(stored.config, DEFAULT_EPIC_RUN_CONFIG);
+      assert.deepStrictEqual(stored.configProvenance, DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
+      assert.strictEqual(stored.maxIterations, DEFAULT_EPIC_RUN_CONFIG.limits.maxIterations);
+      assert.deepStrictEqual(harness.configReadRoots, ["/tmp/epic-runner-repo"]);
+      assert.deepStrictEqual(harness.preflightModes, ["parallel"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("folds the legacy iteration cap into the persisted snapshot", () => {
+    const harness = createHarness({ script: [], readyOutput: "[]" });
+    return Effect.gen(function* () {
+      const run = yield* startRun(2);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const stored = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(stored.maxIterations, 2);
+      assert.strictEqual(stored.config.limits.maxIterations, 2);
+      assert.strictEqual(stored.configProvenance["limits.maxIterations"], "override");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("lets an explicit default-valued file cap beat the legacy cap", () => {
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      configFileResult: loadedConfigFile({ limits: { maxIterations: 50 } }),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(2);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const stored = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(stored.maxIterations, 50);
+      assert.strictEqual(stored.config.limits.maxIterations, 50);
+      assert.strictEqual(stored.configProvenance["limits.maxIterations"], "file");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("persists file config and lets configured leaves beat legacy launch values", () => {
+    const configuredModel = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      configFileResult: loadedConfigFile({
+        limits: { maxIterations: 7 },
+        execution: { sequential: true },
+        runtime: { mode: "auto-accept-edits" },
+        provider: { modelSelection: configuredModel },
+      }),
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-file",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "Cook.",
+        modelSelection,
+        runtimeMode: "full-access",
+        maxIterations: 2,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const stored = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(stored.maxIterations, 7);
+      assert.strictEqual(stored.config.limits.maxIterations, 7);
+      assert.strictEqual(stored.runtimeMode, "auto-accept-edits");
+      assert.deepStrictEqual(stored.modelSelection, configuredModel);
+      assert.strictEqual(stored.configProvenance["limits.maxIterations"], "file");
+      assert.strictEqual(stored.configProvenance["runtime.mode"], "file");
+      assert.strictEqual(stored.configProvenance["provider.modelSelection"], "file");
+      assert.deepStrictEqual(harness.preflightModes, ["sequential"]);
+      assert.deepStrictEqual(harness.configReadRoots, ["/tmp/epic-runner-repo"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("applies API config over file config on overridden leaves only", () => {
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      configFileResult: loadedConfigFile({
+        limits: { maxIterations: 7, maxAttemptsPerChild: 4 },
+        execution: { sequential: true },
+      }),
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-override",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        config: {
+          limits: { maxIterations: 3 },
+          execution: { sequential: false },
+        },
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const stored = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(stored.maxIterations, 3);
+      assert.strictEqual(stored.config.limits.maxIterations, 3);
+      assert.strictEqual(stored.config.limits.maxAttemptsPerChild, 4);
+      assert.strictEqual(stored.configProvenance["limits.maxIterations"], "override");
+      assert.strictEqual(stored.configProvenance["limits.maxAttemptsPerChild"], "file");
+      assert.strictEqual(stored.configProvenance["execution.sequential"], "override");
+      assert.deepStrictEqual(harness.preflightModes, ["parallel"]);
+      assert.deepStrictEqual(harness.configReadRoots, ["/tmp/epic-runner-repo"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("enriches a whole listing with one iteration read, ordered and bounded", () => {
     // Terminal so nothing here is resumed; the listing is what is under test.
     const seedRun = (runId: string, createdAt: string, updatedAt: string): EpicRun => ({
@@ -1199,6 +1386,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "done",
       maxIterations: 10,
@@ -1530,6 +1718,66 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
       assert.strictEqual(harness.store.iterations.length, 1);
       yield* runner.cancelRun({ runId: first.runId });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("returns the winning run when preflight observes its held lock", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", stall: true }],
+      options: { iterationTimeoutMs: 60_000 },
+      upsertDelayMs: 25,
+      preflightResults: [
+        { ok: true, blockers: [], warnings: [] },
+        {
+          ok: false,
+          blockers: [
+            {
+              _tag: "run_in_progress",
+              owner: "t3code",
+              runDir: "/tmp/epic-runner-repo",
+              host: "test",
+              pid: process.pid,
+            },
+          ],
+          warnings: [],
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const [first, duplicate] = yield* Effect.all([startRun(), startRun()], {
+        concurrency: "unbounded",
+      });
+      yield* waitFor(() => harness.turnsStarted() === 1);
+
+      assert.strictEqual(duplicate.runId, first.runId);
+      assert.strictEqual(harness.store.runs.size, 1);
+      assert.strictEqual(harness.activeLockCount(), 1);
+      assert.strictEqual(harness.preflightModes.length, 2);
+      yield* Effect.flatMap(EpicRunner, (runner) => runner.cancelRun({ runId: first.runId }));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("preserves a preflight lock blocker when no winning row appears", () => {
+    const blocker = {
+      _tag: "run_in_progress" as const,
+      owner: "terminal",
+      runDir: "/tmp/terminal-run",
+      host: "test-host",
+      pid: 42,
+    };
+    const harness = createHarness({
+      script: [],
+      preflightResult: { ok: false, blockers: [blocker], warnings: [] },
+    });
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(startRun());
+      assert.strictEqual(error._tag, "EpicRunPreflightBlockedError");
+      if (error._tag === "EpicRunPreflightBlockedError") {
+        assert.deepStrictEqual(error.blockers, [formatEpicRunPreflightBlocker(blocker)]);
+      }
+      assert.strictEqual(harness.store.runs.size, 0);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -2387,6 +2635,7 @@ describe("EpicRunner", () => {
         epicId: "epic-1",
         projectId,
         cwd: "/tmp/epic-runner-repo",
+        config: { provider: { modelSelection: claudeSelection } },
       });
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
       assert.deepStrictEqual(
@@ -2770,6 +3019,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "running",
       maxIterations: 10,
@@ -2811,6 +3061,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "running",
       maxIterations: 10,
@@ -3165,6 +3416,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "running",
       maxIterations: 2,
@@ -3257,6 +3509,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "running",
       maxIterations: 3,
@@ -3314,6 +3567,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "running",
       maxIterations: 10,
@@ -3385,6 +3639,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "running",
       maxIterations: 10,
@@ -3552,6 +3807,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "paused",
       maxIterations: 1,
@@ -3579,6 +3835,50 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("resumes from a non-default persisted snapshot without reading config", () => {
+    const runId = EpicRunId.make("run-resume-config-snapshot");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...persistedSequentialConfigSnapshot,
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 7,
+      iterationsDispatched: 0,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({ script: [], readyOutput: "[]", seedRuns: [pausedRun] });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.resumeRun({ runId });
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+
+      const stored = harness.store.runs.get(runId)!;
+      assert.deepStrictEqual(stored.config, persistedSequentialConfigSnapshot.config);
+      assert.deepStrictEqual(
+        stored.configProvenance,
+        persistedSequentialConfigSnapshot.configProvenance,
+      );
+      assert.deepStrictEqual(harness.configReadRoots, []);
+      assert.deepStrictEqual(harness.preflightModes, ["sequential"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("keeps a stopped run paused when resume cannot acquire its lease", () => {
     const runId = EpicRunId.make("run-resume-acquire-failure");
     const pausedRun: EpicRun = {
@@ -3590,6 +3890,7 @@ describe("EpicRunner", () => {
       orientationFile: null,
       modelSelection,
       runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
       originThreadId: null,
       status: "paused",
       maxIterations: 10,
@@ -3636,6 +3937,7 @@ describe("EpicRunner", () => {
         orientationFile: null,
         modelSelection,
         runtimeMode: "full-access",
+        ...defaultConfigSnapshot,
         originThreadId: null,
         status: "paused",
         maxIterations: 10,

@@ -3,6 +3,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   type EpicRun as TransportEpicRun,
+  type EpicRunConfigProvenance,
   EpicRunId,
   epicRunIterationThreadId,
   type LaunchEpicRunInput,
@@ -27,7 +28,6 @@ import {
   DEFAULT_ITERATION_TIMEOUT_MS,
   DEFAULT_MAX_CONSECUTIVE_FAILURES,
   DEFAULT_MAX_GRACE_CONTINUATIONS,
-  DEFAULT_MAX_ITERATIONS,
   DEFAULT_MAX_NO_COMMIT_STREAK,
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
@@ -41,7 +41,10 @@ import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import {
   EpicRunPreflight,
   formatEpicRunPreflightBlocker,
+  makeEpicRunConfigSnapshot,
+  type EpicRunConfigSnapshot,
 } from "@t3tools/epic-core/EpicRunPreflight";
+import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
 import {
   EpicRunLock,
   type EpicRunLockHeldError,
@@ -348,7 +351,6 @@ export interface EpicRunnerLiveOptions {
   readonly maxConsecutiveFailures?: number;
   readonly maxNoCommitStreak?: number;
   readonly infraFailureBudget?: number;
-  readonly defaultMaxIterations?: number;
   readonly subagentGraceTimeoutMs?: number;
   readonly maxGraceContinuations?: number;
   readonly providerDegradationTtlMs?: number;
@@ -364,6 +366,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
     const preflight = yield* EpicRunPreflight;
+    const configSource = yield* EpicRunConfigSource;
     const runLock = yield* EpicRunLock;
     const agentAwarenessRelay = yield* AgentAwarenessRelay;
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
@@ -392,10 +395,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const infraFailureBudget = Math.max(
       1,
       options?.infraFailureBudget ?? DEFAULT_INFRA_FAILURE_BUDGET,
-    );
-    const defaultMaxIterations = Math.max(
-      1,
-      options?.defaultMaxIterations ?? DEFAULT_MAX_ITERATIONS,
     );
     const subagentGraceTimeoutMs = Math.max(
       1,
@@ -906,13 +905,17 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const acquireLease = Effect.fn("EpicRunner.acquireLease")(function* (
       runId: EpicRunId,
       input: Pick<StartEpicRunInput, "cwd" | "epicId">,
+      configSnapshot: EpicRunConfigSnapshot,
     ) {
       const result = yield* preflight
-        .check({
-          workspaceRoot: input.cwd,
-          epicId: input.epicId,
-          mode: "sequential",
-        })
+        .check(
+          {
+            workspaceRoot: input.cwd,
+            epicId: input.epicId,
+            mode: configSnapshot.config.execution.sequential ? "sequential" : "parallel",
+          },
+          configSnapshot,
+        )
         .pipe(
           Effect.mapError(
             (error) =>
@@ -923,10 +926,17 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           ),
         );
       if (!result.ok) {
-        return yield* new EpicRunPreflightBlockedError({
+        const mapped = new EpicRunPreflightBlockedError({
           epicId: input.epicId,
           blockers: result.blockers.map(formatEpicRunPreflightBlocker),
         });
+        if (result.blockers.some((blocker) => blocker._tag === "run_in_progress")) {
+          return yield* Effect.fail({
+            _tag: "EpicRunLeaseHeld",
+            mappedError: mapped,
+          } satisfies EpicRunLeaseHeld);
+        }
+        return yield* mapped;
       }
       const lease = yield* runLock
         .acquire({
@@ -1958,6 +1968,129 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         Effect.asVoid,
       );
 
+    const readConfigSnapshot = Effect.fn("EpicRunner.readConfigSnapshot")(function* (
+      input: Pick<StartEpicRunInput, "cwd" | "config">,
+    ) {
+      const fileResult = yield* configSource.read({ repoRoot: input.cwd });
+      return makeEpicRunConfigSnapshot({
+        fileResult,
+        override: input.config ?? null,
+        harness: null,
+      });
+    });
+
+    const persistedConfigSnapshot = (run: EpicRun): EpicRunConfigSnapshot => ({
+      fileResult: { _tag: "absent" },
+      config: run.config,
+      provenance: run.configProvenance,
+      violations: [],
+    });
+
+    const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
+      provenance[key] !== undefined && provenance[key] !== "default";
+
+    const applyLegacyIterationCap = (
+      configSnapshot: EpicRunConfigSnapshot,
+      maxIterations: number | undefined,
+    ): EpicRunConfigSnapshot =>
+      maxIterations === undefined ||
+      hasConfiguredValue(configSnapshot.provenance, "limits.maxIterations")
+        ? configSnapshot
+        : {
+            ...configSnapshot,
+            config: {
+              ...configSnapshot.config,
+              limits: {
+                ...configSnapshot.config.limits,
+                maxIterations: Math.max(1, Math.trunc(maxIterations)),
+              },
+            },
+            provenance: {
+              ...configSnapshot.provenance,
+              "limits.maxIterations": "override",
+            },
+          };
+
+    const startNewRun = Effect.fn("EpicRunner.startNewRun")(function* (
+      input: StartEpicRunInput,
+      configSnapshot: EpicRunConfigSnapshot,
+      modelSelectionAlreadyResolved = false,
+    ) {
+      const orientationFile = input.orientationFile ?? null;
+      if (orientationFile !== null && !isValidOrientationFile(orientationFile)) {
+        return yield* new EpicRunLaunchError({ reason: "orientation_file_invalid" });
+      }
+
+      const runId = EpicRunId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+      const createdAt = yield* nowIso;
+      const configuredModelSelection = configSnapshot.config.provider.modelSelection;
+      const modelSelection =
+        !modelSelectionAlreadyResolved &&
+        configuredModelSelection !== null &&
+        hasConfiguredValue(configSnapshot.provenance, "provider.modelSelection")
+          ? configuredModelSelection
+          : input.modelSelection;
+      const runtimeMode = hasConfiguredValue(configSnapshot.provenance, "runtime.mode")
+        ? configSnapshot.config.runtime.mode
+        : (input.runtimeMode ?? DEFAULT_RUNTIME_MODE);
+      const maxIterations = hasConfiguredValue(configSnapshot.provenance, "limits.maxIterations")
+        ? configSnapshot.config.limits.maxIterations
+        : (input.maxIterations ?? configSnapshot.config.limits.maxIterations);
+      const run: EpicRun = {
+        runId,
+        epicId: input.epicId,
+        projectId: input.projectId,
+        cwd: input.cwd,
+        prompt: input.prompt,
+        orientationFile,
+        modelSelection,
+        runtimeMode,
+        config: configSnapshot.config,
+        configProvenance: configSnapshot.provenance,
+        // Only ever what the launcher supplied: the run's own iteration
+        // threads are children, so they can never stand in for an origin.
+        originThreadId: input.originThreadId ?? null,
+        status: "running",
+        maxIterations: Math.max(1, Math.trunc(maxIterations)),
+        iterationsCompleted: 0,
+        iterationsDispatched: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        noCommitStreak: 0,
+        infraStreak: 0,
+        lastError: null,
+        createdAt,
+        updatedAt: createdAt,
+      };
+
+      const acquireError = yield* acquireLease(runId, input, configSnapshot).pipe(
+        Effect.match({
+          onFailure: (error) => error,
+          onSuccess: () => null,
+        }),
+      );
+      if (acquireError !== null) {
+        if (acquireError._tag === "EpicRunLeaseHeld") {
+          const winner = yield* awaitActiveRun(input);
+          if (winner !== undefined) {
+            return yield* enrichRun(winner);
+          }
+          return yield* acquireError.mappedError;
+        }
+        return yield* acquireError;
+      }
+      yield* saveRun(run).pipe(releaseLeaseOnFailure(runId));
+      yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
+      yield* Effect.logInfo("epic.runner.run-started", {
+        runId,
+        epicId: run.epicId,
+        cwd: run.cwd,
+        maxIterations: run.maxIterations,
+      });
+      return yield* enrichRun(run);
+    });
+
     const startRun: EpicRunnerShape["startRun"] = (input: StartEpicRunInput) =>
       Effect.gen(function* () {
         const orientationFile = input.orientationFile ?? null;
@@ -1968,60 +2101,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         if (active !== undefined) {
           return yield* enrichRun(active);
         }
-
-        const runId = EpicRunId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
-        const createdAt = yield* nowIso;
-        const run: EpicRun = {
-          runId,
-          epicId: input.epicId,
-          projectId: input.projectId,
-          cwd: input.cwd,
-          prompt: input.prompt,
-          orientationFile,
-          modelSelection: input.modelSelection,
-          runtimeMode: input.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-          // Only ever what the launcher supplied: the run's own iteration
-          // threads are children, so they can never stand in for an origin.
-          originThreadId: input.originThreadId ?? null,
-          status: "running",
-          maxIterations: Math.max(1, Math.trunc(input.maxIterations ?? defaultMaxIterations)),
-          iterationsCompleted: 0,
-          iterationsDispatched: 0,
-          currentThreadId: null,
-          currentTurnStartedAt: null,
-          consecutiveFailures: 0,
-          noCommitStreak: 0,
-          infraStreak: 0,
-          lastError: null,
-          createdAt,
-          updatedAt: createdAt,
-        };
-
-        const acquireError = yield* acquireLease(runId, input).pipe(
-          Effect.match({
-            onFailure: (error) => error,
-            onSuccess: () => null,
-          }),
+        const configSnapshot = applyLegacyIterationCap(
+          yield* readConfigSnapshot(input),
+          input.maxIterations,
         );
-        if (acquireError !== null) {
-          if (acquireError._tag === "EpicRunLeaseHeld") {
-            const winner = yield* awaitActiveRun(input);
-            if (winner !== undefined) {
-              return yield* enrichRun(winner);
-            }
-            return yield* acquireError.mappedError;
-          }
-          return yield* acquireError;
-        }
-        yield* saveRun(run).pipe(releaseLeaseOnFailure(runId));
-        yield* forkLoop(runId).pipe(releaseLeaseOnFailure(runId));
-        yield* Effect.logInfo("epic.runner.run-started", {
-          runId,
-          epicId: run.epicId,
-          cwd: run.cwd,
-          maxIterations: run.maxIterations,
-        });
-        return yield* enrichRun(run);
+        return yield* startNewRun(input, configSnapshot);
       });
 
     const resolveLaunchModelSelection = (
@@ -2087,20 +2171,28 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         if (project.value.workspaceRoot !== input.cwd) {
           return yield* new EpicRunLaunchError({ reason: "cwd_mismatch" });
         }
-        if (project.value.defaultModelSelection === null) {
+        const configSnapshot = yield* readConfigSnapshot(input);
+        const configuredModelSelection = configSnapshot.config.provider.modelSelection;
+        const selectedModel =
+          configuredModelSelection !== null &&
+          hasConfiguredValue(configSnapshot.provenance, "provider.modelSelection")
+            ? configuredModelSelection
+            : project.value.defaultModelSelection;
+        if (selectedModel === null) {
           return yield* new EpicRunLaunchError({ reason: "model_default_missing" });
         }
-        const modelSelection = yield* resolveLaunchModelSelection(
-          project.value.defaultModelSelection,
+        const modelSelection = yield* resolveLaunchModelSelection(selectedModel);
+        return yield* startNewRun(
+          {
+            ...input,
+            prompt: EPIC_RUN_ITERATION_PROMPT,
+            orientationFile: null,
+            modelSelection,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+          },
+          configSnapshot,
+          true,
         );
-        return yield* startRun({
-          ...input,
-          prompt: EPIC_RUN_ITERATION_PROMPT,
-          orientationFile: null,
-          modelSelection,
-          runtimeMode: DEFAULT_RUNTIME_MODE,
-          maxIterations: defaultMaxIterations,
-        });
       });
 
     const pauseRun: EpicRunnerShape["pauseRun"] = ({ runId }) =>
@@ -2163,7 +2255,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         if (!handoff.relaunch) return yield* enrichRun(handoff.run);
 
         yield* awaitLoopExit(runId);
-        yield* acquireLease(runId, { cwd: handoff.run.cwd, epicId: handoff.run.epicId }).pipe(
+        yield* acquireLease(
+          runId,
+          { cwd: handoff.run.cwd, epicId: handoff.run.epicId },
+          persistedConfigSnapshot(handoff.run),
+        ).pipe(
           Effect.mapError((error) =>
             error._tag === "EpicRunLeaseHeld" ? error.mappedError : error,
           ),
@@ -2294,10 +2390,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           .pipe(Effect.mapError(storeError("listRuns")));
 
         for (const run of running) {
-          const acquireError = yield* acquireLease(run.runId, {
-            cwd: run.cwd,
-            epicId: run.epicId,
-          }).pipe(
+          const acquireError = yield* acquireLease(
+            run.runId,
+            { cwd: run.cwd, epicId: run.epicId },
+            persistedConfigSnapshot(run),
+          ).pipe(
             Effect.match({
               onFailure: (error) => error,
               onSuccess: () => null,

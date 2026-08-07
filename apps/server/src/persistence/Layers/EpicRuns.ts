@@ -5,7 +5,12 @@ import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
-import { ModelSelection } from "@t3tools/contracts";
+import {
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunConfig as EpicRunConfigSchema,
+  EpicRunConfigProvenance as EpicRunConfigProvenanceSchema,
+  ModelSelection,
+} from "@t3tools/contracts";
 import {
   PersistenceDecodeError,
   PersistenceSqlError,
@@ -29,9 +34,15 @@ import {
 } from "../Services/EpicRuns.ts";
 
 const EpicRunDbRow = EpicRun.mapFields(
-  Struct.assign({ modelSelection: Schema.fromJsonString(ModelSelection) }),
+  Struct.assign({
+    modelSelection: Schema.fromJsonString(ModelSelection),
+    config: Schema.fromJsonString(EpicRunConfigSchema),
+    configProvenance: Schema.fromJsonString(EpicRunConfigProvenanceSchema),
+  }),
 );
 type EpicRunDbRow = typeof EpicRunDbRow.Type;
+
+const DEFAULT_CONFIG_PROVENANCE_JSON = JSON.stringify(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
 
 /**
  * Discriminate a schema failure from a SQL failure so both members of
@@ -69,6 +80,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           orientation_file,
           model_selection_json,
           runtime_mode,
+          config_json,
+          config_provenance_json,
           origin_thread_id,
           status,
           max_iterations,
@@ -92,6 +105,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.orientationFile},
           ${JSON.stringify(row.modelSelection)},
           ${row.runtimeMode},
+          ${JSON.stringify(row.config)},
+          ${JSON.stringify(row.configProvenance)},
           ${row.originThreadId},
           ${row.status},
           ${row.maxIterations},
@@ -115,6 +130,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           orientation_file = excluded.orientation_file,
           model_selection_json = excluded.model_selection_json,
           runtime_mode = excluded.runtime_mode,
+          config_json = excluded.config_json,
+          config_provenance_json = excluded.config_provenance_json,
           origin_thread_id = excluded.origin_thread_id,
           status = excluded.status,
           max_iterations = excluded.max_iterations,
@@ -140,6 +157,8 @@ const makeEpicRunStore = Effect.gen(function* () {
     orientation_file AS "orientationFile",
     model_selection_json AS "modelSelection",
     runtime_mode AS "runtimeMode",
+    COALESCE(config_json, '{}') AS "config",
+    COALESCE(config_provenance_json, '${DEFAULT_CONFIG_PROVENANCE_JSON}') AS "configProvenance",
     origin_thread_id AS "originThreadId",
     status,
     max_iterations AS "maxIterations",

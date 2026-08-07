@@ -272,6 +272,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     maxNoCommitStreak: 1,
   }).pipe(
     Layer.provide(preflightLayer),
+    Layer.provide(EpicRunConfigSource.layer.pipe(Layer.provide(NodeServices.layer))),
     Layer.provide(lockLive.layer),
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),

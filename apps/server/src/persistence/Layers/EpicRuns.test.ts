@@ -1,8 +1,18 @@
-import { EpicRunId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunConfig as EpicRunConfigSchema,
+  EpicRunConfigProvenance as EpicRunConfigProvenanceSchema,
+  EpicRunId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { EpicRunStoreLive } from "./EpicRuns.ts";
@@ -13,6 +23,10 @@ const modelSelection = {
   instanceId: ProviderInstanceId.make("claudeAgent"),
   model: "claude-opus-4-6",
 };
+const encodeConfigJson = Schema.encodeEffect(Schema.fromJsonString(EpicRunConfigSchema));
+const encodeConfigProvenanceJson = Schema.encodeEffect(
+  Schema.fromJsonString(EpicRunConfigProvenanceSchema),
+);
 
 const makeRun = (overrides: Partial<EpicRun> = {}): EpicRun => ({
   runId: EpicRunId.make("run-1"),
@@ -23,6 +37,8 @@ const makeRun = (overrides: Partial<EpicRun> = {}): EpicRun => ({
   orientationFile: null,
   modelSelection,
   runtimeMode: "full-access",
+  config: DEFAULT_EPIC_RUN_CONFIG,
+  configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   originThreadId: null,
   status: "running",
   maxIterations: 10,
@@ -77,6 +93,41 @@ describe("EpicRunStore", () => {
         // @effect-diagnostics-next-line preferSchemaOverJson:off
         JSON.stringify(modelSelection),
       );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  it.effect("round-trips non-default config and provenance as JSON", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const sql = yield* SqlClient.SqlClient;
+      const run = makeRun({
+        runId: EpicRunId.make("run-config"),
+        config: {
+          ...DEFAULT_EPIC_RUN_CONFIG,
+          limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 7 },
+          execution: { sequential: true },
+        },
+        configProvenance: {
+          ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+          "limits.maxIterations": "file",
+          "execution.sequential": "override",
+          "parallel.workers": "policy",
+        },
+      });
+      yield* store.upsertRun(run);
+
+      assert.deepStrictEqual(Option.getOrThrow(yield* store.getRun({ runId: run.runId })), run);
+      const rows = yield* sql<{
+        readonly config: string;
+        readonly provenance: string;
+      }>`
+        SELECT config_json AS config, config_provenance_json AS provenance
+        FROM epic_runs WHERE run_id = ${run.runId}
+      `;
+      const encodedConfig = yield* encodeConfigJson(run.config);
+      const encodedProvenance = yield* encodeConfigProvenanceJson(run.configProvenance);
+      assert.strictEqual(rows[0]!.config, encodedConfig);
+      assert.strictEqual(rows[0]!.provenance, encodedProvenance);
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

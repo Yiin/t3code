@@ -165,6 +165,8 @@ export const EpicRunConfig = Schema.Struct({
 });
 export type EpicRunConfig = typeof EpicRunConfig.Type;
 
+export const DEFAULT_EPIC_RUN_CONFIG: EpicRunConfig = Schema.decodeUnknownSync(EpicRunConfig)({});
+
 export const EpicRunConfigOverride = Schema.Struct({
   budget: Schema.optionalKey(
     Schema.Struct({
@@ -661,3 +663,23 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     control: "text",
   },
 ];
+
+export const EpicRunConfigProvenanceSource = Schema.Literals([
+  "default",
+  "file",
+  "environment",
+  "override",
+  "policy",
+]);
+export type EpicRunConfigProvenanceSource = typeof EpicRunConfigProvenanceSource.Type;
+
+export const EpicRunConfigProvenance = Schema.Record(Schema.String, EpicRunConfigProvenanceSource);
+export type EpicRunConfigProvenance = typeof EpicRunConfigProvenance.Type;
+
+/** Exhaustive provenance for a run decoded without a persisted config snapshot. */
+export const DEFAULT_EPIC_RUN_CONFIG_PROVENANCE: EpicRunConfigProvenance = Object.fromEntries(
+  EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only").map((field) => [
+    field.key,
+    "default" as const,
+  ]),
+);

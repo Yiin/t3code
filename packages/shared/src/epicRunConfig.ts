@@ -5,16 +5,11 @@ import {
   EpicRunConfig,
   type EpicRunConfig as EpicRunConfigValue,
   type EpicRunConfigOverride,
+  type EpicRunConfigProvenance,
+  type EpicRunConfigProvenanceSource,
 } from "@t3tools/contracts";
 
-export type EpicRunConfigProvenanceSource =
-  | "default"
-  | "file"
-  | "environment"
-  | "override"
-  | "policy";
-
-export type EpicRunConfigProvenance = Readonly<Record<string, EpicRunConfigProvenanceSource>>;
+export type { EpicRunConfigProvenance, EpicRunConfigProvenanceSource };
 
 export interface EpicRunConfigViolation {
   readonly key: string;

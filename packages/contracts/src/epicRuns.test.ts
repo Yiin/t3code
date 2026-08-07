@@ -3,10 +3,13 @@ import * as Schema from "effect/Schema";
 
 import { EpicRunId, ProjectId, ThreadId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { EnvironmentEpicRunsHttpApi } from "./environmentHttp.ts";
+import { DEFAULT_EPIC_RUN_CONFIG_PROVENANCE } from "./epicRunConfig.ts";
 import {
   EpicRun,
   EpicRunEvent,
   EpicRunInput,
+  LaunchEpicRunInput,
   EpicRunnerDispatchError,
   EpicRunnerStoreError,
   epicRunIterationThreadId,
@@ -39,6 +42,17 @@ const encodeEpicRun = Schema.encodeSync(EpicRun);
 const decodeEpicRunEvent = Schema.decodeUnknownSync(EpicRunEvent);
 const encodeEpicRunEvent = Schema.encodeSync(EpicRunEvent);
 const decodeEpicRunStartPayload = Schema.decodeUnknownSync(WsEpicRunStartRpc.payloadSchema);
+const decodeEpicRunLaunchPayload = Schema.decodeUnknownSync(WsEpicRunLaunchRpc.payloadSchema);
+const httpPayloadSchema = <S extends Schema.Top>(name: "launch" | "start", expected: S): S => {
+  const endpoint =
+    name === "start"
+      ? EnvironmentEpicRunsHttpApi.endpoints.start
+      : EnvironmentEpicRunsHttpApi.endpoints.launch;
+  if (endpoint === undefined) throw new Error(`Missing HTTP endpoint: ${name}`);
+  const schema = endpoint.payload.get("application/json")?.schemas[0];
+  expect(schema).toBeDefined();
+  return (schema ?? expected) as unknown as S;
+};
 const decodeEpicRunnerStoreError = Schema.decodeUnknownSync(EpicRunnerStoreError);
 const encodeEpicRunnerStoreError = Schema.encodeSync(EpicRunnerStoreError);
 const decodeEpicRunnerDispatchError = Schema.decodeUnknownSync(EpicRunnerDispatchError);
@@ -46,6 +60,34 @@ const decodeEpicRunnerDispatchError = Schema.decodeUnknownSync(EpicRunnerDispatc
 describe("EpicRun contracts", () => {
   it("defaults omitted runtime mode to full access", () => {
     expect(decodeEpicRunInput(input).runtimeMode).toBe("full-access");
+  });
+
+  it("accepts config unchanged through WS and HTTP start and launch payloads", () => {
+    const config = {
+      limits: { maxIterations: 7 },
+      execution: { sequential: true },
+      runtime: { mode: "auto-accept-edits" as const },
+    };
+    const launch = {
+      epicId: input.epicId,
+      projectId: input.projectId,
+      cwd: input.cwd,
+      config,
+    };
+    const start = { ...input, config };
+
+    expect(decodeEpicRunStartPayload({ ...start, _tag: WS_METHODS.epicRunStart }).config).toEqual(
+      config,
+    );
+    expect(
+      decodeEpicRunLaunchPayload({ ...launch, _tag: WS_METHODS.epicRunLaunch }).config,
+    ).toEqual(config);
+    expect(
+      Schema.decodeUnknownSync(httpPayloadSchema("start", EpicRunInput))(start).config,
+    ).toEqual(config);
+    expect(
+      Schema.decodeUnknownSync(httpPayloadSchema("launch", LaunchEpicRunInput))(launch).config,
+    ).toEqual(config);
   });
 
   it("round-trips a complete run and versioned state-change event", () => {
@@ -85,6 +127,8 @@ describe("EpicRun contracts", () => {
 
     // The iteration above predates `failureReason`; old rows decode to null.
     expect(run.recentIterations[0]?.failureReason).toBeNull();
+    expect(run.config.limits.maxIterations).toBe(50);
+    expect(run.configProvenance).toEqual(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
     expect(decodeEpicRun(encodeEpicRun(run))).toEqual(run);
     expect(decodeEpicRunEvent(encodeEpicRunEvent(event))).toEqual(event);
   });

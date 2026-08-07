@@ -331,6 +331,7 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunStoreLive),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(EpicRunPreflightLayerLive),
+  Layer.provide(EpicRunConfigSource.layer),
   Layer.provide(NodeEpicRunLock.layer),
   Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );

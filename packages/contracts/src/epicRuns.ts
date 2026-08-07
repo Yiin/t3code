@@ -11,6 +11,12 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ModelSelection, RuntimeMode } from "./orchestration.ts";
+import {
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunConfig,
+  EpicRunConfigOverride,
+  EpicRunConfigProvenance,
+} from "./epicRunConfig.ts";
 
 export const EpicRunStatus = Schema.Literals(["running", "paused", "done", "failed", "cancelled"]);
 export type EpicRunStatus = typeof EpicRunStatus.Type;
@@ -23,6 +29,8 @@ export const EpicRunInput = Schema.Struct({
   orientationFile: Schema.optional(Schema.NullOr(Schema.String)),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed("full-access"))),
+  config: Schema.optional(EpicRunConfigOverride),
+  /** Legacy alias. An explicitly configured `limits.maxIterations` value wins. */
   maxIterations: Schema.optional(PositiveInt),
   originThreadId: Schema.optional(ThreadId),
 });
@@ -35,6 +43,7 @@ export const LaunchEpicRunInput = Schema.Struct({
   epicId: TrimmedNonEmptyString,
   projectId: ProjectId,
   cwd: TrimmedNonEmptyString,
+  config: Schema.optional(EpicRunConfigOverride),
   originThreadId: Schema.optional(ThreadId),
 });
 export type LaunchEpicRunInput = typeof LaunchEpicRunInput.Type;
@@ -87,6 +96,10 @@ export const EpicRun = Schema.Struct({
   orientationFile: Schema.NullOr(Schema.String),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
+  config: EpicRunConfig.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  configProvenance: EpicRunConfigProvenance.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE)),
+  ),
   /**
    * The thread whose agent launched this run, when a skill launched it from
    * inside one; `null` for a launch from the Epics page. Never inferred from

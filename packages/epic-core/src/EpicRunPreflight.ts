@@ -4,14 +4,17 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
   EpicRunPreflightError,
+  type EpicRunConfig,
+  type EpicRunConfigOverride,
+  type EpicRunConfigProvenance,
   type EpicRunPreflightBlocker,
   type EpicRunPreflightInput,
   type EpicRunPreflightResult,
   type EpicRunPreflightWarning,
 } from "@t3tools/contracts";
-import { resolveEpicRunConfig } from "@t3tools/shared/epicRunConfig";
+import { resolveEpicRunConfig, type EpicRunConfigViolation } from "@t3tools/shared/epicRunConfig";
 
-import { EpicRunConfigSource } from "./EpicRunConfigSource.ts";
+import { EpicRunConfigSource, type EpicRunConfigFileResult } from "./EpicRunConfigSource.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
 
@@ -44,8 +47,31 @@ export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker):
 export interface EpicRunPreflightShape {
   readonly check: (
     input: EpicRunPreflightInput,
+    configSnapshot?: EpicRunConfigSnapshot,
   ) => Effect.Effect<EpicRunPreflightResult, EpicRunPreflightError>;
 }
+
+/** The immutable config view shared by launch and preflight. */
+export interface EpicRunConfigSnapshot {
+  readonly fileResult: EpicRunConfigFileResult;
+  readonly config: EpicRunConfig;
+  readonly provenance: EpicRunConfigProvenance;
+  readonly violations: readonly EpicRunConfigViolation[];
+}
+
+export const makeEpicRunConfigSnapshot = (input: {
+  readonly fileResult: EpicRunConfigFileResult;
+  readonly override: EpicRunConfigOverride | null;
+  readonly harness: string | null;
+}): EpicRunConfigSnapshot => ({
+  fileResult: input.fileResult,
+  ...resolveEpicRunConfig({
+    file: input.fileResult._tag === "loaded" ? input.fileResult.override : null,
+    environment: null,
+    override: input.override,
+    harness: input.harness,
+  }),
+});
 
 export class EpicRunPreflight extends Context.Service<EpicRunPreflight, EpicRunPreflightShape>()(
   "@t3tools/epic-core/EpicRunPreflight",
@@ -123,7 +149,7 @@ export const layer = Layer.effect(
     });
 
     const check: EpicRunPreflightShape["check"] = Effect.fn("EpicRunPreflight.check")(
-      function* (input) {
+      function* (input, suppliedConfigSnapshot) {
         const blockers: Array<EpicRunPreflightResult["blockers"][number]> = [];
         const warnings: Array<EpicRunPreflightWarning> = [];
 
@@ -159,7 +185,14 @@ export const layer = Layer.effect(
           blockers.push({ _tag: "dirty_tree", paths: [...dirtyPaths].toSorted() });
         }
 
-        const configFile = yield* configSource.read({ repoRoot: input.workspaceRoot });
+        const configSnapshot =
+          suppliedConfigSnapshot ??
+          makeEpicRunConfigSnapshot({
+            fileResult: yield* configSource.read({ repoRoot: input.workspaceRoot }),
+            override: { execution: { sequential: input.mode === "sequential" } },
+            harness: null,
+          });
+        const configFile = configSnapshot.fileResult;
         if (configFile._tag === "invalid") {
           blockers.push({
             _tag: "config_invalid",
@@ -174,13 +207,7 @@ export const layer = Layer.effect(
               keys: configFile.unknownKeys,
             });
           }
-          const resolved = resolveEpicRunConfig({
-            file: configFile._tag === "loaded" ? configFile.override : null,
-            environment: null,
-            override: { execution: { sequential: input.mode === "sequential" } },
-            harness: null,
-          });
-          for (const violation of resolved.violations) {
+          for (const violation of configSnapshot.violations) {
             if (violation.key === "gate.command") {
               blockers.push({
                 _tag: "config_invalid",

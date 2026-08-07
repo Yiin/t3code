@@ -1,5 +1,7 @@
 import {
   AuthSessionId,
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   EpicRunId,
   ProjectId,
   ProviderInstanceId,
@@ -290,6 +292,8 @@ describe("persistence error correlation", () => {
           model: "gpt-5.4",
         },
         runtimeMode: "full-access",
+        config: DEFAULT_EPIC_RUN_CONFIG,
+        configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
         originThreadId: null,
         status: "running",
         maxIterations: 5,

@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import { DEFAULT_EPIC_RUN_CONFIG, DEFAULT_EPIC_RUN_CONFIG_PROVENANCE } from "@t3tools/contracts";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -16,7 +17,7 @@ import {
   layer as EpicRunConfigSourceLive,
   type EpicRunConfigFileResult,
 } from "./EpicRunConfigSource.ts";
-import { EpicRunPreflight, layer } from "./EpicRunPreflight.ts";
+import { EpicRunPreflight, layer, type EpicRunConfigSnapshot } from "./EpicRunPreflight.ts";
 
 const run = (
   status: string,
@@ -27,12 +28,18 @@ const run = (
     readonly gitStderr?: string;
     readonly onGit?: (input: ProcessRunner.ProcessRunInput) => void;
     readonly config?: EpicRunConfigFileResult;
+    readonly configSnapshot?: EpicRunConfigSnapshot;
+    readonly onConfigRead?: () => void;
   },
 ) => {
   const testLayer = layer.pipe(
     Layer.provide(
       Layer.succeed(EpicRunConfigSource, {
-        read: () => Effect.succeed(options?.config ?? { _tag: "absent" }),
+        read: () =>
+          Effect.sync(() => {
+            options?.onConfigRead?.();
+            return options?.config ?? { _tag: "absent" };
+          }),
       }),
     ),
     Layer.provide(
@@ -79,11 +86,61 @@ const run = (
     ),
   );
   return Effect.flatMap(EpicRunPreflight, (service) =>
-    service.check({ workspaceRoot: "/repo", epicId: "epic-1", mode: "sequential" }),
+    service.check(
+      { workspaceRoot: "/repo", epicId: "epic-1", mode: "sequential" },
+      options?.configSnapshot,
+    ),
   ).pipe(Effect.provide(testLayer));
 };
 
 describe("EpicRunPreflight", () => {
+  it.effect("uses a supplied launch snapshot without reading config again", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        onConfigRead: () => {
+          reads += 1;
+        },
+        configSnapshot: {
+          fileResult: { _tag: "absent" },
+          config: DEFAULT_EPIC_RUN_CONFIG,
+          provenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+          violations: [],
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect(reads).toBe(0);
+    }),
+  );
+
+  it.effect("blocks a supplied invalid snapshot without reading config again", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        onConfigRead: () => {
+          reads += 1;
+        },
+        configSnapshot: {
+          fileResult: {
+            _tag: "invalid",
+            configPath: "/repo/.t3code/epic-run.json",
+            diagnostics: ["limits.maxIterations must be positive"],
+          },
+          config: DEFAULT_EPIC_RUN_CONFIG,
+          provenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+          violations: [],
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(result.blockers).toContainEqual({
+        _tag: "config_invalid",
+        configPath: "/repo/.t3code/epic-run.json",
+        diagnostics: ["limits.maxIterations must be positive"],
+      });
+      expect(reads).toBe(0);
+    }),
+  );
+
   it.effect("blocks staged, untracked, and renamed paths but exempts .beads", () =>
     Effect.gen(function* () {
       const result = yield* run(
