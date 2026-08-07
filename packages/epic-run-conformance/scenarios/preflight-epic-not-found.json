@@ -1,0 +1,19 @@
+{
+  "name": "preflight-epic-not-found",
+  "description": "Preflight rejects a missing epic.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": { "epicId": "missing", "epicExists": false, "runInProgress": false, "children": [] },
+  "agentScript": [],
+  "expectedTranscript": [
+    {
+      "_tag": "finished",
+      "sequence": 0,
+      "epicId": "missing",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "epic not found"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

@@ -1,0 +1,60 @@
+{
+  "name": "stranded-child-reopened",
+  "description": "A failed claimed child reopens after retry exhaustion.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "no-commit",
+      "claimChild": true,
+      "report": { "_tag": "ralph-blocked" },
+      "closeChild": false,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "retry",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "failureReason": "child:blocked",
+      "attempts": 1
+    },
+    {
+      "_tag": "retry",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1,
+      "failureReason": "child:blocked",
+      "attempts": 2
+    },
+    {
+      "_tag": "blocked",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 2,
+      "failureReason": "child:blocked",
+      "attempts": 3,
+      "reason": "retry budget exhausted; child reopened"
+    }
+  ],
+  "appliesTo": ["core", "server"]
+}

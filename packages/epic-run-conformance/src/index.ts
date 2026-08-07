@@ -1,0 +1,6 @@
+export { ConformanceScenario, decodeConformanceScenario } from "./scenario.ts";
+export {
+  makeConformanceWorkspace,
+  materializeConformanceWorkspace,
+  type ConformanceWorkspace,
+} from "./workspace.ts";

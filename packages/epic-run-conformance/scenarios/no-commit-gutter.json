@@ -1,0 +1,55 @@
+{
+  "name": "no-commit-gutter",
+  "description": "Two no-commit child failures stop at maxNoCommitStreak 2.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-msg", "summary": "none", "why": "no commit" },
+      "closeChild": false,
+      "hangMs": 0
+    },
+    {
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-msg", "summary": "none", "why": "no commit" },
+      "closeChild": false,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "retry",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "failureReason": "child:no-commit-child-open",
+      "attempts": 1
+    },
+    {
+      "_tag": "blocked",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1,
+      "reason": "no-commit gutter",
+      "attempts": 2
+    }
+  ],
+  "appliesTo": ["core", "server"]
+}

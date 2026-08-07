@@ -1,0 +1,81 @@
+{
+  "name": "serialized-trial-merge",
+  "description": "Parallel results enter one serialized trial-merge queue.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      },
+      {
+        "id": "epic.2",
+        "title": "Second",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "commit",
+      "report": { "_tag": "ralph-msg", "summary": "built", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 200
+    },
+    {
+      "repoAction": "commit",
+      "report": { "_tag": "ralph-msg", "summary": "built", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 400
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "dispatched",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "branch": "epic/epic.1"
+    },
+    {
+      "_tag": "dispatched",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.2",
+      "iterationIndex": 1,
+      "branch": "epic/epic.2"
+    },
+    { "_tag": "done", "sequence": 2, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 0 },
+    { "_tag": "done", "sequence": 3, "epicId": "epic", "issueId": "epic.2", "iterationIndex": 1 },
+    {
+      "_tag": "merged",
+      "sequence": 4,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "pushed": false,
+      "verified": true
+    },
+    {
+      "_tag": "merged",
+      "sequence": 5,
+      "epicId": "epic",
+      "issueId": "epic.2",
+      "iterationIndex": 1,
+      "pushed": false,
+      "verified": true
+    }
+  ],
+  "appliesTo": ["terminal"]
+}

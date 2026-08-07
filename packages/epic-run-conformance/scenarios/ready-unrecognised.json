@@ -1,0 +1,44 @@
+{
+  "name": "ready-unrecognised",
+  "description": "A nonempty ready response with only foreign-parent rows fails instead of reporting completion.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "readyIncludesForeign": true,
+    "children": [
+      {
+        "id": "foreign.1",
+        "title": "Foreign child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0,
+        "parentId": "foreign"
+      }
+    ]
+  },
+  "agentScript": [],
+  "expectedTranscript": [
+    {
+      "_tag": "iteration-state-changed",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": 0,
+      "turnStatus": "failed",
+      "failureReason": "infra:ready-unrecognised"
+    },
+    {
+      "_tag": "run-state-changed",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "ready children were unrecognised"
+    }
+  ],
+  "appliesTo": ["server"]
+}

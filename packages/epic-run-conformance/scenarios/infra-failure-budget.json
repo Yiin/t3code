@@ -1,0 +1,77 @@
+{
+  "name": "infra-failure-budget",
+  "description": "Infrastructure timeouts retry five times and never charge the no-commit gutter.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "no-commit",
+      "report": { "_tag": "none" },
+      "closeChild": false,
+      "hangMs": 5000
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "retry",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "failureReason": "infra:timeout",
+      "attempts": 1
+    },
+    {
+      "_tag": "retry",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1,
+      "failureReason": "infra:timeout",
+      "attempts": 2
+    },
+    {
+      "_tag": "retry",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 2,
+      "failureReason": "infra:timeout",
+      "attempts": 3
+    },
+    {
+      "_tag": "retry",
+      "sequence": 3,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 3,
+      "failureReason": "infra:timeout",
+      "attempts": 4
+    },
+    {
+      "_tag": "finished",
+      "sequence": 4,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "infra failure budget",
+      "attempts": 5
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "lock-held",
+  "description": "A second runner refuses while the first owns the lock.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Long child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    { "repoAction": "no-commit", "report": { "_tag": "none" }, "closeChild": false, "hangMs": 5000 }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "lock_held",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

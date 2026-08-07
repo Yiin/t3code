@@ -1,0 +1,24 @@
+{
+  "name": "preflight-run-in-progress",
+  "description": "Preflight rejects an epic already in progress.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "lockHeld": true,
+    "children": []
+  },
+  "agentScript": [],
+  "expectedTranscript": [
+    {
+      "_tag": "lock_held",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "reason": "run in progress"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

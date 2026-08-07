@@ -1,0 +1,39 @@
+{
+  "name": "sibling-repo-layout",
+  "description": "Worker layouts mirror a sibling repository beside the main checkout.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": ["api"] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Cross-repo child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "commit-with-siblings",
+      "report": { "_tag": "ralph-msg", "summary": "built", "why": "cross-repo change" },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "merged",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "repositories": ["repo", "api"]
+    }
+  ],
+  "appliesTo": ["terminal"]
+}

@@ -1,0 +1,40 @@
+{
+  "name": "no-commit-child-closed",
+  "description": "A closed child with fresh evidence does not enter the gutter.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Research: Child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-msg", "summary": "researched", "why": "findings posted" },
+      "closeChild": true,
+      "beadComment": "Research findings",
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "completed-no-code",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "comments": 1
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

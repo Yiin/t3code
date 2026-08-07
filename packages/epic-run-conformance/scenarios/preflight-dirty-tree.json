@@ -1,0 +1,19 @@
+{
+  "name": "preflight-dirty-tree",
+  "description": "Preflight rejects a dirty worktree.",
+  "repo": { "files": [], "detachedHead": false, "dirty": true, "siblingRepos": [] },
+  "beads": { "epicId": "epic", "epicExists": true, "runInProgress": false, "children": [] },
+  "agentScript": [],
+  "expectedTranscript": [
+    {
+      "_tag": "finished",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "dirty tree"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

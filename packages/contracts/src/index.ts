@@ -16,6 +16,7 @@ export * from "./server.ts";
 export * from "./settings.ts";
 export * from "./beads.ts";
 export * from "./epicRuns.ts";
+export * from "./epicRunTranscript.ts";
 export * from "./epicRunConfig.ts";
 export * from "./git.ts";
 export * from "./vcs.ts";

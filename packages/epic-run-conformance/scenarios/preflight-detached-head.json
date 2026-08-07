@@ -1,0 +1,19 @@
+{
+  "name": "preflight-detached-head",
+  "description": "Preflight rejects a detached HEAD.",
+  "repo": { "files": [], "detachedHead": true, "dirty": false, "siblingRepos": [] },
+  "beads": { "epicId": "epic", "epicExists": true, "runInProgress": false, "children": [] },
+  "agentScript": [],
+  "expectedTranscript": [
+    {
+      "_tag": "finished",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "detached head"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

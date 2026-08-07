@@ -1,0 +1,69 @@
+{
+  "name": "provider-fallback-persists",
+  "description": "A provider error falls back from Claude to Codex to Kimi and persists the next selection.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "Child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "agentScript": [
+    {
+      "repoAction": "no-commit",
+      "report": { "_tag": "provider-error", "message": "rate limit" },
+      "closeChild": false,
+      "hangMs": 0
+    },
+    {
+      "repoAction": "no-commit",
+      "report": { "_tag": "provider-error", "message": "rate limit" },
+      "closeChild": false,
+      "hangMs": 0
+    },
+    {
+      "repoAction": "commit",
+      "report": { "_tag": "ralph-msg", "summary": "built", "why": "fallback recovered" },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "provider-fallback",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "fromProvider": "claude",
+      "toProvider": "codex"
+    },
+    {
+      "_tag": "provider-fallback",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1,
+      "fromProvider": "codex",
+      "toProvider": "kimi"
+    },
+    {
+      "_tag": "dispatched",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 2,
+      "toProvider": "kimi"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}
