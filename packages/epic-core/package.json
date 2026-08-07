@@ -1,0 +1,90 @@
+{
+  "name": "@t3tools/epic-core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./ralphProtocol": {
+      "types": "./src/ralphProtocol.ts",
+      "import": "./src/ralphProtocol.ts"
+    },
+    "./providerFallback": {
+      "types": "./src/providerFallback.ts",
+      "import": "./src/providerFallback.ts"
+    },
+    "./Errors": {
+      "types": "./src/Errors.ts",
+      "import": "./src/Errors.ts"
+    },
+    "./policy": {
+      "types": "./src/policy.ts",
+      "import": "./src/policy.ts"
+    },
+    "./processRunner": {
+      "types": "./src/processRunner.ts",
+      "import": "./src/processRunner.ts"
+    },
+    "./collectUint8StreamText": {
+      "types": "./src/collectUint8StreamText.ts",
+      "import": "./src/collectUint8StreamText.ts"
+    },
+    "./ports/AgentDispatch": {
+      "types": "./src/ports/AgentDispatch.ts",
+      "import": "./src/ports/AgentDispatch.ts"
+    },
+    "./ports/RunJournal": {
+      "types": "./src/ports/RunJournal.ts",
+      "import": "./src/ports/RunJournal.ts"
+    },
+    "./ports/Vcs": {
+      "types": "./src/ports/Vcs.ts",
+      "import": "./src/ports/Vcs.ts"
+    },
+    "./ports/Backlog": {
+      "types": "./src/ports/Backlog.ts",
+      "import": "./src/ports/Backlog.ts"
+    },
+    "./ports/Gate": {
+      "types": "./src/ports/Gate.ts",
+      "import": "./src/ports/Gate.ts"
+    },
+    "./ports/RunEvents": {
+      "types": "./src/ports/RunEvents.ts",
+      "import": "./src/ports/RunEvents.ts"
+    },
+    "./ports/WorkerSupervisor": {
+      "types": "./src/ports/WorkerSupervisor.ts",
+      "import": "./src/ports/WorkerSupervisor.ts"
+    },
+    "./adapters/FileRunJournal": {
+      "types": "./src/adapters/FileRunJournal.ts",
+      "import": "./src/adapters/FileRunJournal.ts"
+    },
+    "./adapters/ProcessBacklog": {
+      "types": "./src/adapters/ProcessBacklog.ts",
+      "import": "./src/adapters/ProcessBacklog.ts"
+    },
+    "./adapters/ProcessVcs": {
+      "types": "./src/adapters/ProcessVcs.ts",
+      "import": "./src/adapters/ProcessVcs.ts"
+    },
+    "./adapters/ProcessGate": {
+      "types": "./src/adapters/ProcessGate.ts",
+      "import": "./src/adapters/ProcessGate.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "vp test run"
+  },
+  "dependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "@t3tools/shared": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

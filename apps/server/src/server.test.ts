@@ -98,7 +98,7 @@ import {
   EpicRunnerDispatchError,
   EpicRunnerStoreError,
   EpicRunStateError,
-} from "./runner/Errors.ts";
+} from "@t3tools/epic-core/Errors";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -116,7 +116,7 @@ import * as VcsDriver from "./vcs/VcsDriver.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
 import { EpicRunPreflight } from "./beads/EpicRunPreflight.ts";
-import * as ProcessRunner from "./processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";

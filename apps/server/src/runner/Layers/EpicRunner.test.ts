@@ -14,6 +14,12 @@ import {
   type ProjectionThreadTurnStatus,
   type ServerProvider,
 } from "@t3tools/contracts";
+import {
+  EPIC_RUN_CONTINUATION_PROMPT,
+  EPIC_RUN_ITERATION_PROMPT,
+  EPIC_RUN_STALLED_PROGRESS_PROMPT,
+} from "@t3tools/epic-core/policy";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -39,7 +45,6 @@ import {
   type EpicRun,
   type EpicRunIteration,
 } from "../../persistence/Services/EpicRuns.ts";
-import * as ProcessRunner from "../../processRunner.ts";
 import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
@@ -54,13 +59,7 @@ import {
   type EpicRunLockLease,
 } from "../Services/EpicRunLock.ts";
 import { EpicRunner } from "../Services/EpicRunner.ts";
-import {
-  EPIC_RUN_CONTINUATION_PROMPT,
-  EPIC_RUN_ITERATION_PROMPT,
-  EPIC_RUN_STALLED_PROGRESS_PROMPT,
-  assembleIterationPrompt,
-  makeEpicRunnerLive,
-} from "./EpicRunner.ts";
+import { assembleIterationPrompt, makeEpicRunnerLive } from "./EpicRunner.ts";
 
 const projectId = ProjectId.make("project-epic-runner");
 const modelSelection = {

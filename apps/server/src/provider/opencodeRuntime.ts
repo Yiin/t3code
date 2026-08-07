@@ -29,7 +29,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { isWindowsCommandNotFound } from "../processRunner.ts";
+import { isWindowsCommandNotFound } from "@t3tools/epic-core/processRunner";
 import { collectStreamAsString } from "./providerSnapshot.ts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";

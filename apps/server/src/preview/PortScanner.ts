@@ -24,7 +24,7 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 
 export class PortDiscovery extends Context.Service<
   PortDiscovery,

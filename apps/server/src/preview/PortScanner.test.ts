@@ -10,7 +10,7 @@ import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import { expect } from "vite-plus/test";
 
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as PortScanner from "./PortScanner.ts";
 const TestProcessRunner = Layer.succeed(ProcessRunner.ProcessRunner, {
   run: (input) =>

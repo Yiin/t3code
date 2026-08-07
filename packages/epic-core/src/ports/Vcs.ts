@@ -1,0 +1,77 @@
+/** Version-control effects used by sequential and parallel epic runs. */
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
+export class VcsError extends Schema.TaggedErrorClass<VcsError>()("VcsError", {
+  operation: Schema.String,
+  repositoryPath: Schema.String,
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {}
+
+export interface CreatedWorktree {
+  readonly repositoryPath: string;
+  readonly worktreePath: string;
+  readonly branch: string;
+}
+
+export interface RepoRef {
+  readonly repositoryPath: string;
+  readonly baseBranch: string;
+  readonly worktreeRoot: string;
+  readonly siblings: ReadonlyArray<{
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+    readonly worktreeRoot: string;
+  }>;
+}
+
+export interface RepoOperation {
+  readonly repositoryPath: string;
+  readonly commit: string;
+}
+
+export interface MergeRepositoryResult {
+  readonly repositoryPath: string;
+  readonly passed: boolean;
+  readonly output: string;
+}
+
+export interface TrialMergeResult {
+  readonly passed: boolean;
+  readonly repositories: ReadonlyArray<MergeRepositoryResult>;
+}
+
+export interface LandRepoSetResult {
+  readonly repositories: ReadonlyArray<{ readonly repositoryPath: string }>;
+}
+
+export interface VcsShape {
+  readonly headCommit: (repository: RepoRef) => Effect.Effect<string | null, VcsError>;
+  /** Return `git status --porcelain=v1` for the selected repository. */
+  readonly worktreeFingerprint: (repository: RepoRef) => Effect.Effect<string | null, VcsError>;
+  /** The caller supplies the root. Core code must not read server configuration. */
+  readonly createWorktree: (input: {
+    readonly repositoryPath: string;
+    readonly worktreeRoot: string;
+    readonly branch: string;
+    readonly startPoint: string;
+  }) => Effect.Effect<CreatedWorktree, VcsError>;
+  readonly removeWorktree: (input: {
+    readonly repositoryPath: string;
+    readonly worktreePath: string;
+  }) => Effect.Effect<void, VcsError>;
+  /** Trial every repository in order and abort the repository that conflicts. */
+  readonly trialMerge: (input: {
+    readonly repositories: ReadonlyArray<RepoOperation>;
+  }) => Effect.Effect<TrialMergeResult, VcsError>;
+  /** Land the accepted repo set after the core verifies every base head. */
+  readonly landFastForward: (input: {
+    readonly repositories: ReadonlyArray<RepoOperation>;
+  }) => Effect.Effect<LandRepoSetResult, VcsError>;
+  readonly push: (input: {
+    readonly repositoryPath: string;
+    readonly remote: string;
+    readonly refspec: string;
+  }) => Effect.Effect<void, VcsError>;
+}

@@ -1,3 +1,4 @@
+// @effect-diagnostics deterministicKeys:off
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -11,10 +12,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import {
-  collectUint8StreamText,
-  type CollectedUint8StreamText,
-} from "./stream/collectUint8StreamText.ts";
+import { collectUint8StreamText, type CollectedUint8StreamText } from "./collectUint8StreamText.ts";
 
 export interface ProcessRunInput {
   readonly command: string;
@@ -23,6 +21,8 @@ export interface ProcessRunInput {
   readonly spawnCwd?: string | undefined;
   readonly timeout?: Duration.Input | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /** Replace the child environment when false. Defaults to extending it. */
+  readonly extendEnv?: boolean | undefined;
   readonly stdin?: string | undefined;
   readonly maxOutputBytes?: number | undefined;
   readonly outputMode?: "error" | "truncate" | undefined;
@@ -290,7 +290,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const outputMode = input.outputMode ?? "error";
   const truncatedMarker = input.truncatedMarker ?? "";
-  const extendEnv = input.env !== undefined;
+  const extendEnv = input.env !== undefined && (input.extendEnv ?? true);
   const spawnCommand = yield* resolveSpawnCommand(
     input.command,
     input.args,

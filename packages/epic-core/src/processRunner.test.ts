@@ -19,6 +19,8 @@ type ChildProcessCommand = {
   readonly args: ReadonlyArray<string>;
   readonly options: {
     readonly shell?: boolean | string;
+    readonly env?: Readonly<Record<string, string | undefined>>;
+    readonly extendEnv?: boolean;
   };
 };
 
@@ -122,6 +124,23 @@ describe("runProcess", () => {
 
       expect(result.stdout).toBe("service ok");
     }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("can replace the child environment for isolated commands", () => {
+    const spawner = makeSpawner((command) =>
+      Effect.sync(() => {
+        expect(command.options.env).toEqual({ TASK_TOKEN: "kept" });
+        expect(command.options.extendEnv).toBe(false);
+        return makeHandle({ stdout: "isolated" });
+      }),
+    );
+
+    return runWith(spawner)({
+      command: "fake",
+      args: [],
+      env: { TASK_TOKEN: "kept" },
+      extendEnv: false,
+    }).pipe(Effect.map((result) => expect(result.stdout).toBe("isolated")));
   });
 
   it.effect("resolves and escapes Windows command shims before spawning", () => {

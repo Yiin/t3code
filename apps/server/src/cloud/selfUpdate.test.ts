@@ -16,7 +16,7 @@ import {
 } from "@t3tools/shared/hostProcess";
 
 import * as ServerConfig from "../config.ts";
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import {
   BOOT_SERVICE_UNIT_ENV,
   BOOT_SERVICE_UNIT_FILE,

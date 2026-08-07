@@ -57,7 +57,7 @@ import {
   terminalRestartsTotal,
   terminalSessionsTotal,
 } from "../observability/Metrics.ts";
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
 

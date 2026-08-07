@@ -13,6 +13,40 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThread,
 } from "@t3tools/contracts";
+import {
+  EpicRunLaunchError,
+  EpicRunNotFoundError,
+  EpicRunPreflightBlockedError,
+  EpicRunnerDispatchError,
+  type EpicRunnerError,
+  EpicRunnerStoreError,
+  EpicRunStateError,
+} from "@t3tools/epic-core/Errors";
+import {
+  DEFAULT_INFRA_FAILURE_BUDGET,
+  DEFAULT_ITERATION_TIMEOUT_MS,
+  DEFAULT_MAX_CONSECUTIVE_FAILURES,
+  DEFAULT_MAX_GRACE_CONTINUATIONS,
+  DEFAULT_MAX_ITERATIONS,
+  DEFAULT_MAX_NO_COMMIT_STREAK,
+  DEFAULT_RETRY_BASE_DELAY_MS,
+  DEFAULT_RETRY_MAX_DELAY_MS,
+  DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
+  EPIC_RUN_CONTINUATION_PROMPT,
+  EPIC_RUN_ITERATION_PROMPT,
+  EPIC_RUN_STALLED_PROGRESS_PROMPT,
+} from "@t3tools/epic-core/policy";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import { resolveEpicProviderFallback } from "@t3tools/epic-core/providerFallback";
+import {
+  classifyIteration,
+  hasRalphBlocked,
+  hasRalphDone,
+  iterationFailureClass,
+  parseRalphReport,
+  type EpicIterationOutcome,
+  type IterationTurnState,
+} from "@t3tools/epic-core/ralphProtocol";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -42,56 +76,20 @@ import {
   type EpicRunIteration as EpicRunIterationRow,
   type EpicRunIterationStatus,
 } from "../../persistence/Services/EpicRuns.ts";
-import * as ProcessRunner from "../../processRunner.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
-import {
-  EpicRunNotFoundError,
-  EpicRunLaunchError,
-  EpicRunPreflightBlockedError,
-  EpicRunStateError,
-  EpicRunnerDispatchError,
-  EpicRunnerStoreError,
-  type EpicRunnerError,
-} from "../Errors.ts";
 import { EpicRunLock, type EpicRunLockLease } from "../Services/EpicRunLock.ts";
-import {
-  classifyIteration,
-  hasRalphBlocked,
-  hasRalphDone,
-  iterationFailureClass,
-  parseRalphReport,
-  type EpicIterationOutcome,
-  type IterationTurnState,
-} from "../ralphProtocol.ts";
-import { resolveEpicProviderFallback } from "../providerFallback.ts";
 import {
   EpicRunner,
   type EpicRunnerShape,
   type StartEpicRunInput,
 } from "../Services/EpicRunner.ts";
 
-/** Generous by default — a single unit of epic work can legitimately take hours. */
-const DEFAULT_ITERATION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_QUIET_PERIOD_MS = 1_000;
-const DEFAULT_RETRY_BASE_DELAY_MS = 10_000;
-const DEFAULT_RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
-const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
-const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
-/**
- * How many consecutive infra failures (provider errors, timeouts, dispatch
- * failures — see `iterationFailureClass`) a run absorbs with backoff before it
- * fails. Deliberately above `maxConsecutiveFailures`: an org spend limit or
- * provider outage outlasts any child-failure streak worth retrying, but the
- * budget must still terminate — infra failures are never infinite-retry.
- */
-const DEFAULT_INFRA_FAILURE_BUDGET = 5;
-const DEFAULT_MAX_ITERATIONS = 50;
 /** A provider degradation influences automatic launches for one hour. */
 const DEFAULT_PROVIDER_DEGRADATION_TTL_MS = 60 * 60 * 1000;
 const RECENT_ITERATIONS_LIMIT = 25;
-export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 export const assembleIterationPrompt = (input: {
   readonly basePrompt: string;
   readonly issueId: string;
@@ -99,22 +97,8 @@ export const assembleIterationPrompt = (input: {
   readonly orientationCard: string | null;
 }): string =>
   `${input.basePrompt}\n\nCook exactly \`${input.issueId}\` this iteration.\n\n## Epic context (resolved at dispatch)\n\n${input.epicContext ?? "(epic description unavailable)"}\n\n${input.orientationCard ?? "(no orientation card in this repo)"}`;
-/**
- * The follow-up turn an iteration gets when its agent ended the turn with
- * subagents still running (despite the prompt contract above). Sent after each
- * subagent batch drains, so "finished" is true when the agent reads it.
- */
-export const EPIC_RUN_CONTINUATION_PROMPT = `Your background tasks finished. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
-export const EPIC_RUN_STALLED_PROGRESS_PROMPT = `Your turn ended early while work was still in progress. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
 const GIT_HEAD_TIMEOUT_MS = 15_000;
 const MAX_SETTLE_READS = 20;
-/**
- * How long the runner will wait for a still-running subagent to finish before
- * giving up on the grace path. Matches `RUNNING_SUBAGENT_FRESHNESS_MS`: a row
- * quiet for longer no longer counts as live work anywhere else either.
- */
-const DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS = 15 * 60 * 1_000;
-const DEFAULT_MAX_GRACE_CONTINUATIONS = 10;
 /**
  * The bound for the one absence worth waiting out: a completed turn whose
  * assistant row has not projected at all. Two minutes at the default quiet

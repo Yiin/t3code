@@ -10,7 +10,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import { HostProcessHostname, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { vi } from "vite-plus/test";
 
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as ServerEnvironmentLabel from "./ServerEnvironmentLabel.ts";
 
 const isServerEnvironmentLabelFileError = Schema.is(

@@ -17,7 +17,7 @@
  * approval machinery rather than reimplementing it.
  *
  * Iterations report completion in-band, in the text of their final assistant
- * message — see `../ralphProtocol.ts` for that contract. Beads and git remain
+ * message. See `@t3tools/epic-core/ralphProtocol` for that contract. Beads and git remain
  * the only shared ground truth between a t3code-hosted run and a terminal one.
  *
  * ## What lives elsewhere
@@ -36,12 +36,11 @@ import type {
   ListEpicRunsInput,
   StartEpicRunInput,
 } from "@t3tools/contracts";
+import type { EpicRunnerError } from "@t3tools/epic-core/Errors";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import type * as Stream from "effect/Stream";
-
-import type { EpicRunnerError } from "../Errors.ts";
 
 export type { EpicRunRef, StartEpicRunInput };
 export type ListEpicRunsFilter = ListEpicRunsInput;

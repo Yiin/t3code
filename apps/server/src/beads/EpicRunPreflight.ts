@@ -9,7 +9,7 @@ import {
   type EpicRunPreflightWarning,
 } from "@t3tools/contracts";
 
-import { ProcessRunner } from "../processRunner.ts";
+import { ProcessRunner } from "@t3tools/epic-core/processRunner";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { EpicRunLock } from "../runner/Services/EpicRunLock.ts";
 

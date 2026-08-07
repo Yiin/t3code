@@ -16,7 +16,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../src/config.ts";
-import * as ProcessRunner from "../src/processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as BeadsStatusBroadcaster from "../src/beads/BeadsStatusBroadcaster.ts";
 import { EpicRunPreflight, layer as EpicRunPreflightLive } from "../src/beads/EpicRunPreflight.ts";
 import * as EpicRunLockLive from "../src/runner/Layers/EpicRunLock.ts";

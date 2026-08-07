@@ -103,7 +103,7 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
 import * as EpicRunPreflight from "./beads/EpicRunPreflight.ts";
 import * as EpicRunner from "./runner/Services/EpicRunner.ts";
-import type { EpicRunnerError } from "./runner/Errors.ts";
+import type { EpicRunnerError } from "@t3tools/epic-core/Errors";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import { selectThreadsBoundToWorktree } from "./vcs/worktreeBoundSessions.ts";

@@ -24,7 +24,7 @@ import type {
   BeadsUnavailableReason,
 } from "@t3tools/contracts";
 
-import { ProcessRunner, type ProcessRunError } from "../processRunner.ts";
+import { ProcessRunner, type ProcessRunError } from "@t3tools/epic-core/processRunner";
 
 const BEADS_DIRECTORY_NAME = ".beads";
 const BEADS_METADATA_FILE_NAME = "metadata.json";

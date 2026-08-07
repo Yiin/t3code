@@ -15,7 +15,7 @@ import {
   HostProcessPlatform,
 } from "@t3tools/shared/hostProcess";
 
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { ensurePinnedRuntimeInstalled, pinnedRuntimePaths } from "./pinnedRuntime.ts";
 
 /**

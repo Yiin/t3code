@@ -4,6 +4,7 @@ import {
   EnvironmentHttpApi,
   EnvironmentHttpConflictError,
 } from "@t3tools/contracts";
+import type { EpicRunnerError } from "@t3tools/epic-core/Errors";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
@@ -14,7 +15,6 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
-import type { EpicRunnerError } from "./Errors.ts";
 import { EpicRunner } from "./Services/EpicRunner.ts";
 
 const mapRunnerError = <A, R>(effect: Effect.Effect<A, EpicRunnerError, R>) =>

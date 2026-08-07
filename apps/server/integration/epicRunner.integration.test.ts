@@ -25,7 +25,7 @@ import { OrchestrationEngineService } from "../src/orchestration/Services/Orches
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
 import { EpicRunStore } from "../src/persistence/Services/EpicRuns.ts";
-import * as ProcessRunner from "../src/processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
 import * as lockLive from "../src/runner/Layers/EpicRunLock.ts";
 import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";

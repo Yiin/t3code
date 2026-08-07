@@ -8,7 +8,7 @@ import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as ServerConfig from "../config.ts";
 import { EpicRunLock } from "../runner/Services/EpicRunLock.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";

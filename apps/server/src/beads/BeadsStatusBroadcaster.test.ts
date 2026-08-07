@@ -21,7 +21,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type { BeadsStatusResult } from "@t3tools/contracts";
 
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as BeadsStatusBroadcaster from "./BeadsStatusBroadcaster.ts";
 
 const fixtureDirectory = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));

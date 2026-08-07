@@ -14,9 +14,9 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { normalizeCustomModelSlug } from "@t3tools/shared/model";
-import { isWindowsCommandNotFound } from "../processRunner.ts";
+import { isWindowsCommandNotFound } from "@t3tools/epic-core/processRunner";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
-import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
+import { collectUint8StreamText } from "@t3tools/epic-core/collectUint8StreamText";
 
 export const DEFAULT_TIMEOUT_MS = 4_000;
 // Auth status checks involve disk/network lookups and can be slow on first run (especially Windows)

@@ -15,7 +15,7 @@ import {
 } from "@t3tools/shared/hostProcess";
 
 import { reconcileService } from "../cli/service.ts";
-import * as ProcessRunner from "../processRunner.ts";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as BootService from "./bootService.ts";
 
 const isUnsupportedError = Schema.is(BootService.BootServiceUnsupportedError);
