@@ -1,6 +1,6 @@
 {
   "name": "child-failure-budget",
-  "description": "Three consecutive child failures stop the run. Narrowed: no terminal leg yet; terminal driver coverage is tracked by t3code-06s.41.",
+  "description": "Three consecutive child failures stop the run.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",
@@ -75,5 +75,5 @@
       "reason": "child failure budget"
     }
   ],
-  "appliesTo": ["core", "server"]
+  "appliesTo": ["core", "terminal", "server"]
 }

@@ -1,6 +1,6 @@
 {
   "name": "ready-unrecognised",
-  "description": "A nonempty ready response with only foreign-parent rows fails instead of reporting completion. Narrowed: server-only; core and terminal applicability is tracked by t3code-06s.41.",
+  "description": "A nonempty ready response with only foreign-parent rows fails instead of reporting completion. Server-only by assessment (t3code-06s.41): the sequential core and terminal loops take the bd ready --parent scope at face value and cross-check listChildren before reporting completion, so the false-completion failure mode cannot occur there; a foreign-parent row requires bd to violate its own --parent contract.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",

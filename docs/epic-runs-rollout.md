@@ -8,17 +8,17 @@ t3code-06s.42; conformance gaps are tracked by t3code-06s.41.
 ## Exit checklist
 
 - [x] **Every conformance scenario's `appliesTo` covers both `core` and
-      `terminal`, or the narrowed scenario names the bead that covers the gap.**
-      Evidence: 11 of 20 scenarios in `packages/epic-run-conformance/scenarios/`
-      apply to `["core","terminal","server"]`. The 9 narrowed scenarios name
-      t3code-06s.41 in their `description`:
-  - terminal-only (the core's terminal cook loop is sequential):
-    `parallel-worktrees`, `park-merge-conflict`,
-    `permission-denial-fast-park`, `serialized-trial-merge`,
-    `sibling-repo-layout`;
-  - core+server, terminal leg missing: `child-failure-budget`,
-    `no-commit-gutter`, `stranded-child-reopened`;
-  - server-only: `ready-unrecognised`.
+      `terminal`, or the narrowed scenario records why it is exempt.**
+      Evidence: 14 of 15 scenarios in
+      `packages/epic-run-conformance/scenarios/` apply to
+      `["core","terminal","server"]`. Closed under t3code-06s.41 on
+      2026-08-07: `child-failure-budget`, `no-commit-gutter`, and
+      `stranded-child-reopened` gained the terminal leg; the 5 terminal-only
+      parallel scenarios (`parallel-worktrees`, `park-merge-conflict`,
+      `permission-denial-fast-park`, `serialized-trial-merge`,
+      `sibling-repo-layout`) were deleted with the legacy engine
+      (t3code-06s.42). `ready-unrecognised` stays server-only; its
+      `description` records the core/terminal assessment.
 - [x] **The shadow comparator reports zero structural divergences on at least
       three real epics of increasing size.** Evidence: on 2026-08-07,
       `node scripts/epic-shadow-compare.ts --epic <id> --cwd <repo> --adapters
@@ -117,7 +117,8 @@ Every other knob refuses to start. The dropped knobs and their reasons:
 
 1. This change: `run.sh` becomes the shim, default engine `core`, legacy one
    release behind `COOKEPIC_CORE=legacy`.
-2. t3code-06s.41 closes the conformance `appliesTo` gaps.
+2. ~~t3code-06s.41 closes the conformance `appliesTo` gaps.~~ Done 2026-08-07;
+   see the first checklist item.
 3. ~~After one release with no rollback, t3code-06s.42 deletes `run-legacy.sh`,
    retires or ports the 11 legacy bash suites, and removes the
    `COOKEPIC_CORE` escape hatch.~~ Done 2026-08-07 (t3code-06s.42); see
@@ -139,8 +140,8 @@ Completed 2026-08-07 under t3code-06s.42, after one release with no rollback:
 - Parallel terminal execution retires with the legacy engine. Its 5
   terminal-only conformance scenarios (`parallel-worktrees`,
   `park-merge-conflict`, `permission-denial-fast-park`,
-  `serialized-trial-merge`, `sibling-repo-layout`) are deleted; the coverage
-  gap stays tracked by t3code-06s.41.
+  `serialized-trial-merge`, `sibling-repo-layout`) are deleted; t3code-06s.41
+  closed the remaining gap with this retirement call.
 - The shadow comparator (`scripts/epic-shadow-compare.ts` and its library and
   tests) is deleted. It served its evidence purpose — the zero-divergence runs
   recorded above — and compared two engines, one of which no longer exists.
