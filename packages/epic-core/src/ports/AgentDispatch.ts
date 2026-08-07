@@ -31,6 +31,12 @@ export interface FinalMessageRead {
   readonly text: string | null;
   readonly streaming: boolean;
   readonly waitExhausted: boolean;
+  /**
+   * Server projection reads carry the settled turn and session state of the
+   * same snapshot, so classification reads one consistent projection.
+   */
+  readonly turnState?: "completed" | "error" | "interrupted" | null;
+  readonly sessionLastError?: string | null;
 }
 
 export type AuxiliaryPurpose = "idle-inspection" | "epic-note-fold";

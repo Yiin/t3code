@@ -48,6 +48,17 @@ export interface LandRepoSetResult {
 
 export interface VcsShape {
   readonly headCommit: (repository: RepoRef) => Effect.Effect<string | null, VcsError>;
+  /**
+   * Count commits on `branch` not reachable from `base`
+   * (`git rev-list --count base..branch`). `null` on any read failure, so a
+   * broken ref never counts as progress — same contract as the server's
+   * branch commit probe.
+   */
+  readonly commitsAhead: (input: {
+    readonly cwd: string;
+    readonly base: string;
+    readonly branch: string;
+  }) => Effect.Effect<number | null, VcsError>;
   /** Return `git status --porcelain=v1` for the selected repository. */
   readonly worktreeFingerprint: (repository: RepoRef) => Effect.Effect<string | null, VcsError>;
   /** The caller supplies the root. Core code must not read server configuration. */

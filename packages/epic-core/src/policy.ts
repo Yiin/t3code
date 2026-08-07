@@ -143,6 +143,29 @@ export const persistedFailureReason = (input: PersistedFailureReasonInput): stri
   return failureClass === null || reason === null ? null : `${failureClass}:${reason}`;
 };
 
+/**
+ * The ready frontier of one epic, partitioned for the parallel loop.
+ *
+ * `bd ready --parent` owns the scope, but some rows omit the parent value,
+ * which decodes to null and is usable. Only an explicit parent naming another
+ * issue rejects the row.
+ */
+export type ReadyFrontierPartition<Issue> =
+  | { readonly _tag: "empty" }
+  | { readonly _tag: "unrecognised"; readonly candidateIds: ReadonlyArray<string> }
+  | { readonly _tag: "children"; readonly issues: ReadonlyArray<Issue> };
+
+export const partitionReadyChildren = <Issue extends { readonly id: string }>(
+  epicId: string,
+  issues: ReadonlyArray<Issue & { readonly parentId: string | null }>,
+): ReadyFrontierPartition<Issue> => {
+  if (issues.length === 0) return { _tag: "empty" };
+  const direct = issues.filter((issue) => issue.parentId === null || issue.parentId === epicId);
+  return direct.length === 0
+    ? { _tag: "unrecognised", candidateIds: issues.map((issue) => issue.id) }
+    : { _tag: "children", issues: direct };
+};
+
 export interface IterationBoundaryLimits {
   readonly maxConsecutiveFailures: number;
   readonly maxNoCommitStreak: number;

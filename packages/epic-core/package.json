@@ -39,6 +39,14 @@
       "types": "./src/SequentialEpicLoop.ts",
       "import": "./src/SequentialEpicLoop.ts"
     },
+    "./ParallelEpicLoop": {
+      "types": "./src/ParallelEpicLoop.ts",
+      "import": "./src/ParallelEpicLoop.ts"
+    },
+    "./runPolicy": {
+      "types": "./src/runPolicy.ts",
+      "import": "./src/runPolicy.ts"
+    },
     "./MergeQueue": {
       "types": "./src/MergeQueue.ts",
       "import": "./src/MergeQueue.ts"
@@ -74,6 +82,14 @@
     "./ports/WorkerSupervisor": {
       "types": "./src/ports/WorkerSupervisor.ts",
       "import": "./src/ports/WorkerSupervisor.ts"
+    },
+    "./ports/PoolDispatch": {
+      "types": "./src/ports/PoolDispatch.ts",
+      "import": "./src/ports/PoolDispatch.ts"
+    },
+    "./ports/Workspace": {
+      "types": "./src/ports/Workspace.ts",
+      "import": "./src/ports/Workspace.ts"
     },
     "./ports/EpicRunLock": {
       "types": "./src/ports/EpicRunLock.ts",

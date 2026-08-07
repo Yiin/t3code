@@ -153,8 +153,23 @@ export const makeProcessVcs = (input: {
       args: ["push", remote, refspec],
     }).pipe(Effect.asVoid);
 
+  const commitsAhead: VcsShape["commitsAhead"] = ({ cwd, base, branch }) =>
+    run({
+      operation: "commitsAhead",
+      repositoryPath: cwd,
+      args: ["rev-list", "--count", `${base}..${branch}`],
+    }).pipe(
+      Effect.map((output) => {
+        if (output.code !== 0) return null;
+        const count = Number.parseInt(output.stdout.trim(), 10);
+        return Number.isSafeInteger(count) && count >= 0 ? count : null;
+      }),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+
   return {
     headCommit,
+    commitsAhead,
     worktreeFingerprint,
     createWorktree,
     removeWorktree,
