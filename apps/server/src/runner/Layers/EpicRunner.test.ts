@@ -64,6 +64,12 @@ import {
   type EpicRunIteration,
 } from "../../persistence/Services/EpicRuns.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
+import { ServerConfig } from "../../config.ts";
+import {
+  ProjectSetupScriptRunner,
+  type ProjectSetupScriptRunnerInput,
+} from "../../project/ProjectSetupScriptRunner.ts";
+import { WorktreeProvisioner, type ProvisionWorktreeInput } from "../../vcs/WorktreeProvisioner.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import {
   makeMemoryStore,
@@ -133,6 +139,8 @@ interface ScriptedIteration {
   readonly head: string;
   /** The porcelain fingerprint git reports after this turn settles. */
   readonly worktreeFingerprint?: string;
+  /** Commits visible through base..branch when the worker HEAD read is stale. */
+  readonly branchCommitCount?: number;
   readonly turnState?: ProjectionThreadTurnStatus;
   readonly sessionStatus?: OrchestrationSessionStatus;
   /** The projected session's `lastError` once the turn settles. */
@@ -229,6 +237,8 @@ const captureLogs = () => {
   };
 };
 
+let harnessSequence = 0;
+
 function createHarness(input: {
   readonly script: ReadonlyArray<ScriptedIteration>;
   readonly initialHead?: string;
@@ -271,6 +281,8 @@ function createHarness(input: {
   readonly refuseCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
   /** Guarded normal-stop refusals that simulate a subagent starting after the advisory read. */
   readonly guardedStopRefusals?: number;
+  /** Model a parallel branch HEAD that moves while the base checkout stays put. */
+  readonly separateWorkerHead?: boolean;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   for (const run of input.seedRuns ?? []) {
@@ -290,7 +302,9 @@ function createHarness(input: {
     }
   >();
   let head = input.initialHead ?? "head-0";
+  const baseHead = input.initialHead ?? "head-0";
   let worktreeFingerprint = input.initialWorktreeFingerprint ?? "";
+  let branchCommitCount = 0;
   let turnsStarted = 0;
   let sequence = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
@@ -307,6 +321,11 @@ function createHarness(input: {
   let epicDescriptionReads = 0;
   const configReadRoots: string[] = [];
   const preflightModes: Array<"parallel" | "sequential"> = [];
+  const provisionInputs: ProvisionWorktreeInput[] = [];
+  const setupInputs: ProjectSetupScriptRunnerInput[] = [];
+  const iterationLifecycle: string[] = [];
+  harnessSequence += 1;
+  const worktreesDir = `/tmp/t3-epic-runner-worktrees-${harnessSequence}`;
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -330,6 +349,7 @@ function createHarness(input: {
       yield* Effect.sleep(`${scripted.settleDelayMs ?? 2} millis`);
 
       head = scripted.head;
+      branchCommitCount = scripted.branchCommitCount ?? 0;
       if (scripted.worktreeFingerprint !== undefined) {
         worktreeFingerprint = scripted.worktreeFingerprint;
       }
@@ -370,6 +390,9 @@ function createHarness(input: {
     ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
       Effect.gen(function* () {
         dispatched.push(command);
+        if (command.type === "thread.create" || command.type === "thread.turn.start") {
+          iterationLifecycle.push(command.type);
+        }
         if (
           command.type === "thread.session.stop" &&
           command.preserveRunningSubagents === true &&
@@ -642,9 +665,21 @@ function createHarness(input: {
             request.command === "bd"
               ? (input.readyOutput ??
                 `[{"id":"child-${turnsStarted + 1}","parent":"${request.args[2] ?? "epic-1"}"}]`)
-              : request.args[0] === "status"
-                ? worktreeFingerprint
-                : `${head}\n`,
+              : request.args[0] === "symbolic-ref"
+                ? "mine\n"
+                : request.args[0] === "rev-list"
+                  ? `${
+                      input.separateWorkerHead && !request.args[2]?.startsWith(`${baseHead}..`)
+                        ? 0
+                        : branchCommitCount
+                    }\n`
+                  : request.args[0] === "status"
+                    ? worktreeFingerprint
+                    : request.args[0] === "rev-parse" &&
+                        input.separateWorkerHead === true &&
+                        request.cwd === "/tmp/epic-runner-repo"
+                      ? `${baseHead}\n`
+                      : `${head}\n`,
           stderr: "",
           code: 0 as never,
           timedOut: false,
@@ -728,6 +763,31 @@ function createHarness(input: {
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processRunnerLayer),
+    Layer.provide(
+      Layer.succeed(WorktreeProvisioner, {
+        provision: (request) =>
+          Effect.sync(() => {
+            provisionInputs.push(request);
+            const provisionedPath = request.path ?? `${worktreesDir}/default`;
+            return {
+              path: provisionedPath,
+              refName: request.branch ?? request.baseBranch,
+            };
+          }),
+        release: () => Effect.die("unused"),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ProjectSetupScriptRunner, {
+        runForThread: (request) =>
+          Effect.sync(() => {
+            setupInputs.push(request);
+            iterationLifecycle.push("setup");
+            return { status: "no-script" } as const;
+          }),
+      }),
+    ),
+    Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
     Layer.provide(makeProviderRegistryLayer(input.providers ?? [])),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(
@@ -750,6 +810,10 @@ function createHarness(input: {
     epicDescriptionReads: () => epicDescriptionReads,
     configReadRoots,
     preflightModes,
+    provisionInputs,
+    setupInputs,
+    iterationLifecycle,
+    worktreesDir,
     childStatus: (issueId: string) => childStatuses.get(issueId),
     commands: dispatched,
     commandsOfType: <T extends OrchestrationCommand["type"]>(type: T) =>
@@ -4151,12 +4215,192 @@ describe("EpicRunner", () => {
     const harness = createHarness({
       script: [{ text: "RALPH_DONE", head: "head-0" }],
       workspaceRoot: "/tmp/epic-runner-repo",
+      configFileResult: loadedConfigFile({ execution: { sequential: true } }),
     });
 
     return Effect.gen(function* () {
       const run = yield* startRun();
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
       assert.strictEqual(harness.commandsOfType("thread.create")[0]?.worktreePath, null);
+      assert.strictEqual(harness.commandsOfType("thread.create")[0]?.branch, null);
+      assert.deepStrictEqual(harness.provisionInputs, []);
+      assert.deepStrictEqual(harness.setupInputs, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("provisions a parallel iteration and dispatches its setup before the turn", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+    });
+
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const expectedPath = `${harness.worktreesDir}/epic-${run.runId}/child-1`;
+      assert.deepStrictEqual(harness.provisionInputs, [
+        {
+          projectCwd: "/tmp/epic-runner-repo",
+          branch: "epic/child-1",
+          baseBranch: "mine",
+          path: expectedPath,
+        },
+      ]);
+      const created = harness.commandsOfType("thread.create")[0]!;
+      assert.strictEqual(created.branch, "epic/child-1");
+      assert.strictEqual(created.worktreePath, expectedPath);
+      assert.deepStrictEqual(harness.iterationLifecycle.slice(0, 3), [
+        "thread.create",
+        "setup",
+        "thread.turn.start",
+      ]);
+      assert.strictEqual(harness.setupInputs[0]?.worktreePath, expectedPath);
+      assert.strictEqual(
+        yield* fileSystem.readFileString(`${expectedPath}/.beads/redirect`),
+        "../../../epic-runner-repo/.beads",
+      );
+      assert.strictEqual(harness.store.iterations[0]?.workerId, created.threadId);
+      assert.strictEqual(harness.store.iterations[0]?.branch, "epic/child-1");
+      assert.strictEqual(harness.store.iterations[0]?.worktreePath, expectedPath);
+      const runner = yield* EpicRunner;
+      const transported = Option.getOrThrow(yield* runner.getRun({ runId: run.runId }));
+      assert.strictEqual(transported.recentIterations[0]?.workerId, created.threadId);
+      assert.strictEqual(transported.recentIterations[0]?.branch, "epic/child-1");
+      assert.strictEqual(transported.recentIterations[0]?.worktreePath, expectedPath);
+    }).pipe(Effect.provide(Layer.merge(harness.layer, NodeServices.layer)));
+  });
+
+  it.live("resolves a nested beads redirect before writing the worker redirect", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      const canonicalBeads = path.join(root, "canonical-beads");
+      const runCwd = path.join(root, "existing-worker");
+      yield* fileSystem.makeDirectory(path.join(runCwd, ".beads"), { recursive: true });
+      yield* fileSystem.makeDirectory(canonicalBeads, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(runCwd, ".beads", "redirect"),
+        path.relative(runCwd, canonicalBeads),
+      );
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: runCwd,
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: runCwd,
+          prompt: "Cook.",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        const worktreePath = harness.commandsOfType("thread.create")[0]!.worktreePath!;
+        const redirect = yield* fileSystem.readFileString(
+          path.join(worktreePath, ".beads", "redirect"),
+        );
+        assert.strictEqual(path.resolve(worktreePath, redirect), canonicalBeads);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("classifies a branch commit when the worker HEAD read stays stale", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"branch commit","why":"worker committed"}',
+          head: "head-0",
+          branchCommitCount: 1,
+        },
+        { text: "RALPH_DONE", head: "head-0" },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.summary, "branch commit");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps sequential HEAD movement as the commit signal", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"sequential commit","why":"HEAD moved"}',
+          head: "head-1",
+        },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      configFileResult: loadedConfigFile({ execution: { sequential: true } }),
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[0]?.summary, "sequential commit");
+      assert.isFalse(harness.processRequests.some((request) => request.args[0] === "rev-list"));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps a parallel iteration as no-commit when HEAD and branch stay unchanged", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"claimed only","why":"no commit"}',
+          head: "head-0",
+          branchCommitCount: 0,
+        },
+      ],
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps the base checkout as commit evidence across a child retry", () => {
+    const harness = createHarness({
+      readyOutput: '[{"id":"child-1","parent":"epic-1"}]',
+      separateWorkerHead: true,
+      script: [
+        {
+          text: "provider failed after committing",
+          head: "branch-head-1",
+          branchCommitCount: 1,
+          turnState: "error",
+          sessionStatus: "error",
+          sessionLastError: "provider failed",
+        },
+        {
+          text: 'RALPH_MSG: {"summary":"closed on retry","why":"the branch commit survived"}',
+          head: "branch-head-1",
+          branchCommitCount: 1,
+        },
+      ],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.iterations[1]?.turnStatus === "completed");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "failed");
+      assert.strictEqual(harness.store.iterations[1]?.turnStatus, "completed");
+      assert.strictEqual(harness.store.iterations[1]?.summary, "closed on retry");
+      if (harness.store.runs.get(run.runId)?.status === "running") {
+        yield* runner.cancelRun({ runId: run.runId });
+      }
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -4167,6 +4411,7 @@ describe("EpicRunner", () => {
     const harness = createHarness({
       script: [{ text: "RALPH_DONE", head: "head-0" }],
       workspaceRoot: "/tmp/some-other-checkout",
+      configFileResult: loadedConfigFile({ execution: { sequential: true } }),
     });
 
     return Effect.gen(function* () {
@@ -4176,6 +4421,7 @@ describe("EpicRunner", () => {
         harness.commandsOfType("thread.create")[0]?.worktreePath,
         "/tmp/epic-runner-repo",
       );
+      assert.deepStrictEqual(harness.setupInputs, []);
     }).pipe(Effect.provide(harness.layer));
   });
 

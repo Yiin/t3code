@@ -131,7 +131,7 @@ describe("WorktreeProvisioner", () => {
         path: "/worktrees/child",
       });
 
-      assert.deepEqual(operations, ["fetch", "resolve", "branch-exists", "create"]);
+      assert.deepEqual(operations, ["list", "fetch", "resolve", "branch-exists", "create"]);
       assert.deepInclude(createInput, {
         cwd: "/repo",
         refName: "fetched-sha",
@@ -143,8 +143,12 @@ describe("WorktreeProvisioner", () => {
     }).pipe(
       Effect.provide(
         makeTestLayer({
-          execute: () =>
+          execute: (request) =>
             Effect.sync(() => {
+              if (request.args[0] === "worktree") {
+                operations.push("list");
+                return gitResult(0);
+              }
               operations.push("branch-exists");
               return gitResult(1);
             }),
@@ -208,6 +212,39 @@ describe("WorktreeProvisioner", () => {
     );
   });
 
+  it.effect("reuses the matching registered worktree on an iteration retry", () => {
+    let existingPath = "";
+    return Effect.scoped(
+      Effect.gen(function* () {
+        existingPath = yield* makeTmpDir();
+        const provisioner = yield* WorktreeProvisioner;
+        const result = yield* provisioner.provision({
+          projectCwd: "/repo",
+          branch: "epic/retry",
+          baseBranch: "main",
+          path: existingPath,
+        });
+
+        assert.deepStrictEqual(result, { path: existingPath, refName: "epic/retry" });
+      }).pipe(
+        Effect.provide(
+          makeTestLayer({
+            execute: (request) =>
+              request.args[0] === "worktree"
+                ? Effect.succeed(
+                    gitResult(
+                      0,
+                      `worktree ${existingPath}\nHEAD abc\nbranch refs/heads/epic/retry\n`,
+                    ),
+                  )
+                : Effect.die("branch lookup must not run for a registered retry"),
+            createWorktree: () => Effect.die("registered retry must not create a worktree"),
+          }),
+        ),
+      ),
+    ).pipe(Effect.provide(NodeServices.layer));
+  });
+
   it.effect("refuses an existing filesystem target", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -256,6 +293,39 @@ describe("WorktreeProvisioner", () => {
                 ? gitResult(0, `worktree ${registeredPath}\nHEAD abc\nbranch refs/heads/main\n`)
                 : gitResult(1),
             ),
+        }),
+      ),
+    );
+  });
+
+  it.effect("refuses a missing registered target during a normal retry", () => {
+    const registeredPath = "/worktrees/registered-retry-missing";
+    return Effect.gen(function* () {
+      const provisioner = yield* WorktreeProvisioner;
+      const error = yield* provisioner
+        .provision({
+          projectCwd: "/repo",
+          branch: "epic/retry-missing",
+          baseBranch: "main",
+          path: registeredPath,
+        })
+        .pipe(Effect.flip, Effect.orDie);
+
+      assert.instanceOf(error, WorktreeTargetExistsError);
+      assert.deepInclude(error, { source: "git", path: registeredPath });
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          execute: (request) =>
+            Effect.succeed(
+              request.args[0] === "worktree"
+                ? gitResult(
+                    0,
+                    `worktree ${registeredPath}\nHEAD abc\nbranch refs/heads/epic/retry-missing\n`,
+                  )
+                : gitResult(1),
+            ),
+          createWorktree: () => Effect.die("a missing registered target must not be reused"),
         }),
       ),
     );

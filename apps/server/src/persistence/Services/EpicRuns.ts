@@ -39,7 +39,7 @@ import {
   type ListEpicRunsInput as ListEpicRunsInputType,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import type * as Effect from "effect/Effect";
+import * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -70,6 +70,10 @@ export const EpicRunIteration = Schema.Struct({
   iterationIndex: NonNegativeInt,
   threadId: ThreadId,
   issueId: Schema.NullOr(Schema.String),
+  /** The orchestration thread is the server worker identity for this iteration. */
+  workerId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  branch: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  worktreePath: Schema.optionalKey(Schema.NullOr(Schema.String)),
   turnStatus: EpicRunIterationStatus,
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),

@@ -435,6 +435,9 @@ describe("EpicRunStore", () => {
           iterationIndex,
           threadId: ThreadId.make(`thread-${iterationIndex}`),
           issueId: `issue-${iterationIndex}`,
+          workerId: `worker-${iterationIndex}`,
+          branch: `epic/issue-${iterationIndex}`,
+          worktreePath: `/tmp/worktrees/issue-${iterationIndex}`,
           turnStatus: "completed",
           summary: `iteration ${iterationIndex}`,
           why: `reason ${iterationIndex}`,
@@ -453,6 +456,9 @@ describe("EpicRunStore", () => {
       const latest = yield* store.getLatestIteration({ runId });
       assert.strictEqual(Option.getOrNull(latest)?.iterationIndex, 2);
       assert.strictEqual(Option.getOrNull(latest)?.threadId, "thread-2");
+      assert.strictEqual(Option.getOrNull(latest)?.workerId, "worker-2");
+      assert.strictEqual(Option.getOrNull(latest)?.branch, "epic/issue-2");
+      assert.strictEqual(Option.getOrNull(latest)?.worktreePath, "/tmp/worktrees/issue-2");
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

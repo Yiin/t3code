@@ -42,7 +42,10 @@ The shared event stream also has `subagent-liveness-degraded` and `subagent-live
 | ---------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------- |
 | `iterationIndex` | Mailbox sequence and dispatch order.                              | The terminal adapter synthesizes the stable zero-based index.        |
 | `threadId`       | No stable terminal value.                                         | The adapter stores it in ignored transcript metadata when available. |
+| `workerId`       | Worker lifecycle events.                                          | The terminal adapter copies the worker identity when available.      |
 | `issueId`        | Mailbox `child`.                                                  | The terminal adapter renames it. Run-level records use null.         |
+| `branch`         | Worker checkout events.                                           | The terminal adapter copies the per-child branch when available.     |
+| `worktreePath`   | Worker checkout events.                                           | The terminal adapter copies the per-child path when available.       |
 | `turnStatus`     | Dispatch, completion, retry, blocked, and interruption events.    | The adapter synthesizes the four-state value.                        |
 | `summary`        | Worker result text or the terminal event reason.                  | The adapter includes only stable worker-reported text.               |
 | `why`            | The structured worker report.                                     | The terminal adapter copies it when the harness supplies it.         |

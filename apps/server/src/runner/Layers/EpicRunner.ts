@@ -88,6 +88,9 @@ import {
 } from "../../persistence/Services/EpicRuns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
+import { ServerConfig } from "../../config.ts";
+import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
+import { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
 import {
   EpicRunner,
   type EpicRunnerShape,
@@ -128,7 +131,12 @@ const buildTransportRun = (
   recentIterations: ReadonlyArray<EpicRunIterationRow>,
 ): TransportEpicRun => ({
   ...run,
-  recentIterations,
+  recentIterations: recentIterations.map((iteration) => ({
+    ...iteration,
+    workerId: iteration.workerId ?? null,
+    branch: iteration.branch ?? null,
+    worktreePath: iteration.worktreePath ?? null,
+  })),
   threadRefs: recentIterations.flatMap((iteration) =>
     iteration.issueId === null
       ? []
@@ -186,6 +194,11 @@ type RunIterationResult =
       readonly detail: string;
       readonly providerTurnDispatched: false;
     };
+interface IterationWorkspace {
+  readonly cwd: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}
 const IssueEvidence = Schema.Struct({
   status: Schema.optional(Schema.String),
   title: Schema.optional(Schema.String),
@@ -202,6 +215,7 @@ const decodeEpicDescription = Schema.decodeUnknownOption(
     ]),
   ),
 );
+const isEpicRunnerDispatchError = Schema.is(EpicRunnerDispatchError);
 
 const isValidOrientationFile = (value: string): boolean =>
   !/^(?:[A-Za-z]:[\\/]|[\\/])/u.test(value) && !value.split(/[\\/]/u).includes("..");
@@ -468,6 +482,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const configSource = yield* EpicRunConfigSource;
     const runLock = yield* EpicRunLock;
     const agentAwarenessRelay = yield* AgentAwarenessRelay;
+    const serverConfig = yield* ServerConfig;
+    const worktreeProvisioner = yield* WorktreeProvisioner;
+    const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
     const leases = new Map<EpicRunId, EpicRunLockLease>();
     const issueTitleCache = new Map<string, string>();
@@ -726,6 +743,68 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             ),
           ),
         );
+
+    const readCurrentBranch = (cwd: string): Effect.Effect<string, EpicRunnerDispatchError> =>
+      processRunner
+        .run({
+          command: "git",
+          args: ["symbolic-ref", "--short", "HEAD"],
+          cwd,
+          timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+        })
+        .pipe(
+          Effect.flatMap((output) => {
+            const branch = output.stdout.trim();
+            return output.code === 0 && branch.length > 0
+              ? Effect.succeed(branch)
+              : Effect.fail(
+                  new EpicRunnerDispatchError({
+                    commandType: "git.current-branch",
+                    detail: output.stderr.trim() || "Could not resolve the epic base branch",
+                  }),
+                );
+          }),
+          Effect.mapError((cause) =>
+            isEpicRunnerDispatchError(cause)
+              ? cause
+              : new EpicRunnerDispatchError({
+                  commandType: "git.current-branch",
+                  detail: "Could not resolve the epic base branch",
+                  cause,
+                }),
+          ),
+        );
+
+    const iterationCommitted = (input: {
+      readonly workspace: IterationWorkspace;
+      readonly headBefore: string | null;
+      readonly branchBase: string | null;
+    }): Effect.Effect<boolean> =>
+      Effect.gen(function* () {
+        const headAfter = yield* readHeadCommit(input.workspace.cwd);
+        if (headAfter !== null && headAfter !== input.headBefore) return true;
+        if (input.workspace.branch === null || input.branchBase === null) return false;
+
+        return yield* processRunner
+          .run({
+            command: "git",
+            args: ["rev-list", "--count", `${input.branchBase}..${input.workspace.branch}`],
+            cwd: input.workspace.cwd,
+            timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+          })
+          .pipe(
+            Effect.map(
+              (output) => output.code === 0 && Number.parseInt(output.stdout.trim(), 10) > 0,
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logDebug("epic.runner.branch-commit-read-failed", {
+                cwd: input.workspace.cwd,
+                branch: input.workspace.branch,
+                cause,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+      });
 
     const selectReadyChild = (run: EpicRun): Effect.Effect<ReadyChildSelection, EpicRunnerError> =>
       processRunner
@@ -1084,6 +1163,88 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    const resolveBeadsDirectory = (cwd: string) =>
+      Effect.gen(function* () {
+        const beadsDirectory = path.join(cwd, ".beads");
+        const canonicalBeads = yield* fileSystem
+          .realPath(beadsDirectory)
+          .pipe(Effect.orElseSucceed(() => beadsDirectory));
+        const redirect = yield* fileSystem
+          .readFileString(path.join(canonicalBeads, "redirect"))
+          .pipe(
+            Effect.map((contents) => contents.trim()),
+            Effect.orElseSucceed(() => ""),
+          );
+        const target =
+          redirect.length === 0
+            ? canonicalBeads
+            : path.isAbsolute(redirect)
+              ? redirect
+              : path.resolve(cwd, redirect);
+        return yield* fileSystem.realPath(target).pipe(Effect.orElseSucceed(() => target));
+      });
+
+    const writeBeadsRedirect = (runCwd: string, worktreeCwd: string) =>
+      Effect.gen(function* () {
+        const targetBeads = yield* resolveBeadsDirectory(runCwd);
+        const worktreeBeads = path.join(worktreeCwd, ".beads");
+        yield* fileSystem.makeDirectory(worktreeBeads, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(worktreeBeads, "redirect"),
+          path.relative(worktreeCwd, targetBeads),
+        );
+      });
+
+    const resolveIterationWorkspace = Effect.fn("EpicRunner.resolveIterationWorkspace")(function* (
+      run: EpicRun,
+      issueId: string,
+    ): Effect.fn.Return<IterationWorkspace, EpicRunnerError> {
+      if (run.config.execution.sequential) {
+        const worktreePath = yield* resolveIterationWorktreePath(run);
+        return {
+          cwd: worktreePath ?? run.cwd,
+          branch: null,
+          worktreePath,
+        };
+      }
+
+      const branch = `epic/${issueId}`;
+      const baseBranch = yield* readCurrentBranch(run.cwd);
+      const targetPath = path.join(serverConfig.worktreesDir, `epic-${run.runId}`, issueId);
+      const provisioned = yield* worktreeProvisioner
+        .provision({
+          projectCwd: run.cwd,
+          branch,
+          baseBranch,
+          path: targetPath,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.worktree-provision",
+                detail: `Could not provision ${branch} at ${targetPath}`,
+                cause,
+              }),
+          ),
+        );
+      yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
+        Effect.mapError(
+          (cause) =>
+            new EpicRunnerDispatchError({
+              commandType: "beads.redirect-write",
+              detail: `Could not write the beads redirect in ${provisioned.path}`,
+              cause,
+            }),
+        ),
+      );
+      return {
+        cwd: provisioned.path,
+        branch: provisioned.refName,
+        worktreePath: provisioned.path,
+      };
+    });
+
     const readThreadShell = (threadId: ThreadId) =>
       projectionSnapshotQuery.getThreadShellById(threadId).pipe(
         Effect.map(Option.getOrUndefined),
@@ -1213,7 +1374,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       readonly run: EpicRun;
       readonly iterationIndex: number;
       readonly threadId: ThreadId;
+      readonly workspace: IterationWorkspace;
       readonly headBefore: string | null;
+      readonly branchBase: string | null;
       readonly initialWorktreeFingerprint: string | null;
       readonly policy: EpicRunnerPolicy;
     }): Effect.Effect<IterationSettleResult> =>
@@ -1223,8 +1386,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         let worktreeFingerprintBefore = input.initialWorktreeFingerprint;
 
         while (true) {
-          const headAfter = yield* readHeadCommit(input.run.cwd);
-          const headMoved = headAfter !== null && headAfter !== input.headBefore;
+          const headMoved = yield* iterationCommitted({
+            workspace: input.workspace,
+            headBefore: input.headBefore,
+            branchBase: input.branchBase,
+          });
           if (headMoved) {
             const decision = decideGraceStep({
               headMoved,
@@ -1268,7 +1434,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           let finalMessageWaitExhausted = false;
           let hasRalphToken = false;
           if (freshRunning === 0) {
-            worktreeFingerprintAfter = yield* readWorktreeFingerprint(input.run.cwd);
+            worktreeFingerprintAfter = yield* readWorktreeFingerprint(input.workspace.cwd);
             fingerprintChanged =
               worktreeFingerprintBefore === null || worktreeFingerprintAfter === null
                 ? null
@@ -1341,7 +1507,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               });
               return settled;
             }
-            worktreeFingerprintBefore = yield* readWorktreeFingerprint(input.run.cwd);
+            worktreeFingerprintBefore = yield* readWorktreeFingerprint(input.workspace.cwd);
             yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
               runId: input.run.runId,
               iterationIndex: input.iterationIndex,
@@ -1471,14 +1637,18 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const classifyFromProjection = (input: {
       readonly threadId: ThreadId;
-      readonly cwd: string;
+      readonly workspace: IterationWorkspace;
       readonly headBefore: string | null;
+      readonly branchBase: string | null;
       readonly timedOut: boolean;
       readonly policy: EpicRunnerPolicy;
     }) =>
       Effect.gen(function* () {
-        const headAfter = yield* readHeadCommit(input.cwd);
-        const committed = headAfter !== null && headAfter !== input.headBefore;
+        const committed = yield* iterationCommitted({
+          workspace: input.workspace,
+          headBefore: input.headBefore,
+          branchBase: input.branchBase,
+        });
         // A timed-out turn was just interrupted and may still be streaming, so
         // there is nothing to wait for — and `classifyIteration` ignores the
         // message for a timeout anyway.
@@ -1541,6 +1711,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               iterationIndex: input.iterationIndex,
               threadId,
               issueId: null,
+              workerId: null,
+              branch: null,
+              worktreePath: null,
               turnStatus: "running",
               summary: null,
               why: null,
@@ -1569,12 +1742,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         }
 
         const issueId = selection.issueId;
-        const worktreePath = yield* resolveIterationWorktreePath(run);
-        const checkoutPath = worktreePath ?? run.cwd;
+        const workspace = yield* resolveIterationWorkspace(run, issueId);
+        const branchBase = workspace.branch === null ? null : yield* readHeadCommit(run.cwd);
         const epicContext = yield* readEpicDescription(run.cwd, run.epicId);
-        const orientationCard = yield* readOrientationCard(checkoutPath, run.orientationFile);
-        const headBefore = yield* readHeadCommit(run.cwd);
-        const initialWorktreeFingerprint = yield* readWorktreeFingerprint(run.cwd);
+        const orientationCard = yield* readOrientationCard(run.cwd, run.orientationFile);
+        const headBefore = yield* readHeadCommit(workspace.cwd);
+        const initialWorktreeFingerprint = yield* readWorktreeFingerprint(workspace.cwd);
         const issueEvidenceBefore = yield* readIssueEvidence(run.cwd, issueId);
         const commentsBefore = issueEvidenceBefore.commentCount;
         const isResearchChild = yield* readIssueIsResearch(
@@ -1593,6 +1766,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             iterationIndex: input.iterationIndex,
             threadId,
             issueId,
+            workerId: threadId,
+            branch: workspace.branch,
+            worktreePath: workspace.worktreePath,
             turnStatus: "running",
             summary: null,
             why: null,
@@ -1633,10 +1809,30 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             modelSelection: dispatchedRun.modelSelection,
             runtimeMode: dispatchedRun.runtimeMode,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: null,
-            worktreePath,
+            branch: workspace.branch,
+            worktreePath: workspace.worktreePath,
             createdAt: startedAt,
           });
+          if (workspace.branch !== null && workspace.worktreePath !== null) {
+            // This matches the existing bootstrap path: setup starts before the
+            // turn, but its configured terminal command completes asynchronously.
+            yield* projectSetupScriptRunner
+              .runForThread({
+                threadId,
+                projectId: dispatchedRun.projectId,
+                projectCwd: run.cwd,
+                worktreePath: workspace.worktreePath,
+              })
+              .pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("epic.runner.worktree-setup-failed", {
+                    threadId,
+                    worktreePath: workspace.worktreePath,
+                    cause,
+                  }),
+                ),
+              );
+          }
           yield* dispatchCommand({
             type: "thread.turn.start",
             commandId: yield* commandId("turn-start"),
@@ -1670,7 +1866,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               run,
               iterationIndex: input.iterationIndex,
               threadId,
+              workspace,
               headBefore,
+              branchBase,
               initialWorktreeFingerprint,
               policy: input.policy,
             }),
@@ -1709,8 +1907,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             ? { kind: "error", detail: settleResult.detail, report: null }
             : yield* classifyFromProjection({
                 threadId,
-                cwd: run.cwd,
+                workspace,
                 headBefore,
+                branchBase,
                 timedOut: settleResult._tag === "timeout",
                 policy: input.policy,
               });

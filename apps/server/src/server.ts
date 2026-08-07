@@ -68,6 +68,7 @@ import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as WorktreeProvisioner from "./vcs/WorktreeProvisioner.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
@@ -289,6 +290,17 @@ const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PortScannerLayerLive),
 );
 
+const EpicWorktreeProvisionerLayerLive = WorktreeProvisioner.layerDirect.pipe(
+  Layer.provide(GitWorkflowLayerLive),
+  Layer.provide(GitVcsDriver.layer),
+  Layer.provide(OrchestrationLayerLive),
+);
+
+const EpicProjectSetupScriptRunnerLayerLive = ProjectSetupScriptRunner.layer.pipe(
+  Layer.provide(TerminalLayerLive),
+  Layer.provide(OrchestrationLayerLive),
+);
+
 const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
   Layer.provideMerge(PortScannerLayerLive),
@@ -330,6 +342,8 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
 const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunStoreLive),
   Layer.provide(ProcessRunner.layer),
+  Layer.provide(EpicWorktreeProvisionerLayerLive),
+  Layer.provide(EpicProjectSetupScriptRunnerLayerLive),
   Layer.provide(EpicRunPreflightLayerLive),
   Layer.provide(EpicRunConfigSource.layer),
   Layer.provide(NodeEpicRunLock.layer),

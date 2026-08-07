@@ -27,6 +27,9 @@ import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts"
 import { EpicRunStore } from "../src/persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
+import { ServerConfig } from "../src/config.ts";
+import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunner.ts";
+import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
 import * as lockLive from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";
 import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
@@ -65,6 +68,13 @@ const makeFixture = Effect.acquireRelease(
     git(cwd, ["add", "base.txt"]);
     git(cwd, ["commit", "-qm", "base"]);
     await NodeFSP.mkdir(NodePath.join(cwd, ".beads"));
+    await NodeFSP.mkdir(NodePath.join(cwd, ".t3code"));
+    await NodeFSP.writeFile(
+      NodePath.join(cwd, ".t3code", "epic-run.json"),
+      '{"execution":{"sequential":true}}\n',
+    );
+    git(cwd, ["add", ".t3code/epic-run.json"]);
+    git(cwd, ["commit", "-qm", "configure sequential epic test"]);
     await NodeFSP.writeFile(NodePath.join(state, "status"), "open");
     await NodeFSP.writeFile(NodePath.join(state, "comments"), "0");
     await NodeFSP.writeFile(NodePath.join(state, "invocations"), "");
@@ -277,6 +287,22 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processLayer),
+    Layer.provide(
+      Layer.succeed(WorktreeProvisioner, {
+        provision: () => Effect.die("sequential integration run must not provision"),
+        release: () => Effect.die("unused"),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ProjectSetupScriptRunner, {
+        runForThread: () => Effect.die("sequential integration run must not run setup"),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ServerConfig, {
+        worktreesDir: NodePath.join(fixture.root, "worktrees"),
+      } as ServerConfig["Service"]),
+    ),
     Layer.provide(makeProviderRegistryLayer()),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(
