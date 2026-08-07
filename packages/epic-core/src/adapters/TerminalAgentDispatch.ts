@@ -14,6 +14,7 @@ import {
   type IterationHandle,
   type IterationSettle,
 } from "../ports/AgentDispatch.ts";
+import { wrapWorkerScopeSpawn, type WorkerScopePreparation } from "../workerScope.ts";
 import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
 
 export type TerminalHarness = "worker-cmd" | "kimi" | "claude" | "ccx" | "codex" | "opencode";
@@ -30,6 +31,13 @@ export interface TerminalAgentDispatchOptions {
   readonly maxArtifactBytes?: number;
   readonly environment?: NodeJS.ProcessEnv;
   readonly providerRoutes?: ReadonlyArray<TerminalProviderRoute>;
+  /**
+   * Optional systemd scope governance for the worker spawn. When present and
+   * active, the provider subprocess leaves the coordinator's cgroup for a
+   * named scope under cook-epic.slice; when absent or inactive, the spawn is
+   * unwrapped. See `workerScope.ts`.
+   */
+  readonly workerScope?: WorkerScopePreparation | undefined;
 }
 
 interface ParsedArtifact {
@@ -419,12 +427,21 @@ export const makeTerminalAgentDispatch = (
             selection: input.selection,
             sessionId,
           });
+          const scoped =
+            options.workerScope === undefined
+              ? call
+              : wrapWorkerScopeSpawn(
+                  options.workerScope,
+                  `iteration-${String(input.iterationIndex)}`,
+                  call.command,
+                  call.args,
+                );
           let chunks = "";
           let timedOut = false;
           let parseBuffer = "";
           let streamProviderError: string | null = null;
           let timeoutKillTimer: NodeJS.Timeout | undefined;
-          child = NodeChildProcess.spawn(call.command, call.args, {
+          child = NodeChildProcess.spawn(scoped.command, scoped.args, {
             cwd: input.worktreePath ?? input.cwd,
             env: { ...process.env, ...options.environment },
             detached: true,

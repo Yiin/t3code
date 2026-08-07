@@ -121,6 +121,10 @@ export const EpicRunPreflightBlocker = Schema.Union([
     configPath: TrimmedNonEmptyString,
     diagnostics: Schema.Array(TrimmedNonEmptyString),
   }),
+  Schema.TaggedStruct("integration_leftover", {
+    branch: Schema.NullOr(TrimmedNonEmptyString),
+    worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  }),
 ]);
 export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
 
@@ -138,6 +142,9 @@ export const EpicRunPreflightWarning = Schema.Union([
   Schema.TaggedStruct("config_violation", {
     key: TrimmedNonEmptyString,
     message: TrimmedNonEmptyString,
+  }),
+  Schema.TaggedStruct("untracked_files", {
+    paths: Schema.Array(TrimmedNonEmptyString),
   }),
 ]);
 export type EpicRunPreflightWarning = typeof EpicRunPreflightWarning.Type;

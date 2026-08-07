@@ -30,6 +30,12 @@ const run = (
     readonly config?: EpicRunConfigFileResult;
     readonly configSnapshot?: EpicRunConfigSnapshot;
     readonly onConfigRead?: () => void;
+    readonly mode?: "parallel" | "sequential";
+    readonly worktreeList?: string;
+    readonly branchList?: string;
+    readonly nestedStatus?: Readonly<
+      Record<string, { readonly stdout: string; readonly code?: number }>
+    >;
   },
 ) => {
   const testLayer = layer.pipe(
@@ -46,7 +52,40 @@ const run = (
       Layer.succeed(ProcessRunner.ProcessRunner, {
         run: (input) => {
           const { command, args } = input;
-          if (command === "git") options?.onGit?.(input);
+          if (command === "git") {
+            options?.onGit?.(input);
+            if (args[0] === "status" && input.cwd !== "/repo") {
+              const nested = options?.nestedStatus?.[input.cwd ?? ""];
+              return Effect.succeed({
+                stdout: nested?.stdout ?? "",
+                stderr: "",
+                code: (nested?.code ?? 0) as never,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            }
+            if (args[0] === "worktree") {
+              return Effect.succeed({
+                stdout: options?.worktreeList ?? "worktree /repo\nbranch refs/heads/main\n",
+                stderr: "",
+                code: 0 as never,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            }
+            if (args[0] === "branch") {
+              return Effect.succeed({
+                stdout: options?.branchList ?? "",
+                stderr: "",
+                code: 0 as never,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            }
+          }
           return Effect.succeed({
             stdout:
               command === "git"
@@ -87,7 +126,7 @@ const run = (
   );
   return Effect.flatMap(EpicRunPreflight, (service) =>
     service.check(
-      { workspaceRoot: "/repo", epicId: "epic-1", mode: "sequential" },
+      { workspaceRoot: "/repo", epicId: "epic-1", mode: options?.mode ?? "sequential" },
       options?.configSnapshot,
     ),
   ).pipe(Effect.provide(testLayer));
@@ -455,5 +494,159 @@ describe("EpicRunPreflight", () => {
         });
       }),
     ),
+  );
+
+  describe("parallel mode", () => {
+    it.effect("still blocks tracked modifications", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n",
+          undefined,
+          undefined,
+          { mode: "parallel" },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "dirty_tree",
+          paths: ["modified.ts"],
+        });
+      }),
+    );
+
+    it.effect("warns instead of blocking on untracked files", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n? untracked.ts\n", undefined, undefined, {
+          mode: "parallel",
+        });
+        expect(result.ok).toBe(true);
+        expect(result.blockers).toEqual([]);
+        expect(result.warnings).toContainEqual({
+          _tag: "untracked_files",
+          paths: ["untracked.ts"],
+        });
+      }),
+    );
+
+    it.effect("ignores a clean registered nested worktree", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n? .claude/worktrees/wt-1/\n",
+          undefined,
+          undefined,
+          {
+            mode: "parallel",
+            worktreeList:
+              "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.claude/worktrees/wt-1\nbranch refs/heads/child-branch\n",
+            nestedStatus: { "/repo/.claude/worktrees/wt-1": { stdout: "" } },
+          },
+        );
+        expect(result.ok).toBe(true);
+        expect(result.blockers).toEqual([]);
+        expect(result.warnings).toEqual([]);
+      }),
+    );
+
+    it.effect("blocks a dirty registered nested worktree", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n? .claude/worktrees/wt-1/\n",
+          undefined,
+          undefined,
+          {
+            mode: "parallel",
+            worktreeList:
+              "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.claude/worktrees/wt-1\nbranch refs/heads/child-branch\n",
+            nestedStatus: {
+              "/repo/.claude/worktrees/wt-1": { stdout: " M scratch.ts\n" },
+            },
+          },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "dirty_tree",
+          paths: [".claude/worktrees/wt-1"],
+        });
+      }),
+    );
+
+    it.effect("blocks a leftover integration branch", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          branchList: "cook-epic-integration-run-9\n",
+        });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "integration_leftover",
+          branch: "cook-epic-integration-run-9",
+          worktreePath: null,
+        });
+      }),
+    );
+
+    it.effect("blocks a leftover integration worktree", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          worktreeList:
+            "worktree /repo\nbranch refs/heads/main\n\nworktree /worktrees/epic-run-9/integration\nbranch refs/heads/cook-epic-integration-run-9\n",
+        });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "integration_leftover",
+          branch: null,
+          worktreePath: "/worktrees/epic-run-9/integration",
+        });
+      }),
+    );
+
+    it.effect("still blocks detached HEAD", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head (detached)\n", undefined, undefined, {
+          mode: "parallel",
+        });
+        expect(result.blockers).toContainEqual({ _tag: "detached_head" });
+      }),
+    );
+
+    it.effect("reports a held lock instead of the holder's dirtiness", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n? untracked.ts\n",
+          { workspaceRoot: "/repo", epicId: "epic-1" },
+          undefined,
+          { mode: "parallel" },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toEqual([
+          {
+            _tag: "run_in_progress",
+            owner: "terminal",
+            runDir: "/tmp/run",
+            host: "host",
+            pid: 42,
+          },
+        ]);
+      }),
+    );
+  });
+
+  it.effect("sequential mode reports a held lock instead of the holder's dirtiness", () =>
+    Effect.gen(function* () {
+      const result = yield* run(
+        "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n",
+        { workspaceRoot: "/repo", epicId: "epic-1" },
+      );
+      expect(result.ok).toBe(false);
+      expect(result.blockers).toEqual([
+        {
+          _tag: "run_in_progress",
+          owner: "terminal",
+          runDir: "/tmp/run",
+          host: "host",
+          pid: 42,
+        },
+      ]);
+    }),
   );
 });

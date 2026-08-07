@@ -84,7 +84,8 @@ export const trialMergeMessage = (branch: string, childId: string): string =>
   `cook-epic: merge ${branch} (${childId})`;
 
 /** Terminal parity: integration branch creation near `skills/cook-epic/run.sh:1039-1047`. */
-export const integrationBranch = (runId: string): string => `cook-epic-integration-${runId}`;
+export const INTEGRATION_BRANCH_PREFIX = "cook-epic-integration-";
+export const integrationBranch = (runId: string): string => `${INTEGRATION_BRANCH_PREFIX}${runId}`;
 
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 

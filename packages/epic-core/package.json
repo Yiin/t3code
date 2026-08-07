@@ -83,6 +83,10 @@
       "types": "./src/workerLiveness.ts",
       "import": "./src/workerLiveness.ts"
     },
+    "./workerScope": {
+      "types": "./src/workerScope.ts",
+      "import": "./src/workerScope.ts"
+    },
     "./ports/WorkerEvidence": {
       "types": "./src/ports/WorkerEvidence.ts",
       "import": "./src/ports/WorkerEvidence.ts"

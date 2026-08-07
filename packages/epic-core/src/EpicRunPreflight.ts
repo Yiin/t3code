@@ -15,6 +15,7 @@ import {
 import { resolveEpicRunConfig, type EpicRunConfigViolation } from "@t3tools/shared/epicRunConfig";
 
 import { EpicRunConfigSource, type EpicRunConfigFileResult } from "./EpicRunConfigSource.ts";
+import { INTEGRATION_BRANCH_PREFIX } from "./policy.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
 
@@ -41,6 +42,14 @@ export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker):
       return boundedBlockerText(`Epic ${blocker.epicId} was not found.`);
     case "config_invalid":
       return boundedBlockerText(`${blocker.configPath}\n${blocker.diagnostics.join("\n")}`);
+    case "integration_leftover":
+      return boundedBlockerText(
+        `A previous parallel run left ${
+          blocker.branch !== null ? `integration branch ${blocker.branch}` : "an integration branch"
+        }${
+          blocker.worktreePath !== null ? ` (worktree ${blocker.worktreePath})` : ""
+        } behind; reconcile it before launching.`,
+      );
   }
 }
 
@@ -102,6 +111,34 @@ function isBeadsPath(path: string): boolean {
   return path === ".beads" || path.startsWith(".beads/");
 }
 
+interface WorktreeEntry {
+  readonly path: string;
+  readonly branch: string | null;
+}
+
+function parseWorktreeList(stdout: string): ReadonlyArray<WorktreeEntry> {
+  const entries: Array<{ path: string; branch: string | null }> = [];
+  let current: { path: string; branch: string | null } | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) {
+      current = { path: line.slice("worktree ".length), branch: null };
+      entries.push(current);
+    } else if (line.startsWith("branch ") && current !== null) {
+      current.branch = line.slice("branch ".length);
+    }
+  }
+  return entries;
+}
+
+/** A nested worktree shows in the parent's status as its collapsed directory entry. */
+function isWorktreeStatusPath(path: string, relativeWorktree: string): boolean {
+  return (
+    path === relativeWorktree ||
+    path === `${relativeWorktree}/` ||
+    path.startsWith(`${relativeWorktree}/`)
+  );
+}
+
 function deadLocalClaimIds(entries: ReadonlyArray<Record<string, unknown>>): ReadonlyArray<string> {
   const ids: Array<string> = [];
   for (const entry of entries) {
@@ -148,41 +185,165 @@ export const layer = Layer.effect(
       return result;
     });
 
+    const runGit = Effect.fn("EpicRunPreflight.runGit")(function* (
+      cwd: string,
+      args: ReadonlyArray<string>,
+    ) {
+      const result = yield* processRunner
+        .run({ command: "git", args, cwd, timeout: COMMAND_TIMEOUT })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new EpicRunPreflightError({ message: `git ${args[0] ?? ""}: ${error.message}` }),
+          ),
+        );
+      if (result.code !== 0) {
+        return yield* new EpicRunPreflightError({
+          message: `git ${args[0] ?? ""}: ${result.stderr.trim() || `git exited ${String(result.code)}`}`,
+        });
+      }
+      return result;
+    });
+
     const check: EpicRunPreflightShape["check"] = Effect.fn("EpicRunPreflight.check")(
       function* (input, suppliedConfigSnapshot) {
         const blockers: Array<EpicRunPreflightResult["blockers"][number]> = [];
         const warnings: Array<EpicRunPreflightWarning> = [];
 
-        const status = yield* processRunner
-          .run({
-            command: "git",
-            cwd: input.workspaceRoot,
-            args: ["status", "--porcelain=2", "--branch", "--untracked-files=all"],
-            timeout: COMMAND_TIMEOUT,
+        // The run lock is observed BEFORE the ordinary preflight, mirroring
+        // run.sh:676-685: a live sequential holder legitimately has a dirty
+        // checkout, so a contender must report the held lock rather than fail
+        // on the holder's dirtiness.
+        const held = yield* lock
+          .inspect({
+            workspaceRoot: input.workspaceRoot,
+            epicId: input.epicId,
           })
-          .pipe(
-            Effect.mapError(
-              (error) => new EpicRunPreflightError({ message: `git status: ${error.message}` }),
-            ),
-          );
-        if (status.code !== 0) {
-          return yield* new EpicRunPreflightError({
-            message: `git status: ${status.stderr.trim() || `git exited ${String(status.code)}`}`,
-          });
+          .pipe(Effect.mapError((error) => new EpicRunPreflightError({ message: error.message })));
+        if (
+          held !== undefined &&
+          typeof held.owner === "string" &&
+          typeof held.runDir === "string" &&
+          typeof held.host === "string" &&
+          typeof held.pid === "number"
+        ) {
+          return {
+            ok: false,
+            blockers: [
+              {
+                _tag: "run_in_progress",
+                owner: held.owner,
+                runDir: held.runDir,
+                host: held.host,
+                pid: held.pid,
+              },
+            ],
+            warnings,
+          };
         }
+
+        const status = yield* runGit(input.workspaceRoot, [
+          "status",
+          "--porcelain=2",
+          "--branch",
+          "--untracked-files=all",
+        ]);
         let detached = true;
-        const dirtyPaths = new Set<string>();
+        const trackedDirtyPaths = new Set<string>();
+        const untrackedPaths = new Set<string>();
         for (const line of status.stdout.split(/\r?\n/)) {
           if (line.startsWith("# branch.head ")) {
             detached = line.slice("# branch.head ".length).trim().startsWith("(");
           } else if (line.length > 0 && !line.startsWith("#")) {
             const path = porcelainPath(line);
-            if (path !== null && !isBeadsPath(path)) dirtyPaths.add(path);
+            if (path === null || isBeadsPath(path)) continue;
+            if (line.startsWith("? ") || line.startsWith("! ")) {
+              untrackedPaths.add(path);
+            } else {
+              trackedDirtyPaths.add(path);
+            }
           }
         }
         if (detached) blockers.push({ _tag: "detached_head" });
-        if (dirtyPaths.size > 0) {
-          blockers.push({ _tag: "dirty_tree", paths: [...dirtyPaths].toSorted() });
+
+        if (input.mode === "sequential") {
+          // Sequential workers commit directly on the base branch in the main
+          // checkout: any dirt — tracked or untracked — is fatal.
+          const dirtyPaths = [...trackedDirtyPaths, ...untrackedPaths].toSorted();
+          if (dirtyPaths.length > 0) {
+            blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+          }
+        } else {
+          // Parallel workers commit in their own worktrees and the main
+          // checkout is only ever fast-forwarded (run.sh:694-697): tracked
+          // modifications still block, untracked files only warn, and a clean
+          // registered nested worktree must not make the checkout look dirty
+          // (run.sh registered_nested_worktree_dirty /
+          // sequential_untracked_paths).
+          const worktreeList = yield* runGit(input.workspaceRoot, [
+            "worktree",
+            "list",
+            "--porcelain",
+          ]);
+          const worktrees = parseWorktreeList(worktreeList.stdout);
+          const dirtyWorktrees: Array<string> = [];
+          for (const worktree of worktrees) {
+            if (!worktree.path.startsWith(`${input.workspaceRoot}/`)) continue;
+            const relative = worktree.path.slice(input.workspaceRoot.length + 1);
+            const reported = [...untrackedPaths].filter((path) =>
+              isWorktreeStatusPath(path, relative),
+            );
+            if (reported.length === 0) continue;
+            const nestedStatus = yield* processRunner
+              .run({
+                command: "git",
+                args: ["status", "--porcelain", "--untracked-files=all", "--", ":(exclude).beads"],
+                cwd: worktree.path,
+                timeout: COMMAND_TIMEOUT,
+              })
+              .pipe(
+                Effect.mapError(
+                  (error) => new EpicRunPreflightError({ message: `git status: ${error.message}` }),
+                ),
+              );
+            for (const path of reported) untrackedPaths.delete(path);
+            // A dirty or unreadable registered nested worktree counts as dirt.
+            if (nestedStatus.code !== 0 || nestedStatus.stdout.trim() !== "") {
+              dirtyWorktrees.push(relative);
+            }
+          }
+          const dirtyPaths = [...trackedDirtyPaths, ...dirtyWorktrees].toSorted();
+          if (dirtyPaths.length > 0) {
+            blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+          }
+          if (untrackedPaths.size > 0) {
+            warnings.push({ _tag: "untracked_files", paths: [...untrackedPaths].toSorted() });
+          }
+
+          // A leftover integration branch or worktree from a crashed parallel
+          // run must be reconciled, not silently reused (run.sh:1039-1047).
+          const branchList = yield* runGit(input.workspaceRoot, [
+            "branch",
+            "--list",
+            "--format=%(refname:short)",
+            `${INTEGRATION_BRANCH_PREFIX}*`,
+          ]);
+          const leftoverBranch =
+            branchList.stdout
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .find((line) => line.length > 0) ?? null;
+          const leftoverWorktree =
+            worktrees.find((worktree) =>
+              worktree.branch?.startsWith(`refs/heads/${INTEGRATION_BRANCH_PREFIX}`),
+            )?.path ?? null;
+          if (leftoverBranch !== null || leftoverWorktree !== null) {
+            blockers.push({
+              _tag: "integration_leftover",
+              branch: leftoverBranch,
+              worktreePath: leftoverWorktree,
+            });
+          }
         }
 
         const configSnapshot =
@@ -221,28 +382,6 @@ export const layer = Layer.effect(
               warnings.push({ _tag: "config_violation", ...violation });
             }
           }
-        }
-
-        const held = yield* lock
-          .inspect({
-            workspaceRoot: input.workspaceRoot,
-            epicId: input.epicId,
-          })
-          .pipe(Effect.mapError((error) => new EpicRunPreflightError({ message: error.message })));
-        if (
-          held !== undefined &&
-          typeof held.owner === "string" &&
-          typeof held.runDir === "string" &&
-          typeof held.host === "string" &&
-          typeof held.pid === "number"
-        ) {
-          blockers.push({
-            _tag: "run_in_progress",
-            owner: held.owner,
-            runDir: held.runDir,
-            host: held.host,
-            pid: held.pid,
-          });
         }
 
         const shown = yield* runBd(input.workspaceRoot, ["show", input.epicId, "--json"]);

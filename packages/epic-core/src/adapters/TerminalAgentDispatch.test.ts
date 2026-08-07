@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -7,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import type { WorkerScopePreparation } from "../workerScope.ts";
 import { makeTerminalAgentDispatch, parseTerminalArtifact } from "./TerminalAgentDispatch.ts";
 
 describe("TerminalAgentDispatch final assistant selection", () => {
@@ -86,7 +88,12 @@ const makeWorker = (body: string) => {
 
 const startWorker = (
   body: string,
-  options: { maxArtifactBytes?: number; timeoutSeconds?: number; stopGraceSeconds?: number } = {},
+  options: {
+    maxArtifactBytes?: number;
+    timeoutSeconds?: number;
+    stopGraceSeconds?: number;
+    workerScope?: WorkerScopePreparation;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const fixture = yield* Effect.acquireRelease(
@@ -369,6 +376,45 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"R
       assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
       const args = NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8");
       assert.include(args, 'model_reasoning_effort="high"');
+    }),
+  ),
+);
+
+const systemdScopeAvailable = (): boolean => {
+  const probe = NodeChildProcess.spawnSync(
+    "systemd-run",
+    ["--user", "--scope", "--quiet", "--", "true"],
+    {
+      stdio: "ignore",
+    },
+  );
+  return probe.status === 0;
+};
+
+it.live("runs the worker inside its named systemd scope when governance is active", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      if (!systemdScopeAvailable()) return;
+      const unit = "cook-epic-testdispatch-iteration-0.scope";
+      const { handle } = yield* startWorker("cat /proc/self/cgroup; echo RALPH_DONE", {
+        workerScope: { scopeId: "testdispatch", active: true },
+      });
+      yield* handle.awaitSettled;
+      const artifact = NodeFS.readFileSync(handle.ref, "utf8");
+      assert.include(artifact, unit);
+    }),
+  ),
+);
+
+it.live("spawns unwrapped when scope governance is inactive", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { handle } = yield* startWorker("cat /proc/self/cgroup; echo RALPH_DONE", {
+        workerScope: { scopeId: "testdispatch", active: false },
+      });
+      yield* handle.awaitSettled;
+      const artifact = NodeFS.readFileSync(handle.ref, "utf8");
+      assert.notInclude(artifact, "cook-epic-testdispatch");
     }),
   ),
 );

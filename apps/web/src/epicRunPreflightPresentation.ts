@@ -16,6 +16,12 @@ export function epicRunPreflightBlockerText(blocker: EpicRunPreflightBlocker): s
       return `Epic ${blocker.epicId} was not found.`;
     case "config_invalid":
       return `${blocker.configPath}\n${blocker.diagnostics.join("\n")}`;
+    case "integration_leftover":
+      return `A previous parallel run left ${
+        blocker.branch !== null ? `integration branch ${blocker.branch}` : "an integration branch"
+      }${
+        blocker.worktreePath !== null ? ` (worktree ${blocker.worktreePath})` : ""
+      } behind; reconcile it before launching.`;
   }
 }
 
@@ -29,6 +35,8 @@ export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): s
       return `${warning.configPath} has unknown keys: ${warning.keys.join(", ")}`;
     case "config_violation":
       return `${warning.key}: ${warning.message}`;
+    case "untracked_files":
+      return `The worktree has untracked files: ${warning.paths.join(", ")}`;
   }
 }
 

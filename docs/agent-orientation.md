@@ -56,10 +56,15 @@ canonical terminal coordinator until it is reduced to a shim.
 - `packages/epic-core/src/providerFallback.ts` — claude to codex to kimi.
 - `packages/epic-core/src/ports/EpicRunLock.ts` — the run lock port, shared with
   `run.sh`. Both owners take the same file.
-- `packages/epic-core/src/EpicRunPreflight.ts` — blockers and warnings.
+- `packages/epic-core/src/EpicRunPreflight.ts` — blockers and warnings. The lock
+  is observed before all other checks; parallel mode warns on untracked files,
+  exempts clean registered nested worktrees, and blocks integration leftovers.
 - `packages/epic-core/src/workerLiveness.ts` — the pure per-worker liveness
   state machine (progress signals, repo probe, inspector stop gating), fed by
   `ports/WorkerEvidence.ts`. Ported from `run.sh` `supervise_workers`.
+- `packages/epic-core/src/workerScope.ts` — optional systemd scope governance
+  for worker spawns (named scopes under `cook-epic.slice`, CPUWeight and
+  MemoryHigh only). Fail-soft except for a run-identity collision.
 - `apps/server/integration/epicRunnerConformance.integration.test.ts` — runs
   every conformance scenario whose `appliesTo` includes "server" through the
   server adapter.

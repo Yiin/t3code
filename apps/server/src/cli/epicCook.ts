@@ -24,6 +24,7 @@ import {
 import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
+import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
 import { resolveEpicRunConfig } from "@t3tools/shared/epicRunConfig";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -272,6 +273,20 @@ export const cookCommand = Command.make("cook", {
           });
         }
         const journal = yield* FileRunJournal.make({ runDirectory });
+        // Optional systemd scope governance for worker spawns. A colliding
+        // pre-existing scope is fatal (run identity clash); every other
+        // degradation warns and spawns unwrapped inside prepareWorkerScope.
+        const workerScope = yield* prepareWorkerScope({
+          repositoryPath: cwd,
+          runDirectory,
+          epicId: flags.epic,
+          runId,
+        }).pipe(
+          Effect.mapError(
+            (error) =>
+              new EpicCookCliError({ operation: "epicCook.workerScope", detail: error.detail }),
+          ),
+        );
         const terminalProviders = makeTerminalProviderSupport({
           harness,
           selection: modelSelection,
@@ -366,6 +381,7 @@ export const cookCommand = Command.make("cook", {
                   providerRoutes: terminalProviders.routes,
                   timeoutSeconds: snapshot.config.supervision.workerTimeoutSeconds,
                   stopGraceSeconds: snapshot.config.supervision.stopGraceSeconds,
+                  workerScope,
                 }),
                 gate: makeProcessGate({
                   processRunner: runner,
