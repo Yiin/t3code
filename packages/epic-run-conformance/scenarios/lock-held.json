@@ -6,6 +6,7 @@
     "epicId": "epic",
     "epicExists": true,
     "runInProgress": false,
+    "lockHeld": true,
     "children": [
       {
         "id": "epic.1",

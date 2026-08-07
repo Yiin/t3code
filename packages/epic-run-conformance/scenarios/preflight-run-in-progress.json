@@ -5,7 +5,7 @@
   "beads": {
     "epicId": "epic",
     "epicExists": true,
-    "runInProgress": false,
+    "runInProgress": true,
     "lockHeld": true,
     "children": []
   },

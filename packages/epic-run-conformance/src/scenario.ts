@@ -73,6 +73,18 @@ export const ConformanceScenario = Schema.Struct({
 });
 export type ConformanceScenario = typeof ConformanceScenario.Type;
 
-export const decodeConformanceScenario = Schema.decodeUnknownSync(ConformanceScenario, {
+const decodeScenario = Schema.decodeUnknownSync(ConformanceScenario, {
   onExcessProperty: "error",
 });
+
+export const decodeConformanceScenario = (input: unknown): ConformanceScenario => {
+  const scenario = decodeScenario(input);
+  return {
+    ...scenario,
+    expectedTranscript: scenario.expectedTranscript.map((event) => ({
+      pushed: event.pushed ?? false,
+      verified: event.verified ?? true,
+      ...event,
+    })),
+  };
+};

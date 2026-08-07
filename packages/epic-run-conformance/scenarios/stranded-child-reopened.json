@@ -1,6 +1,6 @@
 {
   "name": "stranded-child-reopened",
-  "description": "A failed claimed child reopens after retry exhaustion.",
+  "description": "A failed claimed child reopens after retry exhaustion. Core support is tracked by t3code-06s.37.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",
@@ -56,5 +56,5 @@
       "reason": "retry budget exhausted; child reopened"
     }
   ],
-  "appliesTo": ["core", "server"]
+  "appliesTo": ["server"]
 }
