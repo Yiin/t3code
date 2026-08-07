@@ -11,6 +11,8 @@
 # Usage: run.sh <run-dir>          # launch from the project root
 #
 # Environment (all optional unless noted):
+#   COOKEPIC_CORE              1 = delegate to the shared TypeScript core (default 0)
+#   COOKEPIC_T3_BIN            t3 binary override for COOKEPIC_CORE=1
 #   COOKEPIC_EPIC              beads epic id                       (REQUIRED)
 #   COOKEPIC_HARNESS           auto, kimi, claude, ccx, codex, or opencode (default auto)
 #                              claude/ccx workers all launch with
@@ -102,6 +104,177 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="$SKILL_DIR/worker-prompt.md"
 INSPECTOR_TEMPLATE="$SKILL_DIR/inspector-prompt.md"
 FOLD_TEMPLATE="$SKILL_DIR/fold-prompt.md"
+
+core_detect_ccx_environment() {
+  [[ "${ANTHROPIC_BASE_URL:-}" =~ ^http://(localhost|127(\.[0-9]{1,3}){3}|\[::1\])(:[0-9]+)?(/.*)?$ ]] \
+    && [ "${ANTHROPIC_AUTH_TOKEN:-}" = unused ] \
+    && [[ "${ANTHROPIC_MODEL:-}" == *'[1m]' ]]
+}
+
+core_detect_harness() {
+  [ -z "${COOKEPIC_WORKER_CMD:-}" ] || { printf 'worker-cmd\n'; return; }
+  case "${COOKEPIC_HARNESS:-auto}" in
+    kimi|claude|codex|opencode) printf '%s\n' "$COOKEPIC_HARNESS"; return ;;
+    ccx) core_detect_ccx_environment && { printf 'ccx\n'; return; } || return 3 ;;
+    auto|'') ;;
+    *) return 2 ;;
+  esac
+  if core_detect_ccx_environment; then printf 'ccx\n'; return; fi
+  local pid="$PPID" row comm parent
+  while [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ]; do
+    row=$(ps -o comm= -o ppid= -p "$pid" 2>/dev/null) || break
+    read -r comm parent <<< "$row"
+    comm=${comm##*/}
+    case "$comm" in
+      kimi|kimi-*) printf 'kimi\n'; return ;;
+      codex|codex-*) printf 'codex\n'; return ;;
+      claude|claude-*) printf 'claude\n'; return ;;
+      opencode|opencode-*) printf 'opencode\n'; return ;;
+    esac
+    pid=${parent//[[:space:]]/}
+  done
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ -z "${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    printf 'codex\n'
+  elif [ -z "${CODEX_THREAD_ID:-}" ] \
+    && { [ "${CLAUDECODE:-}" = 1 ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; }; then
+    printf 'claude\n'
+  elif [ -z "${CODEX_THREAD_ID:-}${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ] \
+    && [ -n "${OPENCODE:-}${OPENCODE_PID:-}" ]; then
+    printf 'opencode\n'
+  else
+    return 1
+  fi
+}
+
+core_delegate() {
+  local name candidate harness_status
+  local -a unsupported=(
+    COOKEPIC_WORKERS COOKEPIC_SIBLINGS COOKEPIC_BUDGET_USD
+    COOKEPIC_IDLE_THRESHOLD COOKEPIC_INSPECTOR_TIMEOUT
+    COOKEPIC_INSPECT_RETRY_DELAY COOKEPIC_INSPECT_MIN_DELAY
+    COOKEPIC_INSPECT_MAX_DELAY COOKEPIC_RATE_LIMIT_BACKOFF
+    COOKEPIC_CPU_WEIGHT COOKEPIC_IO_WEIGHT COOKEPIC_MEMORY_HIGH
+    COOKEPIC_DISABLE_SYSTEMD COOKEPIC_SPAWN_DELAY COOKEPIC_SUPERVISION_TICK
+    COOKEPIC_INSPECTOR_CMD COOKEPIC_FOLD_CMD COOKEPIC_CLOCK_CMD
+    COOKEPIC_RESOURCE_SAMPLER_CMD COOKEPIC_WORKER_ACTIVE_CMD
+    COOKEPIC_WORKER_STOP_CMD COOKEPIC_PROCESS_START_TICKS_CMD COOKEPIC_PUSH_CMD
+    COOKEPIC_WORKER_ARTIFACT_BYTES COOKEPIC_INSPECTOR_RESULT_BYTES
+    COOKEPIC_INSPECTOR_LOG_BYTES COOKEPIC_REPO_EVIDENCE_BYTES
+    COOKEPIC_REPO_PROBE_INTERVAL COOKEPIC_REPO_PROBE_TIMEOUT COOKEPIC_FOLD_TIMEOUT
+    RUNLOCK_HEARTBEAT_SECS RUNLOCK_STALE_SECS OPENCODE_BIN
+  )
+  for name in "${unsupported[@]}"; do
+    if [[ -v $name && -n ${!name} ]]; then
+      printf 'error: %s is not supported by COOKEPIC_CORE=1\n' "$name" >&2
+      printf 'help: unset %s or use COOKEPIC_CORE=0\n' "$name" >&2
+      exit 2
+    fi
+  done
+
+  [ -n "${COOKEPIC_EPIC:-}" ] || {
+    printf 'error: COOKEPIC_EPIC is required\n' >&2
+    printf 'help: set it to the beads epic id\n' >&2
+    exit 2
+  }
+  if [[ -v COOKEPIC_SEQUENTIAL && -n ${COOKEPIC_SEQUENTIAL} && ${COOKEPIC_SEQUENTIAL} != 1 ]]; then
+    printf 'error: COOKEPIC_CORE=1 supports sequential execution only\n' >&2
+    printf 'help: set COOKEPIC_SEQUENTIAL=1 or use COOKEPIC_CORE=0\n' >&2
+    exit 2
+  fi
+  if [[ -v COOKEPIC_NO_PUSH && -n ${COOKEPIC_NO_PUSH} && ${COOKEPIC_NO_PUSH} != 1 ]]; then
+    printf 'error: COOKEPIC_NO_PUSH must be exactly 1 when set\n' >&2
+    printf 'help: unset it to enable pushes, or set COOKEPIC_NO_PUSH=1 for local-only landing\n' >&2
+    exit 2
+  fi
+  if [[ -v COOKEPIC_PERMISSION_MODE && -n ${COOKEPIC_PERMISSION_MODE} ]] \
+    && [ "${COOKEPIC_PERMISSION_MODE}" != auto ] \
+    && [ "${COOKEPIC_PERMISSION_MODE}" != bypassPermissions ]; then
+    printf 'error: unsupported COOKEPIC_PERMISSION_MODE %s\n' "$COOKEPIC_PERMISSION_MODE" >&2
+    printf 'help: use auto or bypassPermissions\n' >&2
+    exit 2
+  fi
+  if [[ -v COOKEPIC_HARNESS && -n ${COOKEPIC_HARNESS} && -z ${COOKEPIC_WORKER_CMD:-} ]]; then
+    case "$COOKEPIC_HARNESS" in
+      auto|kimi|claude|ccx|codex|opencode|worker-cmd) ;;
+      *)
+        printf 'error: invalid COOKEPIC_HARNESS %s\n' "$COOKEPIC_HARNESS" >&2
+        printf 'help: use auto, kimi, claude, ccx, codex, opencode, or worker-cmd for tests\n' >&2
+        exit 2
+        ;;
+    esac
+  fi
+
+  # The Bash path treats empty values as unset through ${name:-default}.
+  for name in COOKEPIC_T3_BIN COOKEPIC_GATE COOKEPIC_NO_GATE COOKEPIC_NO_PUSH \
+    COOKEPIC_MAX_DISPATCHES COOKEPIC_MAX_ATTEMPTS COOKEPIC_WORKER_TIMEOUT \
+    COOKEPIC_STOP_GRACE COOKEPIC_MODEL COOKEPIC_ORIENTATION_FILE \
+    COOKEPIC_HARNESS COOKEPIC_BIN COOKEPIC_WORKER_CMD COOKEPIC_PERMISSION_MODE \
+    COOKEPIC_SEQUENTIAL; do
+    if [[ -v $name && -z ${!name} ]]; then unset "$name"; fi
+  done
+
+  if COOKEPIC_HARNESS=$(core_detect_harness); then
+    harness_status=0
+  else
+    harness_status=$?
+  fi
+  case "$harness_status" in
+    0) export COOKEPIC_HARNESS ;;
+    2)
+      printf 'error: invalid COOKEPIC_HARNESS %s\n' "${COOKEPIC_HARNESS:-}" >&2
+      printf 'help: use auto, kimi, claude, ccx, codex, or opencode\n' >&2
+      exit 2
+      ;;
+    3)
+      printf 'error: COOKEPIC_HARNESS=ccx requires the inherited ccx proxy environment\n' >&2
+      printf 'help: launch from ccx\n' >&2
+      exit 2
+      ;;
+    *)
+      printf 'error: could not identify the invoking harness\n' >&2
+      printf 'help: set COOKEPIC_HARNESS to kimi, claude, ccx, codex, or opencode\n' >&2
+      exit 2
+      ;;
+  esac
+
+  local core_skill_dir core_checkout repo_root
+  local -a core_command
+  core_skill_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  core_checkout="$(cd "$core_skill_dir/../.." && pwd -P)"
+  repo_root="$(pwd -P)"
+  if [ -n "${COOKEPIC_T3_BIN:-}" ] \
+    && candidate=$(command -v -- "$COOKEPIC_T3_BIN" 2>/dev/null); then
+    core_command=("$candidate")
+  elif candidate=$(command -v t3 2>/dev/null); then
+    core_command=("$candidate")
+  elif [ -f "$core_checkout/apps/server/dist/bin.mjs" ]; then
+    core_command=(node "$core_checkout/apps/server/dist/bin.mjs")
+  elif [ -f "$core_checkout/apps/server/src/bin.ts" ]; then
+    core_command=(node "$core_checkout/apps/server/src/bin.ts")
+  else
+    printf 'error: could not resolve t3 from COOKEPIC_T3_BIN, t3 on PATH, %s, or %s\n' \
+      "$core_checkout/apps/server/dist/bin.mjs" "$core_checkout/apps/server/src/bin.ts" >&2
+    printf 'help: set COOKEPIC_T3_BIN or use COOKEPIC_CORE=0\n' >&2
+    exit 2
+  fi
+
+  : > "$LOG"; : > "$MAILBOX"; : > "$SUMMARY"
+  exec "${core_command[@]}" epic cook --epic "$COOKEPIC_EPIC" \
+    --cwd "$repo_root" --run-dir "$RUN_DIR"
+  printf 'error: failed to exec the resolved t3 entrypoint\n' >&2
+  exit 2
+}
+
+CORE_MODE="${COOKEPIC_CORE:-0}"
+case "$CORE_MODE" in
+  0) ;;
+  1) core_delegate ;;
+  *)
+    printf 'error: COOKEPIC_CORE must be 0 or 1\n' >&2
+    printf 'help: use 1 for the shared core or 0 for the Bash coordinator\n' >&2
+    exit 2
+    ;;
+esac
 
 : > "$LOG"; : > "$MAILBOX"; : > "$SUMMARY"
 

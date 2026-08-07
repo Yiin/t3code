@@ -184,7 +184,12 @@ it.live("escalates a TERM-resistant interrupt and verifies exit", () =>
   ),
 );
 
-const startStructuredHarness = (body: string, maxArtifactBytes = 1024) =>
+const startStructuredHarness = (
+  body: string,
+  maxArtifactBytes = 1024,
+  permissionMode?: string,
+  useHarnessDefaultModel = false,
+) =>
   Effect.gen(function* () {
     const fixture = yield* Effect.acquireRelease(
       Effect.sync(() => makeWorker(body)),
@@ -197,6 +202,8 @@ const startStructuredHarness = (body: string, maxArtifactBytes = 1024) =>
       artifactsDirectory: fixture.directory,
       maxArtifactBytes,
       stopGraceSeconds: 0.05,
+      ...(permissionMode === undefined ? {} : { permissionMode }),
+      useHarnessDefaultModel,
     });
     const handle = yield* dispatch.startIteration({
       runId: "structured",
@@ -239,6 +246,40 @@ printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"
         running: 1,
       });
       assert.equal(handle.capabilities.terminalSignal, "process-exit");
+    }),
+  ),
+);
+
+it.live("passes the Codex bypass permission mode to the harness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startStructuredHarness(
+        `printf '%s\n' "$@" > args
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"final"}}'`,
+        1_024,
+        "bypassPermissions",
+      );
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8");
+      assert.include(args, "--dangerously-bypass-approvals-and-sandbox");
+      assert.notInclude(args, "danger-full-access");
+    }),
+  ),
+);
+
+it.live("lets Codex select its default model when no model was configured", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startStructuredHarness(
+        `printf '%s\n' "$@" > args
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"final"}}'`,
+        1_024,
+        undefined,
+        true,
+      );
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").split("\n");
+      assert.notInclude(args, "-m");
     }),
   ),
 );

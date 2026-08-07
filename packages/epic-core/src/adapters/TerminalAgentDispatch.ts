@@ -23,6 +23,7 @@ export interface TerminalAgentDispatchOptions {
   readonly binary?: string;
   readonly workerCommand?: string;
   readonly permissionMode?: string;
+  readonly useHarnessDefaultModel?: boolean;
   readonly timeoutSeconds?: number | null;
   readonly stopGraceSeconds?: number;
   readonly maxArtifactBytes?: number;
@@ -164,6 +165,18 @@ const capabilities = (harness: TerminalHarness): IterationHandle["capabilities"]
         : "none",
 });
 
+const codexPermissionArgs = (permissionMode: string | undefined): ReadonlyArray<string> =>
+  permissionMode === "bypassPermissions"
+    ? ["--dangerously-bypass-approvals-and-sandbox"]
+    : [
+        "-a",
+        "never",
+        "-s",
+        permissionMode === undefined || permissionMode === "auto"
+          ? "danger-full-access"
+          : permissionMode,
+      ];
+
 const invocation = (input: {
   readonly options: TerminalAgentDispatchOptions;
   readonly prompt: string;
@@ -194,7 +207,7 @@ const invocation = (input: {
           prompt,
           "--output-format",
           "stream-json",
-          ...(model.length === 0 ? [] : ["-m", model]),
+          ...(model.length === 0 || options.useHarnessDefaultModel ? [] : ["-m", model]),
         ],
       };
     case "claude":
@@ -221,11 +234,8 @@ const invocation = (input: {
         args:
           sessionId === null
             ? [
-                "-a",
-                "never",
-                "-s",
-                "danger-full-access",
-                ...(model ? ["-m", model] : []),
+                ...codexPermissionArgs(options.permissionMode),
+                ...(model && !options.useHarnessDefaultModel ? ["-m", model] : []),
                 "exec",
                 "--json",
                 prompt,
@@ -248,7 +258,7 @@ const invocation = (input: {
           "json",
           "--auto",
           ...(sessionId === null ? [] : ["--session", sessionId]),
-          ...(model ? ["-m", model] : []),
+          ...(model && !options.useHarnessDefaultModel ? ["-m", model] : []),
           "--",
           prompt,
         ],

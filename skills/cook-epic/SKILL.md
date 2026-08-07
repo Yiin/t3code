@@ -45,6 +45,18 @@ cross-repo epics run in parallel too (step 2).
 Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 (commit or stash first — both modes mutate the base branch).
 
+## Shared core migration
+
+Set `COOKEPIC_CORE=1` to replace the Bash coordinator with `t3 epic cook` for
+one run. This path currently supports sequential runs only. It keeps the same
+run directory, gate, push, attempt, timeout, model, orientation, harness, and
+worker-command settings.
+
+The shared path rejects parallel workers, siblings, inspection, budgets,
+systemd controls, and Bash-only test seams. It names the unsupported setting
+before it starts a worker. Unset that setting, or use `COOKEPIC_CORE=0` to run
+the existing Bash coordinator. The default remains `COOKEPIC_CORE=0`.
+
 ## Tests
 
 Run `bash skills/cook-epic/tests/all.sh` from the repository root.

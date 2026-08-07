@@ -41,7 +41,10 @@ const decodeEpicRunConfigOverride = Schema.decodeUnknownEffect(EpicRunConfigOver
 const optionalString = (name: string, description: string) =>
   Flag.string(name).pipe(Flag.withDescription(description), Flag.optional);
 
-const deprecatedEnvironmentOverride = (environment: NodeJS.ProcessEnv): unknown => ({
+const deprecatedEnvironmentOverride = (
+  environment: NodeJS.ProcessEnv,
+  harness: TerminalHarness,
+): unknown => ({
   ...(environment.COOKEPIC_GATE === undefined && environment.COOKEPIC_NO_GATE === undefined
     ? {}
     : {
@@ -67,15 +70,39 @@ const deprecatedEnvironmentOverride = (environment: NodeJS.ProcessEnv): unknown 
             : { maxIterations: Number(environment.COOKEPIC_MAX_DISPATCHES) }),
         },
       }),
-  ...(environment.COOKEPIC_WORKER_TIMEOUT === undefined
+  ...(environment.COOKEPIC_WORKER_TIMEOUT === undefined &&
+  environment.COOKEPIC_STOP_GRACE === undefined
     ? {}
-    : { supervision: { workerTimeoutSeconds: Number(environment.COOKEPIC_WORKER_TIMEOUT) } }),
+    : {
+        supervision: {
+          ...(environment.COOKEPIC_WORKER_TIMEOUT === undefined
+            ? {}
+            : { workerTimeoutSeconds: Number(environment.COOKEPIC_WORKER_TIMEOUT) }),
+          ...(environment.COOKEPIC_STOP_GRACE === undefined
+            ? {}
+            : { stopGraceSeconds: Number(environment.COOKEPIC_STOP_GRACE) }),
+        },
+      }),
+  ...(environment.COOKEPIC_MODEL === undefined
+    ? {}
+    : { provider: { modelSelection: { instanceId: harness, model: environment.COOKEPIC_MODEL } } }),
   ...(environment.COOKEPIC_ORIENTATION_FILE === undefined
     ? {}
     : { orientation: { file: environment.COOKEPIC_ORIENTATION_FILE } }),
   ...(environment.COOKEPIC_NO_PUSH === undefined
     ? {}
     : { vcs: { noPush: environment.COOKEPIC_NO_PUSH === "1" } }),
+  ...(environment.COOKEPIC_PERMISSION_MODE === undefined
+    ? {}
+    : {
+        runtime: {
+          mode:
+            environment.COOKEPIC_PERMISSION_MODE === "auto" ||
+            environment.COOKEPIC_PERMISSION_MODE === "bypassPermissions"
+              ? "full-access"
+              : environment.COOKEPIC_PERMISSION_MODE,
+        },
+      }),
 });
 
 const selectHarness = (environment: NodeJS.ProcessEnv): TerminalHarness => {
@@ -129,7 +156,7 @@ export const cookCommand = Command.make("cook", {
       const cwd = NodePath.resolve(flags.cwd);
       const harness = selectHarness(process.env);
       const environmentOverride = yield* decodeEpicRunConfigOverride(
-        deprecatedEnvironmentOverride(process.env),
+        deprecatedEnvironmentOverride(process.env, harness),
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -298,6 +325,10 @@ export const cookCommand = Command.make("cook", {
                   ...(process.env.COOKEPIC_WORKER_CMD === undefined
                     ? {}
                     : { workerCommand: process.env.COOKEPIC_WORKER_CMD }),
+                  ...(process.env.COOKEPIC_PERMISSION_MODE === undefined
+                    ? {}
+                    : { permissionMode: process.env.COOKEPIC_PERMISSION_MODE }),
+                  useHarnessDefaultModel: snapshot.config.provider.modelSelection === null,
                   timeoutSeconds: snapshot.config.supervision.workerTimeoutSeconds,
                   stopGraceSeconds: snapshot.config.supervision.stopGraceSeconds,
                 }),

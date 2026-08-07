@@ -283,6 +283,30 @@ it("lets --gate override a lower disabled gate", () => {
   assert.isTrue(NodeFS.existsSync(marker));
 });
 
+it("maps supported terminal settings into the shared config", () => {
+  const fixture = makeFixture(1);
+  const environment = {
+    ...fixture.environment,
+    COOKEPIC_MODEL: "adapter-model",
+    COOKEPIC_PERMISSION_MODE: "bypassPermissions",
+    COOKEPIC_STOP_GRACE: "7",
+  };
+  const result = run("node", cookArgs(fixture), fixture.repo, environment);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const state = JSON.parse(
+    NodeFS.readFileSync(NodePath.join(fixture.runDirectory, "run.json"), "utf8"),
+  );
+  assert.equal(state.config.supervision.stopGraceSeconds, 7);
+  assert.deepEqual(state.config.provider.modelSelection, {
+    instanceId: "worker-cmd",
+    model: "adapter-model",
+  });
+  assert.equal(state.config.runtime.mode, "full-access");
+  assert.equal(state.configProvenance["supervision.stopGraceSeconds"], "environment");
+  assert.equal(state.configProvenance["provider.modelSelection"], "environment");
+  assert.equal(state.configProvenance["runtime.mode"], "environment");
+});
+
 it("shows local cook help from TypeScript source", () => {
   const result = run("node", [bin, "epic", "cook", "--help"], repositoryRoot);
   assert.equal(result.status, 0, result.stderr);
