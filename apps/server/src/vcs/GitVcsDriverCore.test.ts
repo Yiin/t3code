@@ -38,6 +38,21 @@ const makeNonRepositoryHandle = () =>
     getOutputFd: () => Stream.empty,
   });
 
+const makeCommandHandle = (exitCode: Effect.Effect<number>, stdout = "") =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: exitCode.pipe(Effect.map(ChildProcessSpawner.ExitCode)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.encodeText(Stream.make(stdout)),
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
 const makeTmpDir = (
   prefix = "git-vcs-driver-test-",
 ): Effect.Effect<string, PlatformError.PlatformError, FileSystem.FileSystem | Scope.Scope> =>
@@ -131,6 +146,131 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
       { args: ["rev-parse", "--abbrev-ref", "HEAD"], lcAll: "C" },
       { args: ["branch", "--no-color", "--no-column"], lcAll: "C" },
     ]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("serializes common-state mutations across worktree CWDs", () => {
+  let activeMutations = 0;
+  let maxActiveMutations = 0;
+  let commonDirLookups = 0;
+  let commonDir = "";
+  const spawner = ChildProcessSpawner.make((command) =>
+    Effect.sync(() => {
+      if (!ChildProcess.isStandardCommand(command)) {
+        return assert.fail("expected a standard Git command");
+      }
+      if (command.args[0] === "rev-parse" && command.args[1] === "--git-common-dir") {
+        commonDirLookups += 1;
+        return makeCommandHandle(Effect.succeed(0), `${commonDir}\n`);
+      }
+
+      const collided = activeMutations > 0;
+      activeMutations += 1;
+      maxActiveMutations = Math.max(maxActiveMutations, activeMutations);
+      return makeCommandHandle(
+        Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+          discard: true,
+        }).pipe(
+          Effect.as(collided ? 1 : 0),
+          Effect.ensuring(
+            Effect.sync(() => {
+              activeMutations -= 1;
+            }),
+          ),
+        ),
+      );
+    }),
+  );
+  const layer = GitVcsDriver.layer.pipe(
+    Layer.provide(ServerConfigLayer),
+    Layer.provideMerge(
+      Layer.merge(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
+    ),
+  );
+
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoCwd = yield* makeTmpDir();
+      const worktreeCwd = yield* makeTmpDir();
+      commonDir = path.join(repoCwd, ".git");
+      yield* fileSystem.makeDirectory(commonDir);
+      const driver = yield* GitVcsDriver.GitVcsDriver;
+
+      yield* Effect.forEach(
+        Array.from({ length: 8 }, (_, index) => index),
+        (index) =>
+          driver.execute({
+            operation: `GitVcsDriver.test.concurrentMutation.${index}`,
+            cwd: index % 2 === 0 ? repoCwd : worktreeCwd,
+            args:
+              index === 0
+                ? ["--git-dir", commonDir, "fetch", "--quiet", "origin"]
+                : index === 1
+                  ? ["--literal-pathspecs", "add", "-A"]
+                  : ["branch", `feature/${index}`],
+          }),
+        { concurrency: "unbounded", discard: true },
+      );
+
+      assert.equal(maxActiveMutations, 1);
+      assert.equal(commonDirLookups, 2);
+    }).pipe(Effect.provide(layer)),
+  );
+});
+
+it.effect("keeps read-only Git commands concurrent", () => {
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  const spawner = ChildProcessSpawner.make((command) =>
+    Effect.sync(() => {
+      if (!ChildProcess.isStandardCommand(command)) {
+        return assert.fail("expected a standard Git command");
+      }
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      return makeCommandHandle(
+        Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+          discard: true,
+        }).pipe(
+          Effect.as(0),
+          Effect.ensuring(
+            Effect.sync(() => {
+              activeReads -= 1;
+            }),
+          ),
+        ),
+      );
+    }),
+  );
+  const layer = GitVcsDriver.layer.pipe(
+    Layer.provide(ServerConfigLayer),
+    Layer.provideMerge(
+      Layer.merge(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    yield* Effect.all(
+      [
+        driver.execute({ operation: "GitVcsDriver.test.readOne", cwd: "/repo", args: ["status"] }),
+        driver.execute({
+          operation: "GitVcsDriver.test.readTwo",
+          cwd: "/repo",
+          args: ["rev-parse", "HEAD"],
+        }),
+      ],
+      { concurrency: "unbounded" },
+    );
+    assert.equal(maxActiveReads, 2);
   }).pipe(Effect.provide(layer));
 });
 

@@ -17,6 +17,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as SynchronizedRef from "effect/SynchronizedRef";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
@@ -104,6 +105,131 @@ interface ExecuteGitOptions {
   maxOutputBytes?: number | undefined;
   appendTruncationMarker?: boolean | undefined;
   progress?: GitVcsDriver.ExecuteGitProgress | undefined;
+}
+
+function isBranchMutation(args: readonly string[]): boolean {
+  const branchArgs = args.slice(1);
+  if (
+    branchArgs.some((arg) =>
+      [
+        "-d",
+        "-D",
+        "-m",
+        "-M",
+        "-c",
+        "-C",
+        "-f",
+        "--delete",
+        "--move",
+        "--copy",
+        "--force",
+        "--set-upstream-to",
+        "--unset-upstream",
+        "--edit-description",
+      ].includes(arg),
+    )
+  ) {
+    return true;
+  }
+  if (
+    branchArgs.some((arg) =>
+      [
+        "--list",
+        "-l",
+        "--show-current",
+        "--contains",
+        "--no-contains",
+        "--merged",
+        "--no-merged",
+      ].includes(arg),
+    )
+  ) {
+    return false;
+  }
+  return branchArgs.some((arg) => !arg.startsWith("-"));
+}
+
+function isConfigMutation(args: readonly string[]): boolean {
+  const configArgs = args.slice(1);
+  return !configArgs.some(
+    (arg) =>
+      arg === "--get" ||
+      arg === "--get-all" ||
+      arg === "--get-regexp" ||
+      arg === "--get-urlmatch" ||
+      arg === "--list" ||
+      arg === "-l",
+  );
+}
+
+function gitSubcommandArgs(args: readonly string[]): readonly string[] {
+  const optionsWithSeparateValue = new Set([
+    "-c",
+    "-C",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+  ]);
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === "--") return args.slice(index + 1);
+    if (arg === undefined || !arg.startsWith("-")) return args.slice(index);
+    index += optionsWithSeparateValue.has(arg) ? 2 : 1;
+  }
+  return [];
+}
+
+function isGitCommonStateMutation(args: readonly string[]): boolean {
+  const commandArgs = gitSubcommandArgs(args);
+  const command = commandArgs[0];
+  switch (command) {
+    case "add":
+    case "checkout":
+    case "cherry-pick":
+    case "commit":
+    case "fetch":
+    case "merge":
+    case "mv":
+    case "pull":
+    case "push":
+    case "rebase":
+    case "reset":
+    case "restore":
+    case "revert":
+    case "rm":
+    case "stash":
+    case "switch":
+    case "update-index":
+    case "update-ref":
+      return true;
+    case "branch":
+      return isBranchMutation(commandArgs);
+    case "config":
+      return isConfigMutation(commandArgs);
+    case "remote":
+      return [
+        "add",
+        "remove",
+        "rename",
+        "set-branches",
+        "set-head",
+        "set-url",
+        "update",
+        "prune",
+      ].includes(commandArgs[1] ?? "");
+    case "symbolic-ref":
+      return commandArgs.filter((arg, index) => index > 0 && !arg.startsWith("-")).length > 1;
+    case "tag":
+      return !commandArgs.slice(1).some((arg) => arg === "--list" || arg === "-l");
+    case "worktree":
+      return ["add", "remove", "move", "prune", "repair"].includes(commandArgs[1] ?? "");
+    default:
+      return false;
+  }
 }
 
 function parseBranchAb(value: string): { ahead: number; behind: number } {
@@ -767,8 +893,77 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
 
-  const execute: GitVcsDriver.GitVcsDriver["Service"]["execute"] = (input) =>
-    executeRaw(input).pipe(
+  const gitCommonDirByCwd = yield* SynchronizedRef.make(new Map<string, string>());
+  const mutationMutexByGitCommonDir = yield* SynchronizedRef.make(
+    new Map<string, Semaphore.Semaphore>(),
+  );
+
+  const resolveCanonicalGitCommonDir = Effect.fn("GitVcsDriver.resolveCanonicalGitCommonDir")(
+    function* (cwd: string) {
+      return yield* SynchronizedRef.modifyEffect(gitCommonDirByCwd, (cached) => {
+        const normalizedCwd = path.resolve(cwd);
+        const existing = cached.get(normalizedCwd);
+        if (existing !== undefined) {
+          return Effect.succeed([existing, cached] as const);
+        }
+        return executeRaw({
+          operation: "GitVcsDriver.resolveCanonicalGitCommonDir",
+          cwd,
+          args: ["rev-parse", "--git-common-dir"],
+          timeoutMs: 5_000,
+        }).pipe(
+          Effect.flatMap((result) => {
+            const rawCommonDir = result.stdout.trim();
+            const resolvedCommonDir = path.isAbsolute(rawCommonDir)
+              ? rawCommonDir
+              : path.resolve(cwd, rawCommonDir);
+            return fileSystem.realPath(resolvedCommonDir).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new GitCommandError({
+                    ...gitCommandContext({
+                      operation: "GitVcsDriver.resolveCanonicalGitCommonDir",
+                      cwd,
+                      args: ["rev-parse", "--git-common-dir"],
+                    }),
+                    detail: "Failed to resolve the Git common directory.",
+                    cause,
+                  }),
+              ),
+            );
+          }),
+          Effect.map((canonicalCommonDir) => {
+            const next = new Map(cached);
+            next.set(normalizedCwd, canonicalCommonDir);
+            return [canonicalCommonDir, next] as const;
+          }),
+        );
+      });
+    },
+  );
+
+  const getMutationMutex = Effect.fn("GitVcsDriver.getMutationMutex")(function* (cwd: string) {
+    const commonDir = yield* resolveCanonicalGitCommonDir(cwd);
+    const candidate = yield* Semaphore.make(1);
+    return yield* SynchronizedRef.modify(mutationMutexByGitCommonDir, (mutexes) => {
+      const existing = mutexes.get(commonDir);
+      if (existing !== undefined) {
+        return [existing, mutexes] as const;
+      }
+      const next = new Map(mutexes);
+      next.set(commonDir, candidate);
+      return [candidate, next] as const;
+    });
+  });
+
+  const withMutationMutex = <A, E, R>(
+    cwd: string,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | GitCommandError, R> =>
+    Effect.flatMap(getMutationMutex(cwd), (mutex) => mutex.withPermit(effect));
+
+  const execute: GitVcsDriver.GitVcsDriver["Service"]["execute"] = (input) => {
+    const observed = executeRaw(input).pipe(
       withMetrics({
         counter: gitCommandsTotal,
         timer: gitCommandDuration,
@@ -785,6 +980,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         },
       }),
     );
+    return isGitCommonStateMutation(input.args) ? withMutationMutex(input.cwd, observed) : observed;
+  };
 
   const executeGit = (
     operation: string,
