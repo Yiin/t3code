@@ -60,6 +60,7 @@ import {
   type IterationTurnState,
 } from "@t3tools/epic-core/ralphProtocol";
 import * as Crypto from "effect/Crypto";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -71,6 +72,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -177,11 +179,24 @@ const ReadyChildren = Schema.fromJsonString(
   ),
 );
 const decodeReadyChildren = Schema.decodeUnknownEffect(ReadyChildren);
-type ReadyChildSelection =
-  | { readonly _tag: "child"; readonly issueId: string }
+const EpicChildren = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      status: Schema.String,
+    }),
+  ),
+);
+const decodeEpicChildren = Schema.decodeUnknownEffect(EpicChildren);
+type ReadyFrontierSelection =
+  | { readonly _tag: "children"; readonly issueIds: ReadonlyArray<string> }
   | { readonly _tag: "empty" }
   | { readonly _tag: "unrecognised"; readonly candidateIds: ReadonlyArray<string> };
+type ReadyChildSelection =
+  | { readonly _tag: "child"; readonly issueId: string }
+  | { readonly _tag: "unrecognised"; readonly candidateIds: ReadonlyArray<string> };
 type RunIterationResult =
+  | { readonly _tag: "dispatch-skipped"; readonly providerTurnDispatched: false }
   | {
       readonly _tag: "classified";
       readonly outcome: EpicIterationOutcome;
@@ -349,7 +364,11 @@ const formatEpicRunLockHeldError = (error: EpicRunLockHeldError): string => {
  */
 type LoopBoundary =
   | { readonly _tag: "stop" }
-  | { readonly _tag: "continue"; readonly delayMs: number };
+  | {
+      readonly _tag: "continue";
+      readonly delayMs: number;
+      readonly providerFallbackApplied: boolean;
+    };
 
 const LOOP_STOP: LoopBoundary = { _tag: "stop" };
 
@@ -540,6 +559,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * exiting, so it can never claim a loop that will not look again.
      */
     const liveLoops = new Set<EpicRunId>();
+    /** Wake a pool blocked on worker settlement after a live cap change. */
+    const workerCapSignals = new Map<EpicRunId, Queue.Queue<SchedulerEvent>>();
+    /** Cancellation owns lease release after it abandons every running row. */
+    const cancelCleanupOwned = new Set<EpicRunId>();
     /**
      * Serializes every run-status transition — the loop's own boundary writes
      * included — so no writer can act on a status another writer has already
@@ -806,7 +829,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           );
       });
 
-    const selectReadyChild = (run: EpicRun): Effect.Effect<ReadyChildSelection, EpicRunnerError> =>
+    const selectReadyFrontier = (
+      run: EpicRun,
+    ): Effect.Effect<ReadyFrontierSelection, EpicRunnerError> =>
       processRunner
         .run({
           command: "bd",
@@ -842,29 +867,76 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               ),
               Effect.flatMap((value) => {
                 if (value.length === 0)
-                  return Effect.succeed<ReadyChildSelection>({ _tag: "empty" });
+                  return Effect.succeed<ReadyFrontierSelection>({ _tag: "empty" });
 
                 // `bd ready --parent` owns the scope. Some bd rows omit the
                 // parent value, which decodes to null and is usable. Reject
                 // only an explicit parent that names another issue.
-                const direct = value.find(
+                const direct = value.filter(
                   (issue) => issue.parent === null || issue.parent === run.epicId,
                 );
-                if (direct === undefined) {
-                  return Effect.succeed<ReadyChildSelection>({
+                if (direct.length === 0) {
+                  return Effect.succeed<ReadyFrontierSelection>({
                     _tag: "unrecognised",
                     candidateIds: value.map((issue) => issue.id),
                   });
                 }
-                return direct.id.trim().length === 0
+                const invalid = direct.find((issue) => issue.id.trim().length === 0);
+                return invalid !== undefined
                   ? Effect.fail(
                       new EpicRunnerDispatchError({
                         commandType: "bd.ready",
-                        detail: "Invalid bd ready output: first usable ready child has no id",
+                        detail: "Invalid bd ready output: a usable ready child has no id",
                       }),
                     )
-                  : Effect.succeed<ReadyChildSelection>({ _tag: "child", issueId: direct.id });
+                  : Effect.succeed<ReadyFrontierSelection>({
+                      _tag: "children",
+                      issueIds: direct.map((issue) => issue.id),
+                    });
               }),
+            );
+          }),
+        );
+
+    const countOpenChildren = (run: EpicRun): Effect.Effect<number, EpicRunnerError> =>
+      processRunner
+        .run({
+          command: "bd",
+          args: ["list", "--parent", run.epicId, "--all", "--flat", "--json"],
+          cwd: run.cwd,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "bd.list",
+                detail: "Could not read the epic's children",
+                cause,
+              }),
+          ),
+          Effect.flatMap((output) => {
+            if (output.code !== 0) {
+              return Effect.fail(
+                new EpicRunnerDispatchError({
+                  commandType: "bd.list",
+                  detail: output.stderr.trim() || `bd list exited with code ${output.code}`,
+                }),
+              );
+            }
+            return decodeEpicChildren(output.stdout).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "bd.list",
+                    detail: `Invalid bd list output: ${String(cause)}`,
+                    cause,
+                  }),
+              ),
+              Effect.map(
+                (children) =>
+                  children.filter((child) => child.id !== run.epicId && child.status !== "closed")
+                    .length,
+              ),
             );
           }),
         );
@@ -1671,61 +1743,47 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const runIteration = (input: {
       readonly run: EpicRun;
-      readonly iterationIndex: number;
+      readonly selection: ReadyChildSelection;
       readonly policy: EpicRunnerPolicy;
+      readonly onDispatched: (threadId: ThreadId) => void;
     }): Effect.Effect<RunIterationResult, EpicRunnerError> =>
       Effect.gen(function* () {
         const run = input.run;
-        const selection = yield* selectReadyChild(run);
-        if (selection._tag === "empty") {
-          return {
-            _tag: "classified" as const,
-            outcome: { kind: "backlog-empty", detail: null, report: null },
-            noCommitChildClosed: false,
-            providerTurnDispatched: false,
-          };
-        }
-        // Deterministic, and unique because iteration indices are never reused:
-        // a crash cannot leave two threads competing for one iteration row. The
-        // shape is a contract — the sidebar parses it back to fold a run's
-        // iterations into one row — so it is built by the shared helper.
-        const threadId = ThreadId.make(
-          epicRunIterationThreadId({ runId: run.runId, iterationIndex: input.iterationIndex }),
-        );
+        const selection = input.selection;
         const startedAt = yield* nowIso;
 
         if (selection._tag === "unrecognised") {
+          const iterationIndex = yield* withTransition(
+            Effect.gen(function* () {
+              const current = yield* requireRun(run.runId);
+              if (current.status !== "running") return null;
+              return yield* store
+                .allocateIteration({
+                  runId: run.runId,
+                  issueId: null,
+                  branch: null,
+                  worktreePath: null,
+                  startedAt,
+                })
+                .pipe(Effect.mapError(storeError("allocateIteration")));
+            }),
+          );
+          if (iterationIndex === null) {
+            return { _tag: "dispatch-skipped", providerTurnDispatched: false };
+          }
           const detail = `bd ready returned no usable child for ${run.epicId}; candidates: ${selection.candidateIds.join(", ")}`;
           yield* Effect.logError("epic.runner.ready-unrecognised", {
             runId: run.runId,
             epicId: run.epicId,
-            iterationIndex: input.iterationIndex,
+            iterationIndex,
             candidateIds: selection.candidateIds,
           });
-          // Keep the same append-then-update discipline as an ordinary turn.
-          // This synthetic row records the failed selection, but issueId null
-          // prevents it from becoming a public thread reference.
-          yield* store
-            .appendIteration({
-              runId: run.runId,
-              iterationIndex: input.iterationIndex,
-              threadId,
-              issueId: null,
-              workerId: null,
-              branch: null,
-              worktreePath: null,
-              turnStatus: "running",
-              summary: null,
-              why: null,
-              failureReason: null,
-              startedAt,
-              finishedAt: null,
-            })
-            .pipe(Effect.mapError(storeError("appendIteration")));
+          // Allocation writes the synthetic running row before this terminal
+          // update. Its null issue id prevents a public thread reference.
           yield* store
             .updateIteration({
               runId: run.runId,
-              iterationIndex: input.iterationIndex,
+              iterationIndex,
               turnStatus: "failed",
               summary: detail,
               why: null,
@@ -1756,124 +1814,154 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           issueEvidenceBefore.title,
         );
 
-        // Write-ahead, per the store's crash-safe ordering contract: the
-        // iteration row — carrying its threadId — exists before the turn is
-        // dispatched, so a crash in between leaves a visible `running`
-        // iteration rather than a turn nobody knows about.
-        yield* store
-          .appendIteration({
-            runId: run.runId,
-            iterationIndex: input.iterationIndex,
-            threadId,
-            issueId,
-            workerId: threadId,
-            branch: workspace.branch,
-            worktreePath: workspace.worktreePath,
-            turnStatus: "running",
-            summary: null,
-            why: null,
-            failureReason: null,
-            startedAt,
-            finishedAt: null,
-          })
-          .pipe(Effect.mapError(storeError("appendIteration")));
+        const allocated = yield* withTransition(
+          Effect.gen(function* () {
+            const current = yield* requireRun(run.runId);
+            if (current.status !== "running") return null;
+            const iterationIndex = yield* store
+              .allocateIteration({
+                runId: run.runId,
+                issueId,
+                branch: workspace.branch,
+                worktreePath: workspace.worktreePath,
+                startedAt,
+              })
+              .pipe(Effect.mapError(storeError("allocateIteration")));
+            const threadId = ThreadId.make(
+              epicRunIterationThreadId({ runId: run.runId, iterationIndex }),
+            );
+            yield* dispatchCommand({
+              type: "thread.create",
+              commandId: yield* commandId("thread-create"),
+              threadId,
+              projectId: current.projectId,
+              title: `${run.epicId} · iteration ${iterationIndex + 1}`,
+              modelSelection: current.modelSelection,
+              runtimeMode: current.runtimeMode,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              branch: workspace.branch,
+              worktreePath: workspace.worktreePath,
+              createdAt: startedAt,
+            });
+            return { iterationIndex, threadId } as const;
+          }),
+        );
+        if (allocated === null) {
+          return { _tag: "dispatch-skipped", providerTurnDispatched: false };
+        }
+        const { iterationIndex, threadId } = allocated;
 
-        // Charge a dispatch from a fresh row inside the transition lock. This
-        // preserves a concurrent status change and prevents restart/cancel
-        // reconciliation from charging the same provider turn again.
+        if (workspace.branch !== null && workspace.worktreePath !== null) {
+          yield* projectSetupScriptRunner
+            .runForThread({
+              threadId,
+              projectId: run.projectId,
+              projectCwd: run.cwd,
+              worktreePath: workspace.worktreePath,
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("epic.runner.worktree-setup-failed", {
+                  threadId,
+                  worktreePath: workspace.worktreePath,
+                  cause,
+                }),
+              ),
+            );
+        }
+
+        // Re-check under the same transition lock that charges and starts the
+        // provider turn. A durable pause therefore cannot be followed by a new
+        // provider dispatch.
         const dispatchedRun = yield* withTransition(
           Effect.gen(function* () {
             const current = yield* requireRun(run.runId);
+            if (current.status !== "running") {
+              yield* store
+                .updateIteration({
+                  runId: run.runId,
+                  iterationIndex,
+                  turnStatus: "abandoned",
+                  summary: `dispatch skipped after run became ${current.status}`,
+                  why: null,
+                  failureReason: "cancelled",
+                  finishedAt: yield* nowIso,
+                })
+                .pipe(Effect.mapError(storeError("updateIteration")));
+              return null;
+            }
+            const dispatchedAt = yield* nowIso;
             const next = {
               ...current,
               currentThreadId: threadId,
-              currentTurnStartedAt: startedAt,
+              currentTurnStartedAt: dispatchedAt,
               iterationsDispatched: current.iterationsDispatched + 1,
-              updatedAt: startedAt,
+              updatedAt: dispatchedAt,
             };
             yield* saveRun(next);
-            return next;
+            input.onDispatched(threadId);
+            const dispatchError = yield* dispatchCommand({
+              type: "thread.turn.start",
+              commandId: yield* commandId("turn-start"),
+              threadId,
+              message: {
+                messageId: MessageId.make(`${threadId}-prompt`),
+                role: "user",
+                text: assembleIterationPrompt({
+                  basePrompt: next.prompt,
+                  issueId,
+                  epicContext,
+                  orientationCard,
+                }),
+                attachments: [],
+              },
+              modelSelection: next.modelSelection,
+              runtimeMode: next.runtimeMode,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              createdAt: dispatchedAt,
+            }).pipe(
+              Effect.match({
+                onFailure: (error) => error,
+                onSuccess: () => null,
+              }),
+            );
+            return { run: next, dispatchError } as const;
           }),
         );
-
-        const dispatchTurn = Effect.gen(function* () {
-          // `OrchestrationEngine.dispatch` ignores a turn command's `bootstrap`
-          // block — that path lives only in the websocket handler (`ws.ts:844`)
-          // — so the runner creates the thread itself.
-          yield* dispatchCommand({
-            type: "thread.create",
-            commandId: yield* commandId("thread-create"),
+        if (dispatchedRun === null) {
+          yield* dispatchBestEffort("epic.runner.skipped-session-stop-failed", {
+            type: "thread.session.stop",
+            commandId: yield* commandId("skipped-session-stop"),
             threadId,
-            projectId: dispatchedRun.projectId,
-            title: `${run.epicId} · iteration ${input.iterationIndex + 1}`,
-            modelSelection: dispatchedRun.modelSelection,
-            runtimeMode: dispatchedRun.runtimeMode,
-            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: workspace.branch,
-            worktreePath: workspace.worktreePath,
-            createdAt: startedAt,
+            createdAt: yield* nowIso,
           });
-          if (workspace.branch !== null && workspace.worktreePath !== null) {
-            // This matches the existing bootstrap path: setup starts before the
-            // turn, but its configured terminal command completes asynchronously.
-            yield* projectSetupScriptRunner
-              .runForThread({
-                threadId,
-                projectId: dispatchedRun.projectId,
-                projectCwd: run.cwd,
-                worktreePath: workspace.worktreePath,
-              })
-              .pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("epic.runner.worktree-setup-failed", {
+          return { _tag: "dispatch-skipped", providerTurnDispatched: false };
+        }
+
+        const settleIteration =
+          dispatchedRun.dispatchError === null
+            ? awaitTurnEnd(threadId, input.policy).pipe(
+                // A normally-settled turn may still have subagents working because
+                // the agent ended its turn early. Drain and resume as many times as
+                // the nested workflow needs. One timeout covers the original turn
+                // and every continuation, so each cycle cannot reset the bound.
+                Effect.flatMap(() =>
+                  graceContinuationForSubagents({
+                    run,
+                    iterationIndex,
                     threadId,
-                    worktreePath: workspace.worktreePath,
-                    cause,
+                    workspace,
+                    headBefore,
+                    branchBase,
+                    initialWorktreeFingerprint,
+                    policy: input.policy,
                   }),
                 ),
-              );
-          }
-          yield* dispatchCommand({
-            type: "thread.turn.start",
-            commandId: yield* commandId("turn-start"),
-            threadId,
-            message: {
-              messageId: MessageId.make(`${threadId}-prompt`),
-              role: "user",
-              text: assembleIterationPrompt({
-                basePrompt: dispatchedRun.prompt,
-                issueId,
-                epicContext,
-                orientationCard,
-              }),
-              attachments: [],
-            },
-            modelSelection: dispatchedRun.modelSelection,
-            runtimeMode: dispatchedRun.runtimeMode,
-            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            createdAt: startedAt,
-          });
-        });
-
-        const settleIteration = dispatchTurn.pipe(
-          Effect.flatMap(() => awaitTurnEnd(threadId, input.policy)),
-          // A normally-settled turn may still have subagents working because
-          // the agent ended its turn early. Drain and resume as many times as
-          // the nested workflow needs. One timeout covers the original turn
-          // and every continuation, so each cycle cannot reset the bound.
-          Effect.flatMap(() =>
-            graceContinuationForSubagents({
-              run,
-              iterationIndex: input.iterationIndex,
-              threadId,
-              workspace,
-              headBefore,
-              branchBase,
-              initialWorktreeFingerprint,
-              policy: input.policy,
-            }),
-          ),
-        );
+              )
+            : Effect.succeed<IterationSettleResult>({
+                _tag: "dispatch-failed",
+                detail: dispatchedRun.dispatchError.message,
+              });
         const boundedIteration =
           input.policy.iterationTimeoutMs === null
             ? settleIteration
@@ -1988,7 +2076,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         yield* store
           .updateIteration({
             runId: run.runId,
-            iterationIndex: input.iterationIndex,
+            iterationIndex,
             turnStatus: iterationStatus,
             summary: outcome.report?.summary ?? outcome.detail,
             why: outcome.report?.why ?? null,
@@ -2013,7 +2101,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
         yield* Effect.logInfo("epic.runner.iteration-finished", {
           runId: run.runId,
-          iterationIndex: input.iterationIndex,
+          iterationIndex,
           threadId,
           outcome: outcome.kind,
           detail: outcome.detail,
@@ -2027,178 +2115,356 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         };
       });
 
+    const applyIterationBoundary = (input: {
+      readonly runId: EpicRunId;
+      readonly policy: EpicRunnerPolicy;
+      readonly iterationResult: RunIterationResult;
+      readonly providerInstanceId: EpicRun["modelSelection"]["instanceId"];
+      readonly providerFallbackApplied: boolean;
+    }): Effect.Effect<LoopBoundary, EpicRunnerError> =>
+      withTransition(
+        Effect.gen(function* () {
+          if (input.iterationResult._tag === "dispatch-skipped") {
+            return LOOP_STOP;
+          }
+          // Failure budgets belong to the run. Every completed worker applies
+          // its boundary under this semaphore, so simultaneous settlements
+          // cannot overwrite one another's counters.
+          const currentRun = yield* requireRun(input.runId);
+          const settledRun = {
+            ...currentRun,
+            iterationsCompleted: currentRun.iterationsCompleted + 1,
+            updatedAt: yield* nowIso,
+          };
+
+          if (input.iterationResult._tag === "ready-unrecognised") {
+            if (currentRun.status !== "running") {
+              yield* saveRun(settledRun);
+              return LOOP_STOP;
+            }
+            yield* saveRun({
+              ...settledRun,
+              status: "failed",
+              lastError: input.iterationResult.detail,
+            });
+            return LOOP_STOP;
+          }
+
+          const { outcome, noCommitChildClosed, providerTurnDispatched } = input.iterationResult;
+
+          if (currentRun.status !== "running" && currentRun.status !== "paused") {
+            yield* saveRun(settledRun);
+            return LOOP_STOP;
+          }
+
+          const successfulProviderTurn =
+            providerTurnDispatched &&
+            (outcome.kind === "done" || outcome.kind === "backlog-empty" || noCommitChildClosed);
+          if (successfulProviderTurn) {
+            yield* store
+              .clearProviderDegradation({
+                providerInstanceId: input.providerInstanceId,
+              })
+              .pipe(Effect.mapError(storeError("clearProviderDegradation")));
+          }
+
+          const decision = decideIterationBoundary({
+            runStatus: currentRun.status,
+            consecutiveFailures: currentRun.consecutiveFailures,
+            noCommitStreak: currentRun.noCommitStreak,
+            infraStreak: currentRun.infraStreak,
+            lastError: currentRun.lastError,
+            outcome,
+            noCommitChildClosed,
+            providerFallbackApplied: input.providerFallbackApplied,
+            providerTurnDispatched,
+            limits: {
+              maxConsecutiveFailures: input.policy.maxConsecutiveFailures,
+              maxNoCommitStreak: input.policy.maxNoCommitStreak,
+              infraFailureBudget: input.policy.infraFailureBudget,
+              retryBaseDelayMs: input.policy.retryBaseDelayMs,
+              retryMaxDelayMs: input.policy.retryMaxDelayMs,
+            },
+          });
+          yield* saveRun({
+            ...settledRun,
+            ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
+            consecutiveFailures: decision.nextConsecutiveFailures,
+            noCommitStreak: decision.nextNoCommitStreak,
+            infraStreak: decision.nextInfraStreak,
+            lastError: decision.lastError,
+          });
+          return decision.action === "stop"
+            ? LOOP_STOP
+            : ({
+                _tag: "continue",
+                delayMs: decision.delayMs,
+                providerFallbackApplied: input.providerFallbackApplied,
+              } satisfies LoopBoundary);
+        }),
+      );
+
+    interface PendingProviderFallback {
+      readonly from: ModelSelection;
+      readonly to: ModelSelection;
+      readonly failureReason: string;
+    }
+
+    const resolvePendingProviderFallback = Effect.fn("EpicRunner.resolvePendingProviderFallback")(
+      function* (
+        modelSelection: ModelSelection,
+        iterationResult: RunIterationResult,
+      ): Effect.fn.Return<PendingProviderFallback | null, EpicRunnerError> {
+        if (
+          iterationResult._tag !== "classified" ||
+          iterationResult.outcome.providerFallbackEligible !== true ||
+          Option.isNone(providerRegistry)
+        ) {
+          return null;
+        }
+        const providers = yield* providerRegistry.value.getProviders;
+        const fallback = resolveEpicProviderFallback({
+          providers,
+          current: modelSelection,
+          failureReason: iterationResult.outcome.failureReason,
+          providerFallbackEligible: true,
+        });
+        return fallback === null
+          ? null
+          : {
+              from: modelSelection,
+              to: fallback,
+              failureReason:
+                iterationResult.outcome.failureReason ??
+                iterationResult.outcome.detail ??
+                iterationResult.outcome.kind,
+            };
+      },
+    );
+
+    const applyPendingProviderFallback = Effect.fn("EpicRunner.applyPendingProviderFallback")(
+      function* (runId: EpicRunId, pending: PendingProviderFallback) {
+        const applied = yield* withTransition(
+          Effect.gen(function* () {
+            const current = yield* requireRun(runId);
+            if (current.status !== "running" && current.status !== "paused") return false;
+            if (current.modelSelection.instanceId !== pending.from.instanceId) return false;
+            const degradedAt = yield* nowIso;
+            yield* store
+              .upsertProviderDegradation({
+                providerInstanceId: pending.from.instanceId,
+                failureReason: pending.failureReason,
+                degradedAt,
+              })
+              .pipe(Effect.mapError(storeError("upsertProviderDegradation")));
+            yield* saveRun({
+              ...current,
+              modelSelection: pending.to,
+              updatedAt: degradedAt,
+            });
+            return true;
+          }),
+        );
+        if (!applied) return;
+        yield* Effect.logInfo("epic.runner.provider-fallback", {
+          runId,
+          fromInstanceId: pending.from.instanceId,
+          fromModel: pending.from.model,
+          toInstanceId: pending.to.instanceId,
+          toModel: pending.to.model,
+        });
+      },
+    );
+
+    interface ActiveIteration {
+      charged: boolean;
+      readonly modelSelection: ModelSelection;
+    }
+    interface WorkerSettlement {
+      readonly _tag: "settlement";
+      readonly key: string;
+      readonly modelSelection: ModelSelection;
+      readonly exit: Exit.Exit<RunIterationResult, EpicRunnerError>;
+    }
+    type SchedulerEvent = WorkerSettlement | { readonly _tag: "retune" };
+
     const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
         const initialRun = yield* requireRun(runId);
         const policy = makeEpicRunnerPolicy(policySeed, initialRun);
+        const events = yield* Queue.unbounded<SchedulerEvent>();
+        workerCapSignals.set(runId, events);
+        const active = new Map<string, ActiveIteration>();
+        let drainBeforeDispatch = false;
+        let terminalWorkerError: EpicRunnerError | null = null;
+        let pendingFallback: PendingProviderFallback | null = null;
+        let syntheticSequence = 0;
+
+        const launch = (run: EpicRun, selection: ReadyChildSelection, key: string) =>
+          Effect.gen(function* () {
+            const activeIteration: ActiveIteration = {
+              charged: false,
+              modelSelection: run.modelSelection,
+            };
+            active.set(key, activeIteration);
+            yield* runIteration({
+              run,
+              selection,
+              policy,
+              onDispatched: () => {
+                activeIteration.charged = true;
+              },
+            }).pipe(
+              Effect.exit,
+              Effect.flatMap((exit) =>
+                Queue.offer(events, {
+                  _tag: "settlement",
+                  key,
+                  modelSelection: activeIteration.modelSelection,
+                  exit,
+                }),
+              ),
+              Effect.forkChild,
+            );
+          });
+
         while (true) {
-          const run = yield* withTransition(
-            Effect.gen(function* () {
-              const current = yield* requireRun(runId);
-              if (current.status !== "running") {
-                liveLoops.delete(runId);
-                yield* Effect.logInfo("epic.runner.loop-stopped", {
-                  runId,
-                  status: current.status,
-                });
-                return null;
-              }
-              if (current.iterationsDispatched >= policy.maxIterations) {
-                liveLoops.delete(runId);
-                yield* saveRun({
-                  ...current,
-                  status: "done",
-                  currentThreadId: null,
-                  currentTurnStartedAt: null,
-                  lastError: `max iterations (${policy.maxIterations}) reached`,
-                  updatedAt: yield* nowIso,
-                });
-                return null;
-              }
-              return current;
-            }),
-          );
-          if (run === null) return;
+          const run = yield* requireRun(runId);
 
-          const latest = yield* store
-            .getLatestIteration({ runId })
-            .pipe(Effect.mapError(storeError("getLatestIteration")));
-          const iterationIndex = Option.isSome(latest) ? latest.value.iterationIndex + 1 : 0;
+          if (active.size === 0 && terminalWorkerError !== null) {
+            return yield* terminalWorkerError;
+          }
+          if (active.size === 0 && pendingFallback !== null) {
+            const fallback = pendingFallback;
+            pendingFallback = null;
+            yield* applyPendingProviderFallback(runId, fallback);
+            drainBeforeDispatch = false;
+            continue;
+          }
+          if (active.size === 0 && drainBeforeDispatch) {
+            drainBeforeDispatch = false;
+          }
 
-          const iterationResult = yield* runIteration({ run, iterationIndex, policy });
+          if (run.status !== "running") {
+            if (active.size === 0) {
+              liveLoops.delete(runId);
+              yield* Effect.logInfo("epic.runner.loop-stopped", { runId, status: run.status });
+              return;
+            }
+          } else if (!drainBeforeDispatch && terminalWorkerError === null) {
+            const uncharged = [...active.values()].filter((worker) => !worker.charged).length;
+            const remainingDispatches = Math.max(
+              0,
+              policy.maxIterations - run.iterationsDispatched - uncharged,
+            );
+            const slots = Math.min(Math.max(0, run.workers - active.size), remainingDispatches);
 
-          const boundary = yield* withTransition(
-            Effect.gen(function* () {
-              // Re-read rather than writing back the snapshot taken before the
-              // iteration: `pauseRun`/`cancelRun`/`resumeRun` may have changed the
-              // status while the turn was in flight, and building the
-              // post-iteration row from the stale copy would silently resurrect
-              // the run as `running` — or bury a resume that arrived while this
-              // iteration was draining.
-              const currentRun = yield* requireRun(runId);
-              let settledRun = {
-                ...currentRun,
-                currentThreadId: null,
-                currentTurnStartedAt: null,
-                iterationsCompleted: currentRun.iterationsCompleted + 1,
-                updatedAt: yield* nowIso,
-              };
-
-              if (iterationResult._tag === "ready-unrecognised") {
-                liveLoops.delete(runId);
-                if (currentRun.status !== "running") {
-                  // A concurrent pause or cancel owns the run state even
-                  // though the selection anomaly is already persisted.
-                  yield* saveRun(settledRun);
-                  yield* Effect.logInfo("epic.runner.loop-stopped", {
-                    runId,
-                    status: currentRun.status,
-                  });
-                  return LOOP_STOP;
+            if (slots > 0) {
+              const frontier = yield* selectReadyFrontier(run);
+              if (frontier._tag === "empty") {
+                if (active.size === 0) {
+                  const openChildren = yield* countOpenChildren(run);
+                  yield* withTransition(
+                    Effect.gen(function* () {
+                      const current = yield* requireRun(runId);
+                      if (current.status === "running") {
+                        yield* saveRun({
+                          ...current,
+                          status: openChildren === 0 ? "done" : "failed",
+                          lastError:
+                            openChildren === 0
+                              ? null
+                              : `infra:ready-frontier-stuck: ${openChildren} open children remain but none are ready`,
+                          updatedAt: yield* nowIso,
+                        });
+                      }
+                    }),
+                  );
+                  liveLoops.delete(runId);
+                  return;
                 }
-                yield* saveRun({
-                  ...settledRun,
-                  status: "failed",
-                  lastError: iterationResult.detail,
-                });
-                return LOOP_STOP;
-              }
-
-              const { outcome, noCommitChildClosed, providerTurnDispatched } = iterationResult;
-
-              const successfulProviderTurn =
-                providerTurnDispatched &&
-                (outcome.kind === "done" ||
-                  outcome.kind === "backlog-empty" ||
-                  noCommitChildClosed);
-              if (successfulProviderTurn) {
-                yield* store
-                  .clearProviderDegradation({
-                    providerInstanceId: currentRun.modelSelection.instanceId,
-                  })
-                  .pipe(Effect.mapError(storeError("clearProviderDegradation")));
-              }
-
-              let providerFallbackApplied = false;
-              let providerFallbackLog: Record<string, unknown> | null = null;
-              if (Option.isSome(providerRegistry)) {
-                const providers = yield* providerRegistry.value.getProviders;
-                const fallback = resolveEpicProviderFallback({
-                  providers,
-                  current: currentRun.modelSelection,
-                  failureReason: outcome.failureReason,
-                  providerFallbackEligible: outcome.providerFallbackEligible === true,
-                });
-                if (fallback !== null) {
-                  const degradedAt = yield* nowIso;
-                  yield* store
-                    .upsertProviderDegradation({
-                      providerInstanceId: currentRun.modelSelection.instanceId,
-                      failureReason: outcome.failureReason ?? outcome.detail ?? outcome.kind,
-                      degradedAt,
-                    })
-                    .pipe(Effect.mapError(storeError("upsertProviderDegradation")));
-                  providerFallbackApplied = true;
-                  settledRun = { ...settledRun, modelSelection: fallback };
-                  providerFallbackLog = {
-                    runId,
-                    fromInstanceId: currentRun.modelSelection.instanceId,
-                    fromModel: currentRun.modelSelection.model,
-                    toInstanceId: fallback.instanceId,
-                    toModel: fallback.model,
-                    status: currentRun.status,
-                  };
+              } else {
+                const selections: ReadonlyArray<readonly [string, ReadyChildSelection]> =
+                  frontier._tag === "unrecognised"
+                    ? [
+                        [
+                          `synthetic:${syntheticSequence++}`,
+                          { _tag: "unrecognised", candidateIds: frontier.candidateIds },
+                        ],
+                      ]
+                    : frontier.issueIds
+                        .filter((issueId, index, issueIds) => issueIds.indexOf(issueId) === index)
+                        .filter((issueId) => !active.has(issueId))
+                        .map((issueId) => [issueId, { _tag: "child", issueId }] as const);
+                for (const [key, selection] of selections.slice(0, slots)) {
+                  yield* launch(run, selection, key);
                 }
               }
+            } else if (active.size === 0 && run.iterationsDispatched >= policy.maxIterations) {
+              yield* withTransition(
+                Effect.gen(function* () {
+                  const current = yield* requireRun(runId);
+                  if (current.status === "running") {
+                    yield* saveRun({
+                      ...current,
+                      status: "done",
+                      lastError: `max iterations (${policy.maxIterations}) reached`,
+                      updatedAt: yield* nowIso,
+                    });
+                  }
+                }),
+              );
+              liveLoops.delete(runId);
+              return;
+            }
+          }
 
-              const decision = decideIterationBoundary({
-                runStatus: currentRun.status,
-                consecutiveFailures: currentRun.consecutiveFailures,
-                noCommitStreak: currentRun.noCommitStreak,
-                infraStreak: currentRun.infraStreak,
-                lastError: currentRun.lastError,
-                outcome,
-                noCommitChildClosed,
-                providerFallbackApplied,
-                providerTurnDispatched,
-                limits: {
-                  maxConsecutiveFailures: policy.maxConsecutiveFailures,
-                  maxNoCommitStreak: policy.maxNoCommitStreak,
-                  infraFailureBudget: policy.infraFailureBudget,
-                  retryBaseDelayMs: policy.retryBaseDelayMs,
-                  retryMaxDelayMs: policy.retryMaxDelayMs,
-                },
-              });
-              yield* saveRun({
-                ...settledRun,
-                ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
-                consecutiveFailures: decision.nextConsecutiveFailures,
-                noCommitStreak: decision.nextNoCommitStreak,
-                infraStreak: decision.nextInfraStreak,
-                lastError: decision.lastError,
-              });
-              if (providerFallbackLog !== null) {
-                yield* Effect.logInfo("epic.runner.provider-fallback", providerFallbackLog);
-              }
+          if (active.size === 0) continue;
 
-              if (decision.action === "stop") {
-                liveLoops.delete(runId);
-              }
-              if (currentRun.status !== "running" && !providerFallbackApplied) {
-                yield* Effect.logInfo("epic.runner.loop-stopped", {
-                  runId,
-                  status: currentRun.status,
-                });
-              }
-              return decision.action === "stop"
-                ? LOOP_STOP
-                : ({ _tag: "continue", delayMs: decision.delayMs } satisfies LoopBoundary);
-            }),
-          );
-          if (boundary._tag === "stop") return;
-          // Outside the lock on purpose: a backoff is a wait, and pause, resume
-          // and cancel must not queue behind it.
-          if (boundary.delayMs > 0) yield* Effect.sleep(Duration.millis(boundary.delayMs));
+          const event = yield* Queue.take(events);
+          if (event._tag === "retune") continue;
+          const settlement = event;
+          active.delete(settlement.key);
+          if (Exit.isFailure(settlement.exit)) {
+            const cause = settlement.exit.cause;
+            terminalWorkerError ??= Option.getOrElse(
+              Cause.findErrorOption(cause),
+              () =>
+                new EpicRunnerStoreError({
+                  operation: `iteration worker failed: ${String(cause)}`,
+                }),
+            );
+            drainBeforeDispatch = true;
+            continue;
+          }
+
+          let fallbackAppliesToBoundary = false;
+          if (pendingFallback === null) {
+            pendingFallback = yield* resolvePendingProviderFallback(
+              settlement.modelSelection,
+              settlement.exit.value,
+            );
+            fallbackAppliesToBoundary = pendingFallback !== null;
+          }
+          const boundary = yield* applyIterationBoundary({
+            runId,
+            policy,
+            iterationResult: settlement.exit.value,
+            providerInstanceId: settlement.modelSelection.instanceId,
+            providerFallbackApplied: fallbackAppliesToBoundary,
+          });
+          if (
+            boundary._tag === "stop" ||
+            boundary.providerFallbackApplied ||
+            pendingFallback !== null
+          ) {
+            drainBeforeDispatch = true;
+          }
+          // Backoff stays outside the transition semaphore. Already-running
+          // workers continue while dispatch waits.
+          if (boundary._tag === "continue" && boundary.delayMs > 0) {
+            yield* Effect.sleep(Duration.millis(boundary.delayMs));
+          }
         }
       });
 
@@ -2224,15 +2490,90 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    const abandonRunningIterations = Effect.fn("EpicRunner.abandonRunningIterations")(function* (
+      runId: EpicRunId,
+      summary: string,
+      failureReason: string,
+      commandPrefix: string,
+    ) {
+      const run = yield* store.getRun({ runId }).pipe(
+        Effect.mapError(storeError("getRun")),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.fail(new EpicRunNotFoundError({ runId })),
+            onSome: Effect.succeed,
+          }),
+        ),
+      );
+      const iterations = yield* store
+        .listRunningIterations({ runId })
+        .pipe(Effect.mapError(storeError("listRunningIterations")));
+      for (const iteration of iterations) {
+        const abandonedAt = yield* nowIso;
+        if (iteration.issueId !== null) {
+          yield* dispatchBestEffort(`epic.runner.${commandPrefix}-interrupt-failed`, {
+            type: "thread.turn.interrupt",
+            commandId: yield* commandId(`${commandPrefix}-interrupt`),
+            threadId: iteration.threadId,
+            createdAt: abandonedAt,
+          });
+          yield* dispatchBestEffort(`epic.runner.${commandPrefix}-session-stop-failed`, {
+            type: "thread.session.stop",
+            commandId: yield* commandId(`${commandPrefix}-session-stop`),
+            threadId: iteration.threadId,
+            createdAt: abandonedAt,
+          });
+        }
+        yield* store
+          .updateIteration({
+            runId,
+            iterationIndex: iteration.iterationIndex,
+            turnStatus: "abandoned",
+            summary,
+            why: null,
+            failureReason,
+            finishedAt: abandonedAt,
+          })
+          .pipe(Effect.mapError(storeError("updateIteration")));
+        if (iteration.issueId !== null) {
+          yield* releaseClaimedChild(run.cwd, iteration.issueId);
+        }
+      }
+    });
+
     const supervisedLoop = (runId: EpicRunId): Effect.Effect<void> =>
       runLoop(runId).pipe(
         Effect.catch((error: EpicRunnerError) =>
           Effect.logError("epic.runner.loop-failed", { runId, detail: error.message }).pipe(
+            Effect.flatMap(() =>
+              abandonRunningIterations(
+                runId,
+                "abandoned after iteration worker failure",
+                "infra:dispatch-failed",
+                "worker-failure",
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("epic.runner.worker-cleanup-failed", { runId, cause }),
+                ),
+              ),
+            ),
             Effect.flatMap(() => markRunFailed(runId, error.message)),
           ),
         ),
         Effect.catchDefect((defect) =>
           Effect.logError("epic.runner.loop-defect", { runId, defect }).pipe(
+            Effect.flatMap(() =>
+              abandonRunningIterations(
+                runId,
+                "abandoned after iteration worker defect",
+                "infra:dispatch-failed",
+                "worker-defect",
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("epic.runner.worker-cleanup-failed", { runId, cause }),
+                ),
+              ),
+            ),
             Effect.flatMap(() => markRunFailed(runId, String(defect))),
           ),
         ),
@@ -2246,9 +2587,16 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         // its own boundary drops it inside the critical section, before this
         // runs. Interruption and defects never get there.
         Effect.ensuring(
-          Effect.sync(() => liveLoops.delete(runId)).pipe(
-            Effect.andThen(releaseLease(runId)),
-            Effect.andThen(releaseStrandedChild(runId)),
+          Effect.sync(() => {
+            liveLoops.delete(runId);
+            workerCapSignals.delete(runId);
+            return cancelCleanupOwned.has(runId);
+          }).pipe(
+            Effect.flatMap((cancelOwnsCleanup) =>
+              cancelOwnsCleanup
+                ? Effect.succeed(undefined)
+                : releaseStrandedChild(runId).pipe(Effect.andThen(releaseLease(runId))),
+            ),
           ),
         ),
       );
@@ -2362,6 +2710,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         originThreadId: input.originThreadId ?? null,
         status: "running",
         maxIterations: Math.max(1, Math.trunc(maxIterations)),
+        workers: configSnapshot.config.parallel.workers,
         iterationsCompleted: 0,
         iterationsDispatched: 0,
         currentThreadId: null,
@@ -2624,52 +2973,80 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               updatedAt: cancelledAt,
             };
             yield* saveRun(cancelled);
-            return { cancelled, cancelledAt, threadId: fresh.currentThreadId } as const;
+            return { cancelled, cancelledAt } as const;
           }),
         );
 
-        const { cancelled, cancelledAt, threadId } = transition;
+        const { cancelled, cancelledAt } = transition;
         // Cancellation is durable before loop interruption. The loop either
         // observes the cancelled row at its boundary or is interrupted here,
         // while its lease remains held until the cancelled state is visible.
-        yield* FiberMap.remove(loops, runId);
+        cancelCleanupOwned.add(runId);
+        yield* Effect.gen(function* () {
+          yield* FiberMap.remove(loops, runId);
 
-        if (threadId !== null) {
-          yield* dispatchBestEffort("epic.runner.cancel-interrupt-failed", {
-            type: "thread.turn.interrupt",
-            commandId: yield* commandId("cancel-interrupt"),
-            threadId,
-            createdAt: cancelledAt,
-          });
-          yield* dispatchBestEffort("epic.runner.cancel-session-stop-failed", {
-            type: "thread.session.stop",
-            commandId: yield* commandId("cancel-session-stop"),
-            threadId,
-            createdAt: cancelledAt,
-          });
-        }
-
-        // The interrupted loop never got to close its iteration row out.
-        const latest = yield* store
-          .getLatestIteration({ runId })
-          .pipe(Effect.mapError(storeError("getLatestIteration")));
-        if (Option.isSome(latest) && latest.value.turnStatus === "running") {
-          yield* store
-            .updateIteration({
-              runId,
-              iterationIndex: latest.value.iterationIndex,
-              turnStatus: "abandoned",
-              summary: "cancelled",
-              why: null,
-              failureReason: "cancelled",
-              finishedAt: cancelledAt,
-            })
-            .pipe(Effect.mapError(storeError("updateIteration")));
-        }
-
-        yield* releaseLease(runId);
+          const runningIterations = yield* store
+            .listRunningIterations({ runId })
+            .pipe(Effect.mapError(storeError("listRunningIterations")));
+          for (const iteration of runningIterations) {
+            yield* dispatchBestEffort("epic.runner.cancel-interrupt-failed", {
+              type: "thread.turn.interrupt",
+              commandId: yield* commandId("cancel-interrupt"),
+              threadId: iteration.threadId,
+              createdAt: cancelledAt,
+            });
+            yield* dispatchBestEffort("epic.runner.cancel-session-stop-failed", {
+              type: "thread.session.stop",
+              commandId: yield* commandId("cancel-session-stop"),
+              threadId: iteration.threadId,
+              createdAt: cancelledAt,
+            });
+            yield* store
+              .updateIteration({
+                runId,
+                iterationIndex: iteration.iterationIndex,
+                turnStatus: "abandoned",
+                summary: "cancelled",
+                why: null,
+                failureReason: "cancelled",
+                finishedAt: cancelledAt,
+              })
+              .pipe(Effect.mapError(storeError("updateIteration")));
+            if (iteration.issueId !== null) {
+              yield* releaseClaimedChild(cancelled.cwd, iteration.issueId);
+            }
+          }
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => cancelCleanupOwned.delete(runId)).pipe(
+              Effect.andThen(releaseLease(runId)),
+            ),
+          ),
+        );
         return yield* enrichRun(cancelled);
       });
+
+    const setWorkers: EpicRunnerShape["setWorkers"] = ({ runId, workers }) =>
+      withTransition(
+        Effect.gen(function* () {
+          const run = yield* requireRun(runId);
+          if (run.status !== "running" && run.status !== "paused") {
+            return yield* new EpicRunStateError({
+              runId,
+              detail: `cannot set workers on a ${run.status} run`,
+            });
+          }
+          const updated: EpicRun = {
+            ...run,
+            workers,
+            updatedAt: yield* nowIso,
+          };
+          yield* saveRun(updated);
+          const signal = workerCapSignals.get(runId);
+          if (signal !== undefined) yield* Queue.offer(signal, { _tag: "retune" });
+          return yield* enrichRun(updated);
+        }),
+      );
 
     const listRuns: EpicRunnerShape["listRuns"] = (input) =>
       store
@@ -2695,11 +3072,25 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
     const start: EpicRunnerShape["start"] = () =>
       Effect.gen(function* () {
-        const running = yield* store
-          .listRuns({ status: "running" })
-          .pipe(Effect.mapError(storeError("listRuns")));
+        const runs = yield* store.listRuns({}).pipe(Effect.mapError(storeError("listRuns")));
 
-        for (const run of running) {
+        for (const run of runs) {
+          if (run.status !== "running") {
+            yield* abandonRunningIterations(
+              run.runId,
+              "abandoned by server restart",
+              "server-restart",
+              "restart",
+            ).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("epic.runner.restart-reconcile-failed", {
+                  runId: run.runId,
+                  cause,
+                }),
+              ),
+            );
+            continue;
+          }
           const acquireError = yield* acquireLease(
             run.runId,
             { cwd: run.cwd, epicId: run.epicId },
@@ -2726,54 +3117,18 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             continue;
           }
           yield* Effect.gen(function* () {
-            // An iteration still recorded as `running` at boot is by definition
-            // abandoned. A child-backed row had a provider subprocess that the
-            // restart killed. A null-issue synthetic selection row had no turn,
-            // but can occupy the append-before-update crash window. The status
-            // is the sole in-flight marker, so both rows must be reconciled.
-            const latest = yield* store
-              .getLatestIteration({ runId: run.runId })
-              .pipe(Effect.mapError(storeError("getLatestIteration")));
-            if (Option.isSome(latest) && latest.value.turnStatus === "running") {
-              const abandonedAt = yield* nowIso;
-              if (latest.value.issueId !== null) {
-                yield* dispatchBestEffort("epic.runner.restart-interrupt-failed", {
-                  type: "thread.turn.interrupt",
-                  commandId: yield* commandId("restart-interrupt"),
-                  threadId: latest.value.threadId,
-                  createdAt: abandonedAt,
-                });
-                yield* dispatchBestEffort("epic.runner.restart-session-stop-failed", {
-                  type: "thread.session.stop",
-                  commandId: yield* commandId("restart-session-stop"),
-                  threadId: latest.value.threadId,
-                  createdAt: abandonedAt,
-                });
-              }
-              yield* store
-                .updateIteration({
-                  runId: run.runId,
-                  iterationIndex: latest.value.iterationIndex,
-                  turnStatus: "abandoned",
-                  summary: "abandoned by server restart",
-                  why: null,
-                  failureReason: "server-restart",
-                  finishedAt: abandonedAt,
-                })
-                .pipe(Effect.mapError(storeError("updateIteration")));
-              // The abandoned iteration's child is claimed with nothing left
-              // to finish it; release it so `bd ready` can resurface it once
-              // the resumed loop below reaches its next selectReadyChild.
-              if (latest.value.issueId !== null) {
-                yield* releaseClaimedChild(run.cwd, latest.value.issueId);
-              }
-            }
+            yield* abandonRunningIterations(
+              run.runId,
+              "abandoned by server restart",
+              "server-restart",
+              "restart",
+            );
             yield* forkLoop(run.runId);
           }).pipe(releaseLeaseOnFailure(run.runId));
         }
 
         yield* Effect.logInfo("epic.runner.started", {
-          resumedRuns: running.length,
+          resumedRuns: runs.filter((run) => run.status === "running").length,
           iterationTimeoutMs: policySeed.iterationTimeoutMs,
           maxConsecutiveFailures: policySeed.maxConsecutiveFailures,
         });
@@ -2791,6 +3146,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       pauseRun,
       resumeRun,
       cancelRun,
+      setWorkers,
       listRuns,
       getRun,
       streamRuns,

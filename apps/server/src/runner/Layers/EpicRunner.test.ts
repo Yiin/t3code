@@ -150,6 +150,8 @@ interface ScriptedIteration {
   readonly stall?: boolean;
   /** Keep the turn active for this long before projecting its result. */
   readonly settleDelayMs?: number;
+  /** Hold this turn at the running boundary until the test opens the gate. */
+  readonly settleGate?: Deferred.Deferred<void>;
   /**
    * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
    * that report no assistant message before the scripted one appears —
@@ -258,9 +260,17 @@ function createHarness(input: {
   readonly upsertDelayMs?: number;
   /** Hold append open after its running row is visible, for boundary-race tests. */
   readonly appendIterationDelayMs?: number;
+  /** Hold worktree setup after thread creation, before the provider turn starts. */
+  readonly setupGate?: Deferred.Deferred<void>;
+  /** Per-thread setup barrier for out-of-order dispatch tests. */
+  readonly beforeSetupCompletes?: (request: ProjectSetupScriptRunnerInput) => Effect.Effect<void>;
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly projectDefaultModelSelection?: import("@t3tools/contracts").ModelSelection;
   readonly readyOutput?: string;
+  /** Complete child listing used to distinguish done from a blocked frontier. */
+  readonly openChildren?: ReadonlyArray<{ readonly id: string; readonly status: string }>;
+  /** Mutable ready frontier used by worker-pool tests. */
+  readonly readyChildren?: ReadonlyArray<string>;
   /** Epic descriptions returned in order by per-iteration `bd show`. */
   readonly epicDescriptions?: ReadonlyArray<string>;
   readonly epicDescriptionExitCode?: number;
@@ -306,6 +316,10 @@ function createHarness(input: {
   let worktreeFingerprint = input.initialWorktreeFingerprint ?? "";
   let branchCommitCount = 0;
   let turnsStarted = 0;
+  let activeTurns = 0;
+  let maxActiveTurns = 0;
+  const startedIssueIds: string[] = [];
+  const readyChildren = new Set(input.readyChildren ?? []);
   let sequence = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
   const heldLocks = new Set<string>();
@@ -334,11 +348,19 @@ function createHarness(input: {
    */
   const simulateTurn = (threadId: ThreadId) =>
     Effect.gen(function* () {
-      const scripted = input.script[turnsStarted];
+      const scriptIndex = turnsStarted;
+      const scripted = input.script[scriptIndex];
       turnsStarted += 1;
       if (scripted === undefined) {
         return;
       }
+
+      const issueId = store.iterations.find(
+        (iteration) => iteration.threadId === threadId,
+      )?.issueId;
+      if (issueId !== null && issueId !== undefined) startedIssueIds.push(issueId);
+      activeTurns += 1;
+      maxActiveTurns = Math.max(maxActiveTurns, activeTurns);
 
       shells.set(threadId, { latestTurn: "running", session: "running" });
       if (scripted.stall === true) {
@@ -347,6 +369,7 @@ function createHarness(input: {
 
       // A beat of "the turn is live" before it settles.
       yield* Effect.sleep(`${scripted.settleDelayMs ?? 2} millis`);
+      if (scripted.settleGate !== undefined) yield* Deferred.await(scripted.settleGate);
 
       head = scripted.head;
       branchCommitCount = scripted.branchCommitCount ?? 0;
@@ -360,7 +383,7 @@ function createHarness(input: {
           // Unique per dispatched turn: a continuation turn on the same thread
           // must project a NEW turn id, exactly as provider adoption would,
           // or `awaitTurnEnd`'s prior-turn mask could never see it end.
-          turnId: TurnId.make(`${threadId}-turn-${turnsStarted}`),
+          turnId: TurnId.make(`${threadId}-turn-${scriptIndex + 1}`),
           turnState: scripted.turnState ?? "completed",
           text: scripted.text,
           streaming: scripted.streaming ?? false,
@@ -379,6 +402,9 @@ function createHarness(input: {
         latestTurn: scripted.turnState ?? "completed",
         session: scripted.sessionStatus ?? "ready",
       });
+      activeTurns -= 1;
+      iterationLifecycle.push("turn-settled");
+      if (issueId !== null && issueId !== undefined) readyChildren.delete(issueId);
     });
 
   const engineLayer = Layer.succeed(OrchestrationEngineService, {
@@ -575,6 +601,16 @@ function createHarness(input: {
         processRequests.push(request);
         const subcommand = request.args[0];
         const issueId = request.args[1];
+        if (request.command === "bd" && subcommand === "list") {
+          return {
+            stdout: encodeUnknownJson(input.openChildren ?? []),
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
         if (request.command === "bd" && subcommand === "show" && issueId === "epic-1") {
           const description =
             input.epicDescriptions?.[
@@ -664,6 +700,11 @@ function createHarness(input: {
           stdout:
             request.command === "bd"
               ? (input.readyOutput ??
+                (input.readyChildren === undefined
+                  ? undefined
+                  : encodeUnknownJson(
+                      [...readyChildren].map((id) => ({ id, parent: request.args[2] })),
+                    )) ??
                 `[{"id":"child-${turnsStarted + 1}","parent":"${request.args[2] ?? "epic-1"}"}]`)
               : request.args[0] === "symbolic-ref"
                 ? "mine\n"
@@ -784,7 +825,13 @@ function createHarness(input: {
             setupInputs.push(request);
             iterationLifecycle.push("setup");
             return { status: "no-script" } as const;
-          }),
+          }).pipe(
+            Effect.tap(
+              () =>
+                input.beforeSetupCompletes?.(request) ??
+                (input.setupGate === undefined ? Effect.void : Deferred.await(input.setupGate)),
+            ),
+          ),
       }),
     ),
     Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
@@ -804,6 +851,9 @@ function createHarness(input: {
     layer,
     store,
     turnsStarted: () => turnsStarted,
+    activeTurns: () => activeTurns,
+    maxActiveTurns: () => maxActiveTurns,
+    startedIssueIds,
     activeLockCount: () => heldLocks.size,
     stopsWithRunningSubagents: () => stopsWithRunningSubagents,
     processRequests,
@@ -833,7 +883,21 @@ const startRun = (maxIterations = 10) =>
       prompt: "do one unit of work",
       orientationFile: null,
       modelSelection,
+      config: { parallel: { workers: 1 } },
       maxIterations,
+    }),
+  );
+
+const startRunWithWorkers = (workers: number, maxIterations = 10) =>
+  Effect.flatMap(EpicRunner, (runner) =>
+    runner.startRun({
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      config: { parallel: { workers }, limits: { maxIterations } },
     }),
   );
 
@@ -1170,6 +1234,402 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("dispatches five ready children through a three-worker pool", () => {
+    const gates = Array.from({ length: 5 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c", "child-d", "child-e"],
+      script: gates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(3, 5);
+      assert.strictEqual(run.workers, 3);
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      assert.strictEqual(harness.maxActiveTurns(), 3);
+      yield* Deferred.succeed(gates[0]!, undefined);
+      yield* Deferred.succeed(gates[1]!, undefined);
+      yield* Deferred.succeed(gates[2]!, undefined);
+      yield* waitFor(() => harness.turnsStarted() === 5);
+      yield* Deferred.succeed(gates[3]!, undefined);
+      yield* Deferred.succeed(gates[4]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.strictEqual(harness.maxActiveTurns(), 3);
+      assert.deepStrictEqual([...harness.startedIssueIds].sort(), [
+        "child-a",
+        "child-b",
+        "child-c",
+        "child-d",
+        "child-e",
+      ]);
+      assert.strictEqual(new Set(harness.startedIssueIds).size, 5);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("uses only the remaining dispatch budget when the worker cap is larger", () => {
+    const gates = Array.from({ length: 2 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c"],
+      script: gates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "work",
+        orientationFile: null,
+        modelSelection,
+        config: { parallel: { workers: 3 }, limits: { maxIterations: 2 } },
+      });
+      yield* waitFor(() => harness.turnsStarted() === 2);
+      yield* settle;
+      assert.strictEqual(harness.turnsStarted(), 2);
+      yield* Deferred.succeed(gates[0]!, undefined);
+      yield* Deferred.succeed(gates[1]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.maxActiveTurns(), 2);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not dispatch an in-flight child twice", () => {
+    const childAGate = Deferred.makeUnsafe<void>();
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c"],
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"a","why":"needed"}',
+          head: "head-a",
+          settleGate: childAGate,
+        },
+        { text: 'RALPH_MSG: {"summary":"b","why":"needed"}', head: "head-b" },
+        { text: 'RALPH_MSG: {"summary":"c","why":"needed"}', head: "head-c" },
+      ],
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 3);
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      assert.deepStrictEqual([...harness.startedIssueIds].sort(), [
+        "child-a",
+        "child-b",
+        "child-c",
+      ]);
+      assert.strictEqual(
+        harness.startedIssueIds.filter((issueId) => issueId === "child-a").length,
+        1,
+      );
+      yield* Deferred.succeed(childAGate, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("workers one preserves ready-frontier order", () => {
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c"],
+      script: ["a", "b", "c"].map((summary, index) => ({
+        text: `RALPH_MSG: {"summary":"${summary}","why":"needed"}`,
+        head: `head-${index + 1}`,
+      })),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(1, 3);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.maxActiveTurns(), 1);
+      assert.deepStrictEqual(harness.startedIssueIds, ["child-a", "child-b", "child-c"]);
+      assert.deepStrictEqual(
+        harness.iterationLifecycle.filter((event) => event !== "setup"),
+        [
+          "thread.create",
+          "thread.turn.start",
+          "turn-settled",
+          "thread.create",
+          "thread.turn.start",
+          "turn-settled",
+          "thread.create",
+          "thread.turn.start",
+          "turn-settled",
+        ],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("fails an empty ready frontier when open children remain", () => {
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      openChildren: [
+        { id: "child-a", status: "blocked" },
+        { id: "child-b", status: "open" },
+      ],
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 10);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      const failed = harness.store.runs.get(run.runId);
+      assert.match(failed?.lastError ?? "", /^infra:ready-frontier-stuck:/);
+      assert.strictEqual(failed?.iterationsDispatched, 0);
+      assert.strictEqual(harness.commandsOfType("thread.create").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not complete an empty frontier while a worker is active", () => {
+    const gates = [Deferred.makeUnsafe<void>(), Deferred.makeUnsafe<void>()];
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b"],
+      script: gates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 10);
+      yield* waitFor(() => harness.turnsStarted() === 2);
+      yield* Deferred.succeed(gates[0]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.iterationsCompleted === 1);
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "running");
+      yield* Deferred.succeed(gates[1]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("lowers the live worker cap without interrupting active turns", () => {
+    const gates = Array.from({ length: 3 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c", "child-d"],
+      script: [
+        ...gates.map((settleGate, index) => ({
+          text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+          head: `head-${index + 1}`,
+          settleGate,
+        })),
+        {
+          text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+          head: "head-4",
+        },
+      ],
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRunWithWorkers(3, 4);
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      const updated = yield* runner.setWorkers({ runId: run.runId, workers: 1 });
+      assert.strictEqual(updated.workers, 1);
+      assert.strictEqual(updated.config.parallel.workers, 3);
+      yield* Deferred.succeed(gates[0]!, undefined);
+      yield* settle;
+      assert.strictEqual(harness.turnsStarted(), 3);
+      yield* Deferred.succeed(gates[1]!, undefined);
+      yield* settle;
+      assert.strictEqual(harness.turnsStarted(), 3);
+      yield* Deferred.succeed(gates[2]!, undefined);
+      yield* waitFor(() => harness.turnsStarted() === 4);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("raises the live worker cap without waiting for a settlement", () => {
+    const gates = Array.from({ length: 3 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c"],
+      script: gates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRunWithWorkers(1, 3);
+      yield* waitFor(() => harness.turnsStarted() === 1);
+      yield* runner.setWorkers({ runId: run.runId, workers: 3 });
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      assert.strictEqual(harness.maxActiveTurns(), 3);
+      for (const gate of gates) yield* Deferred.succeed(gate, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("pauses new dispatch and drains every active worker", () => {
+    const gates = Array.from({ length: 3 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c", "child-d"],
+      script: gates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRunWithWorkers(3, 10);
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      yield* runner.pauseRun({ runId: run.runId });
+      for (const gate of gates) yield* Deferred.succeed(gate, undefined);
+      yield* waitFor(
+        () =>
+          harness.store.runs.get(run.runId)?.iterationsCompleted === 3 &&
+          harness.activeLockCount() === 0,
+      );
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "paused");
+      assert.strictEqual(harness.turnsStarted(), 3);
+      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("does not dispatch after pause becomes durable during worker setup", () => {
+    const setupGate = Deferred.makeUnsafe<void>();
+    const harness = createHarness({
+      readyChildren: ["child-a"],
+      setupGate,
+      script: [{ text: 'RALPH_MSG: {"summary":"done","why":"needed"}', head: "head-1" }],
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRunWithWorkers(1, 1);
+      yield* waitFor(() => harness.commandsOfType("thread.create").length === 1);
+      yield* runner.pauseRun({ runId: run.runId });
+      yield* Deferred.succeed(setupGate, undefined);
+      yield* waitFor(() => harness.activeLockCount() === 0);
+
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "paused");
+      assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 0);
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("abandons every running row when an iteration worker fails", () => {
+    const harness = createHarness({
+      readyChildren: ["child-a"],
+      childStatuses: { "child-a": "in_progress" },
+      refuseCommandTypes: ["thread.create"],
+      script: [],
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(1, 1);
+      yield* waitFor(
+        () =>
+          harness.store.runs.get(run.runId)?.status === "failed" && harness.activeLockCount() === 0,
+      );
+
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:dispatch-failed");
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) =>
+            request.command === "bd" &&
+            request.args[0] === "update" &&
+            request.args[1] === "child-a" &&
+            request.args.includes("open"),
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("tracks the provider turn that starts last when setup completes out of order", () => {
+    const firstSetup = Deferred.makeUnsafe<void>();
+    const secondSetup = Deferred.makeUnsafe<void>();
+    const turnGates = [Deferred.makeUnsafe<void>(), Deferred.makeUnsafe<void>()];
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b"],
+      beforeSetupCompletes: (request) =>
+        Deferred.await(request.threadId.endsWith("-0") ? firstSetup : secondSetup),
+      script: turnGates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 2);
+      const firstThread = ThreadId.make(`epic-run-${run.runId}-0`);
+      const secondThread = ThreadId.make(`epic-run-${run.runId}-1`);
+      yield* waitFor(() => harness.setupInputs.length === 2);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => iteration.iterationIndex),
+        [0, 1],
+      );
+
+      yield* Deferred.succeed(secondSetup, undefined);
+      yield* waitFor(() => harness.turnsStarted() === 1);
+      assert.strictEqual(harness.commandsOfType("thread.turn.start")[0]?.threadId, secondThread);
+      assert.strictEqual(harness.store.runs.get(run.runId)?.currentThreadId, secondThread);
+
+      yield* Deferred.succeed(firstSetup, undefined);
+      yield* waitFor(() => harness.turnsStarted() === 2);
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start").map((command) => command.threadId),
+        [secondThread, firstThread],
+      );
+      assert.strictEqual(harness.store.runs.get(run.runId)?.currentThreadId, firstThread);
+
+      for (const gate of turnGates) yield* Deferred.succeed(gate, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.strictEqual(harness.store.runs.get(run.runId)?.currentThreadId, firstThread);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps the latest dispatched thread after out-of-order settlement", () => {
+    const gates = [Deferred.makeUnsafe<void>(), Deferred.makeUnsafe<void>()];
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b"],
+      script: gates.map((settleGate, index) => ({
+        text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+        head: `head-${index + 1}`,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 2);
+      yield* waitFor(() => harness.turnsStarted() === 2);
+      yield* Deferred.succeed(gates[1]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.iterationsCompleted === 1);
+      assert.strictEqual(
+        harness.store.runs.get(run.runId)?.currentThreadId,
+        ThreadId.make(`epic-run-${run.runId}-1`),
+      );
+      yield* Deferred.succeed(gates[0]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("applies simultaneous failure boundaries without lost completions", () => {
+    const gates = Array.from({ length: 3 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c"],
+      options: { quietPeriodMs: 1, infraFailureBudget: 3 },
+      script: gates.map((settleGate) => ({
+        text: null,
+        head: "head-0",
+        turnState: "error" as const,
+        sessionStatus: "error" as const,
+        settleGate,
+      })),
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(3, 3);
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      for (const gate of gates) yield* Deferred.succeed(gate, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      const failed = harness.store.runs.get(run.runId)!;
+      assert.strictEqual(failed.iterationsCompleted, 3);
+      assert.strictEqual(failed.infraStreak, 3);
+      assert.strictEqual(
+        harness.store.iterations.filter((row) => row.turnStatus === "failed").length,
+        3,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("fails once when bd returns only children with different parents", () => {
     const logs = captureLogs();
     const harness = createHarness({
@@ -1457,6 +1917,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "done",
       maxIterations: 10,
+      workers: 1,
       iterationsDispatched: 2,
       iterationsCompleted: 2,
       currentThreadId: null,
@@ -1567,7 +2028,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(finished.status, "done");
       assert.strictEqual(finished.iterationsCompleted, 3);
       assert.strictEqual(finished.consecutiveFailures, 0);
-      assert.strictEqual(finished.currentThreadId, null);
+      assert.strictEqual(finished.currentThreadId, ThreadId.make(`epic-run-${run.runId}-2`));
 
       // Every iteration got its own fresh thread, and the loop stopped at
       // RALPH_DONE rather than running on to maxIterations.
@@ -2648,6 +3109,76 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("drains old-provider siblings before dispatching with fallback", () => {
+    const claudeSelection = {
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-sonnet-5",
+    } as const;
+    const codexSelection = {
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    } as const;
+    const gates = Array.from({ length: 4 }, () => Deferred.makeUnsafe<void>());
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c", "child-d"],
+      options: { quietPeriodMs: 1, infraFailureBudget: 5 },
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+      ],
+      script: [
+        ...gates.slice(0, 3).map((settleGate) => ({
+          text: null,
+          head: "head-0",
+          turnState: "error" as const,
+          sessionStatus: "error" as const,
+          sessionLastError: "You've hit your org's monthly spend limit",
+          settleGate,
+        })),
+        {
+          text: 'RALPH_MSG: {"summary":"done","why":"needed"}',
+          head: "head-4",
+          settleGate: gates[3]!,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "work",
+        orientationFile: null,
+        modelSelection: claudeSelection,
+        config: { parallel: { workers: 3 }, limits: { maxIterations: 4 } },
+      });
+      yield* waitFor(() => harness.turnsStarted() === 3);
+      yield* Deferred.succeed(gates[0]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.iterationsCompleted === 1);
+      yield* settle;
+      assert.strictEqual(harness.turnsStarted(), 3);
+      assert.deepStrictEqual(harness.store.runs.get(run.runId)?.modelSelection, claudeSelection);
+      yield* Deferred.succeed(gates[1]!, undefined);
+      yield* Deferred.succeed(gates[2]!, undefined);
+      yield* waitFor(
+        () =>
+          harness.turnsStarted() === 4 &&
+          harness.store.runs.get(run.runId)?.modelSelection.instanceId ===
+            codexSelection.instanceId,
+      );
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start").map((command) => command.modelSelection),
+        [claudeSelection, claudeSelection, claudeSelection, codexSelection],
+      );
+      assert.deepStrictEqual(harness.store.runs.get(run.runId)?.modelSelection, codexSelection);
+      yield* Deferred.succeed(gates[3]!, undefined);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("clears only the successful provider instance degradation", () => {
     const claudeSelection = {
       instanceId: ProviderInstanceId.make("claude-work"),
@@ -3180,6 +3711,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 10,
+      workers: 1,
       iterationsDispatched: 1,
       iterationsCompleted: 1,
       currentThreadId: null,
@@ -3222,6 +3754,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 10,
+      workers: 1,
       iterationsDispatched: 4,
       iterationsCompleted: 4,
       currentThreadId: null,
@@ -3536,6 +4069,55 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("cancels and abandons every active worker", () => {
+    let allRowsAbandonedAtRelease = false;
+    let harness!: ReturnType<typeof createHarness>;
+    harness = createHarness({
+      readyChildren: ["child-a", "child-b", "child-c"],
+      script: [0, 1, 2].map(() => ({ text: null, head: "head-0", stall: true })),
+      options: { iterationTimeoutMs: 60_000 },
+      childStatuses: {
+        "child-a": "in_progress",
+        "child-b": "in_progress",
+        "child-c": "in_progress",
+      },
+      onLockRelease: () => {
+        allRowsAbandonedAtRelease =
+          harness.store.iterations.every((row) => row.turnStatus === "abandoned") &&
+          ["child-a", "child-b", "child-c"].every(
+            (issueId) => harness.childStatus(issueId) === "open",
+          );
+      },
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRunWithWorkers(3, 10);
+      yield* waitFor(
+        () => harness.store.iterations.filter((row) => row.turnStatus === "running").length === 3,
+      );
+      const turnsAtCancel = harness.turnsStarted();
+      yield* runner.cancelRun({ runId: run.runId });
+
+      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 3);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 3);
+      assert.isTrue(allRowsAbandonedAtRelease);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((row) => [row.turnStatus, row.failureReason]),
+        [
+          ["abandoned", "cancelled"],
+          ["abandoned", "cancelled"],
+          ["abandoned", "cancelled"],
+        ],
+      );
+      assert.deepStrictEqual(
+        ["child-a", "child-b", "child-c"].map((issueId) => harness.childStatus(issueId)),
+        ["open", "open", "open"],
+      );
+      yield* settle;
+      assert.strictEqual(harness.turnsStarted(), turnsAtCancel);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("interrupts and fails an iteration that outlives its timeout", () => {
     const harness = createHarness({
       script: [{ text: null, head: "head-0", stall: true }],
@@ -3606,6 +4188,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 2,
+      workers: 1,
       iterationsDispatched: 1,
       iterationsCompleted: 0,
       currentThreadId: ThreadId.make(`epic-run-${runId}-0`),
@@ -3683,6 +4266,80 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("reconciles every running worker after restart", () => {
+    const runId = EpicRunId.make("run-restart-pool");
+    const staleRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "running",
+      maxIterations: 10,
+      workers: 3,
+      iterationsDispatched: 3,
+      iterationsCompleted: 0,
+      currentThreadId: ThreadId.make(`epic-run-${runId}-2`),
+      currentTurnStartedAt: NOW,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const seedIterations: EpicRunIteration[] = [0, 1, 2].map((iterationIndex) => ({
+      runId,
+      iterationIndex,
+      threadId: ThreadId.make(`epic-run-${runId}-${iterationIndex}`),
+      issueId: `child-${iterationIndex}`,
+      workerId: `epic-run-${runId}-${iterationIndex}`,
+      branch: `epic/child-${iterationIndex}`,
+      worktreePath: `/tmp/worktrees/child-${iterationIndex}`,
+      turnStatus: "running",
+      summary: null,
+      why: null,
+      failureReason: null,
+      startedAt: NOW,
+      finishedAt: null,
+    }));
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      seedRuns: [staleRun],
+      seedIterations,
+      childStatuses: {
+        "child-0": "in_progress",
+        "child-1": "in_progress",
+        "child-2": "in_progress",
+      },
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 3);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 3);
+      assert.deepStrictEqual(
+        harness.store.iterations.map((row) => [row.turnStatus, row.failureReason]),
+        [
+          ["abandoned", "server-restart"],
+          ["abandoned", "server-restart"],
+          ["abandoned", "server-restart"],
+        ],
+      );
+      assert.deepStrictEqual(
+        ["child-0", "child-1", "child-2"].map((issueId) => harness.childStatus(issueId)),
+        ["open", "open", "open"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("stops at the dispatch cap after repeated restart abandonment", () => {
     const runId = EpicRunId.make("run-restart-cap");
     const currentThreadId = ThreadId.make(`epic-run-${runId}-1`);
@@ -3706,6 +4363,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 3,
+      workers: 1,
       iterationsDispatched: 2,
       iterationsCompleted: 0,
       currentThreadId,
@@ -3765,6 +4423,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 10,
+      workers: 1,
       iterationsDispatched: 0,
       iterationsCompleted: 0,
       currentThreadId: null,
@@ -3819,6 +4478,73 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("reconciles running iteration rows for a paused run on restart", () => {
+    const runId = EpicRunId.make("run-restart-paused");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 1,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      seedRuns: [pausedRun],
+      childStatuses: { "child-a": "in_progress" },
+      seedIterations: [
+        {
+          runId,
+          iterationIndex: 0,
+          threadId: ThreadId.make(`epic-run-${runId}-0`),
+          issueId: "child-a",
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: null,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+
+      assert.strictEqual(harness.store.runs.get(runId)?.status, "paused");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "server-restart");
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) =>
+            request.command === "bd" &&
+            request.args[0] === "update" &&
+            request.args[1] === "child-a" &&
+            request.args.includes("open"),
+        ),
+      );
+      assert.strictEqual(harness.activeLockCount(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("releases a stranded child when a restart cannot reacquire the run's lease", () => {
     // This run's loop never gets a chance to fork — the lease acquisition
     // itself fails — so its finalizer never runs. The lease-failure branch in
@@ -3837,6 +4563,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "running",
       maxIterations: 10,
+      workers: 1,
       iterationsDispatched: 1,
       iterationsCompleted: 1,
       currentThreadId: null,
@@ -4005,6 +4732,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "paused",
       maxIterations: 1,
+      workers: 1,
       iterationsDispatched: 1,
       iterationsCompleted: 0,
       currentThreadId: null,
@@ -4044,6 +4772,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "paused",
       maxIterations: 7,
+      workers: 1,
       iterationsDispatched: 0,
       iterationsCompleted: 0,
       currentThreadId: null,
@@ -4088,6 +4817,7 @@ describe("EpicRunner", () => {
       originThreadId: null,
       status: "paused",
       maxIterations: 10,
+      workers: 1,
       iterationsDispatched: 4,
       iterationsCompleted: 2,
       currentThreadId: null,
@@ -4135,6 +4865,7 @@ describe("EpicRunner", () => {
         originThreadId: null,
         status: "paused",
         maxIterations: 10,
+        workers: 1,
         iterationsDispatched: 4,
         iterationsCompleted: 2,
         currentThreadId: null,

@@ -23,6 +23,7 @@ import {
   WsEpicRunListRpc,
   WsEpicRunLaunchRpc,
   WsEpicRunPauseRpc,
+  WsEpicRunSetWorkersRpc,
   WsEpicRunResumeRpc,
   WsEpicRunStartRpc,
   WsRpcGroup,
@@ -123,6 +124,7 @@ describe("EpicRun contracts", () => {
         },
       ],
     });
+    expect(run.workers).toBe(1);
     const event = { version: 1 as const, type: "run-state-changed" as const, run };
 
     // The iteration above predates `failureReason`; old rows decode to null.
@@ -153,6 +155,7 @@ describe("EpicRun contracts", () => {
       epicRunStart: "epicRun.start",
       epicRunLaunch: "epicRun.launch",
       epicRunPause: "epicRun.pause",
+      epicRunSetWorkers: "epicRun.setWorkers",
       epicRunResume: "epicRun.resume",
       epicRunCancel: "epicRun.cancel",
       epicRunList: "epicRun.list",
@@ -162,6 +165,7 @@ describe("EpicRun contracts", () => {
       WsEpicRunStartRpc,
       WsEpicRunLaunchRpc,
       WsEpicRunPauseRpc,
+      WsEpicRunSetWorkersRpc,
       WsEpicRunResumeRpc,
       WsEpicRunCancelRpc,
       WsEpicRunListRpc,
@@ -175,6 +179,21 @@ describe("EpicRun contracts", () => {
         _tag: WS_METHODS.epicRunStart,
       }).runtimeMode,
     ).toBe("full-access");
+    const decodeSetWorkers = Schema.decodeUnknownSync(WsEpicRunSetWorkersRpc.payloadSchema);
+    expect(
+      decodeSetWorkers({
+        _tag: WS_METHODS.epicRunSetWorkers,
+        runId: EpicRunId.make("run-1"),
+        workers: 3,
+      }).workers,
+    ).toBe(3);
+    expect(() =>
+      decodeSetWorkers({
+        _tag: WS_METHODS.epicRunSetWorkers,
+        runId: EpicRunId.make("run-1"),
+        workers: 0,
+      }),
+    ).toThrow();
   });
 
   it("decodes internal-shaped errors and encodes them without causes", () => {

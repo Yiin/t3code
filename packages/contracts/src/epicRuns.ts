@@ -112,6 +112,8 @@ export const EpicRun = Schema.Struct({
   status: EpicRunStatus,
   /** The maximum number of provider dispatch attempts this run can start. */
   maxIterations: PositiveInt,
+  /** The durable maximum number of iterations that may run concurrently. */
+  workers: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
   /**
    * Provider attempts charged before orchestration dispatch. This includes
    * dispatch failures and turns later marked abandoned or cancelled.
@@ -122,6 +124,7 @@ export const EpicRun = Schema.Struct({
    * `iterationsDispatched` when a started turn is abandoned or cancelled.
    */
   iterationsCompleted: NonNegativeInt,
+  /** The most recently dispatched iteration thread, not the in-flight marker. */
   currentThreadId: Schema.NullOr(ThreadId),
   currentTurnStartedAt: Schema.NullOr(IsoDateTime),
   consecutiveFailures: NonNegativeInt,
@@ -172,6 +175,12 @@ export const EpicRunRef = Schema.Struct({
   runId: EpicRunId,
 });
 export type EpicRunRef = typeof EpicRunRef.Type;
+
+export const SetEpicRunWorkersInput = Schema.Struct({
+  runId: EpicRunId,
+  workers: PositiveInt,
+});
+export type SetEpicRunWorkersInput = typeof SetEpicRunWorkersInput.Type;
 
 /**
  * How a run listing is ordered.

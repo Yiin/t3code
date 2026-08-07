@@ -297,6 +297,7 @@ describe("persistence error correlation", () => {
         originThreadId: null,
         status: "running",
         maxIterations: 5,
+        workers: 1,
         iterationsDispatched: 0,
         iterationsCompleted: 0,
         currentThreadId: null,

@@ -340,6 +340,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.epicRunStart, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunLaunch, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunPause, AuthOrchestrationOperateScope],
+  [WS_METHODS.epicRunSetWorkers, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunResume, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunCancel, AuthOrchestrationOperateScope],
   [WS_METHODS.epicRunList, AuthOrchestrationReadScope],
@@ -1833,6 +1834,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.epicRunPause,
             sanitizeEpicRunnerError(epicRunner.pauseRun(input)),
+            { "rpc.aggregate": "epic-run" },
+          ),
+        [WS_METHODS.epicRunSetWorkers]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.epicRunSetWorkers,
+            sanitizeEpicRunnerError(epicRunner.setWorkers(input)),
             { "rpc.aggregate": "epic-run" },
           ),
         [WS_METHODS.epicRunResume]: (input) =>

@@ -149,6 +149,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
     originThreadId: null,
     status: "running",
     maxIterations: config.limits.maxIterations,
+    workers: 1,
     iterationsDispatched: 0,
     iterationsCompleted: 0,
     currentThreadId: null,

@@ -689,6 +689,7 @@ const buildAppUnderTest = (options?: {
             start: () => Effect.void,
             startRun: () => Effect.die("EpicRunner not stubbed in this test"),
             pauseRun: () => Effect.die("EpicRunner not stubbed in this test"),
+            setWorkers: () => Effect.die("EpicRunner not stubbed in this test"),
             resumeRun: () => Effect.die("EpicRunner not stubbed in this test"),
             cancelRun: () => Effect.die("EpicRunner not stubbed in this test"),
             listRuns: () => Effect.succeed([]),
@@ -7389,6 +7390,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         originThreadId: null,
         status: "running" as const,
         maxIterations: 10,
+        workers: 1,
         iterationsDispatched: 0,
         iterationsCompleted: 0,
         currentThreadId: null,
@@ -7419,6 +7421,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               Effect.sync(() => {
                 runnerCalls.push({ method: "pause", input });
                 return { ...run, status: "paused" as const };
+              }),
+            setWorkers: (input) =>
+              Effect.sync(() => {
+                runnerCalls.push({ method: "setWorkers", input });
+                return { ...run, workers: input.workers };
               }),
             resumeRun: (input) =>
               Effect.sync(() => {
@@ -7484,6 +7491,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             client[WS_METHODS.epicRunList]({}),
             client[WS_METHODS.epicRunList]({ orderBy: "updatedAt-desc", limit: 50 }),
             client[WS_METHODS.epicRunPause]({ runId: run.runId }),
+            client[WS_METHODS.epicRunSetWorkers]({ runId: run.runId, workers: 3 }),
             client[WS_METHODS.epicRunResume]({ runId: run.runId }),
             client[WS_METHODS.epicRunCancel]({ runId: run.runId }),
           ]),
@@ -7497,8 +7505,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         [{}, { orderBy: "updatedAt-desc", limit: 50 }],
       );
       assert.equal(wsResults[2].status, "paused");
-      assert.equal(wsResults[3].status, "running");
-      assert.equal(wsResults[4].status, "cancelled");
+      assert.equal(wsResults[3].workers, 3);
+      assert.equal(wsResults[4].status, "running");
+      assert.equal(wsResults[5].status, "cancelled");
 
       const event = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
@@ -7604,6 +7613,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         originThreadId: null,
         status: "running" as const,
         maxIterations: 3,
+        workers: 1,
         iterationsDispatched: 0,
         iterationsCompleted: 0,
         currentThreadId: null,
@@ -7642,6 +7652,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   Effect.fail(new EpicRunStateError({ runId, detail: "already done" })),
                 ),
               ),
+            setWorkers: ({ workers }) =>
+              Effect.sync(() => {
+                mutationCalls.push("setWorkers");
+                return { ...readableRun, workers };
+              }),
             resumeRun: () =>
               Effect.sync(() => {
                 mutationCalls.push("resume");
@@ -7740,7 +7755,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
       const callsBeforeDenied = mutationCalls.length;
       const deniedErrors = yield* Effect.forEach(
-        ["start", "pause", "resume", "cancel"] as const,
+        ["start", "pause", "setWorkers", "resume", "cancel"] as const,
         (method) =>
           Effect.gen(function* () {
             const deniedTicketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
@@ -7767,6 +7782,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                       });
                     case "pause":
                       return client[WS_METHODS.epicRunPause]({ runId: missingId });
+                    case "setWorkers":
+                      return client[WS_METHODS.epicRunSetWorkers]({
+                        runId: missingId,
+                        workers: 2,
+                      });
                     case "resume":
                       return client[WS_METHODS.epicRunResume]({ runId: missingId });
                     case "cancel":

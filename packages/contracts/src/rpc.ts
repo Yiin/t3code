@@ -29,6 +29,7 @@ import {
   EpicRunRef,
   EpicRunTransportError,
   ListEpicRunsInput,
+  SetEpicRunWorkersInput,
 } from "./epicRuns.ts";
 import {
   GitActionProgressEvent,
@@ -198,6 +199,7 @@ export const WS_METHODS = {
   epicRunStart: "epicRun.start",
   epicRunLaunch: "epicRun.launch",
   epicRunPause: "epicRun.pause",
+  epicRunSetWorkers: "epicRun.setWorkers",
   epicRunResume: "epicRun.resume",
   epicRunCancel: "epicRun.cancel",
   epicRunList: "epicRun.list",
@@ -482,6 +484,11 @@ export const WsEpicRunLaunchRpc = Rpc.make(WS_METHODS.epicRunLaunch, {
 });
 export const WsEpicRunPauseRpc = Rpc.make(WS_METHODS.epicRunPause, {
   payload: EpicRunRef,
+  success: EpicRun,
+  error: EpicRunRpcError,
+});
+export const WsEpicRunSetWorkersRpc = Rpc.make(WS_METHODS.epicRunSetWorkers, {
+  payload: SetEpicRunWorkersInput,
   success: EpicRun,
   error: EpicRunRpcError,
 });
@@ -829,6 +836,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsEpicRunStartRpc,
   WsEpicRunLaunchRpc,
   WsEpicRunPauseRpc,
+  WsEpicRunSetWorkersRpc,
   WsEpicRunResumeRpc,
   WsEpicRunCancelRpc,
   WsEpicRunListRpc,

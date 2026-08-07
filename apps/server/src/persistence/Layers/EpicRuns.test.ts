@@ -42,6 +42,7 @@ const makeRun = (overrides: Partial<EpicRun> = {}): EpicRun => ({
   originThreadId: null,
   status: "running",
   maxIterations: 10,
+  workers: 1,
   iterationsDispatched: 0,
   iterationsCompleted: 0,
   currentThreadId: null,
@@ -71,6 +72,7 @@ describe("EpicRunStore", () => {
         originThreadId: ThreadId.make("thread-launcher-1"),
         orientationFile: "docs/agent-orientation.md",
         iterationsDispatched: 7,
+        workers: 3,
         noCommitStreak: 2,
         infraStreak: 3,
       });
@@ -459,6 +461,52 @@ describe("EpicRunStore", () => {
       assert.strictEqual(Option.getOrNull(latest)?.workerId, "worker-2");
       assert.strictEqual(Option.getOrNull(latest)?.branch, "epic/issue-2");
       assert.strictEqual(Option.getOrNull(latest)?.worktreePath, "/tmp/worktrees/issue-2");
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  it.effect("atomically allocates distinct indices and lists running rows", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-allocate");
+      yield* store.upsertRun(makeRun({ runId }));
+
+      const allocated = yield* Effect.forEach(
+        Array.from({ length: 10 }, (_unused, index) => index),
+        (index) =>
+          store.allocateIteration({
+            runId,
+            issueId: `issue-${index}`,
+            branch: `epic/issue-${index}`,
+            worktreePath: `/tmp/worktrees/issue-${index}`,
+            startedAt: "2026-07-27T00:00:00.000Z",
+          }),
+        { concurrency: "unbounded" },
+      );
+
+      assert.deepStrictEqual(
+        [...allocated].sort((left, right) => left - right),
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      );
+      const running = yield* store.listRunningIterations({ runId });
+      assert.strictEqual(running.length, 10);
+      assert.deepStrictEqual(
+        running.map((row) => row.threadId),
+        Array.from({ length: 10 }, (_unused, index) => `epic-run-${runId}-${index}`),
+      );
+
+      yield* store.updateIteration({
+        runId,
+        iterationIndex: 4,
+        turnStatus: "completed",
+        summary: "done",
+        why: null,
+        failureReason: null,
+        finishedAt: "2026-07-27T00:01:00.000Z",
+      });
+      assert.deepStrictEqual(
+        (yield* store.listRunningIterations({ runId })).map((row) => row.iterationIndex),
+        [0, 1, 2, 3, 5, 6, 7, 8, 9],
+      );
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

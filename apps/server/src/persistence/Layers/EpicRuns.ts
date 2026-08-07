@@ -10,6 +10,7 @@ import {
   EpicRunConfig as EpicRunConfigSchema,
   EpicRunConfigProvenance as EpicRunConfigProvenanceSchema,
   ModelSelection,
+  NonNegativeInt,
 } from "@t3tools/contracts";
 import {
   PersistenceDecodeError,
@@ -18,6 +19,7 @@ import {
   type PersistenceErrorCorrelation,
 } from "../Errors.ts";
 import {
+  AllocateEpicRunIterationInput,
   EpicRun,
   EpicRunIteration,
   EpicProviderDegradation,
@@ -64,6 +66,27 @@ function toEpicRunStoreError(
         });
 }
 
+const isIterationAllocationConflict = (cause: unknown): boolean => {
+  let current = cause;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof current !== "object" || current === null) return false;
+    const value = current as {
+      readonly message?: unknown;
+      cause?: unknown;
+    };
+    if (
+      typeof value.message === "string" &&
+      value.message.includes(
+        "UNIQUE constraint failed: epic_run_iterations.run_id, epic_run_iterations.iteration_index",
+      )
+    ) {
+      return true;
+    }
+    current = value.cause;
+  }
+  return false;
+};
+
 const makeEpicRunStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -85,6 +108,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           origin_thread_id,
           status,
           max_iterations,
+          workers,
           iterations_completed,
           iterations_dispatched,
           current_thread_id,
@@ -110,6 +134,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.originThreadId},
           ${row.status},
           ${row.maxIterations},
+          ${row.workers},
           ${row.iterationsCompleted},
           ${row.iterationsDispatched},
           ${row.currentThreadId},
@@ -135,6 +160,7 @@ const makeEpicRunStore = Effect.gen(function* () {
           origin_thread_id = excluded.origin_thread_id,
           status = excluded.status,
           max_iterations = excluded.max_iterations,
+          workers = excluded.workers,
           iterations_completed = excluded.iterations_completed,
           iterations_dispatched = excluded.iterations_dispatched,
           current_thread_id = excluded.current_thread_id,
@@ -162,6 +188,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     origin_thread_id AS "originThreadId",
     status,
     max_iterations AS "maxIterations",
+    workers,
     iterations_completed AS "iterationsCompleted",
     iterations_dispatched AS "iterationsDispatched",
     current_thread_id AS "currentThreadId",
@@ -243,6 +270,37 @@ const makeEpicRunStore = Effect.gen(function* () {
       `,
   });
 
+  const AllocatedIteration = Schema.Struct({ iterationIndex: NonNegativeInt });
+  const allocateEpicRunIterationRow = SqlSchema.findOne({
+    Request: AllocateEpicRunIterationInput,
+    Result: AllocatedIteration,
+    execute: (row) =>
+      sql`
+        INSERT INTO epic_run_iterations (
+          run_id, iteration_index, thread_id, issue_id, worker_id, branch,
+          worktree_path, turn_status, summary, why, failure_reason, started_at,
+          finished_at
+        )
+        SELECT
+          ${row.runId},
+          COALESCE(MAX(iteration_index) + 1, 0),
+          'epic-run-' || ${row.runId} || '-' || COALESCE(MAX(iteration_index) + 1, 0),
+          ${row.issueId},
+          'epic-run-' || ${row.runId} || '-' || COALESCE(MAX(iteration_index) + 1, 0),
+          ${row.branch},
+          ${row.worktreePath},
+          'running',
+          NULL,
+          NULL,
+          NULL,
+          ${row.startedAt},
+          NULL
+        FROM epic_run_iterations
+        WHERE run_id = ${row.runId}
+        RETURNING iteration_index AS "iterationIndex"
+      `,
+  });
+
   const updateEpicRunIterationRow = SqlSchema.void({
     Request: UpdateEpicRunIterationInput,
     execute: (input) =>
@@ -283,6 +341,18 @@ const makeEpicRunStore = Effect.gen(function* () {
         SELECT ${iterationColumns}
         FROM epic_run_iterations
         WHERE run_id = ${runId}
+        ORDER BY iteration_index ASC
+      `,
+  });
+
+  const listRunningEpicRunIterationRows = SqlSchema.findAll({
+    Request: ListEpicRunIterationsInput,
+    Result: EpicRunIteration,
+    execute: ({ runId }) =>
+      sql`
+        SELECT ${iterationColumns}
+        FROM epic_run_iterations
+        WHERE run_id = ${runId} AND turn_status = 'running'
         ORDER BY iteration_index ASC
       `,
   });
@@ -411,6 +481,19 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const allocateIteration: EpicRunStoreShape["allocateIteration"] = (input) =>
+    allocateEpicRunIterationRow(input).pipe(
+      Effect.retry({ times: 3, while: isIterationAllocationConflict }),
+      Effect.map((row) => row.iterationIndex),
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.allocateIteration:query",
+          "EpicRunStore.allocateIteration:decodeRow",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
   const updateIteration: EpicRunStoreShape["updateIteration"] = (input) =>
     updateEpicRunIterationRow(input).pipe(
       Effect.mapError(
@@ -428,6 +511,17 @@ const makeEpicRunStore = Effect.gen(function* () {
         toEpicRunStoreError(
           "EpicRunStore.listIterations:query",
           "EpicRunStore.listIterations:decodeRows",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const listRunningIterations: EpicRunStoreShape["listRunningIterations"] = (input) =>
+    listRunningEpicRunIterationRows(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.listRunningIterations:query",
+          "EpicRunStore.listRunningIterations:decodeRows",
           { runId: input.runId },
         ),
       ),
@@ -503,8 +597,10 @@ const makeEpicRunStore = Effect.gen(function* () {
     getRun,
     listRuns,
     appendIteration,
+    allocateIteration,
     updateIteration,
     listIterations,
+    listRunningIterations,
     listRecentIterationsForRuns,
     getLatestIteration,
     upsertProviderDegradation,

@@ -8,18 +8,15 @@
  * ## Crash-safe write ordering
  *
  * The store is designed for a write-ahead discipline that the runner must
- * honour: `appendIteration` (carrying its `threadId` and `turnStatus: "running"`)
- * happens BEFORE orchestration begins, and the terminal state is persisted
- * after the turn resolves. Selection anomalies use the same append-then-update
- * order without dispatching a turn. A crash in between therefore leaves a
- * visible `running` iteration rather than work nobody knows about.
+ * honour: `allocateIteration` atomically inserts a complete `running` row
+ * BEFORE orchestration begins, and the terminal state is persisted after the
+ * turn resolves. A crash in between therefore leaves visible in-flight work.
  *
  * ## Why the iteration readers exist
  *
- * On restart the runner finds a `running` iteration, marks it `abandoned` via
- * `updateIteration`, and then needs `getLatestIteration + 1` for the next
- * index — hence both `listIterations` and `getLatestIteration`. The loop logic
- * itself is not this module's concern.
+ * On restart the runner lists every `running` iteration and marks each one
+ * `abandoned` via `updateIteration`. The loop logic itself is not this
+ * module's concern.
  *
  * @module EpicRunStore
  */
@@ -87,6 +84,15 @@ export const EpicRunIteration = Schema.Struct({
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type EpicRunIteration = typeof EpicRunIteration.Type;
+
+export const AllocateEpicRunIterationInput = Schema.Struct({
+  runId: EpicRunId,
+  issueId: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(Schema.String),
+  worktreePath: Schema.NullOr(Schema.String),
+  startedAt: IsoDateTime,
+});
+export type AllocateEpicRunIterationInput = typeof AllocateEpicRunIterationInput.Type;
 
 export const GetEpicRunInput = EpicRunRef;
 export type GetEpicRunInput = EpicRunRefType;
@@ -169,14 +175,16 @@ export interface EpicRunStoreShape {
     input: ListEpicRunsInput,
   ) => Effect.Effect<ReadonlyArray<EpicRun>, EpicRunStoreError>;
 
-  /**
-   * Append one iteration row.
-   *
-   * Must be called with `turnStatus: "running"` before orchestration begins.
-   * Synthetic selection failures append and immediately update without a turn.
-   * A duplicate `(runId, iterationIndex)` is rejected rather than merged.
-   */
+  /** Legacy explicit-index insert. New dispatches use `allocateIteration`. */
   readonly appendIteration: (iteration: EpicRunIteration) => Effect.Effect<void, EpicRunStoreError>;
+
+  /**
+   * Atomically allocate the next unique index and insert its complete running
+   * row. The generated thread id also serves as the worker identity.
+   */
+  readonly allocateIteration: (
+    input: AllocateEpicRunIterationInput,
+  ) => Effect.Effect<number, EpicRunStoreError>;
 
   /**
    * Total update of an iteration's mutable columns.
@@ -200,6 +208,11 @@ export interface EpicRunStoreShape {
     input: ListEpicRunIterationsInput,
   ) => Effect.Effect<ReadonlyArray<EpicRunIteration>, EpicRunStoreError>;
 
+  /** List the authoritative in-flight set in ascending index order. */
+  readonly listRunningIterations: (
+    input: ListEpicRunIterationsInput,
+  ) => Effect.Effect<ReadonlyArray<EpicRunIteration>, EpicRunStoreError>;
+
   /**
    * The newest `limitPerRun` iterations of every requested run, in one query.
    *
@@ -215,8 +228,8 @@ export interface EpicRunStoreShape {
   /**
    * Read a run's highest-indexed iteration, if any.
    *
-   * The runner uses this to compute the next iteration index after closing out
-   * an abandoned one.
+   * Kept for read-side callers. Dispatch allocation is atomic and does not use
+   * this read.
    */
   readonly getLatestIteration: (
     input: GetLatestEpicRunIterationInput,

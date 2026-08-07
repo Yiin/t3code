@@ -35,6 +35,7 @@ import type {
   LaunchEpicRunInput,
   ListEpicRunsInput,
   StartEpicRunInput,
+  SetEpicRunWorkersInput,
 } from "@t3tools/contracts";
 import type { EpicRunnerError } from "@t3tools/epic-core/Errors";
 import * as Context from "effect/Context";
@@ -84,6 +85,9 @@ export interface EpicRunnerShape {
    * Stop a run now, interrupting any turn in flight.
    */
   readonly cancelRun: (input: EpicRunRef) => Effect.Effect<EpicRun, EpicRunnerError>;
+
+  /** Change the durable dispatch cap without interrupting active workers. */
+  readonly setWorkers: (input: SetEpicRunWorkersInput) => Effect.Effect<EpicRun, EpicRunnerError>;
 
   readonly listRuns: (
     input?: ListEpicRunsFilter,

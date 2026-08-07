@@ -5,7 +5,7 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
-  type ThreadId,
+  ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -140,6 +140,32 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
         ? append
         : append.pipe(Effect.andThen(Effect.sleep(`${appendIterationDelayMs} millis`)));
     },
+    allocateIteration: (input) => {
+      const append = Effect.sync(() => {
+        const iterationIndex = iterations.reduce(
+          (next, iteration) =>
+            iteration.runId === input.runId ? Math.max(next, iteration.iterationIndex + 1) : next,
+          0,
+        );
+        const threadId = ThreadId.make(`epic-run-${input.runId}-${iterationIndex}`);
+        iterationWrites.push({ method: "append", turnStatus: "running" });
+        iterations.push({
+          ...input,
+          iterationIndex,
+          threadId,
+          workerId: threadId,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          finishedAt: null,
+        });
+        return iterationIndex;
+      });
+      return appendIterationDelayMs === 0
+        ? append
+        : append.pipe(Effect.tap(() => Effect.sleep(`${appendIterationDelayMs} millis`)));
+    },
     updateIteration: (input) =>
       Effect.sync(() => {
         iterationWrites.push({ method: "update", turnStatus: input.turnStatus });
@@ -162,6 +188,12 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
         iterationReadCounts.perRun += 1;
         return iterations.filter((iteration) => iteration.runId === runId);
       }),
+    listRunningIterations: ({ runId }) =>
+      Effect.sync(() =>
+        iterations.filter(
+          (iteration) => iteration.runId === runId && iteration.turnStatus === "running",
+        ),
+      ),
     listRecentIterationsForRuns: ({ runIds, limitPerRun }) =>
       Effect.sync(() => {
         iterationReadCounts.batched += 1;
