@@ -32,9 +32,10 @@ import {
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
-  EPIC_RUN_CONTINUATION_PROMPT,
   EPIC_RUN_ITERATION_PROMPT,
-  EPIC_RUN_STALLED_PROGRESS_PROMPT,
+  decideGraceStep,
+  decideIterationBoundary,
+  persistedFailureReason,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
@@ -44,7 +45,6 @@ import {
   classifyIteration,
   hasRalphBlocked,
   hasRalphDone,
-  iterationFailureClass,
   parseRalphReport,
   type EpicIterationOutcome,
   type IterationTurnState,
@@ -75,7 +75,6 @@ import {
   EpicRunStore,
   type EpicRun,
   type EpicRunIteration as EpicRunIterationRow,
-  type EpicRunIterationStatus,
 } from "../../persistence/Services/EpicRuns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
@@ -132,42 +131,6 @@ const buildTransportRun = (
         ],
   ),
 });
-
-/**
- * The machine-readable `failure_reason` a classified outcome scores its
- * iteration row with; `null` for the kinds that complete the iteration. Part
- * of the closed vocabulary documented on
- * `EpicRunIterationReport.failureReason` — downstream policy and UI badges
- * switch on these strings, so they must stay stable. The persisted value is
- * prefixed with the outcome's failure class (`iterationFailureClass`), e.g.
- * "infra:timeout" / "child:no-commit-child-open", so post-mortems can tell a
- * provider death from agent behavior. "dispatch-failed",
- * "ready-unrecognised", "cancelled" and "server-restart" are assigned at
- * their own sites, which are the only places that know the turn never started,
- * selection rejected every candidate, the turn was cancelled, or it died with
- * the server. Dispatch and selection failures are infra; the other two never
- * had a classified outcome and stay unprefixed. No-commit evidence checks can
- * override the default suffix with "closed-without-findings" or
- * "no-commit-no-evidence". Classification can also override this table with
- * the `provider-error:*` family (`EpicIterationOutcome.failureReason`).
- */
-const failureReasonForOutcome = (kind: EpicIterationOutcome["kind"]): string | null => {
-  switch (kind) {
-    case "done":
-    case "backlog-empty":
-      return null;
-    case "no-commit":
-      return "no-commit-child-open";
-    case "timeout":
-      return "timeout";
-    case "error":
-      return "turn-error";
-    case "protocol-error":
-      return "protocol-error";
-    case "blocked":
-      return "blocked";
-  }
-};
 
 const noCommitEvidenceVerdict = (input: {
   readonly status: string | null;
@@ -345,7 +308,6 @@ type LoopBoundary =
   | { readonly _tag: "continue"; readonly delayMs: number };
 
 const LOOP_STOP: LoopBoundary = { _tag: "stop" };
-const LOOP_CONTINUE: LoopBoundary = { _tag: "continue", delayMs: 0 };
 
 /** How long a resume waits for a dying loop to release the run's own lock. */
 const LOOP_EXIT_WAIT_MS = 5_000;
@@ -1120,44 +1082,116 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
 
         while (true) {
           const headAfter = yield* readHeadCommit(input.run.cwd);
-          if (headAfter !== null && headAfter !== input.headBefore) {
-            return settled;
+          const headMoved = headAfter !== null && headAfter !== input.headBefore;
+          if (headMoved) {
+            const decision = decideGraceStep({
+              headMoved,
+              turnStatus: null,
+              freshRunningCount: 0,
+              fingerprintChanged: null,
+              hasRalphToken: false,
+              finalMessageMissing: false,
+              finalMessageWaitExhausted: false,
+              continuationsUsed: continuationIndex,
+              maxGraceContinuations,
+            });
+            if (decision.action === "settle") return settled;
           }
+
           const snapshot = yield* readThreadDetail(input.threadId);
           const thread = snapshot?.thread;
-          // Only a COMPLETED turn earns a continuation: an errored turn's
-          // failure must reach classification untouched, or a provider error
-          // with a live subagent would silently retry in place.
-          if (thread === undefined || iterationTurnState(thread) !== "completed") {
-            return settled;
+          const turnStatus = iterationTurnState(thread);
+          if (turnStatus !== "completed") {
+            const decision = decideGraceStep({
+              headMoved,
+              turnStatus,
+              freshRunningCount: 0,
+              fingerprintChanged: null,
+              hasRalphToken: false,
+              finalMessageMissing: false,
+              finalMessageWaitExhausted: false,
+              continuationsUsed: continuationIndex,
+              maxGraceContinuations,
+            });
+            if (decision.action === "settle") return settled;
           }
+
           const freshRunning = countFreshRunningSubagents(
-            thread.subagents,
+            thread?.subagents ?? [],
             Date.parse(yield* nowIso),
           );
+          let worktreeFingerprintAfter: string | null = null;
+          let fingerprintChanged: boolean | null = null;
+          let finalMessageMissing = false;
+          let finalMessageWaitExhausted = false;
+          let hasRalphToken = false;
           if (freshRunning === 0) {
-            const worktreeFingerprintAfter = yield* readWorktreeFingerprint(input.run.cwd);
-            if (
-              worktreeFingerprintBefore === null ||
-              worktreeFingerprintAfter === null ||
-              worktreeFingerprintAfter === worktreeFingerprintBefore
-            ) {
-              return settled;
+            worktreeFingerprintAfter = yield* readWorktreeFingerprint(input.run.cwd);
+            fingerprintChanged =
+              worktreeFingerprintBefore === null || worktreeFingerprintAfter === null
+                ? null
+                : worktreeFingerprintAfter !== worktreeFingerprintBefore;
+            if (fingerprintChanged !== true) {
+              const decision = decideGraceStep({
+                headMoved,
+                turnStatus,
+                freshRunningCount: freshRunning,
+                fingerprintChanged,
+                hasRalphToken,
+                finalMessageMissing,
+                finalMessageWaitExhausted,
+                continuationsUsed: continuationIndex,
+                maxGraceContinuations,
+              });
+              if (decision.action === "settle") return settled;
             }
             const finalMessage = yield* readSettledFinalMessage(input.threadId);
             const finalAssistantMessage = resolveFinalAssistantMessage(
               finalMessage.snapshot?.thread,
             );
             const text = finalAssistantMessage?.text ?? null;
-            if (
-              (finalMessage.messageWaitExhausted && text === null) ||
-              (text !== null &&
-                (hasRalphDone(text) || hasRalphBlocked(text) || parseRalphReport(text) !== null))
-            ) {
-              return settled;
-            }
-            if (continuationIndex >= maxGraceContinuations) {
+            finalMessageMissing = text === null;
+            finalMessageWaitExhausted = finalMessage.messageWaitExhausted;
+            hasRalphToken =
+              text !== null &&
+              (hasRalphDone(text) || hasRalphBlocked(text) || parseRalphReport(text) !== null);
+          }
+
+          const decision = decideGraceStep({
+            headMoved,
+            turnStatus,
+            freshRunningCount: freshRunning,
+            fingerprintChanged,
+            hasRalphToken,
+            finalMessageMissing,
+            finalMessageWaitExhausted,
+            continuationsUsed: continuationIndex,
+            maxGraceContinuations,
+          });
+          if (decision.action === "settle") {
+            if (decision.reason === "continuation-cap") {
               yield* Effect.logWarning("epic.runner.subagent-grace-cap", {
+                runId: input.run.runId,
+                iterationIndex: input.iterationIndex,
+                threadId: input.threadId,
+                continuationIndex,
+              });
+            }
+            return settled;
+          }
+
+          const priorTurnId = thread?.latestTurn?.turnId ?? null;
+          if (decision.action === "awaitDrain") {
+            yield* Effect.logInfo("epic.runner.subagent-grace-started", {
+              runId: input.run.runId,
+              iterationIndex: input.iterationIndex,
+              threadId: input.threadId,
+              continuationIndex,
+              freshRunning,
+            });
+            const drained = yield* awaitSubagentDrain(input.threadId);
+            if (!drained) {
+              yield* Effect.logWarning("epic.runner.subagent-grace-timeout", {
                 runId: input.run.runId,
                 iterationIndex: input.iterationIndex,
                 threadId: input.threadId,
@@ -1165,75 +1199,24 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               });
               return settled;
             }
-            const priorTurnId = thread.latestTurn?.turnId ?? null;
+            worktreeFingerprintBefore = yield* readWorktreeFingerprint(input.run.cwd);
+            yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
+              runId: input.run.runId,
+              iterationIndex: input.iterationIndex,
+              threadId: input.threadId,
+              continuationIndex: decision.nextContinuationCount,
+            });
+          } else {
             worktreeFingerprintBefore = worktreeFingerprintAfter;
-            continuationIndex += 1;
             yield* Effect.logInfo("epic.runner.progress-continuation", {
               runId: input.run.runId,
               iterationIndex: input.iterationIndex,
               threadId: input.threadId,
-              continuationIndex,
+              continuationIndex: decision.nextContinuationCount,
             });
-            const createdAt = yield* nowIso;
-            yield* dispatchCommand({
-              type: "thread.turn.start",
-              commandId: yield* commandId("turn-continue"),
-              threadId: input.threadId,
-              message: {
-                messageId: MessageId.make(
-                  continuationIndex === 1
-                    ? `${input.threadId}-continue`
-                    : `${input.threadId}-continue-${continuationIndex}`,
-                ),
-                role: "user",
-                text: EPIC_RUN_STALLED_PROGRESS_PROMPT,
-                attachments: [],
-              },
-              modelSelection: input.run.modelSelection,
-              runtimeMode: input.run.runtimeMode,
-              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-              createdAt,
-            });
-            yield* awaitTurnEnd(input.threadId, priorTurnId);
-            continue;
-          }
-          if (continuationIndex >= maxGraceContinuations) {
-            yield* Effect.logWarning("epic.runner.subagent-grace-cap", {
-              runId: input.run.runId,
-              iterationIndex: input.iterationIndex,
-              threadId: input.threadId,
-              continuationIndex,
-            });
-            return settled;
-          }
-          const priorTurnId = thread.latestTurn?.turnId ?? null;
-
-          yield* Effect.logInfo("epic.runner.subagent-grace-started", {
-            runId: input.run.runId,
-            iterationIndex: input.iterationIndex,
-            threadId: input.threadId,
-            continuationIndex,
-            freshRunning,
-          });
-          const drained = yield* awaitSubagentDrain(input.threadId);
-          if (!drained) {
-            yield* Effect.logWarning("epic.runner.subagent-grace-timeout", {
-              runId: input.run.runId,
-              iterationIndex: input.iterationIndex,
-              threadId: input.threadId,
-              continuationIndex,
-            });
-            return settled;
           }
 
-          worktreeFingerprintBefore = yield* readWorktreeFingerprint(input.run.cwd);
-          continuationIndex += 1;
-          yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
-            runId: input.run.runId,
-            iterationIndex: input.iterationIndex,
-            threadId: input.threadId,
-            continuationIndex,
-          });
+          continuationIndex = decision.nextContinuationCount;
           const createdAt = yield* nowIso;
           yield* dispatchCommand({
             type: "thread.turn.start",
@@ -1248,7 +1231,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   : `${input.threadId}-continue-${continuationIndex}`,
               ),
               role: "user",
-              text: EPIC_RUN_CONTINUATION_PROMPT,
+              text: decision.prompt,
               attachments: [],
             },
             modelSelection: input.run.modelSelection,
@@ -1639,23 +1622,16 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               });
         const noCommitChildClosed = evidenceVerdict?.accepted ?? false;
 
-        const iterationStatus: EpicRunIterationStatus =
+        const iterationStatus =
           outcome.kind === "backlog-empty" || outcome.kind === "done" || noCommitChildClosed
             ? "completed"
             : "failed";
-        const failureClass = iterationFailureClass(outcome.kind);
-        const baseFailureReason =
-          settleResult._tag === "dispatch-failed"
-            ? "dispatch-failed"
-            : (evidenceVerdict?.failureReason ??
-              outcome.failureReason ??
-              failureReasonForOutcome(outcome.kind));
-        // A failed status implies a failure kind, and every failure kind has a
-        // class and a reason — the null guards only close the type.
-        const failureReason =
-          iterationStatus === "completed" || failureClass === null || baseFailureReason === null
-            ? null
-            : `${failureClass}:${baseFailureReason}`;
+        const failureReason = persistedFailureReason({
+          iterationStatus,
+          dispatchFailed: settleResult._tag === "dispatch-failed",
+          evidenceFailureReason: evidenceVerdict?.failureReason ?? null,
+          outcome,
+        });
 
         yield* store
           .updateIteration({
@@ -1698,9 +1674,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           providerTurnDispatched: true,
         };
       });
-
-    const backoffDelayMs = (consecutiveFailures: number) =>
-      Math.min(retryBaseDelayMs * 2 ** (consecutiveFailures - 1), retryMaxDelayMs);
 
     const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
@@ -1792,6 +1765,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   .pipe(Effect.mapError(storeError("clearProviderDegradation")));
               }
 
+              let providerFallbackApplied = false;
+              let providerFallbackLog: Record<string, unknown> | null = null;
               if (Option.isSome(providerRegistry)) {
                 const providers = yield* providerRegistry.value.getProviders;
                 const fallback = resolveEpicProviderFallback({
@@ -1809,128 +1784,61 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                       degradedAt,
                     })
                     .pipe(Effect.mapError(storeError("upsertProviderDegradation")));
-                  settledRun = { ...settledRun, modelSelection: fallback, infraStreak: 0 };
-                  yield* saveRun(settledRun);
-                  yield* Effect.logInfo("epic.runner.provider-fallback", {
+                  providerFallbackApplied = true;
+                  settledRun = { ...settledRun, modelSelection: fallback };
+                  providerFallbackLog = {
                     runId,
                     fromInstanceId: currentRun.modelSelection.instanceId,
                     fromModel: currentRun.modelSelection.model,
                     toInstanceId: fallback.instanceId,
                     toModel: fallback.model,
                     status: currentRun.status,
-                  });
-                  if (currentRun.status !== "running") {
-                    liveLoops.delete(runId);
-                    return LOOP_STOP;
-                  }
-                  return LOOP_CONTINUE;
+                  };
                 }
               }
 
-              if (currentRun.status !== "running") {
-                // Someone stopped the run mid-iteration. Record that the iteration
-                // happened, honour their status, and leave.
+              const decision = decideIterationBoundary({
+                runStatus: currentRun.status,
+                consecutiveFailures: currentRun.consecutiveFailures,
+                noCommitStreak: currentRun.noCommitStreak,
+                infraStreak: currentRun.infraStreak,
+                lastError: currentRun.lastError,
+                outcome,
+                noCommitChildClosed,
+                providerFallbackApplied,
+                providerTurnDispatched,
+                limits: {
+                  maxConsecutiveFailures,
+                  maxNoCommitStreak,
+                  infraFailureBudget,
+                  retryBaseDelayMs,
+                  retryMaxDelayMs,
+                },
+              });
+              yield* saveRun({
+                ...settledRun,
+                ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
+                consecutiveFailures: decision.nextConsecutiveFailures,
+                noCommitStreak: decision.nextNoCommitStreak,
+                infraStreak: decision.nextInfraStreak,
+                lastError: decision.lastError,
+              });
+              if (providerFallbackLog !== null) {
+                yield* Effect.logInfo("epic.runner.provider-fallback", providerFallbackLog);
+              }
+
+              if (decision.action === "stop") {
                 liveLoops.delete(runId);
-                yield* saveRun(settledRun);
+              }
+              if (currentRun.status !== "running" && !providerFallbackApplied) {
                 yield* Effect.logInfo("epic.runner.loop-stopped", {
                   runId,
                   status: currentRun.status,
                 });
-                return LOOP_STOP;
               }
-
-              if (outcome.kind === "backlog-empty") {
-                liveLoops.delete(runId);
-                yield* saveRun({
-                  ...settledRun,
-                  status: "done",
-                  consecutiveFailures: 0,
-                  ...(providerTurnDispatched ? { noCommitStreak: 0, infraStreak: 0 } : {}),
-                  lastError: null,
-                });
-                return LOOP_STOP;
-              }
-
-              if (outcome.kind === "done") {
-                yield* saveRun({
-                  ...settledRun,
-                  consecutiveFailures: 0,
-                  noCommitStreak: 0,
-                  infraStreak: 0,
-                  lastError: null,
-                });
-                return LOOP_CONTINUE;
-              }
-
-              if (noCommitChildClosed) {
-                yield* saveRun({
-                  ...settledRun,
-                  consecutiveFailures: 0,
-                  noCommitStreak: 0,
-                  infraStreak: 0,
-                  lastError: null,
-                });
-                return LOOP_CONTINUE;
-              }
-
-              if (outcome.kind === "no-commit") {
-                const noCommitStreak = currentRun.noCommitStreak + 1;
-                const gutter = noCommitStreak >= maxNoCommitStreak;
-                if (gutter) liveLoops.delete(runId);
-                yield* saveRun({
-                  ...settledRun,
-                  ...(gutter
-                    ? {
-                        status: "failed" as const,
-                        lastError: `gutter: ${noCommitStreak} iterations without a commit`,
-                      }
-                    : { lastError: null }),
-                  consecutiveFailures: 0,
-                  noCommitStreak,
-                });
-                return gutter ? LOOP_STOP : LOOP_CONTINUE;
-              }
-
-              if (iterationFailureClass(outcome.kind) === "infra") {
-                // Infra failures leave `consecutiveFailures` and the gutter
-                // streak untouched: neither budget may be spent by a failure
-                // the agent never caused. `lastError` carries the real infra
-                // reason on every retry, so a run sitting in backoff reads
-                // "provider error: monthly spend limit …", not a generic
-                // failure count.
-                const infraStreak = currentRun.infraStreak + 1;
-                const infraReason = outcome.detail ?? outcome.kind;
-                const exhaustedInfra = infraStreak >= infraFailureBudget;
-                if (exhaustedInfra) liveLoops.delete(runId);
-                yield* saveRun({
-                  ...settledRun,
-                  ...(exhaustedInfra ? { status: "failed" as const } : {}),
-                  lastError: exhaustedInfra
-                    ? `infra: ${infraStreak} consecutive infrastructure failures; last: ${infraReason}`
-                    : infraReason,
-                  infraStreak,
-                });
-                const infraRetry: LoopBoundary = {
-                  _tag: "continue",
-                  delayMs: backoffDelayMs(infraStreak),
-                };
-                return exhaustedInfra ? LOOP_STOP : infraRetry;
-              }
-
-              const consecutiveFailures = currentRun.consecutiveFailures + 1;
-              const exhausted = consecutiveFailures >= maxConsecutiveFailures;
-              if (exhausted) liveLoops.delete(runId);
-              yield* saveRun({
-                ...settledRun,
-                ...(exhausted ? { status: "failed" as const } : {}),
-                consecutiveFailures,
-                lastError: outcome.detail ?? outcome.kind,
-              });
-              const retry: LoopBoundary = {
-                _tag: "continue",
-                delayMs: backoffDelayMs(consecutiveFailures),
-              };
-              return exhausted ? LOOP_STOP : retry;
+              return decision.action === "stop"
+                ? LOOP_STOP
+                : ({ _tag: "continue", delayMs: decision.delayMs } satisfies LoopBoundary);
             }),
           );
           if (boundary._tag === "stop") return;
