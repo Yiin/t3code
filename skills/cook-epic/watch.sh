@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # cook-epic watch — stream a run's mailbox through the invoking harness's
-# long-running monitor mechanism. One readable line per event; exits on the
-# terminal "finished" record.
+# long-running monitor mechanism. One readable line per event; exits when the
+# run reports a terminal status (done, failed, or cancelled).
+#
+# The mailbox is the shared core's FileRunEvents stream: one JSON RunEvent per
+# line (run-state-changed, iteration-state-changed, provider-fallback,
+# child-claim-released, subagent-liveness-*).
 #
 # Usage (as a Monitor/background command): watch.sh <run-dir>
 set -uo pipefail
@@ -10,51 +14,30 @@ RUN_DIR="${1:?usage: watch.sh <run-dir>}"
 MBOX="$RUN_DIR/mailbox.jsonl"
 
 FMT='
-  def landing:
-    if has("landing") then .landing
-    elif (.verified? == false) then
-      if .pushed? == true then "pushed, landed unverified" else "landed unverified locally" end
-    elif (.pushed? == true) then "gated, pushed, landed"
-    else "gated, landed locally"
-    end;
-  def verification:
-    if .verified? == false then "unverified"
-    elif .verified? == true then "verified"
-    else "verified" # mailbox lines written before verified existed
-    end;
-  # total_cost is deliberately not printed: dollar figures must not be
-  # surfaced in chat. It stays in mailbox.jsonl for anyone who asks.
-  # (Keep this comment apostrophe-free: FMT is a single-quoted shell string.)
-  if .event=="finished" then
-    "🏁 cook-epic finished: \(.reason) — dispatched \(.dispatched // 0), landed \(.merged // 0), \(verification)"
-  elif .event=="dispatched" then
-    "🚀 \(.child): \(.worker) dispatched on \(.branch)"
-  elif .event=="done" then
-    "✅ \(.child): \(landing) (\(.commits) commits) — \(.summary)"
-  elif .event=="merged" then
-    "🎯 \(.child): \(landing) on base via \(.branch) (\(.commit))"
-  elif .event=="parked" then
-    "⚠ \(.child): merge of \(.branch) parked (\(.reason)) — merge-fix \(.fix) created"
-  elif .event=="retry" then
-    "↻ \(.child): attempt \(.attempt)/\(.max) failed (\(.reason)) — requeued"
-  elif .event=="blocked" then
-    "⛔ \(.child): blocked after \(.attempts) attempts (\(.reason)) — needs a human"
-  elif .event=="rate-limited" then
-    "⏳ \(.child): \(.worker) hit a rate limit — requeueing in 120s"
-  elif .event=="worker-idle" then
-    "idle \(.child): \(.worker) has no progress for \(.idleSeconds)s"
-  elif .event=="inspection-started" then
-    "inspect \(.child): structural liveness check started (limit \(.timeoutSeconds)s)"
-  elif .event=="inspection-continue" then
-    "continue \(.child): \(.rationale) (check again in \(.nextCheckSeconds)s)"
-  elif .event=="inspection-uncertain" then
-    "uncertain \(.child): \(.reason) (check again in \(.nextCheckSeconds)s)"
-  elif .event=="inspection-stop-pending" then
-    "confirm stop \(.child): \(.rationale) (fresh check in \(.nextCheckSeconds)s)"
-  elif .event=="inspection-stop" then
-    "stop \(.child): inspector found the worker stuck (\(.rationale))"
-  else
-    "• \(.child // "-"): \(.event)"
+  def issue: (.iteration.issueId // .issueId // "-");
+  # Keep this comment apostrophe-free: FMT is a single-quoted shell string.
+  # run-state-changed fires on every journal save; only the terminal ones
+  # render a line.
+  if .type=="run-state-changed" then
+    if .run.status == "running" then ""
+    else "🏁 cook-epic finished: \(.run.status)\(if .run.lastError then " — \(.run.lastError)" else "" end) — iterations \(.run.iterationsCompleted)/\(.run.maxIterations)" end
+  elif .type=="iteration-state-changed" then
+    if .iteration.turnStatus == "running" then
+      "🚀 \(issue): iteration \(.iteration.iterationIndex) dispatched"
+    elif .iteration.turnStatus == "completed" then
+      "✅ \(issue): completed — \(.iteration.summary // "done")"
+    else
+      "↻ \(issue): \(.iteration.turnStatus) (\(.iteration.failureReason // "unknown"))\(if .iteration.summary then " — \(.iteration.summary)" else "" end)"
+    end
+  elif .type=="provider-fallback" then
+    "⇄ \(issue): provider fallback \(.fromDriver) → \(.toDriver) (\(.failureReason))"
+  elif .type=="child-claim-released" then
+    "⚠ \(issue): claim released — \(.reason)"
+  elif .type=="subagent-liveness-degraded" then
+    "• iteration \(.iterationIndex): liveness degraded — \(.evidence)"
+  elif .type=="subagent-liveness-unavailable" then
+    "• iteration \(.iterationIndex): liveness unavailable — \(.reason)"
+  else ""
   end
 '
 
@@ -79,11 +62,15 @@ tail -n +1 -F -- "$MBOX" > "$watch_fifo" &
 tail_pid=$!
 terminal=0
 while IFS= read -r event; do
-  rendered=$(jq -er "$FMT" <<< "$event") || exit $?
-  printf '%s\n' "$rendered"
-  [ "$(jq -r '.event // empty' <<< "$event")" = finished ] || continue
-  terminal=1
-  break
+  rendered=$(jq -r "$FMT" <<< "$event") || exit $?
+  [ -z "$rendered" ] || printf '%s\n' "$rendered"
+  status=$(jq -r 'select(.type=="run-state-changed") | .run.status // empty' <<< "$event") || exit $?
+  case "$status" in
+    done | failed | cancelled)
+      terminal=1
+      break
+      ;;
+  esac
 done < "$watch_fifo"
 
 [ "$terminal" -eq 1 ] || exit 1

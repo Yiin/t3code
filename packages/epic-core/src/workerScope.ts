@@ -8,6 +8,9 @@
  * `cook-epic.slice`, so the interactive session always wins CPU contention.
  * The server unit itself never joins the throttled slice.
  *
+ * run-legacy.sh retired in t3code-06s.42; its line references below resolve in
+ * git history.
+ *
  * Only the controllers this host family delegates are set: CPUWeight and
  * MemoryHigh. IOWeight is deliberately not ported — the io controller is not
  * delegated on the reference host, so setting it would be cargo cult.

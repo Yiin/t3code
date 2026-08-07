@@ -8,7 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { diffTranscripts, type EpicRunTranscriptEvent } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { mailboxToTranscript, parseMailboxJsonl } from "./mailboxTranscript.ts";
+import { normalizeCoreMailbox, parseCoreMailbox } from "./coreMailbox.ts";
 import { decodeConformanceScenario, type ConformanceScenario } from "./scenario.ts";
 import { makeConformanceWorkspace } from "./workspace.ts";
 
@@ -19,13 +19,7 @@ const packageDirectory = NodePath.resolve(
 const repositoryDirectory = NodePath.resolve(packageDirectory, "../..");
 const scenariosDirectory = NodePath.join(packageDirectory, "scenarios");
 const runner = NodePath.join(repositoryDirectory, "skills/cook-epic/run.sh");
-const parallelScenarios = new Set([
-  "parallel-worktrees",
-  "park-merge-conflict",
-  "permission-denial-fast-park",
-  "serialized-trial-merge",
-  "sibling-repo-layout",
-]);
+const t3Source = NodePath.join(repositoryDirectory, "apps/server/src/bin.ts");
 
 const scenarios = (): ReadonlyArray<ConformanceScenario> =>
   NodeFS.readdirSync(scenariosDirectory)
@@ -53,6 +47,70 @@ const maxExpectedAttempts = (scenario: ConformanceScenario): number =>
     ),
   );
 
+const maximumIterations = (scenario: ConformanceScenario): number =>
+  Math.max(
+    1,
+    scenario.agentScript.length,
+    maxExpectedAttempts(scenario),
+    ...scenario.expectedTranscript.flatMap((event) =>
+      event.iterationIndex === null ? [] : [event.iterationIndex + 1],
+    ),
+  );
+
+const runGit = (cwd: string, args: ReadonlyArray<string>): void => {
+  const result = NodeChildProcess.spawnSync("git", [...args], { cwd, stdio: "ignore" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed in ${cwd}`);
+};
+
+const beadComments = (statePath: string | undefined): ReadonlyMap<string, number> => {
+  if (statePath === undefined) return new Map();
+  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
+    readonly children?: ReadonlyArray<Record<string, unknown>>;
+  };
+  return new Map(
+    (state.children ?? []).flatMap((child) =>
+      typeof child["id"] === "string" && typeof child["comment_count"] === "number"
+        ? [[child["id"], child["comment_count"]] as const]
+        : [],
+    ),
+  );
+};
+
+const synthesizePreflightFailure = (
+  scenario: ConformanceScenario,
+  output: string,
+): ReadonlyArray<EpicRunTranscriptEvent> => {
+  const common = {
+    sequence: 0,
+    epicId: scenario.beads.epicId,
+    issueId: null,
+    iterationIndex: null,
+    pushed: false,
+    verified: true,
+  } as const;
+  if (output.includes("run_in_progress")) {
+    return [
+      {
+        _tag: "lock_held",
+        ...common,
+        ...(scenario.beads.runInProgress ? { reason: "run in progress" } : {}),
+      },
+    ];
+  }
+  if (output.includes("epic_not_found")) {
+    return [{ _tag: "finished", ...common, status: "failed", reason: "epic not found" }];
+  }
+  if (output.includes("detached_head") || output.includes("Could not resolve the current branch")) {
+    // The terminal CLI rejects a detached HEAD before preflight runs: `t3 epic
+    // cook` resolves the base branch first and fails with this message.
+    return [{ _tag: "finished", ...common, status: "failed", reason: "detached head" }];
+  }
+  if (output.includes("dirty_tree")) {
+    return [{ _tag: "finished", ...common, status: "failed", reason: "dirty tree" }];
+  }
+  throw new Error(`unexpected terminal preflight output for ${scenario.name}: ${output.trim()}`);
+};
+
 const runTerminalScenario = (
   scenario: ConformanceScenario,
 ): ReadonlyArray<EpicRunTranscriptEvent> => {
@@ -60,36 +118,45 @@ const runTerminalScenario = (
   const root = NodePath.dirname(workspace.cwd);
   const runDirectory = NodePath.join(root, "terminal-run");
   NodeFS.mkdirSync(runDirectory);
-  const siblingPaths = scenario.repo.siblingRepos.map((path) =>
-    NodePath.relative(workspace.cwd, NodePath.resolve(root, path)),
+  // Hermetic t3 resolution: the shim finds this wrapper on the fixture PATH.
+  NodeFS.writeFileSync(
+    NodePath.join(workspace.binDir, "t3"),
+    `#!/usr/bin/env bash\nexec "${process.execPath}" "${t3Source}" "$@"\n`,
+    { mode: 0o755 },
   );
+  // Compress the retry backoff like the in-process core leg does; the run
+  // config file is committed so preflight still sees a clean tree.
+  NodeFS.mkdirSync(NodePath.join(workspace.cwd, ".t3code"));
+  NodeFS.writeFileSync(
+    NodePath.join(workspace.cwd, ".t3code", "epic-run.json"),
+    `${JSON.stringify({ server: { retryBaseDelayMs: 5, retryMaxDelayMs: 5 } })}\n`,
+  );
+  runGit(workspace.cwd, ["add", ".t3code/epic-run.json"]);
+  runGit(workspace.cwd, ["commit", "-qm", "run config"]);
   const environment = {
     ...scrubCookEpic(process.env),
     ...workspace.env,
     PATH: `${workspace.binDir}:${process.env.PATH ?? ""}`,
-    COOKEPIC_CORE: "0",
     COOKEPIC_EPIC: scenario.beads.epicId,
     COOKEPIC_HARNESS: "claude",
-    COOKEPIC_WORKER_CMD: NodePath.join(workspace.binDir, "agent"),
-    COOKEPIC_SEQUENTIAL: parallelScenarios.has(scenario.name) ? "0" : "1",
-    COOKEPIC_WORKERS: "2",
+    // worker-cmd pinpoints the fixture agent for every scenario except the
+    // provider fallback chain, which must route through the harness shims.
+    ...(scenario.name === "provider-fallback-persists"
+      ? {}
+      : { COOKEPIC_WORKER_CMD: NodePath.join(workspace.binDir, "agent") }),
+    COOKEPIC_SEQUENTIAL: "1",
     COOKEPIC_GATE: "true",
     COOKEPIC_NO_PUSH: "1",
-    COOKEPIC_SPAWN_DELAY: "0",
-    COOKEPIC_MAX_DISPATCHES: String(
-      Math.max(scenario.agentScript.length, maxExpectedAttempts(scenario)),
-    ),
-    COOKEPIC_MAX_ATTEMPTS: String(maxExpectedAttempts(scenario)),
+    COOKEPIC_MAX_DISPATCHES: String(maximumIterations(scenario)),
+    // The core leg always runs with the default per-child budget of 3.
+    COOKEPIC_MAX_ATTEMPTS: String(Math.max(3, maxExpectedAttempts(scenario))),
     COOKEPIC_WORKER_TIMEOUT: "1",
-    COOKEPIC_SUPERVISION_TICK: "1",
-    COOKEPIC_REPO_PROBE_INTERVAL: "1",
-    ...(siblingPaths.length === 0 ? {} : { COOKEPIC_SIBLINGS: siblingPaths.join(" ") }),
   };
   const result = NodeChildProcess.spawnSync("setsid", ["env", runner, runDirectory], {
     cwd: workspace.cwd,
     env: environment,
     encoding: "utf8",
-    timeout: 8_000,
+    timeout: 60_000,
     killSignal: "SIGKILL",
   });
   const spawnError = result.error as NodeJS.ErrnoException | undefined;
@@ -101,7 +168,7 @@ const runTerminalScenario = (
     }
   }
   if (spawnError?.code === "ETIMEDOUT") {
-    throw new Error(`${scenario.name} terminal adapter timed out after 8 seconds`);
+    throw new Error(`${scenario.name} terminal adapter timed out after 60 seconds`);
   }
   if (spawnError !== undefined) {
     throw new Error(`${scenario.name} terminal adapter failed to start`, { cause: spawnError });
@@ -112,9 +179,13 @@ const runTerminalScenario = (
       `${scenario.name} terminal adapter produced no mailbox (status ${String(result.status)}): ${result.stderr.trim()}`,
     );
   }
-  return mailboxToTranscript({
-    epicId: scenario.beads.epicId,
-    records: parseMailboxJsonl(NodeFS.readFileSync(mailbox, "utf8")),
+  const values = parseCoreMailbox(NodeFS.readFileSync(mailbox, "utf8"));
+  if (values.length === 0) {
+    return synthesizePreflightFailure(scenario, `${result.stdout}\n${result.stderr}`);
+  }
+  return normalizeCoreMailbox(values, scenario.beads.epicId, {
+    comments: beadComments(workspace.env["CONFORMANCE_STATE"]),
+    maxIterations: maximumIterations(scenario),
   });
 };
 
@@ -130,7 +201,7 @@ const describeDiff = (
 
 describe("terminal adapter conformance", () => {
   it.live.skipIf(!process.env.T3CODE_CONFORMANCE_TERMINAL)(
-    "runs every terminal scenario against the canonical shell adapter",
+    "runs every terminal scenario against the shared core through run.sh",
     () =>
       Effect.sync(() => {
         const divergences: string[] = [];
@@ -147,6 +218,6 @@ describe("terminal adapter conformance", () => {
         }
         assert.deepEqual(divergences, [], divergences.join("\n\n"));
       }),
-    120_000,
+    600_000,
   );
 });

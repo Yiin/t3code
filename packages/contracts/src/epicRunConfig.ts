@@ -72,7 +72,7 @@ const RetryMaxDelayMs = PositiveInt;
 const SubagentGraceTimeoutMs = PositiveInt;
 const MaxGraceContinuations = PositiveInt;
 const ProviderDegradationTtlMs = NonNegativeInt;
-export const EpicRunEngine = Schema.Literals(["legacy", "core", "shadow"]);
+export const EpicRunEngine = Schema.Literals(["core", "shadow"]);
 export type EpicRunEngine = typeof EpicRunEngine.Type;
 
 const BudgetConfig = Schema.Struct({
@@ -277,7 +277,7 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     key: "engine",
     scope: "core",
     label: "Epic engine",
-    doc: "Selects the legacy, shared-core, or no-side-effects shadow policy engine.",
+    doc: "Selects the shared-core or no-side-effects shadow policy engine.",
     control: "select",
   },
   {

@@ -11,7 +11,9 @@ import { EpicRunLock, EpicRunLockHeldError, type EpicRunLockLease } from "../por
 import { layer, makeLayer } from "./NodeEpicRunLock.ts";
 
 const repositoryRoot = NodePath.resolve(import.meta.dirname, "../../../..");
-const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run-legacy.sh");
+// ralph/run.sh carries the only surviving Bash copy of the run-lock block
+// (cook-epic's retired with the legacy coordinator, t3code-06s.42).
+const ralphRunner = NodePath.join(repositoryRoot, "skills/ralph/run.sh");
 const requiredCommands = ["bash", "flock", "git", "jq", "setsid", "sha256sum", "timeout"];
 const unsupportedReason =
   !NodeFS.existsSync("/proc/self/stat") ||
@@ -20,7 +22,7 @@ const unsupportedReason =
       NodeChildProcess.spawnSync("sh", ["-c", 'command -v "$1" >/dev/null 2>&1', "probe", command])
         .status !== 0,
   )
-    ? "requires Linux process metadata and the cook-epic shell tools"
+    ? "requires Linux process metadata and the ralph shell tools"
     : null;
 
 interface Fixture {
@@ -90,15 +92,14 @@ exit 0
 `,
     { mode: 0o755 },
   );
+  // One Claude result object: RALPH_DONE with no commit ends the loop after a
+  // single iteration. FIXTURE_SLEEP holds the iteration open for lock tests.
   await NodeFSP.writeFile(
-    NodePath.join(bin, "worker.sh"),
+    NodePath.join(bin, "claude"),
     `#!/usr/bin/env bash
 set -euo pipefail
 sleep "\${FIXTURE_SLEEP:-0}"
-printf 'work\\n' >> work.txt
-git add work.txt
-git commit -qm work
-bd close "\${COOKEPIC_CHILD:?}"
+printf '%s\\n' '{"type":"result","result":"RALPH_DONE","session_id":"fixture","total_cost_usd":0}'
 `,
     { mode: 0o755 },
   );
@@ -111,8 +112,10 @@ bd close "\${COOKEPIC_CHILD:?}"
   };
 };
 
-const spawnCook = (fixture: Fixture, runDir: string, workerSleep: number) =>
-  NodeChildProcess.spawn("bash", [cookEpicRunner, runDir], {
+const spawnRalph = (fixture: Fixture, runDir: string, workerSleep: number) => {
+  NodeFS.mkdirSync(runDir, { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(runDir, "prompt.md"), "Epic: epic\nDo the work.\n");
+  return NodeChildProcess.spawn("bash", [ralphRunner, runDir], {
     cwd: fixture.repo,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -121,21 +124,14 @@ const spawnCook = (fixture: Fixture, runDir: string, workerSleep: number) =>
       PATH: `${fixture.bin}:${process.env.PATH ?? ""}`,
       FAKE_BD_STATE: fixture.state,
       FIXTURE_SLEEP: String(workerSleep),
-      COOKEPIC_EPIC: "epic",
-      COOKEPIC_HARNESS: "claude",
-      COOKEPIC_WORKER_CMD: NodePath.join(fixture.bin, "worker.sh"),
-      COOKEPIC_SEQUENTIAL: "1",
-      COOKEPIC_NO_GATE: "1",
-      COOKEPIC_NO_PUSH: "1",
-      COOKEPIC_DISABLE_SYSTEMD: "1",
-      COOKEPIC_SPAWN_DELAY: "0",
-      COOKEPIC_SUPERVISION_TICK: "1",
-      COOKEPIC_MAX_DISPATCHES: "1",
-      COOKEPIC_MAX_ATTEMPTS: "1",
-      COOKEPIC_WORKER_TIMEOUT: "60",
+      RALPH_EPIC: "epic",
+      RALPH_HARNESS: "claude",
+      RALPH_BIN: NodePath.join(fixture.bin, "claude"),
+      RALPH_MAX_ITER: "5",
       RUNLOCK_HEARTBEAT_SECS: "1",
     },
   });
+};
 
 const waitForFile = async (file: string): Promise<void> => {
   for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -188,7 +184,7 @@ it.live.skipIf(unsupportedReason !== null)(
       Effect.gen(function* () {
         const fixture = yield* fixtureScope;
         const child = yield* processScope(() =>
-          spawnCook(fixture, NodePath.join(fixture.root, "bash-run"), 60),
+          spawnRalph(fixture, NodePath.join(fixture.root, "bash-run"), 60),
         );
         yield* Effect.promise(() => waitForFile(fixture.lockFile));
         const raw = yield* Effect.promise(() => NodeFSP.readFile(fixture.lockFile, "utf8"));
@@ -259,7 +255,7 @@ it.live.skipIf(unsupportedReason !== null)(
         ]);
 
         const result = yield* Effect.promise(() =>
-          waitForExit(spawnCook(fixture, NodePath.join(fixture.root, "blocked-run"), 0)),
+          waitForExit(spawnRalph(fixture, NodePath.join(fixture.root, "blocked-run"), 0)),
         );
         expect(result.code).toBe(75);
         expect(result.output).toContain('"event":"lock_held"');
@@ -309,7 +305,7 @@ it.live.skipIf(unsupportedReason !== null)(
         ).toBeUndefined();
 
         const result = yield* Effect.promise(() =>
-          waitForExit(spawnCook(fixture, NodePath.join(fixture.root, "takeover-run"), 0)),
+          waitForExit(spawnRalph(fixture, NodePath.join(fixture.root, "takeover-run"), 0)),
         );
         expect(result.code).toBe(0);
         expect(result.output).not.toContain('"event":"lock_held"');

@@ -3,7 +3,8 @@
  *
  * Ported from the terminal coordinator (`skills/cook-epic/run-legacy.sh`,
  * `liveness_start` at run-legacy.sh:1710-1728 and `supervise_workers` at
- * run-legacy.sh:1743-1794). The machine never touches /proc, cgroups, git, or a
+ * run-legacy.sh:1743-1794). run-legacy.sh retired in t3code-06s.42; its line
+ * references resolve in git history. The machine never touches /proc, cgroups, git, or a
  * provider process: every platform fact arrives through `WorkerTickEvidence`
  * (gathered by `ports/WorkerEvidence.ts`) and every side effect leaves as a
  * `WorkerLivenessAction` for the driving adapter to perform.

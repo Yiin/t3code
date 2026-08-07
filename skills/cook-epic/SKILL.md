@@ -1,6 +1,6 @@
 ---
 name: cook-epic
-description: Execute a beads epic unattended with fresh-context workers on the shared epic core: sequential on the base branch, one worker at a time, gated landings. A deprecated legacy engine (COOKEPIC_CORE=legacy, one more release) still does parallel git worktrees and mirrored sibling-repo layouts. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
+description: Execute a beads epic unattended with fresh-context workers on the shared epic core: sequential on the base branch, one worker at a time, gated landings. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
 ---
 
 # cook-epic — epic executor
@@ -14,19 +14,10 @@ status) and git (commits, merges).
 
 **This is the only skill for running an epic.** It handles a chain, a wide
 frontier, and every mix of the two in one run — nobody has to predict the shape
-up front. Two engines share that contract:
-
-- **Core** (default): `run.sh` execs `t3 epic cook`, the same shared
-  orchestration core the T3 Code server runner drives. One worker at a time,
-  directly in the main checkout on the base branch, with claiming, retry
-  budgets, a per-child gate, and verify-by-effects. No worktrees, no merge
-  queue.
-- **Legacy** (`COOKEPIC_CORE=legacy`, kept for one release): the original Bash
-  coordinator (`run-legacy.sh`) — parallel workers in per-child git worktrees
-  on `epic/<child>` branches with a serialized trial-merge queue, mirrored
-  sibling-repo layouts, liveness inspectors, and soft budget caps. It prints a
-  deprecation notice on every start; `t3code-06s.42` tracks its removal. The
-  sections below mark legacy-only behavior where it applies.
+up front. `run.sh` execs `t3 epic cook`, the same shared orchestration core the
+T3 Code server runner drives. One worker at a time, directly in the main
+checkout on the base branch, with claiming, retry budgets, a per-child gate,
+and verify-by-effects. No worktrees, no merge queue.
 
 ## When this fits
 
@@ -41,7 +32,7 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 
 ## Engines and configuration
 
-The default engine is the shared core. `run.sh` maps the supported
+The engine is the shared core. `run.sh` maps the supported
 `COOKEPIC_*` environment onto the run config and execs `t3 epic cook`. The
 committed `.t3code/epic-run.json` is the preferred configuration surface; the
 environment layer is deprecated and loses to the file. The full mapping table
@@ -52,74 +43,42 @@ Knobs the core engine maps: `COOKEPIC_GATE`, `COOKEPIC_NO_GATE`,
 `COOKEPIC_WORKER_TIMEOUT`, `COOKEPIC_STOP_GRACE`, `COOKEPIC_MODEL`,
 `COOKEPIC_PERMISSION_MODE`, `COOKEPIC_ORIENTATION_FILE`, `COOKEPIC_HARNESS`,
 `COOKEPIC_BIN`, and `COOKEPIC_WORKER_CMD` (test seam). Any other `COOKEPIC_*`
-knob — workers, siblings, inspector, budget, cgroup weights, Bash-only test
+knob — workers, siblings, inspector, budget, cgroup weights, retired Bash test
 seams — refuses to start loudly, never silently.
-
-`COOKEPIC_CORE=legacy` (or `0`) runs the deprecated Bash coordinator for one
-documented release. Every legacy start prints a deprecation notice.
 
 ## Tests
 
 Run `bash skills/cook-epic/tests/all.sh` from the repository root.
 Set `COOKEPIC_TESTS_FILTER=<name>` to select matching files.
-Each file has a 120-second limit. The full suite has a 600-second ceiling.
-Measured local wall time: 373 seconds on 2026-08-07 with all tests enabled.
 
 `core-delegation.sh` covers the shim: entrypoint resolution, knob validation,
-and a real-`bd` parity fixture across both engines. Every other suite drives
-`run-legacy.sh` — they are the executable specification of the legacy engine
-and retire with it (`t3code-06s.42`).
-
-- `core-delegation.sh` covers the shim's validation, t3 resolution, and engine parity.
-- `fallback-session-regressions.sh` covers session fallback and recovery.
-- `fold-regressions.sh` covers folded worker results and state updates.
-- `liveness-regressions.sh` covers worker activity, inspection, and stop rules.
-- `opencode-harness.sh` covers the OpenCode harness command contract.
-- `orientation-injection.sh` covers orientation-card selection and prompt injection.
-- `orientation-metrics.sh` covers orientation metrics and diagnostic output.
-- `parallel-siblings.sh` covers parallel sibling layouts and atomic landing.
-- `prompt-cache-warmup.sh` covers prompt-cache warm-up behavior.
-- `provider-fallback.sh` covers provider error classification and fallback order.
-- `run-lock.sh` covers terminal lock ownership, exclusion, and stale-lock recovery.
-- `sequential-regressions.sh` covers sequential dispatch, gates, and push rules.
+and a real-`bd` fixture run through the shared core. The 11 legacy-engine
+suites retired with the legacy Bash coordinator (t3code-06s.42).
 
 ## Steps
 
 1. **Parse the request.** The first argument after `/cook-epic` is the epic id.
-   Map optional knobs (the table documents both engines; knobs marked _legacy_
-   refuse to start under the default core engine — see **Engines and
-   configuration**):
+   Map optional knobs:
 
-   | User says                                       | Environment variable                                                             | Default                                                                                                 |
-   | ----------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-   | "sequential", "one at a time"                   | `COOKEPIC_SEQUENTIAL=1`                                                          | decided by shape (step 2)                                                                               |
-   | sibling repos, e.g. "also touches ../proga-api" | `COOKEPIC_SIBLINGS="../proga-api"` (space-separated) _(legacy)_                  | detected in step 2                                                                                      |
-   | "4 workers", "parallel 5"                       | `COOKEPIC_WORKERS` _(legacy)_                                                    | 3 (forces parallel)                                                                                     |
-   | "gate: bun run build"                           | `COOKEPIC_GATE`                                                                  | **required** — see below                                                                                |
-   | "no gate", "skip verification"                  | `COOKEPIC_NO_GATE=1`                                                             | unset                                                                                                   |
-   | "budget $40"                                    | `COOKEPIC_BUDGET_USD` _(legacy)_                                                 | none; claude/ccx only (not enforceable on kimi/codex/opencode)                                          |
-   | "2h absolute limit per worker"                  | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                                     | unset; no absolute timeout                                                                              |
-   | "inspect after 45m idle"                        | `COOKEPIC_IDLE_THRESHOLD` _(legacy)_ (positive seconds)                          | 1800                                                                                                    |
-   | "inspector limit 90s"                           | `COOKEPIC_INSPECTOR_TIMEOUT` _(legacy)_ (positive seconds)                       | 120                                                                                                     |
-   | "retry failed inspections after 10m"            | `COOKEPIC_INSPECT_RETRY_DELAY` _(legacy)_ (positive seconds)                     | 300                                                                                                     |
-   | "bound inspector delays to 2m through 1h"       | `COOKEPIC_INSPECT_MIN_DELAY` / `COOKEPIC_INSPECT_MAX_DELAY` _(legacy)_           | 60 / 7200                                                                                               |
-   | "give stopped workers 30s to exit"              | `COOKEPIC_STOP_GRACE` (positive seconds)                                         | 15                                                                                                      |
-   | "yolo", "skip permissions"                      | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                                     | `auto`                                                                                                  |
-   | "use \<model\>"                                 | `COOKEPIC_MODEL`                                                                 | Primary stage only. Claude/ccx defaults to tiered models. Later fallback stages use their fixed models. |
-   | "fleet memory 12G", "half the CPU"              | `COOKEPIC_MEMORY_HIGH` / `COOKEPIC_CPU_WEIGHT` / `COOKEPIC_IO_WEIGHT` _(legacy)_ | 60% / 50 / 50                                                                                           |
-   | "cap at 80 dispatches"                          | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run)                      | 50                                                                                                      |
-   | "5 attempts per child"                          | `COOKEPIC_MAX_ATTEMPTS`                                                          | 3                                                                                                       |
-   | "no push", "local-only", "push at the end"      | `COOKEPIC_NO_PUSH=1`                                                             | unset                                                                                                   |
-   | "orientation card at docs/foo.md"               | `COOKEPIC_ORIENTATION_FILE` (path relative to repo root)                         | `docs/agent-orientation.md`, then `AGENTS.md`, first match wins                                         |
+   | User says                                  | Environment variable                                        | Default                                                                                                 |
+   | ------------------------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+   | "sequential", "one at a time"              | `COOKEPIC_SEQUENTIAL=1`                                     | always sequential                                                                                       |
+   | "gate: bun run build"                      | `COOKEPIC_GATE`                                             | **required** — see below                                                                                |
+   | "no gate", "skip verification"             | `COOKEPIC_NO_GATE=1`                                        | unset                                                                                                   |
+   | "2h absolute limit per worker"             | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                | unset; no absolute timeout                                                                              |
+   | "give stopped workers 30s to exit"         | `COOKEPIC_STOP_GRACE` (positive seconds)                    | 15                                                                                                      |
+   | "yolo", "skip permissions"                 | `COOKEPIC_PERMISSION_MODE=bypassPermissions`                | `auto`                                                                                                  |
+   | "use \<model\>"                            | `COOKEPIC_MODEL`                                            | Primary stage only. Claude/ccx defaults to tiered models. Later fallback stages use their fixed models. |
+   | "cap at 80 dispatches"                     | `COOKEPIC_MAX_DISPATCHES` (global spawn cap across the run) | 50                                                                                                      |
+   | "5 attempts per child"                     | `COOKEPIC_MAX_ATTEMPTS`                                     | 3                                                                                                       |
+   | "no push", "local-only", "push at the end" | `COOKEPIC_NO_PUSH=1`                                        | unset                                                                                                   |
+   | "orientation card at docs/foo.md"          | `COOKEPIC_ORIENTATION_FILE` (path relative to repo root)    | `docs/agent-orientation.md`, then `AGENTS.md`, first match wins                                         |
 
-   `COOKEPIC_NO_PUSH=1` disables every push: the coordinator fast-forwards the
-   base branch locally after each gated merge but never pushes it, workers are
-   prompt-instructed to commit only, and remote branch cleanup is skipped. Use
-   it for repos that commit locally and push deliberately (e.g. a pre-push
-   hook that refuses non-interactive pushes). Reports say **“gated, landed
-   locally”**, never “pushed”; every mailbox event has `pushed: false`. At the
-   end, the summary lists every repository that gained commits, its count, and
-   its ending hash. Push only on the user's say-so.
+   `COOKEPIC_NO_PUSH=1` disables every push: workers are prompt-instructed to
+   commit only, and the core lands each child on the base branch without
+   pushing it. Use it for repos that commit locally and push deliberately (e.g.
+   a pre-push hook that refuses non-interactive pushes). Reports say **“gated,
+   landed locally”**, never “pushed”. Push only on the user's say-so.
 
    `COOKEPIC_NO_PUSH` is strict: unset means push mode, while exactly
    `COOKEPIC_NO_PUSH=1` means local-only. Values such as `0`, `true`, or any
@@ -134,13 +93,6 @@ and retire with it (`t3code-06s.42`).
    set; if none of those exist, workers get the literal line "(no orientation
    card in this repo)".
 
-   `COOKEPIC_WORKERS` _(legacy)_ is only the starting cap. An operator can widen or
-   narrow a LIVE legacy run without restarting it: write a positive integer to
-   `$RUN_DIR/WORKERS` and the coordinator re-reads it every tick (clamped to
-   at least 1; malformed content is ignored with one logged warning per
-   change; sequential runs stay pinned to one worker). The core engine runs
-   one worker and does not read this file.
-
    `COOKEPIC_GATE` is required: workers only run cheap checks (typecheck,
    lint, targeted unit tests), so the gate is the only full verification. If
    the user names no gate, derive it yourself from the project (CI config,
@@ -148,82 +100,29 @@ and retire with it (`t3code-06s.42`).
    report. Pass `COOKEPIC_NO_GATE=1` only when the user explicitly accepts
    unverified merges. Reports and every mailbox event expose `verified: false`
    and say **“landed unverified”** in that mode; they never describe it as
-   gated. Claude and ccx workers receive
-   `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` only when the caller has not set
-   it, so a finished headless worker is not held for background waits. This
-   does not add an absolute worker limit. Workers have no absolute time limit
+   gated. Workers have no absolute time limit
    by default. Set
    `COOKEPIC_WORKER_TIMEOUT` only when an operator needs a fixed positive
    limit. Zero and other invalid values fail preflight.
 
-   On the legacy engine, the coordinator samples cumulative output bytes and
-   worker-scope CPU and
-   I/O on each tick. It runs a bounded repository probe only after these
-   signals stay quiet. The repository probe defaults to a 60-second interval,
-   has a hard timeout, and does not enumerate untracked files. Any changed
-   signal refreshes liveness. Process existence alone does not count. After
-   `COOKEPIC_IDLE_THRESHOLD` seconds with no changed signal, one bounded
-   read-only inspector reviews the evidence while the worker keeps running.
-   Only a valid high-confidence `stop` result can stop the worker. All failed,
-   malformed, timed out, low-confidence, and uncertain results keep it alive.
-   Codex cannot enforce a no-tool inspector session. Codex inspections return
-   `uncertain` without launching Codex.
-
-2. **Choose the engine and execution shape.** The core engine is the default
-   and needs no shape decision: it runs one worker at a time in the main
-   checkout. Parallel is a legacy-engine feature, available for one release:
-   an explicit user instruction ("parallel 4", sibling repos, inspectors, a
-   budget cap) means `COOKEPIC_CORE=legacy` plus the legacy knobs below.
-
-   **Parallel is the answer for every mixed-shape epic — on the legacy
-   engine.** Do not pre-judge the epic as "sequential work" because the ready
-   frontier starts narrow, because the graph looks chain-like, or because the
-   children are small. The legacy dispatch loop tracks the frontier tick by
-   tick: it runs one worker while the chain is one-wide, and fills the pool the
-   moment the graph fans out.
-
-   **Sibling repos need the legacy engine.** When a child references paths
-   OUTSIDE the repo (sibling repos like `../proga-api`), collect them into
-   `COOKEPIC_SIBLINGS` _(legacy)_ — parallel mode mirrors each sibling into every
-   worker's layout under `$RUN_DIR/layouts/<child>/` at its real relative
-   position (all on `epic/<child>`), so `../proga-api` resolves inside the
-   sandbox, and landing trial-merges, gates, and lands every touched repo as
-   one all-or-nothing set.
-
-   **Same-file clustering is not a reason to avoid legacy parallel.** Merge
-   conflicts are already handled: the branch parks and a `Merge fix:` child
-   comes back to the pool. If most children genuinely fight over one or two
-   files, lower `COOKEPIC_WORKERS` to 2 instead — the run still widens later
-   when the work spreads out.
-
-   State your choice and the reason in the launch report. The core engine takes
-   `COOKEPIC_SEQUENTIAL=1` (or nothing — it is always sequential); legacy
-   parallel sets `COOKEPIC_CORE=legacy` and `COOKEPIC_WORKERS` (default 3).
+2. **Execution shape.** The core engine runs one worker at a time in the main
+   checkout on the base branch. There is no shape decision to make:
+   `COOKEPIC_SEQUENTIAL=1` is accepted for compatibility but redundant.
+   Parallel workers, sibling-repo layouts, inspectors, and budget caps retired
+   with the legacy Bash engine (t3code-06s.42).
 
 3. **Preflight** (all must hold; fix and report instead of launching otherwise):
    - You are at the project root: `.beads/` exists and there are no uncommitted
-     TRACKED changes (`git diff-index --quiet HEAD --`). Uncommitted work is a
-     hard stop — the coordinator merges into the base branch. Untracked files
-     (scratch dirs, local artifacts) only earn a warning.
+     changes (`git status --porcelain` is empty). Uncommitted work is a hard
+     stop — the core verifies each child by effects on the base branch, so it
+     must start from a clean checkout.
    - `bd show <EPIC>` exists and has open children (`bd list --parent <EPIC>`).
    - `bd ready --parent <EPIC> --json` is non-empty, OR open children exist but
      are dependency-blocked — in that case report the blockage and do NOT
      launch; the loop would exit "stuck" immediately anyway.
-   - The beads data dir is not git-tracked (`git ls-files .beads` shows no
-     dolt/db files) — run.sh exits fatally otherwise, since worktrees would
-     fork the database.
-   - `COOKEPIC_SIBLINGS` (either mode): each sibling is a git repo, on a
-     branch, with no uncommitted changes. The coordinator resolves every
-     configured sibling to a canonical absolute path before comparing worktrees
-     or recording effects. When pushes are enabled, every sibling must also
-     have an `origin` remote (run.sh hard-stops otherwise). In parallel mode
-     each sibling must additionally be mirrorable: its path relative to the
-     project root must stay inside a per-worker layout root and outside the
-     main repo — a sibling that escapes the layout (e.g. resolves above it) or
-     nests inside the main repository fails preflight with a clear message.
-   - Push-enabled runs require an `origin` remote in the main repository and
-     every sibling, because the coordinator always pushes to
-     `origin <branch>`. A repository with only another remote must set
+   - Push-enabled runs require an `origin` remote in the main repository,
+     because the core pushes `origin HEAD:<base-branch>` after each gated
+     child. A repository with only another remote must set
      `COOKEPIC_NO_PUSH=1` or add `origin`; it never silently becomes local-only.
    - If `git status` shows another agent's work, warn: cook-epic assumes
      exclusive use of the repo, like ralph.
@@ -244,22 +143,19 @@ and retire with it (`t3code-06s.42`).
    task text such as `authentication`, `401`, or `service unavailable` does
    not qualify. Claude and ccx move to Codex, then Codex moves to Kimi.
    Missing binaries and exits 126 or 127 also mark a stage unavailable. The
-   coordinator skips an unavailable intermediate binary. It never moves
+   core skips an unavailable intermediate binary. It never moves
    backward.
 
-   A fallback stops new dispatches first. Active workers and inspectors drain
-   before the coordinator changes the global harness settings. The failed
-   child returns to the ready frontier without using an attempt. Codex fallback
+   A fallback takes effect at the iteration boundary: the failed child
+   returns to the ready frontier without using an attempt, and the next
+   dispatch uses the fallback harness. Codex fallback
    uses `gpt-5.6-sol` with high reasoning. Kimi fallback uses
    `kimi-code/k3`. `COOKEPIC_MODEL` applies only to the primary stage. Generic
    nonzero exits keep the normal attempt and backoff rules.
 
    claude/ccx workers automatically launch with
-   `--exclude-dynamic-system-prompt-sections` and `ENABLE_PROMPT_CACHING_1H=1`
-   so parallel workers in distinct worktrees share one prompt-cache prefix
-   instead of fragmenting it on cwd/git-status, and the runner fires a cheap
-   warm-up request before the first dispatch wave to seed that prefix (a
-   warm-up failure only warns; it never stops the run). No action needed —
+   `--exclude-dynamic-system-prompt-sections`, keeping the prompt prefix
+   stable across dispatches. No action needed —
    this is automatic for claude/ccx and a no-op for kimi/codex/opencode.
 
 6. **Resolve the runner from this skill, then launch from the project root.** Derive `SKILL_DIR` from the directory containing the `SKILL.md` you loaded. Use `${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}`; this lets callers pin a specific copy with `COOKEPIC_RUNNER`. Only when the loaded skill path is unavailable or ambiguous, fall back to `~/.agents/skills/cook-epic/run.sh`.
@@ -273,9 +169,8 @@ and retire with it (`t3code-06s.42`).
      "${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}" "$RUN_DIR" >/dev/null 2>&1 &
    ```
 
-   Add only the optional variables the user requested (plus
-   `COOKEPIC_SIBLINGS` when step 2 detected sibling repos, and
-   `COOKEPIC_SEQUENTIAL` when the user chose sequential) after `env`. In a plain interactive CLI, a non-detached launch is still fine
+   Add only the optional variables the user requested after `env`. In a plain
+   interactive CLI, a non-detached launch is still fine
    when the user is watching it live.
 
    Inside t3code, prefer its server-owned EpicRunner. It persists run state,
@@ -298,46 +193,37 @@ and retire with it (`t3code-06s.42`).
 7. **Report progress** by running `"$SKILL_DIR/watch.sh" "$RUN_DIR"` (falling back to `~/.agents/skills/cook-epic/watch.sh` only when the loaded skill path is unavailable or ambiguous)
    with the harness's long-running monitor mechanism. Relay each emitted event
    line to the user: dispatches, completions (including research completions),
-   merges, parks, retries, blocks, idle detections, and inspection decisions.
+   retries, provider fallbacks, and claim releases.
    Stay silent between event lines — no heartbeats. Exception: an actionable
    blocker (external base-branch movement, push rejection) or a direct user
    status request.
 
    The watcher is stateless: every invocation replays `mailbox.jsonl` from the
-   first record and exits after the `finished` record. Any later session can
+   first record and exits when the run reaches a terminal status (`done`,
+   `failed`, or `cancelled`). Any later session can
    reattach by running `"$SKILL_DIR/watch.sh" <run-dir>` or reading
    `<run-dir>/mailbox.jsonl` with `jq`. When resuming after a chat was reaped,
-   inspect `/var/tmp/cook-epic.*` directories that do not yet contain a
-   `finished` mailbox record, then re-run the watcher for the matching
+   inspect `/var/tmp/cook-epic.*` directories whose `run.json` is not yet in a
+   terminal status, then re-run the watcher for the matching
    directory.
 
 8. **Tell the user once, up front:** include the run directory, say that the
    detached loop survives the chat closing, and explain that a later session
    can reattach with `watch.sh <run-dir>`. Say that events will appear in chat
-   and that `touch $RUN_DIR/STOP` stops new dispatches immediately (including
-   unused slots in the current dispatch pass) and drains in-flight workers
-   before exiting. A reconciliation stop, such as a rejected push or externally
-   moved base branch, exits nonzero, preserves local commits, and does not close
-   the epic.
+   and that `touch $RUN_DIR/STOP` takes effect at the next iteration boundary:
+   the in-flight worker finishes its turn, then the run exits `cancelled`. A
+   failed run, such as a rejected push or an exhausted attempt budget, exits
+   nonzero, preserves local commits, and does not close the epic.
 
 9. **When the loop finishes**, report: stop reason (completion, STOP file,
-   budget cap, stuck frontier, or the global dispatch cap — see
-   `COOKEPIC_MAX_DISPATCHES`), children landed (`$RUN_DIR/summary.md`), every
-   repository that gained commits (count and ending hash), and anything
-   parked/blocked (needs a human). In no-push mode, say “gated, landed
-   locally.” Failed children keep their branch plus a bounded worker output
-   tail in `$RUN_DIR/worker-<child>.log`. Point the user there when anything
-   was blocked. A run that ended with exit 75 dispatched nothing: report the
-   holding run instead (see step 6) and stop there.
-
-   Each landed child's `done`/`researched`/`completed-no-code` mailbox event
-   also carries an `orientation` field — for claude/ccx workers,
-   `{secondsToFirstEdit, toolCallsBeforeFirstEdit, tokensBeforeFirstEdit}`
-   measured from the worker's own transcript up to its first
-   Edit/Write/MultiEdit/NotebookEdit call, or `orientation: null` when the
-   transcript is missing or the harness isn't claude/ccx. `summary.md` gets a
-   matching `- <child> orientation: …` line per landed child (omitted when
-   `orientation` is null).
+   stuck frontier, an exhausted per-child attempt budget, or the global
+   dispatch cap — see `COOKEPIC_MAX_DISPATCHES`), children landed
+   (`$RUN_DIR/summary.md`), and anything blocked (needs a human). In no-push
+   mode, say “gated, landed locally.” Every iteration keeps its record in
+   `$RUN_DIR/iter-<N>.json`; point the user there when anything was blocked.
+   A run that ended with exit 75 dispatched nothing: report the holding run
+   instead (see step 6) and stop there. The loop does not close the epic
+   bead — close it yourself once the summary checks out.
 
 ## Running inside t3code
 
@@ -382,8 +268,7 @@ send it only when you have a real value, never an empty string.
 - "server EpicRunner (shared core)" — include the run link
   `$T3_SERVER_URL/epics/$T3_ENVIRONMENT_ID/<epicId>`, and say when the server
   attached to an already-active run instead of starting a new one.
-- "terminal run.sh (shared core)" or "terminal run-legacy.sh (legacy)" — say
-  why the server path was not used
+- "terminal run.sh (shared core)" — say why the server path was not used
   (no `T3_SERVER_URL`, probe unreachable, or network failure).
 
 **Control commands** (all with `Authorization: Bearer $T3_SERVER_TOKEN`):
@@ -399,177 +284,68 @@ pausing a finished run). Report it; do not retry.
 
 ## How it works (what to tell the user when asked)
 
-Except where noted, this section describes the legacy engine
-(`COOKEPIC_CORE=legacy`). The core engine's behavior is pinned by the
-conformance scenarios in `packages/epic-run-conformance/scenarios/` and by
-`docs/epic-runs.md`.
+The core engine is sequential: one worker at a time, in the main checkout on
+the base branch, like ralph. No worktrees, no branches, no merge queue.
 
-- **Dispatch**: each tick, `bd ready --parent <EPIC>` yields the dependency
-  frontier; free worker slots are filled after an atomic `bd update --claim`.
-  Concurrency therefore tracks the graph on its own — one worker while the
-  frontier is one child wide, up to `COOKEPIC_WORKERS` once it fans out, and
-  back down again. An epic that starts as a chain and opens up mid-run needs no
-  mode change and no operator decision. The cap itself is live: writing a
-  positive integer to `$RUN_DIR/WORKERS` replaces it on the next tick (clamped
-  to at least 1; malformed content is ignored with one logged warning per
-  change).
-  Retried children back off `10s·2^(n-1)` (cap 300s). Provider failures move
-  the whole fleet to the next installed harness without consuming an attempt.
-  If no later harness exists, rate-limited children wait 120s without using an
-  attempt. `COOKEPIC_MAX_ATTEMPTS` (default 3) failed attempts block the child.
-- **Sequential mode** (`COOKEPIC_SEQUENTIAL=1`): one worker at a time, in the
-  main checkout on the base branch — no worktrees, no branches, no merge
-  queue. The worker commits on the base branch as it goes (fix-forward, never
-  rewrites history, never pushes). On completion the coordinator verifies by
-  effects (child closed + tree clean + commits landed in the repo or a
-  registered sibling — a crash-before-close retry is recognized by the tree
-  signature having moved since the child's first dispatch), then runs the
-  integration gate on the checkout. If a worker leaves the main checkout or a
-  sibling dirty, or makes a clean commit without closing, that state remains
-  assigned to that child: no other child can dispatch until the same child
-  retries after backoff and cleans/closes it, or becomes blocked. Existing
-  untracked paths at first dispatch remain allowed, matching the preflight
-  warning; new untracked paths still fail. If it blocks while still owning
-  state, the run stops for operator reconciliation; no later child inherits
-  that state. This prevents a later child from inheriting another child's
-  partial state. Clean tool-created worktrees registered beneath a
-  sibling's `.claude/worktrees` are ignored during these checks; unknown
-  untracked paths and dirty worktrees still fail. Sibling paths are
-  canonicalized before these comparisons, so documented relative paths such as
-  `../proga-api` match Git's absolute registered-worktree paths. The coordinator captures
-  first-dispatch HEAD baselines for the main repo and every sibling, so the
-  final report lists all repositories changed by the run — including
-  API-only work and cleanup-only retries — with commit counts and ending
-  hash. With `COOKEPIC_NO_GATE=1`, successful children are **landed
-  unverified** (and mailbox events carry `verified: false`); otherwise
-  successful children are **gated, landed locally**.
-  In push mode the coordinator pushes every repository whose HEAD
-  changed since that child's first dispatch, including commits made by an
-  earlier retry attempt that a later retry only closes. Siblings are pushed as
-  `origin <current-branch>` rather than through an upstream setting. A child
-  that closes while leaving dirt still owns that state; after every gate the
-  coordinator checks the main repository and each sibling again before it can
-  push or report success. Siblings work in parallel mode too (mirrored
-  layouts, see Isolation and Landing) — sequential is an explicit operator
-  preference, and the mode stays fixed for the whole run.
-- **Isolation**: every worker gets a run-scoped
-  `.worktrees/cook-epic-<run-id>/<child>` path on branch `epic/<child>`
-  (created from the base branch, or the existing branch on retry). The
-  coordinator refuses an existing path instead of removing a possibly unowned
-  worktree. Each worktree gets a `.beads/redirect` pointing at the main
-  checkout's `.beads` (plus `BEADS_DIR` in the worker env), so all workers
-  share one issue database; `node_modules` is symlinked and dev env files
-  copied (`.env`, `.env.local`, `.env.development[.local]`, `.env.test` —
-  production/staging env files are not). Workers are prompt-bound to
-  their worktree and branch, with per-worker port/DB/browser offsets.
-  With `COOKEPIC_SIBLINGS`, the worktree moves into a per-child layout at
-  `$RUN_DIR/layouts/<child>/` that also holds one worktree per sibling repo at
-  its real relative position (branch `epic/<child>` in each repo, created from
-  the sibling's current branch, reused on retry), so relative sibling
-  references resolve inside the sandbox. `node_modules` symlinks and dev env
-  files are provisioned per repo; the beads redirect exists only in the
-  main-repo worktree — siblings have no beads db.
-- **Landing**: completed branches queue for a serialized trial merge in an
-  integration worktree → optional `COOKEPIC_GATE` → fast-forward the base
-  branch → push. Before every trial merge, the coordinator resets and cleans
-  only its run-scoped integration worktree, so artifacts from an earlier trial
-  cannot affect the next one. Merges run under the bd 1.x **merge slot**
-  (`bd merge-slot acquire` by the coordinator's holder id). Startup never
-  releases a holder based only on its name, so a second coordinator cannot
-  steal a live run's slot. A fatal reconciliation stop freezes the merge queue
-  rather than retrying queued merges during drain. Conflicts or red gates never
-  touch the user's checkout: the branch is parked and a `Merge fix:` child is
-  created under the epic, which the worker pool repairs like any other task;
-  its completion re-enqueues the merge. With `COOKEPIC_SIBLINGS`, landing is a
-  set operation: an integration layout mirrors the same relative structure,
-  every repo whose `epic/<child>` branch gained commits is trial-merged, the
-  gate runs once from the main repo's integration worktree (so relative
-  sibling references resolve against the sibling trial merges), and every repo
-  in the set fast-forwards and pushes together. If ANY repo conflicts or the
-  gate fails, ALL branches in the set park together behind ONE `Merge fix:`
-  child that names every parked branch and repo; its completion re-enqueues
-  the whole set. External movement of a sibling's branch mid-run is a
-  reconciliation stop, same as the main repo.
-- **Discovery**: the coordinator registers the epic as a bd 1.x **swarm**
-  (`bd swarm create`), so `bd swarm status <EPIC>` shows live
-  completed/active/ready state while a run is in flight.
-- **Gate tiering**: workers run only cheap checks (typecheck, lint, unit
-  tests for touched files); full builds and e2e/browser suites are forbidden
-  in workers. The expensive verification runs once, serially, as the
-  integration gate at merge time — failures come back to the pool as
-  `Merge fix:` children with the failure context. A `Merge fix:` worker that
-  must rerun the gate serializes it through `$RUN_DIR/heavy.lock`, so at most
-  one heavy command runs on the machine at a time.
-- **Resource governance**: every worker (and the integration gate) runs in
-  the `cook-epic.slice` cgroup — CPUWeight/IOWeight 50, MemoryHigh 60% by
-  default — so the interactive session wins contention and the fleet cannot
-  swap-thrash the machine. A systemd user session is required for terminal
-  runs. The cgroup is the ownership seam for workers and their descendants.
-  Without it, a child can leave a shell process group and escape safe cleanup.
-- **Liveness supervision**: workers have no default absolute timeout. Every
-  coordinator tick compares cumulative output bytes and cumulative CPU and I/O
-  for the worker scope. A quiet worker gets a slower bounded Git probe. The
-  probe omits untracked files and has a hard timeout. Changed evidence resets
-  the idle clock and increments a progress generation. After 1800 idle seconds
-  by default, the coordinator starts one inspector in a separate scope. The
-  inspector gets only structural evidence. This
-  includes byte counts, tool names, process counts, elapsed times, resource
-  deltas, exit state, and bounded repository status counts. It never gets raw
-  worker output, command arguments, child text, environment values, URLs,
-  headers, cookies, or file contents. Its strict JSON result is `continue`,
-  `stop`, or `uncertain`. Only a high-confidence `stop` from the current
-  progress generation ends the worker. The coordinator sends `TERM`, waits
-  `COOKEPIC_STOP_GRACE`, then sends `KILL` if needed. All other outcomes
-  schedule another bounded check and keep the worker alive. The coordinator
-  does not launch a Codex inspector because Codex cannot disable tools
-  completely. It records a fail-safe `uncertain` result instead.
-- **Bounded output**: each worker keeps a rolling output tail and a separate
-  cumulative byte count. Inspector prompts, results, raw logs, and repository
-  evidence also have fixed limits. Rate-limit detection survives worker log
-  rotation. Claude cost extraction and final result tails remain available.
+- **Dispatch**: each iteration, `bd ready --parent <EPIC>` yields the
+  dependency frontier and the loop takes the top ready child after an atomic
+  `bd update --claim`. A failed child backs off (doubling from
+  `server.retryBaseDelayMs` up to `server.retryMaxDelayMs`) and retries within
+  its attempt budget (`COOKEPIC_MAX_ATTEMPTS`, default 3). Exhausting the
+  budget releases the claim, reopens the child with a `child-claim-released`
+  mailbox event, and fails the run. Provider failures move the whole run to
+  the next installed harness (claude → codex → kimi) without consuming an
+  attempt.
+- **Commits**: the worker commits on the base branch as it goes (fix-forward,
+  never rewrites history, never pushes).
 - **Verification is by effects**: a child counts as done when `bd` shows it
-  closed AND its branch has commits — worker self-reports are ignored.
+  closed AND the base branch gained commits — worker self-reports are ignored.
   **Research children are the exception**: a child whose title starts with
-  `Research:` or that carries the `research` label delivers findings into beads,
-  not code. It counts as done only when it is closed AND its bead gained a
-  comment since dispatch (counted via `comment_count`), even if it also commits
-  code. A research child with commits passes normal gate and landing after that
-  findings check; without commits, its empty branch is dropped. Closing one
-  with no new comment fails as "closed without findings".
-  **Non-research children may also finish with zero new commits** when the
-  work already exists (operator pre-commit, external/infra effects): that is
-  accepted only when the bead gained a comment since dispatch — the comment is
-  the evidence. A bare close with no commits and no comment still fails.
-- **Permission denials park fast**: a failed attempt whose worker log records
-  permission denials is retried once (denials can be stochastic); a second
-  denial-bearing failure blocks the child for a human immediately instead of
-  burning the remaining attempts.
-- **Dirt verdicts are evidence-backed**: untracked-path drift counts only
-  paths ADDED since the child's first dispatch (paths that vanish from the
-  baseline are ignored), and every dirty verdict logs the repo and offending
-  paths as `dirty:` lines in the run log.
-- **Completion**: when no open children remain and queues are drained, the
-  coordinator closes the epic and exits.
+  `Research:` or that carries the `research` label delivers findings into
+  beads, not code. It counts as done only when it is closed AND its bead
+  gained a comment since dispatch; closing one with no new comment blocks it
+  as "closed without findings". **Non-research children may also finish with
+  zero new commits** when the work already exists (operator pre-commit,
+  external effects): accepted only when the bead gained a comment since
+  dispatch — the comment is the evidence. A bare close with no commits and no
+  comment fails.
+- **Gate**: after a verified child, the loop runs the integration gate once on
+  the real checkout (`COOKEPIC_GATE`; skipped only with `COOKEPIC_NO_GATE=1`,
+  which lands children **unverified**). A red gate or a dirty tree blocks the
+  child and retries it within its budget. Workers run only cheap checks
+  (typecheck, lint, unit tests for touched files); the gate is the only full
+  verification.
+- **Push**: after a green gate the loop pushes `origin HEAD:<base-branch>`
+  unless `COOKEPIC_NO_PUSH=1`. A rejected push fails the run for operator
+  reconciliation; local commits are preserved.
+- **Resource governance**: each worker spawn is optionally wrapped in a
+  systemd user scope under `cook-epic.slice` (CPUWeight and MemoryHigh only),
+  so the interactive session wins contention. A scope name that clashes with
+  the run identity is fatal; every other scope degradation spawns unwrapped
+  with a warning.
+- **Liveness**: workers have no default absolute timeout. After each turn the
+  loop records the subagent-liveness evidence the harness exposes
+  (`subagent-liveness-degraded` / `subagent-liveness-unavailable` mailbox
+  events). Harnesses with no subagent evidence report `unavailable`; there is
+  no inspector.
+- **Recovery**: run state lives in `$RUN_DIR/run.json`, one
+  `$RUN_DIR/iter-<N>.json` per iteration, `mailbox.jsonl`, `loop.log`, and
+  `summary.md`. On exit the loop releases any child claim it still holds and
+  releases the epic run lock. A dead run's lock goes stale on its own; the
+  next run takes it over once the heartbeat lapses.
+- **Completion**: when no open children remain, the run reports `done`. An
+  empty ready frontier with open children is `failed` (stuck), never `done`.
+  The loop does not close the epic bead — review `summary.md` and close it
+  yourself.
 
 ## When the coordinator looks dead
 
-This section describes the legacy engine's process model. The core engine runs
-one worker as a direct child process, so a dead coordinator cannot leave a
-live worker behind.
+The core engine runs one worker as a direct child process, optionally inside a
+systemd scope named `cook-epic-<run-id>-<worker>.scope`. A coordinator that
+dies mid-iteration can leave that worker alive in its scope, still writing to
+the checkout. **Never infer the worker's state from the coordinator's.**
 
-**Workers can outlive the coordinator. Never infer a worker's state from the
-coordinator's.** Each worker runs in its own systemd scope under
-`cook-epic.slice`, so a signal aimed at the coordinator's process group — a
-session ending, a Ctrl-C, an agent harness tearing down its shell — kills the
-coordinator and its bookkeeping subshell while the worker keeps running and
-keeps writing to the checkout.
-
-`run-legacy.sh` handles normal exits itself. Worker scopes are named
-`cook-epic-<run-id>-<worker>.scope`. Inspector scopes are named
-`cook-epic-<run-id>-inspect-<worker>.scope`. `reap_finished` refuses to judge a
-child whose worker scope is still active. An EXIT trap stops surviving worker
-and inspector scopes. A hard kill, OOM, or reboot cannot run that trap. Manual
-recovery is still required after those failures. Before you touch anything:
+Before you touch anything:
 
 ```bash
 # Is a worker still alive? Check the WORKER, not run.sh.
@@ -586,49 +362,30 @@ the run may still complete on its own. Wait for it (`tail --pid=<pid> -f
 Only once nothing is alive: inspect `git status`, decide whether to keep or
 discard partial work, release any `IN_PROGRESS` child still assigned to the dead
 worker (`bd update <child> --status open --assignee ""`), and relaunch. The
-coordinator picks up the remaining frontier; children that already landed stay
-landed.
+loop picks up the remaining frontier; children that already landed stay
+landed. The dead run's epic lock goes stale on its own — the relaunched run
+takes it over once the heartbeat lapses.
 
 ## Cautions
 
-Engine coverage: the core engine is sequential and covers the gate, push,
-attempt, timeout, model, orientation, harness, and permission behavior. The
-remaining bullets describe the legacy engine except where noted.
-
-- Sequential mode works on the base branch in your checkout for the whole run
+- The core engine works on the base branch in your checkout for the whole run
   (like ralph): exclusive use is assumed, retries fix forward, and the gate
-  runs per child on the real checkout. The coordinator detects base movement
-  only while no worker owns that checkout; movement during a worker cannot be
-  distinguished from that worker's own commits, so do not write there then.
+  runs per child on the real checkout. The loop cannot tell your edits from
+  the worker's — do not write to the checkout while a run is active.
 - In a server or remote harness, launch the run detached (`setsid`) by default.
   A plain background job dies with its parent session, and with it the
   supervision of any worker that survives in its own cgroup.
 - `bypassPermissions` is only appropriate for trusted, reversible work.
-- The coordinator owns all merges into the base branch — and, with siblings,
-  into each sibling's base branch. If the user (or another agent) pushes to or
-  moves any of those branches mid-run, the loop stops with a reconciliation
-  error rather than guessing.
-- Budgets are soft: the cap stops new dispatches, and active workers finish.
-  Cost is only tracked on Claude and ccx. A Codex or Kimi fallback disables
-  further cost enforcement because those harnesses do not report spend.
-- Orientation metrics (time/tool-calls/tokens spent before a worker's first
-  edit) are likewise claude/ccx-only, computed from the worker's transcript;
-  other harnesses and any unresolvable transcript report `orientation: null`
-  without affecting reaping.
-- Workers share one beads database and one `node_modules`. If a child adds a
-  dependency, expect the integration gate to need an install — this is the
-  known sharp edge; watch for it in parked merges.
-- Sibling sets land all-or-nothing: one red gate or one conflicting repo parks
-  EVERY branch in the set behind a single `Merge fix:` child, so a parked
-  cross-repo child holds back its work in every repo it touched until the fix
-  lands. That is deliberate — partial cross-repo landings are worse.
-- Failed attempts keep sibling `epic/<child>` branches too; a retry reuses
-  them, and empty ones are deleted at landing time.
+- The coordinator owns the base branch for the whole run. If the user (or
+  another agent) commits to or moves it mid-run, the affected child fails its
+  effects check rather than the loop guessing.
+- Workers share one checkout and one `node_modules`. If a child adds a
+  dependency, expect the next child's gate to need an install — this is the
+  known sharp edge.
 - Spec research children so the findings land in beads — a `bd comment` on the
   child plus, when it changes remaining work, the epic's "Context & architecture"
   — and title them `Research: …` (or label them `research`) so the coordinator
   verifies them by bead comment instead of commits. Do NOT ask them for a
   notes/report file; the repo is not the knowledge store.
-- Failed attempts keep their branch and a bounded rolling harness output tail
-  in `$RUN_DIR/worker-<child>.log`. The adjacent `.bytes` file records total
-  output bytes. Worktrees themselves are recycled.
+- Every iteration keeps its full record in `$RUN_DIR/iter-<N>.json` and the
+  run mailbox; nothing is deleted between attempts.

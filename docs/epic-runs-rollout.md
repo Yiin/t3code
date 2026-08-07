@@ -118,6 +118,35 @@ Every other knob refuses to start. The dropped knobs and their reasons:
 1. This change: `run.sh` becomes the shim, default engine `core`, legacy one
    release behind `COOKEPIC_CORE=legacy`.
 2. t3code-06s.41 closes the conformance `appliesTo` gaps.
-3. After one release with no rollback, t3code-06s.42 deletes `run-legacy.sh`,
+3. ~~After one release with no rollback, t3code-06s.42 deletes `run-legacy.sh`,
    retires or ports the 11 legacy bash suites, and removes the
-   `COOKEPIC_CORE` escape hatch.
+   `COOKEPIC_CORE` escape hatch.~~ Done 2026-08-07 (t3code-06s.42); see
+   **Retirement** below.
+
+## Retirement
+
+Completed 2026-08-07 under t3code-06s.42, after one release with no rollback:
+
+- `skills/cook-epic/run-legacy.sh` and its 11 Bash suites under
+  `skills/cook-epic/tests/` are deleted. `core-delegation.sh` keeps covering
+  the shim (entrypoint resolution, knob validation, one real-`bd` fixture run
+  through the core engine).
+- The 5 legacy-only prompt templates (`worker-prompt.md`,
+  `worker-prompt-sequential.md`, `inspector-prompt.md`, `inspector-agent.md`,
+  `fold-prompt.md`) are deleted with it.
+- The `COOKEPIC_CORE` escape hatch is gone: `run.sh` always execs
+  `t3 epic cook`, and the `engine` config literal no longer accepts `legacy`.
+- Parallel terminal execution retires with the legacy engine. Its 5
+  terminal-only conformance scenarios (`parallel-worktrees`,
+  `park-merge-conflict`, `permission-denial-fast-park`,
+  `serialized-trial-merge`, `sibling-repo-layout`) are deleted; the coverage
+  gap stays tracked by t3code-06s.41.
+- The shadow comparator (`scripts/epic-shadow-compare.ts` and its library and
+  tests) is deleted. It served its evidence purpose — the zero-divergence runs
+  recorded above — and compared two engines, one of which no longer exists.
+  Its core-mailbox normalizer lives on as
+  `packages/epic-run-conformance/src/coreMailbox.ts`.
+- The conformance terminal leg now drives the shared core through `run.sh`
+  with a hermetic `t3` wrapper; `mailboxTranscript.ts` (the legacy mailbox
+  parser) is deleted.
+- `skills/cook-epic/watch.sh` remains the operator monitor.

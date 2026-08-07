@@ -27,7 +27,8 @@ import { EpicRunLock, EpicRunLockHeldError } from "@t3tools/epic-core/ports/Epic
 import * as BeadsStatusBroadcaster from "../src/beads/BeadsStatusBroadcaster.ts";
 
 const repositoryRoot = NodePath.resolve(import.meta.dirname, "../../..");
-const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run-legacy.sh");
+const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run.sh");
+const t3Source = NodePath.join(repositoryRoot, "apps/server/src/bin.ts");
 
 const execFile = (
   command: string,
@@ -270,11 +271,21 @@ describe("shared Beads state", () => {
             Effect.gen(function* () {
               const runDir = NodePath.join(value.root, "run");
               const worker = NodePath.join(value.root, "worker.sh");
+              const t3Wrapper = NodePath.join(value.root, "t3");
               yield* Effect.promise(() => NodeFSP.mkdir(runDir));
               yield* Effect.promise(() =>
                 NodeFSP.writeFile(
                   worker,
                   "#!/usr/bin/env bash\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
+                  { mode: 0o755 },
+                ),
+              );
+              // Hermetic t3 resolution for the run.sh shim: exec the server
+              // CLI from source, never a host-installed t3.
+              yield* Effect.promise(() =>
+                NodeFSP.writeFile(
+                  t3Wrapper,
+                  `#!/usr/bin/env bash\nexec "${process.execPath}" "${t3Source}" "$@"\n`,
                   { mode: 0o755 },
                 ),
               );
@@ -287,13 +298,11 @@ describe("shared Beads state", () => {
                     env: {
                       ...value.env,
                       COOKEPIC_EPIC: value.epicId,
+                      COOKEPIC_T3_BIN: t3Wrapper,
                       COOKEPIC_WORKER_CMD: worker,
                       COOKEPIC_SEQUENTIAL: "1",
                       COOKEPIC_NO_PUSH: "1",
                       COOKEPIC_NO_GATE: "1",
-                      COOKEPIC_DISABLE_SYSTEMD: "1",
-                      COOKEPIC_SPAWN_DELAY: "0",
-                      COOKEPIC_SUPERVISION_TICK: "1",
                     },
                   }),
                 ),
@@ -317,7 +326,8 @@ describe("shared Beads state", () => {
               });
               expect(
                 result.blockers.some(
-                  (blocker) => blocker._tag === "run_in_progress" && blocker.owner === "terminal",
+                  (blocker) =>
+                    blocker._tag === "run_in_progress" && blocker.owner.startsWith("t3-epic-cook-"),
                 ),
               ).toBe(true);
             }),

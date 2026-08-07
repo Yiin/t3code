@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import { assert, describe, it } from "@effect/vitest";
+import { EPIC_RUN_TRANSCRIPT_TAGS } from "@t3tools/contracts";
 import { parseTerminalArtifact } from "@t3tools/epic-core/adapters/TerminalAgentDispatch";
 
 import { decodeConformanceScenario, type ConformanceScenario } from "./scenario.ts";
@@ -39,11 +40,6 @@ const requiredScenarioNames = [
   "preflight-epic-not-found",
   "lock-held",
   "iteration-timeout",
-  "parallel-worktrees",
-  "serialized-trial-merge",
-  "park-merge-conflict",
-  "sibling-repo-layout",
-  "permission-denial-fast-park",
   "ready-unrecognised",
 ] as const;
 
@@ -87,7 +83,7 @@ const treeDigest = (root: string): string => {
 describe("conformance scenarios", () => {
   it("strictly decodes every scenario and covers at least one adapter", () => {
     const scenarios = scenarioFiles().map(loadScenario);
-    assert.isAtLeast(scenarios.length, 16);
+    assert.isAtLeast(scenarios.length, 15);
     assert.equal(new Set(scenarios.map((scenario) => scenario.name)).size, scenarios.length);
     assert.includeMembers(
       scenarios.map((scenario) => scenario.name),
@@ -101,20 +97,15 @@ describe("conformance scenarios", () => {
     assert.throws(() => decodeConformanceScenario({ ...scenario, unexpected: true }));
   });
 
-  it("maps each terminal event and server iteration field exactly once", () => {
+  it("maps each transcript event tag and server iteration field exactly once", () => {
     const repository = NodePath.resolve(packageDirectory, "../..");
-    const runner = NodeFS.readFileSync(
-      NodePath.join(repository, "skills/cook-epic/run-legacy.sh"),
-      "utf8",
-    );
     const docs = NodeFS.readFileSync(
       NodePath.join(repository, "docs/epic-runs-transcript.md"),
       "utf8",
     );
-    const terminalEvents = [...runner.matchAll(/event:"([^"]+)"/gu)].map((match) => match[1]!);
-    for (const event of new Set(terminalEvents)) {
-      const rows = docs.match(new RegExp("^\\|\\s+`" + event + "`\\s+\\|", "gmu")) ?? [];
-      assert.equal(rows.length, 1, `terminal event ${event}`);
+    for (const tag of EPIC_RUN_TRANSCRIPT_TAGS) {
+      const rows = docs.match(new RegExp("^\\|\\s+`" + tag + "`\\s+\\|", "gmu")) ?? [];
+      assert.equal(rows.length, 1, `transcript event ${tag}`);
     }
 
     const contracts = NodeFS.readFileSync(
@@ -470,8 +461,21 @@ describe("conformance workspace", () => {
 
   it("commits scripted changes in the main and sibling repositories", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conformance-sibling-"));
+    const base = loadScenario(NodePath.join(scenariosDirectory, "happy-path.json"));
     const workspace = materializeConformanceWorkspace(
-      loadScenario(NodePath.join(scenariosDirectory, "sibling-repo-layout.json")),
+      decodeConformanceScenario({
+        ...base,
+        name: "sibling-repo-layout",
+        repo: { ...base.repo, siblingRepos: ["api"] },
+        agentScript: [
+          {
+            repoAction: "commit-with-siblings",
+            report: { _tag: "ralph-msg", summary: "built", why: "cross-repo change" },
+            closeChild: true,
+            hangMs: 0,
+          },
+        ],
+      }),
       root,
     );
     const layout = NodePath.join(root, "worker");
@@ -511,8 +515,30 @@ describe("conformance workspace", () => {
 
   it("advances the base branch to create a real trial-merge conflict", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conformance-conflict-"));
+    const base = loadScenario(NodePath.join(scenariosDirectory, "happy-path.json"));
     const workspace = materializeConformanceWorkspace(
-      loadScenario(NodePath.join(scenariosDirectory, "park-merge-conflict.json")),
+      decodeConformanceScenario({
+        ...base,
+        name: "park-merge-conflict",
+        repo: {
+          ...base.repo,
+          mergeConflict: {
+            path: "conflict.txt",
+            baseContent: "base\n",
+            workerContent: "worker\n",
+            baseAdvanceContent: "base advanced\n",
+          },
+        },
+        agentScript: [
+          {
+            repoAction: "commit",
+            writes: [{ path: "conflict.txt", content: "worker\n" }],
+            report: { _tag: "ralph-msg", summary: "built", why: "conflicting change" },
+            closeChild: true,
+            hangMs: 0,
+          },
+        ],
+      }),
       root,
     );
     const worker = NodePath.join(root, "worker");

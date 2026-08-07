@@ -318,7 +318,7 @@ it("maps supported terminal settings into the shared config", () => {
 
 it("lets the typed engine flag override the deprecated environment shim", () => {
   const fixture = makeFixture(1);
-  const result = run("node", [...cookArgs(fixture), "--engine", "legacy"], fixture.repo, {
+  const result = run("node", [...cookArgs(fixture), "--engine", "shadow"], fixture.repo, {
     ...fixture.environment,
     T3CODE_EPIC_RUN_ENGINE: "core",
   });
@@ -326,7 +326,7 @@ it("lets the typed engine flag override the deprecated environment shim", () => 
   const state = JSON.parse(
     NodeFS.readFileSync(NodePath.join(fixture.runDirectory, "run.json"), "utf8"),
   );
-  assert.equal(state.config.engine, "legacy");
+  assert.equal(state.config.engine, "shadow");
   assert.equal(state.configProvenance.engine, "override");
 });
 

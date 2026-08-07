@@ -6,18 +6,18 @@ state and launches work; it does not keep a second copy of issue status.
 
 ## Shared state
 
-| State                                         | Location                                                                                                    | Owner                                 |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| Issue status, claims, dependencies, and notes | The repository's `.beads` database                                                                          | Workers using `bd`                    |
-| Commits and branches                          | Git; parallel workers (legacy terminal engine, server runs) use `epic/<child-id>` branches and worktrees    | Workers and cook-epic                 |
-| Loop prompt and reports                       | A Ralph `RUN_DIR` under `/var/tmp`, including `prompt.md`, `mailbox.jsonl`, `summary.md`, and `iter-N.json` | Ralph                                 |
-| Epic run lock                                 | `<repo>/.beads/run-lock.<epic-id>.json`                                                                     | The active terminal or T3 Code runner |
-| T3 Code run recovery state                    | `epic_runs` rows in `~/.t3/userdata/state.sqlite`                                                           | T3 Code server                        |
+| State                                         | Location                                                                                                               | Owner                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| Issue status, claims, dependencies, and notes | The repository's `.beads` database                                                                                     | Workers using `bd`                    |
+| Commits and branches                          | Git; the sequential terminal core commits on the base branch, server runs use `epic/<child-id>` branches and worktrees | Workers and cook-epic                 |
+| Loop prompt and reports                       | A Ralph `RUN_DIR` under `/var/tmp`, including `prompt.md`, `mailbox.jsonl`, `summary.md`, and `iter-N.json`            | Ralph                                 |
+| Epic run lock                                 | `<repo>/.beads/run-lock.<epic-id>.json`                                                                                | The active terminal or T3 Code runner |
+| T3 Code run recovery state                    | `epic_runs` rows in `~/.t3/userdata/state.sqlite`                                                                      | T3 Code server                        |
 
 The branch and worktree rules live in
 [`skills/cook-epic/SKILL.md`](../skills/cook-epic/SKILL.md) under **How it
-works** (Isolation and Landing); they describe the legacy terminal engine and
-the server runner's parallel loop.
+works**; they describe the shared core that both the terminal and the server
+runner drive.
 Ralph's run artifacts are listed in
 [`skills/ralph/SKILL.md:17-21`](../skills/ralph/SKILL.md#L17-L21).
 The server derives `state.sqlite` in
@@ -40,11 +40,9 @@ own the epic run lock and is not an epic mode to switch into or out of.
 
 ## Engine selection
 
-The default engine is `core`. The terminal `run.sh` is a shim that validates
+The engine is `core`. The terminal `run.sh` is a shim that validates
 the launch and execs `t3 epic cook`; the hosted runner drives the same shared
-core. The deprecated Bash coordinator (`skills/cook-epic/run-legacy.sh`) stays
-reachable for one release through `COOKEPIC_CORE=legacy` (or `0`) and prints a
-deprecation notice on every start.
+core. The legacy Bash coordinator retired on 2026-08-07 (t3code-06s.42).
 
 Set `engine` in `.t3code/epic-run.json` or in a run input. The default is
 `core`. Config layers apply in this order, with the last value winning:
@@ -59,67 +57,30 @@ terminal adapter logs a warning when either variable is present. If both are
 present, `T3CODE_EPIC_RUN_ENGINE` wins within the environment layer. Replace
 both variables with the `engine` config key.
 
-The config reader accepts these rollout values:
+The config reader accepts these values:
 
-- `legacy` runs the existing adapter.
 - `core` runs the shared orchestration core.
-- `shadow` runs the legacy adapter and records shared-core policy decisions.
+- `shadow` is a reserved rollout selector kept for config compatibility. No
+  adapter branches on it; the shadow comparator it served retired with the
+  legacy engine (t3code-06s.42).
 
-Shadow core is observation-only. It consumes each legacy iteration's head,
-worktree fingerprint, child status, and classified outcome. It does not start
-agents, write Beads, change Git, run gates, or push.
-
-The selector is persisted on the run for provenance and rollout auditing.
-Entry points choose the adapter themselves: `run.sh` and `t3 epic cook` run
-the shared core, the hosted runner runs the same core, and
-`COOKEPIC_CORE=legacy` selects the legacy terminal coordinator for one more
-release.
+The selector is persisted on the run for provenance. Entry points choose the
+adapter themselves: `run.sh` and `t3 epic cook` run the shared core, and the
+hosted runner runs the same core.
 
 Config is strict. An unknown engine value rejects the launch like any other
 invalid config value. It does not silently select a different engine.
 
-## Compare adapters
-
-Run a real comparison only on a clean throwaway branch with a local embedded
-Beads database:
-
-```bash
-node scripts/epic-shadow-compare.ts \
-  --epic <id> \
-  --cwd <repo> \
-  --adapters terminal,core \
-  --mode run
-```
-
-Run mode copies one exact Git and Beads snapshot into two temporary roots. It
-runs each adapter once, disables pushes, and deletes only those temporary roots.
-It refuses default branches, dirty trees, shared Dolt hosts, external Beads
-databases, linked Git worktrees, and sibling repository layouts.
-
-Shadow mode reads paired normalized transcripts without starting an adapter:
-
-```bash
-node scripts/epic-shadow-compare.ts \
-  --epic <id> \
-  --cwd <repo> \
-  --adapters terminal,core \
-  --mode shadow
-```
-
-The default files are
-`.git/t3code/epic-shadow/<id>/terminal.jsonl` and `core.jsonl`. Use
-`--transcript-dir <dir>` to read a copied artifact directory. A different event
-sequence is structural drift and makes the command fail. Changes only to
-`summary` or `why` are content drift and do not fail the command.
+## Run lock
 
 Only one runner may own an epic. Epic-targeted `ralph`, `cook-epic`, and the T3
 Code server runner use the same run-lock file. If the lock is live, the second
 runner reports that the run is already in progress instead of claiming another
 child. `NodeEpicRunLock` in `packages/epic-core` is the shared implementation
-for the terminal core and the hosted runner; the legacy Bash coordinator and
-ralph keep their own holders on the same file. The `run-lock.sh` suite covers
-the legacy holder, and the `NodeEpicRunLock` interop test covers the shared
-file format and exclusive-create behavior across implementations.
+for the terminal core and the hosted runner; ralph keeps its own Bash holder on
+the same file format. The `NodeEpicRunLock` interop test covers the shared file
+format and exclusive-create behavior across the TypeScript and Bash
+implementations.
 
 ## Lifecycle
 

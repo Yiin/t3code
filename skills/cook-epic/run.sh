@@ -8,11 +8,6 @@
 #
 # Usage: run.sh <run-dir>          # launch from the project root
 #
-# Engine: the shared core is the default. COOKEPIC_CORE=0 (or "legacy") execs
-# run-legacy.sh, the deprecated Bash coordinator, for one documented release;
-# docs/epic-runs-rollout.md is the exit checklist and t3code-06s.42 tracks the
-# removal.
-#
 # Supported environment, mapped onto the run config (prefer the committed
 # .t3code/epic-run.json; the env layer is deprecated):
 #   COOKEPIC_EPIC              beads epic id (REQUIRED)
@@ -35,7 +30,7 @@
 # docs/epic-runs-rollout.md lists each dropped knob and its reason.
 #
 # loop.log, mailbox.jsonl, summary.md, and the STOP control file keep their
-# exact meanings under both engines.
+# exact meanings from the retired Bash coordinator.
 set -uo pipefail
 
 RUN_DIR="${1:?usage: run.sh <run-dir>}"
@@ -50,16 +45,6 @@ fail() { # <message> <help>
   printf 'error: %s\nhelp: %s\n' "$1" "$2" >&2
   exit 2
 }
-
-case "${COOKEPIC_CORE:-core}" in
-  0|legacy)
-    printf 'note: the legacy Bash coordinator is deprecated; the default engine is the shared core (t3 epic cook). Removal: t3code-06s.42\n' >&2
-    exec "$SKILL_DIR/run-legacy.sh" "$RUN_DIR"
-    ;;
-  1|core) ;;
-  *) fail 'COOKEPIC_CORE must be core or legacy' \
-    'unset it for the shared core, or use legacy (0) for the deprecated Bash coordinator' ;;
-esac
 
 for name in COOKEPIC_WORKERS COOKEPIC_SIBLINGS COOKEPIC_BUDGET_USD \
   COOKEPIC_IDLE_THRESHOLD COOKEPIC_INSPECTOR_TIMEOUT \
@@ -76,14 +61,14 @@ for name in COOKEPIC_WORKERS COOKEPIC_SIBLINGS COOKEPIC_BUDGET_USD \
   RUNLOCK_HEARTBEAT_SECS RUNLOCK_STALE_SECS OPENCODE_BIN; do
   if [[ -v $name && -n ${!name} ]]; then
     fail "$name is not supported by the shared core" \
-      "unset $name (see docs/epic-runs-rollout.md) or use COOKEPIC_CORE=legacy"
+      "unset $name (see docs/epic-runs-rollout.md)"
   fi
 done
 
 [ -n "${COOKEPIC_EPIC:-}" ] || fail 'COOKEPIC_EPIC is required' 'set it to the beads epic id'
 if [[ -v COOKEPIC_SEQUENTIAL && -n ${COOKEPIC_SEQUENTIAL} && ${COOKEPIC_SEQUENTIAL} != 1 ]]; then
   fail 'the shared core cook loop is sequential; COOKEPIC_SEQUENTIAL must be 1 or unset' \
-    'set COOKEPIC_SEQUENTIAL=1 or use COOKEPIC_CORE=legacy'
+    'set COOKEPIC_SEQUENTIAL=1 or unset it'
 fi
 if [[ -v COOKEPIC_NO_PUSH && -n ${COOKEPIC_NO_PUSH} && ${COOKEPIC_NO_PUSH} != 1 ]]; then
   fail 'COOKEPIC_NO_PUSH must be exactly 1 when set' \
@@ -182,7 +167,7 @@ elif [ -f "$checkout/apps/server/src/bin.ts" ]; then
   core_command=(node "$checkout/apps/server/src/bin.ts")
 else
   fail "could not resolve t3 from COOKEPIC_T3_BIN, t3 on PATH, $checkout/apps/server/dist/bin.mjs, or $checkout/apps/server/src/bin.ts" \
-    'set COOKEPIC_T3_BIN or use COOKEPIC_CORE=legacy'
+    'set COOKEPIC_T3_BIN to a t3 entrypoint'
 fi
 
 printf 'note: run.sh and the COOKEPIC_* environment are deprecated; prefer .t3code/epic-run.json plus: %s epic cook --epic %s --cwd %s --run-dir %s\n' \

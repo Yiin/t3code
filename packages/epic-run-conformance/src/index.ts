@@ -4,4 +4,4 @@ export {
   materializeConformanceWorkspace,
   type ConformanceWorkspace,
 } from "./workspace.ts";
-export { mailboxToTranscript, parseMailboxJsonl } from "./mailboxTranscript.ts";
+export { normalizeCoreMailbox, parseCoreMailbox } from "./coreMailbox.ts";

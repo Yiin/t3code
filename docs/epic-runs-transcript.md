@@ -2,7 +2,18 @@
 
 The conformance transcript records stable decisions. It keeps timestamps, thread identifiers, process identifiers, run paths, and cost in metadata. Comparators remove that metadata.
 
-The terminal adapter adds `pushed` and `verified` to every mailbox record. The server adapter must synthesize those values from its launch policy and gate result.
+The terminal adapter is the shared core reached through `skills/cook-epic/run.sh`, which execs `t3 epic cook`. Its `mailbox.jsonl` records are the `FileRunEvents` format: one JSON `RunEvent` per line (`run-state-changed`, `iteration-state-changed`, `child-claim-released`, `provider-fallback`, and the subagent-liveness records). The terminal adapter adds `pushed` and `verified` to every normalized event. The server adapter must synthesize those values from its launch policy and gate result.
+
+## Shared core records
+
+The contract also accepts the shared `run-state-changed` and `iteration-state-changed` records directly. An adapter expands them into the specific decision tags before comparison. This boundary avoids false differences caused by store writes that occur before policy decisions. The shared event stream also has `subagent-liveness-degraded` and `subagent-liveness-unavailable`. Terminal adapters synthesize these from harness capabilities. They are separate from worker-idle inspection events.
+
+| Shared record                   | Meaning                                                     | Verdict                                                                         |
+| ------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `iteration-state-changed`       | The core persisted an iteration state transition.           | Adapters expand it into dispatched, done, retry, blocked, or completed-no-code. |
+| `run-state-changed`             | The core persisted a run state transition.                  | Adapters expand terminal statuses into the finished decision.                   |
+| `subagent-liveness-degraded`    | Live subagent evidence is partial for the iteration.        | The terminal adapter reports it from harness capabilities.                      |
+| `subagent-liveness-unavailable` | The harness exposes no subagent evidence for the iteration. | The terminal adapter reports it from harness capabilities.                      |
 
 ## Terminal events with a server transition
 
@@ -34,8 +45,6 @@ The terminal adapter adds `pushed` and `verified` to every mailbox record. The s
 | `worker-cap`              | The live parallel worker limit changed.                              | The terminal adapter synthesizes this operator-only control event. |
 | `worker-idle`             | A worker crossed the idle threshold before inspection.               | The shared supervisor grows this observation.                      |
 
-The shared event stream also has `subagent-liveness-degraded` and `subagent-liveness-unavailable`. Terminal adapters synthesize these from harness capabilities. They are separate from worker-idle inspection events.
-
 ## Server iteration fields without a terminal field
 
 | Server field     | Terminal source                                                   | Verdict                                                              |
@@ -52,5 +61,3 @@ The shared event stream also has `subagent-liveness-degraded` and `subagent-live
 | `failureReason`  | Retry, blocked, rate-limit, timeout, and provider classification. | The shared core owns the closed classified value.                    |
 | `startedAt`      | Mailbox timestamp.                                                | The adapter moves it to ignored transcript metadata.                 |
 | `finishedAt`     | Mailbox timestamp.                                                | The adapter moves it to ignored transcript metadata.                 |
-
-The contract also accepts the shared `run-state-changed` and `iteration-state-changed` records directly. An adapter expands them into the specific decision tags before comparison. This boundary avoids false differences caused by store writes that occur before policy decisions.

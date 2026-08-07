@@ -193,9 +193,9 @@ if [ "$HARNESS" = codex ]; then
 fi
 
 # --------------------------------------------------------------- run lock ----
-# MIRRORED BLOCK — cook-epic/run-legacy.sh and ralph/run.sh carry an identical copy.
-# Both runners are standalone, copyable single scripts with no library to
-# source, so this is duplicated on purpose: edit both or neither.
+# This is now the only Bash copy of the run-lock block. cook-epic's identical
+# copy retired with the legacy coordinator (t3code-06s.42); the shared core
+# uses NodeEpicRunLock on the same file format.
 #
 # Why it exists: a t3code server run and a terminal /ralph or /cook-epic can aim
 # at the same beads epic in the same repo. Per-child `bd update --claim` does

@@ -184,7 +184,7 @@ describe("EpicRunConfig", () => {
   });
 
   it("accepts only known epic engines", () => {
-    for (const engine of ["legacy", "core", "shadow"] as const) {
+    for (const engine of ["core", "shadow"] as const) {
       expect(decodeConfig({ engine }).engine).toBe(engine);
       expect(decodeOverride({ engine })).toEqual({ engine });
     }

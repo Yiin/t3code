@@ -50,7 +50,7 @@ run_core_shim() {
   local runner="$1" run_dir="$2" output="$3" path_bin="$4"
   shift 4
   set +e
-  env PATH="$path_bin" COOKEPIC_EPIC=epic COOKEPIC_CORE=1 COOKEPIC_HARNESS=codex "$@" \
+  env PATH="$path_bin" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=codex "$@" \
     "$BASH_BIN" "$runner" "$run_dir" > "$output" 2>&1
   local rc=$?
   set -e
@@ -181,7 +181,7 @@ EOF
 }
 
 run_fixture() {
-  local root="$1" core="$2" repo epic run_dir
+  local root="$1" repo epic run_dir
   repo="$root/repo"
   epic="$(<"$root/epic-id")"
   run_dir="$root/run"
@@ -189,7 +189,7 @@ run_fixture() {
   (
     cd "$repo"
     env -u BEADS_DIR -u BEADS_DOLT_SERVER_HOST HOME="$root/home" \
-      XDG_CONFIG_HOME="$root/config" COOKEPIC_CORE="$core" COOKEPIC_EPIC="$epic" \
+      XDG_CONFIG_HOME="$root/config" COOKEPIC_EPIC="$epic" \
       COOKEPIC_T3_BIN="$TMP_ROOT/t3-source" COOKEPIC_HARNESS=worker-cmd \
       COOKEPIC_WORKER_CMD="$root/worker.sh" COOKEPIC_SEQUENTIAL=1 \
       COOKEPIC_NO_GATE=1 COOKEPIC_NO_PUSH=1 COOKEPIC_MAX_DISPATCHES=1 \
@@ -200,7 +200,7 @@ run_fixture() {
   set -e
   [ "$rc" -eq 0 ] || {
     sed -n '1,160p' "$root/stdout" >&2
-    fail "COOKEPIC_CORE=$core fixture exited $rc"
+    fail "core fixture exited $rc"
   }
   (cd "$repo" && env -u BEADS_DIR -u BEADS_DOLT_SERVER_HOST HOME="$root/home" \
     XDG_CONFIG_HOME="$root/config" bd list --parent "$epic" --all --flat --json) \
@@ -213,15 +213,10 @@ exec "$NODE_BIN" "$REPO_ROOT/apps/server/src/bin.ts" "\$@"
 EOF
 chmod +x "$TMP_ROOT/t3-source"
 
-legacy_root="$TMP_ROOT/legacy"
 core_root="$TMP_ROOT/core"
-make_fixture "$legacy_root"
 make_fixture "$core_root"
-run_fixture "$legacy_root" 0
-run_fixture "$core_root" 1
-cmp -s "$legacy_root/final-state.json" "$core_root/final-state.json" \
-  || fail 'Bash and core adapters ended with different bead states'
-assert_contains "$legacy_root/final-state.json" '"status": "closed"'
+run_fixture "$core_root"
+assert_contains "$core_root/final-state.json" '"status": "closed"'
 jq -e '.status == "done"' "$core_root/run/run.json" >/dev/null \
   || fail 'shared core did not record a done run'
 
