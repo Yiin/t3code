@@ -48,6 +48,8 @@ export interface BacklogShape {
     epicId: string,
   ) => Effect.Effect<ReadonlyArray<BacklogIssue>, BacklogError>;
   readonly claim: (issueId: string, actor?: string) => Effect.Effect<void, BacklogError>;
+  /** Reopen and clear the assignee only when the issue is currently claimed. */
+  readonly releaseClaim: (issueId: string) => Effect.Effect<boolean, BacklogError>;
   /** Reopen a retry or block a child after its attempt budget ends. */
   readonly setStatus: (
     issueId: string,

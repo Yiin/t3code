@@ -128,8 +128,16 @@ const translateCoreEvents = (input: {
     (event): event is Extract<RunEvent, { readonly type: "run-state-changed" }> =>
       event.type === "run-state-changed",
   )?.run;
+  const releasedClaims = new Map(
+    input.events.flatMap((event) =>
+      event.type === "child-claim-released"
+        ? [[`${String(event.iterationIndex)}\0${event.issueId}`, event] as const]
+        : [],
+    ),
+  );
   const childAttempts = new Map<string, number>();
   let infraAttempts = 0;
+  let recoveredExhaustion = false;
   const comments = new Map(
     stateChildren(input.workspace).flatMap((child) => {
       const id = typeof child["id"] === "string" ? child["id"] : undefined;
@@ -174,11 +182,24 @@ const translateCoreEvents = (input: {
         : (childAttempts.set(issueId, (childAttempts.get(issueId) ?? 0) + 1),
           childAttempts.get(issueId)!);
     const last = index === settled.length - 1;
+    const recovery =
+      issueId === null
+        ? undefined
+        : releasedClaims.get(`${String(iteration.iterationIndex)}\0${issueId}`);
     if (!last || finalRun?.status === "running") {
       output.push({ _tag: "retry", ...common, failureReason: failure, attempts });
       continue;
     }
-    if (finalRun?.lastError?.startsWith("gutter:")) {
+    if (recovery !== undefined) {
+      recoveredExhaustion = true;
+      output.push({
+        _tag: "blocked",
+        ...common,
+        failureReason: failure,
+        attempts,
+        reason: recovery.reason,
+      });
+    } else if (finalRun?.lastError?.startsWith("gutter:")) {
       output.push({ _tag: "blocked", ...common, reason: "no-commit gutter", attempts });
     } else if (finalRun?.lastError?.startsWith("infra:")) {
       // The exhausted infrastructure attempt is represented by the terminal
@@ -228,6 +249,7 @@ const translateCoreEvents = (input: {
       verified: true,
     });
   } else if (
+    !recoveredExhaustion &&
     finalRun?.status === "failed" &&
     finalRun.consecutiveFailures >= DEFAULT_EPIC_RUN_CONFIG.server.maxConsecutiveFailures
   ) {

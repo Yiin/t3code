@@ -14,7 +14,7 @@ import type { AgentDispatchShape, AgentSelection, IterationHandle } from "./port
 import type { BacklogIssue, BacklogShape } from "./ports/Backlog.ts";
 import type { EpicRunLockShape } from "./ports/EpicRunLock.ts";
 import type { GateShape } from "./ports/Gate.ts";
-import type { RunEventsShape } from "./ports/RunEvents.ts";
+import { CHILD_CLAIM_RELEASED_REASON, type RunEventsShape } from "./ports/RunEvents.ts";
 import type {
   PersistedEpicRun,
   PersistedEpicRunIteration,
@@ -158,6 +158,23 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
     updatedAt: now(),
   };
   const attempts = new Map<string, number>();
+  const trackedChildren = new Map<string, number>();
+  const exhaustedIterations = new Map<string, number>();
+  const publishedRecoveryEvents = new Set<string>();
+
+  const publishClaimRecovery = Effect.fn("runSequentialEpicLoop.publishClaimRecovery")(function* (
+    issueId: string,
+    iterationIndex: number,
+  ) {
+    yield* ports.events.publish({
+      type: "child-claim-released",
+      runId: run.runId,
+      issueId,
+      iterationIndex,
+      reason: CHILD_CLAIM_RELEASED_REASON,
+    });
+    publishedRecoveryEvents.add(issueId);
+  });
 
   const saveRun = Effect.fn("runSequentialEpicLoop.saveRun")(function* () {
     run = { ...run, updatedAt: now() };
@@ -252,8 +269,8 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         yield* saveRun();
         break;
       }
-      yield* ports.backlog.claim(child.id, `t3code-${String(process.pid)}`);
       yield* ports.journal.appendIteration(pending);
+      trackedChildren.set(child.id, iterationIndex);
       yield* ports.events.publish({ type: "iteration-state-changed", iteration: pending });
       run = {
         ...run,
@@ -426,15 +443,22 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         forceChildRetry || iterationFailureClass(outcome.kind) === "child";
       const attempt = (attempts.get(child.id) ?? 0) + (successful || !consumesChildAttempt ? 0 : 1);
       attempts.set(child.id, attempt);
-      if (!successful && !fatalFailure && consumesChildAttempt) {
-        yield* ports.backlog.setStatus(
-          child.id,
-          attempt >= config.limits.maxAttemptsPerChild ? "blocked" : "open",
-        );
-        postChild = yield* ports.backlog.showIssue(child.id);
-      } else if (!successful && !fatalFailure && !consumesChildAttempt) {
-        yield* ports.backlog.setStatus(child.id, "open");
-        postChild = yield* ports.backlog.showIssue(child.id);
+      const childAttemptBudgetExhausted =
+        consumesChildAttempt && attempt >= config.limits.maxAttemptsPerChild;
+      if (childAttemptBudgetExhausted) exhaustedIterations.set(child.id, iterationIndex);
+      let claimReleased = false;
+      if (!successful && !fatalFailure) {
+        const recovery = yield* Effect.result(ports.backlog.releaseClaim(child.id));
+        if (recovery._tag === "Failure") {
+          yield* Effect.logWarning("epic.loop.release-claimed-child-failed", {
+            issueId: child.id,
+            cause: recovery.failure,
+          });
+        } else if (recovery.success) {
+          claimReleased = true;
+          const refreshed = yield* Effect.result(ports.backlog.showIssue(child.id));
+          if (refreshed._tag === "Success") postChild = refreshed.success;
+        }
       }
 
       const turnStatus = successful ? ("completed" as const) : ("failed" as const);
@@ -456,6 +480,9 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
       };
       yield* ports.journal.updateIteration(updated);
       yield* ports.events.publish({ type: "iteration-state-changed", iteration: updated });
+      if (claimReleased && childAttemptBudgetExhausted) {
+        yield* publishClaimRecovery(child.id, iterationIndex);
+      }
 
       const decision = decideIterationBoundary({
         runStatus: run.status,
@@ -485,10 +512,16 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         infraStreak: decision.nextInfraStreak,
         lastError: decision.lastError,
         ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
+        ...(childAttemptBudgetExhausted
+          ? {
+              status: "failed" as const,
+              lastError: outcome.detail ?? outcome.kind,
+            }
+          : {}),
         ...(fatalFailure ? { status: "failed" as const, lastError: outcome.detail } : {}),
       };
       yield* saveRun();
-      if (fatalFailure || decision.action === "stop") break;
+      if (fatalFailure || childAttemptBudgetExhausted || decision.action === "stop") break;
       if (decision.delayMs > 0) yield* Effect.sleep(decision.delayMs);
     }
     return run;
@@ -516,6 +549,27 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         if (activeHandle !== null) {
           yield* activeHandle.interrupt.pipe(Effect.ignore);
           yield* activeHandle.release.pipe(Effect.ignore);
+        }
+        for (const issueId of trackedChildren.keys()) {
+          const released = yield* Effect.result(ports.backlog.releaseClaim(issueId));
+          if (released._tag === "Failure") {
+            yield* Effect.logWarning("epic.loop.release-claimed-child-failed", {
+              issueId,
+              cause: released.failure,
+            });
+            continue;
+          }
+          if (!released.success || publishedRecoveryEvents.has(issueId)) continue;
+          const exhaustedIterationIndex = exhaustedIterations.get(issueId);
+          if (exhaustedIterationIndex === undefined) continue;
+          yield* publishClaimRecovery(issueId, exhaustedIterationIndex).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("epic.loop.publish-claim-recovery-failed", {
+                issueId,
+                cause,
+              }),
+            ),
+          );
         }
         yield* lease.release.pipe(Effect.ignore);
       }),

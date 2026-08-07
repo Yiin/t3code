@@ -154,6 +154,18 @@ export const makeProcessBacklog = (input: {
       issueId,
       args: ["update", issueId, "--claim", ...(actor === undefined ? [] : ["--actor", actor])],
     }).pipe(Effect.asVoid);
+  const releaseClaim: BacklogShape["releaseClaim"] = Effect.fn("ProcessBacklog.releaseClaim")(
+    function* (issueId) {
+      const issue = yield* showIssue(issueId);
+      if (issue.status !== "in_progress") return false;
+      yield* run({
+        operation: "releaseClaim",
+        issueId,
+        args: ["update", issueId, "--status", "open", "--assignee", ""],
+      });
+      return true;
+    },
+  );
   const setStatus: BacklogShape["setStatus"] = (issueId, status) =>
     run({
       operation: "setStatus",
@@ -313,6 +325,7 @@ export const makeProcessBacklog = (input: {
     showIssue,
     listChildren,
     claim,
+    releaseClaim,
     setStatus,
     createChild,
     close,

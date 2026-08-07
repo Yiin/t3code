@@ -189,7 +189,7 @@ describe("conformance workspace", () => {
     assert.equal(invoke(["ready", "--parent", "epic", "--json"]).status, 0);
     assert.equal(invoke(["list", "--parent", "epic", "--all", "--flat", "--json"]).status, 0);
     assert.equal(invoke(["update", "epic.1", "--claim"]).status, 0);
-    assert.equal(invoke(["update", "epic.1", "--status", "open"]).status, 0);
+    assert.equal(invoke(["update", "epic.1", "--status", "open", "--assignee", ""]).status, 0);
     assert.equal(invoke(["note", "epic.1", "note"]).status, 0);
     assert.equal(invoke(["comment", "epic.1", "comment"]).status, 0);
     assert.equal(invoke(["dep", "add", "epic.1", "epic"]).status, 0);
@@ -220,10 +220,12 @@ describe("conformance workspace", () => {
     assert.equal(run(workspace, "git", ["status", "--short"]).status, 0);
     const child = JSON.parse(invoke(["show", "epic.1", "--json"]).stdout)[0] as {
       status: string;
+      assignee?: string;
       labels: ReadonlyArray<string>;
       dependencies: ReadonlyArray<string>;
     };
     assert.equal(child.status, "closed");
+    assert.equal(child.assignee, "");
     assert.deepEqual(child.labels, ["test"]);
     assert.deepEqual(child.dependencies, ["epic"]);
     const created = JSON.parse(invoke(["show", "created-1", "--json"]).stdout)[0] as {
@@ -252,7 +254,7 @@ describe("conformance workspace", () => {
         ["ready", "--parent", "epic", "--json"],
         ["list", "--parent", "epic", "--all", "--flat", "--json"],
         ["update", "epic.1", "--claim"],
-        ["update", "epic.1", "--status", "open"],
+        ["update", "epic.1", "--status", "open", "--assignee", ""],
         ["note", "epic.1", "note"],
         ["comment", "epic.1", "comment"],
         ["dep", "add", "epic.1", "epic"],

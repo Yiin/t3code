@@ -165,6 +165,60 @@ describe("ProcessBacklog", () => {
     }),
   );
 
+  it.effect("releases only an in-progress claim and clears its assignee", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunInput[] = [];
+      let status = "open";
+      const processRunner = ProcessRunner.of({
+        run: (command) =>
+          Effect.sync(() => {
+            calls.push(command);
+            if (command.args[0] === "show") {
+              return success(`{"id":"epic.1","title":"First","status":"${status}"}`);
+            }
+            return success();
+          }),
+      });
+      const backlog = makeProcessBacklog({ repositoryPath: "/repo", processRunner });
+
+      for (const unchanged of ["open", "closed", "blocked"]) {
+        status = unchanged;
+        expect(yield* backlog.releaseClaim("epic.1")).toBe(false);
+      }
+      status = "in_progress";
+      expect(yield* backlog.releaseClaim("epic.1")).toBe(true);
+
+      expect(calls.map(({ args }) => args)).toEqual([
+        ["show", "epic.1", "--json"],
+        ["show", "epic.1", "--json"],
+        ["show", "epic.1", "--json"],
+        ["show", "epic.1", "--json"],
+        ["update", "epic.1", "--status", "open", "--assignee", ""],
+      ]);
+    }),
+  );
+
+  it.effect("reports a failed claim release without claiming success", () =>
+    Effect.gen(function* () {
+      const processRunner = ProcessRunner.of({
+        run: (command) =>
+          Effect.succeed(
+            command.args[0] === "show"
+              ? success('{"id":"epic.1","title":"First","status":"in_progress"}')
+              : failure("database unavailable"),
+          ),
+      });
+      const backlog = makeProcessBacklog({ repositoryPath: "/repo", processRunner });
+
+      const error = yield* backlog.releaseClaim("epic.1").pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "BacklogError",
+        operation: "releaseClaim",
+        issueId: "epic.1",
+      });
+    }),
+  );
+
   it.effect("distinguishes a held merge slot from command failure", () =>
     Effect.gen(function* () {
       let response = {

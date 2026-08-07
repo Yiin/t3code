@@ -10,12 +10,14 @@ import * as Option from "effect/Option";
 
 import { runSequentialEpicLoop, type SequentialEpicLoopPorts } from "./SequentialEpicLoop.ts";
 import { DispatchError, type IterationHandle } from "./ports/AgentDispatch.ts";
-import type { BacklogIssue, BacklogShape } from "./ports/Backlog.ts";
+import { BacklogError, type BacklogIssue, type BacklogShape } from "./ports/Backlog.ts";
+import type { RunEvent } from "./ports/RunEvents.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
 import { VcsError } from "./ports/Vcs.ts";
 
 type Attempt = {
   readonly infra?: boolean;
+  readonly claim?: boolean;
   readonly commit?: boolean;
   readonly close?: boolean;
   readonly comment?: boolean;
@@ -59,6 +61,7 @@ const fixture = (input: {
   readonly pushFails?: boolean;
   readonly childTitle?: string;
   readonly stopChecks?: ReadonlyArray<boolean>;
+  readonly releaseFailures?: number;
 }) => {
   const epic = issue({
     id: "epic",
@@ -77,10 +80,12 @@ const fixture = (input: {
   let dispatches = 0;
   let released = false;
   let claims = 0;
+  let releaseAttempts = 0;
   let stopReads = 0;
   let persistedRun: PersistedEpicRun | null = null;
   const iterations: PersistedEpicRunIteration[] = [];
   const statuses: string[] = [];
+  const events: RunEvent[] = [];
   const ordering: string[] = [];
   const attempts = input.attempts ?? [];
 
@@ -93,6 +98,25 @@ const fixture = (input: {
         claims += 1;
         child = { ...child, status: "in_progress" };
       }),
+    releaseClaim: () => {
+      releaseAttempts += 1;
+      ordering.push("claim:release-attempt");
+      if (releaseAttempts <= (input.releaseFailures ?? 0)) {
+        return Effect.fail(
+          new BacklogError({
+            operation: "releaseClaim",
+            issueId: child.id,
+            detail: "offline",
+          }),
+        );
+      }
+      return Effect.sync(() => {
+        if (child.status !== "in_progress") return false;
+        child = { ...child, status: "open" };
+        statuses.push("open");
+        return true;
+      });
+    },
     setStatus: (_id: string, status: "open" | "in_progress" | "blocked" | "closed") =>
       Effect.sync(() => {
         child = { ...child, status };
@@ -118,6 +142,7 @@ const fixture = (input: {
           },
           heartbeat: Effect.succeed(true),
           release: Effect.sync(() => {
+            ordering.push("lease:released");
             released = true;
             return true;
           }),
@@ -157,8 +182,11 @@ const fixture = (input: {
     events: {
       publish: (event) =>
         Effect.sync(() => {
+          events.push(event);
           if (event.type === "iteration-state-changed") {
             ordering.push(`event:${event.iteration.turnStatus}`);
+          } else if (event.type === "child-claim-released") {
+            ordering.push("event:child-claim-released");
           }
         }),
     },
@@ -177,6 +205,7 @@ const fixture = (input: {
             cost: "none",
           },
           awaitSettled: Effect.sync(() => {
+            if (attempt.claim) child = { ...child, status: "in_progress" };
             if (attempt.commit) head += 1;
             if (attempt.close) child = { ...child, status: "closed" };
             if (attempt.comment) child = { ...child, commentCount: child.commentCount + 1 };
@@ -256,27 +285,113 @@ const fixture = (input: {
     iterations,
     released: () => released,
     claims: () => claims,
+    releaseAttempts: () => releaseAttempts,
+    events,
     ordering,
   };
 };
 
-it.live("reopens then blocks a closed child after repeated gate failures", () =>
+it.live("keeps a closed child unchanged after a gate failure", () =>
   Effect.gen(function* () {
     const test = fixture({
-      attempts: [
-        { commit: true, close: true },
-        { commit: true, close: true },
-      ],
+      attempts: [{ claim: true, commit: true, close: true }],
       config: config({
-        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 2, maxIterations: 5 },
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 1, maxIterations: 2 },
         gate: { command: "gate", disabled: false },
       }),
       gatePasses: false,
     });
     const result = yield* test.run();
     assert.equal(result.status, "failed");
-    assert.equal(test.child().status, "blocked");
-    assert.deepEqual(test.statuses, ["open", "blocked"]);
+    assert.equal(test.child().status, "closed");
+    assert.deepEqual(test.statuses, []);
+  }),
+);
+
+it.live("reopens a claimed child and emits recovery when its retry budget is exhausted", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ claim: true, blocked: true }],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 1 },
+        server: { ...DEFAULT_EPIC_RUN_CONFIG.server, maxConsecutiveFailures: 1 },
+      }),
+    });
+
+    const result = yield* test.run();
+    assert.equal(result.status, "failed");
+    assert.equal(test.child().status, "open");
+    assert.deepEqual(test.statuses, ["open"]);
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "child-claim-released"),
+      [
+        {
+          type: "child-claim-released",
+          runId: "run",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          reason: "retry budget exhausted; child reopened",
+        },
+      ],
+    );
+    assert.isBelow(
+      test.ordering.indexOf("event:failed"),
+      test.ordering.indexOf("event:child-claim-released"),
+    );
+  }),
+);
+
+it.live("keeps an unclaimed child open without emitting recovery at exhaustion", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ blocked: true }],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 1 },
+        server: { ...DEFAULT_EPIC_RUN_CONFIG.server, maxConsecutiveFailures: 1 },
+      }),
+    });
+
+    assert.equal((yield* test.run()).status, "failed");
+    assert.equal(test.child().status, "open");
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "child-claim-released"),
+      [],
+    );
+  }),
+);
+
+it.live("retries a failed claim release during terminal cleanup", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ claim: true, blocked: true }],
+      releaseFailures: 1,
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 1 },
+        server: { ...DEFAULT_EPIC_RUN_CONFIG.server, maxConsecutiveFailures: 1 },
+      }),
+    });
+
+    const result = yield* test.run();
+    assert.equal(result.status, "failed");
+    assert.equal(result.lastError, "agent reported RALPH_BLOCKED");
+    assert.equal(test.child().status, "open");
+    assert.equal(test.releaseAttempts(), 2);
+    assert.isBelow(
+      test.ordering.lastIndexOf("claim:release-attempt"),
+      test.ordering.indexOf("lease:released"),
+    );
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "child-claim-released"),
+      [
+        {
+          type: "child-claim-released",
+          runId: "run",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          reason: "retry budget exhausted; child reopened",
+        },
+      ],
+    );
   }),
 );
 
@@ -311,20 +426,21 @@ it.live("treats ready-empty with an open child as stuck", () =>
   }),
 );
 
-it.live("reports done at the iteration cap when the completed child is closed", () =>
+it.live("leaves claiming to the worker and reports done when it closes the child", () =>
   Effect.gen(function* () {
     const test = fixture({
-      attempts: [{ commit: true, close: true }],
+      attempts: [{ claim: true, commit: true, close: true }],
       config: config({ limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 1 } }),
     });
     const result = yield* test.run();
     assert.equal(result.status, "done");
     assert.equal(result.iterationsCompleted, 1);
+    assert.equal(test.claims(), 0);
     assert.isTrue(test.released());
   }),
 );
 
-it.live("blocks a closed child that leaves the worktree dirty", () =>
+it.live("keeps a closed child unchanged when the worker leaves the worktree dirty", () =>
   Effect.gen(function* () {
     const test = fixture({
       attempts: [{ commit: true, close: true, dirty: true }],
@@ -334,7 +450,7 @@ it.live("blocks a closed child that leaves the worktree dirty", () =>
     });
     const result = yield* test.run();
     assert.equal(result.status, "failed");
-    assert.equal(test.child().status, "blocked");
+    assert.equal(test.child().status, "closed");
   }),
 );
 
@@ -353,7 +469,7 @@ it.live("fails safely after push failure without dispatching duplicate work", ()
   }),
 );
 
-it.live("requires new findings from committed research children", () =>
+it.live("records missing findings without reopening a closed research child", () =>
   Effect.gen(function* () {
     const test = fixture({
       childTitle: "Research: investigate",
@@ -364,7 +480,7 @@ it.live("requires new findings from committed research children", () =>
     });
     const result = yield* test.run();
     assert.equal(result.status, "failed");
-    assert.equal(test.child().status, "blocked");
+    assert.equal(test.child().status, "closed");
     assert.equal(test.iterations[0]?.failureReason, "child:closed-without-findings");
   }),
 );
@@ -386,7 +502,7 @@ it.live("accepts non-code work with a closed child and new comment evidence", ()
   }),
 );
 
-it.live("does not claim or dispatch when STOP appears at the pre-claim check", () =>
+it.live("does not claim or dispatch when STOP appears before dispatch", () =>
   Effect.gen(function* () {
     const test = fixture({ stopChecks: [false, true] });
     const result = yield* test.run();
@@ -411,16 +527,20 @@ it.live("publishes iteration events only after their journal writes", () =>
   }),
 );
 
-it.live("reopens a committed and closed child after a non-done outcome", () =>
+it.live("does not reopen a closed child after a non-done outcome", () =>
   Effect.gen(function* () {
     const test = fixture({
-      attempts: [{ commit: true, close: true, blocked: true }],
+      attempts: [{ claim: true, commit: true, close: true, blocked: true }],
       config: config({
         limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 1, maxIterations: 2 },
       }),
     });
     const result = yield* test.run();
     assert.equal(result.status, "failed");
-    assert.equal(test.child().status, "blocked");
+    assert.equal(test.child().status, "closed");
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "child-claim-released"),
+      [],
+    );
   }),
 );

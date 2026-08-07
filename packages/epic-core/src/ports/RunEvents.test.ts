@@ -25,4 +25,20 @@ describe("RunEvent", () => {
       }),
     ).toMatchObject({ type: "subagent-liveness-unavailable" });
   });
+
+  it("represents a released child claim", () => {
+    expect(
+      decodeRunEvent({
+        type: "child-claim-released",
+        runId: "run-1",
+        issueId: "epic.1",
+        iterationIndex: 2,
+        reason: "retry budget exhausted; child reopened",
+      }),
+    ).toMatchObject({
+      type: "child-claim-released",
+      issueId: "epic.1",
+      reason: "retry budget exhausted; child reopened",
+    });
+  });
 });

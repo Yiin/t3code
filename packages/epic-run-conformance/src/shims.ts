@@ -80,10 +80,12 @@ switch (command) {
     const actor = takeOption(argv, "--actor"); const assignee = takeOption(argv, "--assignee");
     const status = takeOption(argv, "--status");
     const operations = Number(claim) + Number(status !== null) + Number(assignee !== null);
-    if (operations !== 1 || (actor !== null && !claim)) fail("bd update requires one operation");
+    if (operations < 1 || (claim && operations !== 1) || (actor !== null && !claim)) fail("bd update requires compatible operations");
     if (claim) { found.status = "in_progress"; if (actor) found.assignee = actor; }
-    else if (status !== null) found.status = status;
-    else if (assignee !== null) found.assignee = assignee;
+    else if (status !== null || assignee !== null) {
+      if (status !== null) found.status = status;
+      if (assignee !== null) found.assignee = assignee;
+    }
     else fail("unsupported bd update operation");
     if (argv.length) fail("unsupported bd update arguments"); save(); break;
   }

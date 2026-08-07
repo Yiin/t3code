@@ -5,6 +5,8 @@ import * as Schema from "effect/Schema";
 
 import { PersistedEpicRun, PersistedEpicRunIteration } from "./RunJournal.ts";
 
+export const CHILD_CLAIM_RELEASED_REASON = "retry budget exhausted; child reopened" as const;
+
 export const RunEvent = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("run-state-changed"),
@@ -25,6 +27,13 @@ export const RunEvent = Schema.Union([
     runId: EpicRunId,
     iterationIndex: NonNegativeInt,
     reason: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("child-claim-released"),
+    runId: EpicRunId,
+    issueId: Schema.String,
+    iterationIndex: NonNegativeInt,
+    reason: Schema.Literal(CHILD_CLAIM_RELEASED_REASON),
   }),
 ]);
 export type RunEvent = typeof RunEvent.Type;
