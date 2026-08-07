@@ -98,7 +98,9 @@ case "$cmd" in
     [ "$#" -eq 3 ] && [ "$1" = --parent ] && [ "$2" = epic-1 ] && [ "$3" = --json ] || { echo "unsupported bd argv: ready $*" >&2; exit 64; }
     [ "$status" = open ] && printf '[{"id":"child-1","parent":"epic-1"}]\\n' || printf '[]\\n' ;;
   list)
-    [ "$#" -eq 3 ] && [ "$1" = --parent ] && [ "$2" = epic-1 ] && [ "$3" = --json ] || { echo "unsupported bd argv: list $*" >&2; exit 64; }
+    { [ "$#" -eq 3 ] && [ "$1" = --parent ] && [ "$2" = epic-1 ] && [ "$3" = --json ]; } ||
+    { [ "$#" -eq 5 ] && [ "$1" = --parent ] && [ "$2" = epic-1 ] && [ "$3" = --all ] && [ "$4" = --flat ] && [ "$5" = --json ]; } ||
+    { echo "unsupported bd argv: list $*" >&2; exit 64; }
     printf '[{"id":"child-1","status":"%s","parent":"epic-1"}]\\n' "$status" ;;
   label)
     [ "$#" -eq 2 ] && [ "$1" = list ] && [ "$2" = child-1 ] || { echo "unsupported bd argv: label $*" >&2; exit 64; } ;;
@@ -358,8 +360,8 @@ const preflightBdInvocations = [
 
 const iterationBdInvocations = [
   "ready --parent epic-1 --json",
-  "show epic-1 --json",
   "show child-1 --json",
+  "show epic-1 --json",
   "label list child-1",
   "show child-1 --json",
 ] as const;
@@ -395,6 +397,7 @@ describe("EpicRunner real process boundaries", () => {
           "show epic-1 --json",
           ...iterationBdInvocations,
           "ready --parent epic-1 --json",
+          "list --parent epic-1 --all --flat --json",
           "show child-1 --json",
         ]);
       }).pipe(Effect.provide(NodeServices.layer)),

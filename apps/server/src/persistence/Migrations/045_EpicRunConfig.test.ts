@@ -31,7 +31,7 @@ layer("045_EpicRunConfig", (it) => {
           '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'
         )
       `;
-      yield* runMigrations({ toMigrationInclusive: 45 });
+      yield* runMigrations();
 
       const stored = yield* Effect.gen(function* () {
         const store = yield* EpicRunStore;
