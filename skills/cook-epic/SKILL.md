@@ -50,7 +50,7 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 Run `bash skills/cook-epic/tests/all.sh` from the repository root.
 Set `COOKEPIC_TESTS_FILTER=<name>` to select matching files.
 Each file has a 120-second limit. The full suite has a 600-second ceiling.
-Measured local wall time: 186 seconds on 2026-08-07, with the two documented skips.
+Measured local wall time: 280 seconds on 2026-08-07, with the documented skip.
 
 - `fallback-session-regressions.sh` covers session fallback and recovery.
 - `fold-regressions.sh` covers folded worker results and state updates.
@@ -62,7 +62,7 @@ Measured local wall time: 186 seconds on 2026-08-07, with the two documented ski
 - `prompt-cache-warmup.sh` covers prompt-cache warm-up behavior.
 - `provider-fallback.sh` covers provider error classification and fallback order.
 - `run-lock.sh` covers terminal lock ownership, exclusion, and stale-lock recovery.
-- `sequential-regressions.sh` covers sequential dispatch, gates, and push rules. It skips under `t3code-06s.33` because it exceeds 120 seconds.
+- `sequential-regressions.sh` covers sequential dispatch, gates, and push rules.
 
 ## Steps
 

@@ -64,20 +64,26 @@ for ((attempt = 0; attempt < 60; attempt++)); do
 done
 [ -f "$MBOX" ] || { echo "cook-epic watch: no mailbox at $RUN_DIR"; exit 1; }
 
-tail -n +1 -F -- "$MBOX" | jq --unbuffered -r "
-  if .event == \"finished\" then
-    ($FMT), halt
-  else
-    ($FMT)
-  end
-"
-pipeline_status=("${PIPESTATUS[@]}")
-tail_rc=${pipeline_status[0]}
-jq_rc=${pipeline_status[1]}
+watch_tmp=$(mktemp -d "${TMPDIR:-/tmp}/cook-epic-watch.XXXXXX")
+watch_fifo="$watch_tmp/events"
+tail_pid=''
+cleanup() {
+  [ -z "$tail_pid" ] || kill "$tail_pid" 2>/dev/null || true
+  [ -z "$tail_pid" ] || wait "$tail_pid" 2>/dev/null || true
+  rm -rf "$watch_tmp"
+}
+trap cleanup EXIT INT TERM HUP
 
-[ "$jq_rc" -eq 0 ] || exit "$jq_rc"
-# jq closes the pipe intentionally after the terminal record; SIGPIPE (141) is
-# the expected successful exit for tail.
-if [ "$tail_rc" -ne 0 ] && [ "$tail_rc" -ne 141 ]; then
-  exit "$tail_rc"
-fi
+mkfifo "$watch_fifo"
+tail -n +1 -F -- "$MBOX" > "$watch_fifo" &
+tail_pid=$!
+terminal=0
+while IFS= read -r event; do
+  rendered=$(jq -er "$FMT" <<< "$event") || exit $?
+  printf '%s\n' "$rendered"
+  [ "$(jq -r '.event // empty' <<< "$event")" = finished ] || continue
+  terminal=1
+  break
+done < "$watch_fifo"
+
+[ "$terminal" -eq 1 ] || exit 1

@@ -64,7 +64,7 @@ EOF
 }
 
 run_case() {
-  local case_name="$1" worker_script="$2" setup_case="${3:-}" push_mode="${4:-no-push}" gate="${5:-true}"
+  local case_name="$1" worker_script="$2" setup_case="${3:-}" push_mode="${4:-no-push}" gate="${5:-true}" max_attempts="${6:-2}"
   local root repo sibling state bin run
   root="$TMP_ROOT/$case_name"; repo="$root/repo"; sibling="$root/api"; state="$root/state"; bin="$root/bin"; run="$root/run"
   mkdir -p "$state" "$run"
@@ -87,10 +87,10 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 \
       COOKEPIC_WORKER_CMD="$root/worker.sh" COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="../api" \
       COOKEPIC_GATE="$gate" COOKEPIC_NO_PUSH=$([ "$push_mode" = push ] && printf '' || printf 1) COOKEPIC_PUSH_CMD="${root}/push.sh" COOKEPIC_PUSH_LOG="$run/pushes" COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=3 \
-      COOKEPIC_MAX_ATTEMPTS=2 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
+      COOKEPIC_MAX_ATTEMPTS="$max_attempts" COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
   printf '%s\n' "$root"
 }
@@ -188,10 +188,13 @@ if [ "$COOKEPIC_CHILD" = a ]; then
   attempt=$((attempt + 1)); printf '%s' "$attempt" > "$attempt_file"
   if [ "$attempt" = 1 ]; then
     printf 'A\n' > a.txt; git add a.txt; git commit -qm 'A clean partial'
+    if [ "${COOKEPIC_TEST_MODE:-}" = gate ] || [ "${COOKEPIC_TEST_MODE:-}" = gate-dirt ]; then
+      bd close a
+    fi
     if [ "${COOKEPIC_TEST_MODE:-}" = closed-dirty ]; then
       printf 'dirty\n' > closed-dirty.tmp; bd close a
     fi
-    [ "${COOKEPIC_RATE_CASE:-0}" = 1 ] && printf '429 rate limit\n'
+    [ "${COOKEPIC_RATE_CASE:-0}" = 1 ] && printf 'provider-error: 429 rate limit\n'
   else
     [ "${COOKEPIC_GATE_DIRT_CASE:-0}" = 1 ] && rm -f gate-dirt.tmp
     [ "${COOKEPIC_TEST_MODE:-}" = closed-dirty ] && { git add closed-dirty.tmp; git commit -qm 'cleanup closed dirt'; }
@@ -205,7 +208,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE="$gate" COOKEPIC_NO_PUSH=1 COOKEPIC_RATE_LIMIT_BACKOFF="$rate_backoff" COOKEPIC_RATE_CASE=$([ "$mode" = rate ] && printf 1 || printf 0) COOKEPIC_GATE_DIRT_CASE=$([ "$mode" = gate-dirt ] && printf 1 || printf 0) COOKEPIC_TEST_MODE="$mode" COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=4 \
       COOKEPIC_MAX_ATTEMPTS="$max_attempts" COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
@@ -295,7 +298,7 @@ printf "main change\\n" >> main.txt
 git add main.txt && git commit -qm "main"
 bd close "$COOKEPIC_CHILD"
 '
-unknown_worktree_root=$(run_case unknown-nested-path "$unknown_worktree_worker" clean_worktree_setup)
+unknown_worktree_root=$(run_case unknown-nested-path "$unknown_worktree_worker" clean_worktree_setup no-push true 1)
 assert_contains "$unknown_worktree_root/run/loop.log" 'this child owns cleanup'
 
 run_env_case() {
@@ -319,7 +322,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
       COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
@@ -349,7 +352,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=123 COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=123 COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
       COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
@@ -383,7 +386,7 @@ sibling_clean_worktree_root=$(run_case relative-sibling-clean-worktree "$sibling
 assert_contains "$sibling_clean_worktree_root/run/loop.log" 'gated, landed locally'
 assert_not_contains "$sibling_clean_worktree_root/run/loop.log" 'left uncommitted changes'
 
-sibling_dirty_worktree_root=$(run_case relative-sibling-dirty-worktree "$sibling_nested_worker" sibling_dirty_worktree_setup)
+sibling_dirty_worktree_root=$(run_case relative-sibling-dirty-worktree "$sibling_nested_worker" sibling_dirty_worktree_setup no-push true 1)
 assert_contains "$sibling_dirty_worktree_root/run/loop.log" 'this child owns cleanup'
 assert_not_contains "$sibling_dirty_worktree_root/run/loop.log" 'gated, landed locally'
 
@@ -432,7 +435,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_WORKERS=2 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=1 COOKEPIC_MAX_DISPATCHES=2 \
       COOKEPIC_MAX_ATTEMPTS=2 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
@@ -460,7 +463,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
   printf '%s\n' "$root"
@@ -495,11 +498,11 @@ run_push_preflight_case() {
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
     if [ "$mode" = no-push ]; then
-      PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH=1 COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
+      PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH=1 COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
     elif [ "$mode" = missing-origin ]; then
-      PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
+      PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
     else
-      PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH="$export_value" COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
+      PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD=true COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH="$export_value" COOKEPIC_GATE=true COOKEPIC_MAX_DISPATCHES=1 "$RUNNER" "$run"
     fi
   ) >"$root/stdout" 2>&1
   rc=$?
@@ -542,7 +545,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_SIBLINGS="../api" COOKEPIC_GATE=true COOKEPIC_PUSH_CMD="$root/push.sh" COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1
   rc=$?
@@ -575,7 +578,7 @@ EOF
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
-    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
+    PATH="$bin:$PATH" FAKE_BD_STATE="$state" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_NO_PUSH=1 COOKEPIC_NO_GATE=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_WORKER_TIMEOUT=30 "$RUNNER" "$run"
   ) >"$root/stdout" 2>&1 || true
   printf '%s\n' "$root"

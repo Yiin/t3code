@@ -95,10 +95,6 @@ for name in "${tests[@]}"; do
       echo "SKIP: liveness-regressions.sh — t3code-06s.32"
       continue
       ;;
-    sequential-regressions.sh)
-      echo "SKIP: sequential-regressions.sh — t3code-06s.33"
-      continue
-      ;;
   esac
   file_started=$SECONDS
   output=$(mktemp "${TMPDIR:-/tmp}/cook-epic-test.XXXXXX")

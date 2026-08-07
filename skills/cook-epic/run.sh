@@ -180,7 +180,8 @@ fi
 [[ "$INSPECT_MIN_DELAY" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECT_MIN_DELAY must be a positive integer' 'use whole seconds'
 [[ "$INSPECT_MAX_DELAY" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_INSPECT_MAX_DELAY must be a positive integer' 'use whole seconds'
 [[ "$STOP_GRACE" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_STOP_GRACE must be a positive integer' 'use whole seconds'
-[[ "$SUPERVISION_TICK" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_SUPERVISION_TICK must be a positive integer' 'use whole seconds'
+[[ "$SUPERVISION_TICK" =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$ ]] \
+  || die 'COOKEPIC_SUPERVISION_TICK must be a positive number' 'use seconds greater than zero'
 [[ "$REPO_PROBE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_REPO_PROBE_INTERVAL must be a positive integer' 'use whole seconds'
 [[ "$REPO_PROBE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_REPO_PROBE_TIMEOUT must be a positive integer' 'use whole seconds'
 [[ "$WORKER_ARTIFACT_BYTES" =~ ^[1-9][0-9]*$ ]] || die 'COOKEPIC_WORKER_ARTIFACT_BYTES must be a positive integer' 'use bytes'
