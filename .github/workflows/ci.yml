@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - mine
 
 jobs:
   check:
@@ -60,6 +61,32 @@ jobs:
 
       - name: Test
         run: vp run test
+
+  epic_runs:
+    name: Epic Runs
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 20
+    env:
+      T3CODE_CONFORMANCE_TERMINAL: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.2"
+
+      - name: Install Beads
+        run: |
+          go install github.com/steveyegge/beads/cmd/bd@v1.1.2
+          bd --version
+
+      - name: Run epic regression gates
+        run: |
+          echo "PENDING: terminal conformance driver is owned by t3code-06s.2 and did not run"
+          echo "PENDING: server conformance driver is owned by t3code-06s.6 and did not run"
+          bash skills/cook-epic/tests/all.sh
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis

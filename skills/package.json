@@ -1,0 +1,7 @@
+{
+  "name": "@t3tools/skills",
+  "private": true,
+  "scripts": {
+    "test": "bash cook-epic/tests/all.sh"
+  }
+}
