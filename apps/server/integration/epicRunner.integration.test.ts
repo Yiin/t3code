@@ -19,18 +19,16 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
-import * as ServerConfig from "../src/config.ts";
-import { layer as preflightLive } from "../src/beads/EpicRunPreflight.ts";
+import { layer as preflightLive } from "@t3tools/epic-core/EpicRunPreflight";
 import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
 import { EpicRunStore } from "../src/persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
-import * as lockLive from "../src/runner/Layers/EpicRunLock.ts";
+import * as lockLive from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";
 import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
-import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
 import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
 import { makeMemoryStore, makeThreadDetail } from "./EpicRunnerHarness.integration.ts";
 
@@ -258,14 +256,8 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
       }),
   });
 
-  const configLayer = ServerConfig.layerTest(fixture.cwd, { prefix: "epic-runner-integration-" });
   const processLayer = ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer));
-  const gitLayer = GitVcsDriver.layer.pipe(
-    Layer.provide(configLayer),
-    Layer.provideMerge(NodeServices.layer),
-  );
   const preflightLayer = preflightLive.pipe(
-    Layer.provide(gitLayer),
     Layer.provide(processLayer),
     Layer.provide(lockLive.layer),
   );
@@ -359,6 +351,10 @@ describe("EpicRunner real process boundaries", () => {
               () => NodeFS.existsSync(NodePath.join(fixture.cwd, ".beads/run-lock.epic-1.json")),
               (exists) => !exists,
             );
+            yield* waitFor(
+              () => readBdInvocations(fixture).length,
+              (count) => count >= preflightBdInvocations.length + iterationBdInvocations.length + 3,
+            );
           }).pipe(Effect.provide(harness.layer)),
         );
         assert.notEqual(git(fixture.cwd, ["rev-parse", "HEAD"]), fixture.initialHead);
@@ -409,6 +405,10 @@ describe("EpicRunner real process boundaries", () => {
             yield* waitFor(
               () => NodeFS.existsSync(NodePath.join(fixture.cwd, ".beads/run-lock.epic-1.json")),
               (exists) => !exists,
+            );
+            yield* waitFor(
+              () => readBdInvocations(fixture).length,
+              (count) => count >= preflightBdInvocations.length + iterationBdInvocations.length + 4,
             );
           }).pipe(Effect.provide(harness.layer)),
         );

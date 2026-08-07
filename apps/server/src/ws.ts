@@ -101,7 +101,7 @@ import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
-import * as EpicRunPreflight from "./beads/EpicRunPreflight.ts";
+import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunner from "./runner/Services/EpicRunner.ts";
 import type { EpicRunnerError } from "@t3tools/epic-core/Errors";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";

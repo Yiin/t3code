@@ -13,10 +13,15 @@ import {
   EpicRunLockHeldError,
   type EpicRunLockLease,
   type EpicRunLockOwner,
-} from "../Services/EpicRunLock.ts";
+} from "../ports/EpicRunLock.ts";
 
 const staleSeconds = 300;
 const heartbeatMilliseconds = 30_000;
+
+export interface NodeEpicRunLockOptions {
+  readonly beforeHeartbeatCommit?: () => Promise<void>;
+  readonly now?: () => number;
+}
 
 const startTicks = async (pid: number): Promise<string> => {
   try {
@@ -164,8 +169,7 @@ const readHolder = async (file: string): Promise<EpicRunLockOwner | undefined> =
   }
 };
 
-const isStale = async (file: string): Promise<boolean> => {
-  const now = Math.floor(Date.now() / 1000);
+const isStale = async (file: string, now: number): Promise<boolean> => {
   let value: Partial<EpicRunLockOwner>;
   try {
     value = JSON.parse(await NodeFSP.readFile(file, "utf8")) as Partial<EpicRunLockOwner>;
@@ -226,6 +230,7 @@ const withGuard = async <A>(file: string, body: () => Promise<A>): Promise<A> =>
 const makeLease = (
   file: string,
   owner: EpicRunLockOwner,
+  now: () => number,
   stopTimer: () => void,
   stopSupervisor: () => Promise<void>,
   beforeHeartbeatCommit?: () => Promise<void>,
@@ -237,13 +242,9 @@ const makeLease = (
       const current = JSON.parse(await NodeFSP.readFile(file, "utf8")) as EpicRunLockOwner;
       if (current.pid !== owner.pid || current.startedAt !== owner.startedAt) return false;
       const temp = `${file}.hb.${owner.pid}.${Math.random().toString(36).slice(2)}`;
-      await NodeFSP.writeFile(
-        temp,
-        `${JSON.stringify({ ...current, heartbeatAt: Math.floor(Date.now() / 1000) })}\n`,
-        {
-          flag: "wx",
-        },
-      );
+      await NodeFSP.writeFile(temp, `${JSON.stringify({ ...current, heartbeatAt: now() })}\n`, {
+        flag: "wx",
+      });
       await beforeHeartbeatCommit?.();
       const after = await NodeFSP.stat(file);
       if (before.dev !== after.dev || before.ino !== after.ino) {
@@ -280,15 +281,16 @@ const makeLease = (
   };
 };
 
-export const makeLayer = (options?: { readonly beforeHeartbeatCommit?: () => Promise<void> }) =>
-  Layer.succeed(EpicRunLock, {
+export const makeLayer = (options: NodeEpicRunLockOptions = {}) => {
+  const now = () => options.now?.() ?? Math.floor(Date.now() / 1000);
+  return Layer.succeed(EpicRunLock, {
     inspect: ({ workspaceRoot, epicId }) =>
       Effect.tryPromise({
         try: async () => {
           const file = await lockPath(workspaceRoot, epicId);
           const holder = await readHolder(file);
           if (holder === undefined) return undefined;
-          return (await isStale(file)) ? undefined : holder;
+          return (await isStale(file, now())) ? undefined : holder;
         },
         catch: (cause) => new EpicRunLockError("inspect", cause),
       }),
@@ -310,7 +312,7 @@ export const makeLayer = (options?: { readonly beforeHeartbeatCommit?: () => Pro
               startTicks: await startTicks(pid),
               runDir: input.runDir,
               startedAt: new Date().toISOString(),
-              heartbeatAt: Math.floor(Date.now() / 1000),
+              heartbeatAt: now(),
             };
             return await withGuard(file, async () => {
               for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -325,6 +327,7 @@ export const makeLayer = (options?: { readonly beforeHeartbeatCommit?: () => Pro
                   const lease = makeLease(
                     file,
                     owner,
+                    now,
                     () => timer && clearInterval(timer),
                     supervisor?.stop ?? (async () => {}),
                     options?.beforeHeartbeatCommit,
@@ -337,7 +340,7 @@ export const makeLayer = (options?: { readonly beforeHeartbeatCommit?: () => Pro
                 } catch (cause) {
                   const error = cause as NodeJS.ErrnoException;
                   if (error.code !== "EEXIST") throw cause;
-                  if (attempt === 0 && (await isStale(file))) {
+                  if (attempt === 0 && (await isStale(file, now()))) {
                     await NodeFSP.unlink(file).catch(() => undefined);
                     continue;
                   }
@@ -355,5 +358,6 @@ export const makeLayer = (options?: { readonly beforeHeartbeatCommit?: () => Pro
           cause instanceof EpicRunLockHeldError ? cause : new EpicRunLockError("acquire", cause),
       }),
   });
+};
 
 export const layer = makeLayer();

@@ -64,5 +64,5 @@ export interface EpicRunLockShape {
 }
 
 export class EpicRunLock extends Context.Service<EpicRunLock, EpicRunLockShape>()(
-  "t3/runner/Services/EpicRunLock",
+  "@t3tools/epic-core/ports/EpicRunLock",
 ) {}

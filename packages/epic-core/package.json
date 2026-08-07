@@ -23,6 +23,10 @@
       "types": "./src/processRunner.ts",
       "import": "./src/processRunner.ts"
     },
+    "./EpicRunPreflight": {
+      "types": "./src/EpicRunPreflight.ts",
+      "import": "./src/EpicRunPreflight.ts"
+    },
     "./collectUint8StreamText": {
       "types": "./src/collectUint8StreamText.ts",
       "import": "./src/collectUint8StreamText.ts"
@@ -55,6 +59,10 @@
       "types": "./src/ports/WorkerSupervisor.ts",
       "import": "./src/ports/WorkerSupervisor.ts"
     },
+    "./ports/EpicRunLock": {
+      "types": "./src/ports/EpicRunLock.ts",
+      "import": "./src/ports/EpicRunLock.ts"
+    },
     "./adapters/FileRunJournal": {
       "types": "./src/adapters/FileRunJournal.ts",
       "import": "./src/adapters/FileRunJournal.ts"
@@ -70,6 +78,10 @@
     "./adapters/ProcessGate": {
       "types": "./src/adapters/ProcessGate.ts",
       "import": "./src/adapters/ProcessGate.ts"
+    },
+    "./adapters/NodeEpicRunLock": {
+      "types": "./src/adapters/NodeEpicRunLock.ts",
+      "import": "./src/adapters/NodeEpicRunLock.ts"
     }
   },
   "scripts": {

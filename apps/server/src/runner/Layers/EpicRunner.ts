@@ -37,6 +37,8 @@ import {
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
+import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
 import { resolveEpicProviderFallback } from "@t3tools/epic-core/providerFallback";
 import {
   classifyIteration,
@@ -63,7 +65,6 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
-import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import {
   countFreshRunningSubagents,
@@ -78,7 +79,6 @@ import {
 } from "../../persistence/Services/EpicRuns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
-import { EpicRunLock, type EpicRunLockLease } from "../Services/EpicRunLock.ts";
 import {
   EpicRunner,
   type EpicRunnerShape,

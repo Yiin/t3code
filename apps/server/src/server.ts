@@ -19,7 +19,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
 import { EpicRunnerLive } from "./runner/Layers/EpicRunner.ts";
-import * as EpicRunLock from "./runner/Layers/EpicRunLock.ts";
+import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
@@ -65,7 +65,7 @@ import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
-import * as EpicRunPreflight from "./beads/EpicRunPreflight.ts";
+import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
@@ -266,9 +266,8 @@ const VcsLayerLive = Layer.empty.pipe(
 );
 
 const EpicRunPreflightLayerLive = EpicRunPreflight.layer.pipe(
-  Layer.provide(GitVcsDriver.layer),
   Layer.provide(ProcessRunner.layer),
-  Layer.provide(EpicRunLock.layer),
+  Layer.provide(NodeEpicRunLock.layer),
 );
 
 const BeadsLayerLive = Layer.mergeAll(
@@ -330,7 +329,7 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunStoreLive),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(EpicRunPreflightLayerLive),
-  Layer.provide(EpicRunLock.layer),
+  Layer.provide(NodeEpicRunLock.layer),
   Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 

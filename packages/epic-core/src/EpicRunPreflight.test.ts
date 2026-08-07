@@ -1,53 +1,49 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
 import * as Layer from "effect/Layer";
 
-import * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import * as ServerConfig from "../config.ts";
-import { EpicRunLock } from "../runner/Services/EpicRunLock.ts";
-import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProcessRunner from "./processRunner.ts";
+import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { EpicRunPreflight, layer } from "./EpicRunPreflight.ts";
 
 const run = (
   status: string,
   holder?: Parameters<EpicRunLock["Service"]["inspect"]>[0],
   bd?: { readonly show?: string; readonly ready?: string; readonly list?: string },
+  options?: {
+    readonly gitCode?: number;
+    readonly gitStderr?: string;
+    readonly onGit?: (input: ProcessRunner.ProcessRunInput) => void;
+  },
 ) => {
   const testLayer = layer.pipe(
     Layer.provide(
-      Layer.mock(GitVcsDriver.GitVcsDriver)({
-        execute: () =>
-          Effect.succeed({
-            exitCode: 0 as never,
-            stdout: status,
-            stderr: "",
-            stdoutTruncated: false,
-            stderrTruncated: false,
-          }),
-      }),
-    ),
-    Layer.provide(
       Layer.succeed(ProcessRunner.ProcessRunner, {
-        run: ({ args }) =>
-          Effect.succeed({
+        run: (input) => {
+          const { command, args } = input;
+          if (command === "git") options?.onGit?.(input);
+          return Effect.succeed({
             stdout:
-              args[0] === "show"
-                ? (bd?.show ?? '[{"id":"epic-1","issue_type":"epic"}]')
-                : args[0] === "ready"
-                  ? (bd?.ready ?? '[{"id":"child-1"}]')
-                  : (bd?.list ?? "[]"),
-            stderr: "",
-            code: 0 as never,
+              command === "git"
+                ? status
+                : args[0] === "show"
+                  ? (bd?.show ?? '[{"id":"epic-1","issue_type":"epic"}]')
+                  : args[0] === "ready"
+                    ? (bd?.ready ?? '[{"id":"child-1"}]')
+                    : (bd?.list ?? "[]"),
+            stderr: command === "git" ? (options?.gitStderr ?? "") : "",
+            code: (command === "git" ? (options?.gitCode ?? 0) : 0) as never,
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
-          }),
+          });
+        },
       }),
     ),
     Layer.provide(
@@ -120,6 +116,34 @@ describe("EpicRunPreflight", () => {
     }),
   );
 
+  it.effect("runs the exact bounded git status command", () =>
+    Effect.gen(function* () {
+      let captured: ProcessRunner.ProcessRunInput | undefined;
+      yield* run("# branch.head main\n", undefined, undefined, {
+        onGit: (input) => (captured = input),
+      });
+      expect(captured).toBeDefined();
+      expect(captured?.command).toBe("git");
+      expect(captured?.args).toEqual([
+        "status",
+        "--porcelain=2",
+        "--branch",
+        "--untracked-files=all",
+      ]);
+      expect(captured?.cwd).toBe("/repo");
+      expect(Duration.toMillis(captured?.timeout ?? 0)).toBe(20_000);
+    }),
+  );
+
+  it.effect("reports a non-zero git status result", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        run("", undefined, undefined, { gitCode: 128, gitStderr: "not a repository\n" }),
+      );
+      expect(error.message).toBe("git status: not a repository");
+    }),
+  );
+
   it.effect("reports unknown epics and nothing-ready backlogs", () =>
     Effect.gen(function* () {
       const unknown = yield* run("# branch.head main\n", undefined, { show: "[]" });
@@ -138,7 +162,7 @@ describe("EpicRunPreflight", () => {
     }),
   );
 
-  it.effect("reads rename destinations through the real GitVcsDriver", () =>
+  it.effect("reads rename destinations through the real ProcessRunner", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const directory = yield* Effect.acquireRelease(
@@ -163,25 +187,42 @@ describe("EpicRunPreflight", () => {
         yield* git(["mv", "old.ts", "renamed.ts"]);
 
         const live = layer.pipe(
-          Layer.provide(GitVcsDriver.layer),
-          Layer.provide(ServerConfig.layerTest(directory, { prefix: "preflight-git-" })),
-          Layer.provide(NodeServices.layer),
           Layer.provide(
             Layer.succeed(ProcessRunner.ProcessRunner, {
-              run: ({ args }) =>
-                Effect.succeed({
-                  stdout:
-                    args[0] === "show"
-                      ? '[{"id":"epic-1","issue_type":"epic"}]'
-                      : args[0] === "ready"
-                        ? '[{"id":"child-1"}]'
-                        : "[]",
-                  stderr: "",
-                  code: 0 as never,
-                  timedOut: false,
-                  stdoutTruncated: false,
-                  stderrTruncated: false,
-                }),
+              run: ({ command, args, cwd }) => {
+                if (command !== "git") {
+                  return Effect.succeed({
+                    stdout:
+                      args[0] === "show"
+                        ? '[{"id":"epic-1","issue_type":"epic"}]'
+                        : args[0] === "ready"
+                          ? '[{"id":"child-1"}]'
+                          : "[]",
+                    stderr: "",
+                    code: 0 as never,
+                    timedOut: false,
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                  });
+                }
+                return Effect.promise(
+                  () =>
+                    new Promise<ProcessRunner.ProcessRunOutput>((resolve, reject) => {
+                      NodeChildProcess.execFile("git", args, { cwd }, (error, stdout, stderr) =>
+                        error
+                          ? reject(error)
+                          : resolve({
+                              stdout,
+                              stderr,
+                              code: 0 as never,
+                              timedOut: false,
+                              stdoutTruncated: false,
+                              stderrTruncated: false,
+                            }),
+                      );
+                    }),
+                );
+              },
             }),
           ),
           Layer.provide(

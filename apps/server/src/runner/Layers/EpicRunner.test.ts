@@ -20,6 +20,13 @@ import {
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
+import {
+  EpicRunLock,
+  EpicRunLockError,
+  EpicRunLockHeldError,
+  type EpicRunLockLease,
+} from "@t3tools/epic-core/ports/EpicRunLock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -45,19 +52,12 @@ import {
   type EpicRun,
   type EpicRunIteration,
 } from "../../persistence/Services/EpicRuns.ts";
-import { EpicRunPreflight } from "../../beads/EpicRunPreflight.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import {
   makeMemoryStore,
   makeThreadDetail,
 } from "../../../integration/EpicRunnerHarness.integration.ts";
-import {
-  EpicRunLock,
-  EpicRunLockError,
-  EpicRunLockHeldError,
-  type EpicRunLockLease,
-} from "../Services/EpicRunLock.ts";
 import { EpicRunner } from "../Services/EpicRunner.ts";
 import { assembleIterationPrompt, makeEpicRunnerLive } from "./EpicRunner.ts";
 

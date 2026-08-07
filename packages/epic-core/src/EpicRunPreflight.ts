@@ -9,9 +9,8 @@ import {
   type EpicRunPreflightWarning,
 } from "@t3tools/contracts";
 
-import { ProcessRunner } from "@t3tools/epic-core/processRunner";
-import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import { EpicRunLock } from "../runner/Services/EpicRunLock.ts";
+import { EpicRunLock } from "./ports/EpicRunLock.ts";
+import { ProcessRunner } from "./processRunner.ts";
 
 const COMMAND_TIMEOUT = Duration.seconds(20);
 
@@ -22,7 +21,7 @@ export interface EpicRunPreflightShape {
 }
 
 export class EpicRunPreflight extends Context.Service<EpicRunPreflight, EpicRunPreflightShape>()(
-  "t3/beads/EpicRunPreflight",
+  "@t3tools/epic-core/EpicRunPreflight",
 ) {}
 
 function parseArray(stdout: string): ReadonlyArray<Record<string, unknown>> | null {
@@ -75,7 +74,6 @@ function deadLocalClaimIds(entries: ReadonlyArray<Record<string, unknown>>): Rea
 export const layer = Layer.effect(
   EpicRunPreflight,
   Effect.gen(function* () {
-    const git = yield* GitVcsDriver.GitVcsDriver;
     const processRunner = yield* ProcessRunner;
     const lock = yield* EpicRunLock;
 
@@ -101,20 +99,23 @@ export const layer = Layer.effect(
         const blockers: Array<EpicRunPreflightResult["blockers"][number]> = [];
         const warnings: Array<EpicRunPreflightWarning> = [];
 
-        const status = yield* git
-          .execute({
-            operation: "EpicRunPreflight.status",
+        const status = yield* processRunner
+          .run({
+            command: "git",
             cwd: input.workspaceRoot,
             args: ["status", "--porcelain=2", "--branch", "--untracked-files=all"],
+            timeout: COMMAND_TIMEOUT,
           })
           .pipe(
             Effect.mapError(
-              (error) =>
-                new EpicRunPreflightError({
-                  message: `git status: ${error.message}`,
-                }),
+              (error) => new EpicRunPreflightError({ message: `git status: ${error.message}` }),
             ),
           );
+        if (status.code !== 0) {
+          return yield* new EpicRunPreflightError({
+            message: `git status: ${status.stderr.trim() || `git exited ${String(status.code)}`}`,
+          });
+        }
         let detached = true;
         const dirtyPaths = new Set<string>();
         for (const line of status.stdout.split(/\r?\n/)) {

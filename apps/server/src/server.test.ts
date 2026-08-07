@@ -115,7 +115,7 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
-import { EpicRunPreflight } from "./beads/EpicRunPreflight.ts";
+import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";

@@ -6,8 +6,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 
-import { EpicRunLock } from "../Services/EpicRunLock.ts";
-import { layer, makeLayer } from "./EpicRunLock.ts";
+import { EpicRunLock } from "../ports/EpicRunLock.ts";
+import { layer, makeLayer } from "./NodeEpicRunLock.ts";
 
 const fixture = Effect.acquireRelease(
   Effect.tryPromise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-epic-lock-"))),

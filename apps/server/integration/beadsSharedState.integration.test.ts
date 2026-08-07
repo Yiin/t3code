@@ -15,13 +15,14 @@ import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
-import * as ServerConfig from "../src/config.ts";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import {
+  EpicRunPreflight,
+  layer as EpicRunPreflightLive,
+} from "@t3tools/epic-core/EpicRunPreflight";
+import * as EpicRunLockLive from "@t3tools/epic-core/adapters/NodeEpicRunLock";
+import { EpicRunLock, EpicRunLockHeldError } from "@t3tools/epic-core/ports/EpicRunLock";
 import * as BeadsStatusBroadcaster from "../src/beads/BeadsStatusBroadcaster.ts";
-import { EpicRunPreflight, layer as EpicRunPreflightLive } from "../src/beads/EpicRunPreflight.ts";
-import * as EpicRunLockLive from "../src/runner/Layers/EpicRunLock.ts";
-import { EpicRunLock, EpicRunLockHeldError } from "../src/runner/Services/EpicRunLock.ts";
-import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
 
 const repositoryRoot = NodePath.resolve(import.meta.dirname, "../../..");
 const cookEpicRunner = NodePath.join(repositoryRoot, "skills/cook-epic/run.sh");
@@ -200,16 +201,13 @@ const withFixtureEnvironment = <A, E, R>(fixture: Fixture, effect: Effect.Effect
 };
 
 const nodeLayer = NodeServices.layer;
-const configLayer = ServerConfig.layerTest(process.cwd(), { prefix: "t3-beads-shared-test-" });
 const processLayer = ProcessRunner.layer.pipe(Layer.provide(nodeLayer));
-const gitLayer = GitVcsDriver.layer.pipe(Layer.provide(configLayer), Layer.provideMerge(nodeLayer));
 const lockLayer = EpicRunLockLive.layer;
 const broadcasterLayer = BeadsStatusBroadcaster.layer.pipe(
   Layer.provide(processLayer),
   Layer.provideMerge(nodeLayer),
 );
 const preflightLayer = EpicRunPreflightLive.pipe(
-  Layer.provide(gitLayer),
   Layer.provide(processLayer),
   Layer.provide(lockLayer),
 );
