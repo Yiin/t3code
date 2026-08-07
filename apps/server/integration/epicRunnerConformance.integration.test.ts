@@ -1,0 +1,837 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalProcess:off
+/**
+ * Server conformance driver: every scenario whose `appliesTo` includes
+ * "server" runs through the real EpicRunner service — the shared core loop
+ * wired to the server adapters — against the same fixture workspace the core
+ * and terminal drivers use. The fake orchestration engine executes each turn
+ * as the fixture's agent subprocess and projects its outcome the way the real
+ * projector would, so the transcript the run produces can be diffed against
+ * the scenario's expected one.
+ */
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, describe, it } from "@effect/vitest";
+import {
+  ProjectId,
+  ThreadId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  TurnId,
+  diffTranscripts,
+  type EpicRunConfigOverride,
+  type EpicRunTranscriptEvent,
+  type OrchestrationCommand,
+  type OrchestrationSessionStatus,
+  type OrchestrationThread,
+  type ProjectionThreadTurnStatus,
+  type ServerProvider,
+} from "@t3tools/contracts";
+import {
+  decodeConformanceScenario,
+  makeConformanceWorkspace,
+  type ConformanceScenario,
+  type ConformanceWorkspace,
+} from "@t3tools/epic-run-conformance";
+import { layer as epicRunConfigSourceLayer } from "@t3tools/epic-core/EpicRunConfigSource";
+import { layer as epicRunPreflightLayer } from "@t3tools/epic-core/EpicRunPreflight";
+import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
+import { DEFAULT_MAX_NO_COMMIT_STREAK, EPIC_RUN_ITERATION_PROMPT } from "@t3tools/epic-core/policy";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+
+import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
+import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
+import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
+import { EpicRunStore, type EpicRun } from "../src/persistence/Services/EpicRuns.ts";
+import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
+import { ServerConfig } from "../src/config.ts";
+import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunner.ts";
+import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
+import { GitVcsDriver } from "../src/vcs/GitVcsDriver.ts";
+import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
+import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
+import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";
+import { makeMemoryStore, makeThreadDetail } from "./EpicRunnerHarness.integration.ts";
+
+const scenariosDirectory = NodePath.resolve(
+  NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+  "../../../packages/epic-run-conformance/scenarios",
+);
+
+const scenarios = (): ReadonlyArray<ConformanceScenario> =>
+  NodeFS.readdirSync(scenariosDirectory)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) =>
+      decodeConformanceScenario(
+        JSON.parse(NodeFS.readFileSync(NodePath.join(scenariosDirectory, name), "utf8")),
+      ),
+    )
+    .filter((scenario) => scenario.appliesTo.includes("server"));
+
+const maximumIterations = (scenario: ConformanceScenario): number => {
+  const attempts = scenario.expectedTranscript.flatMap((event) =>
+    event.attempts === undefined ? [] : [event.attempts],
+  );
+  const iterationIndexes = scenario.expectedTranscript.flatMap((event) =>
+    event.iterationIndex === null ? [] : [event.iterationIndex + 1],
+  );
+  return Math.max(1, scenario.agentScript.length, ...attempts, ...iterationIndexes);
+};
+
+const provider = (instanceId: string, driver: string, model: string): ServerProvider => ({
+  instanceId: ProviderInstanceId.make(instanceId),
+  driver: ProviderDriverKind.make(driver),
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-01-01T00:00:00Z",
+  availability: "available",
+  models: [{ slug: model, name: model, isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+});
+
+const conformanceProviders = [
+  provider("claude", "claudeAgent", "sonnet"),
+  provider("codex", "codex", "gpt-5.6-sol"),
+  provider("kimi", "kimi", "kimi-code/k3"),
+] as const;
+
+const conformanceInstanceIds = new Set(conformanceProviders.map((entry) => entry.instanceId));
+
+const projectId = ProjectId.make("project-epic-runner-conformance");
+
+const configOverride = (scenario: ConformanceScenario): EpicRunConfigOverride => ({
+  execution: { sequential: true },
+  limits: { maxIterations: maximumIterations(scenario) },
+  supervision: { workerTimeoutSeconds: 1, stopGraceSeconds: 1 },
+  server: {
+    maxNoCommitStreak: DEFAULT_MAX_NO_COMMIT_STREAK,
+    pollIntervalMs: 5,
+    quietPeriodMs: 5,
+    retryBaseDelayMs: 5,
+    retryMaxDelayMs: 5,
+  },
+  vcs: { noPush: true },
+  gate: { command: "true", disabled: false },
+});
+
+const readHead = (workspace: ConformanceWorkspace): string | null => {
+  const git = workspace.env["CONFORMANCE_REAL_GIT"] ?? "git";
+  const result = NodeChildProcess.spawnSync(git, ["rev-parse", "--verify", "-q", "HEAD"], {
+    cwd: workspace.cwd,
+    encoding: "utf8",
+  });
+  const sha = result.stdout.trim();
+  return result.status === 0 && sha.length > 0 ? sha : null;
+};
+
+const stateChildren = (workspace: ConformanceWorkspace): ReadonlyArray<Record<string, unknown>> => {
+  const statePath = workspace.env["CONFORMANCE_STATE"];
+  if (statePath === undefined) return [];
+  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
+    readonly children?: ReadonlyArray<Record<string, unknown>>;
+  };
+  return state.children ?? [];
+};
+
+const stateEpicStatus = (workspace: ConformanceWorkspace): string | undefined => {
+  const statePath = workspace.env["CONFORMANCE_STATE"];
+  if (statePath === undefined) return undefined;
+  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
+    readonly epic?: Readonly<Record<string, unknown>>;
+  };
+  return typeof state.epic?.["status"] === "string" ? state.epic["status"] : undefined;
+};
+
+/** Children whose standing claim the loop reopened, observed in the journal. */
+const releasedClaimIds = (workspace: ConformanceWorkspace): ReadonlySet<string> => {
+  const released = new Set<string>();
+  for (const item of workspace.readTranscript()) {
+    if (typeof item !== "object" || item === null) continue;
+    const record = item as Readonly<Record<string, unknown>>;
+    if (record["tool"] !== "bd" || !Array.isArray(record["argv"])) continue;
+    const argv = record["argv"] as ReadonlyArray<unknown>;
+    const statusIndex = argv.indexOf("--status");
+    if (argv[0] === "update" && statusIndex > 0 && argv[statusIndex + 1] === "open") {
+      const issueId = argv[1];
+      if (typeof issueId === "string") released.add(issueId);
+    }
+  }
+  return released;
+};
+
+interface AgentResult {
+  readonly code: number | null;
+  readonly killed: boolean;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/** The provider error text the fixture agent reported, when it failed like one. */
+const providerErrorMessage = (stdout: string): string | null => {
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        readonly error?: { readonly message?: unknown };
+        readonly result?: unknown;
+        readonly is_error?: unknown;
+      };
+      if (typeof parsed.error?.message === "string") return parsed.error.message;
+      if (parsed.is_error === true && typeof parsed.result === "string") return parsed.result;
+    } catch {
+      // not a JSON line
+    }
+  }
+  return null;
+};
+
+const translateStartFailure = (input: {
+  readonly scenario: ConformanceScenario;
+  readonly workspace: ConformanceWorkspace;
+  readonly failure: unknown;
+}): ReadonlyArray<EpicRunTranscriptEvent> => {
+  const common = {
+    sequence: 0,
+    epicId: input.scenario.beads.epicId,
+    issueId: null,
+    iterationIndex: null,
+    pushed: false,
+    verified: true,
+  } as const;
+  const detail = input.failure instanceof Error ? input.failure.message : String(input.failure);
+  if (detail.includes("Another epic run owns")) {
+    return [
+      {
+        _tag: "lock_held",
+        ...common,
+        ...(stateEpicStatus(input.workspace) === "in_progress"
+          ? { reason: "run in progress" }
+          : {}),
+      },
+    ];
+  }
+  if (detail.includes("was not found")) {
+    return [{ _tag: "finished", ...common, status: "failed", reason: "epic not found" }];
+  }
+  if (detail.includes("detached HEAD")) {
+    return [{ _tag: "finished", ...common, status: "failed", reason: "detached head" }];
+  }
+  if (detail.includes("worktree has changes")) {
+    return [{ _tag: "finished", ...common, status: "failed", reason: "dirty tree" }];
+  }
+  throw new Error(`unexpected server failure for ${input.scenario.name}: ${detail}`);
+};
+
+const translateServerRun = (input: {
+  readonly scenario: ConformanceScenario;
+  readonly workspace: ConformanceWorkspace;
+  readonly history: ReadonlyArray<{ readonly run: EpicRun; readonly head: string | null }>;
+  readonly iterations: ReadonlyArray<{
+    readonly iterationIndex: number;
+    readonly issueId: string | null;
+    readonly turnStatus: string;
+    readonly failureReason: string | null;
+  }>;
+}): ReadonlyArray<EpicRunTranscriptEvent> => {
+  const output: EpicRunTranscriptEvent[] = [];
+  const settled = input.iterations.filter((iteration) => iteration.turnStatus !== "running");
+  const finalRun = input.history.at(-1)?.run;
+
+  // Per-iteration commit evidence: HEAD at the charge write versus HEAD at the
+  // boundary write of the same iteration.
+  const headAtDispatch = new Map<number, string | null>();
+  const headAtBoundary = new Map<number, string | null>();
+  const selectionAtDispatch = new Map<number, EpicRun["modelSelection"]>();
+  for (const entry of input.history) {
+    const { run, head } = entry;
+    if (run.iterationsDispatched > 0 && !headAtDispatch.has(run.iterationsDispatched - 1)) {
+      headAtDispatch.set(run.iterationsDispatched - 1, head);
+      selectionAtDispatch.set(run.iterationsDispatched - 1, run.modelSelection);
+    }
+    if (run.iterationsCompleted > 0 && !headAtBoundary.has(run.iterationsCompleted - 1)) {
+      headAtBoundary.set(run.iterationsCompleted - 1, head);
+    }
+  }
+
+  // Provider fallbacks: every persisted model-selection change, attributed to
+  // the iteration whose boundary preceded it.
+  const providerFallbacks = new Map<number, { readonly from: string; readonly to: string }>();
+  for (let index = 1; index < input.history.length; index += 1) {
+    const previous = input.history[index - 1]!.run.modelSelection;
+    const current = input.history[index]!.run.modelSelection;
+    if (previous.instanceId !== current.instanceId || previous.model !== current.model) {
+      providerFallbacks.set(input.history[index]!.run.iterationsDispatched - 1, {
+        from: previous.instanceId,
+        to: current.instanceId,
+      });
+    }
+  }
+
+  const releasedClaims = releasedClaimIds(input.workspace);
+  const comments = new Map(
+    stateChildren(input.workspace).flatMap((child) => {
+      const id = typeof child["id"] === "string" ? child["id"] : undefined;
+      const count = typeof child["comment_count"] === "number" ? child["comment_count"] : 0;
+      return id === undefined ? [] : [[id, count] as const];
+    }),
+  );
+  const childAttempts = new Map<string, number>();
+  let infraAttempts = 0;
+  let recoveredExhaustion = false;
+
+  for (const [index, iteration] of settled.entries()) {
+    const issueId = iteration.issueId;
+    const common = {
+      sequence: output.length,
+      epicId: input.scenario.beads.epicId,
+      issueId,
+      iterationIndex: iteration.iterationIndex,
+      pushed: false,
+      verified: true,
+    } as const;
+    const fallback = providerFallbacks.get(iteration.iterationIndex);
+    if (fallback !== undefined) {
+      output.push({
+        _tag: "provider-fallback",
+        ...common,
+        fromProvider: fallback.from,
+        toProvider: fallback.to,
+      });
+      continue;
+    }
+    if (iteration.turnStatus === "completed") {
+      const committed =
+        headAtDispatch.get(iteration.iterationIndex) !==
+        headAtBoundary.get(iteration.iterationIndex);
+      if (!committed) {
+        output.push({
+          _tag: "completed-no-code",
+          ...common,
+          comments: issueId === null ? 0 : (comments.get(issueId) ?? 0),
+        });
+      } else {
+        const selection = selectionAtDispatch.get(iteration.iterationIndex);
+        output.push({
+          _tag: "dispatched",
+          ...common,
+          sequence: output.length,
+          ...(selection !== undefined && conformanceInstanceIds.has(selection.instanceId)
+            ? { toProvider: selection.instanceId }
+            : {}),
+        });
+        if (providerFallbacks.size > 0) continue;
+        output.push({ _tag: "done", ...common, sequence: output.length });
+      }
+      continue;
+    }
+
+    const failure = iteration.failureReason ?? "infra:turn-error";
+    if (failure === "infra:ready-unrecognised") {
+      output.push({
+        _tag: "iteration-state-changed",
+        ...common,
+        turnStatus: "failed",
+        failureReason: failure,
+      });
+      continue;
+    }
+    const isInfra = failure.startsWith("infra:");
+    const attempts = isInfra
+      ? ++infraAttempts
+      : issueId === null
+        ? 1
+        : (childAttempts.set(issueId, (childAttempts.get(issueId) ?? 0) + 1),
+          childAttempts.get(issueId)!);
+    const last = index === settled.length - 1;
+    if (!last || finalRun?.status === "running") {
+      output.push({ _tag: "retry", ...common, failureReason: failure, attempts });
+      continue;
+    }
+    if (issueId !== null && releasedClaims.has(issueId)) {
+      recoveredExhaustion = true;
+      output.push({
+        _tag: "blocked",
+        ...common,
+        failureReason: failure,
+        attempts,
+        reason: "retry budget exhausted; child reopened",
+      });
+    } else if (finalRun?.lastError?.startsWith("gutter:")) {
+      output.push({ _tag: "blocked", ...common, reason: "no-commit gutter", attempts });
+    } else if (finalRun?.lastError?.startsWith("infra:")) {
+      // The exhausted infrastructure attempt is represented by the terminal
+      // run decision below, not by a second event for the same decision.
+    } else if (
+      settled.length === 1 &&
+      maximumIterations(input.scenario) === 1 &&
+      failure === "infra:timeout"
+    ) {
+      output.push({
+        _tag: "iteration-state-changed",
+        ...common,
+        turnStatus: "failed",
+        failureReason: failure,
+      });
+    } else {
+      output.push(
+        settled.length === 1 && maximumIterations(input.scenario) === 1
+          ? { _tag: "retry", ...common, failureReason: failure }
+          : { _tag: "blocked", ...common, failureReason: failure, attempts },
+      );
+    }
+  }
+
+  if (finalRun?.status === "failed" && finalRun.lastError?.includes("no usable child")) {
+    output.push({
+      _tag: "run-state-changed",
+      sequence: output.length,
+      epicId: input.scenario.beads.epicId,
+      issueId: null,
+      iterationIndex: null,
+      status: "failed",
+      reason: "ready children were unrecognised",
+      pushed: false,
+      verified: true,
+    });
+  } else if (finalRun?.status === "done" && output.some((event) => event._tag === "done")) {
+    output.push({
+      _tag: "finished",
+      sequence: output.length,
+      epicId: input.scenario.beads.epicId,
+      issueId: null,
+      iterationIndex: null,
+      status: "done",
+      pushed: false,
+      verified: true,
+    });
+  } else if (finalRun?.status === "failed" && finalRun.lastError?.startsWith("infra:")) {
+    output.push({
+      _tag: "finished",
+      sequence: output.length,
+      epicId: input.scenario.beads.epicId,
+      issueId: null,
+      iterationIndex: null,
+      status: "failed",
+      reason: "infra failure budget",
+      attempts: finalRun.infraStreak,
+      pushed: false,
+      verified: true,
+    });
+  } else if (
+    !recoveredExhaustion &&
+    finalRun?.status === "failed" &&
+    finalRun.consecutiveFailures >= 3
+  ) {
+    output.push({
+      _tag: "finished",
+      sequence: output.length,
+      epicId: input.scenario.beads.epicId,
+      issueId: null,
+      iterationIndex: null,
+      status: "failed",
+      reason: "child failure budget",
+      pushed: false,
+      verified: true,
+    });
+  }
+  return output;
+};
+
+const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: ConformanceScenario) {
+  const workspace = makeConformanceWorkspace(scenario);
+  const baseRunner = yield* ProcessRunner.ProcessRunner;
+  const runner = ProcessRunner.ProcessRunner.of({
+    run: (input: ProcessRunner.ProcessRunInput) =>
+      baseRunner.run({
+        ...input,
+        command:
+          input.command === "git"
+            ? (workspace.env["CONFORMANCE_REAL_GIT"] ?? input.command)
+            : input.command,
+        env: { ...process.env, ...workspace.env, ...input.env },
+        extendEnv: false,
+      }),
+    runStreaming: () => Effect.die("unused"),
+  } as never);
+
+  const store = makeMemoryStore();
+  const history: Array<{ readonly run: EpicRun; readonly head: string | null }> = [];
+  const baseUpsertRun = store.shape.upsertRun;
+  Object.assign(store.shape, {
+    upsertRun: (run: EpicRun) => {
+      history.push({ run, head: readHead(workspace) });
+      return baseUpsertRun(run);
+    },
+  });
+
+  const shells = new Map<
+    string,
+    {
+      readonly latestTurn: ProjectionThreadTurnStatus | null;
+      readonly session: OrchestrationSessionStatus;
+    }
+  >();
+  const details = new Map<string, OrchestrationThread>();
+  const agentProcesses = new Map<string, NodeChildProcess.ChildProcess>();
+  let sequence = 0;
+
+  const runAgent = (threadId: string) =>
+    new Promise<AgentResult>((resolvePromise) => {
+      const child = NodeChildProcess.spawn(NodePath.join(workspace.binDir, "agent"), [], {
+        cwd: workspace.cwd,
+        env: { ...process.env, ...workspace.env },
+      });
+      agentProcesses.set(threadId, child);
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+      child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+      child.on("close", (code, signal) => {
+        agentProcesses.delete(threadId);
+        resolvePromise({ code, killed: signal !== null, stdout, stderr });
+      });
+      child.on("error", () => {
+        agentProcesses.delete(threadId);
+        resolvePromise({ code: 1, killed: false, stdout, stderr });
+      });
+    });
+
+  const simulateTurn = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      shells.set(threadId, { latestTurn: "running", session: "running" });
+      const result = yield* Effect.promise(() => runAgent(threadId));
+      if (result.killed) {
+        shells.set(threadId, { latestTurn: "interrupted", session: "interrupted" });
+        return;
+      }
+      if (result.code !== 0) {
+        const message =
+          providerErrorMessage(result.stdout) ??
+          (result.stderr.trim().length > 0 ? result.stderr.trim() : "agent failed");
+        details.set(
+          threadId,
+          makeThreadDetail({
+            threadId,
+            turnId: TurnId.make(`${threadId}-turn`),
+            turnState: "error",
+            text: null,
+            streaming: false,
+            sessionStatus: "error",
+            sessionLastError: message,
+          }),
+        );
+        shells.set(threadId, { latestTurn: "error", session: "error" });
+        return;
+      }
+      const text = result.stdout.trim();
+      details.set(
+        threadId,
+        makeThreadDetail({
+          threadId,
+          turnId: TurnId.make(`${threadId}-turn`),
+          turnState: "completed",
+          text: text === "" ? null : text,
+          streaming: false,
+          sessionStatus: "ready",
+        }),
+      );
+      shells.set(threadId, { latestTurn: "completed", session: "ready" });
+    });
+
+  const dispatched: OrchestrationCommand[] = [];
+  const engineLayer = Layer.succeed(OrchestrationEngineService, {
+    readEvents: () => Stream.empty,
+    latestSequence: Effect.sync(() => sequence),
+    streamDomainEvents: Stream.never,
+    dispatch: (
+      command: OrchestrationCommand,
+    ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
+      Effect.gen(function* () {
+        dispatched.push(command);
+        if (command.type === "thread.turn.start") {
+          // Forked so `dispatch` returns before the turn resolves, the way the
+          // real engine behaves.
+          yield* Effect.forkDetach(simulateTurn(command.threadId));
+        }
+        if (
+          (command.type === "thread.turn.interrupt" || command.type === "thread.session.stop") &&
+          agentProcesses.has(command.threadId)
+        ) {
+          agentProcesses.get(command.threadId)?.kill("SIGKILL");
+        }
+        sequence += 1;
+        return { sequence };
+      }),
+  });
+
+  const snapshotLayer = Layer.succeed(ProjectionSnapshotQuery, {
+    getCommandReadModel: () => Effect.die("unused"),
+    getSnapshot: () => Effect.die("unused"),
+    getShellSnapshot: () => Effect.die("unused"),
+    getArchivedShellSnapshot: () => Effect.die("unused"),
+    getSnapshotSequence: () => Effect.succeed({ snapshotSequence: sequence }),
+    getCounts: () => Effect.die("unused"),
+    getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
+    getProjectShellById: (id) =>
+      Effect.succeed(
+        Option.some({
+          id,
+          title: "Conformance project",
+          workspaceRoot: workspace.cwd,
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("worker-cmd"),
+            model: "fixture",
+          },
+          scripts: [],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      ),
+    getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+    getThreadCheckpointContext: () => Effect.die("unused"),
+    getFullThreadDiffContext: () => Effect.die("unused"),
+    getThreadShellById: (threadId) =>
+      Effect.sync(() => {
+        const shell = shells.get(threadId);
+        if (shell === undefined) return Option.none();
+        return Option.some({
+          id: threadId,
+          projectId,
+          title: "Epic iteration",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("worker-cmd"),
+            model: "fixture",
+          },
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          branch: null,
+          worktreePath: null,
+          latestTurn:
+            shell.latestTurn === null
+              ? null
+              : {
+                  turnId: TurnId.make(`${threadId}-turn`),
+                  state: shell.latestTurn,
+                  requestedAt: "2026-01-01T00:00:00.000Z",
+                  startedAt: "2026-01-01T00:00:00.000Z",
+                  completedAt: shell.latestTurn === "running" ? null : "2026-01-01T00:00:00.000Z",
+                  assistantMessageId: null,
+                },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          session: {
+            threadId,
+            status: shell.session,
+            providerName: "codex",
+            runtimeMode: "full-access" as const,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          latestUserMessageAt: "2026-01-01T00:00:00.000Z",
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+          activeSubagentCount: 0,
+        });
+      }),
+    getThreadSessionById: () => Effect.die("unused"),
+    getThreadSubagentLiveness: () =>
+      Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
+    getSubagentActivities: () =>
+      Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
+    getThreadDetailById: () => Effect.die("unused"),
+    getThreadDetailSnapshot: (threadId) =>
+      Effect.sync(() => {
+        const detail = details.get(threadId);
+        return detail === undefined
+          ? Option.none()
+          : Option.some({ snapshotSequence: sequence, thread: detail });
+      }),
+  });
+
+  const gitVcsLayer = Layer.effect(
+    GitVcsDriver,
+    Effect.gen(function* () {
+      const processRunnerService = yield* ProcessRunner.ProcessRunner;
+      return GitVcsDriver.of({
+        execute: (request: Parameters<GitVcsDriver["Service"]["execute"]>[0]) =>
+          processRunnerService
+            .run({
+              command: "git",
+              args: request.args,
+              cwd: request.cwd,
+              maxOutputBytes: request.maxOutputBytes,
+            })
+            .pipe(
+              Effect.map((result) => ({
+                exitCode: result.code,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                stdoutTruncated: result.stdoutTruncated,
+                stderrTruncated: result.stderrTruncated,
+              })),
+            ),
+      } as never);
+    }),
+  );
+
+  const infraLayer = Layer.mergeAll(
+    Layer.succeed(ProcessRunner.ProcessRunner, runner),
+    NodeEpicRunLock.layer,
+    epicRunConfigSourceLayer,
+  );
+  const preflightLayer = epicRunPreflightLayer.pipe(Layer.provide(infraLayer));
+
+  const runnerLayer = makeEpicRunnerLive({
+    pollIntervalMs: 5,
+    quietPeriodMs: 5,
+    retryBaseDelayMs: 5,
+    retryMaxDelayMs: 5,
+  }).pipe(
+    Layer.provide(preflightLayer),
+    Layer.provide(infraLayer),
+    Layer.provide(engineLayer),
+    Layer.provide(snapshotLayer),
+    Layer.provide(gitVcsLayer.pipe(Layer.provide(infraLayer))),
+    Layer.provide(
+      Layer.succeed(WorktreeProvisioner, {
+        provision: () => Effect.die("sequential runs never provision worktrees"),
+        release: () => Effect.void,
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ProjectSetupScriptRunner, {
+        runForThread: () => Effect.succeed({ status: "no-script" } as const),
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ServerConfig, {
+        worktreesDir: NodePath.join(NodePath.dirname(workspace.cwd), "worktrees"),
+      } as ServerConfig["Service"]),
+    ),
+    Layer.provide(makeProviderRegistryLayer(conformanceProviders)),
+    Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
+    Layer.provide(
+      Layer.succeed(AgentAwarenessRelay, {
+        publishThread: () => Effect.void,
+        publishEpicRun: () => Effect.void,
+        start: () => Effect.void,
+      }),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
+
+  const providerScenario = scenario.name === "provider-fallback-persists";
+  const initialSelection = providerScenario
+    ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
+    : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
+
+  const executed = yield* Effect.gen(function* () {
+    const service = yield* EpicRunner;
+    const startExit = yield* Effect.result(
+      service.startRun({
+        epicId: scenario.beads.epicId,
+        projectId,
+        cwd: workspace.cwd,
+        prompt: EPIC_RUN_ITERATION_PROMPT,
+        orientationFile: null,
+        modelSelection: initialSelection,
+        config: configOverride(scenario),
+      }),
+    );
+    if (startExit._tag === "Failure") {
+      return { startFailure: startExit.failure };
+    }
+    const runId = startExit.success.runId;
+    // Wait for the run to reach a terminal state.
+    yield* Effect.gen(function* () {
+      while (true) {
+        const run = store.runs.get(runId);
+        if (
+          run !== undefined &&
+          (run.status === "done" || run.status === "failed" || run.status === "cancelled")
+        ) {
+          return;
+        }
+        yield* Effect.sleep("10 millis");
+      }
+    }).pipe(Effect.timeout("60 seconds"));
+    return { startFailure: null };
+  }).pipe(Effect.scoped, Effect.provide(runnerLayer));
+
+  for (const child of agentProcesses.values()) child.kill("SIGKILL");
+
+  if (executed.startFailure !== null) {
+    const failure = executed.startFailure;
+    return translateStartFailure({
+      scenario,
+      workspace,
+      failure: failure instanceof Error ? failure : String(failure),
+    });
+  }
+  return translateServerRun({
+    scenario,
+    workspace,
+    history,
+    iterations: store.iterations,
+  });
+});
+
+const describeDiff = (
+  scenario: ConformanceScenario,
+  actual: ReadonlyArray<EpicRunTranscriptEvent>,
+): string => {
+  const diff = diffTranscripts(actual, scenario.expectedTranscript);
+  return diff === null
+    ? ""
+    : `${scenario.name} diverged at index ${String(diff.index)}\nactual: ${JSON.stringify(diff.left)}\nexpected: ${JSON.stringify(diff.right)}`;
+};
+
+describe("epic-core conformance through the server adapter", () => {
+  it.live(
+    "matches every server scenario through the EpicRunner service",
+    () =>
+      Effect.gen(function* () {
+        for (const scenario of scenarios()) {
+          const startedAt = yield* Clock.currentTimeMillis;
+          const actual = yield* runServerScenario(scenario).pipe(
+            Effect.provide(
+              Layer.merge(
+                NodeServices.layer,
+                ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)),
+              ),
+            ),
+          );
+          assert.equal(
+            diffTranscripts(actual, scenario.expectedTranscript),
+            null,
+            describeDiff(scenario, actual),
+          );
+          assert.isBelow(
+            (yield* Clock.currentTimeMillis) - startedAt,
+            30_000,
+            `${scenario.name} exceeded 30 seconds`,
+          );
+        }
+      }),
+    300_000,
+  );
+});

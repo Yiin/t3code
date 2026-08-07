@@ -37,22 +37,29 @@ call a change done. Do not assume CI will catch anything.
 
 ## Epic runner
 
-Two implementations run epics today, and they are not at parity.
+The server runner is a thin adapter over the shared loop in `packages/epic-core`;
+the terminal's `t3 epic local` entry uses the same core. `run.sh` remains the
+canonical terminal coordinator until it is reduced to a shim.
 
 - `skills/cook-epic/run.sh` (3238 lines) — the terminal coordinator. This copy is
   canonical; `skills/install.sh` symlinks it into `~/.agents/skills`. Edit it
   here, then run `./skills/install.sh`. Never edit the installed symlink target.
 - `skills/cook-epic/SKILL.md` — the terminal coordinator's contract.
-- `apps/server/src/runner/Layers/EpicRunner.ts` (2088 lines) — the server loop.
+- `packages/epic-core` — the shared loop, policy, ports, and conformance core.
+- `apps/server/src/runner/Layers/EpicRunner.ts` — the server adapter: lifecycle
+  and loop supervision only. The loop is `runParallelEpicLoop` from epic-core.
+- `apps/server/src/runner/Layers/EpicRunnerPoolPorts.ts` — the server port
+  adapters (dispatch, journal, events, backlog, workspace, merge drain, VCS).
 - `apps/server/src/runner/Services/EpicRunner.ts` — the service shape.
-- `apps/server/src/runner/ralphProtocol.ts` — `RALPH_MSG`/`RALPH_DONE` parsing and
+- `packages/epic-core/src/ralphProtocol.ts` — `RALPH_MSG`/`RALPH_DONE` parsing and
   the outcome kinds.
-- `apps/server/src/runner/providerFallback.ts` — claude to codex to kimi.
-- `apps/server/src/runner/Layers/EpicRunLock.ts` — the run lock, shared with
+- `packages/epic-core/src/providerFallback.ts` — claude to codex to kimi.
+- `packages/epic-core/src/ports/EpicRunLock.ts` — the run lock port, shared with
   `run.sh`. Both owners take the same file.
-- `apps/server/src/beads/EpicRunPreflight.ts` — blockers and warnings.
-- `apps/server/src/beads/EpicRunParity.integration.test.ts` — today it proves only
-  shared beads visibility and the shared lock, nothing about loop behaviour.
+- `packages/epic-core/src/EpicRunPreflight.ts` — blockers and warnings.
+- `apps/server/integration/epicRunnerConformance.integration.test.ts` — runs
+  every conformance scenario whose `appliesTo` includes "server" through the
+  server adapter.
 - `packages/contracts/src/epicRuns.ts` — `EpicRunInput`, `LaunchEpicRunInput`, the
   iteration report and its `failureReason` vocabulary.
 - `apps/server/src/persistence/Layers/EpicRuns.ts` — the run store.

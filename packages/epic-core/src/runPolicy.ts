@@ -26,6 +26,8 @@ export interface PoolPolicy extends Omit<PoolPolicySeed, "iterationTimeoutMs"> {
   /** `null` means the persisted run explicitly disabled the worker timeout. */
   readonly iterationTimeoutMs: number | null;
   readonly maxIterations: number;
+  /** Per-child attempt budget, shared with the sequential loop. */
+  readonly maxAttemptsPerChild: number;
 }
 
 const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
@@ -99,6 +101,11 @@ export const makePoolPolicy = (seed: PoolPolicySeed, run: PersistedEpicRun): Poo
       "limits.maxIterations",
       run.config.limits.maxIterations,
       run.maxIterations,
+    ),
+    maxAttemptsPerChild: configured(
+      "limits.maxAttemptsPerChild",
+      run.config.limits.maxAttemptsPerChild,
+      run.config.limits.maxAttemptsPerChild,
     ),
   });
 };

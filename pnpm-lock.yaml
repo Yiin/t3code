@@ -478,6 +478,9 @@ importers:
       '@t3tools/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@t3tools/epic-run-conformance':
+        specifier: workspace:*
+        version: link:../../packages/epic-run-conformance
       '@t3tools/shared':
         specifier: workspace:*
         version: link:../../packages/shared

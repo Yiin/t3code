@@ -30,11 +30,15 @@ import {
   type EpicRunnerError,
 } from "./Errors.ts";
 import { decideIterationBoundary, parseMergeFixTitle, persistedFailureReason } from "./policy.ts";
-import { classifyIteration, type EpicIterationOutcome } from "./ralphProtocol.ts";
+import {
+  classifyIteration,
+  iterationFailureClass,
+  type EpicIterationOutcome,
+} from "./ralphProtocol.ts";
 import type { DispatchError, FinalMessageRead, IterationSettle } from "./ports/AgentDispatch.ts";
 import type { PoolDispatchShape } from "./ports/PoolDispatch.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
-import type { RunEvent } from "./ports/RunEvents.ts";
+import { CHILD_CLAIM_RELEASED_REASON, type RunEvent } from "./ports/RunEvents.ts";
 import type { RunJournalShape } from "./ports/RunJournal.ts";
 import type { IterationWorkspace, PoolRunContext, WorkspaceShape } from "./ports/Workspace.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
@@ -98,8 +102,12 @@ export interface PoolBacklogShape {
     title: string | null,
   ) => Effect.Effect<boolean>;
   readonly epicDescription: (cwd: string, epicId: string) => Effect.Effect<string | null>;
-  /** Reopen a still-claimed child. Never fails; the adapter logs. */
-  readonly releaseClaimedChild: (cwd: string, issueId: string) => Effect.Effect<void>;
+  /**
+   * Reopen a still-claimed child. Never fails; the adapter logs. Returns
+   * whether a standing claim was actually released, so the loop can publish
+   * the claim-recovery event exactly once per exhausted child.
+   */
+  readonly releaseClaimedChild: (cwd: string, issueId: string) => Effect.Effect<boolean>;
 }
 
 export type MergeDrainResult =
@@ -153,6 +161,10 @@ type RunIterationResult =
       readonly outcome: EpicIterationOutcome;
       readonly noCommitChildClosed: boolean;
       readonly providerTurnDispatched: boolean;
+      readonly issueId: string;
+      readonly iterationIndex: number;
+      /** True when the loop reopened this child's standing claim after failure. */
+      readonly claimReleased: boolean;
     }
   | {
       readonly _tag: "ready-unrecognised";
@@ -302,6 +314,35 @@ export const runParallelEpicLoop = (
           : Effect.succeed(run.value),
       ),
     );
+
+  /**
+   * Per-child attempt budgets, shared with the sequential loop: a child that
+   * absorbs `maxAttemptsPerChild` child-class failures fails the run, and a
+   * released claim is announced exactly once. Telemetry never fails the loop.
+   */
+  const childAttempts = new Map<string, number>();
+  const exhaustedIterations = new Map<string, number>();
+  const publishedRecoveryEvents = new Set<string>();
+  const publishClaimRecovery = (issueId: string, iterationIndex: number): Effect.Effect<void> => {
+    publishedRecoveryEvents.add(issueId);
+    return ports.events
+      .publish({
+        type: "child-claim-released",
+        runId,
+        issueId,
+        iterationIndex,
+        reason: CHILD_CLAIM_RELEASED_REASON,
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.publish-claim-recovery-failed", {
+            runId,
+            issueId,
+            cause,
+          }),
+        ),
+      );
+  };
 
   const saveRun = (run: import("./ports/RunJournal.ts").PersistedEpicRun) =>
     ports.journal
@@ -733,9 +774,10 @@ export const runParallelEpicLoop = (
       // A failed iteration usually strands its claim: reopen it here so a
       // retry can re-select the same child. `done` outcomes are left to the
       // terminal sweep, which owns the done-with-unclosed-child case.
-      if (outcome.kind !== "done" && outcome.kind !== "backlog-empty") {
-        yield* ports.backlog.releaseClaimedChild(input.cwd, issueId);
-      }
+      const claimReleased =
+        outcome.kind !== "done" && outcome.kind !== "backlog-empty"
+          ? yield* ports.backlog.releaseClaimedChild(input.cwd, issueId)
+          : false;
 
       yield* Effect.logInfo("epic.runner.iteration-finished", {
         runId,
@@ -750,6 +792,9 @@ export const runParallelEpicLoop = (
         outcome,
         noCommitChildClosed,
         providerTurnDispatched: true,
+        issueId,
+        iterationIndex,
+        claimReleased,
       } as const;
     }).pipe(
       Effect.ensuring(
@@ -802,6 +847,24 @@ export const runParallelEpicLoop = (
           return LOOP_STOP;
         }
 
+        // Per-child attempt budget, charged under the same semaphore as the
+        // failure counters so parallel settlements cannot lose an increment.
+        const successful =
+          outcome.kind === "done" || outcome.kind === "backlog-empty" || noCommitChildClosed;
+        const consumesChildAttempt = iterationFailureClass(outcome.kind) === "child";
+        const attempt =
+          (childAttempts.get(args.iterationResult.issueId) ?? 0) +
+          (successful || !consumesChildAttempt ? 0 : 1);
+        childAttempts.set(args.iterationResult.issueId, attempt);
+        const childAttemptBudgetExhausted =
+          !successful && consumesChildAttempt && attempt >= policy.maxAttemptsPerChild;
+        if (childAttemptBudgetExhausted) {
+          exhaustedIterations.set(
+            args.iterationResult.issueId,
+            args.iterationResult.iterationIndex,
+          );
+        }
+
         const successfulProviderTurn =
           providerTurnDispatched &&
           (outcome.kind === "done" || outcome.kind === "backlog-empty" || noCommitChildClosed);
@@ -829,6 +892,12 @@ export const runParallelEpicLoop = (
             retryMaxDelayMs: policy.retryMaxDelayMs,
           },
         });
+        if (childAttemptBudgetExhausted && args.iterationResult.claimReleased) {
+          yield* publishClaimRecovery(
+            args.iterationResult.issueId,
+            args.iterationResult.iterationIndex,
+          );
+        }
         yield* saveRun({
           ...settledRun,
           ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
@@ -836,8 +905,14 @@ export const runParallelEpicLoop = (
           noCommitStreak: decision.nextNoCommitStreak,
           infraStreak: decision.nextInfraStreak,
           lastError: decision.lastError,
+          ...(childAttemptBudgetExhausted
+            ? {
+                status: "failed" as const,
+                lastError: outcome.detail ?? outcome.kind,
+              }
+            : {}),
         });
-        return decision.action === "stop"
+        return decision.action === "stop" || childAttemptBudgetExhausted
           ? LOOP_STOP
           : ({
               _tag: "continue",
@@ -1179,7 +1254,17 @@ export const runParallelEpicLoop = (
           ];
           yield* Effect.forEach(
             issueIds,
-            (issueId) => ports.backlog.releaseClaimedChild(input.cwd, issueId),
+            (issueId) =>
+              Effect.gen(function* () {
+                const released = yield* ports.backlog.releaseClaimedChild(input.cwd, issueId);
+                // A claim the boundary already announced is not announced again;
+                // one released only here (a crash between boundary and sweep)
+                // still gets its recovery event.
+                if (!released || publishedRecoveryEvents.has(issueId)) return;
+                const exhaustedIterationIndex = exhaustedIterations.get(issueId);
+                if (exhaustedIterationIndex === undefined) return;
+                yield* publishClaimRecovery(issueId, exhaustedIterationIndex);
+              }),
             { concurrency: 1, discard: true },
           );
         }

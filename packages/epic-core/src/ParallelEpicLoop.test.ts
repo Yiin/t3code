@@ -45,6 +45,10 @@ type Attempt = {
   readonly close?: boolean;
   /** Append bead evidence during settle. */
   readonly comment?: boolean;
+  /** Claim the child during settle without closing it. */
+  readonly claim?: boolean;
+  /** Settle with a RALPH_BLOCKED final message. */
+  readonly blocked?: boolean;
   /** Settle in an errored turn carrying this provider error. */
   readonly providerError?: string;
   /** Fail `beginTurn` with an EpicRunnerDispatchError. */
@@ -106,6 +110,7 @@ const policy = (override: Partial<PoolPolicy> = {}): PoolPolicy => ({
   subagentGraceTimeoutMs: 1,
   maxGraceContinuations: 0,
   maxIterations: 10,
+  maxAttemptsPerChild: 3,
   ...override,
 });
 
@@ -267,7 +272,11 @@ const fixture = (input: {
     releaseClaimedChild: (_cwd, issueId) =>
       Effect.sync(() => {
         releasedClaims.push(issueId);
-        if (child.status === "in_progress") child = { ...child, status: "open" };
+        if (child.status === "in_progress") {
+          child = { ...child, status: "open" };
+          return true;
+        }
+        return false;
       }),
   };
 
@@ -335,6 +344,7 @@ const fixture = (input: {
             ? Effect.never
             : Effect.sync(() => {
                 if (attempt.commit === true) head += 1;
+                if (attempt.claim === true) child = { ...child, status: "in_progress" };
                 if (attempt.close === true) child = { ...child, status: "closed" };
                 if (attempt.comment === true) {
                   child = { ...child, commentCount: child.commentCount + 1 };
@@ -362,7 +372,10 @@ const fixture = (input: {
           attempt.providerError !== undefined
             ? { text: null, streaming: false, waitExhausted: true }
             : {
-                text: 'RALPH_MSG: {"summary":"did work","why":"needed"}',
+                text:
+                  attempt.blocked === true
+                    ? "RALPH_BLOCKED"
+                    : 'RALPH_MSG: {"summary":"did work","why":"needed"}',
                 streaming: false,
                 waitExhausted: false,
               },
@@ -684,5 +697,54 @@ it.live("classifies a failed dispatch and force-stops its session", () =>
       epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
     ]);
     assert.equal(test.releases(), 0);
+  }),
+);
+
+it.live("exhausts a claimed child's attempt budget and announces the released claim", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [
+        { blocked: true, claim: true },
+        { blocked: true, claim: true },
+        { blocked: true, claim: true },
+      ],
+      // The per-child budget (3) bites before the consecutive-failure budget.
+      policy: policy({ maxConsecutiveFailures: 5, maxAttemptsPerChild: 3 }),
+    });
+    yield* test.run;
+
+    const run = test.runRecord();
+    assert.equal(run.status, "failed");
+    assert.equal(run.lastError, "agent reported RALPH_BLOCKED");
+    assert.equal(test.dispatchCount(), 3);
+    assert.deepEqual(
+      test.iterations.map((iteration) => iteration.failureReason),
+      ["child:blocked", "child:blocked", "child:blocked"],
+    );
+    const recoveries = test.events.filter((event) => event.type === "child-claim-released");
+    assert.equal(recoveries.length, 1);
+    assert.deepEqual(recoveries[0], {
+      type: "child-claim-released",
+      runId: RUN_ID,
+      issueId: "epic.1",
+      iterationIndex: 2,
+      reason: "retry budget exhausted; child reopened",
+    });
+  }),
+);
+
+it.live("charges no per-child attempt when the claim was never standing", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ blocked: true }, { blocked: true }, { blocked: true }],
+      policy: policy({ maxConsecutiveFailures: 5, maxAttemptsPerChild: 3 }),
+    });
+    yield* test.run;
+
+    // The budget still fails the run, but nothing was claimed, so no recovery
+    // event is published.
+    assert.equal(test.runRecord().status, "failed");
+    assert.equal(test.dispatchCount(), 3);
+    assert.equal(test.events.filter((event) => event.type === "child-claim-released").length, 0);
   }),
 );
