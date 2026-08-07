@@ -190,6 +190,7 @@ function isGitCommonStateMutation(args: readonly string[]): boolean {
     case "add":
     case "checkout":
     case "cherry-pick":
+    case "clean":
     case "commit":
     case "fetch":
     case "merge":

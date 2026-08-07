@@ -13,7 +13,9 @@ import * as Option from "effect/Option";
 
 import type {
   EpicRun,
+  EpicRunLandingEffects,
   EpicRunIteration,
+  EpicRunMergeState,
   EpicRunStoreShape,
 } from "../src/persistence/Services/EpicRuns.ts";
 
@@ -100,6 +102,8 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
     string,
     import("../src/persistence/Services/EpicRuns.ts").EpicProviderDegradation
   >();
+  const mergeStates = new Map<string, EpicRunMergeState>();
+  const landingEffects = new Map<string, EpicRunLandingEffects>();
   const iterationWrites: Array<{
     readonly method: "append" | "update";
     readonly turnStatus: EpicRunIteration["turnStatus"];
@@ -227,7 +231,130 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
         if (value !== undefined && value.degradedAt <= cutoff)
           degradations.delete(providerInstanceId);
       }),
+    initializeMergeState: (input) =>
+      Effect.sync(() => {
+        if (!mergeStates.has(input.runId)) {
+          mergeStates.set(input.runId, {
+            ...input,
+            initialHead: input.lastAcceptedHead,
+            parkedCount: 0,
+            entries: [],
+          });
+        }
+      }),
+    getMergeState: ({ runId }) => Effect.sync(() => Option.fromNullishOr(mergeStates.get(runId))),
+    enqueueMerge: ({ runId, childId, branch }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        const active = state.entries.find(
+          (row) => row.branch === branch && (row.status === "queued" || row.status === "draining"),
+        );
+        if (active !== undefined) return;
+        const nextEntries = [
+          ...state.entries,
+          {
+            runId,
+            sequence: Math.max(-1, ...state.entries.map((row) => row.sequence)) + 1,
+            childId,
+            branch,
+            status: "queued" as const,
+            reason: null,
+            fixIssueId: null,
+          },
+        ];
+        mergeStates.set(runId, { ...state, entries: nextEntries });
+      }),
+    beginMergeDrain: ({ runId }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return [];
+        const entries = state.entries.map((row) =>
+          row.status === "queued" ? { ...row, status: "draining" as const } : row,
+        );
+        mergeStates.set(runId, { ...state, entries });
+        return entries.filter((row) => row.status === "draining");
+      }),
+    restoreMergeTail: ({ runId, fromSequence }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        mergeStates.set(runId, {
+          ...state,
+          entries: state.entries.map((row) =>
+            row.sequence >= fromSequence && row.status === "draining"
+              ? { ...row, status: "queued" as const }
+              : row,
+          ),
+        });
+      }),
+    beginParkMerge: ({ runId, sequence, reason }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        mergeStates.set(runId, {
+          ...state,
+          parkedCount: state.parkedCount + 1,
+          entries: state.entries.map((row) =>
+            row.sequence === sequence
+              ? { ...row, status: "parked" as const, reason, fixIssueId: null }
+              : row,
+          ),
+        });
+      }),
+    finalizeParkMerge: ({ runId, sequence, fixIssueId }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        mergeStates.set(runId, {
+          ...state,
+          entries: state.entries.map((row) =>
+            row.sequence === sequence ? { ...row, fixIssueId } : row,
+          ),
+        });
+      }),
+    completeMerge: ({ runId, sequence, lastAcceptedHead }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        const branch = state.entries.find((row) => row.sequence === sequence)?.branch;
+        mergeStates.set(runId, {
+          ...state,
+          lastAcceptedHead,
+          entries: state.entries.filter((row) => row.branch !== branch),
+        });
+      }),
+    dropMerge: ({ runId, sequence }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        mergeStates.set(runId, {
+          ...state,
+          entries: state.entries.filter((row) => row.sequence !== sequence),
+        });
+      }),
+    findParkedOriginalChild: ({ runId, branch }) =>
+      Effect.sync(() =>
+        Option.fromNullishOr(
+          mergeStates
+            .get(runId)
+            ?.entries.find((row) => row.branch === branch && row.status === "parked")?.childId,
+        ),
+      ),
+    upsertLandingEffects: (input) => Effect.sync(() => void landingEffects.set(input.runId, input)),
+    getLandingEffects: ({ runId }) =>
+      Effect.sync(() => Option.fromNullishOr(landingEffects.get(runId))),
+    deleteMergeState: ({ runId }) => Effect.sync(() => void mergeStates.delete(runId)),
   };
 
-  return { shape, runs, iterations, degradations, iterationReadCounts, iterationWrites };
+  return {
+    shape,
+    runs,
+    iterations,
+    degradations,
+    mergeStates,
+    landingEffects,
+    iterationReadCounts,
+    iterationWrites,
+  };
 };

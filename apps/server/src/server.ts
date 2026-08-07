@@ -342,6 +342,7 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
 const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunStoreLive),
   Layer.provide(ProcessRunner.layer),
+  Layer.provide(GitVcsDriver.layer),
   Layer.provide(EpicWorktreeProvisionerLayerLive),
   Layer.provide(EpicProjectSetupScriptRunnerLayerLive),
   Layer.provide(EpicRunPreflightLayerLive),

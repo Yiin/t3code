@@ -30,6 +30,7 @@ import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../src/config.ts";
 import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
+import * as GitVcsDriver from "../src/vcs/GitVcsDriver.ts";
 import * as lockLive from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";
 import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
@@ -287,6 +288,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processLayer),
+    Layer.provide(GitVcsDriver.layer.pipe(Layer.provide(NodeServices.layer))),
     Layer.provide(
       Layer.succeed(WorktreeProvisioner, {
         provision: () => Effect.die("sequential integration run must not provision"),

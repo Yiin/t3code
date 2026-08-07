@@ -212,7 +212,9 @@ it.effect("serializes common-state mutations across worktree CWDs", () => {
                 ? ["--git-dir", commonDir, "fetch", "--quiet", "origin"]
                 : index === 1
                   ? ["--literal-pathspecs", "add", "-A"]
-                  : ["branch", `feature/${index}`],
+                  : index === 2
+                    ? ["clean", "-fdx"]
+                    : ["branch", `feature/${index}`],
           }),
         { concurrency: "unbounded", discard: true },
       );

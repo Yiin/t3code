@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -24,14 +25,25 @@ import {
   EpicRunIteration,
   EpicProviderDegradation,
   ClearExpiredEpicProviderDegradationInput,
+  CompleteEpicRunMergeInput,
+  DropEpicRunMergeInput,
+  EnqueueEpicRunMergeInput,
   EpicRunStore,
+  EpicRunLandingEffects,
+  EpicRunMergeEntry,
+  FinalizeParkedEpicRunMergeInput,
+  FindParkedEpicRunMergeInput,
   GetEpicProviderDegradationInput,
   GetEpicRunInput,
   GetLatestEpicRunIterationInput,
+  InitializeEpicRunMergeStateInput,
   ListEpicRunIterationsInput,
   ListEpicRunsInput,
   ListRecentEpicRunIterationsInput,
+  ParkEpicRunMergeInput,
+  RestoreEpicRunMergeTailInput,
   UpdateEpicRunIterationInput,
+  UpsertEpicRunLandingEffectsInput,
   type EpicRunStoreShape,
 } from "../Services/EpicRuns.ts";
 
@@ -440,6 +452,201 @@ const makeEpicRunStore = Effect.gen(function* () {
     `,
   });
 
+  const EpicRunMergeStateRow = Schema.Struct({
+    ...InitializeEpicRunMergeStateInput.fields,
+    initialHead: Schema.String,
+    parkedCount: NonNegativeInt,
+  });
+
+  const initializeEpicRunMergeStateRow = SqlSchema.void({
+    Request: InitializeEpicRunMergeStateInput,
+    execute: (row) => sql`
+      INSERT INTO epic_run_merge_state (
+        run_id, initial_head, last_accepted_head, repository_path, base_branch,
+        integration_branch, integration_worktree_path
+      ) VALUES (
+        ${row.runId}, ${row.lastAcceptedHead}, ${row.lastAcceptedHead}, ${row.repositoryPath}, ${row.baseBranch},
+        ${row.integrationBranch}, ${row.integrationWorktreePath}
+      )
+      ON CONFLICT (run_id) DO NOTHING
+    `,
+  });
+
+  const mergeStateColumns = sql.literal(`
+    run_id AS "runId",
+    initial_head AS "initialHead",
+    last_accepted_head AS "lastAcceptedHead",
+    parked_count AS "parkedCount",
+    repository_path AS "repositoryPath",
+    base_branch AS "baseBranch",
+    integration_branch AS "integrationBranch",
+    integration_worktree_path AS "integrationWorktreePath"
+  `);
+  const getEpicRunMergeStateRow = SqlSchema.findOneOption({
+    Request: GetEpicRunInput,
+    Result: EpicRunMergeStateRow,
+    execute: ({ runId }) => sql`
+      SELECT ${mergeStateColumns}
+      FROM epic_run_merge_state
+      WHERE run_id = ${runId}
+    `,
+  });
+  const upsertEpicRunLandingEffectsRow = SqlSchema.void({
+    Request: UpsertEpicRunLandingEffectsInput,
+    execute: (row) => sql`
+      INSERT INTO epic_run_landing_effects (
+        run_id, repository_path, base_head, head, commit_count, parked_count
+      ) VALUES (
+        ${row.runId}, ${row.repositoryPath}, ${row.baseHead}, ${row.head},
+        ${row.commitCount}, ${row.parkedCount}
+      )
+      ON CONFLICT (run_id) DO UPDATE SET
+        repository_path = excluded.repository_path,
+        base_head = excluded.base_head,
+        head = excluded.head,
+        commit_count = excluded.commit_count,
+        parked_count = excluded.parked_count
+    `,
+  });
+  const getEpicRunLandingEffectsRow = SqlSchema.findOneOption({
+    Request: GetEpicRunInput,
+    Result: EpicRunLandingEffects,
+    execute: ({ runId }) => sql`
+      SELECT
+        run_id AS "runId",
+        repository_path AS "repositoryPath",
+        base_head AS "baseHead",
+        head,
+        commit_count AS "commitCount",
+        parked_count AS "parkedCount"
+      FROM epic_run_landing_effects
+      WHERE run_id = ${runId}
+    `,
+  });
+
+  const mergeEntryColumns = sql.literal(`
+    run_id AS "runId",
+    sequence,
+    child_id AS "childId",
+    branch,
+    status,
+    reason,
+    fix_issue_id AS "fixIssueId"
+  `);
+  const listEpicRunMergeEntries = SqlSchema.findAll({
+    Request: GetEpicRunInput,
+    Result: EpicRunMergeEntry,
+    execute: ({ runId }) => sql`
+      SELECT ${mergeEntryColumns}
+      FROM epic_run_merge_entries
+      WHERE run_id = ${runId}
+      ORDER BY sequence ASC
+    `,
+  });
+  const listActiveEpicRunMergeEntries = SqlSchema.findAll({
+    Request: GetEpicRunInput,
+    Result: EpicRunMergeEntry,
+    execute: ({ runId }) => sql`
+      SELECT ${mergeEntryColumns}
+      FROM epic_run_merge_entries
+      WHERE run_id = ${runId} AND status IN ('queued', 'draining')
+      ORDER BY sequence ASC
+    `,
+  });
+
+  const insertEpicRunMergeRowUnlessActive = SqlSchema.void({
+    Request: EnqueueEpicRunMergeInput,
+    execute: (row) => sql`
+      INSERT INTO epic_run_merge_entries (
+        run_id, sequence, child_id, branch, status, reason, fix_issue_id
+      )
+      SELECT
+        ${row.runId}, COALESCE(MAX(sequence) + 1, 0), ${row.childId}, ${row.branch},
+        'queued', NULL, NULL
+      FROM epic_run_merge_entries
+      WHERE run_id = ${row.runId}
+      HAVING NOT EXISTS (
+        SELECT 1 FROM epic_run_merge_entries
+        WHERE run_id = ${row.runId} AND branch = ${row.branch}
+          AND status IN ('queued', 'draining')
+      )
+    `,
+  });
+  const markEpicRunMergeDraining = SqlSchema.void({
+    Request: GetEpicRunInput,
+    execute: ({ runId }) => sql`
+      UPDATE epic_run_merge_entries SET status = 'draining'
+      WHERE run_id = ${runId} AND status = 'queued'
+    `,
+  });
+  const restoreEpicRunMergeTail = SqlSchema.void({
+    Request: RestoreEpicRunMergeTailInput,
+    execute: ({ runId, fromSequence }) => sql`
+      UPDATE epic_run_merge_entries SET status = 'queued'
+      WHERE run_id = ${runId} AND sequence >= ${fromSequence} AND status = 'draining'
+    `,
+  });
+  const beginParkEpicRunMergeRow = SqlSchema.void({
+    Request: ParkEpicRunMergeInput,
+    execute: ({ runId, sequence, reason }) => sql`
+      UPDATE epic_run_merge_entries
+      SET status = 'parked', reason = ${reason}, fix_issue_id = NULL
+      WHERE run_id = ${runId} AND sequence = ${sequence}
+    `,
+  });
+  const incrementEpicRunParkedCount = SqlSchema.void({
+    Request: ParkEpicRunMergeInput,
+    execute: ({ runId }) => sql`
+      UPDATE epic_run_merge_state SET parked_count = parked_count + 1 WHERE run_id = ${runId}
+    `,
+  });
+  const finalizeParkedEpicRunMergeRow = SqlSchema.void({
+    Request: FinalizeParkedEpicRunMergeInput,
+    execute: ({ runId, sequence, fixIssueId }) => sql`
+      UPDATE epic_run_merge_entries
+      SET fix_issue_id = ${fixIssueId}
+      WHERE run_id = ${runId} AND sequence = ${sequence} AND status = 'parked'
+    `,
+  });
+  const advanceEpicRunMergeHead = SqlSchema.void({
+    Request: CompleteEpicRunMergeInput,
+    execute: ({ runId, lastAcceptedHead }) => sql`
+      UPDATE epic_run_merge_state
+      SET last_accepted_head = ${lastAcceptedHead}
+      WHERE run_id = ${runId}
+    `,
+  });
+  const deleteEpicRunMergeRow = SqlSchema.void({
+    Request: DropEpicRunMergeInput,
+    execute: ({ runId, sequence }) => sql`
+      DELETE FROM epic_run_merge_entries
+      WHERE run_id = ${runId}
+        AND branch = (
+          SELECT branch FROM epic_run_merge_entries AS target
+          WHERE target.run_id = ${runId} AND target.sequence = ${sequence}
+        )
+    `,
+  });
+  const ParkedChild = Schema.Struct({ childId: Schema.String });
+  const findParkedEpicRunMergeRow = SqlSchema.findOneOption({
+    Request: FindParkedEpicRunMergeInput,
+    Result: ParkedChild,
+    execute: ({ runId, branch }) => sql`
+      SELECT child_id AS "childId"
+      FROM epic_run_merge_entries
+      WHERE run_id = ${runId} AND branch = ${branch} AND status = 'parked'
+      ORDER BY sequence DESC LIMIT 1
+    `,
+  });
+  const deleteEpicRunMergeEntries = SqlSchema.void({
+    Request: GetEpicRunInput,
+    execute: ({ runId }) => sql`DELETE FROM epic_run_merge_entries WHERE run_id = ${runId}`,
+  });
+  const deleteEpicRunMergeState = SqlSchema.void({
+    Request: GetEpicRunInput,
+    execute: ({ runId }) => sql`DELETE FROM epic_run_merge_state WHERE run_id = ${runId}`,
+  });
+
   const upsertRun: EpicRunStoreShape["upsertRun"] = (run) =>
     upsertEpicRunRow(run).pipe(
       Effect.mapError(
@@ -592,6 +799,191 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const initializeMergeState: EpicRunStoreShape["initializeMergeState"] = (input) =>
+    initializeEpicRunMergeStateRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.initializeMergeState:query",
+          "EpicRunStore.initializeMergeState:encodeRequest",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const getMergeState: EpicRunStoreShape["getMergeState"] = (input) =>
+    getEpicRunMergeStateRow(input).pipe(
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.succeed(Option.none()),
+          onSome: (state) =>
+            listEpicRunMergeEntries(input).pipe(
+              Effect.map((entries) => Option.some({ ...state, entries })),
+            ),
+        }),
+      ),
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.getMergeState:query",
+          "EpicRunStore.getMergeState:decodeRow",
+          {
+            runId: input.runId,
+          },
+        ),
+      ),
+    );
+
+  const enqueueMerge: EpicRunStoreShape["enqueueMerge"] = (input) =>
+    insertEpicRunMergeRowUnlessActive(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.enqueueMerge:query",
+          "EpicRunStore.enqueueMerge:encodeRequest",
+          {
+            runId: input.runId,
+          },
+        ),
+      ),
+    );
+
+  const beginMergeDrain: EpicRunStoreShape["beginMergeDrain"] = (input) =>
+    sql
+      .withTransaction(
+        markEpicRunMergeDraining(input).pipe(Effect.andThen(listActiveEpicRunMergeEntries(input))),
+      )
+      .pipe(
+        Effect.mapError(
+          toEpicRunStoreError(
+            "EpicRunStore.beginMergeDrain:query",
+            "EpicRunStore.beginMergeDrain:decodeRows",
+            {
+              runId: input.runId,
+            },
+          ),
+        ),
+      );
+
+  const restoreMergeTail: EpicRunStoreShape["restoreMergeTail"] = (input) =>
+    restoreEpicRunMergeTail(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.restoreMergeTail:query",
+          "EpicRunStore.restoreMergeTail:encodeRequest",
+          {
+            runId: input.runId,
+          },
+        ),
+      ),
+    );
+
+  const beginParkMerge: EpicRunStoreShape["beginParkMerge"] = (input) =>
+    sql
+      .withTransaction(
+        beginParkEpicRunMergeRow(input).pipe(Effect.andThen(incrementEpicRunParkedCount(input))),
+      )
+      .pipe(
+        Effect.mapError(
+          toEpicRunStoreError(
+            "EpicRunStore.beginParkMerge:query",
+            "EpicRunStore.beginParkMerge:encodeRequest",
+            {
+              runId: input.runId,
+            },
+          ),
+        ),
+      );
+
+  const finalizeParkMerge: EpicRunStoreShape["finalizeParkMerge"] = (input) =>
+    finalizeParkedEpicRunMergeRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.finalizeParkMerge:query",
+          "EpicRunStore.finalizeParkMerge:encodeRequest",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const completeMerge: EpicRunStoreShape["completeMerge"] = (input) =>
+    sql
+      .withTransaction(
+        advanceEpicRunMergeHead(input).pipe(Effect.andThen(deleteEpicRunMergeRow(input))),
+      )
+      .pipe(
+        Effect.mapError(
+          toEpicRunStoreError(
+            "EpicRunStore.completeMerge:query",
+            "EpicRunStore.completeMerge:encodeRequest",
+            {
+              runId: input.runId,
+            },
+          ),
+        ),
+      );
+
+  const dropMerge: EpicRunStoreShape["dropMerge"] = (input) =>
+    deleteEpicRunMergeRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.dropMerge:query",
+          "EpicRunStore.dropMerge:encodeRequest",
+          {
+            runId: input.runId,
+          },
+        ),
+      ),
+    );
+
+  const findParkedOriginalChild: EpicRunStoreShape["findParkedOriginalChild"] = (input) =>
+    findParkedEpicRunMergeRow(input).pipe(
+      Effect.map(Option.map((row) => row.childId)),
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.findParkedOriginalChild:query",
+          "EpicRunStore.findParkedOriginalChild:decodeRow",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const upsertLandingEffects: EpicRunStoreShape["upsertLandingEffects"] = (input) =>
+    upsertEpicRunLandingEffectsRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.upsertLandingEffects:query",
+          "EpicRunStore.upsertLandingEffects:encodeRequest",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const getLandingEffects: EpicRunStoreShape["getLandingEffects"] = (input) =>
+    getEpicRunLandingEffectsRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.getLandingEffects:query",
+          "EpicRunStore.getLandingEffects:decodeRow",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const deleteMergeState: EpicRunStoreShape["deleteMergeState"] = (input) =>
+    sql
+      .withTransaction(
+        deleteEpicRunMergeEntries(input).pipe(Effect.andThen(deleteEpicRunMergeState(input))),
+      )
+      .pipe(
+        Effect.mapError(
+          toEpicRunStoreError(
+            "EpicRunStore.deleteMergeState:query",
+            "EpicRunStore.deleteMergeState:encodeRequest",
+            {
+              runId: input.runId,
+            },
+          ),
+        ),
+      );
+
   return {
     upsertRun,
     getRun,
@@ -607,6 +999,19 @@ const makeEpicRunStore = Effect.gen(function* () {
     getProviderDegradation,
     clearProviderDegradation,
     clearExpiredProviderDegradation,
+    initializeMergeState,
+    getMergeState,
+    enqueueMerge,
+    beginMergeDrain,
+    restoreMergeTail,
+    beginParkMerge,
+    finalizeParkMerge,
+    completeMerge,
+    dropMerge,
+    findParkedOriginalChild,
+    upsertLandingEffects,
+    getLandingEffects,
+    deleteMergeState,
   } satisfies EpicRunStoreShape;
 });
 

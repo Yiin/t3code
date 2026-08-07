@@ -601,6 +601,96 @@ describe("EpicRunStore", () => {
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 
+  it.effect("replays ordered draining and parked merge work after a restart boundary", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-merge-restart");
+      yield* store.upsertRun(makeRun({ runId }));
+      yield* store.initializeMergeState({
+        runId,
+        lastAcceptedHead: "base-0",
+        repositoryPath: "/repo",
+        baseBranch: "mine",
+        integrationBranch: "cook-epic-integration-run-merge-restart",
+        integrationWorktreePath: "/worktrees/integration",
+      });
+      yield* store.enqueueMerge({ runId, childId: "child-a", branch: "epic/child-a" });
+      yield* store.enqueueMerge({ runId, childId: "child-b", branch: "epic/child-b" });
+
+      const firstDrain = yield* store.beginMergeDrain({ runId });
+      assert.deepStrictEqual(
+        firstDrain.map((row) => [row.sequence, row.childId, row.status]),
+        [
+          [0, "child-a", "draining"],
+          [1, "child-b", "draining"],
+        ],
+      );
+      yield* store.beginParkMerge({
+        runId,
+        sequence: 0,
+        reason: "conflict",
+      });
+      assert.strictEqual(
+        Option.getOrThrow(yield* store.getMergeState({ runId })).entries[0]?.fixIssueId,
+        null,
+      );
+      yield* store.finalizeParkMerge({ runId, sequence: 0, fixIssueId: "fix-a" });
+
+      // A new runner calls beginDrain again. Existing draining work must replay.
+      const replay = yield* store.beginMergeDrain({ runId });
+      assert.deepStrictEqual(
+        replay.map((row) => [row.sequence, row.childId, row.status]),
+        [[1, "child-b", "draining"]],
+      );
+      assert.strictEqual(
+        Option.getOrNull(yield* store.findParkedOriginalChild({ runId, branch: "epic/child-a" })),
+        "child-a",
+      );
+
+      yield* store.completeMerge({ runId, sequence: 1, lastAcceptedHead: "base-1" });
+      const persisted = Option.getOrThrow(yield* store.getMergeState({ runId }));
+      assert.strictEqual(persisted.lastAcceptedHead, "base-1");
+      assert.deepStrictEqual(
+        persisted.entries.map((row) => [row.childId, row.status]),
+        [["child-a", "parked"]],
+      );
+
+      // A repaired branch joins at the newest sequence. It must not jump ahead
+      // of work that arrived while it was parked. A duplicate active enqueue is ignored.
+      yield* store.enqueueMerge({ runId, childId: "child-c", branch: "epic/child-c" });
+      yield* store.enqueueMerge({ runId, childId: "fix-a", branch: "epic/child-a" });
+      yield* store.enqueueMerge({ runId, childId: "fix-a", branch: "epic/child-a" });
+      const repaired = yield* store.beginMergeDrain({ runId });
+      assert.deepStrictEqual(
+        repaired.map((row) => [row.sequence, row.childId, row.status]),
+        [
+          [1, "child-c", "draining"],
+          [2, "fix-a", "draining"],
+        ],
+      );
+      yield* store.completeMerge({ runId, sequence: 1, lastAcceptedHead: "base-2" });
+      yield* store.completeMerge({ runId, sequence: 2, lastAcceptedHead: "base-3" });
+      assert.deepStrictEqual(Option.getOrThrow(yield* store.getMergeState({ runId })).entries, []);
+      yield* store.upsertLandingEffects({
+        runId,
+        repositoryPath: "/repo",
+        baseHead: "base-0",
+        head: "base-3",
+        commitCount: 5,
+        parkedCount: 1,
+      });
+      yield* store.deleteMergeState({ runId });
+      assert.deepStrictEqual(Option.getOrThrow(yield* store.getLandingEffects({ runId })), {
+        runId,
+        repositoryPath: "/repo",
+        baseHead: "base-0",
+        head: "base-3",
+        commitCount: 5,
+        parkedCount: 1,
+      });
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
   it.effect("fails with a decode error when a stored run no longer decodes", () =>
     Effect.gen(function* () {
       const store = yield* EpicRunStore;

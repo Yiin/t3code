@@ -146,6 +146,102 @@ export const ClearExpiredEpicProviderDegradationInput = Schema.Struct({
 export type ClearExpiredEpicProviderDegradationInput =
   typeof ClearExpiredEpicProviderDegradationInput.Type;
 
+export const EpicRunMergeEntryStatus = Schema.Literals(["queued", "draining", "parked"]);
+export type EpicRunMergeEntryStatus = typeof EpicRunMergeEntryStatus.Type;
+
+export const EpicRunMergeEntry = Schema.Struct({
+  runId: EpicRunId,
+  sequence: NonNegativeInt,
+  childId: Schema.String,
+  branch: Schema.String,
+  status: EpicRunMergeEntryStatus,
+  reason: Schema.NullOr(Schema.Literals(["conflict", "gate-failed"])),
+  fixIssueId: Schema.NullOr(Schema.String),
+});
+export type EpicRunMergeEntry = typeof EpicRunMergeEntry.Type;
+
+export const EpicRunMergeState = Schema.Struct({
+  runId: EpicRunId,
+  initialHead: Schema.String,
+  lastAcceptedHead: Schema.String,
+  parkedCount: NonNegativeInt,
+  repositoryPath: Schema.String,
+  baseBranch: Schema.String,
+  integrationBranch: Schema.String,
+  integrationWorktreePath: Schema.String,
+  entries: Schema.Array(EpicRunMergeEntry),
+});
+export type EpicRunMergeState = typeof EpicRunMergeState.Type;
+
+export const EpicRunLandingEffects = Schema.Struct({
+  runId: EpicRunId,
+  repositoryPath: Schema.String,
+  baseHead: Schema.String,
+  head: Schema.String,
+  commitCount: NonNegativeInt,
+  parkedCount: NonNegativeInt,
+});
+export type EpicRunLandingEffects = typeof EpicRunLandingEffects.Type;
+
+export const InitializeEpicRunMergeStateInput = Schema.Struct({
+  runId: EpicRunId,
+  lastAcceptedHead: Schema.String,
+  repositoryPath: Schema.String,
+  baseBranch: Schema.String,
+  integrationBranch: Schema.String,
+  integrationWorktreePath: Schema.String,
+});
+export type InitializeEpicRunMergeStateInput = typeof InitializeEpicRunMergeStateInput.Type;
+
+export const EnqueueEpicRunMergeInput = Schema.Struct({
+  runId: EpicRunId,
+  childId: Schema.String,
+  branch: Schema.String,
+});
+export type EnqueueEpicRunMergeInput = typeof EnqueueEpicRunMergeInput.Type;
+
+export const RestoreEpicRunMergeTailInput = Schema.Struct({
+  runId: EpicRunId,
+  fromSequence: NonNegativeInt,
+});
+export type RestoreEpicRunMergeTailInput = typeof RestoreEpicRunMergeTailInput.Type;
+
+export const ParkEpicRunMergeInput = Schema.Struct({
+  runId: EpicRunId,
+  sequence: NonNegativeInt,
+  reason: Schema.Literals(["conflict", "gate-failed"]),
+});
+export type ParkEpicRunMergeInput = typeof ParkEpicRunMergeInput.Type;
+
+export const FinalizeParkedEpicRunMergeInput = Schema.Struct({
+  runId: EpicRunId,
+  sequence: NonNegativeInt,
+  fixIssueId: Schema.String,
+});
+export type FinalizeParkedEpicRunMergeInput = typeof FinalizeParkedEpicRunMergeInput.Type;
+
+export const CompleteEpicRunMergeInput = Schema.Struct({
+  runId: EpicRunId,
+  sequence: NonNegativeInt,
+  lastAcceptedHead: Schema.String,
+});
+export type CompleteEpicRunMergeInput = typeof CompleteEpicRunMergeInput.Type;
+
+export const DropEpicRunMergeInput = Schema.Struct({
+  runId: EpicRunId,
+  sequence: NonNegativeInt,
+});
+export type DropEpicRunMergeInput = typeof DropEpicRunMergeInput.Type;
+
+export const FindParkedEpicRunMergeInput = Schema.Struct({
+  runId: EpicRunId,
+  branch: Schema.String,
+});
+export type FindParkedEpicRunMergeInput = typeof FindParkedEpicRunMergeInput.Type;
+
+export const UpsertEpicRunLandingEffectsInput = EpicRunLandingEffects;
+export type UpsertEpicRunLandingEffectsInput = typeof UpsertEpicRunLandingEffectsInput.Type;
+
 /**
  * EpicRunStoreShape - Service API for durable epic run state.
  */
@@ -254,6 +350,44 @@ export interface EpicRunStoreShape {
   readonly clearExpiredProviderDegradation: (
     input: ClearExpiredEpicProviderDegradationInput,
   ) => Effect.Effect<void, EpicRunStoreError>;
+
+  /** Create the durable queue coordinates once. Existing state is never silently replaced. */
+  readonly initializeMergeState: (
+    input: InitializeEpicRunMergeStateInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  readonly getMergeState: (
+    input: GetEpicRunInput,
+  ) => Effect.Effect<Option.Option<EpicRunMergeState>, EpicRunStoreError>;
+  readonly enqueueMerge: (
+    input: EnqueueEpicRunMergeInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  /** Recover draining rows after restart and atomically mark new queued rows draining. */
+  readonly beginMergeDrain: (
+    input: GetEpicRunInput,
+  ) => Effect.Effect<ReadonlyArray<EpicRunMergeEntry>, EpicRunStoreError>;
+  readonly restoreMergeTail: (
+    input: RestoreEpicRunMergeTailInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  readonly beginParkMerge: (input: ParkEpicRunMergeInput) => Effect.Effect<void, EpicRunStoreError>;
+  readonly finalizeParkMerge: (
+    input: FinalizeParkedEpicRunMergeInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  /** Atomically advances accepted HEAD and removes the completed queue row. */
+  readonly completeMerge: (
+    input: CompleteEpicRunMergeInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  readonly dropMerge: (input: DropEpicRunMergeInput) => Effect.Effect<void, EpicRunStoreError>;
+  readonly findParkedOriginalChild: (
+    input: FindParkedEpicRunMergeInput,
+  ) => Effect.Effect<Option.Option<string>, EpicRunStoreError>;
+  readonly upsertLandingEffects: (
+    input: UpsertEpicRunLandingEffectsInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  readonly getLandingEffects: (
+    input: GetEpicRunInput,
+  ) => Effect.Effect<Option.Option<EpicRunLandingEffects>, EpicRunStoreError>;
+  /** Remove merge state only after the integration worktree is gone. */
+  readonly deleteMergeState: (input: GetEpicRunInput) => Effect.Effect<void, EpicRunStoreError>;
 }
 
 /**

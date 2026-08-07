@@ -20,6 +20,72 @@ export const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
 export const DEFAULT_INFRA_FAILURE_BUDGET = 5;
 export const DEFAULT_MAX_ITERATIONS = 50;
 
+/** Terminal parity: `skills/cook-epic/run.sh:3219-3222`. */
+export const landingDescription = (input: {
+  readonly pushEnabled: boolean;
+  readonly verified: boolean;
+}):
+  | "gated, landed locally"
+  | "landed unverified locally"
+  | "gated, pushed, landed"
+  | "pushed, landed unverified" => {
+  if (input.pushEnabled) {
+    return input.verified ? "gated, pushed, landed" : "pushed, landed unverified";
+  }
+  return input.verified ? "gated, landed locally" : "landed unverified locally";
+};
+
+/** Terminal parity: `skills/cook-epic/run.sh:2841-2847`. */
+export const childBranch = (childId: string): string => `epic/${childId}`;
+
+/** Terminal parity: `skills/cook-epic/run.sh:3011-3056`. */
+export type MergeParkReason = "conflict" | "gate-failed";
+
+/** Terminal parity: `skills/cook-epic/run.sh:3048`. */
+export const mergeFixTitle = (branch: string, reason: MergeParkReason): string =>
+  `Merge fix: land ${branch} (${reason})`;
+
+/** Terminal parity: `skills/cook-epic/run.sh:2841-2845`. */
+const MERGE_FIX_TITLE_PATTERN = /^Merge fix: land ([^ ]+) \((conflict|gate-failed)\)$/;
+
+export const parseMergeFixTitle = (
+  title: string,
+): { readonly branch: string; readonly reason: MergeParkReason } | null => {
+  const match = MERGE_FIX_TITLE_PATTERN.exec(title);
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  return { branch: match[1], reason: match[2] as MergeParkReason };
+};
+
+/** Terminal parity: `skills/cook-epic/run.sh:3051`. */
+export const parkedBranchKey = (branch: string): string => branch.replaceAll("/", "_");
+
+/** Terminal parity: `skills/cook-epic/run.sh:3029-3047`. */
+export const mergeFixDescription = (input: {
+  readonly childId: string;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly reason: MergeParkReason;
+  readonly gateCommand: string | null;
+  readonly pushEnabled: boolean;
+}): string => {
+  let description = `Branch \`${input.branch}\` (child \`${input.childId}\`) failed to land on \`${input.baseBranch}\`: ${input.reason}.\n\nRepair procedure: you will be on branch \`${input.branch}\` in an isolated worktree. Merge \`${input.baseBranch}\` into it, resolve conflicts`;
+  description +=
+    input.reason === "conflict"
+      ? ", then run the project quality gates"
+      : `. The integration gate is: \`${input.gateCommand ?? ""}\` — run it and fix what it reports`;
+  description += input.pushEnabled
+    ? ". Push the branch, close this issue, and note the epic."
+    : ". Do not push (disabled this run). Close this issue and note the epic.";
+  return `${description} Do NOT merge into ${input.baseBranch} yourself.`;
+};
+
+/** Terminal parity: `skills/cook-epic/run.sh:3124`. */
+export const trialMergeMessage = (branch: string, childId: string): string =>
+  `cook-epic: merge ${branch} (${childId})`;
+
+/** Terminal parity: integration branch creation near `skills/cook-epic/run.sh:1039-1047`. */
+export const integrationBranch = (runId: string): string => `cook-epic-integration-${runId}`;
+
 export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
 
 /** The follow-up turn used after an iteration's background agents settle. */

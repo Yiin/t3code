@@ -51,6 +51,15 @@ import {
   type EpicRunLockLease,
 } from "@t3tools/epic-core/ports/EpicRunLock";
 import { resolveEpicProviderFallback } from "@t3tools/epic-core/providerFallback";
+import { drainMergeQueue } from "@t3tools/epic-core/MergeQueue";
+import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
+import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
+import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
+import { MergeQueuePortError } from "@t3tools/epic-core/ports/MergeQueue";
+import {
+  integrationBranch as integrationBranchName,
+  parseMergeFixTitle,
+} from "@t3tools/epic-core/policy";
 import {
   classifyIteration,
   hasRalphBlocked,
@@ -93,6 +102,9 @@ import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
 import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
+import { makeEpicRunMergeQueueStore } from "../EpicRunMergeQueueStore.ts";
+import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
 import {
   EpicRunner,
   type EpicRunnerShape,
@@ -503,10 +515,17 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const agentAwarenessRelay = yield* AgentAwarenessRelay;
     const serverConfig = yield* ServerConfig;
     const worktreeProvisioner = yield* WorktreeProvisioner;
+    const gitVcsDriver = yield* GitVcsDriver;
     const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
     const leases = new Map<EpicRunId, EpicRunLockLease>();
     const issueTitleCache = new Map<string, string>();
+    const mergeQueueStore = makeEpicRunMergeQueueStore(store);
+    const mergeGate = makeProcessGate({
+      processRunner,
+      environment: process.env,
+      uid: process.getuid?.() ?? 0,
+    });
 
     const seedRetryBaseDelayMs = Math.max(
       1,
@@ -1267,9 +1286,143 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         );
       });
 
+    const releaseProvisionedWorktree = (input: {
+      readonly repositoryPath: string;
+      readonly worktreePath: string;
+      readonly label: string;
+    }) =>
+      worktreeProvisioner
+        .release({
+          repoCwd: input.repositoryPath,
+          worktreePath: input.worktreePath,
+          force: true,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning(input.label, {
+              repositoryPath: input.repositoryPath,
+              worktreePath: input.worktreePath,
+              cause,
+            }),
+          ),
+        );
+
+    const ensureIntegrationWorkspace = Effect.fn("EpicRunner.ensureIntegrationWorkspace")(
+      function* (run: EpicRun) {
+        if (run.config.execution.sequential) return null;
+        const persisted = yield* store
+          .getMergeState({ runId: run.runId })
+          .pipe(Effect.mapError(storeError("getMergeState")));
+        if (Option.isSome(persisted)) return persisted.value;
+
+        const baseBranch = yield* readCurrentBranch(run.cwd);
+        const lastAcceptedHead = yield* readHeadCommit(run.cwd);
+        if (lastAcceptedHead === null) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.integration-worktree",
+            detail: `Could not resolve HEAD before creating the integration worktree for ${run.runId}`,
+          });
+        }
+        const branch = integrationBranchName(run.runId);
+        const targetPath = path.join(serverConfig.worktreesDir, `epic-${run.runId}`, "integration");
+        const branchCheck = yield* processRunner
+          .run({
+            command: "git",
+            args: ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+            cwd: run.cwd,
+            timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.integration-worktree-check",
+                  detail: `Could not check integration branch ${branch}`,
+                  cause,
+                }),
+            ),
+          );
+        if (branchCheck.code === 0) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.integration-worktree",
+            detail: `Refusing to reuse existing integration branch ${branch}; reconcile it first`,
+          });
+        }
+        const provisioned = yield* worktreeProvisioner
+          .provision({
+            projectCwd: run.cwd,
+            branch,
+            baseBranch,
+            path: targetPath,
+            refuseExisting: true,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.integration-worktree-provision",
+                  detail: `Could not provision ${branch} at ${targetPath}`,
+                  cause,
+                }),
+            ),
+          );
+        return yield* Effect.gen(function* () {
+          yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "beads.integration-redirect-write",
+                  detail: `Could not write the beads redirect in ${provisioned.path}`,
+                  cause,
+                }),
+            ),
+          );
+          yield* store
+            .initializeMergeState({
+              runId: run.runId,
+              lastAcceptedHead,
+              repositoryPath: run.cwd,
+              baseBranch,
+              integrationBranch: provisioned.refName,
+              integrationWorktreePath: provisioned.path,
+            })
+            .pipe(Effect.mapError(storeError("initializeMergeState")));
+          return Option.getOrThrow(
+            yield* store
+              .getMergeState({ runId: run.runId })
+              .pipe(Effect.mapError(storeError("getMergeState"))),
+          );
+        }).pipe(
+          Effect.catchCause((cause) =>
+            releaseProvisionedWorktree({
+              repositoryPath: run.cwd,
+              worktreePath: provisioned.path,
+              label: "epic.runner.integration-provision-rollback-failed",
+            }).pipe(
+              Effect.andThen(
+                makeEpicRunMergeGit({ git: gitVcsDriver, setupWorktree: () => Effect.void })
+                  .deleteLocalBranch(run.cwd, provisioned.refName)
+                  .pipe(
+                    Effect.catchCause((deleteCause) =>
+                      Effect.logWarning("epic.runner.integration-branch-rollback-failed", {
+                        runId: run.runId,
+                        branch: provisioned.refName,
+                        cause: deleteCause,
+                      }),
+                    ),
+                  ),
+              ),
+              Effect.andThen(Effect.failCause(cause)),
+            ),
+          ),
+        );
+      },
+    );
+
     const resolveIterationWorkspace = Effect.fn("EpicRunner.resolveIterationWorkspace")(function* (
       run: EpicRun,
       issueId: string,
+      issueTitle: string,
     ): Effect.fn.Return<IterationWorkspace, EpicRunnerError> {
       if (run.config.execution.sequential) {
         const worktreePath = yield* resolveIterationWorktreePath(run);
@@ -1280,7 +1433,19 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         };
       }
 
-      const branch = `epic/${issueId}`;
+      const mergeFix = parseMergeFixTitle(issueTitle);
+      const branch = mergeFix?.branch ?? `epic/${issueId}`;
+      if (mergeFix !== null) {
+        const original = yield* store
+          .findParkedOriginalChild({ runId: run.runId, branch })
+          .pipe(Effect.mapError(storeError("findParkedOriginalChild")));
+        if (Option.isNone(original)) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.merge-fix-worktree",
+            detail: `Merge-fix child ${issueId} refers to unparked branch ${branch}`,
+          });
+        }
+      }
       const baseBranch = yield* readCurrentBranch(run.cwd);
       const targetPath = path.join(serverConfig.worktreesDir, `epic-${run.runId}`, issueId);
       const provisioned = yield* worktreeProvisioner
@@ -1300,7 +1465,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               }),
           ),
         );
-      yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
+      return yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
         Effect.mapError(
           (cause) =>
             new EpicRunnerDispatchError({
@@ -1309,13 +1474,36 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               cause,
             }),
         ),
+        Effect.as({
+          cwd: provisioned.path,
+          branch: provisioned.refName,
+          worktreePath: provisioned.path,
+        }),
+        Effect.catchCause((cause) =>
+          releaseProvisionedWorktree({
+            repositoryPath: run.cwd,
+            worktreePath: provisioned.path,
+            label: "epic.runner.worker-provision-rollback-failed",
+          }).pipe(Effect.andThen(Effect.failCause(cause))),
+        ),
       );
-      return {
-        cwd: provisioned.path,
-        branch: provisioned.refName,
-        worktreePath: provisioned.path,
-      };
     });
+
+    const releaseIterationWorkspace = (run: EpicRun, workspace: IterationWorkspace) =>
+      workspace.worktreePath === null
+        ? Effect.void
+        : worktreeProvisioner
+            .release({ repoCwd: run.cwd, worktreePath: workspace.worktreePath, force: true })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.worker-worktree-release",
+                    detail: `Could not release worker worktree ${workspace.worktreePath}`,
+                    cause,
+                  }),
+              ),
+            );
 
     const readThreadShell = (threadId: ThreadId) =>
       projectionSnapshotQuery.getThreadShellById(threadId).pipe(
@@ -1746,8 +1934,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       readonly selection: ReadyChildSelection;
       readonly policy: EpicRunnerPolicy;
       readonly onDispatched: (threadId: ThreadId) => void;
-    }): Effect.Effect<RunIterationResult, EpicRunnerError> =>
-      Effect.gen(function* () {
+    }): Effect.Effect<RunIterationResult, EpicRunnerError> => {
+      let releaseContext: {
+        readonly run: EpicRun;
+        readonly issueId: string;
+        readonly workspace: IterationWorkspace;
+      } | null = null;
+      return Effect.gen(function* () {
         const run = input.run;
         const selection = input.selection;
         const startedAt = yield* nowIso;
@@ -1769,7 +1962,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             }),
           );
           if (iterationIndex === null) {
-            return { _tag: "dispatch-skipped", providerTurnDispatched: false };
+            return { _tag: "dispatch-skipped", providerTurnDispatched: false } as const;
           }
           const detail = `bd ready returned no usable child for ${run.epicId}; candidates: ${selection.candidateIds.join(", ")}`;
           yield* Effect.logError("epic.runner.ready-unrecognised", {
@@ -1792,21 +1985,26 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             })
             .pipe(Effect.mapError(storeError("updateIteration")));
           return {
-            _tag: "ready-unrecognised" as const,
+            _tag: "ready-unrecognised",
             candidateIds: selection.candidateIds,
             detail,
             providerTurnDispatched: false,
-          };
+          } as const;
         }
 
         const issueId = selection.issueId;
-        const workspace = yield* resolveIterationWorkspace(run, issueId);
+        const issueEvidenceBefore = yield* readIssueEvidence(run.cwd, issueId);
+        const workspace = yield* resolveIterationWorkspace(
+          run,
+          issueId,
+          issueEvidenceBefore.title?.trim() || issueId,
+        );
+        releaseContext = { run, issueId, workspace };
         const branchBase = workspace.branch === null ? null : yield* readHeadCommit(run.cwd);
         const epicContext = yield* readEpicDescription(run.cwd, run.epicId);
         const orientationCard = yield* readOrientationCard(run.cwd, run.orientationFile);
         const headBefore = yield* readHeadCommit(workspace.cwd);
         const initialWorktreeFingerprint = yield* readWorktreeFingerprint(workspace.cwd);
-        const issueEvidenceBefore = yield* readIssueEvidence(run.cwd, issueId);
         const commentsBefore = issueEvidenceBefore.commentCount;
         const isResearchChild = yield* readIssueIsResearch(
           run.cwd,
@@ -1847,7 +2045,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           }),
         );
         if (allocated === null) {
-          return { _tag: "dispatch-skipped", providerTurnDispatched: false };
+          return { _tag: "dispatch-skipped", providerTurnDispatched: false } as const;
         }
         const { iterationIndex, threadId } = allocated;
 
@@ -1935,7 +2133,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             threadId,
             createdAt: yield* nowIso,
           });
-          return { _tag: "dispatch-skipped", providerTurnDispatched: false };
+          return { _tag: "dispatch-skipped", providerTurnDispatched: false } as const;
         }
 
         const settleIteration =
@@ -2062,6 +2260,29 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               });
         const noCommitChildClosed = evidenceVerdict?.accepted ?? false;
 
+        if (
+          !run.config.execution.sequential &&
+          outcome.kind === "done" &&
+          workspace.branch !== null
+        ) {
+          const mergeFix = parseMergeFixTitle(issueEvidenceBefore.title ?? "");
+          const originalChild =
+            mergeFix === null
+              ? issueId
+              : Option.getOrThrow(
+                  yield* store
+                    .findParkedOriginalChild({ runId: run.runId, branch: workspace.branch })
+                    .pipe(Effect.mapError(storeError("findParkedOriginalChild"))),
+                );
+          yield* store
+            .enqueueMerge({
+              runId: run.runId,
+              childId: originalChild,
+              branch: workspace.branch,
+            })
+            .pipe(Effect.mapError(storeError("enqueueMerge")));
+        }
+
         const iterationStatus =
           outcome.kind === "backlog-empty" || outcome.kind === "done" || noCommitChildClosed
             ? "completed"
@@ -2112,8 +2333,26 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           outcome,
           noCommitChildClosed,
           providerTurnDispatched: true,
-        };
-      });
+        } as const;
+      }).pipe(
+        Effect.ensuring(
+          Effect.suspend(() => {
+            const context = releaseContext;
+            if (context === null) return Effect.void;
+            return releaseIterationWorkspace(context.run, context.workspace).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("epic.runner.worker-worktree-release-failed", {
+                  runId: context.run.runId,
+                  issueId: context.issueId,
+                  worktreePath: context.workspace.worktreePath,
+                  cause,
+                }),
+              ),
+            );
+          }),
+        ),
+      );
+    };
 
     const applyIterationBoundary = (input: {
       readonly runId: EpicRunId;
@@ -2288,14 +2527,106 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     }
     type SchedulerEvent = WorkerSettlement | { readonly _tag: "retune" };
 
+    const drainQueuedBranches = Effect.fn("EpicRunner.drainQueuedBranches")(function* (
+      run: EpicRun,
+    ) {
+      const state = yield* ensureIntegrationWorkspace(run);
+      if (state === null) return { _tag: "idle", queueLength: 0 } as const;
+      const restoreIntegrationWorktreeAssets = (cwd: string) =>
+        Effect.gen(function* () {
+          // Terminal parity: `skills/cook-epic/run.sh:1173-1185,3110-3112`.
+          yield* writeBeadsRedirect(run.cwd, cwd);
+          const sourceNodeModules = path.join(run.cwd, "node_modules");
+          const targetNodeModules = path.join(cwd, "node_modules");
+          if (
+            (yield* fileSystem.exists(sourceNodeModules)) &&
+            !(yield* fileSystem.exists(targetNodeModules))
+          ) {
+            yield* fileSystem.symlink(sourceNodeModules, targetNodeModules);
+          }
+          // Terminal parity: `skills/cook-epic/run.sh:1164-1169`.
+          for (const name of [
+            ".env",
+            ".env.local",
+            ".env.development",
+            ".env.development.local",
+            ".env.test",
+          ]) {
+            const source = path.join(run.cwd, name);
+            const target = path.join(cwd, name);
+            if ((yield* fileSystem.exists(source)) && !(yield* fileSystem.exists(target))) {
+              yield* fileSystem.copyFile(source, target);
+            }
+          }
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new MergeQueuePortError({
+                operation: "setupWorktree",
+                detail: `Could not restore integration worktree assets in ${cwd}`,
+                cause,
+              }),
+          ),
+        );
+      const git = makeEpicRunMergeGit({
+        git: gitVcsDriver,
+        setupWorktree: restoreIntegrationWorktreeAssets,
+      });
+      return yield* drainMergeQueue(
+        {
+          runId: run.runId,
+          epicId: run.epicId,
+          holder: `cook-epic-${run.runId}`,
+          gateCommand: run.config.gate.disabled ? null : run.config.gate.command,
+          pushEnabled: !run.config.vcs.noPush,
+          verified: !run.config.gate.disabled,
+          maxGateOutputBytes: 1024 * 1024,
+        },
+        {
+          store: mergeQueueStore,
+          git,
+          slot: makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner }),
+          gate: mergeGate,
+          backlog: makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
+          events: {
+            emit: (event) =>
+              Effect.logInfo(`epic.runner.merge-${event.event}`, {
+                runId: run.runId,
+                ...event,
+              }).pipe(Effect.asVoid),
+          },
+          fold: {
+            run: (childId) =>
+              Effect.logDebug("epic.runner.merge-fold-hook", {
+                runId: run.runId,
+                childId,
+              }).pipe(Effect.asVoid),
+          },
+        },
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new EpicRunnerDispatchError({
+              commandType: "git.merge-queue",
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
+    });
+
     const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
         const initialRun = yield* requireRun(runId);
         const policy = makeEpicRunnerPolicy(policySeed, initialRun);
+        const initialMergeState = yield* ensureIntegrationWorkspace(initialRun);
         const events = yield* Queue.unbounded<SchedulerEvent>();
         workerCapSignals.set(runId, events);
         const active = new Map<string, ActiveIteration>();
-        let drainBeforeDispatch = false;
+        let drainBeforeDispatch =
+          initialMergeState?.entries.some(
+            (entry) => entry.status === "queued" || entry.status === "draining",
+          ) ?? false;
         let terminalWorkerError: EpicRunnerError | null = null;
         let pendingFallback: PendingProviderFallback | null = null;
         let syntheticSequence = 0;
@@ -2331,6 +2662,31 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         while (true) {
           const run = yield* requireRun(runId);
 
+          if (drainBeforeDispatch) {
+            const result = yield* drainQueuedBranches(run);
+            if (result._tag === "fatal" && "detail" in result) {
+              yield* withTransition(
+                Effect.gen(function* () {
+                  const current = yield* requireRun(runId);
+                  if (current.status === "running") {
+                    yield* saveRun({
+                      ...current,
+                      status: "failed",
+                      lastError: `infra:merge-reconciliation: ${result.detail}`,
+                      updatedAt: yield* nowIso,
+                    });
+                  }
+                }),
+              );
+              liveLoops.delete(runId);
+              return;
+            }
+            if (result._tag === "deferred") {
+              yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
+              continue;
+            }
+            drainBeforeDispatch = false;
+          }
           if (active.size === 0 && terminalWorkerError !== null) {
             return yield* terminalWorkerError;
           }
@@ -2341,9 +2697,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             drainBeforeDispatch = false;
             continue;
           }
-          if (active.size === 0 && drainBeforeDispatch) {
-            drainBeforeDispatch = false;
-          }
 
           if (run.status !== "running") {
             if (active.size === 0) {
@@ -2351,7 +2704,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               yield* Effect.logInfo("epic.runner.loop-stopped", { runId, status: run.status });
               return;
             }
-          } else if (!drainBeforeDispatch && terminalWorkerError === null) {
+          } else if (
+            !drainBeforeDispatch &&
+            terminalWorkerError === null &&
+            pendingFallback === null
+          ) {
             const uncharged = [...active.values()].filter((worker) => !worker.charged).length;
             const remainingDispatches = Math.max(
               0,
@@ -2454,6 +2811,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             providerFallbackApplied: fallbackAppliesToBoundary,
           });
           if (
+            !run.config.execution.sequential &&
+            settlement.exit.value._tag === "classified" &&
+            settlement.exit.value.outcome.kind === "done"
+          ) {
+            drainBeforeDispatch = true;
+          }
+          if (
             boundary._tag === "stop" ||
             boundary.providerFallbackApplied ||
             pendingFallback !== null
@@ -2541,6 +2905,96 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       }
     });
 
+    const cleanupFinishedIntegrationWorkspace = Effect.fn(
+      "EpicRunner.cleanupFinishedIntegrationWorkspace",
+    )(function* (runId: EpicRunId) {
+      const run = yield* requireRun(runId);
+      if (
+        run.config.execution.sequential ||
+        (run.status !== "done" && run.status !== "cancelled" && run.status !== "failed")
+      ) {
+        return;
+      }
+      const state = yield* store
+        .getMergeState({ runId })
+        .pipe(Effect.mapError(storeError("getMergeState")));
+      if (Option.isNone(state)) return;
+      const countOutput = yield* gitVcsDriver
+        .execute({
+          operation: "EpicRunner.landingEffects.commitCount",
+          cwd: state.value.repositoryPath,
+          args: [
+            "rev-list",
+            "--count",
+            `${state.value.initialHead}..${state.value.lastAcceptedHead}`,
+          ],
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.landing-effects",
+                detail: "Could not count landed commits",
+                cause,
+              }),
+          ),
+        );
+      const commitCount = Number.parseInt(countOutput.stdout.trim(), 10);
+      if (!Number.isSafeInteger(commitCount) || commitCount < 0) {
+        return yield* new EpicRunnerDispatchError({
+          commandType: "git.landing-effects",
+          detail: `Git returned an invalid landed commit count: ${countOutput.stdout.trim()}`,
+        });
+      }
+      const landingEffects = {
+        runId,
+        repositoryPath: state.value.repositoryPath,
+        baseHead: state.value.initialHead,
+        head: state.value.lastAcceptedHead,
+        commitCount,
+        parkedCount: state.value.parkedCount,
+      } as const;
+      yield* store
+        .upsertLandingEffects(landingEffects)
+        .pipe(Effect.mapError(storeError("upsertLandingEffects")));
+      yield* Effect.logInfo("epic.runner.repository-landing-effects", {
+        ...landingEffects,
+      });
+      yield* worktreeProvisioner
+        .release({
+          repoCwd: state.value.repositoryPath,
+          worktreePath: state.value.integrationWorktreePath,
+          force: true,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.integration-worktree-release",
+                detail: `Could not release ${state.value.integrationWorktreePath}`,
+                cause,
+              }),
+          ),
+        );
+      yield* makeEpicRunMergeGit({ git: gitVcsDriver, setupWorktree: () => Effect.void })
+        .deleteLocalBranch(state.value.repositoryPath, state.value.integrationBranch)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.integration-branch-delete",
+                detail: cause.detail,
+                cause,
+              }),
+          ),
+        );
+      if (run.status !== "failed") {
+        yield* store
+          .deleteMergeState({ runId })
+          .pipe(Effect.mapError(storeError("deleteMergeState")));
+      }
+    });
+
     const supervisedLoop = (runId: EpicRunId): Effect.Effect<void> =>
       runLoop(runId).pipe(
         Effect.catch((error: EpicRunnerError) =>
@@ -2595,7 +3049,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             Effect.flatMap((cancelOwnsCleanup) =>
               cancelOwnsCleanup
                 ? Effect.succeed(undefined)
-                : releaseStrandedChild(runId).pipe(Effect.andThen(releaseLease(runId))),
+                : cleanupFinishedIntegrationWorkspace(runId).pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("epic.runner.integration-cleanup-failed", { runId, cause }),
+                    ),
+                    Effect.andThen(releaseStrandedChild(runId)),
+                    Effect.andThen(releaseLease(runId)),
+                  ),
             ),
           ),
         ),
@@ -3019,6 +3479,13 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         }).pipe(
           Effect.ensuring(
             Effect.sync(() => cancelCleanupOwned.delete(runId)).pipe(
+              Effect.andThen(
+                cleanupFinishedIntegrationWorkspace(runId).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("epic.runner.integration-cleanup-failed", { runId, cause }),
+                  ),
+                ),
+              ),
               Effect.andThen(releaseLease(runId)),
             ),
           ),

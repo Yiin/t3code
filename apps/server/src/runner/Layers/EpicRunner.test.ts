@@ -70,6 +70,7 @@ import {
   type ProjectSetupScriptRunnerInput,
 } from "../../project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner, type ProvisionWorktreeInput } from "../../vcs/WorktreeProvisioner.ts";
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import {
   makeMemoryStore,
@@ -293,8 +294,28 @@ function createHarness(input: {
   readonly guardedStopRefusals?: number;
   /** Model a parallel branch HEAD that moves while the base checkout stays put. */
   readonly separateWorkerHead?: boolean;
+  /** Inject an allocation defect after this child's worktree is provisioned. */
+  readonly failAllocationFor?: string;
+  readonly failInitializeMergeState?: boolean;
+  readonly workerProvisionPath?: string;
+  readonly integrationProvisionPath?: string;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
+  if (input.failAllocationFor !== undefined) {
+    const allocateIteration = store.shape.allocateIteration;
+    Object.assign(store.shape, {
+      allocateIteration: (request: Parameters<typeof allocateIteration>[0]) =>
+        request.branch === `epic/${input.failAllocationFor}`
+          ? Effect.die(new Error("injected allocation failure"))
+          : allocateIteration(request),
+    });
+  }
+  if (input.failInitializeMergeState === true) {
+    Object.assign(store.shape, {
+      initializeMergeState: () => Effect.die(new Error("injected merge-state failure")),
+    });
+  }
+  const repositoryRoot = input.workspaceRoot ?? "/tmp/epic-runner-repo";
   for (const run of input.seedRuns ?? []) {
     store.runs.set(run.runId, run);
   }
@@ -336,10 +357,13 @@ function createHarness(input: {
   const configReadRoots: string[] = [];
   const preflightModes: Array<"parallel" | "sequential"> = [];
   const provisionInputs: ProvisionWorktreeInput[] = [];
+  const integrationProvisionInputs: ProvisionWorktreeInput[] = [];
+  const releasedWorktrees: string[] = [];
   const setupInputs: ProjectSetupScriptRunnerInput[] = [];
   const iterationLifecycle: string[] = [];
   harnessSequence += 1;
   const worktreesDir = `/tmp/t3-epic-runner-worktrees-${harnessSequence}`;
+  let landedHead = baseHead;
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -601,6 +625,39 @@ function createHarness(input: {
         processRequests.push(request);
         const subcommand = request.args[0];
         const issueId = request.args[1];
+        if (request.command === "git" && subcommand === "show-ref") {
+          const ref = request.args.at(-1) ?? "";
+          return {
+            stdout: "",
+            stderr: "",
+            code: (ref.includes("cook-epic-integration-") ? 1 : 0) as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
+        if (
+          request.command === "git" &&
+          subcommand === "rev-parse" &&
+          request.args.includes("--git-common-dir")
+        ) {
+          return {
+            stdout: `${repositoryRoot}/.git\n`,
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
+        if (
+          request.command === "git" &&
+          subcommand === "merge" &&
+          request.args[1] === "--ff-only" &&
+          request.cwd === repositoryRoot
+        ) {
+          landedHead = head;
+        }
         if (request.command === "bd" && subcommand === "list") {
           return {
             stdout: encodeUnknownJson(input.openChildren ?? []),
@@ -709,17 +766,13 @@ function createHarness(input: {
               : request.args[0] === "symbolic-ref"
                 ? "mine\n"
                 : request.args[0] === "rev-list"
-                  ? `${
-                      input.separateWorkerHead && !request.args[2]?.startsWith(`${baseHead}..`)
-                        ? 0
-                        : branchCommitCount
-                    }\n`
+                  ? `${branchCommitCount}\n`
                   : request.args[0] === "status"
                     ? worktreeFingerprint
                     : request.args[0] === "rev-parse" &&
-                        input.separateWorkerHead === true &&
-                        request.cwd === "/tmp/epic-runner-repo"
-                      ? `${baseHead}\n`
+                        store.mergeStates.size > 0 &&
+                        request.cwd === repositoryRoot
+                      ? `${landedHead}\n`
                       : `${head}\n`,
           stderr: "",
           code: 0 as never,
@@ -730,6 +783,31 @@ function createHarness(input: {
       }),
     runStreaming: () => Effect.die("unused"),
   } as never);
+  const gitVcsLayer = Layer.effect(
+    GitVcsDriver,
+    Effect.gen(function* () {
+      const runner = yield* ProcessRunner.ProcessRunner;
+      return GitVcsDriver.of({
+        execute: (request: Parameters<GitVcsDriver["Service"]["execute"]>[0]) =>
+          runner
+            .run({
+              command: "git",
+              args: request.args,
+              cwd: request.cwd,
+              maxOutputBytes: request.maxOutputBytes,
+            })
+            .pipe(
+              Effect.map((result) => ({
+                exitCode: result.code,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                stdoutTruncated: result.stdoutTruncated,
+                stderrTruncated: result.stderrTruncated,
+              })),
+            ),
+      } as never);
+    }),
+  ).pipe(Layer.provide(processRunnerLayer));
 
   const layer = makeEpicRunnerLive({
     pollIntervalMs: 5,
@@ -804,18 +882,29 @@ function createHarness(input: {
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processRunnerLayer),
+    Layer.provide(gitVcsLayer),
     Layer.provide(
       Layer.succeed(WorktreeProvisioner, {
         provision: (request) =>
           Effect.sync(() => {
-            provisionInputs.push(request);
-            const provisionedPath = request.path ?? `${worktreesDir}/default`;
+            if (request.branch?.startsWith("cook-epic-integration-") === true) {
+              integrationProvisionInputs.push(request);
+            } else {
+              provisionInputs.push(request);
+            }
+            const provisionedPath =
+              request.branch?.startsWith("cook-epic-integration-") === true
+                ? (input.integrationProvisionPath ?? request.path ?? `${worktreesDir}/default`)
+                : (input.workerProvisionPath ?? request.path ?? `${worktreesDir}/default`);
             return {
               path: provisionedPath,
               refName: request.branch ?? request.baseBranch,
             };
           }),
-        release: () => Effect.die("unused"),
+        release: ({ worktreePath }) =>
+          Effect.sync(() => {
+            releasedWorktrees.push(worktreePath);
+          }),
       }),
     ),
     Layer.provide(
@@ -861,6 +950,8 @@ function createHarness(input: {
     configReadRoots,
     preflightModes,
     provisionInputs,
+    integrationProvisionInputs,
+    releasedWorktrees,
     setupInputs,
     iterationLifecycle,
     worktreesDir,
@@ -4790,6 +4881,11 @@ describe("EpicRunner", () => {
       const runner = yield* EpicRunner;
       yield* runner.resumeRun({ runId });
       yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+      assert.strictEqual(
+        harness.store.runs.get(runId)?.status,
+        "done",
+        harness.store.runs.get(runId)?.lastError ?? undefined,
+      );
 
       const stored = harness.store.runs.get(runId)!;
       assert.deepStrictEqual(stored.config, persistedSequentialConfigSnapshot.config);
@@ -4970,6 +5066,16 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
 
       const expectedPath = `${harness.worktreesDir}/epic-${run.runId}/child-1`;
+      const expectedIntegrationPath = `${harness.worktreesDir}/epic-${run.runId}/integration`;
+      assert.deepStrictEqual(harness.integrationProvisionInputs, [
+        {
+          projectCwd: "/tmp/epic-runner-repo",
+          branch: `cook-epic-integration-${run.runId}`,
+          baseBranch: "mine",
+          path: expectedIntegrationPath,
+          refuseExisting: true,
+        },
+      ]);
       assert.deepStrictEqual(harness.provisionInputs, [
         {
           projectCwd: "/tmp/epic-runner-repo",
@@ -4999,7 +5105,379 @@ describe("EpicRunner", () => {
       assert.strictEqual(transported.recentIterations[0]?.workerId, created.threadId);
       assert.strictEqual(transported.recentIterations[0]?.branch, "epic/child-1");
       assert.strictEqual(transported.recentIterations[0]?.worktreePath, expectedPath);
+      assert.includeMembers(harness.releasedWorktrees, [expectedPath, expectedIntegrationPath]);
     }).pipe(Effect.provide(Layer.merge(harness.layer, NodeServices.layer)));
+  });
+
+  it.live("reuses a parked branch for Merge-fix and drains it before completion", () => {
+    const runId = EpicRunId.make("run-merge-fix");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 0,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      seedRuns: [pausedRun],
+      readyChildren: ["fix-1"],
+      openChildren: [],
+      separateWorkerHead: true,
+      childEvidence: {
+        "fix-1": [
+          {
+            title: "Merge fix: land epic/original (conflict)",
+            status: "closed",
+            commentCount: 1,
+          },
+        ],
+      },
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"fixed merge","why":"conflict resolved"}',
+          head: "repair-head",
+          branchCommitCount: 1,
+        },
+      ],
+    });
+    harness.store.mergeStates.set(runId, {
+      runId,
+      initialHead: "head-0",
+      lastAcceptedHead: "head-0",
+      parkedCount: 1,
+      repositoryPath: "/tmp/epic-runner-repo",
+      baseBranch: "mine",
+      integrationBranch: `cook-epic-integration-${runId}`,
+      integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      entries: [
+        {
+          runId,
+          sequence: 0,
+          childId: "original",
+          branch: "epic/original",
+          status: "parked",
+          reason: "conflict",
+          fixIssueId: "fix-1",
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.resumeRun({ runId });
+      yield* Effect.sleep("250 millis");
+      assert.strictEqual(
+        harness.store.runs.get(runId)?.status,
+        "done",
+        harness.store.runs.get(runId)?.lastError ?? undefined,
+      );
+
+      assert.strictEqual(harness.provisionInputs[0]?.branch, "epic/original");
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) =>
+            request.command === "git" &&
+            request.args.join(" ").includes("cook-epic: merge epic/original (original)"),
+        ),
+      );
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) => request.command === "git" && request.args[1] === "--ff-only",
+        ),
+      );
+      assert.include(harness.releasedWorktrees, harness.provisionInputs[0]!.path!);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("lands a successful parallel branch before marking the run done", () => {
+    const logs = captureLogs();
+    const harness = createHarness({
+      readyChildren: ["child-1"],
+      openChildren: [],
+      separateWorkerHead: true,
+      childEvidence: {
+        "child-1": [{ title: "Build child", status: "closed", commentCount: 1 }],
+      },
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"built child","why":"needed"}',
+          head: "child-head",
+          branchCommitCount: 3,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      const fastForward = harness.processRequests.findIndex(
+        (request) => request.command === "git" && request.args[1] === "--ff-only",
+      );
+      assert.isAtLeast(fastForward, 0);
+      assert.includeMembers(harness.releasedWorktrees, [
+        `${harness.worktreesDir}/epic-${run.runId}/child-1`,
+        `${harness.worktreesDir}/epic-${run.runId}/integration`,
+      ]);
+      const landing = logs.messages.find(
+        (message) => message[0] === "epic.runner.repository-landing-effects",
+      );
+      assert.deepInclude(landing?.[1], {
+        commitCount: 3,
+        parkedCount: 0,
+        baseHead: "head-0",
+        head: "child-head",
+      });
+    }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
+  it.live("releases a worker worktree when post-provision setup fails", () => {
+    const harness = createHarness({
+      readyChildren: ["child-a"],
+      openChildren: [],
+      failAllocationFor: "child-a",
+      script: [],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      assert.include(
+        harness.releasedWorktrees,
+        `${harness.worktreesDir}/epic-${run.runId}/child-a`,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("releases a worker worktree when its beads redirect write fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      const blocker = path.join(root, "not-a-directory");
+      yield* fileSystem.writeFileString(blocker, "block");
+      const workerPath = path.join(blocker, "child-a");
+      const harness = createHarness({
+        readyChildren: ["child-a"],
+        openChildren: [],
+        workerProvisionPath: workerPath,
+        script: [],
+      });
+
+      yield* Effect.gen(function* () {
+        const run = yield* startRun();
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+        assert.include(harness.releasedWorktrees, workerPath);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("rolls back an integration worktree when merge-state persistence fails", () => {
+    const harness = createHarness({
+      readyChildren: ["child-a"],
+      openChildren: [],
+      failInitializeMergeState: true,
+      script: [],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      const integrationPath = `${harness.worktreesDir}/epic-${run.runId}/integration`;
+      assert.include(harness.releasedWorktrees, integrationPath);
+      assert.isFalse(harness.store.mergeStates.has(run.runId));
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) =>
+            request.command === "git" &&
+            request.args[0] === "branch" &&
+            request.args.includes(`cook-epic-integration-${run.runId}`),
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("lands queued sibling work before reporting a worker error", () => {
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b"],
+      openChildren: [],
+      separateWorkerHead: true,
+      failAllocationFor: "child-b",
+      childEvidence: {
+        "child-a": [{ title: "Build child A", status: "closed", commentCount: 1 }],
+      },
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"built A","why":"needed"}',
+          head: "child-a-head",
+          branchCommitCount: 1,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 2);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      const effects = harness.store.landingEffects.get(run.runId)!;
+      assert.strictEqual(effects.commitCount, 1);
+      assert.strictEqual(effects.head, "child-a-head");
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) => request.command === "git" && request.args[1] === "--ff-only",
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("restores integration assets after clean and before the trial merge", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      yield* fileSystem.makeDirectory(path.join(root, ".beads"), { recursive: true });
+      yield* fileSystem.makeDirectory(path.join(root, "node_modules"), { recursive: true });
+      yield* fileSystem.writeFileString(path.join(root, ".env.test"), "RESTORED=1\n");
+      const harness = createHarness({
+        workspaceRoot: root,
+        readyChildren: ["child-1"],
+        openChildren: [],
+        separateWorkerHead: true,
+        childEvidence: {
+          "child-1": [{ title: "Build child", status: "closed", commentCount: 1 }],
+        },
+        script: [
+          {
+            text: 'RALPH_MSG: {"summary":"built child","why":"needed"}',
+            head: "child-head",
+            branchCommitCount: 1,
+          },
+        ],
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: root,
+          prompt: "do one unit of work",
+          orientationFile: null,
+          modelSelection,
+          config: { parallel: { workers: 1 } },
+          maxIterations: 10,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const integrationPath = `${harness.worktreesDir}/epic-${run.runId}/integration`;
+        assert.strictEqual(
+          yield* fileSystem.readFileString(path.join(integrationPath, ".env.test")),
+          "RESTORED=1\n",
+        );
+        assert.isTrue(yield* fileSystem.exists(path.join(integrationPath, "node_modules")));
+        assert.isTrue(yield* fileSystem.exists(path.join(integrationPath, ".beads", "redirect")));
+        const cleanIndex = harness.processRequests.findIndex(
+          (request) => request.command === "git" && request.args[0] === "clean",
+        );
+        const mergeIndex = harness.processRequests.findIndex(
+          (request) => request.command === "git" && request.args[0] === "merge",
+        );
+        assert.isAtLeast(cleanIndex, 0);
+        assert.isAbove(mergeIndex, cleanIndex);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("freezes a queued branch when the base moved before slot acquisition", () => {
+    const runId = EpicRunId.make("run-external-base-move");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 0,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({ script: [], seedRuns: [pausedRun], initialHead: "external" });
+    harness.store.mergeStates.set(runId, {
+      runId,
+      initialHead: "base-0",
+      lastAcceptedHead: "base-0",
+      parkedCount: 0,
+      repositoryPath: "/tmp/epic-runner-repo",
+      baseBranch: "mine",
+      integrationBranch: `cook-epic-integration-${runId}`,
+      integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      entries: [
+        {
+          runId,
+          sequence: 0,
+          childId: "child-1",
+          branch: "epic/child-1",
+          status: "queued",
+          reason: null,
+          fixIssueId: null,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.resumeRun({ runId });
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+      assert.strictEqual(harness.store.mergeStates.get(runId)?.entries[0]?.status, "queued");
+      assert.isFalse(
+        harness.processRequests.some(
+          (request) => request.command === "bd" && request.args[0] === "merge-slot",
+        ),
+      );
+      assert.include(
+        harness.releasedWorktrees,
+        `${harness.worktreesDir}/epic-${runId}/integration`,
+      );
+      assert.isTrue(harness.store.mergeStates.has(runId));
+      assert.isTrue(
+        harness.processRequests.some(
+          (request) =>
+            request.command === "git" &&
+            request.args[0] === "branch" &&
+            request.args.includes(`cook-epic-integration-${runId}`),
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.live("resolves a nested beads redirect before writing the worker redirect", () =>

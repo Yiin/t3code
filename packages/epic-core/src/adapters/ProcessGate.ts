@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
 import { ProcessRunner } from "../processRunner.ts";
@@ -41,6 +42,7 @@ export const makeProcessGate = (input: {
   readonly processRunner: ProcessRunner["Service"];
   readonly environment: NodeJS.ProcessEnv;
   readonly uid: number;
+  readonly timeoutMs?: number;
 }): GateShape => {
   const run: GateShape["run"] = Effect.fn("ProcessGate.run")(function* ({
     command,
@@ -81,7 +83,10 @@ export const makeProcessGate = (input: {
         maxOutputBytes,
         outputMode: "truncate",
         truncatedMarker: "",
-        timeout: "Infinity",
+        // The terminal gate itself is unbounded (`run.sh:972-986`). Server
+        // hosting needs a finite process lifetime, so keep the shared lock and
+        // environment contract while applying a generous adapter bound.
+        timeout: Duration.millis(input.timeoutMs ?? 2 * 60 * 60 * 1_000),
       })
       .pipe(
         Effect.mapError(
