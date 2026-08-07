@@ -494,6 +494,12 @@ const program = Effect.gen(function* () {
           activeStrictTurn = { id: promptCount - 1, done };
           const stopReason = yield* Deferred.await(done);
           activeStrictTurn = undefined;
+          if (stopReason === "cancelled") {
+            // The cancelled turn already reported its own stopReason, so the
+            // cancel is fully accounted for; the marker must not leak into
+            // the next prompt and cancel that one too.
+            cancelledSessions.delete(requestedSessionId);
+          }
           return { stopReason };
         }
         return { stopReason: "end_turn" };
