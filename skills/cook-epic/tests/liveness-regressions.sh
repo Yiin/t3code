@@ -6,6 +6,14 @@ RUNNER="$SKILL_DIR/run.sh"
 TMP_ROOT="$(mktemp -d /var/tmp/cook-epic-liveness-test.XXXXXX)"
 trap '[ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ] || rm -rf "$TMP_ROOT"' EXIT
 
+cat > "$TMP_ROOT/clock.sh" <<'EOF'
+#!/usr/bin/env bash
+# Advance one coordinator second per 100 ms. The liveness policy keeps its
+# production-scale thresholds while the fixtures avoid real-time waits.
+printf '%s\n' "$(( $(date +%s%N) / 100000000 ))"
+EOF
+chmod +x "$TMP_ROOT/clock.sh"
+
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "expected $1 to contain: $2"; }
 assert_not_contains() { ! grep -Fq -- "$2" "$1" || fail "expected $1 not to contain: $2"; }
@@ -77,6 +85,7 @@ make_inspector() { # <path> <mode>
 #!/usr/bin/env bash
 set -euo pipefail
 prompt="\$1"; result="\$2"
+trap 'touch "\$COOKEPIC_RUN_DIR/inspector-result-ready"' EXIT
 case "$mode" in
   continue) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"silent command is expected","next_check_seconds":2}' > "\$result" ;;
   stop)
@@ -89,7 +98,11 @@ case "$mode" in
   malformed) printf 'not json\n' > "\$result" ;;
   failure) exit 7 ;;
   timeout) sleep 5 ;;
-  delayed-stop) sleep 2; printf '%s\n' '{"decision":"stop","confidence":"high","rationale":"snapshot looked idle"}' > "\$result" ;;
+  delayed-stop)
+    touch "\$COOKEPIC_RUN_DIR/delayed-inspection-started"
+    sleep 0.5
+    printf '%s\n' '{"decision":"stop","confidence":"high","rationale":"snapshot looked idle"}' > "\$result"
+    ;;
   capture-evidence)
     cp -f "\$prompt" "\$COOKEPIC_RUN_DIR/captured-inspector-prompt"
     printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"structural activity is safe","next_check_seconds":2}' > "\$result"
@@ -98,15 +111,18 @@ case "$mode" in
     count=0; [ -f "\$COOKEPIC_RUN_DIR/schema-count" ] && count=\$(<"\$COOKEPIC_RUN_DIR/schema-count")
     count=\$((count + 1)); printf '%s' "\$count" > "\$COOKEPIC_RUN_DIR/schema-count"
     case "\$count" in
-      1) printf '%s\n' '[]' > "\$result" ;;
-      2) printf '%s\n' '{"decision":"continue"}' > "\$result" ;;
-      3) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"extra","extra":true}' > "\$result" ;;
-      4) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"   "}' > "\$result" ;;
-      5) printf '%s\n' '{"decision":"halt","confidence":"high","rationale":"bad decision"}' > "\$result" ;;
-      6) printf '%s\n' '{"decision":"continue","confidence":"certain","rationale":"bad confidence"}' > "\$result" ;;
-      7) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"fractional","next_check_seconds":1.5}' > "\$result" ;;
-      8) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"negative","next_check_seconds":-1}' > "\$result" ;;
-      9) printf '%s\n%s\n' '{"decision":"continue","confidence":"high","rationale":"first"}' '{"decision":"stop","confidence":"high","rationale":"second"}' > "\$result" ;;
+      1) printf '%s\n' '{"decision":"uncertain","confidence":"low","rationale":"evidence is incomplete","next_check_seconds":1}' > "\$result" ;;
+      2) printf '%s\n' '{"decision":"stop","confidence":"medium","rationale":"possible wait with weak evidence"}' > "\$result" ;;
+      3) printf 'not json\n' > "\$result" ;;
+      4) printf '%s\n' '[]' > "\$result" ;;
+      5) printf '%s\n' '{"decision":"continue"}' > "\$result" ;;
+      6) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"extra","extra":true}' > "\$result" ;;
+      7) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"   "}' > "\$result" ;;
+      8) printf '%s\n' '{"decision":"halt","confidence":"high","rationale":"bad decision"}' > "\$result" ;;
+      9) printf '%s\n' '{"decision":"continue","confidence":"certain","rationale":"bad confidence"}' > "\$result" ;;
+      10) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"fractional","next_check_seconds":1.5}' > "\$result" ;;
+      11) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"negative","next_check_seconds":-1}' > "\$result" ;;
+      12) printf '%s\n%s\n' '{"decision":"continue","confidence":"high","rationale":"first"}' '{"decision":"stop","confidence":"high","rationale":"second"}' > "\$result" ;;
       *) printf '%s\n' '{"decision":"continue","confidence":"high","rationale":"schema sequence complete","next_check_seconds":1}' > "\$result" ;;
     esac
     ;;
@@ -157,13 +173,17 @@ run_case() { # <name> <worker body> <inspector mode> [timeout] [extra env...]
   (
     cd "$repo"
     for v in "${!COOKEPIC_@}"; do unset "$v"; done
+    # Match CI's portable detached mode. orientation-metrics.sh covers the
+    # real systemd scope path separately.
     env PATH="$bin:$PATH" FAKE_BD_STATE="$state" TEST_REPO="$repo" \
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS=claude COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_INSPECTOR_CMD="$inspector" COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 \
+      COOKEPIC_DISABLE_SYSTEMD=1 \
       COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_MAX_ATTEMPTS=1 \
-      COOKEPIC_IDLE_THRESHOLD=2 COOKEPIC_INSPECTOR_TIMEOUT=1 COOKEPIC_INSPECT_RETRY_DELAY=1 \
+      COOKEPIC_IDLE_THRESHOLD=2 COOKEPIC_INSPECTOR_TIMEOUT=10 COOKEPIC_INSPECT_RETRY_DELAY=1 \
       COOKEPIC_INSPECT_MIN_DELAY=1 COOKEPIC_INSPECT_MAX_DELAY=2 COOKEPIC_STOP_GRACE=1 \
-      COOKEPIC_SUPERVISION_TICK=1 ${worker_timeout:+COOKEPIC_WORKER_TIMEOUT=$worker_timeout} "$@" \
+      COOKEPIC_SUPERVISION_TICK=0.1 COOKEPIC_CLOCK_CMD="$TMP_ROOT/clock.sh" \
+      ${worker_timeout:+COOKEPIC_WORKER_TIMEOUT=$worker_timeout} "$@" \
       "$RUNNER" "$run"
   ) > "$root/stdout" 2>&1 || rc=$?
   printf '%s' "$rc" > "$root/rc"
@@ -175,7 +195,10 @@ make_harness_stub() { # <path>
 #!/usr/bin/env bash
 set -euo pipefail
 kind=worker
-for arg in "$@"; do [[ "$arg" == *'liveness inspector'* ]] && kind=inspector; done
+for arg in "$@"; do
+  [[ "$arg" == *'liveness inspector'* ]] && kind=inspector
+done
+[ "$kind" != worker ] || [ -n "${COOKEPIC_CHILD:-}" ] || kind=warmup
 argv="$COOKEPIC_RUN_DIR/$TEST_HARNESS-$kind.argv"
 : > "$argv"
 for arg in "$@"; do
@@ -183,7 +206,12 @@ for arg in "$@"; do
   elif [ "${#arg}" -gt 500 ]; then printf '<PROMPT>\n' >> "$argv"
   else printf '%s\n' "$arg" >> "$argv"; fi
 done
+if [ "$kind" = warmup ]; then
+  printf '%s\n' '{"type":"result","result":"ok"}'
+  exit 0
+fi
 if [ "$kind" = inspector ]; then
+  touch "$COOKEPIC_RUN_DIR/harness-inspector-started"
   [ -z "${OPENCODE_CONFIG_CONTENT:-}" ] || printf '%s\n' "$OPENCODE_CONFIG_CONTENT" > "$COOKEPIC_RUN_DIR/opencode-inspector-config.json"
   if [ "$TEST_HARNESS" = opencode ]; then
     printf '%s\n' '{"part":{"text":"{\"decision\":\"continue\",\"confidence\":\"high\",\"rationale\":\"captured no-tool invocation\",\"next_check_seconds\":1}"}}'
@@ -198,7 +226,12 @@ fi
 if [ "${TEST_LARGE_OUTPUT:-0}" = 1 ]; then
   for i in {1..5000}; do printf '{"type":"noise","sequence":%s,"payload":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}\n' "$i"; done
 fi
-sleep 4
+if [ "$TEST_HARNESS" = codex ]; then
+  sleep 0.2
+else
+  while [ ! -f "$COOKEPIC_RUN_DIR/harness-inspector-started" ]; do sleep 0.05; done
+  sleep 0.2
+fi
 printf 'done\n' > harness-result.txt
 git add harness-result.txt
 git commit -qm done
@@ -224,8 +257,9 @@ run_harness_case() { # <name> <harness> [extra env...]
       COOKEPIC_EPIC=epic COOKEPIC_HARNESS="$harness" COOKEPIC_BIN="$root/harness" \
       COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 \
       COOKEPIC_MAX_DISPATCHES=1 COOKEPIC_MAX_ATTEMPTS=1 COOKEPIC_IDLE_THRESHOLD=1 \
-      COOKEPIC_INSPECTOR_TIMEOUT=3 COOKEPIC_INSPECT_RETRY_DELAY=1 COOKEPIC_INSPECT_MIN_DELAY=1 \
-      COOKEPIC_INSPECT_MAX_DELAY=2 COOKEPIC_STOP_GRACE=1 COOKEPIC_SUPERVISION_TICK=1 "$@" \
+      COOKEPIC_INSPECTOR_TIMEOUT=10 COOKEPIC_INSPECT_RETRY_DELAY=1 COOKEPIC_INSPECT_MIN_DELAY=1 \
+      COOKEPIC_INSPECT_MAX_DELAY=2 COOKEPIC_STOP_GRACE=1 COOKEPIC_SUPERVISION_TICK=0.1 \
+      COOKEPIC_CLOCK_CMD="$TMP_ROOT/clock.sh" "$@" \
       "$RUNNER" "$run"
   ) > "$root/stdout" 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "$harness capturing run failed with rc=$rc"
@@ -238,16 +272,16 @@ set -euo pipefail
 finish() { printf "done\n" > result.txt; git add result.txt; git commit -qm done; bd close "$COOKEPIC_CHILD"; }
 '
 
-output_worker="$finish_worker"'for i in 1 2 3 4 5 6 7 8; do printf "heartbeat %s\n" "$i"; sleep 0.4; done; finish'
-output_root=$(run_case output-heartbeat "$output_worker" '')
+output_worker="$finish_worker"'for i in {1..20}; do printf "heartbeat %s\n" "$i"; sleep 0.05; done; finish'
+output_root=$(run_case output-heartbeat "$output_worker" '' '' COOKEPIC_IDLE_THRESHOLD=5)
 [ "$(event_count "$output_root/run/mailbox.jsonl" worker-idle)" -eq 0 ] || fail 'regular output was treated as idle'
 assert_contains "$output_root/run/mailbox.jsonl" '"event": "done"'
 
-cpu_worker="$finish_worker"'end=$((SECONDS + 4)); while [ "$SECONDS" -lt "$end" ]; do :; done; finish'
-cpu_root=$(run_case silent-cpu "$cpu_worker" '')
+cpu_worker="$finish_worker"'end=$((SECONDS + 1)); while [ "$SECONDS" -lt "$end" ]; do :; done; finish'
+cpu_root=$(run_case silent-cpu "$cpu_worker" '' '' COOKEPIC_IDLE_THRESHOLD=5)
 [ "$(event_count "$cpu_root/run/mailbox.jsonl" worker-idle)" -eq 0 ] || fail 'silent CPU work was treated as idle'
 
-io_worker="$finish_worker"'for i in 1 2 3 4 5 6 7 8; do dd if=/dev/zero of="$COOKEPIC_RUN_DIR/io.bin" bs=65536 count="$i" conv=notrunc status=none; sleep 0.4; done; finish'
+io_worker="$finish_worker"'for i in {1..20}; do dd if=/dev/zero of="$COOKEPIC_RUN_DIR/io.bin" bs=65536 count="$i" conv=notrunc status=none; sleep 0.05; done; finish'
 cat > "$TMP_ROOT/io-sampler.sh" <<'EOF'
 #!/usr/bin/env bash
 size=$(stat -c %s "$TEST_IO_PATH" 2>/dev/null || echo 0)
@@ -257,8 +291,9 @@ chmod +x "$TMP_ROOT/io-sampler.sh"
 io_root=$(run_case silent-io "$io_worker" '' '' COOKEPIC_RESOURCE_SAMPLER_CMD="$TMP_ROOT/io-sampler.sh" TEST_IO_PATH="$TMP_ROOT/silent-io/run/io.bin")
 [ "$(event_count "$io_root/run/mailbox.jsonl" worker-idle)" -eq 0 ] || fail 'silent I/O work was treated as idle'
 
-sleep_worker="$finish_worker"'sleep 5; finish'
-continue_root=$(run_case inspector-continue "$sleep_worker" continue)
+sleep_worker="$finish_worker"'until grep -Eq "inspection-(continue|uncertain)" "$COOKEPIC_RUN_DIR/mailbox.jsonl" 2>/dev/null; do sleep 0.05; done
+finish'
+continue_root=$(run_case inspector-continue "$sleep_worker" continue '' COOKEPIC_DISABLE_SYSTEMD=0)
 assert_contains "$continue_root/run/mailbox.jsonl" '"event": "worker-idle"'
 assert_contains "$continue_root/run/mailbox.jsonl" '"event": "inspection-continue"'
 assert_not_contains "$continue_root/run/mailbox.jsonl" '"event": "inspection-stop"'
@@ -266,12 +301,6 @@ assert_not_contains "$continue_root/run/mailbox.jsonl" '"event": "inspection-sto
 idle_worker='#!/usr/bin/env bash
 sleep 30
 '
-stop_root=$(run_case inspector-stop "$idle_worker" stop)
-[ "$(<"$stop_root/run/inspect-count")" -eq 2 ] || fail 'worker stopped without two matching stop inspections'
-assert_contains "$stop_root/run/mailbox.jsonl" '"event": "inspection-stop-pending"'
-assert_contains "$stop_root/run/mailbox.jsonl" '"event": "inspection-stop"'
-assert_contains "$stop_root/run/loop.log" 'inspector requested stop: sleeping worker has no active work'
-
 tree_worker='#!/usr/bin/env bash
 trap "" TERM INT HUP
 (trap "" TERM INT HUP
@@ -282,12 +311,16 @@ trap "" TERM INT HUP
 wait
 '
 tree_root=$(run_case inspector-stop-tree "$tree_worker" stop '' COOKEPIC_DISABLE_SYSTEMD=1)
+[ "$(<"$tree_root/run/inspect-count")" -eq 2 ] || fail 'worker stopped without two matching stop inspections'
+assert_contains "$tree_root/run/mailbox.jsonl" '"event": "inspection-stop-pending"'
+assert_contains "$tree_root/run/mailbox.jsonl" '"event": "inspection-stop"'
+assert_contains "$tree_root/run/loop.log" 'inspector requested stop: sleeping worker has no active work'
 assert_process_gone "$(<"$tree_root/run/worker-child-pid")"
 assert_process_gone "$(<"$tree_root/run/worker-grandchild-pid")"
 
 reparent_worker="$finish_worker"'(
   printf "%s" "$BASHPID" > "$COOKEPIC_RUN_DIR/reparented-pid"
-  sleep 3
+  sleep 0.5
   finish
 ) &
 exit 0'
@@ -297,33 +330,28 @@ assert_process_gone "$(<"$reparent_root/run/reparented-pid")"
 
 fork_term_worker='#!/usr/bin/env bash
 set -u
-trap '\''trap "" TERM; (trap "" TERM; printf "%s" "$BASHPID" > "$COOKEPIC_RUN_DIR/term-child-pid"; while true; do sleep 1; done) &'\'' TERM
+trap '\''trap "" TERM; (trap "" TERM; printf "%s" "$BASHPID" > "$COOKEPIC_RUN_DIR/term-child-pid"; while true; do sleep 1; done) &
+while [ ! -f "$COOKEPIC_RUN_DIR/term-child-pid" ]; do sleep 0.01; done'\'' TERM
 sleep 30
 '
 fork_term_root=$(run_case fork-on-term-cleanup "$fork_term_worker" stop '' COOKEPIC_DISABLE_SYSTEMD=1)
 [ -f "$fork_term_root/run/term-child-pid" ] || fail 'TERM handler did not create its child'
 assert_process_gone "$(<"$fork_term_root/run/term-child-pid")"
 
-uncertain_root=$(run_case inspector-uncertain "$sleep_worker" uncertain)
-assert_contains "$uncertain_root/run/mailbox.jsonl" '"event": "inspection-uncertain"'
-assert_contains "$uncertain_root/run/mailbox.jsonl" '"event": "done"'
-
-low_stop_root=$(run_case inspector-low-stop "$sleep_worker" low-stop)
-assert_contains "$low_stop_root/run/mailbox.jsonl" 'decision=stop confidence=medium'
-assert_not_contains "$low_stop_root/run/mailbox.jsonl" '"event": "inspection-stop"'
-
-malformed_root=$(run_case inspector-malformed "$sleep_worker" malformed)
-assert_contains "$malformed_root/run/mailbox.jsonl" 'inspector returned malformed output'
-
-schema_worker="$finish_worker"'sleep 30; finish'
+schema_worker="$finish_worker"'while [ ! -f "$COOKEPIC_RUN_DIR/schema-count" ] || [ "$(<"$COOKEPIC_RUN_DIR/schema-count")" -lt 13 ]; do sleep 0.05; done; finish'
 schema_root=$(run_case inspector-schema "$schema_worker" schema-sequence '' COOKEPIC_IDLE_THRESHOLD=1)
-[ "$(<"$schema_root/run/schema-count")" -ge 9 ] || fail 'not every malformed schema fixture was inspected'
-[ "$(event_count "$schema_root/run/mailbox.jsonl" inspection-uncertain)" -ge 9 ] || fail 'malformed schema stopped reinspection'
+[ "$(<"$schema_root/run/schema-count")" -ge 13 ] || fail 'not every inspector decision fixture was inspected'
+[ "$(event_count "$schema_root/run/mailbox.jsonl" inspection-uncertain)" -ge 12 ] || fail 'uncertain inspector result stopped reinspection'
+assert_contains "$schema_root/run/mailbox.jsonl" 'evidence is incomplete'
+assert_contains "$schema_root/run/mailbox.jsonl" 'decision=stop confidence=medium'
+assert_contains "$schema_root/run/mailbox.jsonl" 'inspector returned malformed output'
 assert_not_contains "$schema_root/run/mailbox.jsonl" '"event": "inspection-stop"'
 assert_contains "$schema_root/run/mailbox.jsonl" '"event": "done"'
 
-delayed_worker="$finish_worker"'sleep 3; printf "progress during inspection\n"; sleep 3; finish'
-delayed_root=$(run_case delayed-stale-stop "$delayed_worker" delayed-stop '' COOKEPIC_INSPECTOR_TIMEOUT=4)
+delayed_worker="$finish_worker"'while [ ! -f "$COOKEPIC_RUN_DIR/delayed-inspection-started" ]; do sleep 0.02; done
+for i in {1..10}; do printf "progress-during-inspection-%04d-%05000d\n" "$i" 0; sleep 0.05; done
+sleep 0.4; finish'
+delayed_root=$(run_case delayed-stale-stop "$delayed_worker" delayed-stop '' COOKEPIC_INSPECTOR_TIMEOUT=10)
 assert_contains "$delayed_root/run/mailbox.jsonl" 'stale stop ignored'
 assert_not_contains "$delayed_root/run/mailbox.jsonl" '"event": "inspection-stop"'
 assert_contains "$delayed_root/run/mailbox.jsonl" '"event": "done"'
@@ -337,7 +365,10 @@ secret_worker="$finish_worker"'printf "%s\n" \
   "-----BEGIN PRIVATE KEY-----" \
   "pem-private-material" \
   "-----END PRIVATE KEY-----";
-ln -s /usr/bin/sleep "$COOKEPIC_RUN_DIR/ghp_tool_secret"; "$COOKEPIC_RUN_DIR/ghp_tool_secret" 5 & wait; finish'
+ln -s /usr/bin/sleep "$COOKEPIC_RUN_DIR/ghp_tool_secret"
+"$COOKEPIC_RUN_DIR/ghp_tool_secret" 30 & tool_pid=$!
+while [ ! -f "$COOKEPIC_RUN_DIR/inspector-result-ready" ]; do sleep 0.05; done
+kill "$tool_pid" 2>/dev/null || true; wait "$tool_pid" 2>/dev/null || true; finish'
 secret_root=$(run_case structural-evidence "$secret_worker" capture-evidence)
 for secret in ghp_super_secret_token ghp_tool_secret AKIAIOSFODNN7EXAMPLE private-cookie admin:password 'private quoted value' 'BEGIN PRIVATE KEY' pem-private-material; do
   assert_not_contains "$secret_root/run/captured-inspector-prompt" "$secret"
@@ -346,7 +377,7 @@ assert_contains "$secret_root/run/captured-inspector-prompt" 'Bounded allowliste
 assert_contains "$secret_root/run/captured-inspector-prompt" 'Worker output bytes:'
 assert_not_contains "$secret_root/run/captured-inspector-prompt" 'Recent worker output'
 
-storage_worker="$finish_worker"'sleep 5; finish'
+storage_worker="$sleep_worker"
 storage_root=$(run_case bounded-inspector-storage "$storage_worker" storage '' COOKEPIC_INSPECTOR_RESULT_BYTES=512 COOKEPIC_INSPECTOR_LOG_BYTES=1024)
 [ "$(stat -c %s "$storage_root/run/inspector-w1.result.json")" -le 512 ] || fail 'inspector result exceeded its limit'
 [ "$(stat -c %s "$storage_root/run/inspector-w1.raw.log")" -le 1024 ] || fail 'inspector raw log exceeded its limit'
@@ -360,7 +391,8 @@ assert_contains "$overflow_root/run/mailbox.jsonl" '"event": "done"'
 failure_root=$(run_case inspector-failure "$sleep_worker" failure)
 assert_contains "$failure_root/run/mailbox.jsonl" 'inspector failed with rc=7'
 
-timeout_root=$(run_case inspector-timeout "$sleep_worker" timeout)
+timeout_worker="$finish_worker"'sleep 2; finish'
+timeout_root=$(run_case inspector-timeout "$timeout_worker" timeout '' COOKEPIC_INSPECTOR_TIMEOUT=1)
 assert_contains "$timeout_root/run/mailbox.jsonl" 'inspector timed out after 1s'
 
 bounded_root=$(run_case bounded-reinspection "$idle_worker" bounded '' COOKEPIC_DISABLE_SYSTEMD=1)
@@ -380,16 +412,15 @@ printf "%s" "$!" > "$COOKEPIC_RUN_DIR/fingerprint-child-pid"
 wait
 '
 fingerprint_root=$(run_case fingerprint-clears-stop "$fingerprint_worker" stop '' COOKEPIC_DISABLE_SYSTEMD=1 \
-  COOKEPIC_RESOURCE_SAMPLER_CMD="$TMP_ROOT/static-sampler.sh")
+  COOKEPIC_RESOURCE_SAMPLER_CMD="$TMP_ROOT/static-sampler.sh" \
+  COOKEPIC_INSPECT_MIN_DELAY=5 COOKEPIC_INSPECT_MAX_DELAY=5)
 [ "$(<"$fingerprint_root/run/inspect-count")" -ge 3 ] || fail 'changed process fingerprint did not clear stop confirmation'
 [ "$(event_count "$fingerprint_root/run/mailbox.jsonl" inspection-stop-pending)" -ge 2 ] \
   || fail 'changed process fingerprint was not treated as a new first stop'
 assert_process_gone "$(<"$fingerprint_root/run/fingerprint-child-pid")"
 
-absolute_root=$(run_case explicit-timeout "$idle_worker" '' 1 COOKEPIC_IDLE_THRESHOLD=30)
-assert_contains "$absolute_root/run/loop.log" 'timed out after 1s'
-
 absolute_tree_root=$(run_case explicit-timeout-tree "$tree_worker" '' 1 COOKEPIC_IDLE_THRESHOLD=30 COOKEPIC_DISABLE_SYSTEMD=1)
+assert_contains "$absolute_tree_root/run/loop.log" 'timed out after 1s'
 assert_process_gone "$(<"$absolute_tree_root/run/worker-child-pid")"
 assert_process_gone "$(<"$absolute_tree_root/run/worker-grandchild-pid")"
 
@@ -418,7 +449,7 @@ reuse_root=$(run_case pid-reuse-protection "$reuse_worker" '' 2 COOKEPIC_IDLE_TH
 [ ! -e "$reuse_root/run/unowned-process-signaled" ] || fail 'PID-reused process received an owned-group signal'
 assert_contains "$reuse_root/run/mailbox.jsonl" '"event": "done"'
 
-default_worker="$finish_worker"'sleep 3; finish'
+default_worker="$finish_worker"'sleep 0.8; finish'
 default_root=$(run_case no-default-timeout "$default_worker" '' '' COOKEPIC_IDLE_THRESHOLD=30)
 assert_contains "$default_root/run/mailbox.jsonl" '"event": "done"'
 assert_not_contains "$default_root/run/loop.log" 'timed out after'
@@ -457,8 +488,9 @@ assert_contains "$collision_root/stdout" 'pre-existing worker or inspector scope
 [ "$(<"$collision_state/child")" = open ] || fail 'scope collision adopted or claimed a worker unit'
 
 large_worker='#!/usr/bin/env bash
-printf "429 rate limit before rolling output\n"
+printf "provider error: 429 rate limit before rolling output\n"
 for i in {1..5000}; do printf "noise-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n" "$i"; done
+sleep 0.2
 '
 large_root=$(run_case bounded-worker-output "$large_worker" '' '' COOKEPIC_WORKER_ARTIFACT_BYTES=4096)
 [ "$(stat -c %s "$large_root/run/worker-child.log")" -le 4096 ] || fail 'worker artifact exceeded its limit'
@@ -468,14 +500,16 @@ assert_contains "$large_root/run/mailbox.jsonl" '"event": "rate-limited"'
 threshold_worker="$finish_worker"'for i in {1..260}; do printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; done
 while [ "$(<"$COOKEPIC_RUN_DIR/worker-child.log.bytes")" -lt 13000 ]; do sleep 0.05; done
 stat -c %s "$COOKEPIC_RUN_DIR/worker-child.log" > "$COOKEPIC_RUN_DIR/pre-normalize-size"
-sleep 1
+sleep 0.2
 finish'
 threshold_root=$(run_case bounded-compaction-threshold "$threshold_worker" '' '' COOKEPIC_WORKER_ARTIFACT_BYTES=8192)
 [ "$(<"$threshold_root/run/pre-normalize-size")" -gt 8192 ] || fail 'bounded log compacted before twice its retained limit'
 [ "$(stat -c %s "$threshold_root/run/worker-child.log")" -le 8192 ] || fail 'bounded log final normalization exceeded its limit'
 
 MAKE_GIT_CAPTURE="$TMP_ROOT/repo-probe.log"
-probe_root=$(run_case bounded-hot-probe "$output_worker" '' '' MAKE_GIT_CAPTURE="$MAKE_GIT_CAPTURE" COOKEPIC_REPO_PROBE_INTERVAL=1)
+hot_probe_worker="$finish_worker"'for i in {1..40}; do printf "heartbeat-%04d-%05000d\n" "$i" 0; sleep 0.05; done; finish'
+probe_root=$(run_case bounded-hot-probe "$hot_probe_worker" '' '' MAKE_GIT_CAPTURE="$MAKE_GIT_CAPTURE" \
+  COOKEPIC_REPO_PROBE_INTERVAL=1 COOKEPIC_CLOCK_CMD=)
 unset MAKE_GIT_CAPTURE
 [ ! -s "$TMP_ROOT/repo-probe.log" ] || fail 'repository status ran on the output-active hot path'
 
@@ -511,8 +545,8 @@ make_inspector "$cleanup_root/inspector.sh" cleanup
     COOKEPIC_WORKER_CMD="$cleanup_root/worker.sh" COOKEPIC_INSPECTOR_CMD="$cleanup_root/inspector.sh" \
     COOKEPIC_SEQUENTIAL=1 COOKEPIC_GATE=true COOKEPIC_NO_PUSH=1 COOKEPIC_SPAWN_DELAY=0 COOKEPIC_MAX_DISPATCHES=1 \
     COOKEPIC_MAX_ATTEMPTS=1 COOKEPIC_IDLE_THRESHOLD=1 COOKEPIC_INSPECTOR_TIMEOUT=30 COOKEPIC_STOP_GRACE=1 \
-    COOKEPIC_INSPECT_RETRY_DELAY=1 COOKEPIC_INSPECT_MIN_DELAY=1 COOKEPIC_INSPECT_MAX_DELAY=2 COOKEPIC_SUPERVISION_TICK=1 \
-    COOKEPIC_DISABLE_SYSTEMD=1 \
+    COOKEPIC_INSPECT_RETRY_DELAY=1 COOKEPIC_INSPECT_MIN_DELAY=1 COOKEPIC_INSPECT_MAX_DELAY=2 COOKEPIC_SUPERVISION_TICK=0.1 \
+    COOKEPIC_CLOCK_CMD="$TMP_ROOT/clock.sh" COOKEPIC_DISABLE_SYSTEMD=1 \
     "$RUNNER" "$cleanup_run"
 ) > "$cleanup_root/stdout" 2>&1 &
 coordinator=$!
@@ -527,7 +561,8 @@ while kill -0 "$inspector_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
 kill -0 "$inspector_pid" 2>/dev/null && fail 'inspector survived coordinator exit'
 assert_process_gone "$(<"$cleanup_run/inspector-child-pid")"
 
-claude_root=$(run_harness_case harness-claude claude TEST_LARGE_OUTPUT=1 TEST_COST_EARLY=1 COOKEPIC_WORKER_ARTIFACT_BYTES=4096)
+claude_root=$(run_harness_case harness-claude claude TEST_LARGE_OUTPUT=1 TEST_COST_EARLY=1 \
+  COOKEPIC_WORKER_ARTIFACT_BYTES=4096)
 diff -u <(printf '%s\n' -p --safe-mode --disable-slash-commands --tools '<EMPTY>' --permission-mode plan \
   --no-session-persistence --output-format text --model sonnet -- '<PROMPT>') \
   "$claude_root/run/claude-inspector.argv"

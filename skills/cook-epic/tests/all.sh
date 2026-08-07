@@ -90,12 +90,6 @@ for name in "${tests[@]}"; do
     continue
   fi
   selected=$((selected + 1))
-  case "$name" in
-    liveness-regressions.sh)
-      echo "SKIP: liveness-regressions.sh — t3code-06s.32"
-      continue
-      ;;
-  esac
   file_started=$SECONDS
   output=$(mktemp "${TMPDIR:-/tmp}/cook-epic-test.XXXXXX")
 

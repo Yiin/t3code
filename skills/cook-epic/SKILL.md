@@ -50,11 +50,11 @@ Not this skill: a single issue (use `/cook-it`), or a dirty/fragile tree
 Run `bash skills/cook-epic/tests/all.sh` from the repository root.
 Set `COOKEPIC_TESTS_FILTER=<name>` to select matching files.
 Each file has a 120-second limit. The full suite has a 600-second ceiling.
-Measured local wall time: 280 seconds on 2026-08-07, with the documented skip.
+Measured local wall time: 373 seconds on 2026-08-07 with all tests enabled.
 
 - `fallback-session-regressions.sh` covers session fallback and recovery.
 - `fold-regressions.sh` covers folded worker results and state updates.
-- `liveness-regressions.sh` covers worker activity, inspection, and stop rules. It skips under `t3code-06s.32` because it exceeds 120 seconds.
+- `liveness-regressions.sh` covers worker activity, inspection, and stop rules.
 - `opencode-harness.sh` covers the OpenCode harness command contract.
 - `orientation-injection.sh` covers orientation-card selection and prompt injection.
 - `orientation-metrics.sh` covers orientation metrics and diagnostic output.
