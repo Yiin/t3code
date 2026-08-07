@@ -34,6 +34,7 @@ import {
 } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { cookCommand } from "./epicCook.ts";
 
 const EPIC_CLI_PROBE_TIMEOUT = Duration.seconds(10);
 export const EPIC_CLI_WATCH_INTERVAL = Duration.seconds(1);
@@ -483,6 +484,7 @@ const mutationCommand = (name: "pause" | "resume" | "cancel") =>
 export const epicCommand = Command.make("epic").pipe(
   Command.withDescription("Manage daemon-hosted epic runs."),
   Command.withSubcommands([
+    cookCommand,
     startCommand,
     listCommand,
     statusCommand,

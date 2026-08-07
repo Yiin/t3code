@@ -35,6 +35,10 @@
       "types": "./src/collectUint8StreamText.ts",
       "import": "./src/collectUint8StreamText.ts"
     },
+    "./SequentialEpicLoop": {
+      "types": "./src/SequentialEpicLoop.ts",
+      "import": "./src/SequentialEpicLoop.ts"
+    },
     "./ports/AgentDispatch": {
       "types": "./src/ports/AgentDispatch.ts",
       "import": "./src/ports/AgentDispatch.ts"
@@ -86,6 +90,14 @@
     "./adapters/NodeEpicRunLock": {
       "types": "./src/adapters/NodeEpicRunLock.ts",
       "import": "./src/adapters/NodeEpicRunLock.ts"
+    },
+    "./adapters/FileRunEvents": {
+      "types": "./src/adapters/FileRunEvents.ts",
+      "import": "./src/adapters/FileRunEvents.ts"
+    },
+    "./adapters/TerminalAgentDispatch": {
+      "types": "./src/adapters/TerminalAgentDispatch.ts",
+      "import": "./src/adapters/TerminalAgentDispatch.ts"
     }
   },
   "scripts": {

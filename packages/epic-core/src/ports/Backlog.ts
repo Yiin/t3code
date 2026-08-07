@@ -17,6 +17,10 @@ export interface BacklogIssue {
   readonly priority: number | null;
   readonly issueType: string | null;
   readonly parentId: string | null;
+  /** The current durable body. Dispatch reads it again for every attempt. */
+  readonly description: string;
+  readonly labels: ReadonlyArray<string>;
+  readonly commentCount: number;
 }
 
 export type MergeSlotAction = "create" | "check" | "acquire" | "release";

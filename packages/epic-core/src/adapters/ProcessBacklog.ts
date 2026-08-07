@@ -13,6 +13,10 @@ const BdIssue = Schema.Struct({
   issue_type: Schema.optional(Schema.NullOr(Schema.String)),
   parent: Schema.optional(Schema.NullOr(Schema.String)),
   notes: Schema.optional(Schema.String),
+  description: Schema.optional(Schema.NullOr(Schema.String)),
+  labels: Schema.optional(Schema.Array(Schema.String)),
+  comments: Schema.optional(Schema.Array(Schema.Unknown)),
+  comment_count: Schema.optional(Schema.Number),
 });
 type BdIssue = typeof BdIssue.Type;
 
@@ -33,6 +37,9 @@ const toIssue = (issue: BdIssue): BacklogIssue => ({
   priority: issue.priority ?? null,
   issueType: issue.issue_type ?? null,
   parentId: issue.parent ?? null,
+  description: issue.description ?? "",
+  labels: issue.labels ?? [],
+  commentCount: issue.comment_count ?? issue.comments?.length ?? 0,
 });
 
 const outputDetail = (output: ProcessRunOutput): string =>

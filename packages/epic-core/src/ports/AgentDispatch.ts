@@ -16,7 +16,8 @@ export interface AgentDispatchCapabilities {
     | "result-field"
     | "assistant-jsonl"
     | "agent-item-jsonl"
-    | "step-text-jsonl";
+    | "step-text-jsonl"
+    | "raw-text";
   readonly cost: "total-cost-usd" | "step-cost" | "none";
 }
 

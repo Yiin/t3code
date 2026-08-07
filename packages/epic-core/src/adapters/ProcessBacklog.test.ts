@@ -29,7 +29,7 @@ describe("ProcessBacklog", () => {
             calls.push(command);
             if (command.args[0] === "ready") {
               return success(
-                '[{"id":"epic.1","title":"First","status":"open","priority":1,"issue_type":"task"}]',
+                '[{"id":"epic.1","title":"First","status":"open","priority":1,"issue_type":"task","comment_count":4}]',
               );
             }
             if (command.args[0] === "list") return success("[]");
@@ -55,6 +55,9 @@ describe("ProcessBacklog", () => {
           priority: 1,
           issueType: "task",
           parentId: null,
+          description: "",
+          labels: [],
+          commentCount: 4,
         },
       ]);
       yield* backlog.showIssue("epic.1");
