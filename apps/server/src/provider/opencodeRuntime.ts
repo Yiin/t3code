@@ -1,6 +1,11 @@
 import * as NodeURL from "node:url";
 
-import type { ChatAttachment, ProviderApprovalDecision, RuntimeMode } from "@t3tools/contracts";
+import type {
+  ChatAttachment,
+  ProviderApprovalDecision,
+  ProviderWorkerScopeBinding,
+  RuntimeMode,
+} from "@t3tools/contracts";
 import {
   createOpencodeClient,
   type Agent,
@@ -31,6 +36,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { isWindowsCommandNotFound } from "@t3tools/epic-core/processRunner";
 import { collectStreamAsString } from "./providerSnapshot.ts";
+import { wrapSpawnWithWorkerScope } from "./workerScope.ts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -121,6 +127,11 @@ export interface OpenCodeRuntimeShape {
     readonly port?: number;
     readonly hostname?: string;
     readonly timeoutMs?: number;
+    /**
+     * Set when the session is an epic-run worker: the server spawn is
+     * wrapped in the run's systemd scope unit.
+     */
+    readonly workerScope?: ProviderWorkerScopeBinding;
   }) => Effect.Effect<OpenCodeServerProcess, OpenCodeRuntimeError, Scope.Scope>;
   /**
    * Returns a handle to either an externally-managed OpenCode server (when
@@ -134,6 +145,7 @@ export interface OpenCodeRuntimeShape {
     readonly port?: number;
     readonly hostname?: string;
     readonly timeoutMs?: number;
+    readonly workerScope?: ProviderWorkerScopeBinding;
   }) => Effect.Effect<OpenCodeServerConnection, OpenCodeRuntimeError, Scope.Scope>;
   readonly runOpenCodeCommand: (input: {
     readonly binaryPath: string;
@@ -453,10 +465,15 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
       const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
       const spawnCommand = yield* resolveCommand(input.binaryPath, args, input.environment);
+      const scopedSpawn = wrapSpawnWithWorkerScope(
+        input.workerScope,
+        spawnCommand.command,
+        spawnCommand.args,
+      );
 
       const child = yield* spawner
         .spawn(
-          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          ChildProcess.make(scopedSpawn.command, scopedSpawn.args, {
             detached: hostPlatform !== "win32",
             shell: spawnCommand.shell,
             env: {
@@ -605,6 +622,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ...(input.port !== undefined ? { port: input.port } : {}),
       ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.workerScope !== undefined ? { workerScope: input.workerScope } : {}),
     }).pipe(
       Effect.map((server) => ({
         url: server.url,

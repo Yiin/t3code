@@ -77,6 +77,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import type { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import {
   countFreshRunningSubagents,
   isRunningSubagentLivenessRefusal,
@@ -1384,8 +1385,16 @@ export const makeServerPoolDispatch = (deps: {
   readonly processRunner: ProcessRunner.ProcessRunner["Service"];
   readonly projectSetupScriptRunner: ProjectSetupScriptRunner["Service"];
   readonly crypto: Crypto.Crypto;
+  readonly workerScopeRegistry: EpicWorkerScopeRegistry["Service"];
 }): PoolDispatchShape => {
-  const { engine, projectionSnapshotQuery, processRunner, projectSetupScriptRunner, crypto } = deps;
+  const {
+    engine,
+    projectionSnapshotQuery,
+    processRunner,
+    projectSetupScriptRunner,
+    crypto,
+    workerScopeRegistry,
+  } = deps;
   const vcs = makeServerPoolVcs(processRunner);
 
   const commandId = (tag: string) =>
@@ -1812,6 +1821,14 @@ export const makeServerPoolDispatch = (deps: {
   return {
     createIteration: (input) =>
       Effect.gen(function* () {
+        // Bind the thread to its worker unit before the thread exists so the
+        // provider session — started lazily on the first turn — already
+        // resolves the scope. Same worker naming as the terminal dispatch.
+        yield* workerScopeRegistry.bindWorker({
+          runId: input.runId,
+          threadId: input.threadId,
+          worker: `iteration-${String(input.iterationIndex)}`,
+        });
         yield* dispatchCommand({
           type: "thread.create",
           commandId: yield* commandId("thread-create"),

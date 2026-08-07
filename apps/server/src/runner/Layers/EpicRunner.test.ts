@@ -72,6 +72,7 @@ import {
 import { WorktreeProvisioner, type ProvisionWorktreeInput } from "../../vcs/WorktreeProvisioner.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
+import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import {
   makeMemoryStore,
   makeThreadDetail,
@@ -256,6 +257,8 @@ function createHarness(input: {
   readonly onLockRelease?: () => void;
   readonly beforeLockAcquire?: Effect.Effect<void>;
   readonly lockAcquireError?: EpicRunLockError | EpicRunLockHeldError;
+  /** Plant a pre-existing worker scope unit so scope preparation collides. */
+  readonly workerScopeCollision?: boolean;
   readonly preflightError?: EpicRunPreflightError;
   readonly configFileResult?: EpicRunConfigFileResult;
   readonly upsertDelayMs?: number;
@@ -753,6 +756,23 @@ function createHarness(input: {
             childStatuses.set(issueId, newStatus);
           }
         }
+        // The run loop prepares one systemd worker scope per run
+        // (prepareWorkerScope): the probe succeeds, no pre-existing units
+        // collide unless the test plants one, and slice limits are accepted.
+        if (request.command === "systemd-run" || request.command === "systemctl") {
+          const listsUnits = request.command === "systemctl" && request.args.includes("list-units");
+          return {
+            stdout:
+              listsUnits && input.workerScopeCollision === true
+                ? "cook-epic-deadbeef-iteration-0.scope loaded active running\n"
+                : "",
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
         return {
           stdout:
             request.command === "bd"
@@ -926,6 +946,7 @@ function createHarness(input: {
     Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
     Layer.provide(makeProviderRegistryLayer(input.providers ?? [])),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
+    Layer.provide(EpicWorkerScopeRegistry.layer),
     Layer.provide(
       Layer.succeed(AgentAwarenessRelay, {
         publishThread: () => Effect.void,
@@ -1222,6 +1243,66 @@ describe("EpicRunner", () => {
       }
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live("prepares the systemd worker scope once per run", () =>
+    Effect.gen(function* () {
+      const workspace = yield* makeTempWorkspace;
+      yield* writeWorkspaceFiles(workspace, { "AGENTS.md": "# Repo orientation\n" });
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: workspace,
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: workspace,
+          prompt: "Base prompt",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        const probes = harness.processRequests.filter(
+          (request) => request.command === "systemd-run",
+        );
+        assert.equal(probes.length, 1);
+        const setProperties = harness.processRequests.filter(
+          (request) => request.command === "systemctl" && request.args.includes("set-property"),
+        );
+        assert.equal(setProperties.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("fails the run when the worker scope identity collides", () =>
+    Effect.gen(function* () {
+      const workspace = yield* makeTempWorkspace;
+      yield* writeWorkspaceFiles(workspace, { "AGENTS.md": "# Repo orientation\n" });
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        workspaceRoot: workspace,
+        workerScopeCollision: true,
+      });
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: workspace,
+          prompt: "Base prompt",
+          modelSelection,
+          maxIterations: 1,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+        const failed = harness.store.runs.get(run.runId);
+        assert.include(failed?.lastError ?? "", "run identity");
+        assert.equal(harness.commandsOfType("thread.turn.start").length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   it.live("publishes each persisted run transition", () => {
     const publishedStatuses: string[] = [];

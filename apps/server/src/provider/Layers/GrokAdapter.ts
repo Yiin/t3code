@@ -583,6 +583,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             ...(spawnEnvironment ? { environment: spawnEnvironment } : {}),
             childProcessSpawner,
             cwd,
+            ...(input.workerScope !== undefined ? { workerScope: input.workerScope } : {}),
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
             ...(mcpSession

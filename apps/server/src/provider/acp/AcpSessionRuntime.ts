@@ -20,6 +20,9 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import type { ProviderWorkerScopeBinding } from "@t3tools/contracts";
+
+import { wrapSpawnWithWorkerScope } from "../workerScope.ts";
 
 import {
   collectSessionConfigOptionValues,
@@ -61,6 +64,11 @@ export interface AcpSpawnInput {
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
+  /**
+   * Set when the session is an epic-run worker: the ACP agent spawn is
+   * wrapped in the run's systemd scope unit.
+   */
+  readonly workerScope?: ProviderWorkerScopeBinding;
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
@@ -351,9 +359,14 @@ export const make = (
       options.spawn.args,
       options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {},
     );
+    const scopedSpawn = wrapSpawnWithWorkerScope(
+      options.workerScope,
+      spawnCommand.command,
+      spawnCommand.args,
+    );
     const child = yield* spawner
       .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        ChildProcess.make(scopedSpawn.command, scopedSpawn.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
           ...(options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {}),
           shell: spawnCommand.shell,

@@ -12,6 +12,7 @@ import {
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
+  type ProviderWorkerScopeBinding,
   RuntimeMode,
   ThreadId,
   TurnId,
@@ -40,6 +41,7 @@ import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import { wrapSpawnWithWorkerScope } from "../workerScope.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -127,6 +129,11 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  /**
+   * Set when the session is an epic-run worker: the app-server spawn is
+   * wrapped in the run's systemd scope unit.
+   */
+  readonly workerScope?: ProviderWorkerScopeBinding;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -753,9 +760,14 @@ export const makeCodexSessionRuntime = (
       env,
       extendEnv,
     });
+    const scopedSpawn = wrapSpawnWithWorkerScope(
+      options.workerScope,
+      spawnCommand.command,
+      spawnCommand.args,
+    );
     const child = yield* spawner
       .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        ChildProcess.make(scopedSpawn.command, scopedSpawn.args, {
           cwd: options.cwd,
           env,
           extendEnv,

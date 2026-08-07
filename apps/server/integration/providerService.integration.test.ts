@@ -18,6 +18,7 @@ import {
   ProviderEventLoggers,
 } from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
+import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -79,7 +80,10 @@ const makeIntegrationFixture = Effect.gen(function* () {
     Layer.succeed(EnvironmentAuth, makeUnconfiguredEnvironmentAuth()),
   ).pipe(Layer.provide(SqlitePersistenceMemory));
 
-  const layer = makeProviderServiceLive().pipe(Layer.provide(shared));
+  const layer = makeProviderServiceLive().pipe(
+    Layer.provide(shared),
+    Layer.provide(EpicWorkerScopeRegistry.layer),
+  );
 
   return {
     cwd,

@@ -41,6 +41,7 @@ import { ServerSettingsService } from "../src/serverSettings.ts";
 import { EnvironmentAuth } from "../src/auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../src/auth/environmentAuthTestStub.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
+import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import { makeCodexAdapter } from "../src/provider/Layers/CodexAdapter.ts";
 import {
   NoOpProviderEventLoggers,
@@ -288,6 +289,7 @@ export const makeOrchestrationIntegrationHarness = (
     // T3_* injection is never exercised here: no start input carries
     // `projectId`/`workspaceRoot`, so ProviderService never calls into it.
     const environmentAuthLayer = Layer.succeed(EnvironmentAuth, makeUnconfiguredEnvironmentAuth());
+    const workerScopeRegistryLayer = EpicWorkerScopeRegistry.layer;
     const providerLayer = useRealCodex
       ? makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
@@ -295,6 +297,7 @@ export const makeOrchestrationIntegrationHarness = (
           Layer.provide(AnalyticsService.layerTest),
           Layer.provide(providerEventLoggersLayer),
           Layer.provide(environmentAuthLayer),
+          Layer.provide(workerScopeRegistryLayer),
         )
       : makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
@@ -302,6 +305,7 @@ export const makeOrchestrationIntegrationHarness = (
           Layer.provide(AnalyticsService.layerTest),
           Layer.provide(providerEventLoggersLayer),
           Layer.provide(environmentAuthLayer),
+          Layer.provide(workerScopeRegistryLayer),
         );
     const providerRegistryLayer = makeProviderRegistryLayer();
 

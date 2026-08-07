@@ -57,6 +57,7 @@ import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunne
 import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
 import { GitVcsDriver } from "../src/vcs/GitVcsDriver.ts";
 import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
+import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
 import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";
 import { makeMemoryStore, makeThreadDetail } from "./EpicRunnerHarness.integration.ts";
@@ -708,6 +709,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
   }).pipe(
     Layer.provide(preflightLayer),
     Layer.provide(infraLayer),
+    Layer.provide(EpicWorkerScopeRegistry.layer),
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(gitVcsLayer.pipe(Layer.provide(infraLayer))),

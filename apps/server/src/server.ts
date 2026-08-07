@@ -27,6 +27,7 @@ import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
+import { EpicWorkerScopeRegistry } from "./provider/workerScope.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -191,6 +192,10 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provide(ProviderAdapterRegistryLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
+  // The runner binds epic iteration threads to the run's systemd worker
+  // scope; `ProviderService` resolves the binding at session start. One
+  // shared instance — Effect memoizes the same layer reference.
+  Layer.provideMerge(EpicWorkerScopeRegistry.layer),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
@@ -348,6 +353,7 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunPreflightLayerLive),
   Layer.provide(EpicRunConfigSource.layer),
   Layer.provide(NodeEpicRunLock.layer),
+  Layer.provide(EpicWorkerScopeRegistry.layer),
   Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 

@@ -1273,6 +1273,7 @@ export function makeOpenCodeAdapter(
               const server = yield* openCodeRuntime.connectToOpenCodeServer({
                 binaryPath,
                 serverUrl,
+                ...(input.workerScope !== undefined ? { workerScope: input.workerScope } : {}),
                 ...(options?.environment !== undefined || t3EnvironmentEnv !== undefined
                   ? {
                       environment: {

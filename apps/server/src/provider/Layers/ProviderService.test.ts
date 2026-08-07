@@ -14,6 +14,7 @@ import {
   ApprovalRequestId,
   AuthSessionId,
   EnvironmentId,
+  EpicRunId,
   EventId,
   epicRunIterationThreadId,
   ProjectId,
@@ -66,6 +67,7 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
+import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../../auth/environmentAuthTestStub.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -84,7 +86,10 @@ const environmentAuthTestLayer = Layer.succeed(
 );
 
 const makeProviderServiceLiveForTest = (options?: Parameters<typeof makeProviderServiceLive>[0]) =>
-  makeProviderServiceLive(options).pipe(Layer.provide(environmentAuthTestLayer));
+  makeProviderServiceLive(options).pipe(
+    Layer.provide(environmentAuthTestLayer),
+    Layer.provideMerge(EpicWorkerScopeRegistry.layer),
+  );
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
@@ -572,6 +577,7 @@ function makeT3EnvironmentTestLayers(auth: ReturnType<typeof makeEnvironmentAuth
     Layer.provide(defaultServerSettingsLayer),
     Layer.provide(auth.layer),
     Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(EpicWorkerScopeRegistry.layer),
     Layer.provide(
       Layer.succeed(
         ProviderEventLoggers.ProviderEventLoggers,
@@ -1888,6 +1894,71 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
         NodeFS.rmSync(tempDir, { recursive: true, force: true });
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+const workerScopeAttachment = makeProviderServiceLayer();
+workerScopeAttachment.layer("ProviderServiceLive epic worker scope attachment", (it) => {
+  it.effect("attaches the resolved worker scope to the adapter start input", () =>
+    Effect.gen(function* () {
+      const scopeRegistry = yield* EpicWorkerScopeRegistry;
+      const provider = yield* ProviderService.ProviderService;
+      const runId = EpicRunId.make("run-scope-attach");
+      const threadId = asThreadId("thread-scope-attach");
+      yield* scopeRegistry.setRunPreparation(runId, { scopeId: "scope-abc", active: true });
+      yield* scopeRegistry.bindWorker({ runId, threadId, worker: "iteration-0" });
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = workerScopeAttachment.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepEqual(startInput?.workerScope, { scopeId: "scope-abc", worker: "iteration-0" });
+    }),
+  );
+
+  it.effect("omits the worker scope when the run's preparation is inactive", () =>
+    Effect.gen(function* () {
+      const scopeRegistry = yield* EpicWorkerScopeRegistry;
+      const provider = yield* ProviderService.ProviderService;
+      const runId = EpicRunId.make("run-scope-inactive");
+      const threadId = asThreadId("thread-scope-inactive");
+      yield* scopeRegistry.setRunPreparation(runId, { scopeId: "scope-inactive", active: false });
+      yield* scopeRegistry.bindWorker({ runId, threadId, worker: "iteration-0" });
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = workerScopeAttachment.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(startInput?.workerScope, undefined);
+    }),
+  );
+
+  it.effect("omits the worker scope for a thread with no binding", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-scope-unbound");
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = workerScopeAttachment.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(startInput?.workerScope, undefined);
+    }),
   );
 });
 

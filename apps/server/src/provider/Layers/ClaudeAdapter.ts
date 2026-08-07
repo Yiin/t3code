@@ -71,6 +71,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
+import { spawnWorkerScopeWrappedProcess } from "../workerScope.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
@@ -4014,6 +4015,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(ultracode ? { ultracode: true } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const workerScope = input.workerScope;
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -4047,6 +4049,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         env: input.t3Environment
           ? { ...claudeEnvironment, ...toT3EnvironmentEnv(input.t3Environment) }
           : claudeEnvironment,
+        // The SDK spawns the CLI itself; its custom-spawn seam is the only
+        // way an epic worker session leaves the server's cgroup.
+        ...(workerScope !== undefined
+          ? {
+              spawnClaudeCodeProcess: (spawnOptions: {
+                readonly command: string;
+                readonly args: ReadonlyArray<string>;
+                readonly cwd?: string;
+                readonly env: { readonly [key: string]: string | undefined };
+                readonly signal?: AbortSignal;
+              }) => spawnWorkerScopeWrappedProcess(workerScope, spawnOptions),
+            }
+          : {}),
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession

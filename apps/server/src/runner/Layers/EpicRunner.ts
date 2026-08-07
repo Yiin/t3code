@@ -17,6 +17,7 @@ import {
   EpicRunNotFoundError,
   type EpicRunnerError,
   EpicRunnerStoreError,
+  EpicRunStateError,
 } from "@t3tools/epic-core/Errors";
 import {
   DEFAULT_INFRA_FAILURE_BUDGET,
@@ -32,6 +33,7 @@ import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
 import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
+import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
 import {
   runParallelEpicLoop,
   type ParallelEpicLoopPorts,
@@ -58,6 +60,7 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { EpicRunStore } from "../../persistence/Services/EpicRuns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
 import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
@@ -86,6 +89,11 @@ const DEFAULT_QUIET_PERIOD_MS = 1_000;
 const DEFAULT_PROVIDER_DEGRADATION_TTL_MS = 60 * 60 * 1000;
 /** How long a resume waits for a dying loop to release the run's own lock. */
 const LOOP_EXIT_WAIT_MS = 5_000;
+/**
+ * Server runs have no on-disk run directory; this fixed discriminator keeps
+ * server scope identities disjoint from terminal runs of the same checkout.
+ */
+const SERVER_WORKER_SCOPE_RUN_DIRECTORY = "t3code-server";
 
 const DateTimeNowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -127,6 +135,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const gitVcsDriver = yield* GitVcsDriver;
     const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
+    const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
     const leases = new Map<EpicRunId, EpicRunLockLease>();
 
     const seedRetryBaseDelayMs = Math.max(
@@ -212,6 +221,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         processRunner,
         projectSetupScriptRunner,
         crypto,
+        workerScopeRegistry,
       }),
       mergeDrain: makeServerMergeDrain({ store, processRunner, fileSystem, path, gitVcsDriver }),
       vcs: makeServerPoolVcs(processRunner),
@@ -266,6 +276,22 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
         const initialRun = yield* requireRun(runId);
+        // One systemd scope identity per run, mirroring the terminal
+        // coordinator. A collision is fatal — a crashed run's workers may
+        // still hold the identity; every other degradation logs a warning and
+        // spawns unwrapped (see workerScope.ts in epic-core).
+        const scopePreparation = yield* prepareWorkerScope({
+          repositoryPath: initialRun.cwd,
+          runDirectory: SERVER_WORKER_SCOPE_RUN_DIRECTORY,
+          epicId: initialRun.epicId,
+          runId,
+        }).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+          Effect.mapError(
+            (collision) => new EpicRunStateError({ runId, detail: collision.detail }),
+          ),
+        );
+        yield* workerScopeRegistry.setRunPreparation(runId, scopePreparation);
         const policy = makePoolPolicy(policySeed, initialRun);
         const signals = yield* Queue.unbounded<PoolSchedulerEvent>();
         workerCapSignals.set(runId, signals);
@@ -281,7 +307,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             cleanupOwnedExternally: () => cancelCleanupOwned.has(runId),
           },
           poolPorts,
-        );
+        ).pipe(Effect.ensuring(workerScopeRegistry.releaseRun(runId)));
       });
 
     /** Best-effort terminal write for a loop that died on an unexpected error. */

@@ -64,7 +64,11 @@ canonical terminal coordinator until it is reduced to a shim.
   `ports/WorkerEvidence.ts`. Ported from `run.sh` `supervise_workers`.
 - `packages/epic-core/src/workerScope.ts` — optional systemd scope governance
   for worker spawns (named scopes under `cook-epic.slice`, CPUWeight and
-  MemoryHigh only). Fail-soft except for a run-identity collision.
+  MemoryHigh only). Fail-soft except for a run-identity collision. Server runs
+  prepare one scope per run in `EpicRunner.runLoop` and bind iteration threads
+  through `apps/server/src/provider/workerScope.ts`
+  (`EpicWorkerScopeRegistry`); `ProviderService` resolves the binding at
+  session start and each provider runtime wraps its CLI spawn.
 - `apps/server/integration/epicRunnerConformance.integration.test.ts` — runs
   every conformance scenario whose `appliesTo` includes "server" through the
   server adapter.

@@ -69,6 +69,18 @@ export const T3SessionEnvironment = Schema.Struct({
 });
 export type T3SessionEnvironment = typeof T3SessionEnvironment.Type;
 
+/**
+ * Systemd worker-scope binding for a session that runs as an epic-run worker.
+ * The server attaches it at session start; adapters wrap the provider CLI
+ * spawn in the named scope unit so worker load leaves the coordinator's
+ * cgroup (see `packages/epic-core/src/workerScope.ts`).
+ */
+export const ProviderWorkerScopeBinding = Schema.Struct({
+  scopeId: TrimmedNonEmptyString,
+  worker: TrimmedNonEmptyString,
+});
+export type ProviderWorkerScopeBinding = typeof ProviderWorkerScopeBinding.Type;
+
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
@@ -86,6 +98,9 @@ export const ProviderSessionStartInput = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   t3Environment: Schema.optional(T3SessionEnvironment),
+  // Set by the server when the session belongs to an epic run with an active
+  // worker scope; adapters route the provider CLI spawn through the scope.
+  workerScope: Schema.optional(ProviderWorkerScopeBinding),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
