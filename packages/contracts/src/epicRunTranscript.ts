@@ -104,6 +104,10 @@ export interface EpicRunTranscriptDiff {
   readonly right: NormalizedEpicRunTranscriptEvent | null;
 }
 
+export interface EpicRunTranscriptDivergence extends EpicRunTranscriptDiff {
+  readonly kind: "structural" | "content";
+}
+
 export const normalizeTranscript = (
   events: ReadonlyArray<EpicRunTranscriptEvent>,
 ): ReadonlyArray<NormalizedEpicRunTranscriptEvent> =>
@@ -155,4 +159,38 @@ export const diffTranscripts = (
     }
   }
   return null;
+};
+
+const withoutContent = (
+  event: NormalizedEpicRunTranscriptEvent,
+): NormalizedEpicRunTranscriptEvent => {
+  const { summary: _summary, why: _why, ...structural } = event;
+  return structural as NormalizedEpicRunTranscriptEvent;
+};
+
+/** Classify every difference while treating only summary and why as free text. */
+export const classifyTranscriptDivergences = (
+  left: ReadonlyArray<EpicRunTranscriptEvent>,
+  right: ReadonlyArray<EpicRunTranscriptEvent>,
+): ReadonlyArray<EpicRunTranscriptDivergence> => {
+  const normalizedLeft = normalizeTranscript(left);
+  const normalizedRight = normalizeTranscript(right);
+  const divergences: EpicRunTranscriptDivergence[] = [];
+  const length = Math.max(normalizedLeft.length, normalizedRight.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftEvent = normalizedLeft[index] ?? null;
+    const rightEvent = normalizedRight[index] ?? null;
+    if (sameValue(leftEvent, rightEvent)) continue;
+    const contentOnly =
+      leftEvent !== null &&
+      rightEvent !== null &&
+      sameValue(withoutContent(leftEvent), withoutContent(rightEvent));
+    divergences.push({
+      kind: contentOnly ? "content" : "structural",
+      index,
+      left: leftEvent,
+      right: rightEvent,
+    });
+  }
+  return divergences;
 };

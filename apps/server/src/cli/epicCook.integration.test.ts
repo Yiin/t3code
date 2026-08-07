@@ -287,6 +287,8 @@ it("maps supported terminal settings into the shared config", () => {
   const fixture = makeFixture(1);
   const environment = {
     ...fixture.environment,
+    COOKEPIC_ENGINE: "shadow",
+    T3CODE_EPIC_RUN_ENGINE: "core",
     COOKEPIC_MODEL: "adapter-model",
     COOKEPIC_PERMISSION_MODE: "bypassPermissions",
     COOKEPIC_STOP_GRACE: "7",
@@ -297,20 +299,42 @@ it("maps supported terminal settings into the shared config", () => {
     NodeFS.readFileSync(NodePath.join(fixture.runDirectory, "run.json"), "utf8"),
   );
   assert.equal(state.config.supervision.stopGraceSeconds, 7);
+  assert.equal(state.config.engine, "core");
   assert.deepEqual(state.config.provider.modelSelection, {
     instanceId: "worker-cmd",
     model: "adapter-model",
   });
   assert.equal(state.config.runtime.mode, "full-access");
   assert.equal(state.configProvenance["supervision.stopGraceSeconds"], "environment");
+  assert.equal(state.configProvenance.engine, "environment");
   assert.equal(state.configProvenance["provider.modelSelection"], "environment");
   assert.equal(state.configProvenance["runtime.mode"], "environment");
+  assert.equal(
+    `${result.stdout}\n${result.stderr}`.match(/deprecated\. Use the epic-run config key engine/g)
+      ?.length,
+    1,
+  );
+});
+
+it("lets the typed engine flag override the deprecated environment shim", () => {
+  const fixture = makeFixture(1);
+  const result = run("node", [...cookArgs(fixture), "--engine", "legacy"], fixture.repo, {
+    ...fixture.environment,
+    T3CODE_EPIC_RUN_ENGINE: "core",
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const state = JSON.parse(
+    NodeFS.readFileSync(NodePath.join(fixture.runDirectory, "run.json"), "utf8"),
+  );
+  assert.equal(state.config.engine, "legacy");
+  assert.equal(state.configProvenance.engine, "override");
 });
 
 it("shows local cook help from TypeScript source", () => {
   const result = run("node", [bin, "epic", "cook", "--help"], repositoryRoot);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /--run-dir/);
+  assert.match(result.stdout, /--engine/);
   assert.notInclude(result.stdout, "No running T3 Code server");
   const localSource = NodeFS.readFileSync(
     NodePath.join(repositoryRoot, "apps/server/src/cli/epicCook.ts"),

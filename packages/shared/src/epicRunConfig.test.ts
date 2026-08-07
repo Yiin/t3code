@@ -12,6 +12,7 @@ describe("resolveEpicRunConfig", () => {
       override: null,
       harness: null,
     });
+    expect(result.config.engine).toBe("legacy");
     expect(result.config.parallel.workers).toBe(3);
     expect(result.violations).toEqual([]);
     expect(Object.keys(result.provenance).toSorted()).toEqual(
@@ -35,6 +36,56 @@ describe("resolveEpicRunConfig", () => {
     expect(result.provenance["limits.maxIterations"]).toBe("override");
     expect(result.provenance["limits.maxAttemptsPerChild"]).toBe("default");
   });
+
+  it.each([
+    {
+      name: "defaults",
+      file: null,
+      environment: null,
+      override: null,
+      expected: "legacy",
+      source: "default",
+    },
+    {
+      name: "file",
+      file: { engine: "core" as const },
+      environment: null,
+      override: null,
+      expected: "core",
+      source: "file",
+    },
+    {
+      name: "environment over file",
+      file: { engine: "core" as const },
+      environment: { engine: "shadow" as const },
+      override: null,
+      expected: "shadow",
+      source: "environment",
+    },
+    {
+      name: "run input over environment",
+      file: { engine: "core" as const },
+      environment: { engine: "shadow" as const },
+      override: { engine: "legacy" as const },
+      expected: "legacy",
+      source: "override",
+    },
+    {
+      name: "partial layers do not erase engine",
+      file: { engine: "core" as const },
+      environment: { limits: { maxIterations: 2 } },
+      override: { gate: { disabled: true } },
+      expected: "core",
+      source: "file",
+    },
+  ])(
+    "resolves engine precedence from $name",
+    ({ file, environment, override, expected, source }) => {
+      const result = resolveEpicRunConfig({ file, environment, override, harness: null });
+      expect(result.config.engine).toBe(expected);
+      expect(result.provenance.engine).toBe(source);
+    },
+  );
 
   it("replaces arrays instead of concatenating them", () => {
     const result = resolveEpicRunConfig({

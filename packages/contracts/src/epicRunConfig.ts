@@ -72,6 +72,8 @@ const RetryMaxDelayMs = PositiveInt;
 const SubagentGraceTimeoutMs = PositiveInt;
 const MaxGraceContinuations = PositiveInt;
 const ProviderDegradationTtlMs = NonNegativeInt;
+export const EpicRunEngine = Schema.Literals(["legacy", "core", "shadow"]);
+export type EpicRunEngine = typeof EpicRunEngine.Type;
 
 const BudgetConfig = Schema.Struct({
   usd: defaultTo(BudgetUsd, null),
@@ -149,6 +151,7 @@ const ServerConfig = Schema.Struct({
 });
 
 export const EpicRunConfig = Schema.Struct({
+  engine: defaultTo(EpicRunEngine, "legacy"),
   budget: defaultStruct(BudgetConfig),
   gate: defaultStruct(GateConfig),
   supervision: defaultStruct(SupervisionConfig),
@@ -168,6 +171,7 @@ export type EpicRunConfig = typeof EpicRunConfig.Type;
 export const DEFAULT_EPIC_RUN_CONFIG: EpicRunConfig = Schema.decodeUnknownSync(EpicRunConfig)({});
 
 export const EpicRunConfigOverride = Schema.Struct({
+  engine: Schema.optionalKey(EpicRunEngine),
   budget: Schema.optionalKey(
     Schema.Struct({
       usd: Schema.optionalKey(BudgetUsd),
@@ -269,6 +273,13 @@ export interface EpicRunConfigField {
 }
 
 export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
+  {
+    key: "engine",
+    scope: "core",
+    label: "Epic engine",
+    doc: "Selects the legacy, shared-core, or no-side-effects shadow policy engine.",
+    control: "select",
+  },
   {
     key: "budget.usd",
     scope: "core-partial",

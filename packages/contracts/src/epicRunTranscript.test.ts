@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   diffTranscripts,
+  classifyTranscriptDivergences,
   EPIC_RUN_TRANSCRIPT_TAGS,
   EpicRunTranscriptEvent,
   normalizeTranscript,
@@ -17,6 +18,45 @@ const event = (sequence: number, tag: TranscriptEvent["_tag"] = "done"): Transcr
   epicId: "epic-1",
   issueId: "epic-1.1",
   iterationIndex: sequence,
+});
+
+describe("classifyTranscriptDivergences", () => {
+  it("classifies summary and why changes as content", () => {
+    const left = { ...event(0), summary: "left", why: "first" };
+    const right = { ...event(0), summary: "right", why: "second" };
+    assert.deepEqual(classifyTranscriptDivergences([left], [right]), [
+      { kind: "content", index: 0, left, right },
+    ]);
+  });
+
+  it("classifies event, order, and length changes as structural", () => {
+    const divergences = classifyTranscriptDivergences(
+      [event(0, "dispatched"), event(1, "done")],
+      [event(0, "retry")],
+    );
+    assert.deepEqual(divergences, [
+      {
+        kind: "structural",
+        index: 0,
+        left: event(0, "dispatched"),
+        right: event(0, "retry"),
+      },
+      { kind: "structural", index: 1, left: event(1, "done"), right: null },
+    ]);
+  });
+
+  it("reports exactly one injected policy difference with both events", () => {
+    const left = [event(0, "dispatched"), event(1, "retry"), event(2, "blocked")];
+    const right = [event(0, "dispatched"), event(1, "retry"), event(2, "retry")];
+    assert.deepEqual(classifyTranscriptDivergences(left, right), [
+      {
+        kind: "structural",
+        index: 2,
+        left: event(2, "blocked"),
+        right: event(2, "retry"),
+      },
+    ]);
+  });
 });
 
 describe("EpicRunTranscriptEvent", () => {

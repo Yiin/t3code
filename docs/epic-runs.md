@@ -36,6 +36,73 @@ repository in T3 Code; it reads the current ready frontier from Beads.
 `cook-it` handles one child. It may claim and close that child, but it does not
 own the epic run lock and is not an epic mode to switch into or out of.
 
+## Engine selection
+
+Set `engine` in `.t3code/epic-run.json` or in a run input. The default is
+`legacy`. Config layers apply in this order, with the last value winning:
+
+1. Built-in defaults.
+2. `.t3code/epic-run.json` from the base checkout.
+3. Deprecated environment settings.
+4. The run input from the API, UI, or terminal adapter.
+
+`T3CODE_EPIC_RUN_ENGINE` and `COOKEPIC_ENGINE` are migration settings. The
+terminal adapter logs a warning when either variable is present. If both are
+present, `T3CODE_EPIC_RUN_ENGINE` wins within the environment layer. Replace
+both variables with the `engine` config key.
+
+The config reader accepts these rollout values:
+
+- `legacy` runs the existing adapter.
+- `core` runs the shared orchestration core.
+- `shadow` runs the legacy adapter and records shared-core policy decisions.
+
+Shadow core is observation-only. It consumes each legacy iteration's head,
+worktree fingerprint, child status, and classified outcome. It does not start
+agents, write Beads, change Git, run gates, or push.
+
+The selector is persisted before adapter migration. The hosted runner still
+uses its legacy loop. `t3 epic cook` is the explicit core entry point. The Bash
+adapter still uses its existing `COOKEPIC_CORE` delegation switch. Later adapter
+migration work will route these entry points from the persisted selector.
+
+Config is strict. An unknown engine value rejects the launch like any other
+invalid config value. It does not silently select a different engine.
+
+## Compare adapters
+
+Run a real comparison only on a clean throwaway branch with a local embedded
+Beads database:
+
+```bash
+node scripts/epic-shadow-compare.ts \
+  --epic <id> \
+  --cwd <repo> \
+  --adapters terminal,core \
+  --mode run
+```
+
+Run mode copies one exact Git and Beads snapshot into two temporary roots. It
+runs each adapter once, disables pushes, and deletes only those temporary roots.
+It refuses default branches, dirty trees, shared Dolt hosts, external Beads
+databases, linked Git worktrees, and sibling repository layouts.
+
+Shadow mode reads paired normalized transcripts without starting an adapter:
+
+```bash
+node scripts/epic-shadow-compare.ts \
+  --epic <id> \
+  --cwd <repo> \
+  --adapters terminal,core \
+  --mode shadow
+```
+
+The default files are
+`.git/t3code/epic-shadow/<id>/terminal.jsonl` and `core.jsonl`. Use
+`--transcript-dir <dir>` to read a copied artifact directory. A different event
+sequence is structural drift and makes the command fail. Changes only to
+`summary` or `why` are content drift and do not fail the command.
+
 Only one runner may own an epic. Epic-targeted `ralph`, `cook-epic`, and the T3
 Code server runner use the same run-lock file. If the lock is live, the second
 runner reports that the run is already in progress instead of claiming another

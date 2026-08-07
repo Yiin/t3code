@@ -205,6 +205,8 @@ export const make = (options: FileRunJournalOptions) =>
           summary: input.summary,
           why: input.why,
           failureReason: input.failureReason,
+          headBefore: input.headBefore,
+          headAfter: input.headAfter,
           finishedAt: input.finishedAt,
         };
         yield* writeAtomically(filePath, yield* encodeIterationJson(updated));

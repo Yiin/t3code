@@ -48,6 +48,8 @@ export const PersistedEpicRunIteration = Schema.Struct({
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),
   failureReason: Schema.NullOr(Schema.String),
+  headBefore: Schema.optional(Schema.NullOr(Schema.String)),
+  headAfter: Schema.optional(Schema.NullOr(Schema.String)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -60,6 +62,8 @@ export const UpdatePersistedEpicRunIteration = Schema.Struct({
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),
   failureReason: Schema.NullOr(Schema.String),
+  headBefore: Schema.optional(Schema.NullOr(Schema.String)),
+  headAfter: Schema.optional(Schema.NullOr(Schema.String)),
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type UpdatePersistedEpicRunIteration = typeof UpdatePersistedEpicRunIteration.Type;

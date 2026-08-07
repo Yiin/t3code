@@ -13,6 +13,7 @@ const encodeConfig = Schema.encodeSync(EpicRunConfig);
 const decodeOverride = Schema.decodeUnknownSync(EpicRunConfigOverride);
 
 const DEFAULT_CONFIG = {
+  engine: "legacy",
   budget: { usd: null },
   gate: { command: null, disabled: false },
   supervision: {
@@ -84,6 +85,7 @@ const TERMINAL_ONLY_KEYS = [
 ] as const;
 
 const PUBLIC_FIELD_SCOPES = {
+  engine: "core",
   "budget.usd": "core-partial",
   "gate.command": "core",
   "gate.disabled": "core",
@@ -179,6 +181,15 @@ describe("EpicRunConfig", () => {
     expect(() => decodeConfig({ retry: { rateLimitBackoffSeconds: -1 } })).toThrow();
     expect(() => decodeConfig({ server: { pollIntervalMs: 0 } })).toThrow();
     expect(() => decodeConfig({ server: { providerDegradationTtlMs: -1 } })).toThrow();
+  });
+
+  it("accepts only known epic engines", () => {
+    for (const engine of ["legacy", "core", "shadow"] as const) {
+      expect(decodeConfig({ engine }).engine).toBe(engine);
+      expect(decodeOverride({ engine })).toEqual({ engine });
+    }
+    expect(() => decodeConfig({ engine: "future" })).toThrow();
+    expect(() => decodeOverride({ engine: "future" })).toThrow();
   });
 
   it("rejects non-positive or non-finite budgets", () => {

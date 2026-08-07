@@ -69,7 +69,13 @@ function explicitlyEnablesMissingGate(input: EpicRunConfigOverride | null): bool
   return input.gate.disabled === false || input.gate.command === null;
 }
 
-/** Resolve all config layers without I/O or Effect services. */
+/**
+ * Resolve all config layers without I/O or Effect services.
+ *
+ * Run input stays last so an explicit launch can override the committed file
+ * and deprecated environment shims. The environment layer remains only for
+ * migration from the old terminal settings.
+ */
 export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
   readonly config: EpicRunConfigValue;
   readonly provenance: EpicRunConfigProvenance;

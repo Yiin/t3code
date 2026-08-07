@@ -242,6 +242,8 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         summary: null,
         why: null,
         failureReason: null,
+        headBefore: beforeHead,
+        headAfter: null,
         startedAt,
         finishedAt: null,
       };
@@ -448,6 +450,8 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
           evidenceFailureReason: evidenceFailure,
           outcome,
         }),
+        headBefore: beforeHead,
+        headAfter: afterHead,
         finishedAt,
       };
       yield* ports.journal.updateIteration(updated);

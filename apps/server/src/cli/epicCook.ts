@@ -2,7 +2,12 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import { ProviderInstanceId, PositiveInt, EpicRunConfigOverride } from "@t3tools/contracts";
+import {
+  EpicRunConfigOverride,
+  EpicRunEngine,
+  PositiveInt,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import { runSequentialEpicLoop } from "@t3tools/epic-core/SequentialEpicLoop";
@@ -45,6 +50,11 @@ const deprecatedEnvironmentOverride = (
   environment: NodeJS.ProcessEnv,
   harness: TerminalHarness,
 ): unknown => ({
+  ...(environment.T3CODE_EPIC_RUN_ENGINE === undefined && environment.COOKEPIC_ENGINE === undefined
+    ? {}
+    : {
+        engine: environment.T3CODE_EPIC_RUN_ENGINE ?? environment.COOKEPIC_ENGINE,
+      }),
   ...(environment.COOKEPIC_GATE === undefined && environment.COOKEPIC_NO_GATE === undefined
     ? {}
     : {
@@ -138,6 +148,10 @@ export const cookCommand = Command.make("cook", {
     Flag.optional,
   ),
   model: optionalString("model", "Harness model id."),
+  engine: Flag.choice("engine", EpicRunEngine.literals).pipe(
+    Flag.withDescription("Epic engine rollout selector."),
+    Flag.optional,
+  ),
   json: Flag.boolean("json").pipe(
     Flag.withDescription("Emit JSON events and final state."),
     Flag.withDefault(false),
@@ -155,6 +169,14 @@ export const cookCommand = Command.make("cook", {
       }
       const cwd = NodePath.resolve(flags.cwd);
       const harness = selectHarness(process.env);
+      if (
+        process.env.T3CODE_EPIC_RUN_ENGINE !== undefined ||
+        process.env.COOKEPIC_ENGINE !== undefined
+      ) {
+        yield* Effect.logWarning(
+          "T3CODE_EPIC_RUN_ENGINE and COOKEPIC_ENGINE are deprecated. Use the epic-run config key engine instead.",
+        );
+      }
       const environmentOverride = yield* decodeEpicRunConfigOverride(
         deprecatedEnvironmentOverride(process.env, harness),
       ).pipe(
@@ -184,6 +206,7 @@ export const cookCommand = Command.make("cook", {
         ...(Option.isNone(flags.model)
           ? {}
           : { provider: { modelSelection: { instanceId: harness, model: flags.model.value } } }),
+        ...(Option.isNone(flags.engine) ? {} : { engine: flags.engine.value }),
       }).pipe(
         Effect.mapError(
           (cause) =>
