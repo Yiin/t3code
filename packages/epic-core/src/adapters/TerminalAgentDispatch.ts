@@ -14,6 +14,7 @@ import {
   type IterationHandle,
   type IterationSettle,
 } from "../ports/AgentDispatch.ts";
+import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
 
 export type TerminalHarness = "worker-cmd" | "kimi" | "claude" | "ccx" | "codex" | "opencode";
 
@@ -28,6 +29,7 @@ export interface TerminalAgentDispatchOptions {
   readonly stopGraceSeconds?: number;
   readonly maxArtifactBytes?: number;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly providerRoutes?: ReadonlyArray<TerminalProviderRoute>;
 }
 
 interface ParsedArtifact {
@@ -177,6 +179,13 @@ const codexPermissionArgs = (permissionMode: string | undefined): ReadonlyArray<
           : permissionMode,
       ];
 
+const codexReasoningArgs = (selection: AgentSelection): ReadonlyArray<string> => {
+  const effort = selection.options?.find((option) => option.id === "reasoningEffort")?.value;
+  return typeof effort === "string"
+    ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`]
+    : [];
+};
+
 const invocation = (input: {
   readonly options: TerminalAgentDispatchOptions;
   readonly prompt: string;
@@ -236,6 +245,7 @@ const invocation = (input: {
             ? [
                 ...codexPermissionArgs(options.permissionMode),
                 ...(model && !options.useHarnessDefaultModel ? ["-m", model] : []),
+                ...codexReasoningArgs(selection),
                 "exec",
                 "--json",
                 prompt,
@@ -264,6 +274,25 @@ const invocation = (input: {
         ],
       };
   }
+};
+
+const routeOptions = (
+  options: TerminalAgentDispatchOptions,
+  selection: AgentSelection,
+): { readonly options: TerminalAgentDispatchOptions; readonly harness: TerminalHarness } => {
+  const route = options.providerRoutes?.find(
+    (candidate) => candidate.instanceId === selection.instanceId,
+  );
+  if (route === undefined) return { options, harness: options.harness };
+  return {
+    harness: route.harness,
+    options: {
+      ...options,
+      harness: route.harness,
+      binary: route.binary,
+      useHarnessDefaultModel: route.primary ? (options.useHarnessDefaultModel ?? false) : false,
+    },
+  };
 };
 
 const killGroup = (pid: number, signal: NodeJS.Signals): void => {
@@ -366,6 +395,9 @@ export const makeTerminalAgentDispatch = (
   const startIteration: AgentDispatchShape["startIteration"] = (input) =>
     Effect.tryPromise({
       try: async () => {
+        const routed = routeOptions(options, input.selection);
+        const iterationOptions = routed.options;
+        const iterationHarness = routed.harness;
         await NodeFSP.mkdir(options.artifactsDirectory, { recursive: true });
         const prefix = `${input.runId}-${String(input.iterationIndex)}`;
         const artifactPath = NodePath.join(options.artifactsDirectory, `${prefix}.jsonl`);
@@ -381,7 +413,7 @@ export const makeTerminalAgentDispatch = (
 
         const spawn = (prompt: string): void => {
           const call = invocation({
-            options,
+            options: iterationOptions,
             prompt,
             promptPath,
             selection: input.selection,
@@ -457,7 +489,7 @@ export const makeTerminalAgentDispatch = (
               const max = options.maxArtifactBytes ?? 1024 * 1024;
               const bounded = Buffer.from(chunks).subarray(-max).toString();
               await NodeFSP.writeFile(artifactPath, bounded);
-              parsed = parseTerminalArtifact(options.harness, bounded);
+              parsed = parseTerminalArtifact(iterationHarness, bounded);
               if (streamProviderError !== null) {
                 parsed = { ...parsed, providerError: streamProviderError };
               }
@@ -475,7 +507,7 @@ export const makeTerminalAgentDispatch = (
 
         const handle: IterationHandle = {
           ref: artifactPath,
-          capabilities: capabilities(options.harness),
+          capabilities: capabilities(iterationHarness),
           awaitSettled: Effect.tryPromise({
             try: async () => await settled!,
             catch: (cause) =>
@@ -484,7 +516,7 @@ export const makeTerminalAgentDispatch = (
           continueTurn: (prompt) =>
             Effect.tryPromise({
               try: async () => {
-                if (options.harness === "worker-cmd" || sessionId === null)
+                if (iterationHarness === "worker-cmd" || sessionId === null)
                   throw new Error("continuation is unavailable");
                 spawn(prompt);
               },
@@ -542,14 +574,14 @@ export const makeTerminalAgentDispatch = (
               new DispatchError({ operation: "release", detail: detail(cause), cause }),
           }),
           runningSubagents: Effect.sync(() =>
-            options.harness === "codex" || options.harness === "opencode"
+            iterationHarness === "codex" || iterationHarness === "opencode"
               ? {
                   mode: "event-bookkeeping" as const,
                   running: [...subagentStates.values()].filter(Boolean).length,
                 }
               : {
                   mode: "unavailable" as const,
-                  reason: `${options.harness} does not expose reliable terminal subagent state`,
+                  reason: `${iterationHarness} does not expose reliable terminal subagent state`,
                 },
           ),
           finalMessage: Effect.sync(

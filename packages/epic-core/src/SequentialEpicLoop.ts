@@ -14,6 +14,7 @@ import type { AgentDispatchShape, AgentSelection, IterationHandle } from "./port
 import type { BacklogIssue, BacklogShape } from "./ports/Backlog.ts";
 import type { EpicRunLockShape } from "./ports/EpicRunLock.ts";
 import type { GateShape } from "./ports/Gate.ts";
+import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEventsShape } from "./ports/RunEvents.ts";
 import type {
   PersistedEpicRun,
@@ -21,6 +22,7 @@ import type {
   RunJournalShape,
 } from "./ports/RunJournal.ts";
 import type { RepoRef, VcsShape } from "./ports/Vcs.ts";
+import { resolveEpicProviderFallback } from "./providerFallback.ts";
 
 export class SequentialEpicLoopError extends Schema.TaggedErrorClass<SequentialEpicLoopError>()(
   "SequentialEpicLoopError",
@@ -52,6 +54,7 @@ export interface SequentialEpicLoopPorts {
   readonly backlog: BacklogShape;
   readonly journal: RunJournalShape;
   readonly events: RunEventsShape;
+  readonly providerInventory: ProviderInventoryShape;
   readonly dispatch: AgentDispatchShape;
   readonly gate: GateShape;
   readonly vcs: VcsShape;
@@ -289,7 +292,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
           cwd: input.cwd,
           worktreePath: null,
           prompt,
-          selection: input.selection,
+          selection: run.modelSelection,
         }),
       );
       if (started._tag === "Failure") {
@@ -484,6 +487,49 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         yield* publishClaimRecovery(child.id, iterationIndex);
       }
 
+      let providerFallbackEvent: Extract<
+        Parameters<RunEventsShape["publish"]>[0],
+        { readonly type: "provider-fallback" }
+      > | null = null;
+      let fallbackSelection: AgentSelection | null = null;
+      if (
+        outcome.providerFallbackEligible === true &&
+        outcome.failureReason?.startsWith("provider-error")
+      ) {
+        const providers = yield* ports.providerInventory.getProviders;
+        fallbackSelection = resolveEpicProviderFallback({
+          providers,
+          current: run.modelSelection,
+          failureReason: outcome.failureReason,
+          providerFallbackEligible: true,
+        });
+        if (fallbackSelection !== null) {
+          const fromProvider = providers.find(
+            (provider) => provider.instanceId === run.modelSelection.instanceId,
+          );
+          const toProvider = providers.find(
+            (provider) => provider.instanceId === fallbackSelection?.instanceId,
+          );
+          if (fromProvider !== undefined && toProvider !== undefined) {
+            providerFallbackEvent = {
+              type: "provider-fallback",
+              runId: run.runId,
+              issueId: child.id,
+              iterationIndex,
+              failureReason: outcome.failureReason,
+              fromInstanceId: run.modelSelection.instanceId,
+              fromDriver: fromProvider.driver,
+              fromModel: run.modelSelection.model,
+              toInstanceId: fallbackSelection.instanceId,
+              toDriver: toProvider.driver,
+              toModel: fallbackSelection.model,
+            };
+          } else {
+            fallbackSelection = null;
+          }
+        }
+      }
+
       const decision = decideIterationBoundary({
         runStatus: run.status,
         consecutiveFailures: run.consecutiveFailures,
@@ -492,7 +538,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         lastError: run.lastError,
         outcome,
         noCommitChildClosed: findingsDelivered && !committed,
-        providerFallbackApplied: false,
+        providerFallbackApplied: fallbackSelection !== null,
         providerTurnDispatched: true,
         limits: {
           maxConsecutiveFailures: config.server.maxConsecutiveFailures,
@@ -511,6 +557,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         noCommitStreak: decision.nextNoCommitStreak,
         infraStreak: decision.nextInfraStreak,
         lastError: decision.lastError,
+        ...(fallbackSelection === null ? {} : { modelSelection: fallbackSelection }),
         ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
         ...(childAttemptBudgetExhausted
           ? {
@@ -521,6 +568,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         ...(fatalFailure ? { status: "failed" as const, lastError: outcome.detail } : {}),
       };
       yield* saveRun();
+      if (providerFallbackEvent !== null) yield* ports.events.publish(providerFallbackEvent);
       if (fatalFailure || childAttemptBudgetExhausted || decision.action === "stop") break;
       if (decision.delayMs > 0) yield* Effect.sleep(decision.delayMs);
     }

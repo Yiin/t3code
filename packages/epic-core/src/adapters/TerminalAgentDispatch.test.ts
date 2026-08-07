@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { makeTerminalAgentDispatch, parseTerminalArtifact } from "./TerminalAgentDispatch.ts";
@@ -280,6 +280,95 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
       yield* handle.awaitSettled;
       const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").split("\n");
       assert.notInclude(args, "-m");
+    }),
+  ),
+);
+
+it.live("routes a fallback selection to its own harness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' "$@" > args
+printf '%s\n' '{"role":"assistant","content":"RALPH_DONE"}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        providerRoutes: [
+          {
+            instanceId: ProviderInstanceId.make("kimi"),
+            driver: ProviderDriverKind.make("kimi"),
+            harness: "kimi",
+            binary: fixture.worker,
+            model: "kimi-code/k3",
+            primary: false,
+          },
+        ],
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "fallback",
+        iterationIndex: 0,
+        cwd: fixture.directory,
+        worktreePath: null,
+        prompt: "test",
+        selection: { instanceId: ProviderInstanceId.make("kimi"), model: "kimi-code/k3" },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      yield* handle.awaitSettled;
+      assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
+      assert.equal(handle.capabilities.finalMessage, "assistant-jsonl");
+      const args = NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8");
+      assert.include(args, "kimi-code/k3");
+    }),
+  ),
+);
+
+it.live("applies Codex reasoning options from a fallback selection", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' "$@" > args
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"RALPH_DONE"}}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        providerRoutes: [
+          {
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: ProviderDriverKind.make("codex"),
+            harness: "codex",
+            binary: fixture.worker,
+            model: "gpt-5.6-sol",
+            primary: false,
+          },
+        ],
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "fallback",
+        iterationIndex: 0,
+        cwd: fixture.directory,
+        worktreePath: null,
+        prompt: "test",
+        selection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-sol",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      yield* handle.awaitSettled;
+      assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
+      const args = NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8");
+      assert.include(args, 'model_reasoning_effort="high"');
     }),
   ),
 );

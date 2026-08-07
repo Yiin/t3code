@@ -1,6 +1,6 @@
 {
   "name": "provider-fallback-persists",
-  "description": "A provider error falls back from Claude to Codex to Kimi and persists the next selection. Core support is tracked by t3code-06s.36.",
+  "description": "A provider error falls back from Claude to Codex to Kimi and persists the next selection.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",
@@ -65,5 +65,5 @@
       "toProvider": "kimi"
     }
   ],
-  "appliesTo": ["terminal", "server"]
+  "appliesTo": ["core", "terminal", "server"]
 }

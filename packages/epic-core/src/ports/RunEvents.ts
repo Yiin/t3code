@@ -1,5 +1,10 @@
 /** Observable state changes produced by the shared loop. */
-import { EpicRunId, NonNegativeInt } from "@t3tools/contracts";
+import {
+  EpicRunId,
+  NonNegativeInt,
+  ProviderDriverKind,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -34,6 +39,19 @@ export const RunEvent = Schema.Union([
     issueId: Schema.String,
     iterationIndex: NonNegativeInt,
     reason: Schema.Literal(CHILD_CLAIM_RELEASED_REASON),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("provider-fallback"),
+    runId: EpicRunId,
+    issueId: Schema.String,
+    iterationIndex: NonNegativeInt,
+    failureReason: Schema.String,
+    fromInstanceId: ProviderInstanceId,
+    fromDriver: ProviderDriverKind,
+    fromModel: Schema.String,
+    toInstanceId: ProviderInstanceId,
+    toDriver: ProviderDriverKind,
+    toModel: Schema.String,
   }),
 ]);
 export type RunEvent = typeof RunEvent.Type;

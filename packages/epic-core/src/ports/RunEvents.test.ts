@@ -41,4 +41,26 @@ describe("RunEvent", () => {
       reason: "retry budget exhausted; child reopened",
     });
   });
+
+  it("represents a provider fallback with routing evidence", () => {
+    expect(
+      decodeRunEvent({
+        type: "provider-fallback",
+        runId: "run-1",
+        issueId: "epic.1",
+        iterationIndex: 2,
+        failureReason: "provider-error:rate-limit",
+        fromInstanceId: "claude-work",
+        fromDriver: "claudeAgent",
+        fromModel: "sonnet",
+        toInstanceId: "codex-personal",
+        toDriver: "codex",
+        toModel: "gpt-5.6-sol",
+      }),
+    ).toMatchObject({
+      type: "provider-fallback",
+      fromInstanceId: "claude-work",
+      toInstanceId: "codex-personal",
+    });
+  });
 });

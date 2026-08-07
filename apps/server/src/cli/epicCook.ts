@@ -21,6 +21,7 @@ import {
   makeTerminalAgentDispatch,
   type TerminalHarness,
 } from "@t3tools/epic-core/adapters/TerminalAgentDispatch";
+import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import { resolveEpicRunConfig } from "@t3tools/shared/epicRunConfig";
@@ -271,6 +272,15 @@ export const cookCommand = Command.make("cook", {
           });
         }
         const journal = yield* FileRunJournal.make({ runDirectory });
+        const terminalProviders = makeTerminalProviderSupport({
+          harness,
+          selection: modelSelection,
+          ...(process.env.COOKEPIC_BIN === undefined ? {} : { binary: process.env.COOKEPIC_BIN }),
+          ...(process.env.COOKEPIC_WORKER_CMD === undefined
+            ? {}
+            : { workerCommand: process.env.COOKEPIC_WORKER_CMD }),
+          environment: process.env,
+        });
         let stop = false;
         const requestStop = () => {
           stop = true;
@@ -335,6 +345,7 @@ export const cookCommand = Command.make("cook", {
                 lock,
                 backlog: makeProcessBacklog({ repositoryPath: cwd, processRunner: runner }),
                 journal,
+                providerInventory: terminalProviders.inventory,
                 events: makeFileRunEvents({
                   runDirectory,
                   ...(flags.json ? { stdout: (line) => process.stdout.write(`${line}\n`) } : {}),
@@ -352,6 +363,7 @@ export const cookCommand = Command.make("cook", {
                     ? {}
                     : { permissionMode: process.env.COOKEPIC_PERMISSION_MODE }),
                   useHarnessDefaultModel: snapshot.config.provider.modelSelection === null,
+                  providerRoutes: terminalProviders.routes,
                   timeoutSeconds: snapshot.config.supervision.workerTimeoutSeconds,
                   stopGraceSeconds: snapshot.config.supervision.stopGraceSeconds,
                 }),

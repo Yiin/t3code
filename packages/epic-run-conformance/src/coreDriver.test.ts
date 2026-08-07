@@ -8,10 +8,12 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  ProviderDriverKind,
   ProviderInstanceId,
   diffTranscripts,
   type EpicRunConfig,
   type EpicRunTranscriptEvent,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
@@ -25,6 +27,7 @@ import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
 import { makeProcessVcs } from "@t3tools/epic-core/adapters/ProcessVcs";
 import { makeTerminalAgentDispatch } from "@t3tools/epic-core/adapters/TerminalAgentDispatch";
+import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { DEFAULT_MAX_NO_COMMIT_STREAK } from "@t3tools/epic-core/policy";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
@@ -62,6 +65,30 @@ const maximumIterations = (scenario: ConformanceScenario): number => {
   );
   return Math.max(1, scenario.agentScript.length, ...attempts, ...iterationIndexes);
 };
+
+const provider = (instanceId: string, driver: string, model: string): ServerProvider => ({
+  instanceId: ProviderInstanceId.make(instanceId),
+  driver: ProviderDriverKind.make(driver),
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-01-01T00:00:00Z",
+  availability: "available",
+  models: [{ slug: model, name: model, isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+});
+
+const conformanceProviders = [
+  provider("claude", "claudeAgent", "sonnet"),
+  provider("codex", "codex", "gpt-5.6-sol"),
+  provider("kimi", "kimi", "kimi-code/k3"),
+] as const;
+
+const transcriptProvider = (driver: string): string =>
+  driver === "claudeAgent" ? "claude" : driver;
 
 const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
@@ -111,6 +138,7 @@ const translateCoreEvents = (input: {
   readonly scenario: ConformanceScenario;
   readonly workspace: ConformanceWorkspace;
   readonly events: ReadonlyArray<RunEvent>;
+  readonly dispatchSelections: ReadonlyMap<number, ProviderInstanceId>;
 }): ReadonlyArray<EpicRunTranscriptEvent> => {
   const output: EpicRunTranscriptEvent[] = [];
   const settled = input.events.filter(
@@ -135,6 +163,11 @@ const translateCoreEvents = (input: {
         : [],
     ),
   );
+  const providerFallbacks = new Map(
+    input.events.flatMap((event) =>
+      event.type === "provider-fallback" ? [[event.iterationIndex, event] as const] : [],
+    ),
+  );
   const childAttempts = new Map<string, number>();
   let infraAttempts = 0;
   let recoveredExhaustion = false;
@@ -157,6 +190,16 @@ const translateCoreEvents = (input: {
       pushed: false,
       verified: true,
     };
+    const providerFallback = providerFallbacks.get(iteration.iterationIndex);
+    if (providerFallback !== undefined) {
+      output.push({
+        _tag: "provider-fallback",
+        ...common,
+        fromProvider: transcriptProvider(providerFallback.fromDriver),
+        toProvider: transcriptProvider(providerFallback.toDriver),
+      });
+      continue;
+    }
     if (iteration.turnStatus === "completed") {
       if (iteration.headBefore === iteration.headAfter) {
         output.push({
@@ -166,8 +209,20 @@ const translateCoreEvents = (input: {
         });
       } else {
         if (dispatched.has(iteration.iterationIndex)) {
-          output.push({ _tag: "dispatched", ...common, sequence: output.length });
+          const selection = input.dispatchSelections.get(iteration.iterationIndex);
+          const selectedProvider = conformanceProviders.find(
+            (provider) => provider.instanceId === selection,
+          );
+          output.push({
+            _tag: "dispatched",
+            ...common,
+            sequence: output.length,
+            ...(selectedProvider === undefined
+              ? {}
+              : { toProvider: transcriptProvider(selectedProvider.driver) }),
+          });
         }
+        if (providerFallbacks.size > 0) continue;
         output.push({ _tag: "done", ...common, sequence: output.length });
       }
       continue;
@@ -330,29 +385,50 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
       EpicRunPreflight.layer.pipe(Layer.provide(dependencies)),
     );
     const events: RunEvent[] = [];
+    const dispatchSelections = new Map<number, ProviderInstanceId>();
     return yield* Effect.gen(function* () {
       const lock = yield* EpicRunLock;
       const preflight = yield* EpicRunPreflight.EpicRunPreflight;
       const journal = yield* FileRunJournal.make({ runDirectory });
+      const providerScenario = scenario.name === "provider-fallback-persists";
+      const initialSelection = providerScenario
+        ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
+        : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
+      const harness = providerScenario ? ("claude" as const) : ("worker-cmd" as const);
+      const providerSupport = makeTerminalProviderSupport({
+        harness,
+        selection: initialSelection,
+        workerCommand: NodePath.join(workspace.binDir, "agent"),
+        environment: workspace.env,
+      });
+      const terminalDispatch = makeTerminalAgentDispatch({
+        harness,
+        artifactsDirectory: runDirectory,
+        workerCommand: NodePath.join(workspace.binDir, "agent"),
+        providerRoutes: providerSupport.routes,
+        timeoutSeconds: 0.5,
+        stopGraceSeconds: 1,
+        environment: workspace.env,
+      });
       const ports: SequentialEpicLoopPorts = {
         preflight,
         lock,
         backlog: makeProcessBacklog({ repositoryPath: workspace.cwd, processRunner: runner }),
         journal,
+        providerInventory: providerSupport.inventory,
         events: {
           publish: (event) =>
             Effect.sync(() => {
               events.push(event);
             }),
         },
-        dispatch: makeTerminalAgentDispatch({
-          harness: "worker-cmd",
-          artifactsDirectory: runDirectory,
-          workerCommand: NodePath.join(workspace.binDir, "agent"),
-          timeoutSeconds: 0.5,
-          stopGraceSeconds: 1,
-          environment: workspace.env,
-        }),
+        dispatch: {
+          ...terminalDispatch,
+          startIteration: (input) => {
+            dispatchSelections.set(input.iterationIndex, input.selection.instanceId);
+            return terminalDispatch.startIteration(input);
+          },
+        },
         gate: makeProcessGate({
           processRunner: runner,
           environment: { ...process.env, ...workspace.env },
@@ -373,10 +449,7 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
               worktreeRoot: NodePath.join(runDirectory, "worktrees"),
               siblings: [],
             },
-            selection: {
-              instanceId: ProviderInstanceId.make("worker-cmd"),
-              model: "fixture",
-            },
+            selection: initialSelection,
             configSnapshot: {
               fileResult: { _tag: "absent" },
               config: compressedConfig(scenario),
@@ -390,7 +463,14 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
           ports,
         ),
       );
-      return { result, events };
+      const harnesses = workspace.readTranscript().flatMap((item) => {
+        if (typeof item !== "object" || item === null) return [];
+        const record = item as Readonly<Record<string, unknown>>;
+        return record["tool"] === "agent" && typeof record["harness"] === "string"
+          ? [record["harness"]]
+          : [];
+      });
+      return { result, events, dispatchSelections, harnesses };
     }).pipe(Effect.provide(localLayer));
   }).pipe(
     Effect.provide(
@@ -404,7 +484,15 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
       failure: executed.result.failure,
     });
   }
-  return translateCoreEvents({ scenario, workspace, events: executed.events });
+  if (scenario.name === "provider-fallback-persists") {
+    assert.deepEqual(executed.harnesses, ["claude", "codex", "kimi"]);
+  }
+  return translateCoreEvents({
+    scenario,
+    workspace,
+    events: executed.events,
+    dispatchSelections: executed.dispatchSelections,
+  });
 });
 
 const describeDiff = (

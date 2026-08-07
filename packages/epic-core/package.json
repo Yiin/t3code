@@ -43,6 +43,10 @@
       "types": "./src/ports/AgentDispatch.ts",
       "import": "./src/ports/AgentDispatch.ts"
     },
+    "./ports/ProviderInventory": {
+      "types": "./src/ports/ProviderInventory.ts",
+      "import": "./src/ports/ProviderInventory.ts"
+    },
     "./ports/RunJournal": {
       "types": "./src/ports/RunJournal.ts",
       "import": "./src/ports/RunJournal.ts"
@@ -98,6 +102,10 @@
     "./adapters/TerminalAgentDispatch": {
       "types": "./src/adapters/TerminalAgentDispatch.ts",
       "import": "./src/adapters/TerminalAgentDispatch.ts"
+    },
+    "./adapters/TerminalProviderSupport": {
+      "types": "./src/adapters/TerminalProviderSupport.ts",
+      "import": "./src/adapters/TerminalProviderSupport.ts"
     }
   },
   "scripts": {

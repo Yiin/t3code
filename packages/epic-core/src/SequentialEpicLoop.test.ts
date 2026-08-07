@@ -2,7 +2,9 @@ import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   ProviderInstanceId,
+  ProviderDriverKind,
   type EpicRunConfig,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -23,7 +25,23 @@ type Attempt = {
   readonly comment?: boolean;
   readonly dirty?: boolean;
   readonly blocked?: boolean;
+  readonly providerError?: string;
 };
+
+const provider = (instanceId: string, driver: string, model: string): ServerProvider => ({
+  instanceId: ProviderInstanceId.make(instanceId),
+  driver: ProviderDriverKind.make(driver),
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-01-01T00:00:00Z",
+  availability: "available",
+  models: [{ slug: model, name: model, isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+});
 
 const issue = (
   input: Partial<BacklogIssue> & Pick<BacklogIssue, "id" | "title">,
@@ -62,6 +80,8 @@ const fixture = (input: {
   readonly childTitle?: string;
   readonly stopChecks?: ReadonlyArray<boolean>;
   readonly releaseFailures?: number;
+  readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly selection?: { readonly instanceId: ProviderInstanceId; readonly model: string };
 }) => {
   const epic = issue({
     id: "epic",
@@ -87,6 +107,7 @@ const fixture = (input: {
   const statuses: string[] = [];
   const events: RunEvent[] = [];
   const ordering: string[] = [];
+  const selections: Array<{ readonly instanceId: ProviderInstanceId; readonly model: string }> = [];
   const attempts = input.attempts ?? [];
 
   const backlog = {
@@ -157,6 +178,7 @@ const fixture = (input: {
       saveRun: (run) =>
         Effect.sync(() => {
           persistedRun = run;
+          ordering.push(`run:saved:${run.modelSelection.instanceId}`);
         }),
       getRun: () =>
         Effect.succeed(persistedRun === null ? Option.none() : Option.some(persistedRun)),
@@ -187,11 +209,15 @@ const fixture = (input: {
             ordering.push(`event:${event.iteration.turnStatus}`);
           } else if (event.type === "child-claim-released") {
             ordering.push("event:child-claim-released");
+          } else if (event.type === "provider-fallback") {
+            ordering.push(`event:provider-fallback:${event.toInstanceId}`);
           }
         }),
     },
+    providerInventory: { getProviders: Effect.succeed(input.providers ?? []) },
     dispatch: {
-      startIteration: () => {
+      startIteration: ({ selection }) => {
+        selections.push(selection);
         const attempt = attempts[dispatches++] ?? {};
         if (attempt.infra)
           return Effect.fail(new DispatchError({ operation: "start", detail: "offline" }));
@@ -210,7 +236,12 @@ const fixture = (input: {
             if (attempt.close) child = { ...child, status: "closed" };
             if (attempt.comment) child = { ...child, commentCount: child.commentCount + 1 };
             if (attempt.dirty) fingerprint = " M dirty";
-            return { turnState: "completed" as const, timedOut: false, providerError: null };
+            return {
+              turnState:
+                attempt.providerError === undefined ? ("completed" as const) : ("error" as const),
+              timedOut: false,
+              providerError: attempt.providerError ?? null,
+            };
           }),
           continueTurn: () => Effect.void,
           interrupt: Effect.void,
@@ -263,7 +294,10 @@ const fixture = (input: {
           worktreeRoot: "/worktrees",
           siblings: [],
         },
-        selection: { instanceId: ProviderInstanceId.make("worker"), model: "test" },
+        selection: input.selection ?? {
+          instanceId: ProviderInstanceId.make("worker"),
+          model: "test",
+        },
         configSnapshot: {
           fileResult: { _tag: "absent" },
           config: input.config ?? config(),
@@ -288,8 +322,87 @@ const fixture = (input: {
     releaseAttempts: () => releaseAttempts,
     events,
     ordering,
+    selections,
   };
 };
+
+it.live("persists Claude to Codex to Kimi fallback across dispatches", () =>
+  Effect.gen(function* () {
+    const claude = provider("claude", "claudeAgent", "sonnet");
+    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const kimi = provider("kimi", "kimi", "kimi-code/k3");
+    const test = fixture({
+      attempts: [
+        { providerError: "rate limit" },
+        { providerError: "rate limit" },
+        { commit: true, close: true },
+      ],
+      providers: [claude, codex, kimi],
+      selection: { instanceId: claude.instanceId, model: "sonnet" },
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 3 },
+        server: {
+          ...DEFAULT_EPIC_RUN_CONFIG.server,
+          infraFailureBudget: 1,
+          retryBaseDelayMs: 0,
+          retryMaxDelayMs: 0,
+        },
+      }),
+    });
+
+    const result = yield* test.run();
+    assert.equal(result.status, "done");
+    assert.equal(result.infraStreak, 0);
+    assert.deepEqual(test.selections, [
+      { instanceId: claude.instanceId, model: "sonnet" },
+      {
+        instanceId: codex.instanceId,
+        model: "gpt-5.6-sol",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+      { instanceId: kimi.instanceId, model: "kimi-code/k3" },
+    ]);
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "provider-fallback"),
+      [
+        {
+          type: "provider-fallback",
+          runId: "run",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          failureReason: "provider-error:rate-limit",
+          fromInstanceId: "claude",
+          fromDriver: "claudeAgent",
+          fromModel: "sonnet",
+          toInstanceId: "codex",
+          toDriver: "codex",
+          toModel: "gpt-5.6-sol",
+        },
+        {
+          type: "provider-fallback",
+          runId: "run",
+          issueId: "epic.1",
+          iterationIndex: 1,
+          failureReason: "provider-error:rate-limit",
+          fromInstanceId: "codex",
+          fromDriver: "codex",
+          fromModel: "gpt-5.6-sol",
+          toInstanceId: "kimi",
+          toDriver: "kimi",
+          toModel: "kimi-code/k3",
+        },
+      ],
+    );
+    assert.isBelow(
+      test.ordering.indexOf("run:saved:codex"),
+      test.ordering.indexOf("event:provider-fallback:codex"),
+    );
+    assert.isBelow(
+      test.ordering.indexOf("run:saved:kimi"),
+      test.ordering.indexOf("event:provider-fallback:kimi"),
+    );
+  }),
+);
 
 it.live("keeps a closed child unchanged after a gate failure", () =>
   Effect.gen(function* () {
