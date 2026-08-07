@@ -11,6 +11,10 @@
       "types": "./src/epicPlanMarker.ts",
       "import": "./src/epicPlanMarker.ts"
     },
+    "./epicRunConfig": {
+      "types": "./src/epicRunConfig.ts",
+      "import": "./src/epicRunConfig.ts"
+    },
     "./model": {
       "types": "./src/model.ts",
       "import": "./src/model.ts"

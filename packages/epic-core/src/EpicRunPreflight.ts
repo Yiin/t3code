@@ -4,15 +4,42 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
   EpicRunPreflightError,
+  type EpicRunPreflightBlocker,
   type EpicRunPreflightInput,
   type EpicRunPreflightResult,
   type EpicRunPreflightWarning,
 } from "@t3tools/contracts";
+import { resolveEpicRunConfig } from "@t3tools/shared/epicRunConfig";
 
+import { EpicRunConfigSource } from "./EpicRunConfigSource.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
 
 const COMMAND_TIMEOUT = Duration.seconds(20);
+const MAX_BLOCKER_TEXT_LENGTH = 2_048;
+
+function boundedBlockerText(value: string): string {
+  return value.length <= MAX_BLOCKER_TEXT_LENGTH
+    ? value
+    : `${value.slice(0, MAX_BLOCKER_TEXT_LENGTH - 3)}...`;
+}
+
+export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker): string {
+  switch (blocker._tag) {
+    case "dirty_tree":
+      return boundedBlockerText(`The worktree has changes: ${blocker.paths.join(", ")}`);
+    case "detached_head":
+      return "The repository has a detached HEAD.";
+    case "run_in_progress":
+      return boundedBlockerText(
+        `Another epic run owns this repository on ${blocker.host} (PID ${String(blocker.pid)}, ${blocker.runDir}).`,
+      );
+    case "epic_not_found":
+      return boundedBlockerText(`Epic ${blocker.epicId} was not found.`);
+    case "config_invalid":
+      return boundedBlockerText(`${blocker.configPath}\n${blocker.diagnostics.join("\n")}`);
+  }
+}
 
 export interface EpicRunPreflightShape {
   readonly check: (
@@ -76,6 +103,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const processRunner = yield* ProcessRunner;
     const lock = yield* EpicRunLock;
+    const configSource = yield* EpicRunConfigSource;
 
     const runBd = Effect.fn("EpicRunPreflight.runBd")(function* (
       cwd: string,
@@ -129,6 +157,43 @@ export const layer = Layer.effect(
         if (detached) blockers.push({ _tag: "detached_head" });
         if (dirtyPaths.size > 0) {
           blockers.push({ _tag: "dirty_tree", paths: [...dirtyPaths].toSorted() });
+        }
+
+        const configFile = yield* configSource.read({ repoRoot: input.workspaceRoot });
+        if (configFile._tag === "invalid") {
+          blockers.push({
+            _tag: "config_invalid",
+            configPath: configFile.configPath,
+            diagnostics: configFile.diagnostics,
+          });
+        } else {
+          if (configFile._tag === "loaded" && configFile.unknownKeys.length > 0) {
+            warnings.push({
+              _tag: "config_unknown_keys",
+              configPath: configFile.configPath,
+              keys: configFile.unknownKeys,
+            });
+          }
+          const resolved = resolveEpicRunConfig({
+            file: configFile._tag === "loaded" ? configFile.override : null,
+            environment: null,
+            override: { execution: { sequential: input.mode === "sequential" } },
+            harness: null,
+          });
+          for (const violation of resolved.violations) {
+            if (violation.key === "gate.command") {
+              blockers.push({
+                _tag: "config_invalid",
+                configPath:
+                  configFile._tag === "loaded"
+                    ? configFile.configPath
+                    : `${input.workspaceRoot}/.t3code/epic-run.json`,
+                diagnostics: [violation.message],
+              });
+            } else {
+              warnings.push({ _tag: "config_violation", ...violation });
+            }
+          }
         }
 
         const held = yield* lock

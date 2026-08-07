@@ -253,6 +253,10 @@ export function createEpicsEnvironmentAtoms<R, E>(
       label: "environment-data:epics:start-run",
       tag: WS_METHODS.epicRunStart,
     }),
+    preflightRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:epics:preflight-run",
+      tag: WS_METHODS.epicRunPreflight,
+    }),
     launchRun: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:epics:launch-run",
       tag: WS_METHODS.epicRunLaunch,

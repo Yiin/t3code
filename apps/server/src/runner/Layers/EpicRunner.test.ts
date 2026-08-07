@@ -12,6 +12,7 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
+  type EpicRunPreflightResult,
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
@@ -195,15 +196,11 @@ function createHarness(input: {
   readonly seedRuns?: ReadonlyArray<EpicRun>;
   readonly seedIterations?: ReadonlyArray<EpicRunIteration>;
   readonly workspaceRoot?: string;
-  readonly preflightResult?: {
-    readonly ok: boolean;
-    readonly blockers: ReadonlyArray<{ readonly _tag: "detached_head" }>;
-    readonly warnings: ReadonlyArray<never>;
-  };
+  readonly preflightResult?: EpicRunPreflightResult;
   readonly onLockAcquire?: () => void;
   readonly onLockRelease?: () => void;
   readonly beforeLockAcquire?: Effect.Effect<void>;
-  readonly lockAcquireError?: EpicRunLockError;
+  readonly lockAcquireError?: EpicRunLockError | EpicRunLockHeldError;
   readonly preflightError?: EpicRunPreflightError;
   readonly upsertDelayMs?: number;
   /** Hold append open after its running row is visible, for boundary-race tests. */
@@ -1548,6 +1545,30 @@ describe("EpicRunner", () => {
       if (error._tag === "EpicRunPreflightBlockedError") {
         assert.deepStrictEqual(error.blockers, [
           "Epic run lock operation failed: test-generic-lock-failure",
+        ]);
+      }
+      assert.strictEqual(harness.store.runs.size, 0);
+      assert.strictEqual(harness.turnsStarted(), 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("preserves holder details when lock acquisition loses a race", () => {
+    const harness = createHarness({
+      script: [],
+      lockAcquireError: new EpicRunLockHeldError("/tmp/epic-1.lock", {
+        owner: "terminal",
+        host: "worker-host",
+        pid: 42,
+        runDir: "/tmp/terminal-run",
+      }),
+    });
+
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(startRun());
+      assert.strictEqual(error._tag, "EpicRunPreflightBlockedError");
+      if (error._tag === "EpicRunPreflightBlockedError") {
+        assert.deepStrictEqual(error.blockers, [
+          "Another epic run owns this repository on worker-host (PID 42, /tmp/terminal-run).",
         ]);
       }
       assert.strictEqual(harness.store.runs.size, 0);
@@ -3743,7 +3764,14 @@ describe("EpicRunner", () => {
       script: [],
       preflightResult: {
         ok: false,
-        blockers: [{ _tag: "detached_head" }],
+        blockers: [
+          { _tag: "detached_head" },
+          {
+            _tag: "config_invalid",
+            configPath: "/repo/.t3code/epic-run.json",
+            diagnostics: ['Invalid type\n  at ["parallel"]["workers"]'],
+          },
+        ],
         warnings: [],
       },
       onLockAcquire: () => {
@@ -3752,8 +3780,14 @@ describe("EpicRunner", () => {
     });
 
     return Effect.gen(function* () {
-      const exit = yield* Effect.exit(startRun());
-      assert.isTrue(Exit.isFailure(exit));
+      const error = yield* Effect.flip(startRun());
+      assert.strictEqual(error._tag, "EpicRunPreflightBlockedError");
+      if (error._tag === "EpicRunPreflightBlockedError") {
+        assert.deepStrictEqual(error.blockers, [
+          "The repository has a detached HEAD.",
+          '/repo/.t3code/epic-run.json\nInvalid type\n  at ["parallel"]["workers"]',
+        ]);
+      }
       assert.strictEqual(harness.store.runs.size, 0);
       assert.strictEqual(acquired, 0);
       assert.strictEqual(harness.turnsStarted(), 0);

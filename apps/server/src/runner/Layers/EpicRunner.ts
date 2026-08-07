@@ -38,8 +38,15 @@ import {
   persistedFailureReason,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
-import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
+import {
+  EpicRunPreflight,
+  formatEpicRunPreflightBlocker,
+} from "@t3tools/epic-core/EpicRunPreflight";
+import {
+  EpicRunLock,
+  type EpicRunLockHeldError,
+  type EpicRunLockLease,
+} from "@t3tools/epic-core/ports/EpicRunLock";
 import { resolveEpicProviderFallback } from "@t3tools/epic-core/providerFallback";
 import {
   classifyIteration,
@@ -295,6 +302,26 @@ interface EpicRunLeaseHeld {
   readonly _tag: "EpicRunLeaseHeld";
   readonly mappedError: EpicRunPreflightBlockedError;
 }
+
+const formatEpicRunLockHeldError = (error: EpicRunLockHeldError): string => {
+  const holder = error.holder;
+  if (
+    holder !== undefined &&
+    typeof holder.owner === "string" &&
+    typeof holder.host === "string" &&
+    typeof holder.pid === "number" &&
+    typeof holder.runDir === "string"
+  ) {
+    return formatEpicRunPreflightBlocker({
+      _tag: "run_in_progress",
+      owner: holder.owner,
+      host: holder.host,
+      pid: holder.pid,
+      runDir: holder.runDir,
+    });
+  }
+  return error.message;
+};
 
 /**
  * What the loop does when it reaches an iteration boundary.
@@ -898,7 +925,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       if (!result.ok) {
         return yield* new EpicRunPreflightBlockedError({
           epicId: input.epicId,
-          blockers: result.blockers.map((blocker) => blocker._tag),
+          blockers: result.blockers.map(formatEpicRunPreflightBlocker),
         });
       }
       const lease = yield* runLock
@@ -912,7 +939,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           Effect.mapError((error): EpicRunPreflightBlockedError | EpicRunLeaseHeld => {
             const mapped = new EpicRunPreflightBlockedError({
               epicId: input.epicId,
-              blockers: [error._tag === "EpicRunLockHeldError" ? "run_in_progress" : error.message],
+              blockers: [
+                error._tag === "EpicRunLockHeldError"
+                  ? formatEpicRunLockHeldError(error)
+                  : error.message,
+              ],
             });
             return error._tag === "EpicRunLockHeldError"
               ? { _tag: "EpicRunLeaseHeld", mappedError: mapped }

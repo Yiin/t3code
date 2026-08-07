@@ -70,6 +70,8 @@ import {
 import ChatMarkdown from "../components/ChatMarkdown";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useAtomCommand } from "../state/use-atom-command";
+import { epicRunPreflightBlockersFromError, preflightAndLaunchEpicRun } from "../epicRunLaunch";
+import { presentEpicRunPreflight } from "../epicRunPreflightPresentation";
 
 interface DetailSource {
   readonly environmentId: string;
@@ -291,6 +293,7 @@ function EpicRunSection(props: {
   readonly history: EpicRunHistory;
 }) {
   const launchRun = useAtomCommand(epicsEnvironment.launchRun, { reportFailure: false });
+  const preflightRun = useAtomCommand(epicsEnvironment.preflightRun, { reportFailure: false });
   const pauseRun = useAtomCommand(epicsEnvironment.pauseRun, { reportFailure: false });
   const resumeRun = useAtomCommand(epicsEnvironment.resumeRun, { reportFailure: false });
   const stopRun = useAtomCommand(epicsEnvironment.stopRun, { reportFailure: false });
@@ -328,11 +331,17 @@ function EpicRunSection(props: {
     if (isAtomCommandInterrupted(result)) return;
     if (result._tag === "Success") return;
     const error = squashAtomCommandFailure(result);
+    const blockers = epicRunPreflightBlockersFromError(error);
     toastManager.add(
       stackedThreadToast({
         type: "error",
         title,
-        description: error instanceof Error ? error.message : "An error occurred.",
+        description:
+          blockers === null
+            ? error instanceof Error
+              ? error.message
+              : "An error occurred."
+            : blockers.join("\n\n"),
       }),
     );
   };
@@ -340,14 +349,51 @@ function EpicRunSection(props: {
     if (startControl === null || startControl.busy) return;
     setPending("starting");
     setStartedRunId(null);
-    void launchRun({
-      environmentId: props.environmentId as EnvironmentId,
-      input: {
-        epicId: props.epicId,
-        projectId: props.source.projectId as ProjectId,
-        cwd: props.source.workspaceRoot,
+    const environmentId = props.environmentId as EnvironmentId;
+    void preflightAndLaunchEpicRun({
+      preflightInput: {
+        environmentId,
+        input: {
+          workspaceRoot: props.source.workspaceRoot,
+          epicId: props.epicId,
+          mode: "sequential" as const,
+        },
+      },
+      launchInput: {
+        environmentId,
+        input: {
+          epicId: props.epicId,
+          projectId: props.source.projectId as ProjectId,
+          cwd: props.source.workspaceRoot,
+        },
+      },
+      preflight: preflightRun,
+      launch: launchRun,
+      onPreflightFailure: (result) => {
+        setPending(null);
+        reportFailure("Could not check run", result as AtomCommandResult<unknown, unknown>);
+      },
+      onBlocked: (result) => {
+        setPending(null);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Run is blocked",
+            description: presentEpicRunPreflight(result).blockers.join("\n\n"),
+          }),
+        );
+      },
+      onWarnings: (result) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Run preflight warnings",
+            description: presentEpicRunPreflight(result).warnings.join("\n\n"),
+          }),
+        );
       },
     }).then((result) => {
+      if (result === undefined) return;
       if (result._tag === "Success") {
         setStartedRunId(result.value.runId);
         return;

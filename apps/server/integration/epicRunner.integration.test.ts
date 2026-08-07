@@ -20,6 +20,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import { layer as preflightLive } from "@t3tools/epic-core/EpicRunPreflight";
+import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
@@ -260,6 +261,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
   const preflightLayer = preflightLive.pipe(
     Layer.provide(processLayer),
     Layer.provide(lockLive.layer),
+    Layer.provide(EpicRunConfigSource.layer.pipe(Layer.provide(NodeServices.layer))),
   );
   const layer = makeEpicRunnerLive({
     pollIntervalMs: 5,

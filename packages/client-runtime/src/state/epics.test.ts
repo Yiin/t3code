@@ -741,12 +741,14 @@ describe("createEpicsEnvironmentAtoms", () => {
 
     expect([
       epics.startRun.label,
+      epics.preflightRun.label,
       epics.launchRun.label,
       epics.pauseRun.label,
       epics.resumeRun.label,
       epics.stopRun.label,
     ]).toEqual([
       "environment-data:epics:start-run",
+      "environment-data:epics:preflight-run",
       "environment-data:epics:launch-run",
       "environment-data:epics:pause-run",
       "environment-data:epics:resume-run",

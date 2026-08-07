@@ -187,7 +187,7 @@ function ToastDescriptionAndExpandable({
   const labels = toastData?.expandableLabels ?? {};
   const descriptionTrigger = toastData?.expandableDescriptionTrigger ?? false;
   const descriptionClassName = cn(
-    "min-w-0 select-text wrap-break-word text-muted-foreground",
+    "min-w-0 whitespace-pre-wrap select-text wrap-break-word text-muted-foreground",
     errorDescriptionClampClass(toastType, toastDescription),
   );
   const [open, setOpen] = useState(false);
@@ -239,7 +239,7 @@ function ToastDescriptionAndExpandable({
           <div className="min-w-0 flex-1">
             <Toast.Description
               className={cn(
-                "min-w-0 select-none wrap-break-word text-muted-foreground",
+                "min-w-0 whitespace-pre-wrap select-none wrap-break-word text-muted-foreground",
                 errorDescriptionClampClass(toastType, toastDescription),
                 "underline-offset-2 decoration-muted-foreground/60 group-hover:underline",
               )}

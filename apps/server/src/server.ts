@@ -66,6 +66,7 @@ import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as BeadsStatusBroadcaster from "./beads/BeadsStatusBroadcaster.ts";
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
+import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
@@ -268,6 +269,7 @@ const VcsLayerLive = Layer.empty.pipe(
 const EpicRunPreflightLayerLive = EpicRunPreflight.layer.pipe(
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NodeEpicRunLock.layer),
+  Layer.provide(EpicRunConfigSource.layer),
 );
 
 const BeadsLayerLive = Layer.mergeAll(

@@ -117,6 +117,10 @@ export const EpicRunPreflightBlocker = Schema.Union([
   Schema.TaggedStruct("epic_not_found", {
     epicId: TrimmedNonEmptyString,
   }),
+  Schema.TaggedStruct("config_invalid", {
+    configPath: TrimmedNonEmptyString,
+    diagnostics: Schema.Array(TrimmedNonEmptyString),
+  }),
 ]);
 export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
 
@@ -126,6 +130,14 @@ export const EpicRunPreflightWarning = Schema.Union([
   }),
   Schema.TaggedStruct("nothing_ready", {
     epicId: TrimmedNonEmptyString,
+  }),
+  Schema.TaggedStruct("config_unknown_keys", {
+    configPath: TrimmedNonEmptyString,
+    keys: Schema.Array(TrimmedNonEmptyString),
+  }),
+  Schema.TaggedStruct("config_violation", {
+    key: TrimmedNonEmptyString,
+    message: TrimmedNonEmptyString,
   }),
 ]);
 export type EpicRunPreflightWarning = typeof EpicRunPreflightWarning.Type;

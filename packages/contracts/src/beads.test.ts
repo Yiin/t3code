@@ -87,10 +87,25 @@ describe("EpicRunPreflightResult", () => {
           host: "devbox",
           pid: 1234,
         },
+        {
+          _tag: "config_invalid" as const,
+          configPath: "/repo/.t3code/epic-run.json",
+          diagnostics: ['Invalid type\n  at ["parallel"]["workers"]'],
+        },
       ],
       warnings: [
         { _tag: "stale_claims" as const, childIds: ["t3code-vst.1"] },
         { _tag: "nothing_ready" as const, epicId: "t3code-vst" },
+        {
+          _tag: "config_unknown_keys" as const,
+          configPath: "/repo/.t3code/epic-run.json",
+          keys: ["parallel.futureWorkers"],
+        },
+        {
+          _tag: "config_violation" as const,
+          key: "parallel.workers",
+          message: "Sequential execution limits parallel workers to 1.",
+        },
       ],
     };
 

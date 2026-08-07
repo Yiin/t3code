@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
@@ -10,6 +11,11 @@ import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "./processRunner.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
+import {
+  EpicRunConfigSource,
+  layer as EpicRunConfigSourceLive,
+  type EpicRunConfigFileResult,
+} from "./EpicRunConfigSource.ts";
 import { EpicRunPreflight, layer } from "./EpicRunPreflight.ts";
 
 const run = (
@@ -20,9 +26,15 @@ const run = (
     readonly gitCode?: number;
     readonly gitStderr?: string;
     readonly onGit?: (input: ProcessRunner.ProcessRunInput) => void;
+    readonly config?: EpicRunConfigFileResult;
   },
 ) => {
   const testLayer = layer.pipe(
+    Layer.provide(
+      Layer.succeed(EpicRunConfigSource, {
+        read: () => Effect.succeed(options?.config ?? { _tag: "absent" }),
+      }),
+    ),
     Layer.provide(
       Layer.succeed(ProcessRunner.ProcessRunner, {
         run: (input) => {
@@ -116,6 +128,145 @@ describe("EpicRunPreflight", () => {
     }),
   );
 
+  it.effect("blocks an invalid config file", () =>
+    Effect.gen(function* () {
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        config: {
+          _tag: "invalid",
+          configPath: "/repo/.t3code/epic-run.json",
+          diagnostics: ['Invalid type\n  at ["parallel"]["workers"]'],
+        },
+      });
+      expect(result.ok).toBe(false);
+      expect(result.blockers).toContainEqual({
+        _tag: "config_invalid",
+        configPath: "/repo/.t3code/epic-run.json",
+        diagnostics: ['Invalid type\n  at ["parallel"]["workers"]'],
+      });
+    }),
+  );
+
+  it.effect("blocks an explicitly enabled gate without a command", () =>
+    Effect.gen(function* () {
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        config: {
+          _tag: "loaded",
+          configPath: "/repo/.t3code/epic-run.json",
+          override: { gate: { disabled: false } },
+          config: {} as never,
+          presentKeys: ["gate.disabled"],
+          unknownKeys: [],
+        },
+      });
+      expect(result.blockers).toContainEqual({
+        _tag: "config_invalid",
+        configPath: "/repo/.t3code/epic-run.json",
+        diagnostics: ["Gate is enabled, but no gate command is configured."],
+      });
+    }),
+  );
+
+  it.effect("composes the live strict source with preflight for malformed JSON", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const directory = yield* Effect.acquireRelease(
+          Effect.promise(() =>
+            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "preflight-config-")),
+          ),
+          (root) => Effect.promise(() => NodeFSP.rm(root, { recursive: true, force: true })),
+        );
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(NodePath.join(directory, ".t3code"));
+          await NodeFSP.writeFile(
+            NodePath.join(directory, ".t3code", "epic-run.json"),
+            '{"parallel":{"workers":2,}}',
+          );
+        });
+        const live = layer.pipe(
+          Layer.provide(
+            Layer.succeed(ProcessRunner.ProcessRunner, {
+              run: ({ command, args }) =>
+                Effect.succeed({
+                  stdout:
+                    command === "git"
+                      ? "# branch.head main\n"
+                      : args[0] === "show"
+                        ? '[{"id":"epic-1"}]'
+                        : args[0] === "ready"
+                          ? '[{"id":"child-1"}]'
+                          : "[]",
+                  stderr: "",
+                  code: 0 as never,
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                }),
+            }),
+          ),
+          Layer.provide(
+            Layer.succeed(EpicRunLock, {
+              // @effect-diagnostics-next-line effectSucceedWithVoid:off
+              inspect: () => Effect.succeed(undefined),
+              acquire: () => Effect.die("unused"),
+            }),
+          ),
+          Layer.provide(EpicRunConfigSourceLive.pipe(Layer.provide(NodeServices.layer))),
+        );
+        const result = yield* Effect.flatMap(EpicRunPreflight, (service) =>
+          service.check({ workspaceRoot: directory, epicId: "epic-1", mode: "sequential" }),
+        ).pipe(Effect.provide(live));
+        expect(result.ok).toBe(false);
+        expect(result.blockers[0]?._tag).toBe("config_invalid");
+      }),
+    ),
+  );
+
+  it.effect("warns about unknown keys and safe policy changes", () =>
+    Effect.gen(function* () {
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        config: {
+          _tag: "loaded",
+          configPath: "/repo/.t3code/epic-run.json",
+          override: { parallel: { workers: 4 } },
+          config: {} as never,
+          presentKeys: ["parallel.workers"],
+          unknownKeys: ["parallel.futureWorkers"],
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.warnings).toContainEqual({
+        _tag: "config_unknown_keys",
+        configPath: "/repo/.t3code/epic-run.json",
+        keys: ["parallel.futureWorkers"],
+      });
+      expect(result.warnings).toContainEqual({
+        _tag: "config_violation",
+        key: "parallel.workers",
+        message: "Sequential execution limits parallel workers to 1.",
+      });
+    }),
+  );
+
+  it.effect("warns when the current adapter cannot prove budget enforcement", () =>
+    Effect.gen(function* () {
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        config: {
+          _tag: "loaded",
+          configPath: "/repo/.t3code/epic-run.json",
+          override: { budget: { usd: 10 } },
+          config: {} as never,
+          presentKeys: ["budget.usd"],
+          unknownKeys: [],
+        },
+      });
+      expect(result.warnings).toContainEqual({
+        _tag: "config_violation",
+        key: "budget.usd",
+        message: "The selected harness cannot enforce the budget limit.",
+      });
+    }),
+  );
+
   it.effect("runs the exact bounded git status command", () =>
     Effect.gen(function* () {
       let captured: ProcessRunner.ProcessRunInput | undefined;
@@ -187,6 +338,11 @@ describe("EpicRunPreflight", () => {
         yield* git(["mv", "old.ts", "renamed.ts"]);
 
         const live = layer.pipe(
+          Layer.provide(
+            Layer.succeed(EpicRunConfigSource, {
+              read: () => Effect.succeed({ _tag: "absent" }),
+            }),
+          ),
           Layer.provide(
             Layer.succeed(ProcessRunner.ProcessRunner, {
               run: ({ command, args, cwd }) => {

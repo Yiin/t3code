@@ -20,6 +20,7 @@ import {
   EpicRunPreflight,
   layer as EpicRunPreflightLive,
 } from "@t3tools/epic-core/EpicRunPreflight";
+import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import * as EpicRunLockLive from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { EpicRunLock, EpicRunLockHeldError } from "@t3tools/epic-core/ports/EpicRunLock";
 import * as BeadsStatusBroadcaster from "../src/beads/BeadsStatusBroadcaster.ts";
@@ -210,6 +211,7 @@ const broadcasterLayer = BeadsStatusBroadcaster.layer.pipe(
 const preflightLayer = EpicRunPreflightLive.pipe(
   Layer.provide(processLayer),
   Layer.provide(lockLayer),
+  Layer.provide(EpicRunConfigSource.layer.pipe(Layer.provide(nodeLayer))),
 );
 const testLayer = Layer.mergeAll(processLayer, lockLayer, broadcasterLayer, preflightLayer);
 

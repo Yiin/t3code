@@ -27,6 +27,10 @@
       "types": "./src/EpicRunPreflight.ts",
       "import": "./src/EpicRunPreflight.ts"
     },
+    "./EpicRunConfigSource": {
+      "types": "./src/EpicRunConfigSource.ts",
+      "import": "./src/EpicRunConfigSource.ts"
+    },
     "./collectUint8StreamText": {
       "types": "./src/collectUint8StreamText.ts",
       "import": "./src/collectUint8StreamText.ts"

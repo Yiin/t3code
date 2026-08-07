@@ -1,0 +1,34 @@
+{
+  "budget": { "usd": null },
+  "gate": { "command": null, "disabled": false },
+  "supervision": {
+    "idleThresholdSeconds": 1800,
+    "inspectorTimeoutSeconds": 120,
+    "inspectMaxDelaySeconds": 7200,
+    "inspectMinDelaySeconds": 60,
+    "inspectRetryDelaySeconds": 300,
+    "stopGraceSeconds": 15,
+    "workerTimeoutSeconds": null
+  },
+  "limits": { "maxAttemptsPerChild": 3, "maxIterations": 50 },
+  "provider": { "modelSelection": null },
+  "vcs": { "noPush": false },
+  "orientation": { "file": null },
+  "execution": { "sequential": false },
+  "parallel": { "siblings": [], "workers": 3 },
+  "runtime": { "mode": "full-access" },
+  "retry": { "rateLimitBackoffSeconds": 120 },
+  "lock": { "heartbeatSeconds": 30, "staleSeconds": 300 },
+  "server": {
+    "maxConsecutiveFailures": 3,
+    "maxNoCommitStreak": 2,
+    "infraFailureBudget": 5,
+    "pollIntervalMs": 2000,
+    "quietPeriodMs": 1000,
+    "retryBaseDelayMs": 10000,
+    "retryMaxDelayMs": 300000,
+    "subagentGraceTimeoutMs": 900000,
+    "maxGraceContinuations": 10,
+    "providerDegradationTtlMs": 3600000
+  }
+}

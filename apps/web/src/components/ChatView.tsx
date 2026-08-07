@@ -219,6 +219,8 @@ import {
 import { environmentShell } from "../state/shell";
 import { epicsEnvironment } from "../state/epics";
 import { launchPlannedEpic, plannedEpicIdentity, plannedEpicRoute } from "../plannedEpicFollowUp";
+import { epicRunPreflightBlockersFromError, preflightAndLaunchEpicRun } from "../epicRunLaunch";
+import { presentEpicRunPreflight } from "../epicRunPreflightPresentation";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -1175,6 +1177,7 @@ function ChatViewContent(props: ChatViewProps) {
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const launchEpicRun = useAtomCommand(epicsEnvironment.launchRun, { reportFailure: false });
+  const preflightEpicRun = useAtomCommand(epicsEnvironment.preflightRun, { reportFailure: false });
   const environmentById = useMemo(
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
@@ -1884,21 +1887,71 @@ function ChatViewContent(props: ChatViewProps) {
               onClick={() => {
                 if (isLaunching) return;
                 setPendingPlannedEpicKey(plannedEpicKey);
-                void launchPlannedEpic({
-                  correlation: plannedEpic,
-                  launch: launchEpicRun,
-                  navigate,
-                  onSettled: () => setPendingPlannedEpicKey(null),
-                  onFailure: (result) => {
-                    if (!isAtomCommandInterrupted(result)) {
+                void preflightAndLaunchEpicRun({
+                  preflightInput: {
+                    environmentId: plannedEpic.environmentId,
+                    input: {
+                      workspaceRoot: plannedEpic.cwd,
+                      epicId: plannedEpic.epicId,
+                      mode: "sequential" as const,
+                    },
+                  },
+                  launchInput: plannedEpic,
+                  preflight: preflightEpicRun,
+                  launch: async (correlation) =>
+                    launchPlannedEpic({
+                      correlation,
+                      launch: launchEpicRun,
+                      navigate,
+                      onSettled: () => setPendingPlannedEpicKey(null),
+                      onFailure: (result) => {
+                        if (!isAtomCommandInterrupted(result)) {
+                          const error = squashAtomCommandFailure(result);
+                          const blockers = epicRunPreflightBlockersFromError(error);
+                          toastManager.add(
+                            stackedThreadToast({
+                              type: "error",
+                              title: "Could not start unattended run",
+                              description:
+                                blockers === null
+                                  ? chatActionErrorMessage(error)
+                                  : blockers.join("\n\n"),
+                            }),
+                          );
+                        }
+                      },
+                    }),
+                  onPreflightFailure: (result) => {
+                    setPendingPlannedEpicKey(null);
+                    const failure = result as unknown as AtomCommandResult<unknown, unknown>;
+                    if (failure._tag === "Failure" && !isAtomCommandInterrupted(failure)) {
                       toastManager.add(
                         stackedThreadToast({
                           type: "error",
-                          title: "Could not start unattended run",
-                          description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+                          title: "Could not check unattended run",
+                          description: chatActionErrorMessage(squashAtomCommandFailure(failure)),
                         }),
                       );
                     }
+                  },
+                  onBlocked: (result) => {
+                    setPendingPlannedEpicKey(null);
+                    toastManager.add(
+                      stackedThreadToast({
+                        type: "error",
+                        title: "Unattended run is blocked",
+                        description: presentEpicRunPreflight(result).blockers.join("\n\n"),
+                      }),
+                    );
+                  },
+                  onWarnings: (result) => {
+                    toastManager.add(
+                      stackedThreadToast({
+                        type: "warning",
+                        title: "Unattended run warnings",
+                        description: presentEpicRunPreflight(result).warnings.join("\n\n"),
+                      }),
+                    );
                   },
                 });
               }}
@@ -1987,6 +2040,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeEpicRun,
     launchEpicRun,
+    preflightEpicRun,
     pendingPlannedEpicKey,
     plannedEpic,
     plannedEpicDismissed,
