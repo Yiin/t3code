@@ -302,6 +302,11 @@ export interface ClassifyIterationInput {
    * "turn ended in an error state" used to launder away.
    */
   readonly sessionLastError: string | null;
+  /**
+   * Some harnesses expose provider failures only through structured events.
+   * Their ordinary assistant prose can describe failures without owning one.
+   */
+  readonly assistantProviderErrorsTrusted?: boolean;
   /** Whether the repo's `HEAD` moved across the iteration. */
   readonly committed: boolean;
   readonly timedOut: boolean;
@@ -392,7 +397,8 @@ export const classifyIteration = (input: ClassifyIterationInput): EpicIterationO
         detail: `provider error: ${providerError.excerpt}`,
         report: null,
         failureReason: `provider-error:${providerError.category}`,
-        providerFallbackEligible: isProviderFallbackMessage(text),
+        providerFallbackEligible:
+          input.assistantProviderErrorsTrusted !== false && isProviderFallbackMessage(text),
         providerErrorSource: "assistant-message",
       };
     }

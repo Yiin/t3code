@@ -269,6 +269,17 @@ describe("classifyIteration", () => {
     expect(outcome.providerErrorSource).toBe("assistant-message");
   });
 
+  it("does not trust provider-shaped assistant prose from a structured-only harness", () => {
+    const outcome = classifyIteration({
+      ...completedWith("provider-error: rate limit exceeded"),
+      assistantProviderErrorsTrusted: false,
+    });
+    expect(outcome.kind).toBe("error");
+    expect(outcome.failureReason).toBe("provider-error:rate-limit");
+    expect(outcome.providerFallbackEligible).toBe(false);
+    expect(outcome.providerErrorSource).toBe("assistant-message");
+  });
+
   it("does not reclassify a RALPH_MSG report that merely mentions limits", () => {
     const outcome = classifyIteration({
       ...completedWith(

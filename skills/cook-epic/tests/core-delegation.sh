@@ -273,6 +273,74 @@ run_fixture() {
     | jq -S '[.[] | {status,title}] | sort_by(.title)' > "$root/final-state.json"
 }
 
+make_prime_fallback_binaries() {
+  local root="$1"
+  mkdir -p "$root/bin"
+  cat > "$root/prime.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'prime\n' >> "${PROVIDER_TRACE:?}"
+printf '%s\n' '{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"rate limit exceeded"}'
+EOF
+  chmod +x "$root/prime.sh"
+  cat > "$root/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'claude\n' >> "${PROVIDER_TRACE:?}"
+printf '%s\n' "$@" > "${CLAUDE_ARGS:?}"
+prompt="${!#}"
+child=$(sed -n 's/^ASSIGNED_CHILD_ID=//p' <<< "$prompt")
+if [ -z "$child" ]; then
+  child=$(awk '/^Cook exactly / { gsub(/`/, ""); print $3 }' <<< "$prompt")
+fi
+[ -n "$child" ] || { printf 'no child in prompt\n' >&2; exit 1; }
+printf '%s\n' "$child" >> work.txt
+git add work.txt
+git commit -qm "cook $child"
+bd close "$child" --reason 'fallback worker completed' >/dev/null
+printf '%s\n' '{"type":"result","result":"RALPH_MSG: {\"summary\":\"fallback completed\",\"why\":\"Prime failed\"}","session_id":"fallback-session"}'
+EOF
+  chmod +x "$root/bin/claude"
+}
+
+run_prime_fallback_fixture() {
+  local root="$1" repo epic run_dir
+  shift
+  repo="$root/repo"
+  epic="$(<"$root/epic-id")"
+  run_dir="$root/run"
+  set +e
+  (
+    cd "$repo"
+    env -u BEADS_DIR -u BEADS_DOLT_SERVER_HOST HOME="$root/home" \
+      XDG_CONFIG_HOME="$root/config" PATH="$root/bin:$PATH" COOKEPIC_EPIC="$epic" \
+      COOKEPIC_T3_BIN="$TMP_ROOT/t3-source" COOKEPIC_HARNESS=prime \
+      COOKEPIC_BIN="$root/prime.sh" COOKEPIC_MODEL=prime/custom-model \
+      COOKEPIC_NO_GATE=1 COOKEPIC_NO_PUSH=1 COOKEPIC_MAX_DISPATCHES=2 \
+      COOKEPIC_MAX_ATTEMPTS=1 COOKEPIC_WORKER_TIMEOUT=30 \
+      PROVIDER_TRACE="$root/provider.trace" CLAUDE_ARGS="$root/claude.args" "$@" \
+      "$RUNNER" "$run_dir"
+  ) > "$root/stdout" 2>&1
+  local rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || {
+    sed -n '1,160p' "$root/stdout" >&2
+    fail "Prime fallback fixture exited $rc"
+  }
+  [ "$(grep -c '^prime$' "$root/provider.trace")" = 1 ] \
+    || fail 'Prime fallback fixture did not run Prime exactly once'
+  [ "$(grep -c '^claude$' "$root/provider.trace")" = 1 ] \
+    || fail 'Prime fallback fixture did not run Claude exactly once'
+  assert_contains "$root/claude.args" 'claude-sonnet-5'
+  if grep -Fq 'prime/custom-model' "$root/claude.args"; then
+    fail 'Claude fallback inherited the Prime model'
+  fi
+  [ "$(grep -c '"type":"provider-fallback"' "$run_dir/mailbox.jsonl")" = 1 ] \
+    || fail 'Prime fallback fixture did not publish exactly one fallback event'
+  jq -e '.status == "done" and .modelSelection.instanceId == "claude"' \
+    "$run_dir/run.json" >/dev/null || fail 'Prime fallback fixture did not finish on Claude'
+}
+
 cat > "$TMP_ROOT/t3-source" <<EOF
 #!/usr/bin/env bash
 exec "$NODE_BIN" "$REPO_ROOT/apps/server/src/bin.ts" "\$@"
@@ -303,5 +371,15 @@ assert_not_exists "$parallel_root/run/worktrees"
 if [ -n "$(git -C "$parallel_root/repo" branch --list 'cook-epic-integration-*')" ]; then
   fail 'parallel cook left its integration branch behind'
 fi
+
+prime_sequential_root="$TMP_ROOT/prime-sequential"
+make_fixture "$prime_sequential_root"
+make_prime_fallback_binaries "$prime_sequential_root"
+run_prime_fallback_fixture "$prime_sequential_root" COOKEPIC_SEQUENTIAL=1
+
+prime_parallel_root="$TMP_ROOT/prime-parallel"
+make_fixture "$prime_parallel_root"
+make_prime_fallback_binaries "$prime_parallel_root"
+run_prime_fallback_fixture "$prime_parallel_root" COOKEPIC_WORKERS=2
 
 echo 'core delegation tests passed'

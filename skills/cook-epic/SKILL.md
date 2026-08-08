@@ -154,7 +154,10 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    provider limits, spend, usage, authentication, and availability trigger
    one-way fallback. Explicit `provider-error` output also qualifies. Bare
    task text such as `authentication`, `401`, or `service unavailable` does
-   not qualify. Claude and ccx move to Codex, then Codex moves to Kimi.
+   not qualify. Prime moves to Claude, Claude and ccx move to Codex, and Codex
+   moves to Kimi. Prime trusts failed `auto_retry_end` events and assistant
+   messages with `stopReason: "error"`. It never trusts ordinary assistant
+   text as fallback evidence.
    Missing binaries and exits 126 or 127 also mark a stage unavailable. The
    core skips an unavailable intermediate binary. It never moves
    backward.
