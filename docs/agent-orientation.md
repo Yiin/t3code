@@ -17,9 +17,13 @@ Node is pinned by `mise.toml`. Use pnpm through `vp`.
 | Touched-file format | `vp fmt --check <changed-files>`            |
 | Touched-file lint   | `vp lint <changed-files>`                   |
 
-Run focused local checks only. Do not run repository-wide tests, typecheck, or
-lint unless the user requests them. CI runs the full suite on pull requests and
-pushes to `main` or `mine`.
+Keep your own checks focused on what you changed; the integration gate is what
+proves the whole repo still works, and CI runs the full suite on pull requests
+and pushes to `main` or `mine`.
+
+When a task hands you a specific gate command — an epic merge-fix child does —
+run that one as given, even though it is repo-wide. Substituting a focused
+check there reports a pass the gate never gave.
 
 ## Repo layout
 
