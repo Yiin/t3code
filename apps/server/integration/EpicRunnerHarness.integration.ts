@@ -103,7 +103,7 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
     import("../src/persistence/Services/EpicRuns.ts").EpicProviderDegradation
   >();
   const mergeStates = new Map<string, EpicRunMergeState>();
-  const landingEffects = new Map<string, EpicRunLandingEffects>();
+  const landingEffects = new Map<string, EpicRunLandingEffects[]>();
   const iterationWrites: Array<{
     readonly method: "append" | "update";
     readonly turnStatus: EpicRunIteration["turnStatus"];
@@ -341,9 +341,25 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
             ?.entries.find((row) => row.branch === branch && row.status === "parked")?.childId,
         ),
       ),
-    upsertLandingEffects: (input) => Effect.sync(() => void landingEffects.set(input.runId, input)),
+    upsertLandingEffects: (input) =>
+      Effect.sync(() => {
+        const rows = landingEffects.get(input.runId) ?? [];
+        landingEffects.set(input.runId, [
+          ...rows.filter((row) => row.repositoryPath !== input.repositoryPath),
+          input,
+        ]);
+      }),
     getLandingEffects: ({ runId }) =>
-      Effect.sync(() => Option.fromNullishOr(landingEffects.get(runId))),
+      Effect.sync(() =>
+        // Match the SQL layer's binary ORDER BY repository_path ASC.
+        (landingEffects.get(runId) ?? []).toSorted((left, right) =>
+          left.repositoryPath < right.repositoryPath
+            ? -1
+            : left.repositoryPath > right.repositoryPath
+              ? 1
+              : 0,
+        ),
+      ),
     deleteMergeState: ({ runId }) => Effect.sync(() => void mergeStates.delete(runId)),
   };
 

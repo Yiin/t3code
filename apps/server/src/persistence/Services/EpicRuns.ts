@@ -165,6 +165,13 @@ export const EpicRunMergeStateSibling = Schema.Struct({
   baseBranch: Schema.String,
   integrationWorktreePath: Schema.String,
   lastAcceptedHead: Schema.String,
+  /**
+   * The sibling's HEAD when the run's merge state was initialized; the base
+   * for per-repository landing effects. Absent in rows written after
+   * migration 049 but before 2026-08-08 — readers fall back to
+   * `lastAcceptedHead`.
+   */
+  initialHead: Schema.optionalKey(Schema.String),
 });
 export type EpicRunMergeStateSibling = typeof EpicRunMergeStateSibling.Type;
 
@@ -183,6 +190,10 @@ export const EpicRunMergeState = Schema.Struct({
 });
 export type EpicRunMergeState = typeof EpicRunMergeState.Type;
 
+/**
+ * One row per (runId, repositoryPath): the commits the run landed in that
+ * repository. `parkedCount` is run-level and repeated on every row.
+ */
 export const EpicRunLandingEffects = Schema.Struct({
   runId: EpicRunId,
   repositoryPath: Schema.String,
@@ -400,12 +411,14 @@ export interface EpicRunStoreShape {
   readonly findParkedOriginalChild: (
     input: FindParkedEpicRunMergeInput,
   ) => Effect.Effect<Option.Option<string>, EpicRunStoreError>;
+  /** Insert or replace the landing-effects row for one repository of a run. */
   readonly upsertLandingEffects: (
     input: UpsertEpicRunLandingEffectsInput,
   ) => Effect.Effect<void, EpicRunStoreError>;
+  /** Every repository's landing-effects row for a run, ordered by path. */
   readonly getLandingEffects: (
     input: GetEpicRunInput,
-  ) => Effect.Effect<Option.Option<EpicRunLandingEffects>, EpicRunStoreError>;
+  ) => Effect.Effect<ReadonlyArray<EpicRunLandingEffects>, EpicRunStoreError>;
   /** Remove merge state only after the integration worktree is gone. */
   readonly deleteMergeState: (input: GetEpicRunInput) => Effect.Effect<void, EpicRunStoreError>;
 }

@@ -592,6 +592,7 @@ export const makeServerPoolWorkspace = (deps: {
           readonly baseBranch: string;
           readonly integrationWorktreePath: string;
           readonly lastAcceptedHead: string;
+          readonly initialHead: string;
         }> = [];
         for (const sibling of siblings) {
           const target = mirrorPath(
@@ -672,6 +673,7 @@ export const makeServerPoolWorkspace = (deps: {
             baseBranch: sibling.baseBranch,
             integrationWorktreePath: siblingWorktree.path,
             lastAcceptedHead: siblingHead,
+            initialHead: siblingHead,
           });
         }
         yield* store
@@ -1142,47 +1144,72 @@ export const makeServerPoolWorkspace = (deps: {
           .getMergeState({ runId: runCtx.runId })
           .pipe(Effect.mapError(storeError("getMergeState")));
         if (Option.isNone(state)) return;
-        const countOutput = yield* gitVcsDriver
-          .execute({
-            operation: "EpicRunner.landingEffects.commitCount",
-            cwd: state.value.repositoryPath,
-            args: [
-              "rev-list",
-              "--count",
-              `${state.value.initialHead}..${state.value.lastAcceptedHead}`,
-            ],
-          })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new EpicRunnerDispatchError({
-                  commandType: "git.landing-effects",
-                  detail: "Could not count landed commits",
-                  cause,
-                }),
-            ),
-          );
-        const commitCount = Number.parseInt(countOutput.stdout.trim(), 10);
-        if (!Number.isSafeInteger(commitCount) || commitCount < 0) {
-          return yield* new EpicRunnerDispatchError({
-            commandType: "git.landing-effects",
-            detail: `Git returned an invalid landed commit count: ${countOutput.stdout.trim()}`,
+        // One landing-effects row and one log event per landed repository:
+        // the main repository first, then every sibling (t3code-06s.44).
+        const recordLandingEffects = (input: {
+          readonly repositoryPath: string;
+          readonly baseHead: string;
+          readonly head: string;
+        }) =>
+          Effect.gen(function* () {
+            const countOutput = yield* gitVcsDriver
+              .execute({
+                operation: "EpicRunner.landingEffects.commitCount",
+                cwd: input.repositoryPath,
+                args: ["rev-list", "--count", `${input.baseHead}..${input.head}`],
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EpicRunnerDispatchError({
+                      commandType: "git.landing-effects",
+                      detail: `Could not count landed commits in ${input.repositoryPath}`,
+                      cause,
+                    }),
+                ),
+              );
+            const commitCount = Number.parseInt(countOutput.stdout.trim(), 10);
+            if (!Number.isSafeInteger(commitCount) || commitCount < 0) {
+              return yield* new EpicRunnerDispatchError({
+                commandType: "git.landing-effects",
+                detail: `Git returned an invalid landed commit count: ${countOutput.stdout.trim()}`,
+              });
+            }
+            const landingEffects = {
+              runId: runCtx.runId,
+              repositoryPath: input.repositoryPath,
+              baseHead: input.baseHead,
+              head: input.head,
+              commitCount,
+              parkedCount: state.value.parkedCount,
+            } as const;
+            yield* store
+              .upsertLandingEffects(landingEffects)
+              .pipe(Effect.mapError(storeError("upsertLandingEffects")));
+            yield* Effect.logInfo("epic.runner.repository-landing-effects", {
+              ...landingEffects,
+            });
           });
-        }
-        const landingEffects = {
-          runId: runCtx.runId,
+        yield* recordLandingEffects({
           repositoryPath: state.value.repositoryPath,
           baseHead: state.value.initialHead,
           head: state.value.lastAcceptedHead,
-          commitCount,
-          parkedCount: state.value.parkedCount,
-        } as const;
-        yield* store
-          .upsertLandingEffects(landingEffects)
-          .pipe(Effect.mapError(storeError("upsertLandingEffects")));
-        yield* Effect.logInfo("epic.runner.repository-landing-effects", {
-          ...landingEffects,
         });
+        for (const sibling of state.value.siblings) {
+          if (sibling.initialHead === undefined) {
+            // Merge states initialized before 2026-08-08 have no sibling
+            // initial head; fall back to the last accepted one (a count of 0).
+            yield* Effect.logWarning("epic.runner.sibling-landing-effects-base-missing", {
+              runId: runCtx.runId,
+              repositoryPath: sibling.repositoryPath,
+            });
+          }
+          yield* recordLandingEffects({
+            repositoryPath: sibling.repositoryPath,
+            baseHead: sibling.initialHead ?? sibling.lastAcceptedHead,
+            head: sibling.lastAcceptedHead,
+          });
+        }
         // Sibling integration worktrees and branches go first; the main
         // integration worktree last (`skills/cook-epic/run-legacy.sh:2309-2336`).
         for (const sibling of state.value.siblings) {

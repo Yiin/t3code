@@ -680,15 +680,42 @@ describe("EpicRunStore", () => {
         commitCount: 5,
         parkedCount: 1,
       });
-      yield* store.deleteMergeState({ runId });
-      assert.deepStrictEqual(Option.getOrThrow(yield* store.getLandingEffects({ runId })), {
+      yield* store.upsertLandingEffects({
+        runId,
+        repositoryPath: "/sib",
+        baseHead: "sib-0",
+        head: "sib-2",
+        commitCount: 2,
+        parkedCount: 1,
+      });
+      // A repeat upsert replaces only its own repository's row.
+      yield* store.upsertLandingEffects({
         runId,
         repositoryPath: "/repo",
         baseHead: "base-0",
-        head: "base-3",
-        commitCount: 5,
+        head: "base-4",
+        commitCount: 6,
         parkedCount: 1,
       });
+      yield* store.deleteMergeState({ runId });
+      assert.deepStrictEqual(yield* store.getLandingEffects({ runId }), [
+        {
+          runId,
+          repositoryPath: "/repo",
+          baseHead: "base-0",
+          head: "base-4",
+          commitCount: 6,
+          parkedCount: 1,
+        },
+        {
+          runId,
+          repositoryPath: "/sib",
+          baseHead: "sib-0",
+          head: "sib-2",
+          commitCount: 2,
+          parkedCount: 1,
+        },
+      ]);
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 
@@ -710,6 +737,7 @@ describe("EpicRunStore", () => {
             baseBranch: "main",
             integrationWorktreePath: "/worktrees/sib",
             lastAcceptedHead: "sib-0",
+            initialHead: "sib-0",
           },
           {
             repositoryPath: "/sib2",
@@ -740,6 +768,31 @@ describe("EpicRunStore", () => {
           ["/sib2", "sib2-0"],
         ],
       );
+      // The landing-effects base survives head advancement.
+      assert.strictEqual(persisted.siblings[0]?.initialHead, "sib-0");
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  it.effect("decodes sibling merge state written before initialHead existed", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const sql = yield* SqlClient.SqlClient;
+      const runId = EpicRunId.make("run-merge-siblings-legacy");
+      yield* store.upsertRun(makeRun({ runId }));
+      yield* sql`
+        INSERT INTO epic_run_merge_state (
+          run_id, initial_head, last_accepted_head, repository_path, base_branch,
+          integration_branch, integration_worktree_path, siblings
+        ) VALUES (
+          ${runId}, 'base-0', 'base-0', '/repo', 'mine',
+          'cook-epic-integration-run-merge-siblings-legacy', '/worktrees/integration',
+          ${'[{"repositoryPath":"/sib","baseBranch":"main","integrationWorktreePath":"/worktrees/sib","lastAcceptedHead":"sib-1"}]'}
+        )
+      `;
+
+      const persisted = Option.getOrThrow(yield* store.getMergeState({ runId }));
+      assert.strictEqual(persisted.siblings[0]?.lastAcceptedHead, "sib-1");
+      assert.strictEqual(persisted.siblings[0]?.initialHead, undefined);
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

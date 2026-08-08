@@ -505,15 +505,14 @@ const makeEpicRunStore = Effect.gen(function* () {
         ${row.runId}, ${row.repositoryPath}, ${row.baseHead}, ${row.head},
         ${row.commitCount}, ${row.parkedCount}
       )
-      ON CONFLICT (run_id) DO UPDATE SET
-        repository_path = excluded.repository_path,
+      ON CONFLICT (run_id, repository_path) DO UPDATE SET
         base_head = excluded.base_head,
         head = excluded.head,
         commit_count = excluded.commit_count,
         parked_count = excluded.parked_count
     `,
   });
-  const getEpicRunLandingEffectsRow = SqlSchema.findOneOption({
+  const getEpicRunLandingEffectsRows = SqlSchema.findAll({
     Request: GetEpicRunInput,
     Result: EpicRunLandingEffects,
     execute: ({ runId }) => sql`
@@ -526,6 +525,7 @@ const makeEpicRunStore = Effect.gen(function* () {
         parked_count AS "parkedCount"
       FROM epic_run_landing_effects
       WHERE run_id = ${runId}
+      ORDER BY repository_path ASC
     `,
   });
 
@@ -999,7 +999,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     );
 
   const getLandingEffects: EpicRunStoreShape["getLandingEffects"] = (input) =>
-    getEpicRunLandingEffectsRow(input).pipe(
+    getEpicRunLandingEffectsRows(input).pipe(
       Effect.mapError(
         toEpicRunStoreError(
           "EpicRunStore.getLandingEffects:query",

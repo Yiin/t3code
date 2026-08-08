@@ -312,6 +312,10 @@ function createHarness(input: {
   readonly failInitializeMergeState?: boolean;
   readonly workerProvisionPath?: string;
   readonly integrationProvisionPath?: string;
+  /** Per-cwd `git rev-list --count` responses; fallback is the scripted branch count. */
+  readonly revListCommitCounts?: Readonly<Record<string, number>>;
+  /** Per-cwd `git rev-parse` head responses; fallback is the harness head. */
+  readonly repositoryHeads?: Readonly<Record<string, string>>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   if (input.failAllocationFor !== undefined) {
@@ -796,14 +800,14 @@ function createHarness(input: {
               : request.args[0] === "symbolic-ref"
                 ? "mine\n"
                 : request.args[0] === "rev-list"
-                  ? `${branchCommitCount}\n`
+                  ? `${input.revListCommitCounts?.[request.cwd ?? ""] ?? branchCommitCount}\n`
                   : request.args[0] === "status"
                     ? worktreeFingerprint
                     : request.args[0] === "rev-parse" &&
                         store.mergeStates.size > 0 &&
                         request.cwd === repositoryRoot
                       ? `${landedHead}\n`
-                      : `${head}\n`,
+                      : `${input.repositoryHeads?.[request.cwd ?? ""] ?? head}\n`,
           stderr: "",
           code: 0 as never,
           timedOut: false,
@@ -5340,6 +5344,129 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
   });
 
+  it.live("records landing effects for every landed repository", () => {
+    const runId = EpicRunId.make("run-landing-siblings");
+    const logs = captureLogs();
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 0,
+      iterationsCompleted: 0,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      seedRuns: [pausedRun],
+      readyChildren: ["fix-1"],
+      openChildren: [],
+      separateWorkerHead: true,
+      childEvidence: {
+        "fix-1": [
+          {
+            title: "Merge fix: land epic/original (conflict)",
+            status: "closed",
+            commentCount: 1,
+          },
+        ],
+      },
+      repositoryHeads: { "/tmp/epic-runner-sibling": "sib-head-1" },
+      revListCommitCounts: {
+        "/tmp/epic-runner-repo": 1,
+        "/tmp/epic-runner-sibling": 2,
+        "/tmp/epic-runner-sibling-integration": 2,
+      },
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"fixed merge","why":"conflict resolved"}',
+          head: "repair-head",
+          branchCommitCount: 1,
+        },
+      ],
+    });
+    harness.store.mergeStates.set(runId, {
+      runId,
+      initialHead: "head-0",
+      lastAcceptedHead: "head-0",
+      parkedCount: 1,
+      repositoryPath: "/tmp/epic-runner-repo",
+      baseBranch: "mine",
+      integrationBranch: `cook-epic-integration-${runId}`,
+      integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      siblings: [
+        {
+          repositoryPath: "/tmp/epic-runner-sibling",
+          baseBranch: "sib-main",
+          integrationWorktreePath: "/tmp/epic-runner-sibling-integration",
+          lastAcceptedHead: "sib-head-1",
+          initialHead: "sib-head-0",
+        },
+      ],
+      entries: [
+        {
+          runId,
+          sequence: 0,
+          childId: "original",
+          branch: "epic/original",
+          status: "parked",
+          reason: "conflict",
+          fixIssueId: "fix-1",
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.resumeRun({ runId });
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+      const byRepo = new Map(
+        (harness.store.landingEffects.get(runId) ?? []).map((row) => [row.repositoryPath, row]),
+      );
+      assert.deepInclude(byRepo.get("/tmp/epic-runner-repo"), {
+        baseHead: "head-0",
+        head: "repair-head",
+        commitCount: 1,
+        parkedCount: 1,
+      });
+      assert.deepInclude(byRepo.get("/tmp/epic-runner-sibling"), {
+        baseHead: "sib-head-0",
+        head: "sib-head-1",
+        commitCount: 2,
+        parkedCount: 1,
+      });
+      const landingLogs = logs.messages.filter(
+        (message) => message[0] === "epic.runner.repository-landing-effects",
+      );
+      assert.strictEqual(landingLogs.length, 2);
+      const siblingLog = landingLogs.find(
+        (message) =>
+          (message[1] as { readonly repositoryPath?: string }).repositoryPath ===
+          "/tmp/epic-runner-sibling",
+      );
+      assert.deepInclude(siblingLog?.[1], {
+        baseHead: "sib-head-0",
+        head: "sib-head-1",
+        commitCount: 2,
+      });
+    }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
   it.live("releases a worker worktree when post-provision setup fails", () => {
     const harness = createHarness({
       readyChildren: ["child-a"],
@@ -5428,8 +5555,9 @@ describe("EpicRunner", () => {
       const run = yield* startRunWithWorkers(2, 2);
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
       const effects = harness.store.landingEffects.get(run.runId)!;
-      assert.strictEqual(effects.commitCount, 1);
-      assert.strictEqual(effects.head, "child-a-head");
+      assert.strictEqual(effects.length, 1);
+      assert.strictEqual(effects[0]?.commitCount, 1);
+      assert.strictEqual(effects[0]?.head, "child-a-head");
       assert.isTrue(
         harness.processRequests.some(
           (request) => request.command === "git" && request.args[1] === "--ff-only",
