@@ -1,0 +1,7 @@
+{
+  "gate": {
+    "command": "vp check && vpr typecheck && vp run --concurrency-limit 2 test",
+    "disabled": false
+  },
+  "parallel": { "workers": 2 }
+}
