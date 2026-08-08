@@ -10,7 +10,24 @@ NODE_BIN="$(command -v node || true)"
 [ -x "$NODE_BIN" ] || { printf 'FAIL: node binary not found\n' >&2; exit 1; }
 BASH_BIN="$(command -v bash)"
 TMP_ROOT="$(mktemp -d)"
-trap '[ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ] || rm -rf "$TMP_ROOT"' EXIT
+# Cleanup must never decide the run's exit status. Under `set -e` a failing
+# EXIT trap becomes the script's status, and `rm -rf` loses a race with any
+# detached worker still writing into TMP_ROOT ("Directory not empty") — which
+# turned a fully passing run into a FAIL on a loaded machine. Retry once, then
+# leave the directory and say so.
+cleanup() {
+  if [ "${COOKEPIC_KEEP_TEST_TMP:-0}" = 1 ]; then
+    return 0
+  fi
+  if rm -rf "$TMP_ROOT" 2>/dev/null; then
+    return 0
+  fi
+  sleep 1
+  rm -rf "$TMP_ROOT" 2>/dev/null ||
+    printf 'warning: left %s behind (a worker was still writing)\n' "$TMP_ROOT" >&2
+  return 0
+}
+trap cleanup EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 assert_contains() { grep -Fq -- "$2" "$1" || fail "expected $1 to contain: $2"; }
