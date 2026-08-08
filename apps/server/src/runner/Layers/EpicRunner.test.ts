@@ -3269,7 +3269,10 @@ describe("EpicRunner", () => {
         modelSelection: claudeSelection,
         maxIterations: 10,
       });
-      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      yield* waitFor(
+        () =>
+          harness.store.runs.get(run.runId)?.status === "done" && harness.activeLockCount() === 0,
+      );
 
       assert.deepStrictEqual(harness.store.runs.get(run.runId)?.modelSelection, codexSelection);
       assert.strictEqual(harness.turnsStarted(), 2);

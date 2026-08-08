@@ -22,6 +22,8 @@ export function epicRunPreflightBlockerText(blocker: EpicRunPreflightBlocker): s
       }${
         blocker.worktreePath !== null ? ` (worktree ${blocker.worktreePath})` : ""
       } behind; reconcile it before launching.`;
+    case "sibling_invalid":
+      return blocker.detail;
   }
 }
 
