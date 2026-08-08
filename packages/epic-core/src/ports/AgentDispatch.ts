@@ -18,6 +18,8 @@ export interface AgentDispatchCapabilities {
     | "agent-item-jsonl"
     | "step-text-jsonl"
     | "raw-text";
+  /** Whether final assistant prose is trusted as provider-owned failure evidence. */
+  readonly providerErrors: "session-only" | "session-and-assistant";
   readonly cost: "total-cost-usd" | "step-cost" | "none";
 }
 

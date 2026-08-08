@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, it } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { makeTerminalProviderSupport } from "./TerminalProviderSupport.ts";
@@ -43,7 +43,7 @@ it.effect("reports fresh installed fallbacks and keeps the primary instance", ()
   ),
 );
 
-it.effect("maps Prime to its first-class driver and primary binary without fallbacks", () =>
+it.effect("maps Prime to its first-class driver and forward fallback routes", () =>
   Effect.acquireUseRelease(
     Effect.sync(() => {
       const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "prime-support-"));
@@ -59,16 +59,21 @@ it.effect("maps Prime to its first-class driver and primary binary without fallb
           selection: { instanceId: ProviderInstanceId.make("prime-work"), model: "default" },
           environment: { PATH: directory },
         });
-        assert.deepEqual(defaultSupport.routes, [
-          {
-            instanceId: ProviderInstanceId.make("prime-work"),
-            driver: ProviderDriverKind.make("primeAgent"),
-            harness: "prime",
-            binary: "prime-agent",
-            model: "default",
-            primary: true,
-          },
-        ]);
+        assert.deepEqual(
+          defaultSupport.routes.map((route) => [
+            route.instanceId,
+            route.driver,
+            route.harness,
+            route.model,
+            route.primary,
+          ]),
+          [
+            ["prime-work", "primeAgent", "prime", "default", true],
+            ["claude", "claudeAgent", "claude", "claude-sonnet-5", false],
+            ["codex", "codex", "codex", "gpt-5.6-sol", false],
+            ["kimi", "kimi", "kimi", "kimi-code/k3", false],
+          ],
+        );
         assert.isFalse((yield* defaultSupport.inventory.getProviders)[0]?.installed);
 
         const overrideSupport = makeTerminalProviderSupport({
@@ -81,6 +86,10 @@ it.effect("maps Prime to its first-class driver and primary binary without fallb
         assert.isTrue(provider?.installed);
         assert.equal(provider?.driver, "primeAgent");
         assert.equal(overrideSupport.routes[0]?.binary, binary);
+        assert.deepEqual(
+          (yield* overrideSupport.inventory.getProviders).map((candidate) => candidate.installed),
+          [true, false, false, false],
+        );
       }),
     ({ directory }) =>
       Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),

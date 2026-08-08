@@ -398,6 +398,8 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
             final.text === null ? null : { text: final.text, streaming: final.streaming },
           finalMessageWaitExhausted: final.waitExhausted,
           sessionLastError: settled.providerError,
+          assistantProviderErrorsTrusted:
+            activeHandle.capabilities.providerErrors === "session-and-assistant",
           committed:
             beforeHead !== afterHead || siblingHeadsMoved(beforeSiblingHeads, settledSiblingHeads),
           timedOut: settled.timedOut,

@@ -2232,6 +2232,7 @@ export const makeServerPoolDispatch = (deps: {
             continuation: "same-thread",
             subagentLiveness: "native",
             finalMessage: "projection",
+            providerErrors: "session-and-assistant",
             cost: "none",
           },
           awaitSettled,

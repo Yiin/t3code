@@ -38,8 +38,37 @@ const provider = (
 const claude = provider("claude-work", "claudeAgent", "claude-sonnet-5");
 const codex = provider("codex-personal", "codex", "gpt-5.6-sol");
 const kimi = provider("kimi-team", "kimi", "kimi-code/k3");
+const prime = provider("prime-work", "primeAgent", "prime/custom-model");
 
 describe("resolveEpicProviderFallback", () => {
+  it("moves Prime to Claude without inheriting Prime's model", () => {
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, claude, codex, kimi],
+        current: selection("prime-work", "prime/custom-model"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("claude-work", "claude-sonnet-5"));
+  });
+
+  it("skips unavailable stages while moving forward from Prime", () => {
+    const missingClaude = provider("claude-missing", "claudeAgent", "claude-sonnet-5", {
+      installed: false,
+    });
+    const unavailableCodex = provider("codex-unavailable", "codex", "gpt-5.6-sol", {
+      availability: "unavailable",
+    });
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, missingClaude, unavailableCodex, kimi],
+        current: selection("prime-work", "prime/custom-model"),
+        failureReason: "provider-error:auth",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("kimi-team", "kimi-code/k3"));
+  });
+
   it("resolves a custom current instance and returns exact Codex settings", () => {
     expect(
       resolveEpicProviderFallback({
@@ -205,6 +234,21 @@ describe("resolveEpicProviderFallback", () => {
         providerFallbackEligible: true,
       }),
     ).toBeNull();
+  });
+
+  it("never transitions backward from an existing Claude primary into Prime", () => {
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, claude, codex, kimi],
+        current: selection("claude-work", "claude-sonnet-5"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual({
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
   });
 
   it("requires trusted provider evidence even for a provider-error reason", () => {
