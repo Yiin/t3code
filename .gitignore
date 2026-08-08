@@ -41,3 +41,6 @@ node_modules/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# graphify knowledge-graph output (generated, machine-specific paths)
+graphify-out/
