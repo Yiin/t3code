@@ -8,6 +8,7 @@ import {
   EpicRunPreflightInput,
   EpicRunPreflightResult,
 } from "./beads.ts";
+import { DEFAULT_EPIC_RUN_CONFIG, DEFAULT_EPIC_RUN_CONFIG_PROVENANCE } from "./epicRunConfig.ts";
 import { WS_METHODS, WsEpicRunPreflightRpc } from "./rpc.ts";
 
 const encodeInput = Schema.encodeSync(EpicRunPreflightInput);
@@ -112,11 +113,26 @@ describe("EpicRunPreflightResult", () => {
           message: "Sequential execution limits parallel workers to 1.",
         },
       ],
+      resolvedConfig: {
+        ...DEFAULT_EPIC_RUN_CONFIG,
+        parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: 2 },
+      },
+      configProvenance: {
+        ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+        "parallel.workers": "file" as const,
+      },
     };
 
     const encoded = encodeResult(result);
 
     expect(decodeResult(encoded)).toEqual(result);
+  });
+
+  it("fills the resolved config and provenance with defaults when absent", () => {
+    const decoded = decodeResult({ ok: true, blockers: [], warnings: [] });
+
+    expect(decoded.resolvedConfig).toEqual(DEFAULT_EPIC_RUN_CONFIG);
+    expect(decoded.configProvenance).toEqual(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
   });
 
   it("rejects malformed reason-specific details", () => {

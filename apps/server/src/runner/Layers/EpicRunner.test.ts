@@ -90,6 +90,16 @@ const defaultConfigSnapshot = {
   config: DEFAULT_EPIC_RUN_CONFIG,
   configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
 } as const;
+const stubPreflightResult = (
+  overrides?: Partial<EpicRunPreflightResult>,
+): EpicRunPreflightResult => ({
+  ok: true,
+  blockers: [],
+  warnings: [],
+  resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
+  configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  ...overrides,
+});
 const persistedSequentialConfigSnapshot = {
   config: {
     ...DEFAULT_EPIC_RUN_CONFIG,
@@ -845,7 +855,8 @@ function createHarness(input: {
           return input.preflightError === undefined
             ? Effect.succeed(
                 input.preflightResults?.[Math.min(callIndex, input.preflightResults.length - 1)] ??
-                  input.preflightResult ?? { ok: true, blockers: [], warnings: [] },
+                  input.preflightResult ??
+                  stubPreflightResult(),
               )
             : Effect.fail(input.preflightError);
         },
@@ -2427,8 +2438,8 @@ describe("EpicRunner", () => {
       options: { iterationTimeoutMs: 60_000 },
       upsertDelayMs: 25,
       preflightResults: [
-        { ok: true, blockers: [], warnings: [] },
-        {
+        stubPreflightResult(),
+        stubPreflightResult({
           ok: false,
           blockers: [
             {
@@ -2439,8 +2450,7 @@ describe("EpicRunner", () => {
               pid: process.pid,
             },
           ],
-          warnings: [],
-        },
+        }),
       ],
     });
 
@@ -2468,7 +2478,7 @@ describe("EpicRunner", () => {
     };
     const harness = createHarness({
       script: [],
-      preflightResult: { ok: false, blockers: [blocker], warnings: [] },
+      preflightResult: stubPreflightResult({ ok: false, blockers: [blocker] }),
     });
 
     return Effect.gen(function* () {
@@ -5732,7 +5742,7 @@ describe("EpicRunner", () => {
     let acquired = 0;
     const harness = createHarness({
       script: [],
-      preflightResult: {
+      preflightResult: stubPreflightResult({
         ok: false,
         blockers: [
           { _tag: "detached_head" },
@@ -5742,8 +5752,7 @@ describe("EpicRunner", () => {
             diagnostics: ['Invalid type\n  at ["parallel"]["workers"]'],
           },
         ],
-        warnings: [],
-      },
+      }),
       onLockAcquire: () => {
         acquired += 1;
       },

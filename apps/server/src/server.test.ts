@@ -683,7 +683,14 @@ const buildAppUnderTest = (options?: {
           vcsStatusBroadcasterLayer,
           beadsStatusBroadcasterLayer,
           Layer.succeed(EpicRunPreflight, {
-            check: () => Effect.succeed({ ok: true, blockers: [], warnings: [] }),
+            check: () =>
+              Effect.succeed({
+                ok: true,
+                blockers: [],
+                warnings: [],
+                resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
+                configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+              }),
           }),
           Layer.mock(EpicRunner)({
             start: () => Effect.void,

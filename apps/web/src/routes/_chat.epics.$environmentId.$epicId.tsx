@@ -5,6 +5,7 @@ import type {
   EpicRun,
   ProjectId,
 } from "@t3tools/contracts";
+import { EPIC_RUN_CONFIG_FIELDS } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -48,6 +49,12 @@ import {
   type EpicRunPendingAction,
 } from "../epicRun.logic";
 import { resolveEpicRunStatusPill } from "../components/Sidebar.logic";
+import { EpicRunOptionsForm, EpicRunProvenanceChip } from "../components/EpicRunOptionsForm";
+import {
+  buildEpicRunConfigOverride,
+  epicRunEffectiveValue,
+  formatEpicRunOptionValue,
+} from "../epicRunOptions.logic";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { cn } from "../lib/utils";
 import { epicsEnvironment } from "../state/epics";
@@ -130,11 +137,32 @@ function EpicRunPill(props: { readonly run: EpicRun }) {
  * All of it already rides the contract and none of it was on screen.
  */
 function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId: string }) {
+  const { config, configProvenance } = props.run;
+  const gate = config.gate.disabled ? "no gate" : (config.gate.command ?? "default gate");
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
       <span className="font-mono">{props.run.modelSelection.model}</span>
       <span aria-hidden="true">·</span>
       <span>{epicRuntimeModeLabel(props.run.runtimeMode)}</span>
+      <span aria-hidden="true">·</span>
+      <span>
+        {config.execution.sequential
+          ? "sequential"
+          : `parallel · ${props.run.workers} ${props.run.workers === 1 ? "worker" : "workers"}`}
+      </span>
+      <EpicRunProvenanceChip source={configProvenance["execution.sequential"]} />
+      <span aria-hidden="true">·</span>
+      <span>{gate}</span>
+      <EpicRunProvenanceChip
+        source={
+          config.gate.disabled
+            ? configProvenance["gate.disabled"]
+            : configProvenance["gate.command"]
+        }
+      />
+      <span aria-hidden="true">·</span>
+      <span>{config.vcs.noPush ? "local-only" : "push"}</span>
+      <EpicRunProvenanceChip source={configProvenance["vcs.noPush"]} />
       {props.run.originThreadId ? (
         <>
           <span aria-hidden="true">·</span>
@@ -150,6 +178,24 @@ function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId:
           </Link>
         </>
       ) : null}
+      <details className="basis-full">
+        <summary className="inline-block cursor-pointer hover:text-foreground">
+          Run configuration
+        </summary>
+        <div className="mt-2 space-y-1">
+          {EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only").map(
+            (field) => (
+              <div key={field.key} className="flex items-center gap-2">
+                <span className="font-mono">{field.key}</span>
+                <span className="min-w-0 flex-1 truncate text-foreground/80">
+                  {formatEpicRunOptionValue(epicRunEffectiveValue(config, field.key))}
+                </span>
+                <EpicRunProvenanceChip source={configProvenance[field.key]} />
+              </div>
+            ),
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -301,6 +347,10 @@ function EpicRunSection(props: {
   // The run a launch answered with, awaited so a repeat's pending start clears
   // on the new run arriving rather than on the old terminal one still being there.
   const [startedRunId, setStartedRunId] = useState<string | null>(null);
+  // Run options the operator touched in the disclosure, by dotted registry
+  // key. An empty map means the launch sends no config override at all.
+  const [touchedOptions, setTouchedOptions] = useState<ReadonlyMap<string, unknown>>(new Map());
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const run = props.history.latest;
   const state = epicRunUiState(run, pending);
   const startControl = epicStartControl(run, state);
@@ -350,6 +400,7 @@ function EpicRunSection(props: {
     setPending("starting");
     setStartedRunId(null);
     const environmentId = props.environmentId as EnvironmentId;
+    const config = buildEpicRunConfigOverride(touchedOptions);
     void preflightAndLaunchEpicRun({
       preflightInput: {
         environmentId,
@@ -365,6 +416,7 @@ function EpicRunSection(props: {
           epicId: props.epicId,
           projectId: props.source.projectId as ProjectId,
           cwd: props.source.workspaceRoot,
+          ...(config === undefined ? {} : { config }),
         },
       },
       preflight: preflightRun,
@@ -396,6 +448,8 @@ function EpicRunSection(props: {
       if (result === undefined) return;
       if (result._tag === "Success") {
         setStartedRunId(result.value.runId);
+        // The launch consumed the overrides; the next start begins clean.
+        setTouchedOptions(new Map());
         return;
       }
       setPending(null);
@@ -452,17 +506,62 @@ function EpicRunSection(props: {
         <h2 id="run-heading" className="text-lg font-semibold">
           Run
         </h2>
-        {startControl ? (
-          <Button size="xl" disabled={startControl.busy} onClick={start}>
-            {startControl.busy ? (
-              <LoaderIcon className="animate-spin motion-reduce:animate-none" />
-            ) : (
-              <PlayIcon />
-            )}
-            {startControl.label}
-          </Button>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {startControl ? (
+            <Button
+              variant="outline"
+              size="sm"
+              aria-expanded={optionsOpen}
+              onClick={() => setOptionsOpen((open) => !open)}
+            >
+              <ChevronRightIcon
+                className={cn(
+                  "transition-transform motion-reduce:transition-none",
+                  optionsOpen && "rotate-90",
+                )}
+                aria-hidden="true"
+              />
+              Run options
+              {touchedOptions.size > 0 ? (
+                <span className="rounded-sm bg-primary/10 px-1 text-xs text-primary">
+                  {touchedOptions.size}
+                </span>
+              ) : null}
+            </Button>
+          ) : null}
+          {startControl ? (
+            <Button size="xl" disabled={startControl.busy} onClick={start}>
+              {startControl.busy ? (
+                <LoaderIcon className="animate-spin motion-reduce:animate-none" />
+              ) : (
+                <PlayIcon />
+              )}
+              {startControl.label}
+            </Button>
+          ) : null}
+        </div>
       </div>
+      {optionsOpen && startControl ? (
+        <div className="mb-3 min-w-0 rounded-xl border border-border px-4 py-3">
+          <EpicRunOptionsForm
+            environmentId={props.environmentId as EnvironmentId}
+            workspaceRoot={props.source.workspaceRoot}
+            epicId={props.epicId}
+            touched={touchedOptions}
+            onFieldChange={(key, value) =>
+              setTouchedOptions((current) => new Map(current).set(key, value))
+            }
+            onFieldClear={(key) =>
+              setTouchedOptions((current) => {
+                const next = new Map(current);
+                next.delete(key);
+                return next;
+              })
+            }
+            onReset={() => setTouchedOptions(new Map())}
+          />
+        </div>
+      ) : null}
       {state === "starting" && run === null ? (
         <div className="flex min-h-20 items-center gap-2 rounded-xl border px-4 text-sm">
           <LoaderIcon className="size-4 animate-spin motion-reduce:animate-none" />

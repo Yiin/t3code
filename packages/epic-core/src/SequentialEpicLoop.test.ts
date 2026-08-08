@@ -162,7 +162,16 @@ const fixture = (input: {
   } as unknown as BacklogShape;
 
   const ports: SequentialEpicLoopPorts = {
-    preflight: { check: () => Effect.succeed({ ok: true, blockers: [], warnings: [] }) },
+    preflight: {
+      check: () =>
+        Effect.succeed({
+          ok: true,
+          blockers: [],
+          warnings: [],
+          resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
+          configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+        }),
+    },
     lock: {
       inspect: () => Effect.sync((): undefined => undefined),
       acquire: () =>

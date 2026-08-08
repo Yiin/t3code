@@ -1,6 +1,22 @@
 import { describe, expect, it, vi } from "vite-plus/test";
+import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  type EpicRunPreflightResult,
+} from "@t3tools/contracts";
 
 import { epicRunPreflightBlockersFromError, preflightAndLaunchEpicRun } from "./epicRunLaunch";
+
+const stubPreflightResult = (
+  overrides?: Partial<EpicRunPreflightResult>,
+): EpicRunPreflightResult => ({
+  ok: true,
+  blockers: [],
+  warnings: [],
+  resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
+  configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  ...overrides,
+});
 
 describe("preflightAndLaunchEpicRun", () => {
   it("blocks launch and reports all blockers", async () => {
@@ -11,11 +27,10 @@ describe("preflightAndLaunchEpicRun", () => {
       launchInput: { epicId: "epic-1" },
       preflight: async () => ({
         _tag: "Success",
-        value: {
+        value: stubPreflightResult({
           ok: false,
           blockers: [{ _tag: "detached_head" }, { _tag: "dirty_tree", paths: ["a.ts"] }],
-          warnings: [],
-        },
+        }),
       }),
       launch,
       onPreflightFailure: vi.fn(),
@@ -35,11 +50,9 @@ describe("preflightAndLaunchEpicRun", () => {
         launchInput: {},
         preflight: async () => ({
           _tag: "Success",
-          value: {
-            ok: true,
-            blockers: [],
+          value: stubPreflightResult({
             warnings: [{ _tag: "nothing_ready", epicId: "epic-1" }],
-          },
+          }),
         }),
         launch,
         onPreflightFailure: vi.fn(),
@@ -97,7 +110,7 @@ describe("preflightAndLaunchEpicRun", () => {
         launchInput: {},
         preflight: async () => ({
           _tag: "Success",
-          value: { ok: true, blockers: [], warnings: [] },
+          value: stubPreflightResult(),
         }),
         launch: async () => launchFailure,
         onPreflightFailure: callbacks[0],

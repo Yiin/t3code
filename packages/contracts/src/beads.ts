@@ -1,6 +1,12 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { IsoDateTime, NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunConfig,
+  EpicRunConfigProvenance,
+} from "./epicRunConfig.ts";
 
 /**
  * A timestamp `bd` reported, or `null` when it reported none we can use. bd
@@ -157,6 +163,17 @@ export const EpicRunPreflightResult = Schema.Struct({
   ok: Schema.Boolean,
   blockers: Schema.Array(EpicRunPreflightBlocker),
   warnings: Schema.Array(EpicRunPreflightWarning),
+  /**
+   * The config the run would launch with, resolved the same way launch
+   * resolves it, plus per-key provenance. Decoding defaults keep a payload
+   * from a server that predates these fields decoding instead of throwing.
+   */
+  resolvedConfig: EpicRunConfig.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_EPIC_RUN_CONFIG)),
+  ),
+  configProvenance: EpicRunConfigProvenance.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE)),
+  ),
 });
 export type EpicRunPreflightResult = typeof EpicRunPreflightResult.Type;
 

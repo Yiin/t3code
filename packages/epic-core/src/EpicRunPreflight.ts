@@ -230,6 +230,17 @@ export const layer = Layer.effect(
           typeof held.host === "string" &&
           typeof held.pid === "number"
         ) {
+          // The result stays total even on the early lock return: the launch
+          // form prefills from these fields regardless of the blockers. The
+          // check mode is not a launch override — resolve with `null` so the
+          // returned config matches what a launch with no override would use.
+          const lockSnapshot =
+            suppliedConfigSnapshot ??
+            makeEpicRunConfigSnapshot({
+              fileResult: yield* configSource.read({ repoRoot: input.workspaceRoot }),
+              override: null,
+              harness: null,
+            });
           return {
             ok: false,
             blockers: [
@@ -242,6 +253,8 @@ export const layer = Layer.effect(
               },
             ],
             warnings,
+            resolvedConfig: lockSnapshot.config,
+            configProvenance: lockSnapshot.provenance,
           };
         }
 
@@ -349,11 +362,14 @@ export const layer = Layer.effect(
           }
         }
 
+        // The check mode is not a launch override: resolve with `null` so the
+        // returned config and provenance match what a launch with no override
+        // would use. The mode still drives the dirtiness rules above directly.
         const configSnapshot =
           suppliedConfigSnapshot ??
           makeEpicRunConfigSnapshot({
             fileResult: yield* configSource.read({ repoRoot: input.workspaceRoot }),
-            override: { execution: { sequential: input.mode === "sequential" } },
+            override: null,
             harness: null,
           });
         const configFile = configSnapshot.fileResult;
@@ -445,7 +461,13 @@ export const layer = Layer.effect(
           if (childIds.length > 0) warnings.push({ _tag: "stale_claims", childIds });
         }
 
-        return { ok: blockers.length === 0, blockers, warnings };
+        return {
+          ok: blockers.length === 0,
+          blockers,
+          warnings,
+          resolvedConfig: configSnapshot.config,
+          configProvenance: configSnapshot.provenance,
+        };
       },
     );
 

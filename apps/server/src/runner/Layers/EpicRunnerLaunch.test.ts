@@ -25,6 +25,17 @@ const snapshot = (sequential: boolean): EpicRunConfigSnapshot => ({
   violations: [],
 });
 
+const stubPreflightResult = (
+  overrides?: Partial<EpicRunPreflightResult>,
+): EpicRunPreflightResult => ({
+  ok: true,
+  blockers: [],
+  warnings: [],
+  resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
+  configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  ...overrides,
+});
+
 const makeLaunch = (input: {
   readonly onPreflight: (preflightInput: EpicRunPreflightInput) => void;
   readonly preflightResult?: EpicRunPreflightResult;
@@ -33,7 +44,7 @@ const makeLaunch = (input: {
     check: (preflightInput) =>
       Effect.sync(() => {
         input.onPreflight(preflightInput);
-        return input.preflightResult ?? { ok: true, blockers: [], warnings: [] };
+        return input.preflightResult ?? stubPreflightResult();
       }),
   };
   const runLock: EpicRunLockShape = {
@@ -103,7 +114,7 @@ describe("EpicRunnerLaunch acquireLease", () => {
     Effect.gen(function* () {
       const launch = makeLaunch({
         onPreflight: () => undefined,
-        preflightResult: {
+        preflightResult: stubPreflightResult({
           ok: false,
           blockers: [
             { _tag: "dirty_tree", paths: ["modified.ts"] },
@@ -115,8 +126,7 @@ describe("EpicRunnerLaunch acquireLease", () => {
               pid: 42,
             },
           ],
-          warnings: [],
-        },
+        }),
       });
       const error = yield* Effect.flip(
         launch.acquireLease(

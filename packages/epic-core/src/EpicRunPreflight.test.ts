@@ -216,6 +216,11 @@ describe("EpicRunPreflight", () => {
         host: "host",
         pid: 42,
       });
+      // The early lock return still carries the resolved config so the launch
+      // form can prefill from a blocked preflight. The check mode is not a
+      // launch override, so the resolution matches a launch with no override.
+      expect(result.resolvedConfig).toBeDefined();
+      expect(result.configProvenance["execution.sequential"]).toBe("default");
     }),
   );
 
@@ -225,7 +230,28 @@ describe("EpicRunPreflight", () => {
         ok: true,
         blockers: [],
         warnings: [],
+        // No file and no launch override: the resolution is the defaults.
+        resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
+        configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
       });
+    }),
+  );
+
+  it.effect("surfaces a loaded config file's values and file provenance", () =>
+    Effect.gen(function* () {
+      const result = yield* run("# branch.head main\n", undefined, undefined, {
+        config: {
+          _tag: "loaded",
+          configPath: "/repo/.t3code/epic-run.json",
+          override: { gate: { command: "bun run gate" } },
+          config: {} as never,
+          presentKeys: ["gate.command"],
+          unknownKeys: [],
+        },
+      });
+      expect(result.resolvedConfig.gate.command).toBe("bun run gate");
+      expect(result.configProvenance["gate.command"]).toBe("file");
+      expect(result.configProvenance["vcs.noPush"]).toBe("default");
     }),
   );
 
@@ -328,9 +354,9 @@ describe("EpicRunPreflight", () => {
         config: {
           _tag: "loaded",
           configPath: "/repo/.t3code/epic-run.json",
-          override: { parallel: { workers: 4 } },
+          override: { execution: { sequential: true }, parallel: { workers: 4 } },
           config: {} as never,
-          presentKeys: ["parallel.workers"],
+          presentKeys: ["execution.sequential", "parallel.workers"],
           unknownKeys: ["parallel.futureWorkers"],
         },
       });
