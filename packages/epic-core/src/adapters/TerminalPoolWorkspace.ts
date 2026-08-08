@@ -36,6 +36,7 @@ import {
   siblingRuleSequential,
   type SiblingRef,
 } from "../siblings.ts";
+import { linkNodeModulesTree } from "./worktreeNodeModules.ts";
 import type { FileMergeQueueStoreShape } from "./FileMergeQueueStore.ts";
 
 /** The env files `setup_worktree_assets` copies (never production/staging). */
@@ -241,11 +242,7 @@ export const makeTerminalPoolWorkspace = (deps: {
   ) {
     yield* Effect.tryPromise({
       try: async () => {
-        const sourceNodeModules = NodePath.join(sourceRepo, "node_modules");
-        const targetNodeModules = NodePath.join(target, "node_modules");
-        if ((await pathExists(sourceNodeModules)) && !(await pathExists(targetNodeModules))) {
-          await NodeFSP.symlink(sourceNodeModules, targetNodeModules, "dir");
-        }
+        await linkNodeModulesTree(sourceRepo, target);
         for (const name of WORKTREE_ASSET_ENV_FILES) {
           const source = NodePath.join(sourceRepo, name);
           const targetFile = NodePath.join(target, name);

@@ -47,6 +47,7 @@ import {
   type PersistedEpicRunIteration,
 } from "@t3tools/epic-core/ports/RunJournal";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
+import { findWorkspaceNodeModules, NODE_MODULES } from "@t3tools/epic-core/workspaceNodeModules";
 import {
   decideGraceStep,
   integrationBranch as integrationBranchName,
@@ -135,6 +136,10 @@ const WORKTREE_ASSET_ENV_FILES = [
  * `node_modules` symlink from the source repo plus copies of the whitelisted
  * env files, each only when absent in the worktree. Sibling worktrees get
  * exactly this — no beads redirect; siblings have no beads database.
+ *
+ * In a workspace monorepo the root `node_modules` is not enough on its own:
+ * each package resolves its imports through its own gitignored `node_modules`,
+ * so those get mirrored too. See `@t3tools/epic-core/workspaceNodeModules`.
  */
 const setupWorktreeAssets = (
   deps: {
@@ -145,14 +150,48 @@ const setupWorktreeAssets = (
   target: string,
 ): Effect.Effect<void, PlatformError.PlatformError> =>
   Effect.gen(function* () {
-    const sourceNodeModules = deps.path.join(sourceRepo, "node_modules");
-    const targetNodeModules = deps.path.join(target, "node_modules");
-    if (
-      (yield* deps.fileSystem.exists(sourceNodeModules)) &&
-      !(yield* deps.fileSystem.exists(targetNodeModules))
-    ) {
-      yield* deps.fileSystem.symlink(sourceNodeModules, targetNodeModules);
+    const linkNodeModules = (relative: string) =>
+      Effect.gen(function* () {
+        const source = deps.path.join(sourceRepo, relative);
+        const targetLink = deps.path.join(target, relative);
+        // The owning package directory has to exist in this worktree; a branch
+        // that never added the package simply has nothing to link into.
+        const targetParent = deps.path.dirname(targetLink);
+        if (
+          (yield* deps.fileSystem.exists(source)) &&
+          (yield* deps.fileSystem.exists(targetParent)) &&
+          !(yield* deps.fileSystem.exists(targetLink))
+        ) {
+          yield* deps.fileSystem.symlink(source, targetLink);
+        }
+      });
+
+    yield* linkNodeModules(NODE_MODULES);
+
+    // Best-effort: a directory we cannot read contributes no workspace
+    // packages rather than failing the whole worktree. A link we miss here
+    // surfaces later as a plain dependency-resolution error, which is a far
+    // better failure than refusing to provision the worktree at all.
+    const listDirectories = (absolutePath: string) =>
+      Effect.gen(function* () {
+        const entries = yield* deps.fileSystem.readDirectory(absolutePath);
+        const directories: Array<string> = [];
+        for (const entry of entries) {
+          const info = yield* deps.fileSystem.stat(deps.path.join(absolutePath, entry));
+          if (info.type === "Directory") directories.push(entry);
+        }
+        return directories;
+      }).pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<string>>([])));
+
+    const workspaceNodeModules = yield* findWorkspaceNodeModules(
+      listDirectories,
+      sourceRepo,
+      (...segments) => deps.path.join(...segments),
+    );
+    for (const relative of workspaceNodeModules) {
+      yield* linkNodeModules(relative);
     }
+
     for (const name of WORKTREE_ASSET_ENV_FILES) {
       const source = deps.path.join(sourceRepo, name);
       const targetFile = deps.path.join(target, name);
@@ -583,6 +622,18 @@ export const makeServerPoolWorkspace = (deps: {
               }),
           ),
         );
+        // The merge drain restores these before every set, but do it up front
+        // too so the worktree is runnable the moment it exists.
+        yield* setupWorktreeAssets({ fileSystem, path }, run.cwd, provisioned.path).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "worktree.integration-assets",
+                detail: `Could not set up assets in ${provisioned.path}`,
+                cause,
+              }),
+          ),
+        );
         // One integration worktree per sibling, mirrored beside the main one
         // so set trial-merges and the gate see the same relative structure as
         // workers (`skills/cook-epic/run-legacy.sh:1055-1069`).
@@ -900,6 +951,16 @@ export const makeServerPoolWorkspace = (deps: {
                   }),
               ),
             );
+            yield* setupWorktreeAssets({ fileSystem, path }, run.cwd, main.path).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "worktree.worker-assets",
+                    detail: `Could not set up assets in ${main.path}`,
+                    cause,
+                  }),
+              ),
+            );
             const siblingWorktrees: Array<{
               readonly worktreePath: string;
               readonly sourcePath: string;
@@ -1012,22 +1073,37 @@ export const makeServerPoolWorkspace = (deps: {
                 }),
             ),
           );
-        return yield* writeBeadsRedirect(runCtx.cwd, provisioned.path).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EpicRunnerDispatchError({
-                commandType: "beads.redirect-write",
-                detail: `Could not write the beads redirect in ${provisioned.path}`,
-                cause,
-              }),
-          ),
-          Effect.as({
+        return yield* Effect.gen(function* () {
+          yield* writeBeadsRedirect(runCtx.cwd, provisioned.path).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "beads.redirect-write",
+                  detail: `Could not write the beads redirect in ${provisioned.path}`,
+                  cause,
+                }),
+            ),
+          );
+          // Without this the worker has no dependencies at all, so it cannot
+          // typecheck or test the change it is about to commit.
+          yield* setupWorktreeAssets({ fileSystem, path }, runCtx.cwd, provisioned.path).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "worktree.worker-assets",
+                  detail: `Could not set up assets in ${provisioned.path}`,
+                  cause,
+                }),
+            ),
+          );
+          return {
             cwd: provisioned.path,
             branch: provisioned.refName,
             worktreePath: provisioned.path,
             siblingWorktrees: [],
             siblingRule: null,
-          }),
+          };
+        }).pipe(
           Effect.catchCause((cause) =>
             releaseProvisionedWorktree({
               repositoryPath: runCtx.cwd,

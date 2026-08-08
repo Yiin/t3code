@@ -91,6 +91,10 @@
       "types": "./src/workerScope.ts",
       "import": "./src/workerScope.ts"
     },
+    "./workspaceNodeModules": {
+      "types": "./src/workspaceNodeModules.ts",
+      "import": "./src/workspaceNodeModules.ts"
+    },
     "./ports/WorkerEvidence": {
       "types": "./src/ports/WorkerEvidence.ts",
       "import": "./src/ports/WorkerEvidence.ts"

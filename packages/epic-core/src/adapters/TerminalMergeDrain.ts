@@ -25,6 +25,7 @@ import type { MergeSlotShape } from "../ports/MergeQueue.ts";
 import { MergeQueuePortError } from "../ports/MergeQueue.ts";
 import { RunJournalError, type RunJournalShape } from "../ports/RunJournal.ts";
 import type * as ProcessRunner from "../processRunner.ts";
+import { linkNodeModulesTree } from "./worktreeNodeModules.ts";
 import { makeProcessBacklog } from "./ProcessBacklog.ts";
 import { makeProcessMergeGit } from "./ProcessMergeGit.ts";
 import { makeProcessMergeSlot } from "./ProcessMergeSlot.ts";
@@ -109,11 +110,7 @@ export const makeTerminalMergeDrain = (deps: {
   const setupWorktreeAssets = (sourceRepo: string, target: string) =>
     Effect.tryPromise({
       try: async () => {
-        const sourceNodeModules = NodePath.join(sourceRepo, "node_modules");
-        const targetNodeModules = NodePath.join(target, "node_modules");
-        if ((await pathExists(sourceNodeModules)) && !(await pathExists(targetNodeModules))) {
-          await NodeFSP.symlink(sourceNodeModules, targetNodeModules, "dir");
-        }
+        await linkNodeModulesTree(sourceRepo, target);
         for (const name of WORKTREE_ASSET_ENV_FILES) {
           const source = NodePath.join(sourceRepo, name);
           const targetFile = NodePath.join(target, name);
