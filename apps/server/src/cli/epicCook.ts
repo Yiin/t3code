@@ -183,6 +183,7 @@ const selectHarness = (environment: NodeJS.ProcessEnv): TerminalHarness => {
   if (environment.COOKEPIC_WORKER_CMD) return "worker-cmd";
   const explicit = environment.COOKEPIC_HARNESS;
   if (
+    explicit === "prime" ||
     explicit === "kimi" ||
     explicit === "claude" ||
     explicit === "ccx" ||
@@ -330,13 +331,15 @@ export const cookCommand = Command.make("cook", {
           instanceId: ProviderInstanceId.make(harness),
           model:
             Option.getOrUndefined(flags.model) ??
-            (harness === "claude" || harness === "ccx"
-              ? "sonnet"
-              : harness === "kimi"
-                ? "kimi-code/k3"
-                : harness === "codex"
-                  ? "gpt-5.6-sol"
-                  : "default"),
+            (harness === "prime"
+              ? "default"
+              : harness === "claude" || harness === "ccx"
+                ? "sonnet"
+                : harness === "kimi"
+                  ? "kimi-code/k3"
+                  : harness === "codex"
+                    ? "gpt-5.6-sol"
+                    : "default"),
         };
         const runId = `${flags.epic}-${Date.now().toString(36)}-${String(process.pid)}`;
         const runDirectory = NodePath.resolve(

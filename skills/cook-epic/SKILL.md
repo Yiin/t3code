@@ -8,7 +8,7 @@ description: Execute a beads epic unattended with fresh-context workers on the s
 Run all ready children of a beads epic with fresh-context workers through the
 `run.sh` beside this `SKILL.md` — a thin shim that validates the launch and
 execs `t3 epic cook`, the shared orchestration core. Each worker is a new
-headless session of the current harness (kimi/claude/codex/opencode) with no
+headless session of the current harness (prime/kimi/claude/codex/opencode) with no
 conversation context; all coordination flows through beads (claims, notes,
 status) and git (commits, merges).
 
@@ -147,8 +147,8 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    ```
 
 5. **Select the harness yourself; never ask the user.** Running in Kimi Code:
-   `COOKEPIC_HARNESS=kimi`. Claude Code: `claude`. ccx: `ccx`. Codex: `codex`.
-   OpenCode: `opencode`.
+   `COOKEPIC_HARNESS=kimi`. Prime Agent: `prime`. Claude Code: `claude`. ccx:
+   `ccx`. Codex: `codex`. OpenCode: `opencode`.
 
    The selected harness is the primary stage. Structured harness errors for
    provider limits, spend, usage, authentication, and availability trigger
@@ -169,7 +169,7 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    claude/ccx workers automatically launch with
    `--exclude-dynamic-system-prompt-sections`, keeping the prompt prefix
    stable across dispatches. No action needed —
-   this is automatic for claude/ccx and a no-op for kimi/codex/opencode.
+   this is automatic for claude/ccx and a no-op for prime/kimi/codex/opencode.
 
 6. **Resolve the runner from this skill, then launch from the project root.** Derive `SKILL_DIR` from the directory containing the `SKILL.md` you loaded. Use `${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}`; this lets callers pin a specific copy with `COOKEPIC_RUNNER`. Only when the loaded skill path is unavailable or ambiguous, fall back to `~/.agents/skills/cook-epic/run.sh`.
 

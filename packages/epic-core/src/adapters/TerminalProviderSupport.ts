@@ -27,10 +27,20 @@ export interface TerminalProviderSupport {
 }
 
 const driverForHarness = (harness: TerminalHarness): ProviderDriverKind =>
-  ProviderDriverKind.make(harness === "claude" || harness === "ccx" ? "claudeAgent" : harness);
+  ProviderDriverKind.make(
+    harness === "prime"
+      ? "primeAgent"
+      : harness === "claude" || harness === "ccx"
+        ? "claudeAgent"
+        : harness,
+  );
 
 const defaultBinary = (harness: TerminalHarness): string =>
-  harness === "claude" || harness === "ccx" ? "claude" : harness;
+  harness === "prime"
+    ? "prime-agent"
+    : harness === "claude" || harness === "ccx"
+      ? "claude"
+      : harness;
 
 const fallbackHarnesses = (harness: TerminalHarness): ReadonlyArray<TerminalHarness> => {
   if (harness === "claude" || harness === "ccx") return ["codex", "kimi"];

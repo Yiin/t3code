@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { makeTerminalProviderSupport } from "./TerminalProviderSupport.ts";
@@ -40,5 +40,49 @@ it.effect("reports fresh installed fallbacks and keeps the primary instance", ()
         assert.isTrue((yield* support.inventory.getProviders)[2]?.installed);
       }),
     (directory) => Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+  ),
+);
+
+it.effect("maps Prime to its first-class driver and primary binary without fallbacks", () =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "prime-support-"));
+      const binary = NodePath.join(directory, "custom-prime-agent");
+      NodeFS.writeFileSync(binary, "#!/bin/sh\nexit 0\n");
+      NodeFS.chmodSync(binary, 0o755);
+      return { directory, binary };
+    }),
+    ({ directory, binary }) =>
+      Effect.gen(function* () {
+        const defaultSupport = makeTerminalProviderSupport({
+          harness: "prime",
+          selection: { instanceId: ProviderInstanceId.make("prime-work"), model: "default" },
+          environment: { PATH: directory },
+        });
+        assert.deepEqual(defaultSupport.routes, [
+          {
+            instanceId: ProviderInstanceId.make("prime-work"),
+            driver: ProviderDriverKind.make("primeAgent"),
+            harness: "prime",
+            binary: "prime-agent",
+            model: "default",
+            primary: true,
+          },
+        ]);
+        assert.isFalse((yield* defaultSupport.inventory.getProviders)[0]?.installed);
+
+        const overrideSupport = makeTerminalProviderSupport({
+          harness: "prime",
+          selection: { instanceId: ProviderInstanceId.make("prime-work"), model: "prime/model" },
+          binary,
+          environment: { PATH: directory },
+        });
+        const provider = (yield* overrideSupport.inventory.getProviders)[0];
+        assert.isTrue(provider?.installed);
+        assert.equal(provider?.driver, "primeAgent");
+        assert.equal(overrideSupport.routes[0]?.binary, binary);
+      }),
+    ({ directory }) =>
+      Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
   ),
 );

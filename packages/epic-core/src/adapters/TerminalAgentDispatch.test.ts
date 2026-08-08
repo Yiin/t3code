@@ -66,6 +66,53 @@ describe("TerminalAgentDispatch final assistant selection", () => {
     });
   });
 
+  it("uses Prime's last completed assistant message text blocks", () => {
+    const artifact = [
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "old" },
+            { type: "thinking", thinking: "hidden" },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "toolResult", content: [{ type: "text", text: "RALPH_DONE" }] },
+      }),
+      JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "RALPH_MSG: " },
+            { type: "text", text: "final" },
+          ],
+        },
+        toolResults: [],
+      }),
+    ].join("\n");
+    assert.deepEqual(parseTerminalArtifact("prime", artifact), {
+      finalText: "RALPH_MSG: final",
+      sessionId: null,
+      providerError: null,
+    });
+  });
+
+  it("does not classify Prime structured error records", () => {
+    const artifact = JSON.stringify({
+      type: "error",
+      error: { kind: "provider", message: "rate limit exceeded" },
+    });
+    assert.deepEqual(parseTerminalArtifact("prime", artifact), {
+      finalText: null,
+      sessionId: null,
+      providerError: null,
+    });
+  });
+
   it("extracts nested structured provider errors", () => {
     const artifact = JSON.stringify({
       type: "error",
@@ -376,6 +423,303 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"R
       assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
       const args = NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8");
       assert.include(args, 'model_reasoning_effort="high"');
+    }),
+  ),
+);
+
+const primeEvent = JSON.stringify({
+  type: "message_end",
+  message: { role: "assistant", content: [{ type: "text", text: "RALPH_DONE" }] },
+});
+
+const startPrime = (input: {
+  readonly useHarnessDefaultModel?: boolean;
+  readonly worktreePath?: string | null;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly binary?: string;
+}) =>
+  Effect.gen(function* () {
+    const fixture = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        makeWorker(`printf '%s\\n' "$@" > "$CAPTURE_DIR/args"
+pwd > "$CAPTURE_DIR/cwd"
+printf '%s\\n' "\${COOKEPIC_ROLE:-}" "\${COOKEPIC_FOLD:-}" "\${COOKEPIC_INSPECTOR:-}" > "$CAPTURE_DIR/env"
+printf '%s\\n' '${primeEvent}'`),
+      ),
+      ({ directory }) =>
+        Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+    );
+    const effectiveCwd = input.worktreePath ?? fixture.directory;
+    NodeFS.mkdirSync(effectiveCwd, { recursive: true });
+    const dispatch = makeTerminalAgentDispatch({
+      harness: "prime",
+      artifactsDirectory: fixture.directory,
+      binary: input.binary ?? fixture.worker,
+      ...(input.useHarnessDefaultModel === undefined
+        ? {}
+        : { useHarnessDefaultModel: input.useHarnessDefaultModel }),
+      environment: { CAPTURE_DIR: fixture.directory, ...input.environment },
+    });
+    const handle = yield* dispatch.startIteration({
+      runId: "prime",
+      iterationIndex: 0,
+      cwd: fixture.directory,
+      worktreePath: input.worktreePath ?? null,
+      prompt: "cook child",
+      selection: { instanceId: ProviderInstanceId.make("prime"), model: "prime/model" },
+    });
+    yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+    return { ...fixture, effectiveCwd, handle };
+  });
+
+it.live("runs Prime workers with the effective cwd, model, and worker role", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const worktree = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "prime-worktree-"));
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(worktree, { recursive: true, force: true })),
+      );
+      const { directory, handle } = yield* startPrime({
+        worktreePath: worktree,
+        environment: { COOKEPIC_FOLD: "stale", COOKEPIC_INSPECTOR: "stale" },
+      });
+      const settled = yield* handle.awaitSettled;
+      assert.deepEqual(settled, { turnState: "completed", timedOut: false, providerError: null });
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").trim().split("\n"),
+        [
+          "--mode",
+          "json",
+          "--no-session",
+          "--cwd",
+          worktree,
+          "--model",
+          "prime/model",
+          "--",
+          "cook child",
+        ],
+      );
+      assert.equal(NodeFS.readFileSync(NodePath.join(directory, "cwd"), "utf8").trim(), worktree);
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(directory, "env"), "utf8").split("\n").slice(0, 3),
+        ["worker", "", ""],
+      );
+      assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
+      assert.equal(handle.capabilities.continuation, "none");
+      assert.equal(handle.capabilities.cost, "none");
+    }),
+  ),
+);
+
+it.live("omits the Prime model when the harness default is selected", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startPrime({ useHarnessDefaultModel: true });
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").split("\n");
+      assert.notInclude(args, "--model");
+      assert.notInclude(args, "prime/model");
+    }),
+  ),
+);
+
+it.live("retains Prime final text before a bounded tail and ignores structured errors", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\\n' '${primeEvent}'
+printf '%s\\n' '{"type":"error","error":{"message":"rate limit exceeded"}}'
+printf '%s' '{"type":"agent_end","messages":[{"role":"assistant","content":"'
+head -c 4096 /dev/zero | tr '\\0' x
+printf '%s\\n' '"}]}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "prime",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        maxArtifactBytes: 256,
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "prime-bounded",
+        iterationIndex: 0,
+        cwd: fixture.directory,
+        worktreePath: null,
+        prompt: "test",
+        selection: { instanceId: ProviderInstanceId.make("prime"), model: "default" },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      const settled = yield* handle.awaitSettled;
+      assert.isNull(settled.providerError);
+      assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
+      assert.notInclude(NodeFS.readFileSync(handle.ref, "utf8"), "RALPH_DONE");
+    }),
+  ),
+);
+
+it.live("reports a missing Prime binary through the existing settle diagnostic", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const directory = yield* Effect.acquireRelease(
+        Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "prime-missing-"))),
+        (path) => Effect.sync(() => NodeFS.rmSync(path, { recursive: true, force: true })),
+      );
+      const missing = NodePath.join(directory, "missing-prime-agent");
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "prime",
+        artifactsDirectory: directory,
+        binary: missing,
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "prime-missing",
+        iterationIndex: 0,
+        cwd: directory,
+        worktreePath: null,
+        prompt: "test",
+        selection: { instanceId: ProviderInstanceId.make("prime"), model: "default" },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      const settled = yield* handle.awaitSettled;
+      assert.equal(settled.turnState, "error");
+      assert.include(settled.providerError ?? "", "ENOENT");
+      assert.include(settled.providerError ?? "", "missing-prime-agent");
+    }),
+  ),
+);
+
+it.live("runs Prime fold and inspector helpers with isolated roles", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\\n' "$@" > "$CAPTURE_DIR/$COOKEPIC_ROLE.args"
+pwd > "$CAPTURE_DIR/$COOKEPIC_ROLE.cwd"
+printf '%s\\n' "\${COOKEPIC_ROLE:-}" "\${COOKEPIC_FOLD:-}" "\${COOKEPIC_INSPECTOR:-}" > "$CAPTURE_DIR/$COOKEPIC_ROLE.env"
+printf '%s\\n' '${primeEvent}'
+printf '%s' '{"type":"agent_end","messages":[{"role":"assistant","content":"'
+head -c 4096 /dev/zero | tr '\\0' x
+printf '%s\\n' '"}]}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "prime",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        maxArtifactBytes: 512,
+        environment: {
+          CAPTURE_DIR: fixture.directory,
+          COOKEPIC_FOLD: "stale",
+          COOKEPIC_INSPECTOR: "stale",
+        },
+      });
+      const selection = { instanceId: ProviderInstanceId.make("prime"), model: "prime/model" };
+      const fold = yield* dispatch.runAuxiliary({
+        purpose: "epic-note-fold",
+        cwd: fixture.directory,
+        prompt: "fold notes",
+        selection,
+      });
+      const inspector = yield* dispatch.runAuxiliary({
+        purpose: "idle-inspection",
+        cwd: fixture.directory,
+        prompt: "inspect worker",
+        selection,
+      });
+      assert.deepEqual(fold, { output: "RALPH_DONE", succeeded: true });
+      assert.deepEqual(inspector, { output: "RALPH_DONE", succeeded: true });
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "fold.args"), "utf8")
+          .trim()
+          .split("\n"),
+        [
+          "--mode",
+          "json",
+          "--no-session",
+          "--cwd",
+          fixture.directory,
+          "--model",
+          "prime/model",
+          "--",
+          "fold notes",
+        ],
+      );
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "inspector.args"), "utf8")
+          .trim()
+          .split("\n"),
+        [
+          "--mode",
+          "json",
+          "--no-session",
+          "--cwd",
+          fixture.directory,
+          "--no-tools",
+          "--no-skills",
+          "--no-context-files",
+          "--no-extensions",
+          "--no-prompt-templates",
+          "--model",
+          "prime/model",
+          "--",
+          "inspect worker",
+        ],
+      );
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "fold.env"), "utf8")
+          .split("\n")
+          .slice(0, 3),
+        ["fold", "1", ""],
+      );
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "inspector.env"), "utf8")
+          .split("\n")
+          .slice(0, 3),
+        ["inspector", "", "1"],
+      );
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "fold.cwd"), "utf8").trim(),
+        fixture.directory,
+      );
+    }),
+  ),
+);
+
+it.live("kills a TERM-resistant Prime auxiliary process group after timeout", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`(trap '' TERM; sleep 30) >/dev/null 2>&1 &
+echo $! > descendant.pid
+trap '' TERM
+sleep 30`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "prime",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        timeoutSeconds: 0.05,
+        stopGraceSeconds: 0.05,
+      });
+      const result = yield* dispatch.runAuxiliary({
+        purpose: "idle-inspection",
+        cwd: fixture.directory,
+        prompt: "inspect",
+        selection: { instanceId: ProviderInstanceId.make("prime"), model: "default" },
+      });
+      assert.isFalse(result.succeeded);
+      const descendant = Number(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "descendant.pid"), "utf8"),
+      );
+      assert.throws(() => process.kill(descendant, 0));
     }),
   ),
 );
