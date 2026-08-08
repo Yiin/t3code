@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
-import { drainMergeQueue, type MergeQueuePorts } from "./MergeQueue.ts";
+import { drainMergeQueue, type DrainMergeQueueResult, type MergeQueuePorts } from "./MergeQueue.ts";
 import { BacklogError, type BacklogIssue } from "./ports/Backlog.ts";
 import {
   landingDescription,
@@ -45,6 +45,9 @@ const makeHarness = (
     readonly conflicts?: ReadonlyArray<string>;
     readonly conflictCwds?: ReadonlyArray<string>;
     readonly gatePasses?: boolean;
+    /** Per-call gate answers: [merge set, control on base, …]. */
+    readonly gateSequence?: ReadonlyArray<boolean>;
+    readonly gateOutput?: string;
     readonly fastForwardFails?: ReadonlyArray<string>;
     readonly fastForwardFailCwds?: ReadonlyArray<string>;
     readonly pushFails?: ReadonlyArray<string>;
@@ -100,6 +103,7 @@ const makeHarness = (
     commentCount: 0,
   }));
   let createFailed = false;
+  let gateCall = 0;
 
   const git: MergeGitShape = {
     head: (cwd) =>
@@ -259,7 +263,16 @@ const makeHarness = (
         Effect.sync(() => {
           calls.push("gate");
           gateRepositories.push(...gateInput.repositories);
-          return { passed: options.gatePasses ?? true, repositoryPaths: ["/repo"], output: "" };
+          // A red gate is followed by a control run on the base with nothing
+          // merged, so tests need to answer the two calls differently:
+          // [set, control]. Without a sequence every call answers the same.
+          const sequenced = options.gateSequence?.[gateCall];
+          gateCall += 1;
+          return {
+            passed: sequenced ?? options.gatePasses ?? true,
+            repositoryPaths: ["/repo"],
+            output: options.gateOutput ?? "",
+          };
         }),
     },
     backlog: {
@@ -383,9 +396,50 @@ describe("MergeQueue", () => {
     }),
   );
 
+  it.effect("blames the environment, not the branch, when the base fails the same gate", () =>
+    Effect.gen(function* () {
+      // Regression: a broken toolchain fails every gate. Attributing that to
+      // the branch parked innocent work and opened repair child after repair
+      // child — 15 of them in one run — while the real fault was a missing
+      // native binding no branch had touched.
+      const harness = makeHarness({
+        gatePasses: false,
+        gateOutput: "Cannot find module 'vite-plus/binding'\n2 failed",
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      expect(result._tag === "fatal" ? result.detail : "").toContain("nothing merged");
+      expect(result._tag === "fatal" ? result.detail : "").toContain("vite-plus/binding");
+      // Nothing was blamed and no repair was opened.
+      expect(harness.fixes).toHaveLength(0);
+    }),
+  );
+
+  it.effect("stops opening repair children once repair stops converging", () =>
+    Effect.gen(function* () {
+      // Closed repairs count too: dedup alone only sees one still in flight,
+      // so a closed-then-failed cycle looked new every time.
+      const harness = makeHarness({
+        gateSequence: [false, true],
+        existingFixStatuses: ["closed", "closed", "closed"],
+        entries: [entry(0, "child-1", "epic/child-1")],
+        conflicts: ["epic/child-1"],
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      expect(result._tag === "fatal" ? result.detail : "").toContain("repair attempts");
+      expect(harness.fixes).toHaveLength(0);
+    }),
+  );
+
   it.effect("parks a red gate as gate-failed", () =>
     Effect.gen(function* () {
-      const harness = makeHarness({ gatePasses: false });
+      // Set fails, control on the base passes: the branch really is at fault.
+      const harness = makeHarness({ gateSequence: [false, true] });
       expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 0, parked: 1 });
       expect(harness.calls.filter((call) => call.startsWith("reset:"))).toHaveLength(2);
       expect(harness.calls.some((call) => call.startsWith("ff:"))).toBe(false);
@@ -539,7 +593,7 @@ describe("MergeQueue", () => {
           siblings: [siblingSet()],
           siblingExternalHeads: { "/sib": "sib-external" },
         });
-        const result = yield* drain(harness.ports);
+        const result: DrainMergeQueueResult = yield* drain(harness.ports);
         expect(result).toMatchObject({
           _tag: "fatal",
           detail:
@@ -580,7 +634,7 @@ describe("MergeQueue", () => {
           siblings: [siblingSet()],
           fastForwardFailCwds: ["/sib"],
         });
-        const result = yield* drain(harness.ports);
+        const result: DrainMergeQueueResult = yield* drain(harness.ports);
         expect(result).toMatchObject({
           _tag: "fatal",
           detail:
