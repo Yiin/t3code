@@ -2,12 +2,22 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
+  BUILT_IN_PROVIDER_DRIVER_KINDS,
+  PRIME_AGENT_DRIVER_KIND,
   ProviderDriverKind,
   ProviderInstanceConfig,
   ProviderInstanceConfigMap,
   ProviderInstanceId,
   ProviderInstanceRef,
 } from "./providerInstance.ts";
+
+describe("built-in provider catalog", () => {
+  it("includes Prime without closing the driver slug schema", () => {
+    expect(PRIME_AGENT_DRIVER_KIND).toBe("primeAgent");
+    expect(BUILT_IN_PROVIDER_DRIVER_KINDS).toContain(PRIME_AGENT_DRIVER_KIND);
+    expect(decodeProviderDriverKind("futureDriver")).toBe("futureDriver");
+  });
+});
 
 const decodeProviderDriverKind = Schema.decodeUnknownSync(ProviderDriverKind);
 const decodeProviderInstanceId = Schema.decodeUnknownSync(ProviderInstanceId);

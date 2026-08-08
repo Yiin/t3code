@@ -297,7 +297,7 @@ describe("getDefaultProviderInstanceModel", () => {
 
     expect(
       getDefaultProviderInstanceModel(providers, ProviderInstanceId.make("claude_openrouter")),
-    ).toBe("claude-opus-4-8");
+    ).toBe("openai/gpt-5.5");
   });
 
   it("falls back to the driver default when the instance reports no models", () => {
@@ -330,6 +330,16 @@ describe("getDefaultProviderInstanceModel", () => {
   it("returns undefined for an unknown instance", () => {
     expect(
       getDefaultProviderInstanceModel([], ProviderInstanceId.make("removed_instance")),
+    ).toBeUndefined();
+  });
+
+  it("does not give an empty Prime inventory the global Codex default", () => {
+    const providers = [
+      provider({ provider: ProviderDriverKind.make("primeAgent"), instanceId: "primeAgent" }),
+    ];
+
+    expect(
+      getDefaultProviderInstanceModel(providers, ProviderInstanceId.make("primeAgent")),
     ).toBeUndefined();
   });
 });

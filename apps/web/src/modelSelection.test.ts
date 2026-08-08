@@ -12,6 +12,7 @@ function provider(input: {
   provider?: ProviderDriverKind;
   instanceId: string;
   models?: ReadonlyArray<string>;
+  defaultModel?: string;
 }): ServerProvider {
   const driver =
     input.provider ??
@@ -31,6 +32,7 @@ function provider(input: {
       slug,
       name: slug,
       isCustom: false,
+      ...(slug === input.defaultModel ? { isDefault: true } : {}),
       capabilities: {},
     })),
     slashCommands: [],
@@ -55,6 +57,46 @@ function settingsWithProviderInstances(): UnifiedSettings {
 }
 
 describe("instance-scoped model selection", () => {
+  it("uses Prime's live default without crossing into another provider", () => {
+    const providers = [
+      provider({ instanceId: "codex", models: ["gpt-codex"] }),
+      provider({
+        provider: ProviderDriverKind.make("primeAgent"),
+        instanceId: "primeAgent",
+        models: ["prime-first", "prime-default"],
+        defaultModel: "prime-default",
+      }),
+    ];
+
+    expect(
+      resolveAppModelSelectionForInstance(
+        ProviderInstanceId.make("primeAgent"),
+        DEFAULT_UNIFIED_SETTINGS,
+        providers,
+        null,
+      ),
+    ).toBe("prime-default");
+  });
+
+  it("returns no model for an empty Prime inventory", () => {
+    const providers = [
+      provider({ instanceId: "codex", models: ["gpt-codex"] }),
+      provider({
+        provider: ProviderDriverKind.make("primeAgent"),
+        instanceId: "primeAgent",
+      }),
+    ];
+
+    expect(
+      resolveAppModelSelectionForInstance(
+        ProviderInstanceId.make("primeAgent"),
+        DEFAULT_UNIFIED_SETTINGS,
+        providers,
+        null,
+      ),
+    ).toBeNull();
+  });
+
   it("keeps custom models on the provider instance that declared them", () => {
     const providers = [
       provider({

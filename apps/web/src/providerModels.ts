@@ -1,5 +1,4 @@
 import {
-  DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   ProviderDriverKind,
@@ -8,7 +7,11 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { createModelCapabilities, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  createModelCapabilities,
+  getDefaultLiveModel,
+  normalizeModelSlug,
+} from "@t3tools/shared/model";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -89,13 +92,7 @@ export function getProviderModelCapabilities(
 export function getDefaultServerModel(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
-): string {
+): string | undefined {
   const models = getProviderModels(providers, provider);
-  return (
-    models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-    models.find((model) => !model.isCustom)?.slug ??
-    models[0]?.slug ??
-    DEFAULT_MODEL_BY_PROVIDER[provider] ??
-    DEFAULT_MODEL
-  );
+  return getDefaultLiveModel(models)?.slug ?? DEFAULT_MODEL_BY_PROVIDER[provider];
 }

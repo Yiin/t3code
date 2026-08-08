@@ -1780,6 +1780,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               const cursorProvider = providers.find(
                 (provider) => provider.instanceId === ProviderInstanceId.make("cursor"),
               );
+              const primeProvider = providers.find(
+                (provider) => provider.instanceId === ProviderInstanceId.make("primeAgent"),
+              );
 
               assert.deepStrictEqual(providers.map((provider) => provider.instanceId).toSorted(), [
                 "claudeAgent",
@@ -1788,12 +1791,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "grok",
                 "kimi",
                 "opencode",
+                "primeAgent",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);
               assert.strictEqual(cursorProvider?.status, "disabled");
               assert.strictEqual(
                 cursorProvider?.message,
                 "Cursor is disabled in T3 Code settings.",
+              );
+              assert.strictEqual(primeProvider?.availability, "unavailable");
+              assert.strictEqual(primeProvider?.enabled, false);
+              assert.strictEqual(
+                primeProvider?.unavailableReason,
+                "Driver 'primeAgent' is not registered in this build.",
               );
               assert.strictEqual(cursorSpawned, false);
             }).pipe(Effect.provide(runtimeServices));

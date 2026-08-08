@@ -24,6 +24,7 @@ import {
   type ServerSettings,
   type ServerProviderState,
 } from "@t3tools/contracts";
+import { getDefaultLiveModel } from "@t3tools/shared/model";
 
 import { formatProviderDriverKindLabel } from "./providerModels";
 
@@ -278,12 +279,7 @@ export function getDefaultProviderInstanceModel(
 ): string | undefined {
   const entry = getProviderInstanceEntry(providers, instanceId);
   if (!entry) return undefined;
-  return (
-    entry.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-    entry.models.find((model) => !model.isCustom)?.slug ??
-    entry.models[0]?.slug ??
-    DEFAULT_MODEL_BY_PROVIDER[entry.driverKind]
-  );
+  return getDefaultLiveModel(entry.models)?.slug ?? DEFAULT_MODEL_BY_PROVIDER[entry.driverKind];
 }
 
 const isSelectableProviderInstanceEntry = (entry: ProviderInstanceEntry): boolean =>
