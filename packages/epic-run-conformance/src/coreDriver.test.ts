@@ -518,10 +518,18 @@ describe("epic-core conformance", () => {
             null,
             describeDiff(scenario, actual),
           );
+          // A runaway guard, not a performance benchmark. Each scenario
+          // drives real git and bd subprocesses, so this measures host load
+          // as much as it measures the code: at 5 seconds it went red at
+          // 5.6s merely from running beside the rest of the suite, and an
+          // epic run gates while its own workers compete for the same CPU.
+          // Backoff here is configured down to 5ms, so nothing legitimate
+          // approaches this bound; the outer 90s timeout is the real
+          // backstop.
           assert.isBelow(
             (yield* Clock.currentTimeMillis) - startedAt,
-            5_000,
-            `${scenario.name} exceeded 5 seconds`,
+            30_000,
+            `${scenario.name} exceeded 30 seconds`,
           );
         }
       }),
