@@ -94,7 +94,10 @@ for name in "${tests[@]}"; do
   output=$(mktemp "${TMPDIR:-/tmp}/cook-epic-test.XXXXXX")
 
   if [[ "$use_systemd" -eq 1 ]]; then
-    unit="cook-epic-test-${PPID}-${name%.sh}"
+    # $$ (this run's own pid), not $PPID: two all.sh invocations launched by
+    # the same parent — which is what `vp run` does — would otherwise pick the
+    # same unit name, and the second dies instantly with "already loaded".
+    unit="cook-epic-test-$$-${name%.sh}"
     command=(systemd-run --user --wait --collect --pipe --quiet
       --unit "$unit"
       --property "RuntimeMaxSec=${PER_FILE_TIMEOUT_SECONDS}s"

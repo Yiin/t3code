@@ -90,6 +90,18 @@ const conformanceProviders = [
 const transcriptProvider = (driver: string): string =>
   driver === "claudeAgent" ? "claude" : driver;
 
+/**
+ * The only scenarios that assert on `infra:timeout`, and so the only ones
+ * that need a worker deadline short enough to trip. Every other scenario
+ * inheriting a 500 ms budget just races host load: the fixture worker gets
+ * killed mid-write and leaves a dirty tree, which surfaces as a bogus
+ * `child:dirty-worktree` divergence when the suite runs under contention.
+ */
+const TIMEOUT_SCENARIOS = new Set(["infra-failure-budget", "iteration-timeout"]);
+
+const workerDeadlineSeconds = (scenario: ConformanceScenario): number =>
+  TIMEOUT_SCENARIOS.has(scenario.name) ? 0.5 : 15;
+
 const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
   gate: { command: "true", disabled: false },
@@ -101,9 +113,9 @@ const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   },
   supervision: {
     ...DEFAULT_EPIC_RUN_CONFIG.supervision,
-    // The persisted schema stores whole seconds. The dispatcher below uses the
-    // fixture-only 500 ms deadline requested by the conformance contract.
-    workerTimeoutSeconds: 1,
+    // The persisted schema stores whole seconds. The dispatcher below uses
+    // the sub-second deadline for the scenarios that assert on it.
+    workerTimeoutSeconds: Math.max(1, Math.ceil(workerDeadlineSeconds(scenario))),
     stopGraceSeconds: 1,
   },
   server: {
@@ -406,7 +418,7 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
         artifactsDirectory: runDirectory,
         workerCommand: NodePath.join(workspace.binDir, "agent"),
         providerRoutes: providerSupport.routes,
-        timeoutSeconds: 0.5,
+        timeoutSeconds: workerDeadlineSeconds(scenario),
         stopGraceSeconds: 1,
         environment: workspace.env,
       });
