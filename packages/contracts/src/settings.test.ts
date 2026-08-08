@@ -15,6 +15,7 @@ const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
@@ -136,6 +137,87 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
         providerInstances: { "1bad": { driver: "codex" } },
       }),
     ).toThrow();
+  });
+});
+
+describe("ServerSettings Prime Agent defaults", () => {
+  it("hydrates empty and legacy settings with Prime defaults", () => {
+    for (const input of [{}, { providers: {} }]) {
+      const prime = decodeServerSettings(input).providers.primeAgent;
+      expect(prime).toEqual({
+        enabled: true,
+        binaryPath: "prime-agent",
+        launchArgs: [],
+      });
+      expect(prime).not.toHaveProperty("sessionRoot");
+      expect(prime).not.toHaveProperty("customModels");
+    }
+  });
+
+  it("round-trips every Prime field through full settings", () => {
+    const decoded = decodeServerSettings({
+      providers: {
+        primeAgent: {
+          enabled: false,
+          binaryPath: "  /opt/bin/prime-agent  ",
+          launchArgs: ["  --profile  ", "work"],
+          sessionRoot: "  /var/lib/prime/sessions  ",
+        },
+      },
+    });
+
+    expect(decoded.providers.primeAgent).toEqual({
+      enabled: false,
+      binaryPath: "/opt/bin/prime-agent",
+      launchArgs: ["--profile", "work"],
+      sessionRoot: "/var/lib/prime/sessions",
+    });
+    expect(encodeServerSettings(decoded).providers?.primeAgent).toEqual(
+      decoded.providers.primeAgent,
+    );
+  });
+
+  it("round-trips every Prime patch field", () => {
+    const decoded = decodeServerSettingsPatch({
+      providers: {
+        primeAgent: {
+          enabled: false,
+          binaryPath: "  /opt/bin/prime-agent  ",
+          launchArgs: ["  --profile  ", "work"],
+          sessionRoot: "  /var/lib/prime/sessions  ",
+        },
+      },
+    });
+
+    expect(decoded.providers?.primeAgent).toEqual({
+      enabled: false,
+      binaryPath: "/opt/bin/prime-agent",
+      launchArgs: ["--profile", "work"],
+      sessionRoot: "/var/lib/prime/sessions",
+    });
+    expect(encodeServerSettingsPatch(decoded).providers?.primeAgent).toEqual(
+      decoded.providers?.primeAgent,
+    );
+  });
+
+  it("keeps environment on the instance envelope and preserves unknown config", () => {
+    const primeId = ProviderInstanceId.make("primeAgent");
+    const decoded = decodeServerSettings({
+      providerInstances: {
+        primeAgent: {
+          driver: "primeAgent",
+          environment: [{ name: "PRIME_TOKEN", value: "secret", sensitive: true }],
+          config: { futurePrimeField: { enabled: true } },
+        },
+      },
+    });
+
+    expect(decoded.providerInstances[primeId]?.environment).toEqual([
+      { name: "PRIME_TOKEN", value: "secret", sensitive: true },
+    ]);
+    expect(decoded.providerInstances[primeId]?.config).toEqual({
+      futurePrimeField: { enabled: true },
+    });
   });
 });
 

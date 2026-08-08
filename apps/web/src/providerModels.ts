@@ -1,5 +1,4 @@
 import {
-  DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   ProviderDriverKind,
@@ -28,6 +27,13 @@ export function getProviderModels(
   provider: ProviderDriverKind,
 ): ReadonlyArray<ServerProviderModel> {
   return getProviderSnapshot(providers, provider)?.models ?? [];
+}
+
+/** Select the declared live default, or the first live model when none is declared. */
+export function getDefaultLiveModel(
+  models: ReadonlyArray<ServerProviderModel>,
+): ServerProviderModel | undefined {
+  return models.find((model) => model.isDefault === true) ?? models[0];
 }
 
 export function getProviderSnapshot(
@@ -89,13 +95,7 @@ export function getProviderModelCapabilities(
 export function getDefaultServerModel(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
-): string {
+): string | undefined {
   const models = getProviderModels(providers, provider);
-  return (
-    models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-    models.find((model) => !model.isCustom)?.slug ??
-    models[0]?.slug ??
-    DEFAULT_MODEL_BY_PROVIDER[provider] ??
-    DEFAULT_MODEL
-  );
+  return getDefaultLiveModel(models)?.slug ?? DEFAULT_MODEL_BY_PROVIDER[provider];
 }

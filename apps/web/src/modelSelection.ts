@@ -64,7 +64,7 @@ function readInstanceCustomModels(
   }
   const legacyProviders = settings.providers as Record<
     string,
-    { readonly customModels: ReadonlyArray<string> } | undefined
+    { readonly customModels?: ReadonlyArray<string> } | undefined
   >;
   return legacyProviders[driverKind]?.customModels ?? [];
 }
@@ -227,7 +227,7 @@ export function resolveAppModelSelection(
   settings: UnifiedSettings,
   providers: ReadonlyArray<ServerProvider>,
   selectedModel: string | null | undefined,
-): string {
+): string | undefined {
   const resolvedProvider = resolveSelectableProvider(providers, provider);
   const options = getAppModelOptions(settings, providers, resolvedProvider, selectedModel);
   return (
@@ -318,6 +318,9 @@ export function resolveAppModelSelectionState(
   // don't carry over the old provider's model — use the fallback provider's default.
   const selectedModel = keptSelectedProvider ? selection.model : null;
   const model = resolveAppModelSelection(provider, settings, providers, selectedModel);
+  if (!model) {
+    return createModelSelection(defaultInstanceIdForDriver(provider), "", []);
+  }
   const { modelOptionsForDispatch } = getComposerProviderState({
     provider,
     model,

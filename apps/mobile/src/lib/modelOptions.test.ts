@@ -5,6 +5,41 @@ import { ProviderInstanceId, type ServerConfig } from "@t3tools/contracts";
 import { buildModelOptions } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("uses shared Prime metadata and a neutral unknown-driver label", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "primeAgent",
+          driver: "primeAgent",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            { slug: "prime-model", name: "Prime Model", isCustom: false, capabilities: null },
+          ],
+        },
+        {
+          instanceId: "future_local",
+          driver: "futureDriver",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            { slug: "future-model", name: "Future Model", isCustom: false, capabilities: null },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    const options = buildModelOptions(config, null);
+    expect(options.find((option) => option.providerDriver === "primeAgent")?.providerLabel).toBe(
+      "Prime Agent",
+    );
+    expect(options.find((option) => option.providerDriver === "futureDriver")?.providerLabel).toBe(
+      "future_local",
+    );
+  });
+
   it("normalizes a legacy fallback selection against current capabilities", () => {
     const config = {
       providers: [
