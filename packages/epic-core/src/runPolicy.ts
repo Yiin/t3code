@@ -9,6 +9,10 @@ import type { EpicRunConfigProvenance } from "@t3tools/contracts";
 
 import type { PersistedEpicRun } from "./ports/RunJournal.ts";
 
+/** Loop-scheduler polling defaults shared by the server runner and the terminal cook. */
+export const DEFAULT_POOL_POLL_INTERVAL_MS = 2_000;
+export const DEFAULT_POOL_QUIET_PERIOD_MS = 1_000;
+
 export interface PoolPolicySeed {
   readonly iterationTimeoutMs: number;
   readonly pollIntervalMs: number;

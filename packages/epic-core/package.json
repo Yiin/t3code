@@ -119,9 +119,33 @@
       "types": "./src/adapters/FileRunJournal.ts",
       "import": "./src/adapters/FileRunJournal.ts"
     },
+    "./adapters/FileMergeQueueStore": {
+      "types": "./src/adapters/FileMergeQueueStore.ts",
+      "import": "./src/adapters/FileMergeQueueStore.ts"
+    },
+    "./adapters/TerminalPoolWorkspace": {
+      "types": "./src/adapters/TerminalPoolWorkspace.ts",
+      "import": "./src/adapters/TerminalPoolWorkspace.ts"
+    },
+    "./adapters/TerminalPoolDispatch": {
+      "types": "./src/adapters/TerminalPoolDispatch.ts",
+      "import": "./src/adapters/TerminalPoolDispatch.ts"
+    },
+    "./adapters/TerminalMergeDrain": {
+      "types": "./src/adapters/TerminalMergeDrain.ts",
+      "import": "./src/adapters/TerminalMergeDrain.ts"
+    },
     "./adapters/ProcessBacklog": {
       "types": "./src/adapters/ProcessBacklog.ts",
       "import": "./src/adapters/ProcessBacklog.ts"
+    },
+    "./adapters/ProcessPoolBacklog": {
+      "types": "./src/adapters/ProcessPoolBacklog.ts",
+      "import": "./src/adapters/ProcessPoolBacklog.ts"
+    },
+    "./adapters/ProcessPoolVcs": {
+      "types": "./src/adapters/ProcessPoolVcs.ts",
+      "import": "./src/adapters/ProcessPoolVcs.ts"
     },
     "./adapters/ProcessVcs": {
       "types": "./src/adapters/ProcessVcs.ts",

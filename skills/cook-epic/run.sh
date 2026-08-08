@@ -16,6 +16,7 @@
 #   COOKEPIC_NO_GATE           1 = land unverified            -> gate.disabled
 #   COOKEPIC_NO_PUSH           1 = land without pushing       -> vcs.noPush
 #   COOKEPIC_SIBLINGS         space-separated sibling repos  -> parallel.siblings
+#   COOKEPIC_WORKERS          parallel worker count          -> parallel.workers
 #   COOKEPIC_MAX_DISPATCHES    global spawn cap               -> limits.maxIterations
 #   COOKEPIC_MAX_ATTEMPTS      attempts per child             -> limits.maxAttemptsPerChild
 #   COOKEPIC_WORKER_TIMEOUT    worker timeout, seconds        -> supervision.workerTimeoutSeconds
@@ -26,8 +27,10 @@
 #   COOKEPIC_BIN               harness binary override
 #   COOKEPIC_WORKER_CMD        test hook: run this instead of a harness
 #   COOKEPIC_T3_BIN            t3 entrypoint override
-#   COOKEPIC_SEQUENTIAL        must be 1 or unset; the core cook loop is sequential
-# Every other COOKEPIC_* knob refuses to start, loudly.
+#   COOKEPIC_SEQUENTIAL        1 = force one worker in the base checkout -> execution.sequential
+# COOKEPIC_WORKERS > 1 selects the parallel pool loop (per-worker worktrees,
+# merge queue); unset means sequential. Every other COOKEPIC_* knob refuses to
+# start, loudly.
 # docs/epic-runs-rollout.md lists each dropped knob and its reason.
 #
 # loop.log, mailbox.jsonl, summary.md, and the STOP control file keep their
@@ -47,7 +50,7 @@ fail() { # <message> <help>
   exit 2
 }
 
-for name in COOKEPIC_WORKERS COOKEPIC_BUDGET_USD \
+for name in COOKEPIC_BUDGET_USD \
   COOKEPIC_IDLE_THRESHOLD COOKEPIC_INSPECTOR_TIMEOUT \
   COOKEPIC_INSPECT_RETRY_DELAY COOKEPIC_INSPECT_MIN_DELAY \
   COOKEPIC_INSPECT_MAX_DELAY COOKEPIC_RATE_LIMIT_BACKOFF \
@@ -68,8 +71,17 @@ done
 
 [ -n "${COOKEPIC_EPIC:-}" ] || fail 'COOKEPIC_EPIC is required' 'set it to the beads epic id'
 if [[ -v COOKEPIC_SEQUENTIAL && -n ${COOKEPIC_SEQUENTIAL} && ${COOKEPIC_SEQUENTIAL} != 1 ]]; then
-  fail 'the shared core cook loop is sequential; COOKEPIC_SEQUENTIAL must be 1 or unset' \
-    'set COOKEPIC_SEQUENTIAL=1 or unset it'
+  fail 'COOKEPIC_SEQUENTIAL must be 1 or unset' \
+    'set COOKEPIC_SEQUENTIAL=1 to force sequential execution, or unset it'
+fi
+if [[ -v COOKEPIC_WORKERS && -n ${COOKEPIC_WORKERS} ]]; then
+  [[ ${COOKEPIC_WORKERS} =~ ^[1-9][0-9]*$ ]] \
+    || fail "COOKEPIC_WORKERS must be a positive integer, got '${COOKEPIC_WORKERS}'" \
+      'set COOKEPIC_WORKERS to a positive integer or unset it'
+  if [[ -v COOKEPIC_SEQUENTIAL && -n ${COOKEPIC_SEQUENTIAL} && ${COOKEPIC_WORKERS} -gt 1 ]]; then
+    fail 'COOKEPIC_SEQUENTIAL=1 contradicts COOKEPIC_WORKERS>1' \
+      'unset COOKEPIC_SEQUENTIAL for parallel execution, or unset COOKEPIC_WORKERS for sequential'
+  fi
 fi
 if [[ -v COOKEPIC_NO_PUSH && -n ${COOKEPIC_NO_PUSH} && ${COOKEPIC_NO_PUSH} != 1 ]]; then
   fail 'COOKEPIC_NO_PUSH must be exactly 1 when set' \
@@ -93,7 +105,7 @@ for name in COOKEPIC_T3_BIN COOKEPIC_GATE COOKEPIC_NO_GATE COOKEPIC_NO_PUSH \
   COOKEPIC_MAX_DISPATCHES COOKEPIC_MAX_ATTEMPTS COOKEPIC_WORKER_TIMEOUT \
   COOKEPIC_STOP_GRACE COOKEPIC_MODEL COOKEPIC_ORIENTATION_FILE \
   COOKEPIC_HARNESS COOKEPIC_BIN COOKEPIC_WORKER_CMD COOKEPIC_PERMISSION_MODE \
-  COOKEPIC_SEQUENTIAL; do
+  COOKEPIC_SEQUENTIAL COOKEPIC_WORKERS COOKEPIC_SIBLINGS; do
   if [[ -v $name && -z ${!name} ]]; then unset "$name"; fi
 done
 

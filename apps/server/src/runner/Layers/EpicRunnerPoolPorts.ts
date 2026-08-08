@@ -33,8 +33,6 @@ import type {
   PoolRunEventsShape,
   PoolRunJournalShape,
   PoolTimings,
-  PoolVcsShape,
-  ReadyFrontierSelection,
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import type { PoolDispatchShape } from "@t3tools/epic-core/ports/PoolDispatch";
 import {
@@ -48,7 +46,6 @@ import {
   type PersistedEpicRun,
   type PersistedEpicRunIteration,
 } from "@t3tools/epic-core/ports/RunJournal";
-import { BacklogError } from "@t3tools/epic-core/ports/Backlog";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 import {
   decideGraceStep,
@@ -65,6 +62,7 @@ import { drainMergeQueue } from "@t3tools/epic-core/MergeQueue";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
 import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
+import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import { MergeQueuePortError } from "@t3tools/epic-core/ports/MergeQueue";
 import {
   makeSiblingResolver,
@@ -320,338 +318,6 @@ const IssueEvidence = Schema.Struct({
 const decodeIssueEvidence = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Union([IssueEvidence, Schema.Array(IssueEvidence)])),
 );
-const decodeEpicDescription = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Union([
-      Schema.Struct({ description: Schema.String }),
-      Schema.Array(Schema.Struct({ description: Schema.String })),
-    ]),
-  ),
-);
-const ReadyChildren = Schema.fromJsonString(
-  Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      parent: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
-    }),
-  ),
-);
-const decodeReadyChildren = Schema.decodeUnknownEffect(ReadyChildren);
-const EpicChildren = Schema.fromJsonString(
-  Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      status: Schema.String,
-    }),
-  ),
-);
-const decodeEpicChildren = Schema.decodeUnknownEffect(EpicChildren);
-
-/**
- * The `bd` probes the pool loop reads its backlog through. Evidence reads
- * never fail: an unreadable issue yields conservative nulls, exactly like the
- * pre-extraction runner, and the loop treats unknown as unproven.
- */
-export const makeServerPoolBacklog = (
-  processRunner: ProcessRunner.ProcessRunner["Service"],
-): PoolBacklogShape => {
-  const readyFrontier: PoolBacklogShape["readyFrontier"] = (cwd, epicId) =>
-    processRunner
-      .run({
-        command: "bd",
-        args: ["ready", "--parent", epicId, "--json"],
-        cwd,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new BacklogError({
-              operation: "bd.ready",
-              detail: "Could not read the epic's ready children",
-              cause,
-            }),
-        ),
-        Effect.flatMap((output) => {
-          if (output.code !== 0) {
-            return Effect.fail(
-              new BacklogError({
-                operation: "bd.ready",
-                detail: output.stderr.trim() || `bd ready exited with code ${output.code}`,
-              }),
-            );
-          }
-          return decodeReadyChildren(output.stdout).pipe(
-            Effect.mapError(
-              (cause) =>
-                new BacklogError({
-                  operation: "bd.ready",
-                  detail: `Invalid bd ready output: ${String(cause)}`,
-                  cause,
-                }),
-            ),
-            Effect.flatMap((value): Effect.Effect<ReadyFrontierSelection, BacklogError> => {
-              if (value.length === 0)
-                return Effect.succeed<ReadyFrontierSelection>({ _tag: "empty" });
-
-              // `bd ready --parent` owns the scope. Some bd rows omit the
-              // parent value, which decodes to null and is usable. Reject
-              // only an explicit parent that names another issue.
-              const direct = value.filter(
-                (issue) => issue.parent === null || issue.parent === epicId,
-              );
-              if (direct.length === 0) {
-                return Effect.succeed<ReadyFrontierSelection>({
-                  _tag: "unrecognised",
-                  candidateIds: value.map((issue) => issue.id),
-                });
-              }
-              const invalid = direct.find((issue) => issue.id.trim().length === 0);
-              return invalid !== undefined
-                ? Effect.fail(
-                    new BacklogError({
-                      operation: "bd.ready",
-                      detail: "Invalid bd ready output: a usable ready child has no id",
-                    }),
-                  )
-                : Effect.succeed<ReadyFrontierSelection>({
-                    _tag: "children",
-                    issueIds: direct.map((issue) => issue.id),
-                  });
-            }),
-          );
-        }),
-      );
-
-  const countOpenChildren: PoolBacklogShape["countOpenChildren"] = (cwd, epicId) =>
-    processRunner
-      .run({
-        command: "bd",
-        args: ["list", "--parent", epicId, "--all", "--flat", "--json"],
-        cwd,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new BacklogError({
-              operation: "bd.list",
-              detail: "Could not read the epic's children",
-              cause,
-            }),
-        ),
-        Effect.flatMap((output) => {
-          if (output.code !== 0) {
-            return Effect.fail(
-              new BacklogError({
-                operation: "bd.list",
-                detail: output.stderr.trim() || `bd list exited with code ${output.code}`,
-              }),
-            );
-          }
-          return decodeEpicChildren(output.stdout).pipe(
-            Effect.mapError(
-              (cause) =>
-                new BacklogError({
-                  operation: "bd.list",
-                  detail: `Invalid bd list output: ${String(cause)}`,
-                  cause,
-                }),
-            ),
-            Effect.map(
-              (children) =>
-                children.filter((child) => child.id !== epicId && child.status !== "closed").length,
-            ),
-          );
-        }),
-      );
-
-  const emptyIssueEvidence = {
-    status: null,
-    title: null,
-    commentCount: 0,
-  } as const;
-
-  /**
-   * The child issue evidence available from one `bd show`, with conservative
-   * defaults when the command fails or its output cannot be decoded. Never
-   * fails the caller: unknown status and comment count cannot prove work.
-   */
-  const issueEvidence: PoolBacklogShape["issueEvidence"] = (cwd, issueId) =>
-    processRunner.run({ command: "bd", args: ["show", issueId, "--json"], cwd }).pipe(
-      Effect.map((shown) => {
-        if (shown.code !== 0) return emptyIssueEvidence;
-        const decoded = decodeIssueEvidence(shown.stdout);
-        if (Option.isNone(decoded)) return emptyIssueEvidence;
-        const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
-        if (value === undefined) return emptyIssueEvidence;
-        return {
-          status: value.status ?? null,
-          title: value.title ?? null,
-          commentCount: value.comment_count,
-        };
-      }),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("epic.runner.issue-evidence-read-failed", { cwd, issueId, cause }).pipe(
-          Effect.as(emptyIssueEvidence),
-        ),
-      ),
-    );
-
-  /**
-   * Whether findings in the bead are this child's deliverable. A title
-   * prefix is authoritative; otherwise a failed label read means false.
-   */
-  const issueIsResearch: PoolBacklogShape["issueIsResearch"] = (cwd, issueId, title) => {
-    if (title?.startsWith("Research:") === true) return Effect.succeed(true);
-    return processRunner.run({ command: "bd", args: ["label", "list", issueId], cwd }).pipe(
-      Effect.map((listed) => listed.code === 0 && /^\s*-\s*research\s*$/imu.test(listed.stdout)),
-      Effect.catchCause(() => Effect.succeed(false)),
-    );
-  };
-
-  const epicDescription: PoolBacklogShape["epicDescription"] = (cwd, epicId) =>
-    processRunner.run({ command: "bd", args: ["show", epicId, "--json"], cwd }).pipe(
-      Effect.flatMap((shown) => {
-        if (shown.code !== 0) {
-          return Effect.logWarning("epic.runner.epic-description-read-failed", {
-            cwd,
-            epicId,
-            detail: shown.stderr.trim() || `bd show exited with code ${shown.code}`,
-          }).pipe(Effect.as(null));
-        }
-        const decoded = decodeEpicDescription(shown.stdout);
-        const value = Option.isSome(decoded)
-          ? Array.isArray(decoded.value)
-            ? decoded.value[0]
-            : decoded.value
-          : undefined;
-        if (value === undefined) {
-          return Effect.logWarning("epic.runner.epic-description-decode-failed", {
-            cwd,
-            epicId,
-          }).pipe(Effect.as(null));
-        }
-        return Effect.succeed<string | null>(value.description);
-      }),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("epic.runner.epic-description-read-failed", {
-          cwd,
-          epicId,
-          cause,
-        }).pipe(Effect.as(null)),
-      ),
-    );
-
-  /**
-   * Best-effort: un-claim a child issue the loop's own exit just stranded.
-   *
-   * An iteration's agent claims its child itself and is expected to close it
-   * before the turn ends. When the *run* instead exits without that happening
-   * the child is left `in_progress` with no worker attached, and `bd ready`
-   * filters on status, so a phantom claim silently stalls the epic. The
-   * child's *current* status is re-read and only a standing claim is reopened,
-   * so the happy path (the agent already closed it) and a legitimate handoff
-   * to another run are both untouched. Returns whether a claim was released.
-   *
-   * Never fails the caller: this runs from terminal paths (finalizers,
-   * restart bookkeeping) that have nowhere useful to send an error.
-   */
-  const releaseClaimedChild: PoolBacklogShape["releaseClaimedChild"] = (cwd, issueId) =>
-    issueEvidence(cwd, issueId).pipe(
-      Effect.flatMap((evidence) => {
-        if (evidence.status !== "in_progress") return Effect.succeed(false);
-        return processRunner
-          .run({
-            command: "bd",
-            args: ["update", issueId, "--status", "open", "--assignee", ""],
-            cwd,
-          })
-          .pipe(Effect.as(true));
-      }),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("epic.runner.release-claimed-child-failed", { cwd, issueId, cause }).pipe(
-          Effect.as(false),
-        ),
-      ),
-    );
-
-  return {
-    readyFrontier,
-    countOpenChildren,
-    issueEvidence,
-    issueIsResearch,
-    epicDescription,
-    releaseClaimedChild,
-  };
-};
-
-/** Never-failing git probes; `null` never counts as progress. */
-export const makeServerPoolVcs = (
-  processRunner: ProcessRunner.ProcessRunner["Service"],
-): PoolVcsShape => ({
-  /**
-   * The repo's `HEAD`, or `null` when it cannot be read (no repo, no commits,
-   * git missing). `null` never counts as movement, mirroring terminal ralph's
-   * `head_after != none` guard (`run-legacy.sh:155`).
-   */
-  headCommit: (cwd: string) =>
-    processRunner
-      .run({
-        command: "git",
-        args: ["rev-parse", "--verify", "-q", "HEAD"],
-        cwd,
-        timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
-      })
-      .pipe(
-        Effect.map((output) => {
-          const sha = output.stdout.trim();
-          return output.code === 0 && sha.length > 0 ? sha : null;
-        }),
-        Effect.catchCause((cause) =>
-          Effect.logDebug("epic.runner.head-read-failed", { cwd, cause }).pipe(Effect.as(null)),
-        ),
-      ),
-
-  /**
-   * The repo's current porcelain status, verbatim, or `null` when git cannot
-   * read it. Empty stdout is a valid clean-worktree fingerprint. `null`
-   * never counts as progress.
-   */
-  worktreeFingerprint: (cwd: string) =>
-    processRunner
-      .run({
-        command: "git",
-        args: ["status", "--porcelain=v1"],
-        cwd,
-        timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
-      })
-      .pipe(
-        Effect.map((output) => (output.code === 0 ? output.stdout : null)),
-        Effect.catchCause((cause) =>
-          Effect.logDebug("epic.runner.worktree-read-failed", { cwd, cause }).pipe(Effect.as(null)),
-        ),
-      ),
-
-  commitsAhead: (input) =>
-    processRunner
-      .run({
-        command: "git",
-        args: ["rev-list", "--count", `${input.base}..${input.branch}`],
-        cwd: input.cwd,
-        timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
-      })
-      .pipe(
-        Effect.map((output) =>
-          output.code === 0 ? Number.parseInt(output.stdout.trim(), 10) : null,
-        ),
-        Effect.catchCause((cause) =>
-          Effect.logDebug("epic.runner.branch-commit-read-failed", {
-            cwd: input.cwd,
-            branch: input.branch,
-            cause,
-          }).pipe(Effect.as(null)),
-        ),
-      ),
-});
 
 /**
  * The durable run store behind the loop's journal port. The crash-safe
@@ -851,7 +517,7 @@ export const makeServerPoolWorkspace = (deps: {
       if (Option.isSome(persisted)) return persisted.value;
 
       const baseBranch = yield* readCurrentBranch(run.cwd);
-      const vcs = makeServerPoolVcs(processRunner);
+      const vcs = makeProcessPoolVcs(processRunner);
       const lastAcceptedHead = yield* vcs.headCommit(run.cwd);
       if (lastAcceptedHead === null) {
         return yield* new EpicRunnerDispatchError({
@@ -1883,7 +1549,7 @@ export const makeServerPoolDispatch = (deps: {
     crypto,
     workerScopeRegistry,
   } = deps;
-  const vcs = makeServerPoolVcs(processRunner);
+  const vcs = makeProcessPoolVcs(processRunner);
 
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(

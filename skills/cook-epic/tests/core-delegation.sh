@@ -128,10 +128,10 @@ unsupported_marker="$resolution_root/unsupported-called"
 make_capture_binary "$explicit" unsupported
 if CAPTURE="$unsupported_marker" run_core_shim "$checkout/skills/cook-epic/run.sh" \
   "$resolution_root/unsupported-run" "$resolution_root/unsupported.out" "$path_bin" \
-  COOKEPIC_T3_BIN="$explicit" COOKEPIC_WORKERS=2; then
+  COOKEPIC_T3_BIN="$explicit" COOKEPIC_BUDGET_USD=10; then
   fail 'unsupported core knob exited successfully'
 fi
-assert_contains "$resolution_root/unsupported.out" 'COOKEPIC_WORKERS is not supported'
+assert_contains "$resolution_root/unsupported.out" 'COOKEPIC_BUDGET_USD is not supported'
 assert_not_exists "$unsupported_marker"
 
 empty_marker="$resolution_root/empty-unsupported.args"
@@ -141,6 +141,28 @@ CAPTURE="$empty_marker" run_core_shim "$checkout/skills/cook-epic/run.sh" \
   "$path_bin" COOKEPIC_T3_BIN="$explicit" COOKEPIC_WORKERS= \
   || fail 'empty unsupported knob did not act as unset'
 assert_first_line "$empty_marker" empty-unsupported
+
+workers_marker="$resolution_root/workers.args"
+make_capture_binary "$explicit" workers
+CAPTURE="$workers_marker" run_core_shim "$checkout/skills/cook-epic/run.sh" \
+  "$resolution_root/workers-run" "$resolution_root/workers.out" "$path_bin" \
+  COOKEPIC_T3_BIN="$explicit" COOKEPIC_WORKERS=2 COOKEPIC_SIBLINGS='/tmp/a /tmp/b' \
+  || fail 'supported parallel knobs failed validation'
+assert_first_line "$workers_marker" workers
+
+if run_core_shim "$checkout/skills/cook-epic/run.sh" "$resolution_root/bad-workers-run" \
+  "$resolution_root/bad-workers.out" "$path_bin" \
+  COOKEPIC_T3_BIN="$explicit" COOKEPIC_WORKERS=abc; then
+  fail 'invalid COOKEPIC_WORKERS exited successfully'
+fi
+assert_contains "$resolution_root/bad-workers.out" 'COOKEPIC_WORKERS must be a positive integer'
+
+if run_core_shim "$checkout/skills/cook-epic/run.sh" "$resolution_root/contradiction-run" \
+  "$resolution_root/contradiction.out" "$path_bin" \
+  COOKEPIC_T3_BIN="$explicit" COOKEPIC_WORKERS=2 COOKEPIC_SEQUENTIAL=1; then
+  fail 'contradictory execution knobs exited successfully'
+fi
+assert_contains "$resolution_root/contradiction.out" 'COOKEPIC_SEQUENTIAL=1 contradicts COOKEPIC_WORKERS>1'
 
 make_fixture() {
   local root="$1" repo fake_home
@@ -171,6 +193,11 @@ child="${COOKEPIC_CHILD:-}"
 if [ -z "$child" ]; then
   child=$(sed -n 's/^ASSIGNED_CHILD_ID=//p' "${1:?prompt path}")
 fi
+if [ -z "$child" ]; then
+  # The pool prompt carries the child inline instead of the marker.
+  child=$(awk '/^Cook exactly / { gsub(/`/, ""); print $3 }' "${1:?prompt path}")
+fi
+[ -n "$child" ] || { echo 'no child in prompt' >&2; exit 1; }
 printf '%s\n' "$child" >> work.txt
 git add work.txt
 git commit -qm "cook $child"
@@ -182,6 +209,7 @@ EOF
 
 run_fixture() {
   local root="$1" repo epic run_dir
+  shift
   repo="$root/repo"
   epic="$(<"$root/epic-id")"
   run_dir="$root/run"
@@ -191,9 +219,9 @@ run_fixture() {
     env -u BEADS_DIR -u BEADS_DOLT_SERVER_HOST HOME="$root/home" \
       XDG_CONFIG_HOME="$root/config" COOKEPIC_EPIC="$epic" \
       COOKEPIC_T3_BIN="$TMP_ROOT/t3-source" COOKEPIC_HARNESS=worker-cmd \
-      COOKEPIC_WORKER_CMD="$root/worker.sh" COOKEPIC_SEQUENTIAL=1 \
+      COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_NO_GATE=1 COOKEPIC_NO_PUSH=1 COOKEPIC_MAX_DISPATCHES=1 \
-      COOKEPIC_MAX_ATTEMPTS=1 COOKEPIC_WORKER_TIMEOUT=30 \
+      COOKEPIC_MAX_ATTEMPTS=1 COOKEPIC_WORKER_TIMEOUT=30 "$@" \
       "$RUNNER" "$run_dir"
   ) > "$root/stdout" 2>&1
   local rc=$?
@@ -215,9 +243,27 @@ chmod +x "$TMP_ROOT/t3-source"
 
 core_root="$TMP_ROOT/core"
 make_fixture "$core_root"
-run_fixture "$core_root"
+run_fixture "$core_root" COOKEPIC_SEQUENTIAL=1
 assert_contains "$core_root/final-state.json" '"status": "closed"'
 jq -e '.status == "done"' "$core_root/run/run.json" >/dev/null \
   || fail 'shared core did not record a done run'
+
+parallel_root="$TMP_ROOT/parallel"
+make_fixture "$parallel_root"
+run_fixture "$parallel_root" COOKEPIC_WORKERS=2
+assert_contains "$parallel_root/final-state.json" '"status": "closed"'
+jq -e '.status == "done" and .config.parallel.workers == 2' \
+  "$parallel_root/run/run.json" >/dev/null \
+  || fail 'parallel cook did not record a done run with two workers'
+# The child commit landed on the base branch through the merge queue, and the
+# integration state is released. One landed child is three commits: the base,
+# the child's, and the queue's merge commit.
+[ "$(git -C "$parallel_root/repo" rev-list --count HEAD)" = 3 ] \
+  || fail 'parallel cook did not land the child commit on the base branch'
+assert_not_exists "$parallel_root/run/merge-queue.json"
+assert_not_exists "$parallel_root/run/worktrees"
+if [ -n "$(git -C "$parallel_root/repo" branch --list 'cook-epic-integration-*')" ]; then
+  fail 'parallel cook left its integration branch behind'
+fi
 
 echo 'core delegation tests passed'

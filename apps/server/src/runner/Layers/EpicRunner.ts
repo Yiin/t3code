@@ -34,12 +34,19 @@ import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
 import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
 import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
+import { makeProcessPoolBacklog } from "@t3tools/epic-core/adapters/ProcessPoolBacklog";
+import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import {
   runParallelEpicLoop,
   type ParallelEpicLoopPorts,
   type PoolSchedulerEvent,
 } from "@t3tools/epic-core/ParallelEpicLoop";
-import { makePoolPolicy, type PoolPolicySeed } from "@t3tools/epic-core/runPolicy";
+import {
+  DEFAULT_POOL_POLL_INTERVAL_MS,
+  DEFAULT_POOL_QUIET_PERIOD_MS,
+  makePoolPolicy,
+  type PoolPolicySeed,
+} from "@t3tools/epic-core/runPolicy";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -74,17 +81,13 @@ import {
   makeEpicRunReadModel,
   makeReadOrientation,
   makeServerMergeDrain,
-  makeServerPoolBacklog,
   makeServerPoolDispatch,
   makeServerPoolJournal,
-  makeServerPoolVcs,
   makeServerPoolWorkspace,
 } from "./EpicRunnerPoolPorts.ts";
 
 export { assembleIterationPrompt } from "@t3tools/epic-core/ParallelEpicLoop";
 
-const DEFAULT_POLL_INTERVAL_MS = 2_000;
-const DEFAULT_QUIET_PERIOD_MS = 1_000;
 /** A provider degradation influences automatic launches for one hour. */
 const DEFAULT_PROVIDER_DEGRADATION_TTL_MS = 60 * 60 * 1000;
 /** How long a resume waits for a dying loop to release the run's own lock. */
@@ -144,8 +147,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     );
     const policySeed: PoolPolicySeed = Object.freeze({
       iterationTimeoutMs: Math.max(1, options?.iterationTimeoutMs ?? DEFAULT_ITERATION_TIMEOUT_MS),
-      pollIntervalMs: Math.max(1, options?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS),
-      quietPeriodMs: Math.max(1, options?.quietPeriodMs ?? DEFAULT_QUIET_PERIOD_MS),
+      pollIntervalMs: Math.max(1, options?.pollIntervalMs ?? DEFAULT_POOL_POLL_INTERVAL_MS),
+      quietPeriodMs: Math.max(1, options?.quietPeriodMs ?? DEFAULT_POOL_QUIET_PERIOD_MS),
       retryBaseDelayMs: seedRetryBaseDelayMs,
       retryMaxDelayMs: Math.max(
         seedRetryBaseDelayMs,
@@ -192,7 +195,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const transitions = yield* Semaphore.make(1);
     const withTransition = transitions.withPermits(1);
 
-    const backlog = makeServerPoolBacklog(processRunner);
+    const backlog = makeProcessPoolBacklog(processRunner);
     const readModel = makeEpicRunReadModel({
       store,
       processRunner,
@@ -224,7 +227,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         workerScopeRegistry,
       }),
       mergeDrain: makeServerMergeDrain({ store, processRunner, fileSystem, path, gitVcsDriver }),
-      vcs: makeServerPoolVcs(processRunner),
+      vcs: makeProcessPoolVcs(processRunner),
       providerInventory: Option.isNone(providerRegistry)
         ? null
         : { getProviders: providerRegistry.value.getProviders },

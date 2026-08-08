@@ -1,4 +1,5 @@
 /** A schema-validated, atomic file journal for terminal epic runs. */
+import { ThreadId, epicRunIterationThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -6,6 +7,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import type { PoolRunJournalShape } from "../ParallelEpicLoop.ts";
 import {
   PersistedEpicRun,
   PersistedEpicRunIteration,
@@ -40,6 +42,51 @@ const decodeIterationJson = Schema.decodeUnknownEffect(
 );
 const encodeIterationJson = Schema.encodeEffect(Schema.fromJsonString(PersistedEpicRunIteration));
 
+/** One provider the pool loop parked, keyed by provider instance id. */
+const ProviderDegradations = Schema.Record(
+  Schema.String,
+  Schema.Struct({ failureReason: Schema.String, degradedAt: Schema.String }),
+);
+const decodeProviderDegradations = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ProviderDegradations),
+);
+const encodeProviderDegradations = Schema.encodeEffect(Schema.fromJsonString(ProviderDegradations));
+
+/**
+ * Crash-safe replace of one file inside `directory`: write a temporary
+ * sibling, fsync it, rename over the target, fsync the directory.
+ */
+const writeAtomically = (
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  directory: string,
+  filePath: string,
+  contents: string,
+) =>
+  Effect.gen(function* () {
+    yield* fileSystem.makeDirectory(directory, { recursive: true });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          directory,
+          prefix: `${path.basename(filePath)}.`,
+        });
+        const temporaryPath = path.join(temporaryDirectory, "contents.tmp");
+        const file = yield* fileSystem.open(temporaryPath, { flag: "wx" });
+        const bytes = new TextEncoder().encode(contents);
+        if (bytes.byteLength > 0) yield* file.writeAll(bytes);
+        yield* file.sync;
+        yield* fileSystem.rename(temporaryPath, filePath);
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const opened = yield* fileSystem.open(directory, { flag: "r" });
+            yield* opened.sync;
+          }),
+        );
+      }),
+    );
+  });
+
 export const make = (options: FileRunJournalOptions) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -57,26 +104,11 @@ export const make = (options: FileRunJournalOptions) =>
       );
     });
 
-    const writeAtomically = Effect.fn("FileRunJournal.writeAtomically")(function* (
+    const writeRunAtomically = Effect.fn("FileRunJournal.writeAtomically")(function* (
       filePath: string,
       contents: string,
     ) {
-      yield* fileSystem.makeDirectory(options.runDirectory, { recursive: true });
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const temporaryDirectory = yield* fileSystem.makeTempDirectoryScoped({
-            directory: options.runDirectory,
-            prefix: `${path.basename(filePath)}.`,
-          });
-          const temporaryPath = path.join(temporaryDirectory, "contents.tmp");
-          const file = yield* fileSystem.open(temporaryPath, { flag: "wx" });
-          const bytes = new TextEncoder().encode(contents);
-          if (bytes.byteLength > 0) yield* file.writeAll(bytes);
-          yield* file.sync;
-          yield* fileSystem.rename(temporaryPath, filePath);
-          yield* syncRunDirectory();
-        }),
-      );
+      yield* writeAtomically(fileSystem, path, options.runDirectory, filePath, contents);
     });
 
     const createAtomically = Effect.fn("FileRunJournal.createAtomically")(function* (
@@ -154,7 +186,7 @@ export const make = (options: FileRunJournalOptions) =>
             detail: `Run directory belongs to ${current.value.runId}, not ${run.runId}`,
           });
         }
-        yield* writeAtomically(runPath, yield* encodeRunJson(run));
+        yield* writeRunAtomically(runPath, yield* encodeRunJson(run));
       }).pipe(Effect.mapError(journalError("saveRun")));
 
     const getRun: RunJournalShape["getRun"] = (runId) =>
@@ -209,7 +241,7 @@ export const make = (options: FileRunJournalOptions) =>
           headAfter: input.headAfter,
           finishedAt: input.finishedAt,
         };
-        yield* writeAtomically(filePath, yield* encodeIterationJson(updated));
+        yield* writeRunAtomically(filePath, yield* encodeIterationJson(updated));
       }).pipe(Effect.mapError(journalError("updateIteration")));
 
     const listIterations: RunJournalShape["listIterations"] = (runId) =>
@@ -252,3 +284,95 @@ export const make = (options: FileRunJournalOptions) =>
   });
 
 export const layer = (options: FileRunJournalOptions) => Layer.effect(RunJournal, make(options));
+
+/**
+ * The pool variant of the file journal: the sequential shape plus the atomic
+ * iteration allocation and provider-degradation writes
+ * `runParallelEpicLoop` needs. Iteration allocation lists, then creates
+ * exclusively (a hard link fails on a collision); the loop calls it under its
+ * transition semaphore, so the read-then-create gap cannot race in the
+ * single-process terminal coordinator. Provider degradations persist to
+ * `provider-degradations.json` so a terminal run leaves the same audit trail
+ * the server store keeps.
+ */
+export const makePool = (options: FileRunJournalOptions) =>
+  Effect.gen(function* () {
+    const base = yield* make(options);
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const degradationsPath = path.join(options.runDirectory, "provider-degradations.json");
+
+    const allocateIteration: PoolRunJournalShape["allocateIteration"] = (input) =>
+      Effect.gen(function* () {
+        const iterations = yield* base.listIterations(input.runId);
+        const iterationIndex = iterations.reduce(
+          (next, iteration) => Math.max(next, iteration.iterationIndex + 1),
+          0,
+        );
+        // The deterministic thread id is a cross-side contract: the pool loop
+        // derives the same id from the returned index.
+        yield* base.appendIteration({
+          runId: input.runId,
+          iterationIndex,
+          threadId: ThreadId.make(epicRunIterationThreadId({ runId: input.runId, iterationIndex })),
+          issueId: input.issueId,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: input.startedAt,
+          finishedAt: null,
+        });
+        return iterationIndex;
+      }).pipe(Effect.mapError(journalError("allocateIteration")));
+
+    const readDegradations = Effect.fn("FileRunJournal.readDegradations")(function* () {
+      if (!(yield* fileSystem.exists(degradationsPath))) return {};
+      return yield* decodeProviderDegradations(yield* fileSystem.readFileString(degradationsPath));
+    });
+
+    const writeDegradations = Effect.fn("FileRunJournal.writeDegradations")(function* (
+      degradations: Schema.Schema.Type<typeof ProviderDegradations>,
+    ) {
+      yield* writeAtomically(
+        fileSystem,
+        path,
+        options.runDirectory,
+        degradationsPath,
+        yield* encodeProviderDegradations(degradations),
+      );
+    });
+
+    const upsertProviderDegradation: PoolRunJournalShape["upsertProviderDegradation"] = (input) =>
+      Effect.gen(function* () {
+        const degradations = yield* readDegradations();
+        yield* writeDegradations({
+          ...degradations,
+          [input.providerInstanceId]: {
+            failureReason: input.failureReason,
+            degradedAt: input.degradedAt,
+          },
+        });
+      }).pipe(Effect.mapError(journalError("upsertProviderDegradation")));
+
+    const clearProviderDegradation: PoolRunJournalShape["clearProviderDegradation"] = (input) =>
+      Effect.gen(function* () {
+        const degradations = yield* readDegradations();
+        if (!(input.providerInstanceId in degradations)) return;
+        const { [input.providerInstanceId]: _dropped, ...remaining } = degradations;
+        yield* writeDegradations(remaining);
+      }).pipe(Effect.mapError(journalError("clearProviderDegradation")));
+
+    return {
+      createRun: base.createRun,
+      saveRun: base.saveRun,
+      getRun: base.getRun,
+      appendIteration: base.appendIteration,
+      updateIteration: base.updateIteration,
+      listIterations: base.listIterations,
+      getLatestIteration: base.getLatestIteration,
+      allocateIteration,
+      upsertProviderDegradation,
+      clearProviderDegradation,
+    } satisfies PoolRunJournalShape;
+  });

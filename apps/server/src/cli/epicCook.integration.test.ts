@@ -251,6 +251,67 @@ it("drains a worker after SIGINT and releases the lock", async () => {
   );
 });
 
+it("cooks two children through the parallel pool loop", () => {
+  const fixture = makeFixture(2);
+  const { repo, runDirectory, epic, environment, bdEnvironment } = fixture;
+  // The pool prompt carries the child as "Cook exactly `<id>` this
+  // iteration." instead of the sequential loop's ASSIGNED_CHILD_ID marker.
+  const poolWorker = NodePath.join(fixture.root, "pool-worker.sh");
+  NodeFS.writeFileSync(
+    poolWorker,
+    `#!/usr/bin/env bash
+set -euo pipefail
+prompt="$1"
+child="$(awk '/^Cook exactly / { gsub(/\`/, ""); print $3 }' "$prompt")"
+[ -n "$child" ] || { echo 'no child in prompt' >&2; exit 1; }
+# One file per child: parallel workers must not conflict with each other.
+printf '%s\\n' "$child" >> "$child.txt"
+git add "$child.txt"
+git commit -m "cook $child" >/dev/null
+bd close "$child" --reason "worker completed" >/dev/null
+printf 'RALPH_MSG: {"summary":"completed %s","why":"integration test"}\\n' "$child"
+`,
+  );
+  NodeFS.chmodSync(poolWorker, 0o755);
+  const result = run("node", cookArgs(fixture), repo, {
+    ...environment,
+    COOKEPIC_WORKER_CMD: poolWorker,
+    COOKEPIC_WORKERS: "2",
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /\tdone\t2\/50/);
+  const state = JSON.parse(NodeFS.readFileSync(NodePath.join(runDirectory, "run.json"), "utf8"));
+  assert.equal(state.status, "done");
+  assert.equal(state.config.parallel.workers, 2);
+  assert.equal(state.configProvenance["parallel.workers"], "environment");
+  // Both child commits landed on the base branch through the merge queue.
+  const children = JSON.parse(
+    requireOk(
+      run("bd", ["list", "--parent", epic, "--all", "--flat", "--json"], repo, bdEnvironment),
+    ),
+  ) as ReadonlyArray<{ readonly id: string }>;
+  assert.equal(children.length, 2);
+  for (const child of children) {
+    assert.isTrue(
+      NodeFS.existsSync(NodePath.join(repo, `${child.id}.txt`)),
+      `${child.id} did not land on the base branch`,
+    );
+  }
+  // The integration worktree, its branch, and the merge state are released.
+  assert.isFalse(NodeFS.existsSync(NodePath.join(runDirectory, "merge-queue.json")));
+  assert.isFalse(NodeFS.existsSync(NodePath.join(runDirectory, "worktrees")));
+  assert.equal(requireOk(run("git", ["branch", "--list", "cook-epic-integration-*"], repo)), "");
+  assert.isFalse(NodeFS.existsSync(NodePath.join(repo, ".beads", `run-lock.${epic}.json`)));
+  for (const child of ["Child 1", "Child 2"]) {
+    assert.isTrue(
+      requireOk(
+        run("bd", ["list", "--parent", epic, "--status", "closed", "--json"], repo, bdEnvironment),
+      ).includes(child),
+      child,
+    );
+  }
+});
+
 it("lets --gate override a lower disabled gate", () => {
   const fixture = makeFixture(1);
   NodeFS.mkdirSync(NodePath.join(fixture.repo, ".t3code"), { recursive: true });
@@ -292,6 +353,7 @@ it("maps supported terminal settings into the shared config", () => {
     COOKEPIC_MODEL: "adapter-model",
     COOKEPIC_PERMISSION_MODE: "bypassPermissions",
     COOKEPIC_STOP_GRACE: "7",
+    COOKEPIC_SEQUENTIAL: "1",
   };
   const result = run("node", cookArgs(fixture), fixture.repo, environment);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -299,6 +361,7 @@ it("maps supported terminal settings into the shared config", () => {
     NodeFS.readFileSync(NodePath.join(fixture.runDirectory, "run.json"), "utf8"),
   );
   assert.equal(state.config.supervision.stopGraceSeconds, 7);
+  assert.equal(state.config.execution.sequential, true);
   assert.equal(state.config.engine, "core");
   assert.deepEqual(state.config.provider.modelSelection, {
     instanceId: "worker-cmd",
@@ -306,6 +369,7 @@ it("maps supported terminal settings into the shared config", () => {
   });
   assert.equal(state.config.runtime.mode, "full-access");
   assert.equal(state.configProvenance["supervision.stopGraceSeconds"], "environment");
+  assert.equal(state.configProvenance["execution.sequential"], "environment");
   assert.equal(state.configProvenance.engine, "environment");
   assert.equal(state.configProvenance["provider.modelSelection"], "environment");
   assert.equal(state.configProvenance["runtime.mode"], "environment");

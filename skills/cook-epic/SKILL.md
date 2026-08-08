@@ -1,6 +1,6 @@
 ---
 name: cook-epic
-description: Execute a beads epic unattended with fresh-context workers on the shared epic core: sequential on the base branch, one worker at a time, gated landings. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
+description: Execute a beads epic unattended with fresh-context workers on the shared epic core: sequential on the base branch by default, or a parallel worker pool with per-worker worktrees and a merge queue. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
 ---
 
 # cook-epic — epic executor
@@ -15,9 +15,11 @@ status) and git (commits, merges).
 **This is the only skill for running an epic.** It handles a chain, a wide
 frontier, and every mix of the two in one run — nobody has to predict the shape
 up front. `run.sh` execs `t3 epic cook`, the same shared orchestration core the
-T3 Code server runner drives. One worker at a time, directly in the main
-checkout on the base branch, with claiming, retry budgets, a per-child gate,
-and verify-by-effects. No worktrees, no merge queue.
+T3 Code server runner drives. The default shape is sequential: one worker at a
+time, directly in the main checkout on the base branch, with claiming, retry
+budgets, a per-child gate, and verify-by-effects. `COOKEPIC_WORKERS` above 1
+selects the parallel pool: per-worker worktrees, an integration branch, and a
+serialized merge queue — the same loop the server runner drives.
 
 ## When this fits
 
@@ -39,12 +41,13 @@ environment layer is deprecated and loses to the file. The full mapping table
 and the reason for every dropped knob live in `docs/epic-runs-rollout.md`.
 
 Knobs the core engine maps: `COOKEPIC_GATE`, `COOKEPIC_NO_GATE`,
-`COOKEPIC_NO_PUSH`, `COOKEPIC_MAX_DISPATCHES`, `COOKEPIC_MAX_ATTEMPTS`,
+`COOKEPIC_NO_PUSH`, `COOKEPIC_WORKERS`, `COOKEPIC_SIBLINGS`,
+`COOKEPIC_SEQUENTIAL`, `COOKEPIC_MAX_DISPATCHES`, `COOKEPIC_MAX_ATTEMPTS`,
 `COOKEPIC_WORKER_TIMEOUT`, `COOKEPIC_STOP_GRACE`, `COOKEPIC_MODEL`,
 `COOKEPIC_PERMISSION_MODE`, `COOKEPIC_ORIENTATION_FILE`, `COOKEPIC_HARNESS`,
 `COOKEPIC_BIN`, and `COOKEPIC_WORKER_CMD` (test seam). Any other `COOKEPIC_*`
-knob — workers, siblings, inspector, budget, cgroup weights, retired Bash test
-seams — refuses to start loudly, never silently.
+knob — inspector, budget, cgroup weights, retired Bash test seams — refuses to
+start loudly, never silently.
 
 ## Tests
 
@@ -62,7 +65,9 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
 
    | User says                                  | Environment variable                                        | Default                                                                                                 |
    | ------------------------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-   | "sequential", "one at a time"              | `COOKEPIC_SEQUENTIAL=1`                                     | always sequential                                                                                       |
+   | "3 workers", "in parallel"                 | `COOKEPIC_WORKERS` (positive integer)                       | unset — sequential                                                                                      |
+   | "sibling repos ../api ../web"              | `COOKEPIC_SIBLINGS` (space-separated paths)                 | unset                                                                                                   |
+   | "sequential", "one at a time"              | `COOKEPIC_SEQUENTIAL=1`                                     | unset — sequential unless `COOKEPIC_WORKERS` > 1                                                        |
    | "gate: bun run build"                      | `COOKEPIC_GATE`                                             | **required** — see below                                                                                |
    | "no gate", "skip verification"             | `COOKEPIC_NO_GATE=1`                                        | unset                                                                                                   |
    | "2h absolute limit per worker"             | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                | unset; no absolute timeout                                                                              |
@@ -105,11 +110,19 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    `COOKEPIC_WORKER_TIMEOUT` only when an operator needs a fixed positive
    limit. Zero and other invalid values fail preflight.
 
-2. **Execution shape.** The core engine runs one worker at a time in the main
-   checkout on the base branch. There is no shape decision to make:
-   `COOKEPIC_SEQUENTIAL=1` is accepted for compatibility but redundant.
-   Parallel workers, sibling-repo layouts, inspectors, and budget caps retired
-   with the legacy Bash engine (t3code-06s.42).
+2. **Execution shape.** Sequential is the default: one worker at a time in the
+   main checkout on the base branch. `COOKEPIC_WORKERS` above 1 selects the
+   parallel pool loop: each child cooks in its own worktree on an
+   `epic/<child>` branch, a serialized merge queue trial-merges finished
+   branches into the run's integration branch, gates once per merge set, and
+   fast-forwards the base branch. Conflicting or gate-failing branches park
+   and spawn `Merge fix:` children. `COOKEPIC_SEQUENTIAL=1` forces the
+   sequential shape and contradicts `COOKEPIC_WORKERS` above 1 — the shim
+   refuses that combination. `COOKEPIC_SIBLINGS` names sibling repositories;
+   sequential mode works them as the real checkouts, parallel mode mirrors
+   them into per-worker layouts so `../sibling` references resolve inside the
+   worker sandbox. Inspectors and budget caps retired with the legacy Bash
+   engine (t3code-06s.42).
 
 3. **Preflight** (all must hold; fix and report instead of launching otherwise):
    - You are at the project root: `.beads/` exists and there are no uncommitted
@@ -284,8 +297,20 @@ pausing a finished run). Report it; do not retry.
 
 ## How it works (what to tell the user when asked)
 
-The core engine is sequential: one worker at a time, in the main checkout on
-the base branch, like ralph. No worktrees, no branches, no merge queue.
+The sequential shape runs one worker at a time, in the main checkout on the
+base branch, like ralph. The parallel shape (`COOKEPIC_WORKERS` above 1) runs a
+pool: each iteration cooks in its own worktree on an `epic/<child>` branch, and
+a serialized merge queue lands finished branches on the base branch through the
+run's integration branch — trial merge, one gate per merge set, fast-forward,
+push. A branch that conflicts or fails the gate parks, and the queue creates a
+`Merge fix:` child that resumes the parked branch. With `COOKEPIC_SIBLINGS`,
+each worker also gets mirrored worktrees of the sibling repositories in a
+run-scoped layout, so cross-repo relative paths resolve; merges land in every
+repository's base branch together.
+
+The bullets below describe the sequential mechanics; the pool loop applies the
+same claiming, attempt budgets, provider fallback, and evidence rules per
+worker, with two shape differences called out where they matter.
 
 - **Dispatch**: each iteration, `bd ready --parent <EPIC>` yields the
   dependency frontier and the loop takes the top ready child after an atomic
@@ -297,7 +322,9 @@ the base branch, like ralph. No worktrees, no branches, no merge queue.
   the next installed harness (claude → codex → kimi) without consuming an
   attempt.
 - **Commits**: the worker commits on the base branch as it goes (fix-forward,
-  never rewrites history, never pushes).
+  never rewrites history, never pushes). In the parallel shape the worker
+  commits on its `epic/<child>` branch in its own worktree instead, and the
+  merge queue lands the branch.
 - **Verification is by effects**: a child counts as done when `bd` shows it
   closed AND the base branch gained commits — worker self-reports are ignored.
   **Research children are the exception**: a child whose title starts with
@@ -310,11 +337,13 @@ the base branch, like ralph. No worktrees, no branches, no merge queue.
   dispatch — the comment is the evidence. A bare close with no commits and no
   comment fails.
 - **Gate**: after a verified child, the loop runs the integration gate once on
-  the real checkout (`COOKEPIC_GATE`; skipped only with `COOKEPIC_NO_GATE=1`,
-  which lands children **unverified**). A red gate or a dirty tree blocks the
-  child and retries it within its budget. Workers run only cheap checks
-  (typecheck, lint, unit tests for touched files); the gate is the only full
-  verification.
+  the real checkout — in the parallel shape, once per merge set inside the
+  integration worktree — (`COOKEPIC_GATE`; skipped only with
+  `COOKEPIC_NO_GATE=1`, which lands children **unverified**). A red gate or a
+  dirty tree blocks the child and retries it within its budget; in the parallel
+  shape a red gate parks the branch for a `Merge fix:` child instead. Workers
+  run only cheap checks (typecheck, lint, unit tests for touched files); the
+  gate is the only full verification.
 - **Push**: after a green gate the loop pushes `origin HEAD:<base-branch>`
   unless `COOKEPIC_NO_PUSH=1`. A rejected push fails the run for operator
   reconciliation; local commits are preserved.
@@ -368,10 +397,13 @@ takes it over once the heartbeat lapses.
 
 ## Cautions
 
-- The core engine works on the base branch in your checkout for the whole run
-  (like ralph): exclusive use is assumed, retries fix forward, and the gate
+- The sequential shape works on the base branch in your checkout for the whole
+  run (like ralph): exclusive use is assumed, retries fix forward, and the gate
   runs per child on the real checkout. The loop cannot tell your edits from
-  the worker's — do not write to the checkout while a run is active.
+  the worker's — do not write to the checkout while a run is active. The
+  parallel shape keeps the base checkout read-only for workers (they live in
+  worktrees under the run directory), but the merge queue still moves the base
+  branch — the same exclusivity rule applies.
 - In a server or remote harness, launch the run detached (`setsid`) by default.
   A plain background job dies with its parent session, and with it the
   supervision of any worker that survives in its own cgroup.

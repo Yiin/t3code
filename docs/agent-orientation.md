@@ -42,7 +42,7 @@ the terminal's `t3 epic cook` entry uses the same core. `run.sh` is a shim
 that execs `t3 epic cook`; the legacy Bash coordinator retired on 2026-08-07
 (t3code-06s.42).
 
-- `skills/cook-epic/run.sh` (178 lines) — the terminal shim: usage validation,
+- `skills/cook-epic/run.sh` (191 lines) — the terminal shim: usage validation,
   harness detection, t3 entrypoint resolution, COOKEPIC\_\* mapping, exec. This
   copy is canonical; `skills/install.sh` symlinks it into `~/.agents/skills`.
   Edit it here, then run `./skills/install.sh`. Never edit the installed
