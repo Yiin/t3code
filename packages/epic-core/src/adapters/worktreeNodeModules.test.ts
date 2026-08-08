@@ -46,11 +46,9 @@ describe("linkNodeModulesTree", () => {
 
     await linkNodeModulesTree(source, target);
 
-    // The root is a plain directory link into the source checkout.
-    expect(await linkedPaths(target)).toStrictEqual(["node_modules"]);
-    // Each package gets a real directory instead, so the links inside it
-    // resolve against the worktree rather than the source.
-    for (const dir of packages) {
+    // Every node_modules the worktree gets is a real directory it owns — the
+    // root included — so nothing it writes reaches the source checkout.
+    for (const dir of ["", ...packages]) {
       const stat = await NodeFSP.lstat(NodePath.join(target, dir, "node_modules"));
       expect(stat.isDirectory()).toBe(true);
       expect(stat.isSymbolicLink()).toBe(false);
@@ -102,6 +100,50 @@ describe("linkNodeModulesTree", () => {
     await NodeFSP.rm(root, { recursive: true, force: true });
   });
 
+  it("materialises the root node_modules and the store index, not links to them", async () => {
+    // Regression (t3code-b93.22): the root used to be one directory link, so a
+    // worker's `pnpm install` wrote through it and repointed the SOURCE
+    // checkout's dependency links at the worktree. Pruning the worktree then
+    // broke every other worker with ERR_MODULE_NOT_FOUND.
+    const { root, source, target } = await scaffold(["packages/app"]);
+    await NodeFSP.mkdir(NodePath.join(source, "node_modules/.pnpm/dep/node_modules/dep"), {
+      recursive: true,
+    });
+
+    await linkNodeModulesTree(source, target);
+
+    const rootStat = await NodeFSP.lstat(NodePath.join(target, "node_modules"));
+    expect(rootStat.isSymbolicLink()).toBe(false);
+    const storeStat = await NodeFSP.lstat(NodePath.join(target, "node_modules/.pnpm"));
+    expect(storeStat.isSymbolicLink()).toBe(false);
+    // One level deeper the store package is linked whole, so the worktree
+    // never duplicates the store's contents.
+    const pkgStat = await NodeFSP.lstat(NodePath.join(target, "node_modules/.pnpm/dep"));
+    expect(pkgStat.isSymbolicLink()).toBe(true);
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  });
+
+  it("keeps a write inside the worktree off the source checkout", async () => {
+    const { root, source, target } = await scaffold(["packages/app"]);
+    await NodeFSP.symlink(
+      "./.pnpm/dep-1.0.0/node_modules/dep",
+      NodePath.join(source, "node_modules/dep"),
+    );
+
+    await linkNodeModulesTree(source, target);
+
+    // Stand in for what an install does: repoint a root dependency link.
+    const worktreeLink = NodePath.join(target, "node_modules/dep");
+    await NodeFSP.rm(worktreeLink);
+    await NodeFSP.symlink("./.pnpm/dep-2.0.0/node_modules/dep", worktreeLink);
+
+    expect(await NodeFSP.readlink(NodePath.join(source, "node_modules/dep"))).toBe(
+      "./.pnpm/dep-1.0.0/node_modules/dep",
+    );
+    expect(await NodeFSP.readlink(worktreeLink)).toBe("./.pnpm/dep-2.0.0/node_modules/dep");
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  });
+
   it("still reaches the shared store through the root node_modules link", async () => {
     const { root, source, target } = await scaffold(["packages/app"]);
     await NodeFSP.mkdir(NodePath.join(source, "node_modules/.pnpm/dep/node_modules/dep"), {
@@ -144,7 +186,9 @@ describe("linkNodeModulesTree", () => {
 
     await linkNodeModulesTree(source, target);
 
-    expect(await linkedPaths(target)).toStrictEqual(["node_modules"]);
+    // The root still arrives; the absent package contributes nothing.
+    expect((await NodeFSP.lstat(NodePath.join(target, "node_modules"))).isDirectory()).toBe(true);
+    await expect(NodeFSP.lstat(NodePath.join(target, "apps/web"))).rejects.toThrow();
     await NodeFSP.rm(root, { recursive: true, force: true });
   });
 
