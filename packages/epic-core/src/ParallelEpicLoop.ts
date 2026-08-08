@@ -254,8 +254,10 @@ export const assembleIterationPrompt = (input: {
   readonly issueId: string;
   readonly epicContext: string | null;
   readonly orientationCard: string | null;
+  /** The per-worker sibling rule, spliced beside the orientation card. */
+  readonly siblingRule?: string | null;
 }): string =>
-  `${input.basePrompt}\n\nCook exactly \`${input.issueId}\` this iteration.\n\n## Epic context (resolved at dispatch)\n\n${input.epicContext ?? "(epic description unavailable)"}\n\n${input.orientationCard ?? "(no orientation card in this repo)"}`;
+  `${input.basePrompt}\n\nCook exactly \`${input.issueId}\` this iteration.\n\n## Epic context (resolved at dispatch)\n\n${input.epicContext ?? "(epic description unavailable)"}\n\n${input.orientationCard ?? "(no orientation card in this repo)"}${input.siblingRule ? `\n\n${input.siblingRule}` : ""}`;
 
 const noCommitEvidenceVerdict = (input: {
   readonly status: string | null;
@@ -360,10 +362,21 @@ export const runParallelEpicLoop = (
     readonly workspace: IterationWorkspace;
     readonly headBefore: string | null;
     readonly branchBase: string | null;
+    readonly siblingHeadsBefore: ReadonlyArray<{
+      readonly worktreePath: string;
+      readonly head: string | null;
+    }>;
   }): Effect.Effect<boolean> =>
     Effect.gen(function* () {
       const headAfter = yield* ports.vcs.headCommit(args.workspace.cwd);
       if (headAfter !== null && headAfter !== args.headBefore) return true;
+      // A child's effects can live in any repo of the set: a commit in any
+      // sibling worktree counts as committed
+      // (`skills/cook-epic/run-legacy.sh:2606-2613`).
+      for (const sibling of args.siblingHeadsBefore) {
+        const siblingAfter = yield* ports.vcs.headCommit(sibling.worktreePath);
+        if (siblingAfter !== null && siblingAfter !== sibling.head) return true;
+      }
       if (args.workspace.branch === null || args.branchBase === null) return false;
       const count = yield* ports.vcs.commitsAhead({
         cwd: args.workspace.cwd,
@@ -380,6 +393,7 @@ export const runParallelEpicLoop = (
     readonly onDispatched: (threadId: ThreadId) => void;
   }): Effect.Effect<RunIterationResult, EpicRunnerError> => {
     let releaseContext: { readonly workspace: IterationWorkspace } | null = null;
+    let releaseError: EpicRunnerError | null = null;
     return Effect.gen(function* () {
       const run = args.run;
       const selection = args.selection;
@@ -469,6 +483,12 @@ export const runParallelEpicLoop = (
       const epicContext = yield* ports.backlog.epicDescription(input.cwd, input.epicId);
       const orientationCard = yield* input.readOrientation(input.cwd, run.orientationFile);
       const headBefore = yield* ports.vcs.headCommit(workspace.cwd);
+      const siblingHeadsBefore = yield* Effect.forEach(workspace.siblingWorktrees, (sibling) =>
+        Effect.map(ports.vcs.headCommit(sibling.worktreePath), (head) => ({
+          worktreePath: sibling.worktreePath,
+          head,
+        })),
+      );
       const initialWorktreeFingerprint = yield* ports.vcs.worktreeFingerprint(workspace.cwd);
       const commentsBefore = issueEvidenceBefore.commentCount;
       const isResearchChild = yield* ports.backlog.issueIsResearch(
@@ -574,6 +594,7 @@ export const runParallelEpicLoop = (
                 issueId,
                 epicContext,
                 orientationCard,
+                siblingRule: workspace.siblingRule,
               }),
               selection: next.modelSelection,
               runtimeMode: next.runtimeMode,
@@ -648,6 +669,7 @@ export const runParallelEpicLoop = (
                 workspace,
                 headBefore,
                 branchBase,
+                siblingHeadsBefore,
               });
               // A timed-out turn was just interrupted and may still be
               // streaming, so there is nothing to wait for.
@@ -801,8 +823,34 @@ export const runParallelEpicLoop = (
         Effect.suspend(() => {
           const context = releaseContext;
           if (context === null) return Effect.void;
-          return ports.workspace.release(args.runCtx, context.workspace);
+          // A layout release failure is fatal to the run: leftover worktrees
+          // make every later dispatch unsafe, so reconcile like a drain stop.
+          return ports.workspace.release(args.runCtx, context.workspace).pipe(
+            Effect.catch((error) =>
+              Effect.suspend(() => {
+                releaseError = error;
+                return withTransition(
+                  Effect.gen(function* () {
+                    const current = yield* requireRun(runId);
+                    if (current.status === "running") {
+                      yield* saveRun({
+                        ...current,
+                        status: "failed" as const,
+                        lastError: `infra:merge-reconciliation: ${error.message}`,
+                        updatedAt: yield* nowIso,
+                      });
+                    }
+                  }),
+                ).pipe(Effect.ignore);
+              }),
+            ),
+          );
         }),
+      ),
+      // Finalizers cannot carry the typed failure; raise it once the
+      // iteration body has settled so the worker error path stops the run.
+      Effect.flatMap((result) =>
+        releaseError === null ? Effect.succeed(result) : Effect.fail(releaseError),
       ),
     );
   };

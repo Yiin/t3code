@@ -10,7 +10,12 @@ import {
   mergeFixTitle,
   parseMergeFixTitle,
 } from "./policy.ts";
-import type { MergeGitShape, MergeQueueEntry, MergeQueueSnapshot } from "./ports/MergeQueue.ts";
+import type {
+  MergeGitShape,
+  MergeQueueEntry,
+  MergeQueueSnapshot,
+  MergeQueueStoreShape,
+} from "./ports/MergeQueue.ts";
 
 const baseSnapshot = (entries: ReadonlyArray<MergeQueueEntry>): MergeQueueSnapshot => ({
   runId: "run-1",
@@ -19,6 +24,7 @@ const baseSnapshot = (entries: ReadonlyArray<MergeQueueEntry>): MergeQueueSnapsh
   baseBranch: "mine",
   integrationBranch: "cook-epic-integration-run-1",
   integrationWorktreePath: "/worktrees/integration",
+  siblings: [],
   entries,
 });
 
@@ -37,20 +43,51 @@ const makeHarness = (
     readonly currentHead?: string;
     readonly slotHeld?: boolean;
     readonly conflicts?: ReadonlyArray<string>;
+    readonly conflictCwds?: ReadonlyArray<string>;
     readonly gatePasses?: boolean;
     readonly fastForwardFails?: ReadonlyArray<string>;
+    readonly fastForwardFailCwds?: ReadonlyArray<string>;
     readonly pushFails?: ReadonlyArray<string>;
     readonly empty?: ReadonlyArray<string>;
+    readonly siblings?: ReadonlyArray<{
+      readonly repositoryPath: string;
+      readonly baseBranch: string;
+      readonly integrationWorktreePath: string;
+      readonly lastAcceptedHead: string;
+    }>;
+    /** Ahead count per sibling repository path; defaults to 1. */
+    readonly siblingAhead?: Readonly<Record<string, number>>;
+    /** Move a sibling checkout's head before the drain (external movement). */
+    readonly siblingExternalHeads?: Readonly<Record<string, string>>;
     readonly createFailure?: "before" | "after";
     readonly existingFixStatuses?: ReadonlyArray<string>;
   } = {},
 ) => {
-  let snapshot = baseSnapshot(options.entries ?? [entry(0, "child-1")]);
-  let currentHead = options.currentHead ?? "base-0";
+  const siblings = options.siblings ?? [];
+  let snapshot: MergeQueueSnapshot = {
+    ...baseSnapshot(options.entries ?? [entry(0, "child-1")]),
+    siblings,
+  };
+  const heads: Record<string, string> = { "/repo": options.currentHead ?? "base-0" };
+  for (const sibling of siblings) {
+    heads[sibling.repositoryPath] =
+      options.siblingExternalHeads?.[sibling.repositoryPath] ?? sibling.lastAcceptedHead;
+  }
   const calls: string[] = [];
   const events: unknown[] = [];
   const notes: string[] = [];
   const fixes: string[] = [];
+  const completions: Array<Parameters<MergeQueueStoreShape["complete"]>[0]> = [];
+  const gateRepositories: Array<{
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+    readonly worktreeRoot: string;
+    readonly siblings: ReadonlyArray<{
+      readonly repositoryPath: string;
+      readonly baseBranch: string;
+      readonly worktreeRoot: string;
+    }>;
+  }> = [];
   const children: BacklogIssue[] = (options.existingFixStatuses ?? []).map((status, index) => ({
     id: `existing-${index + 1}`,
     title: mergeFixTitle("epic/child-1", "conflict"),
@@ -68,41 +105,65 @@ const makeHarness = (
     head: (cwd) =>
       Effect.sync(() => {
         calls.push(`head:${cwd}`);
-        return currentHead;
+        return heads[cwd] ?? "base-0";
       }),
-    commitsAhead: ({ branch }) =>
+    commitsAhead: ({ repositoryPath, branch }) =>
       Effect.sync(() => {
-        calls.push(`ahead:${branch}`);
+        calls.push(
+          repositoryPath === "/repo" ? `ahead:${branch}` : `ahead:${repositoryPath}:${branch}`,
+        );
+        if (repositoryPath !== "/repo") {
+          return options.siblingAhead?.[repositoryPath] ?? 1;
+        }
         return options.empty?.includes(branch) === true ? 0 : 1;
       }),
     resetHard: (cwd, ref) => Effect.sync(() => void calls.push(`reset:${cwd}:${ref}`)),
     clean: (cwd) => Effect.sync(() => void calls.push(`clean:${cwd}`)),
     setupWorktree: (cwd) => Effect.sync(() => void calls.push(`setup:${cwd}`)),
-    trialMerge: ({ branch, message }) =>
+    trialMerge: ({ cwd, branch, message }) =>
       Effect.sync(() => {
-        calls.push(`merge:${branch}:${message}`);
-        return { merged: options.conflicts?.includes(branch) !== true, output: "trial" };
+        calls.push(
+          cwd === "/worktrees/integration"
+            ? `merge:${branch}:${message}`
+            : `merge:${cwd}:${branch}:${message}`,
+        );
+        return {
+          merged:
+            options.conflicts?.includes(branch) !== true &&
+            options.conflictCwds?.includes(cwd) !== true,
+          output: "trial",
+        };
       }),
     abortMerge: (cwd) => Effect.sync(() => void calls.push(`abort:${cwd}`)),
-    fastForward: ({ ref }) =>
+    fastForward: ({ cwd, ref }) =>
       Effect.sync(() => {
-        calls.push(`ff:${ref}`);
-        if (options.fastForwardFails?.includes(ref) === true) {
+        calls.push(cwd === "/repo" ? `ff:${ref}` : `ff:${cwd}:${ref}`);
+        if (
+          options.fastForwardFails?.includes(ref) === true ||
+          options.fastForwardFailCwds?.includes(cwd) === true
+        ) {
           return { landed: false, output: "non-fast-forward" };
         }
-        currentHead = `landed-${calls.filter((call) => call.startsWith("ff:")).length}`;
+        heads[cwd] = `landed-${String(calls.filter((call) => call.startsWith("ff:")).length)}`;
         return { landed: true, output: "" };
       }),
-    push: ({ refspec }) =>
+    push: ({ cwd, refspec }) =>
       Effect.sync(() => {
-        calls.push(`push:${refspec}`);
+        calls.push(cwd === "/repo" ? `push:${refspec}` : `push:${cwd}:${refspec}`);
         return {
-          pushed: options.pushFails?.includes(refspec) !== true,
+          pushed:
+            options.pushFails?.includes(refspec) !== true &&
+            options.pushFails?.includes(`${cwd}:${refspec}`) !== true,
           output: "",
         };
       }),
-    deleteLocalBranch: (_cwd, branch) =>
-      Effect.sync(() => void calls.push(`delete-local:${branch}`)),
+    deleteLocalBranch: (cwd, branch) =>
+      Effect.sync(
+        () =>
+          void calls.push(
+            cwd === "/repo" ? `delete-local:${branch}` : `delete-local:${cwd}:${branch}`,
+          ),
+      ),
     deleteRemoteBranch: (_cwd, _remote, branch) =>
       Effect.sync(() => void calls.push(`delete-remote:${branch}`)),
   };
@@ -168,12 +229,13 @@ const makeHarness = (
             ),
           };
         }),
-      complete: ({ sequence, lastAcceptedHead }) =>
+      complete: (input) =>
         Effect.sync(() => {
+          completions.push(input);
           snapshot = {
             ...snapshot,
-            lastAcceptedHead,
-            entries: snapshot.entries.filter((item) => item.sequence !== sequence),
+            lastAcceptedHead: input.lastAcceptedHead,
+            entries: snapshot.entries.filter((item) => item.sequence !== input.sequence),
           };
         }),
       drop: ({ sequence }) =>
@@ -193,9 +255,10 @@ const makeHarness = (
         ),
     },
     gate: {
-      run: () =>
+      run: (gateInput) =>
         Effect.sync(() => {
           calls.push("gate");
+          gateRepositories.push(...gateInput.repositories);
           return { passed: options.gatePasses ?? true, repositoryPaths: ["/repo"], output: "" };
         }),
     },
@@ -244,6 +307,9 @@ const makeHarness = (
     events,
     fixes,
     notes,
+    completions,
+    gateRepositories,
+    heads: () => heads,
     snapshot: () => snapshot,
   };
 };
@@ -450,6 +516,175 @@ describe("MergeQueue", () => {
       expect(harness.calls.at(-1)).toBe("slot-release:cook-epic-run-1");
     }),
   );
+
+  describe("multi-repo branch sets", () => {
+    const siblingSet = (
+      overrides: Partial<{
+        readonly repositoryPath: string;
+        readonly baseBranch: string;
+        readonly integrationWorktreePath: string;
+        readonly lastAcceptedHead: string;
+      }> = {},
+    ) => ({
+      repositoryPath: "/sib",
+      baseBranch: "sib-main",
+      integrationWorktreePath: "/worktrees/integ-sib",
+      lastAcceptedHead: "sib-0",
+      ...overrides,
+    });
+
+    it.effect("stops fatally before the slot when a sibling moved externally", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          siblings: [siblingSet()],
+          siblingExternalHeads: { "/sib": "sib-external" },
+        });
+        const result = yield* drain(harness.ports);
+        expect(result).toMatchObject({
+          _tag: "fatal",
+          detail:
+            "sibling /sib branch sib-main moved externally; cannot trial-merge — operator must reconcile",
+        });
+        expect(harness.calls).toEqual(["head:/repo", "head:/sib"]);
+        expect(harness.snapshot().entries[0]?.status).toBe("queued");
+      }),
+    );
+
+    it.effect("parks the whole set when a sibling conflicts, bases untouched", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          siblings: [siblingSet()],
+          conflictCwds: ["/worktrees/integ-sib"],
+        });
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 0, parked: 1 });
+        expect(harness.calls).toContain("abort:/worktrees/integ-sib");
+        expect(harness.calls.some((call) => call.startsWith("ff:"))).toBe(false);
+        expect(harness.calls.some((call) => call.startsWith("push:"))).toBe(false);
+        expect(harness.heads()).toMatchObject({ "/repo": "base-0", "/sib": "sib-0" });
+        expect(harness.snapshot().entries[0]).toMatchObject({
+          status: "parked",
+          reason: "conflict",
+        });
+        const description = harness.fixes[0] ?? "";
+        expect(description).toContain("lands all-or-nothing");
+        expect(description).toContain("- this repository (`/repo`, base `mine`)");
+        expect(description).toContain("- sibling `/sib` (base `sib-main`)");
+        expect(description).toContain("never push sibling repos");
+      }),
+    );
+
+    it.effect("restores the tail fatally when a sibling cannot fast-forward", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          siblings: [siblingSet()],
+          fastForwardFailCwds: ["/sib"],
+        });
+        const result = yield* drain(harness.ports);
+        expect(result).toMatchObject({
+          _tag: "fatal",
+          detail:
+            "sibling /sib branch sib-main moved externally; cannot fast-forward — operator must reconcile",
+        });
+        expect(harness.calls).toContain("ff:cook-epic-integration-run-1");
+        expect(harness.calls).toContain("ff:/sib:cook-epic-integration-run-1");
+        expect(harness.calls).toContain("restore:0");
+        expect(harness.calls.at(-1)).toBe("slot-release:cook-epic-run-1");
+        expect(harness.snapshot().entries.map((item) => item.status)).toEqual(["queued", "queued"]);
+      }),
+    );
+
+    it.effect("lands every repo with commits and records heads for the whole set", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          siblings: [
+            siblingSet(),
+            siblingSet({
+              repositoryPath: "/sib2",
+              integrationWorktreePath: "/worktrees/integ-sib2",
+              lastAcceptedHead: "sib2-0",
+            }),
+          ],
+          siblingAhead: { "/sib2": 0 },
+        });
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+        // /sib2 has no commits: its integration worktree is reset with the
+        // set, but it gets no trial merge, landing, or push.
+        expect(harness.calls).toContain("reset:/worktrees/integ-sib2:sib-main");
+        expect(harness.calls.some((call) => call.startsWith("merge:/worktrees/integ-sib2:"))).toBe(
+          false,
+        );
+        expect(harness.calls.some((call) => call.startsWith("ff:/sib2"))).toBe(false);
+        expect(harness.calls).toContain("push:mine");
+        expect(harness.calls).toContain("push:/sib:sib-main");
+        expect(harness.calls.some((call) => call.startsWith("push:/sib2"))).toBe(false);
+        // The merged event lists only repos with commits.
+        expect(harness.events).toEqual([
+          {
+            event: "merged",
+            child: "child-1",
+            branch: "epic/child-1",
+            commit: "landed-1",
+            landing: "gated, pushed, landed",
+            repositories: [
+              { repo: "/repo", commits: 1, head: "landed-1" },
+              { repo: "/sib", commits: 1, head: "landed-2" },
+            ],
+          },
+        ]);
+        // ...but completion records heads for EVERY sibling.
+        expect(harness.completions).toEqual([
+          {
+            runId: "run-1",
+            sequence: 0,
+            lastAcceptedHead: "landed-1",
+            siblingHeads: [
+              { repositoryPath: "/sib", lastAcceptedHead: "landed-2" },
+              { repositoryPath: "/sib2", lastAcceptedHead: "sib2-0" },
+            ],
+          },
+        ]);
+        expect(harness.calls).toContain("delete-local:epic/child-1");
+        expect(harness.calls).toContain("delete-local:/sib:epic/child-1");
+        expect(harness.calls).toContain("delete-local:/sib2:epic/child-1");
+      }),
+    );
+
+    it.effect("drops an empty set and deletes the branch in every repo", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          empty: ["epic/child-1"],
+          siblings: [siblingSet()],
+          siblingAhead: { "/sib": 0 },
+        });
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 0, parked: 0 });
+        expect(harness.calls).toContain("drop:0");
+        expect(harness.calls).toContain("delete-local:epic/child-1");
+        expect(harness.calls).toContain("delete-local:/sib:epic/child-1");
+        expect(harness.calls.some((call) => call.startsWith("reset:"))).toBe(false);
+        expect(harness.calls.some((call) => call.startsWith("merge:"))).toBe(false);
+      }),
+    );
+
+    it.effect("fills the gate repositories with the sibling worktrees", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ siblings: [siblingSet()] });
+        yield* drain(harness.ports);
+        expect(harness.gateRepositories[0]).toEqual({
+          repositoryPath: "/repo",
+          baseBranch: "mine",
+          worktreeRoot: "/worktrees/integration",
+          siblings: [
+            {
+              repositoryPath: "/sib",
+              baseBranch: "sib-main",
+              worktreeRoot: "/worktrees/integ-sib",
+            },
+          ],
+        });
+      }),
+    );
+  });
 });
 
 describe("merge policy", () => {

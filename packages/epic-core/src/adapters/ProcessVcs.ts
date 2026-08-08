@@ -71,6 +71,19 @@ export const makeProcessVcs = (input: {
     },
   );
 
+  const currentBranch: VcsShape["currentBranch"] = Effect.fn("ProcessVcs.currentBranch")(
+    function* (repositoryPath) {
+      const output = yield* run({
+        operation: "currentBranch",
+        repositoryPath,
+        args: ["symbolic-ref", "--short", "HEAD"],
+      });
+      if (output.code !== 0) return null;
+      const branch = output.stdout.trim();
+      return branch.length === 0 ? null : branch;
+    },
+  );
+
   const worktreeFingerprint: VcsShape["worktreeFingerprint"] = (repository) =>
     run({
       operation: "worktreeFingerprint",
@@ -169,6 +182,7 @@ export const makeProcessVcs = (input: {
 
   return {
     headCommit,
+    currentBranch,
     commitsAhead,
     worktreeFingerprint,
     createWorktree,

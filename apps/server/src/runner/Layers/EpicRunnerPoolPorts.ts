@@ -66,6 +66,13 @@ import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
 import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
 import { MergeQueuePortError } from "@t3tools/epic-core/ports/MergeQueue";
+import {
+  makeSiblingResolver,
+  mirrorPath,
+  siblingRuleLayout,
+  siblingRuleSequential,
+  type SiblingRef,
+} from "@t3tools/epic-core/siblings";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -73,6 +80,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
+import type * as PlatformError from "effect/PlatformError";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 
@@ -114,6 +122,47 @@ const isEpicRunnerDispatchError = Schema.is(EpicRunnerDispatchError);
 
 const storeError = (operation: string) => (cause: unknown) =>
   new EpicRunnerStoreError({ operation, cause });
+
+/** The env files `setup_worktree_assets` copies (never production/staging). */
+const WORKTREE_ASSET_ENV_FILES = [
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.development.local",
+  ".env.test",
+] as const;
+
+/**
+ * `setup_worktree_assets` (`skills/cook-epic/run-legacy.sh:998-1011`): a
+ * `node_modules` symlink from the source repo plus copies of the whitelisted
+ * env files, each only when absent in the worktree. Sibling worktrees get
+ * exactly this — no beads redirect; siblings have no beads database.
+ */
+const setupWorktreeAssets = (
+  deps: {
+    readonly fileSystem: FileSystem.FileSystem;
+    readonly path: Path.Path;
+  },
+  sourceRepo: string,
+  target: string,
+): Effect.Effect<void, PlatformError.PlatformError> =>
+  Effect.gen(function* () {
+    const sourceNodeModules = deps.path.join(sourceRepo, "node_modules");
+    const targetNodeModules = deps.path.join(target, "node_modules");
+    if (
+      (yield* deps.fileSystem.exists(sourceNodeModules)) &&
+      !(yield* deps.fileSystem.exists(targetNodeModules))
+    ) {
+      yield* deps.fileSystem.symlink(sourceNodeModules, targetNodeModules);
+    }
+    for (const name of WORKTREE_ASSET_ENV_FILES) {
+      const source = deps.path.join(sourceRepo, name);
+      const targetFile = deps.path.join(target, name);
+      if ((yield* deps.fileSystem.exists(source)) && !(yield* deps.fileSystem.exists(targetFile))) {
+        yield* deps.fileSystem.copyFile(source, targetFile);
+      }
+    }
+  });
 
 const journalError = (operation: string) => (cause: unknown) =>
   new RunJournalError({
@@ -753,6 +802,42 @@ export const makeServerPoolWorkspace = (deps: {
         ),
       );
 
+  /** The run-scoped root every worker layout lives under. */
+  const layoutRoot = (runId: string) =>
+    path.join(serverConfig.worktreesDir, `epic-${runId}`, "layouts");
+
+  /**
+   * Sibling repositories resolved once per run
+   * (`skills/cook-epic/run-legacy.sh:240-282`). Resolution failures are not
+   * cached: a later dispatch retries against the reconciled checkouts.
+   */
+  const resolvedSiblings = new Map<string, ReadonlyArray<SiblingRef>>();
+  const runSiblings = Effect.fn("EpicRunnerPoolPorts.runSiblings")(function* (run: EpicRun) {
+    const cached = resolvedSiblings.get(run.runId);
+    if (cached !== undefined) return cached;
+    const configured = run.config.parallel.siblings;
+    if (configured.length === 0) return [] as ReadonlyArray<SiblingRef>;
+    const siblings = yield* makeSiblingResolver(processRunner.run)
+      .resolveSiblings({
+        cwd: run.cwd,
+        siblings: configured,
+        pushEnabled: !run.config.vcs.noPush,
+        layoutMode: !run.config.execution.sequential,
+      })
+      .pipe(
+        Effect.mapError(
+          (error) =>
+            new EpicRunnerDispatchError({
+              commandType: "git.sibling-resolution",
+              detail: error.detail,
+              cause: error,
+            }),
+        ),
+      );
+    resolvedSiblings.set(run.runId, siblings);
+    return siblings;
+  });
+
   /**
    * The integration worktree for a parallel run: the persisted one when it
    * exists, freshly provisioned otherwise. Sequential runs return `null`.
@@ -817,6 +902,10 @@ export const makeServerPoolWorkspace = (deps: {
               }),
           ),
         );
+      const provisionedSiblings: Array<{
+        readonly repo: string;
+        readonly worktreePath: string;
+      }> = [];
       return yield* Effect.gen(function* () {
         yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
           Effect.mapError(
@@ -828,6 +917,97 @@ export const makeServerPoolWorkspace = (deps: {
               }),
           ),
         );
+        // One integration worktree per sibling, mirrored beside the main one
+        // so set trial-merges and the gate see the same relative structure as
+        // workers (`skills/cook-epic/run-legacy.sh:1055-1069`).
+        const siblings = yield* runSiblings(run);
+        const siblingStates: Array<{
+          readonly repositoryPath: string;
+          readonly baseBranch: string;
+          readonly integrationWorktreePath: string;
+          readonly lastAcceptedHead: string;
+        }> = [];
+        for (const sibling of siblings) {
+          const target = mirrorPath(
+            path.dirname(targetPath),
+            path.basename(targetPath),
+            sibling.relativePath,
+          );
+          const siblingBranchCheck = yield* processRunner
+            .run({
+              command: "git",
+              args: ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+              cwd: sibling.canonicalPath,
+              timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.sibling-integration-worktree-check",
+                    detail: `Could not check integration branch ${branch} in sibling ${sibling.canonicalPath}`,
+                    cause,
+                  }),
+              ),
+            );
+          if (siblingBranchCheck.code === 0) {
+            return yield* new EpicRunnerDispatchError({
+              commandType: "git.sibling-integration-worktree",
+              detail: `Refusing to reuse existing integration branch ${branch} in sibling ${sibling.canonicalPath}; reconcile it first`,
+            });
+          }
+          const siblingWorktree = yield* worktreeProvisioner
+            .provision({
+              projectCwd: sibling.canonicalPath,
+              branch,
+              baseBranch: sibling.baseBranch,
+              path: target,
+              refuseExisting: true,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.sibling-integration-worktree-provision",
+                    detail: `Could not provision ${branch} at ${target} for sibling ${sibling.canonicalPath}`,
+                    cause,
+                  }),
+              ),
+            );
+          provisionedSiblings.push({
+            repo: sibling.canonicalPath,
+            worktreePath: siblingWorktree.path,
+          });
+          // Sibling integration worktrees get assets only — siblings have no
+          // beads database (`skills/cook-epic/run-legacy.sh:1008-1009`).
+          yield* setupWorktreeAssets(
+            { fileSystem, path },
+            sibling.canonicalPath,
+            siblingWorktree.path,
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.sibling-integration-assets",
+                  detail: `Could not set up assets in ${siblingWorktree.path}`,
+                  cause,
+                }),
+            ),
+          );
+          const siblingHead = yield* vcs.headCommit(sibling.canonicalPath);
+          if (siblingHead === null) {
+            return yield* new EpicRunnerDispatchError({
+              commandType: "git.sibling-integration-worktree",
+              detail: `Could not resolve HEAD of sibling ${sibling.canonicalPath} while creating its integration worktree`,
+            });
+          }
+          siblingStates.push({
+            repositoryPath: sibling.canonicalPath,
+            baseBranch: sibling.baseBranch,
+            integrationWorktreePath: siblingWorktree.path,
+            lastAcceptedHead: siblingHead,
+          });
+        }
         yield* store
           .initializeMergeState({
             runId: run.runId,
@@ -836,6 +1016,7 @@ export const makeServerPoolWorkspace = (deps: {
             baseBranch,
             integrationBranch: provisioned.refName,
             integrationWorktreePath: provisioned.path,
+            siblings: siblingStates,
           })
           .pipe(Effect.mapError(storeError("initializeMergeState")));
         return Option.getOrThrow(
@@ -845,11 +1026,42 @@ export const makeServerPoolWorkspace = (deps: {
         );
       }).pipe(
         Effect.catchCause((cause) =>
-          releaseProvisionedWorktree({
-            repositoryPath: run.cwd,
-            worktreePath: provisioned.path,
-            label: "epic.runner.integration-provision-rollback-failed",
-          }).pipe(
+          // Roll back the whole set: sibling worktrees and branches first,
+          // then the main integration worktree and its branch.
+          Effect.forEach(
+            provisionedSiblings.toReversed(),
+            (sibling) =>
+              releaseProvisionedWorktree({
+                repositoryPath: sibling.repo,
+                worktreePath: sibling.worktreePath,
+                label: "epic.runner.sibling-integration-provision-rollback-failed",
+              }).pipe(
+                Effect.andThen(
+                  makeEpicRunMergeGit({ git: gitVcsDriver, setupWorktree: () => Effect.void })
+                    .deleteLocalBranch(sibling.repo, provisioned.refName)
+                    .pipe(
+                      Effect.catchCause((deleteCause) =>
+                        Effect.logWarning(
+                          "epic.runner.sibling-integration-branch-rollback-failed",
+                          {
+                            runId: run.runId,
+                            branch: provisioned.refName,
+                            cause: deleteCause,
+                          },
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+            { discard: true },
+          ).pipe(
+            Effect.andThen(
+              releaseProvisionedWorktree({
+                repositoryPath: run.cwd,
+                worktreePath: provisioned.path,
+                label: "epic.runner.integration-provision-rollback-failed",
+              }),
+            ),
             Effect.andThen(
               makeEpicRunMergeGit({ git: gitVcsDriver, setupWorktree: () => Effect.void })
                 .deleteLocalBranch(run.cwd, provisioned.refName)
@@ -929,10 +1141,19 @@ export const makeServerPoolWorkspace = (deps: {
                 }).pipe(Effect.as(run.cwd)),
               ),
             );
+          // Sequential mode works in the real sibling checkouts — no
+          // worktrees, no mirrored paths (`skills/cook-epic/run-legacy.sh:737-739`).
+          const siblings = yield* runSiblings(run);
           return {
             cwd: worktreePath ?? run.cwd,
             branch: null,
             worktreePath,
+            siblingWorktrees: siblings.map((sibling) => ({
+              worktreePath: sibling.canonicalPath,
+              sourcePath: sibling.canonicalPath,
+              baseBranch: sibling.baseBranch,
+            })),
+            siblingRule: siblings.length === 0 ? null : siblingRuleSequential({ siblings }),
           };
         }
 
@@ -950,6 +1171,157 @@ export const makeServerPoolWorkspace = (deps: {
           }
         }
         const baseBranch = yield* readCurrentBranch(runCtx.cwd);
+        const run = yield* requireRun(runCtx.runId);
+        const siblings = yield* runSiblings(run);
+        if (siblings.length > 0) {
+          // Layout mode: the worker sandbox is a run-scoped layout root
+          // outside both repos, reproducing the siblings' real relative
+          // positions so references like `../sibling` resolve inside it
+          // (`skills/cook-epic/run-legacy.sh:1919-1953`).
+          const canonicalCwd = yield* fileSystem
+            .realPath(run.cwd)
+            .pipe(Effect.orElseSucceed(() => run.cwd));
+          const repoBasename = path.basename(canonicalCwd);
+          const root = layoutRoot(runCtx.runId);
+          const layout = path.join(root, input.issueId);
+          const layoutExists = yield* fileSystem.exists(layout).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.layout-provision",
+                  detail: `Could not inspect layout ${layout}`,
+                  cause,
+                }),
+            ),
+          );
+          if (layoutExists) {
+            return yield* new EpicRunnerDispatchError({
+              commandType: "git.layout-provision",
+              detail: `Refusing to provision over existing layout ${layout}; reconcile it first`,
+            });
+          }
+          const created: Array<{ readonly repo: string; readonly worktreePath: string }> = [];
+          const mainTarget = path.join(layout, repoBasename);
+          return yield* Effect.gen(function* () {
+            const main = yield* worktreeProvisioner
+              .provision({
+                projectCwd: run.cwd,
+                branch,
+                baseBranch,
+                path: mainTarget,
+                refuseExisting: true,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EpicRunnerDispatchError({
+                      commandType: "git.layout-worktree-provision",
+                      detail: `Could not provision ${branch} at ${mainTarget}`,
+                      cause,
+                    }),
+                ),
+              );
+            created.push({ repo: run.cwd, worktreePath: main.path });
+            yield* writeBeadsRedirect(run.cwd, main.path).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "beads.redirect-write",
+                    detail: `Could not write the beads redirect in ${main.path}`,
+                    cause,
+                  }),
+              ),
+            );
+            const siblingWorktrees: Array<{
+              readonly worktreePath: string;
+              readonly sourcePath: string;
+              readonly baseBranch: string;
+            }> = [];
+            for (const sibling of siblings) {
+              const target = mirrorPath(layout, repoBasename, sibling.relativePath);
+              const siblingWorktree = yield* worktreeProvisioner
+                .provision({
+                  projectCwd: sibling.canonicalPath,
+                  branch,
+                  baseBranch: sibling.baseBranch,
+                  path: target,
+                  refuseExisting: true,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new EpicRunnerDispatchError({
+                        commandType: "git.layout-worktree-provision",
+                        detail: `Could not provision ${branch} at ${target} for sibling ${sibling.canonicalPath}`,
+                        cause,
+                      }),
+                  ),
+                );
+              created.push({ repo: sibling.canonicalPath, worktreePath: siblingWorktree.path });
+              // Sibling worktrees get assets only
+              // (`skills/cook-epic/run-legacy.sh:1008-1009`).
+              yield* setupWorktreeAssets(
+                { fileSystem, path },
+                sibling.canonicalPath,
+                siblingWorktree.path,
+              ).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EpicRunnerDispatchError({
+                      commandType: "git.layout-worktree-assets",
+                      detail: `Could not set up assets in ${siblingWorktree.path}`,
+                      cause,
+                    }),
+                ),
+              );
+              siblingWorktrees.push({
+                worktreePath: siblingWorktree.path,
+                sourcePath: sibling.canonicalPath,
+                baseBranch: sibling.baseBranch,
+              });
+            }
+            return {
+              cwd: main.path,
+              branch: main.refName,
+              worktreePath: main.path,
+              siblingWorktrees,
+              siblingRule: siblingRuleLayout({
+                layoutRoot: root,
+                layout,
+                repoBasename,
+                branch: main.refName,
+                siblings,
+              }),
+            };
+          }).pipe(
+            // A failed layout provision tears the partial layout down;
+            // branches survive for retries.
+            Effect.catchCause((cause) =>
+              Effect.forEach(
+                created.toReversed(),
+                (entry) =>
+                  releaseProvisionedWorktree({
+                    repositoryPath: entry.repo,
+                    worktreePath: entry.worktreePath,
+                    label: "epic.runner.layout-provision-rollback-failed",
+                  }),
+                { discard: true },
+              ).pipe(
+                Effect.andThen(
+                  fileSystem.remove(layout, { force: true, recursive: true }).pipe(
+                    Effect.catchCause((removeCause) =>
+                      Effect.logWarning("epic.runner.layout-dir-rollback-failed", {
+                        layout,
+                        cause: removeCause,
+                      }),
+                    ),
+                  ),
+                ),
+                Effect.andThen(Effect.failCause(cause)),
+              ),
+            ),
+          );
+        }
         const targetPath = path.join(
           serverConfig.worktreesDir,
           `epic-${runCtx.runId}`,
@@ -985,6 +1357,8 @@ export const makeServerPoolWorkspace = (deps: {
             cwd: provisioned.path,
             branch: provisioned.refName,
             worktreePath: provisioned.path,
+            siblingWorktrees: [],
+            siblingRule: null,
           }),
           Effect.catchCause((cause) =>
             releaseProvisionedWorktree({
@@ -996,20 +1370,95 @@ export const makeServerPoolWorkspace = (deps: {
         );
       }),
 
-    release: (runCtx, workspace) =>
-      workspace.worktreePath === null
-        ? Effect.void
-        : worktreeProvisioner
-            .release({ repoCwd: runCtx.cwd, worktreePath: workspace.worktreePath, force: true })
+    release: (runCtx, workspace) => {
+      if (workspace.worktreePath === null) return Effect.void;
+      const worktreePath = workspace.worktreePath;
+      const root = layoutRoot(runCtx.runId);
+      if (!worktreePath.startsWith(`${root}/`)) {
+        return worktreeProvisioner.release({ repoCwd: runCtx.cwd, worktreePath, force: true }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("epic.runner.worker-worktree-release-failed", {
+              runId: runCtx.runId,
+              worktreePath,
+              cause,
+            }),
+          ),
+        );
+      }
+      // A layout is one unit (`skills/cook-epic/run-legacy.sh:2309-2336`):
+      // every sibling worktree, then the main worktree, then the layout dir.
+      // Branches survive for retries; any failure is fatal to the run.
+      const layout = path.dirname(worktreePath);
+      return Effect.gen(function* () {
+        if (!layout.startsWith(`${root}/`)) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.layout-release",
+            detail: `Refusing to remove ${layout}: not a layout under ${root}`,
+          });
+        }
+        for (const sibling of workspace.siblingWorktrees) {
+          const registered = yield* processRunner
+            .run({
+              command: "git",
+              args: ["-C", sibling.sourcePath, "worktree", "list", "--porcelain"],
+              cwd: runCtx.cwd,
+              timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+            })
             .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("epic.runner.worker-worktree-release-failed", {
-                  runId: runCtx.runId,
-                  worktreePath: workspace.worktreePath,
-                  cause,
-                }),
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.layout-release",
+                    detail: `Could not list worktrees of sibling ${sibling.sourcePath}`,
+                    cause,
+                  }),
               ),
-            ),
+            );
+          if (
+            registered.code !== 0 ||
+            !registered.stdout.split(/\r?\n/).includes(`worktree ${sibling.worktreePath}`)
+          ) {
+            continue;
+          }
+          yield* worktreeProvisioner
+            .release({
+              repoCwd: sibling.sourcePath,
+              worktreePath: sibling.worktreePath,
+              force: true,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.layout-release",
+                    detail: `Could not remove sibling worktree ${sibling.worktreePath}`,
+                    cause,
+                  }),
+              ),
+            );
+        }
+        yield* worktreeProvisioner.release({ repoCwd: runCtx.cwd, worktreePath, force: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.layout-release",
+                detail: `Could not remove layout worktree ${worktreePath}`,
+                cause,
+              }),
+          ),
+        );
+        yield* fileSystem.remove(layout, { force: true, recursive: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.layout-release",
+                detail: `Could not remove layout directory ${layout}`,
+                cause,
+              }),
+          ),
+        );
+      });
+    },
 
     releaseIntegration: (runCtx, outcome) =>
       Effect.gen(function* () {
@@ -1068,6 +1517,38 @@ export const makeServerPoolWorkspace = (deps: {
         yield* Effect.logInfo("epic.runner.repository-landing-effects", {
           ...landingEffects,
         });
+        // Sibling integration worktrees and branches go first; the main
+        // integration worktree last (`skills/cook-epic/run-legacy.sh:2309-2336`).
+        for (const sibling of state.value.siblings) {
+          yield* worktreeProvisioner
+            .release({
+              repoCwd: sibling.repositoryPath,
+              worktreePath: sibling.integrationWorktreePath,
+              force: true,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.sibling-integration-worktree-release",
+                    detail: `Could not release ${sibling.integrationWorktreePath}`,
+                    cause,
+                  }),
+              ),
+            );
+          yield* makeEpicRunMergeGit({ git: gitVcsDriver, setupWorktree: () => Effect.void })
+            .deleteLocalBranch(sibling.repositoryPath, state.value.integrationBranch)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.sibling-integration-branch-delete",
+                    detail: cause.detail,
+                    cause,
+                  }),
+              ),
+            );
+        }
         yield* worktreeProvisioner
           .release({
             repoCwd: state.value.repositoryPath,
@@ -1101,6 +1582,10 @@ export const makeServerPoolWorkspace = (deps: {
             .deleteMergeState({ runId: runCtx.runId })
             .pipe(Effect.mapError(storeError("deleteMergeState")));
         }
+        // Best-effort: drop the run's worktree dir once nothing is left in it.
+        yield* fileSystem
+          .remove(path.join(serverConfig.worktreesDir, `epic-${runCtx.runId}`))
+          .pipe(Effect.ignore);
       }).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("epic.runner.integration-cleanup-failed", {
@@ -1172,32 +1657,35 @@ export const makeServerMergeDrain = (deps: {
         ),
       );
       if (run.config.execution.sequential) return { _tag: "idle" } as const;
+      // The drain's `setup_worktree` mapping: the main integration worktree
+      // gets the beads redirect plus assets; a SIBLING integration worktree
+      // gets assets only, sourced from its own checkout — siblings have no
+      // beads database (`skills/cook-epic/run-legacy.sh:1007-1011,3110-3112`).
+      const mergeState = yield* store.getMergeState({ runId: run.runId }).pipe(
+        Effect.map(Option.getOrNull),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.merge-state-read-failed", {
+            runId: run.runId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      const siblingAssetSources = new Map(
+        (mergeState?.siblings ?? []).map((sibling) => [
+          sibling.integrationWorktreePath,
+          sibling.repositoryPath,
+        ]),
+      );
       const restoreIntegrationWorktreeAssets = (cwd: string) =>
         Effect.gen(function* () {
-          // Terminal parity: `skills/cook-epic/run-legacy.sh:1007-1019,3110-3112`.
-          yield* writeBeadsRedirect(run.cwd, cwd);
-          const sourceNodeModules = path.join(run.cwd, "node_modules");
-          const targetNodeModules = path.join(cwd, "node_modules");
-          if (
-            (yield* fileSystem.exists(sourceNodeModules)) &&
-            !(yield* fileSystem.exists(targetNodeModules))
-          ) {
-            yield* fileSystem.symlink(sourceNodeModules, targetNodeModules);
+          const siblingSource =
+            mergeState !== null && cwd !== mergeState.integrationWorktreePath
+              ? siblingAssetSources.get(cwd)
+              : undefined;
+          if (siblingSource === undefined) {
+            yield* writeBeadsRedirect(run.cwd, cwd);
           }
-          // Terminal parity: `skills/cook-epic/run-legacy.sh:998-1003`.
-          for (const name of [
-            ".env",
-            ".env.local",
-            ".env.development",
-            ".env.development.local",
-            ".env.test",
-          ]) {
-            const source = path.join(run.cwd, name);
-            const target = path.join(cwd, name);
-            if ((yield* fileSystem.exists(source)) && !(yield* fileSystem.exists(target))) {
-              yield* fileSystem.copyFile(source, target);
-            }
-          }
+          yield* setupWorktreeAssets({ fileSystem, path }, siblingSource ?? run.cwd, cwd);
         }).pipe(
           Effect.mapError(
             (cause) =>

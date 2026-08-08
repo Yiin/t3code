@@ -5248,6 +5248,7 @@ describe("EpicRunner", () => {
       baseBranch: "mine",
       integrationBranch: `cook-epic-integration-${runId}`,
       integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      siblings: [],
       entries: [
         {
           runId,
@@ -5522,6 +5523,7 @@ describe("EpicRunner", () => {
       baseBranch: "mine",
       integrationBranch: `cook-epic-integration-${runId}`,
       integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      siblings: [],
       entries: [
         {
           runId,

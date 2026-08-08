@@ -16,7 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 
-import { EpicRunnerDispatchError } from "./Errors.ts";
+import { EpicRunnerDispatchError, EpicRunnerStoreError } from "./Errors.ts";
 import {
   runParallelEpicLoop,
   type MergeDrainShape,
@@ -41,6 +41,8 @@ const EPIC_ID = "epic";
 type Attempt = {
   /** Move the workspace head during settle. */
   readonly commit?: boolean;
+  /** Move every sibling worktree head during settle. */
+  readonly siblingCommit?: boolean;
   /** Close the child during settle. */
   readonly close?: boolean;
   /** Append bead evidence during settle. */
@@ -128,14 +130,28 @@ const fixture = (input: {
   readonly pauseDuringPrepare?: boolean;
   /** Override the ready-frontier read. */
   readonly frontier?: () => ReadyFrontierSelection;
+  /** Sibling worktrees the acquire fake hands out. */
+  readonly siblingWorktrees?: ReadonlyArray<{
+    readonly worktreePath: string;
+    readonly sourcePath: string;
+    readonly baseBranch: string;
+  }>;
+  /** The sibling rule the acquire fake hands out. */
+  readonly siblingRule?: string;
+  /** Fail workspace release with an EpicRunnerStoreError. */
+  readonly releaseFails?: boolean;
 }) => {
   const sequential = input.sequential ?? true;
+  const siblingWorktrees = input.siblingWorktrees ?? [];
   let child = issue({
     id: input.childId ?? "epic.1",
     title: input.childTitle ?? "Child",
     status: input.initialChildStatus ?? "open",
   });
   let head = 0;
+  const siblingHeads = new Map<string, number>(
+    siblingWorktrees.map((sibling) => [sibling.worktreePath, 0]),
+  );
   let nextIterationIndex = 0;
   let persistedRun: PersistedEpicRun = {
     runId: RUN_ID,
@@ -285,7 +301,13 @@ const fixture = (input: {
     acquire: (_runCtx, acquireInput) =>
       Effect.sync((): IterationWorkspace => {
         if (acquireInput.sequential) {
-          return { cwd: "/repo", branch: null, worktreePath: null };
+          return {
+            cwd: "/repo",
+            branch: null,
+            worktreePath: null,
+            siblingWorktrees,
+            siblingRule: input.siblingRule ?? null,
+          };
         }
         const mergeFix = parseMergeFixTitle(acquireInput.issueTitle);
         const branch = mergeFix?.branch ?? `epic/${acquireInput.issueId}`;
@@ -293,12 +315,16 @@ const fixture = (input: {
           cwd: `/wt/${acquireInput.issueId}`,
           branch,
           worktreePath: `/wt/${acquireInput.issueId}`,
+          siblingWorktrees,
+          siblingRule: input.siblingRule ?? null,
         };
       }),
-    release: () =>
-      Effect.sync(() => {
-        workspaceReleases += 1;
-      }),
+    release: () => {
+      workspaceReleases += 1;
+      return input.releaseFails === true
+        ? Effect.fail(new EpicRunnerStoreError({ operation: "workspace.release" }))
+        : Effect.void;
+    },
     releaseIntegration: (_run, outcome) =>
       Effect.sync(() => {
         integrationReleased = outcome;
@@ -344,6 +370,11 @@ const fixture = (input: {
             ? Effect.never
             : Effect.sync(() => {
                 if (attempt.commit === true) head += 1;
+                if (attempt.siblingCommit === true) {
+                  for (const path of siblingHeads.keys()) {
+                    siblingHeads.set(path, (siblingHeads.get(path) ?? 0) + 1);
+                  }
+                }
                 if (attempt.claim === true) child = { ...child, status: "in_progress" };
                 if (attempt.close === true) child = { ...child, status: "closed" };
                 if (attempt.comment === true) {
@@ -415,7 +446,12 @@ const fixture = (input: {
   };
 
   const vcs: PoolVcsShape = {
-    headCommit: () => Effect.succeed(`head-${String(head)}`),
+    headCommit: (cwd) =>
+      Effect.succeed(
+        siblingHeads.has(cwd)
+          ? `sib-head-${String(siblingHeads.get(cwd) ?? 0)}`
+          : `head-${String(head)}`,
+      ),
     worktreeFingerprint: () => Effect.succeed(""),
     commitsAhead: () => Effect.succeed(0),
   };
@@ -519,6 +555,54 @@ it.live("dispatches one child through settle classification to a done run", () =
     assert.equal(test.releases(), 1);
     assert.equal(test.workspaceReleases(), 1);
     assert.equal(test.integrationReleased(), "done");
+  }),
+);
+
+it.live("splices the workspace sibling rule beside the orientation card", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      siblingRule: "SIBLING RULE TEXT",
+      attempts: [{ commit: true, close: true }],
+    });
+    yield* test.run;
+
+    const prompt = test.beginTurnCalls[0]?.prompt ?? "";
+    assert.include(prompt, "ORIENTATION CARD\n\nSIBLING RULE TEXT");
+    assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("counts a commit in any sibling worktree as committed", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      siblingWorktrees: [{ worktreePath: "/wt-sib", sourcePath: "/sib", baseBranch: "sib-main" }],
+      attempts: [{ close: true, siblingCommit: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
+    assert.deepEqual(
+      test.enqueuedMerges.map((merge) => merge.branch),
+      ["epic/epic.1"],
+    );
+  }),
+);
+
+it.live("fails the run as infra:merge-reconciliation when workspace release fails", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      releaseFails: true,
+      attempts: [{ commit: true, close: true }],
+    });
+    const error = yield* Effect.flip(test.run);
+
+    assert.instanceOf(error, EpicRunnerStoreError);
+    const run = test.runRecord();
+    assert.equal(run.status, "failed");
+    assert.include(run.lastError ?? "", "infra:merge-reconciliation");
+    assert.equal(test.workspaceReleases(), 1);
   }),
 );
 

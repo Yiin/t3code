@@ -613,6 +613,7 @@ describe("EpicRunStore", () => {
         baseBranch: "mine",
         integrationBranch: "cook-epic-integration-run-merge-restart",
         integrationWorktreePath: "/worktrees/integration",
+        siblings: [],
       });
       yield* store.enqueueMerge({ runId, childId: "child-a", branch: "epic/child-a" });
       yield* store.enqueueMerge({ runId, childId: "child-b", branch: "epic/child-b" });
@@ -688,6 +689,57 @@ describe("EpicRunStore", () => {
         commitCount: 5,
         parkedCount: 1,
       });
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  it.effect("persists sibling merge state and advances sibling heads on complete", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-merge-siblings");
+      yield* store.upsertRun(makeRun({ runId }));
+      yield* store.initializeMergeState({
+        runId,
+        lastAcceptedHead: "base-0",
+        repositoryPath: "/repo",
+        baseBranch: "mine",
+        integrationBranch: "cook-epic-integration-run-merge-siblings",
+        integrationWorktreePath: "/worktrees/integration",
+        siblings: [
+          {
+            repositoryPath: "/sib",
+            baseBranch: "main",
+            integrationWorktreePath: "/worktrees/sib",
+            lastAcceptedHead: "sib-0",
+          },
+          {
+            repositoryPath: "/sib2",
+            baseBranch: "main",
+            integrationWorktreePath: "/worktrees/sib2",
+            lastAcceptedHead: "sib2-0",
+          },
+        ],
+      });
+      yield* store.enqueueMerge({ runId, childId: "child-a", branch: "epic/child-a" });
+      yield* store.beginMergeDrain({ runId });
+      yield* store.completeMerge({
+        runId,
+        sequence: 0,
+        lastAcceptedHead: "base-1",
+        siblingHeads: [
+          { repositoryPath: "/sib", lastAcceptedHead: "sib-1" },
+          { repositoryPath: "/sib2", lastAcceptedHead: "sib2-0" },
+        ],
+      });
+
+      const persisted = Option.getOrThrow(yield* store.getMergeState({ runId }));
+      assert.strictEqual(persisted.lastAcceptedHead, "base-1");
+      assert.deepStrictEqual(
+        persisted.siblings.map((sibling) => [sibling.repositoryPath, sibling.lastAcceptedHead]),
+        [
+          ["/sib", "sib-1"],
+          ["/sib2", "sib2-0"],
+        ],
+      );
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 

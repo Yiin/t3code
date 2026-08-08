@@ -125,6 +125,10 @@ export const EpicRunPreflightBlocker = Schema.Union([
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   }),
+  Schema.TaggedStruct("sibling_invalid", {
+    path: TrimmedNonEmptyString,
+    detail: TrimmedNonEmptyString,
+  }),
 ]);
 export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
 

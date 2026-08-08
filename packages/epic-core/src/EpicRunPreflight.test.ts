@@ -27,6 +27,9 @@ const run = (
     readonly gitCode?: number;
     readonly gitStderr?: string;
     readonly onGit?: (input: ProcessRunner.ProcessRunInput) => void;
+    readonly processOverride?: (
+      input: ProcessRunner.ProcessRunInput,
+    ) => ProcessRunner.ProcessRunOutput | undefined;
     readonly config?: EpicRunConfigFileResult;
     readonly configSnapshot?: EpicRunConfigSnapshot;
     readonly onConfigRead?: () => void;
@@ -51,6 +54,8 @@ const run = (
     Layer.provide(
       Layer.succeed(ProcessRunner.ProcessRunner, {
         run: (input) => {
+          const override = options?.processOverride?.(input);
+          if (override !== undefined) return Effect.succeed(override);
           const { command, args } = input;
           if (command === "git") {
             options?.onGit?.(input);
@@ -649,4 +654,174 @@ describe("EpicRunPreflight", () => {
       ]);
     }),
   );
+
+  describe("siblings", () => {
+    const siblingSnapshot = (
+      siblings: ReadonlyArray<string>,
+      noPush = false,
+    ): EpicRunConfigSnapshot => ({
+      fileResult: { _tag: "absent" },
+      config: {
+        ...DEFAULT_EPIC_RUN_CONFIG,
+        parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, siblings: [...siblings] },
+        vcs: { ...DEFAULT_EPIC_RUN_CONFIG.vcs, noPush },
+      },
+      provenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+      violations: [],
+    });
+
+    const siblingOutput = (stdout: string, code = 0): ProcessRunner.ProcessRunOutput => ({
+      stdout,
+      stderr: "",
+      code: code as never,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    });
+
+    const siblingProcesses =
+      (overrides: {
+        readonly symbolicRefCode?: number;
+        readonly diffIndexCode?: number;
+        readonly originCode?: number;
+        readonly relativePath?: string;
+      }) =>
+      (input: ProcessRunner.ProcessRunInput): ProcessRunner.ProcessRunOutput | undefined => {
+        const { command, args } = input;
+        if (command === "realpath") {
+          const target = args[0] ?? "";
+          if (target.startsWith("--relative-to=")) {
+            return siblingOutput(`${overrides.relativePath ?? "../sibling"}\n`);
+          }
+          return siblingOutput(target === "/repo" ? "/repo\n" : "/sibling\n");
+        }
+        if (command === "git" && args[0] === "-C") {
+          switch (args[2]) {
+            case "rev-parse":
+              return siblingOutput(".git\n");
+            case "symbolic-ref":
+              return siblingOutput(
+                overrides.symbolicRefCode === undefined ? "main\n" : "",
+                overrides.symbolicRefCode ?? 0,
+              );
+            case "update-index":
+              return siblingOutput("");
+            case "diff-index":
+              return siblingOutput("", overrides.diffIndexCode ?? 0);
+            case "remote":
+              return siblingOutput("git@example.com:sibling.git\n", overrides.originCode ?? 0);
+          }
+        }
+        return undefined;
+      };
+
+    it.effect("accepts a valid sibling without blockers", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          configSnapshot: siblingSnapshot(["../sibling"]),
+          processOverride: siblingProcesses({}),
+        });
+        expect(result.ok).toBe(true);
+        expect(result.blockers).toEqual([]);
+      }),
+    );
+
+    it.effect("blocks a sibling that is not on a branch", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          configSnapshot: siblingSnapshot(["../sibling"]),
+          processOverride: siblingProcesses({ symbolicRefCode: 128 }),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "sibling_invalid",
+          path: "/sibling",
+          detail:
+            "sibling repo '/sibling' is not on a branch; check out a branch there before launching",
+        });
+      }),
+    );
+
+    it.effect("blocks a dirty sibling", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          configSnapshot: siblingSnapshot(["../sibling"]),
+          processOverride: siblingProcesses({ diffIndexCode: 1 }),
+        });
+        expect(result.blockers).toContainEqual({
+          _tag: "sibling_invalid",
+          path: "/sibling",
+          detail:
+            "sibling repo '/sibling' has uncommitted changes; commit or stash there before launching — workers commit on its branch",
+        });
+      }),
+    );
+
+    it.effect("skips the origin check when pushing is disabled", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          configSnapshot: siblingSnapshot(["../sibling"], true),
+          processOverride: siblingProcesses({ originCode: 2 }),
+        });
+        expect(result.blockers).toEqual([]);
+      }),
+    );
+
+    it.effect("requires an origin remote when pushing is enabled", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          configSnapshot: siblingSnapshot(["../sibling"]),
+          processOverride: siblingProcesses({ originCode: 2 }),
+        });
+        expect(result.blockers).toContainEqual({
+          _tag: "sibling_invalid",
+          path: "/sibling",
+          detail:
+            "sibling repo '/sibling' has no origin remote; add an origin remote or set vcs.noPush for local-only landing",
+        });
+      }),
+    );
+
+    it.effect("blocks a sibling nested inside the main repo in parallel mode", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          configSnapshot: siblingSnapshot(["packages/sibling"]),
+          processOverride: siblingProcesses({ relativePath: "packages/sibling" }),
+        });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "sibling_invalid",
+          path: "/sibling",
+          detail:
+            "sibling repo '/sibling' resolves inside the main repository; parallel layouts cannot mirror it — move the sibling outside the project root or run sequentially",
+        });
+      }),
+    );
+
+    it.effect("allows a nested sibling in sequential mode", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          configSnapshot: siblingSnapshot(["packages/sibling"]),
+          processOverride: siblingProcesses({ relativePath: "packages/sibling" }),
+        });
+        expect(result.blockers).toEqual([]);
+      }),
+    );
+
+    it.effect("issues no sibling validation commands when no siblings are configured", () =>
+      Effect.gen(function* () {
+        const seen: Array<string> = [];
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          processOverride: (input) => {
+            seen.push(`${input.command} ${input.args[0] ?? ""}`);
+            return undefined;
+          },
+        });
+        expect(result.ok).toBe(true);
+        expect(seen.some((entry) => entry.startsWith("realpath"))).toBe(false);
+        expect(seen.some((entry) => entry === "git -C")).toBe(false);
+      }),
+    );
+  });
 });

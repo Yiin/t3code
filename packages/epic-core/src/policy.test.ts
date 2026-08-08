@@ -7,6 +7,7 @@ import {
   decideGraceStep,
   decideIterationBoundary,
   failureReasonForOutcome,
+  mergeFixDescription,
   persistedFailureReason,
   type IterationBoundaryDecision,
   type IterationBoundaryInput,
@@ -512,5 +513,66 @@ describe("decideGraceStep", () => {
     expect(
       decideGraceStep(graceInput({ finalMessageMissing: true, finalMessageWaitExhausted: false })),
     ).toMatchObject({ action: "continue" });
+  });
+});
+
+describe("mergeFixDescription branch-set variant", () => {
+  const touchedRepos = [
+    { kind: "main" as const, path: "/repo", baseBranch: "mine" },
+    { kind: "sibling" as const, path: "/work/proga-api", baseBranch: "main" },
+  ];
+
+  // Terminal parity: `skills/cook-epic/run-legacy.sh:2855-2876`.
+  it("lists every touched repo and lands all-or-nothing", () => {
+    const description = mergeFixDescription({
+      childId: "child-1",
+      branch: "epic/child-1",
+      baseBranch: "mine",
+      reason: "conflict",
+      gateCommand: "vp check",
+      pushEnabled: true,
+      touchedRepos,
+    });
+    expect(description).toBe(
+      "Branch `epic/child-1` (child `child-1`) failed to land: conflict. The branch set spans several repositories and lands all-or-nothing; the whole set is parked together:\n" +
+        "\n" +
+        "- this repository (`/repo`, base `mine`)\n" +
+        "- sibling `/work/proga-api` (base `main`)\n" +
+        "\n" +
+        "Repair procedure: you will be on branch `epic/child-1` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into `epic/child-1` and resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes.",
+    );
+  });
+
+  it("names the gate command for gate-failed sets", () => {
+    const description = mergeFixDescription({
+      childId: "child-1",
+      branch: "epic/child-1",
+      baseBranch: "mine",
+      reason: "gate-failed",
+      gateCommand: "vp check",
+      pushEnabled: false,
+      touchedRepos,
+    });
+    expect(description).toContain(
+      "The integration gate is: `vp check` — run it and fix what it reports",
+    );
+    expect(description).toContain("Do not push (disabled this run).");
+    expect(description).toContain(
+      "Do NOT merge into any base branch yourself, and never push sibling repos",
+    );
+  });
+
+  it("omits the main-repo bullet when only siblings have commits", () => {
+    const description = mergeFixDescription({
+      childId: "child-1",
+      branch: "epic/child-1",
+      baseBranch: "mine",
+      reason: "conflict",
+      gateCommand: null,
+      pushEnabled: true,
+      touchedRepos: [touchedRepos[1]!],
+    });
+    expect(description).not.toContain("this repository");
+    expect(description).toContain("- sibling `/work/proga-api` (base `main`)");
   });
 });

@@ -59,7 +59,17 @@ export const parseMergeFixTitle = (
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2885`. */
 export const parkedBranchKey = (branch: string): string => branch.replaceAll("/", "_");
 
-/** Terminal parity: `skills/cook-epic/run-legacy.sh:2863-2881`. */
+/** One repository a parked branch set touched. */
+export interface MergeFixTouchedRepo {
+  readonly kind: "main" | "sibling";
+  readonly path: string;
+  readonly baseBranch: string;
+}
+
+/** Terminal parity: `skills/cook-epic/run-legacy.sh:2863-2881` (single repo) and
+ * `skills/cook-epic/run-legacy.sh:2843-2879` (branch set). A non-empty
+ * `touchedRepos` produces the multi-repo variant; omitting it keeps the
+ * single-repo text byte-identical. */
 export const mergeFixDescription = (input: {
   readonly childId: string;
   readonly branch: string;
@@ -67,8 +77,20 @@ export const mergeFixDescription = (input: {
   readonly reason: MergeParkReason;
   readonly gateCommand: string | null;
   readonly pushEnabled: boolean;
+  readonly touchedRepos?: ReadonlyArray<MergeFixTouchedRepo>;
 }): string => {
-  let description = `Branch \`${input.branch}\` (child \`${input.childId}\`) failed to land on \`${input.baseBranch}\`: ${input.reason}.\n\nRepair procedure: you will be on branch \`${input.branch}\` in an isolated worktree. Merge \`${input.baseBranch}\` into it, resolve conflicts`;
+  const touched = input.touchedRepos ?? [];
+  let description: string;
+  if (touched.length > 0) {
+    const setLines = touched.map((repo) =>
+      repo.kind === "main"
+        ? `- this repository (\`${repo.path}\`, base \`${repo.baseBranch}\`)`
+        : `- sibling \`${repo.path}\` (base \`${repo.baseBranch}\`)`,
+    );
+    description = `Branch \`${input.branch}\` (child \`${input.childId}\`) failed to land: ${input.reason}. The branch set spans several repositories and lands all-or-nothing; the whole set is parked together:\n\n${setLines.join("\n")}\n\nRepair procedure: you will be on branch \`${input.branch}\` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into \`${input.branch}\` and resolve conflicts`;
+  } else {
+    description = `Branch \`${input.branch}\` (child \`${input.childId}\`) failed to land on \`${input.baseBranch}\`: ${input.reason}.\n\nRepair procedure: you will be on branch \`${input.branch}\` in an isolated worktree. Merge \`${input.baseBranch}\` into it, resolve conflicts`;
+  }
   description +=
     input.reason === "conflict"
       ? ", then run the project quality gates"
@@ -76,7 +98,9 @@ export const mergeFixDescription = (input: {
   description += input.pushEnabled
     ? ". Push the branch, close this issue, and note the epic."
     : ". Do not push (disabled this run). Close this issue and note the epic.";
-  return `${description} Do NOT merge into ${input.baseBranch} yourself.`;
+  return touched.length > 0
+    ? `${description} Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes.`
+    : `${description} Do NOT merge into ${input.baseBranch} yourself.`;
 };
 
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2958`. */

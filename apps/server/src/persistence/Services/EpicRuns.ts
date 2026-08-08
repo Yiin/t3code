@@ -160,6 +160,14 @@ export const EpicRunMergeEntry = Schema.Struct({
 });
 export type EpicRunMergeEntry = typeof EpicRunMergeEntry.Type;
 
+export const EpicRunMergeStateSibling = Schema.Struct({
+  repositoryPath: Schema.String,
+  baseBranch: Schema.String,
+  integrationWorktreePath: Schema.String,
+  lastAcceptedHead: Schema.String,
+});
+export type EpicRunMergeStateSibling = typeof EpicRunMergeStateSibling.Type;
+
 export const EpicRunMergeState = Schema.Struct({
   runId: EpicRunId,
   initialHead: Schema.String,
@@ -169,6 +177,8 @@ export const EpicRunMergeState = Schema.Struct({
   baseBranch: Schema.String,
   integrationBranch: Schema.String,
   integrationWorktreePath: Schema.String,
+  /** Empty for single-repo runs; old rows decode to `[]` (column default). */
+  siblings: Schema.Array(EpicRunMergeStateSibling),
   entries: Schema.Array(EpicRunMergeEntry),
 });
 export type EpicRunMergeState = typeof EpicRunMergeState.Type;
@@ -190,6 +200,7 @@ export const InitializeEpicRunMergeStateInput = Schema.Struct({
   baseBranch: Schema.String,
   integrationBranch: Schema.String,
   integrationWorktreePath: Schema.String,
+  siblings: Schema.Array(EpicRunMergeStateSibling),
 });
 export type InitializeEpicRunMergeStateInput = typeof InitializeEpicRunMergeStateInput.Type;
 
@@ -224,6 +235,15 @@ export const CompleteEpicRunMergeInput = Schema.Struct({
   runId: EpicRunId,
   sequence: NonNegativeInt,
   lastAcceptedHead: Schema.String,
+  /** New accepted heads for every sibling; absent for single-repo runs. */
+  siblingHeads: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        repositoryPath: Schema.String,
+        lastAcceptedHead: Schema.String,
+      }),
+    ),
+  ),
 });
 export type CompleteEpicRunMergeInput = typeof CompleteEpicRunMergeInput.Type;
 

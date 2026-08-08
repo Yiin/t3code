@@ -18,6 +18,7 @@ import { EpicRunConfigSource, type EpicRunConfigFileResult } from "./EpicRunConf
 import { INTEGRATION_BRANCH_PREFIX } from "./policy.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
+import { makeSiblingResolver } from "./siblings.ts";
 
 const COMMAND_TIMEOUT = Duration.seconds(20);
 const MAX_BLOCKER_TEXT_LENGTH = 2_048;
@@ -50,6 +51,8 @@ export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker):
           blocker.worktreePath !== null ? ` (worktree ${blocker.worktreePath})` : ""
         } behind; reconcile it before launching.`,
       );
+    case "sibling_invalid":
+      return boundedBlockerText(blocker.detail);
   }
 }
 
@@ -381,6 +384,28 @@ export const layer = Layer.effect(
             } else {
               warnings.push({ _tag: "config_violation", ...violation });
             }
+          }
+        }
+
+        // Sibling repositories are validated only when configured; the
+        // single-repo path issues no extra git invocations
+        // (skills/cook-epic/run-legacy.sh:240-282).
+        const siblingEntries = configSnapshot.config.parallel.siblings;
+        if (siblingEntries.length > 0) {
+          const resolved = yield* Effect.result(
+            makeSiblingResolver(processRunner.run).resolveSiblings({
+              cwd: input.workspaceRoot,
+              siblings: siblingEntries,
+              pushEnabled: !configSnapshot.config.vcs.noPush,
+              layoutMode: input.mode === "parallel",
+            }),
+          );
+          if (resolved._tag === "Failure") {
+            blockers.push({
+              _tag: "sibling_invalid",
+              path: resolved.failure.path,
+              detail: resolved.failure.detail,
+            });
           }
         }
 

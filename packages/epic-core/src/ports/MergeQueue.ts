@@ -24,6 +24,14 @@ export interface MergeQueueEntry {
   readonly fixIssueId: string | null;
 }
 
+/** One sibling repository's merge-tracking state (`skills/cook-epic/run-legacy.sh:239`). */
+export interface MergeQueueSiblingSnapshot {
+  readonly repositoryPath: string;
+  readonly baseBranch: string;
+  readonly integrationWorktreePath: string;
+  readonly lastAcceptedHead: string;
+}
+
 export interface MergeQueueSnapshot {
   readonly runId: string;
   readonly lastAcceptedHead: string;
@@ -31,6 +39,8 @@ export interface MergeQueueSnapshot {
   readonly baseBranch: string;
   readonly integrationBranch: string;
   readonly integrationWorktreePath: string;
+  /** Empty for single-repo runs; persistence defaults old rows to `[]`. */
+  readonly siblings: ReadonlyArray<MergeQueueSiblingSnapshot>;
   readonly entries: ReadonlyArray<MergeQueueEntry>;
 }
 
@@ -65,6 +75,15 @@ export interface MergeQueueStoreShape {
     readonly runId: string;
     readonly sequence: number;
     readonly lastAcceptedHead: string;
+    /**
+     * New accepted heads for every sibling, including siblings without
+     * commits (`skills/cook-epic/run-legacy.sh:3040-3047`). Omitted by
+     * single-repo callers.
+     */
+    readonly siblingHeads?: ReadonlyArray<{
+      readonly repositoryPath: string;
+      readonly lastAcceptedHead: string;
+    }>;
   }) => Effect.Effect<void, MergeQueuePortError>;
   readonly drop: (input: {
     readonly runId: string;

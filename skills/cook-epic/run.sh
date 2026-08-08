@@ -15,6 +15,7 @@
 #   COOKEPIC_GATE              integration gate command       -> gate.command
 #   COOKEPIC_NO_GATE           1 = land unverified            -> gate.disabled
 #   COOKEPIC_NO_PUSH           1 = land without pushing       -> vcs.noPush
+#   COOKEPIC_SIBLINGS         space-separated sibling repos  -> parallel.siblings
 #   COOKEPIC_MAX_DISPATCHES    global spawn cap               -> limits.maxIterations
 #   COOKEPIC_MAX_ATTEMPTS      attempts per child             -> limits.maxAttemptsPerChild
 #   COOKEPIC_WORKER_TIMEOUT    worker timeout, seconds        -> supervision.workerTimeoutSeconds
@@ -46,7 +47,7 @@ fail() { # <message> <help>
   exit 2
 }
 
-for name in COOKEPIC_WORKERS COOKEPIC_SIBLINGS COOKEPIC_BUDGET_USD \
+for name in COOKEPIC_WORKERS COOKEPIC_BUDGET_USD \
   COOKEPIC_IDLE_THRESHOLD COOKEPIC_INSPECTOR_TIMEOUT \
   COOKEPIC_INSPECT_RETRY_DELAY COOKEPIC_INSPECT_MIN_DELAY \
   COOKEPIC_INSPECT_MAX_DELAY COOKEPIC_RATE_LIMIT_BACKOFF \

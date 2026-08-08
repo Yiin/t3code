@@ -24,6 +24,7 @@ import {
 import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
+import { makeSiblingResolver } from "@t3tools/epic-core/siblings";
 import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
 import { resolveEpicRunConfig } from "@t3tools/shared/epicRunConfig";
 import * as Console from "effect/Console";
@@ -104,6 +105,13 @@ const deprecatedEnvironmentOverride = (
   ...(environment.COOKEPIC_NO_PUSH === undefined
     ? {}
     : { vcs: { noPush: environment.COOKEPIC_NO_PUSH === "1" } }),
+  ...(environment.COOKEPIC_SIBLINGS === undefined
+    ? {}
+    : {
+        parallel: {
+          siblings: environment.COOKEPIC_SIBLINGS.split(/\s+/).filter((entry) => entry.length > 0),
+        },
+      }),
   ...(environment.COOKEPIC_PERMISSION_MODE === undefined
     ? {}
     : {
@@ -273,6 +281,25 @@ export const cookCommand = Command.make("cook", {
           });
         }
         const journal = yield* FileRunJournal.make({ runDirectory });
+        // The terminal cook loop is sequential-only: siblings are the real
+        // checkouts, validated with layout mirroring off.
+        const siblingRefs = yield* makeSiblingResolver(runner.run)
+          .resolveSiblings({
+            cwd,
+            siblings: snapshot.config.parallel.siblings,
+            pushEnabled: !snapshot.config.vcs.noPush,
+            layoutMode: false,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new EpicCookCliError({
+                  operation: "epicCook.siblings",
+                  detail: error.detail,
+                  cause: error,
+                }),
+            ),
+          );
         // Optional systemd scope governance for worker spawns. A colliding
         // pre-existing scope is fatal (run identity clash); every other
         // degradation warns and spawns unwrapped inside prepareWorkerScope.
@@ -314,7 +341,11 @@ export const cookCommand = Command.make("cook", {
                   repositoryPath: cwd,
                   baseBranch: branchResult.stdout.trim(),
                   worktreeRoot: NodePath.join(runDirectory, "worktrees"),
-                  siblings: [],
+                  siblings: siblingRefs.map((sibling) => ({
+                    repositoryPath: sibling.canonicalPath,
+                    baseBranch: sibling.baseBranch,
+                    worktreeRoot: sibling.canonicalPath,
+                  })),
                 },
                 selection: modelSelection,
                 configSnapshot: snapshot,

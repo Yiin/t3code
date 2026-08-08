@@ -92,6 +92,11 @@ describe("EpicRunPreflightResult", () => {
           configPath: "/repo/.t3code/epic-run.json",
           diagnostics: ['Invalid type\n  at ["parallel"]["workers"]'],
         },
+        {
+          _tag: "sibling_invalid" as const,
+          path: "/work/sibling",
+          detail: "sibling repo '/work/sibling' is not on a branch",
+        },
       ],
       warnings: [
         { _tag: "stale_claims" as const, childIds: ["t3code-vst.1"] },

@@ -23,6 +23,7 @@ import type {
 } from "./ports/RunJournal.ts";
 import type { RepoRef, VcsShape } from "./ports/Vcs.ts";
 import { resolveEpicProviderFallback } from "./providerFallback.ts";
+import { siblingRuleSequential } from "./siblings.ts";
 
 export class SequentialEpicLoopError extends Schema.TaggedErrorClass<SequentialEpicLoopError>()(
   "SequentialEpicLoopError",
@@ -69,6 +70,8 @@ const workerPrompt = (input: {
   readonly child: BacklogIssue;
   readonly orientation: string;
   readonly preamble?: string;
+  /** The sequential sibling rule; spliced only when the run has siblings. */
+  readonly siblingRule?: string;
 }): string => `${input.preamble ?? "Complete the assigned epic child end-to-end."}
 
 Work only child \`${input.child.id}\`: ${input.child.title}
@@ -76,7 +79,7 @@ ASSIGNED_CHILD_ID=${input.child.id}
 
 Use bd to claim this child. Implement it. Run focused checks. Commit the result, but do not push. Close the child and append its epic progress note. Stop after this child. Keep all work in the foreground. End a completed iteration with exactly one line:
 RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}
-
+${input.siblingRule === undefined ? "" : `\n${input.siblingRule}\n`}
 ## Epic context
 
 ${input.epic.description || "(epic description unavailable)"}
@@ -89,6 +92,14 @@ ${input.orientation}
 const isResearch = (issue: BacklogIssue): boolean =>
   issue.title.startsWith("Research:") ||
   issue.labels.some((label) => label.toLowerCase() === "research");
+
+/** A sibling checkout viewed as its own single-repo root. */
+const siblingRepoRef = (sibling: RepoRef["siblings"][number]): RepoRef => ({
+  repositoryPath: sibling.repositoryPath,
+  baseBranch: sibling.baseBranch,
+  worktreeRoot: sibling.worktreeRoot,
+  siblings: [],
+});
 
 export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function* (
   input: SequentialEpicLoopInput,
@@ -165,6 +176,61 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
   const trackedChildren = new Map<string, number>();
   const exhaustedIterations = new Map<string, number>();
   const publishedRecoveryEvents = new Set<string>();
+
+  const siblings = input.repository.siblings;
+  const siblingRule =
+    siblings.length === 0
+      ? undefined
+      : siblingRuleSequential({
+          siblings: siblings.map((sibling) => ({ canonicalPath: sibling.repositoryPath })),
+        });
+  /** FIRST_HEAD / FIRST_SIB_HEAD (`skills/cook-epic/run-legacy.sh:2473-2478`):
+   * the landing push covers every repo whose HEAD moved since the child's
+   * FIRST dispatch, so a retry pushes an earlier attempt's commits too. */
+  const firstDispatchHeads = new Map<
+    string,
+    {
+      readonly main: string | null;
+      readonly siblings: ReadonlyArray<{
+        readonly repositoryPath: string;
+        readonly head: string | null;
+      }>;
+    }
+  >();
+
+  const readSiblingHeads = Effect.fn("runSequentialEpicLoop.readSiblingHeads")(function* () {
+    const heads: Array<{ readonly repositoryPath: string; readonly head: string | null }> = [];
+    for (const sibling of siblings) {
+      heads.push({
+        repositoryPath: sibling.repositoryPath,
+        head: yield* ports.vcs.headCommit(siblingRepoRef(sibling)),
+      });
+    }
+    return heads;
+  });
+
+  // The dirty fingerprint spans every repo of the set: a worker leaving any
+  // sibling checkout dirty blocks the handoff exactly like main-repo dirt
+  // (`skills/cook-epic/run-legacy.sh:2713-2716`). With no siblings configured
+  // this is the main-repo fingerprint alone, one call, as before.
+  const readFingerprint = Effect.fn("runSequentialEpicLoop.readFingerprint")(function* () {
+    const main = yield* ports.vcs.worktreeFingerprint(input.repository);
+    if (siblings.length === 0 || main === null) return main;
+    const parts = [main];
+    for (const sibling of siblings) {
+      const part = yield* ports.vcs.worktreeFingerprint(siblingRepoRef(sibling));
+      if (part === null) return null;
+      parts.push(part);
+    }
+    return parts.join("\n");
+  });
+
+  // A sequential child's effects can land in any repo of the set: a moved
+  // sibling HEAD counts as committed (`skills/cook-epic/run-legacy.sh:2718-2721`).
+  const siblingHeadsMoved = (
+    before: ReadonlyArray<{ readonly repositoryPath: string; readonly head: string | null }>,
+    after: ReadonlyArray<{ readonly repositoryPath: string; readonly head: string | null }>,
+  ): boolean => before.some((entry, index) => entry.head !== (after[index]?.head ?? null));
 
   const publishClaimRecovery = Effect.fn("runSequentialEpicLoop.publishClaimRecovery")(function* (
     issueId: string,
@@ -245,9 +311,14 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         child: freshChild,
         orientation,
         ...(input.promptPreamble === undefined ? {} : { preamble: input.promptPreamble }),
+        ...(siblingRule === undefined ? {} : { siblingRule }),
       });
       const beforeHead = yield* ports.vcs.headCommit(input.repository);
-      const beforeFingerprint = yield* ports.vcs.worktreeFingerprint(input.repository);
+      const beforeFingerprint = yield* readFingerprint();
+      const beforeSiblingHeads = yield* readSiblingHeads();
+      if (!firstDispatchHeads.has(child.id)) {
+        firstDispatchHeads.set(child.id, { main: beforeHead, siblings: beforeSiblingHeads });
+      }
       const preCommentCount = freshChild.commentCount;
       const iterationIndex = run.iterationsDispatched;
       const threadId = ThreadId.make(
@@ -320,13 +391,15 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         }
         const final = yield* activeHandle.finalMessage;
         const afterHead = yield* ports.vcs.headCommit(input.repository);
+        const settledSiblingHeads = yield* readSiblingHeads();
         outcome = classifyIteration({
           turnState: settled.turnState,
           finalMessage:
             final.text === null ? null : { text: final.text, streaming: final.streaming },
           finalMessageWaitExhausted: final.waitExhausted,
           sessionLastError: settled.providerError,
-          committed: beforeHead !== afterHead,
+          committed:
+            beforeHead !== afterHead || siblingHeadsMoved(beforeSiblingHeads, settledSiblingHeads),
           timedOut: settled.timedOut,
         });
         yield* activeHandle.release;
@@ -334,8 +407,10 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
       }
 
       const afterHead = yield* ports.vcs.headCommit(input.repository);
-      const committed = beforeHead !== afterHead;
-      const afterWorkerFingerprint = yield* ports.vcs.worktreeFingerprint(input.repository);
+      const afterSiblingHeads = yield* readSiblingHeads();
+      const committed =
+        beforeHead !== afterHead || siblingHeadsMoved(beforeSiblingHeads, afterSiblingHeads);
+      const afterWorkerFingerprint = yield* readFingerprint();
       let postChild = yield* ports.backlog.showIssue(child.id);
       const findingsDelivered =
         postChild.status === "closed" && postChild.commentCount > preCommentCount;
@@ -409,7 +484,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
             }
           }
         }
-        const afterGateFingerprint = yield* ports.vcs.worktreeFingerprint(input.repository);
+        const afterGateFingerprint = yield* readFingerprint();
         if (
           outcome.kind === "done" &&
           (afterGateFingerprint === null || afterGateFingerprint !== beforeFingerprint)
@@ -423,21 +498,75 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
           forceChildRetry = true;
         }
         if (outcome.kind === "done" && !config.vcs.noPush) {
-          const pushed = yield* Effect.result(
-            ports.vcs.push({
-              repositoryPath: input.cwd,
-              remote: "origin",
-              refspec: `HEAD:${input.repository.baseBranch}`,
-            }),
-          );
-          if (pushed._tag === "Failure") {
+          const markPushFailed = (detail: string) => {
             outcome = {
               kind: "error",
-              detail: `push failed: ${errorDetail(pushed.failure)}`,
+              detail: `push failed: ${detail}`,
               report: outcome.report,
             };
             evidenceFailure = "push-failed";
             fatalFailure = true;
+          };
+          if (siblings.length === 0) {
+            const pushed = yield* Effect.result(
+              ports.vcs.push({
+                repositoryPath: input.cwd,
+                remote: "origin",
+                refspec: `HEAD:${input.repository.baseBranch}`,
+              }),
+            );
+            if (pushed._tag === "Failure") {
+              markPushFailed(errorDetail(pushed.failure));
+            }
+          } else {
+            // push_sequential_child_effects: push every repo whose HEAD moved
+            // since the child's first dispatch
+            // (`skills/cook-epic/run-legacy.sh:2471-2484`).
+            const first = firstDispatchHeads.get(child.id) ?? {
+              main: beforeHead,
+              siblings: beforeSiblingHeads,
+            };
+            const mainHead = yield* ports.vcs.headCommit(input.repository);
+            if (mainHead !== first.main) {
+              const pushed = yield* Effect.result(
+                ports.vcs.push({
+                  repositoryPath: input.cwd,
+                  remote: "origin",
+                  refspec: `HEAD:${input.repository.baseBranch}`,
+                }),
+              );
+              if (pushed._tag === "Failure") {
+                markPushFailed(errorDetail(pushed.failure));
+              }
+            }
+            for (const sibling of siblings) {
+              if (fatalFailure) break;
+              const firstHead =
+                first.siblings.find((entry) => entry.repositoryPath === sibling.repositoryPath)
+                  ?.head ?? null;
+              const currentHead = yield* ports.vcs.headCommit(siblingRepoRef(sibling));
+              if (currentHead === firstHead) continue;
+              const branch = yield* Effect.result(ports.vcs.currentBranch(sibling.repositoryPath));
+              if (branch._tag === "Failure" || branch.success === null) {
+                markPushFailed(
+                  branch._tag === "Failure"
+                    ? errorDetail(branch.failure)
+                    : `sibling ${sibling.repositoryPath} is not on a branch`,
+                );
+                break;
+              }
+              const pushed = yield* Effect.result(
+                ports.vcs.push({
+                  repositoryPath: sibling.repositoryPath,
+                  remote: "origin",
+                  refspec: `HEAD:${branch.success}`,
+                }),
+              );
+              if (pushed._tag === "Failure") {
+                markPushFailed(errorDetail(pushed.failure));
+                break;
+              }
+            }
           }
         }
       }

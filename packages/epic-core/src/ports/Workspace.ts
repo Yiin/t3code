@@ -12,10 +12,24 @@ export interface PoolRunContext {
   readonly cwd: string;
 }
 
+/**
+ * One sibling worktree of a layout (parallel) or real sibling checkout
+ * (sequential): where the iteration may also commit.
+ */
+export interface SiblingWorktree {
+  readonly worktreePath: string;
+  readonly sourcePath: string;
+  readonly baseBranch: string;
+}
+
 export interface IterationWorkspace {
   readonly cwd: string;
   readonly branch: string | null;
   readonly worktreePath: string | null;
+  /** Empty when the run has no siblings. */
+  readonly siblingWorktrees: ReadonlyArray<SiblingWorktree>;
+  /** The sibling prompt rule for this workspace; `null` when no siblings. */
+  readonly siblingRule: string | null;
 }
 
 /**
@@ -45,8 +59,15 @@ export interface WorkspaceShape {
       readonly sequential: boolean;
     },
   ) => Effect.Effect<IterationWorkspace, EpicRunnerError>;
-  /** Release an iteration workspace. Never fails; the adapter logs. */
-  readonly release: (run: PoolRunContext, workspace: IterationWorkspace) => Effect.Effect<void>;
+  /**
+   * Release an iteration workspace. The single-repo path never fails (the
+   * adapter logs); a layout cleanup failure propagates and the loop fails the
+   * run as `infra:merge-reconciliation`.
+   */
+  readonly release: (
+    run: PoolRunContext,
+    workspace: IterationWorkspace,
+  ) => Effect.Effect<void, EpicRunnerError>;
   /**
    * Release the integration workspace once the run is terminal. The outcome is
    * the run's terminal status. Never fails; the adapter logs.

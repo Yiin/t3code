@@ -10,6 +10,7 @@ import {
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   EpicRunConfig as EpicRunConfigSchema,
   EpicRunConfigProvenance as EpicRunConfigProvenanceSchema,
+  EpicRunId,
   ModelSelection,
   NonNegativeInt,
 } from "@t3tools/contracts";
@@ -37,6 +38,7 @@ import {
   GetEpicRunInput,
   GetLatestEpicRunIterationInput,
   InitializeEpicRunMergeStateInput,
+  EpicRunMergeStateSibling,
   ListEpicRunIterationsInput,
   ListEpicRunsInput,
   ListRecentEpicRunIterationsInput,
@@ -454,6 +456,8 @@ const makeEpicRunStore = Effect.gen(function* () {
 
   const EpicRunMergeStateRow = Schema.Struct({
     ...InitializeEpicRunMergeStateInput.fields,
+    // The column stores JSON; the input schema carries the decoded array.
+    siblings: Schema.fromJsonString(Schema.Array(EpicRunMergeStateSibling)),
     initialHead: Schema.String,
     parkedCount: NonNegativeInt,
   });
@@ -463,10 +467,10 @@ const makeEpicRunStore = Effect.gen(function* () {
     execute: (row) => sql`
       INSERT INTO epic_run_merge_state (
         run_id, initial_head, last_accepted_head, repository_path, base_branch,
-        integration_branch, integration_worktree_path
+        integration_branch, integration_worktree_path, siblings
       ) VALUES (
         ${row.runId}, ${row.lastAcceptedHead}, ${row.lastAcceptedHead}, ${row.repositoryPath}, ${row.baseBranch},
-        ${row.integrationBranch}, ${row.integrationWorktreePath}
+        ${row.integrationBranch}, ${row.integrationWorktreePath}, ${JSON.stringify(row.siblings)}
       )
       ON CONFLICT (run_id) DO NOTHING
     `,
@@ -480,7 +484,8 @@ const makeEpicRunStore = Effect.gen(function* () {
     repository_path AS "repositoryPath",
     base_branch AS "baseBranch",
     integration_branch AS "integrationBranch",
-    integration_worktree_path AS "integrationWorktreePath"
+    integration_worktree_path AS "integrationWorktreePath",
+    siblings
   `);
   const getEpicRunMergeStateRow = SqlSchema.findOneOption({
     Request: GetEpicRunInput,
@@ -613,6 +618,14 @@ const makeEpicRunStore = Effect.gen(function* () {
     execute: ({ runId, lastAcceptedHead }) => sql`
       UPDATE epic_run_merge_state
       SET last_accepted_head = ${lastAcceptedHead}
+      WHERE run_id = ${runId}
+    `,
+  });
+  const advanceEpicRunMergeSiblingHeads = SqlSchema.void({
+    Request: Schema.Struct({ runId: EpicRunId, siblings: Schema.String }),
+    execute: ({ runId, siblings }) => sql`
+      UPDATE epic_run_merge_state
+      SET siblings = ${siblings}
       WHERE run_id = ${runId}
     `,
   });
@@ -906,7 +919,36 @@ const makeEpicRunStore = Effect.gen(function* () {
   const completeMerge: EpicRunStoreShape["completeMerge"] = (input) =>
     sql
       .withTransaction(
-        advanceEpicRunMergeHead(input).pipe(Effect.andThen(deleteEpicRunMergeRow(input))),
+        advanceEpicRunMergeHead(input).pipe(
+          Effect.andThen(deleteEpicRunMergeRow(input)),
+          Effect.andThen(
+            Effect.suspend(() => {
+              const siblingHeads = input.siblingHeads;
+              if (siblingHeads === undefined) return Effect.void;
+              return getEpicRunMergeStateRow({ runId: input.runId }).pipe(
+                Effect.flatMap(
+                  Option.match({
+                    onNone: () => Effect.void,
+                    onSome: (state) =>
+                      advanceEpicRunMergeSiblingHeads({
+                        runId: input.runId,
+                        siblings: JSON.stringify(
+                          state.siblings.map((sibling) => {
+                            const moved = siblingHeads.find(
+                              (head) => head.repositoryPath === sibling.repositoryPath,
+                            );
+                            return moved === undefined
+                              ? sibling
+                              : { ...sibling, lastAcceptedHead: moved.lastAcceptedHead };
+                          }),
+                        ),
+                      }),
+                  }),
+                ),
+              );
+            }),
+          ),
+        ),
       )
       .pipe(
         Effect.mapError(

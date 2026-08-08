@@ -21,6 +21,8 @@ type Attempt = {
   readonly infra?: boolean;
   readonly claim?: boolean;
   readonly commit?: boolean;
+  /** Move the first sibling checkout's HEAD during settle. */
+  readonly siblingCommit?: boolean;
   readonly close?: boolean;
   readonly comment?: boolean;
   readonly dirty?: boolean;
@@ -82,6 +84,11 @@ const fixture = (input: {
   readonly releaseFailures?: number;
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly selection?: { readonly instanceId: ProviderInstanceId; readonly model: string };
+  readonly siblings?: ReadonlyArray<{
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+    readonly worktreeRoot: string;
+  }>;
 }) => {
   const epic = issue({
     id: "epic",
@@ -97,6 +104,15 @@ const fixture = (input: {
   });
   let head = 0;
   let fingerprint = "";
+  const siblingHeads = new Map<string, number>(
+    (input.siblings ?? []).map((sibling) => [sibling.repositoryPath, 0]),
+  );
+  const pushes: Array<{
+    readonly repositoryPath: string;
+    readonly remote: string;
+    readonly refspec: string;
+  }> = [];
+  const prompts: string[] = [];
   let dispatches = 0;
   let released = false;
   let claims = 0;
@@ -216,8 +232,9 @@ const fixture = (input: {
     },
     providerInventory: { getProviders: Effect.succeed(input.providers ?? []) },
     dispatch: {
-      startIteration: ({ selection }) => {
+      startIteration: ({ selection, prompt }) => {
         selections.push(selection);
+        prompts.push(prompt);
         const attempt = attempts[dispatches++] ?? {};
         if (attempt.infra)
           return Effect.fail(new DispatchError({ operation: "start", detail: "offline" }));
@@ -233,6 +250,15 @@ const fixture = (input: {
           awaitSettled: Effect.sync(() => {
             if (attempt.claim) child = { ...child, status: "in_progress" };
             if (attempt.commit) head += 1;
+            if (attempt.siblingCommit) {
+              const first = input.siblings?.[0];
+              if (first !== undefined) {
+                siblingHeads.set(
+                  first.repositoryPath,
+                  (siblingHeads.get(first.repositoryPath) ?? 0) + 1,
+                );
+              }
+            }
             if (attempt.close) child = { ...child, status: "closed" };
             if (attempt.comment) child = { ...child, commentCount: child.commentCount + 1 };
             if (attempt.dirty) fingerprint = " M dirty";
@@ -266,18 +292,34 @@ const fixture = (input: {
         }),
     },
     vcs: {
-      headCommit: () => Effect.succeed(`head-${String(head)}`),
+      headCommit: (repository: { readonly repositoryPath: string }) =>
+        Effect.succeed(
+          repository.repositoryPath === "/repo"
+            ? `head-${String(head)}`
+            : `sib-head-${String(siblingHeads.get(repository.repositoryPath) ?? 0)}`,
+        ),
+      currentBranch: (repositoryPath: string) =>
+        Effect.succeed(
+          input.siblings?.find((sibling) => sibling.repositoryPath === repositoryPath)
+            ?.baseBranch ?? null,
+        ),
       worktreeFingerprint: () => Effect.succeed(fingerprint),
-      push: () =>
-        input.pushFails
+      push: (pushInput: {
+        readonly repositoryPath: string;
+        readonly remote: string;
+        readonly refspec: string;
+      }) => {
+        pushes.push(pushInput);
+        return input.pushFails
           ? Effect.fail(
               new VcsError({
                 operation: "push",
-                repositoryPath: "/repo",
+                repositoryPath: pushInput.repositoryPath,
                 detail: "offline",
               }),
             )
-          : Effect.void,
+          : Effect.void;
+      },
     } as unknown as SequentialEpicLoopPorts["vcs"],
   };
 
@@ -292,7 +334,7 @@ const fixture = (input: {
           repositoryPath: "/repo",
           baseBranch: "mine",
           worktreeRoot: "/worktrees",
-          siblings: [],
+          siblings: input.siblings ?? [],
         },
         selection: input.selection ?? {
           instanceId: ProviderInstanceId.make("worker"),
@@ -315,6 +357,8 @@ const fixture = (input: {
     run,
     child: () => child,
     dispatches: () => dispatches,
+    pushes,
+    prompts,
     statuses,
     iterations,
     released: () => released,
@@ -579,6 +623,56 @@ it.live("fails safely after push failure without dispatching duplicate work", ()
     assert.include(result.lastError ?? "", "push failed");
     assert.equal(test.dispatches(), 1);
     assert.equal(test.child().status, "closed");
+  }),
+);
+
+it.live("counts a sibling-only commit as committed and pushes the moved sibling", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      siblings: [{ repositoryPath: "/sib", baseBranch: "sib-main", worktreeRoot: "/wt-sib" }],
+      attempts: [{ close: true, siblingCommit: true }],
+      config: config({ vcs: { noPush: false } }),
+    });
+    const result = yield* test.run();
+    assert.equal(result.status, "done");
+    // The unmoved main repo is not pushed; the moved sibling is, on its own branch.
+    assert.deepEqual(test.pushes, [
+      { repositoryPath: "/sib", remote: "origin", refspec: "HEAD:sib-main" },
+    ]);
+    assert.include(
+      test.prompts[0] ?? "",
+      "This child may span sibling repositories: /sib (relative to the project root).",
+    );
+  }),
+);
+
+it.live("fails fatally when a moved sibling push is rejected", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      siblings: [{ repositoryPath: "/sib", baseBranch: "sib-main", worktreeRoot: "/wt-sib" }],
+      attempts: [{ close: true, siblingCommit: true }],
+      config: config({ vcs: { noPush: false } }),
+      pushFails: true,
+    });
+    const result = yield* test.run();
+    assert.equal(result.status, "failed");
+    assert.include(result.lastError ?? "", "push failed");
+    assert.equal(test.iterations[0]?.failureReason, "infra:push-failed");
+  }),
+);
+
+it.live("pushes the main repo only when its head moved since first dispatch", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      siblings: [{ repositoryPath: "/sib", baseBranch: "sib-main", worktreeRoot: "/wt-sib" }],
+      attempts: [{ commit: true, close: true }],
+      config: config({ vcs: { noPush: false } }),
+    });
+    const result = yield* test.run();
+    assert.equal(result.status, "done");
+    assert.deepEqual(test.pushes, [
+      { repositoryPath: "/repo", remote: "origin", refspec: "HEAD:mine" },
+    ]);
   }),
 );
 

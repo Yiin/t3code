@@ -48,6 +48,8 @@ export interface LandRepoSetResult {
 
 export interface VcsShape {
   readonly headCommit: (repository: RepoRef) => Effect.Effect<string | null, VcsError>;
+  /** `git symbolic-ref --short HEAD`; `null` when detached or unreadable. */
+  readonly currentBranch: (repositoryPath: string) => Effect.Effect<string | null, VcsError>;
   /**
    * Count commits on `branch` not reachable from `base`
    * (`git rev-list --count base..branch`). `null` on any read failure, so a

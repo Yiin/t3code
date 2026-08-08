@@ -51,6 +51,10 @@
       "types": "./src/MergeQueue.ts",
       "import": "./src/MergeQueue.ts"
     },
+    "./siblings": {
+      "types": "./src/siblings.ts",
+      "import": "./src/siblings.ts"
+    },
     "./ports/AgentDispatch": {
       "types": "./src/ports/AgentDispatch.ts",
       "import": "./src/ports/AgentDispatch.ts"
