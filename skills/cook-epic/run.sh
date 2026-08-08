@@ -11,7 +11,7 @@
 # Supported environment, mapped onto the run config (prefer the committed
 # .t3code/epic-run.json; the env layer is deprecated):
 #   COOKEPIC_EPIC              beads epic id (REQUIRED)
-#   COOKEPIC_HARNESS           auto, kimi, claude, ccx, codex, or opencode (default auto)
+#   COOKEPIC_HARNESS           auto, prime, kimi, claude, ccx, codex, or opencode (default auto)
 #   COOKEPIC_GATE              integration gate command       -> gate.command
 #   COOKEPIC_NO_GATE           1 = land unverified            -> gate.disabled
 #   COOKEPIC_NO_PUSH           1 = land without pushing       -> vcs.noPush
@@ -94,9 +94,9 @@ if [[ -v COOKEPIC_PERMISSION_MODE && -n ${COOKEPIC_PERMISSION_MODE} ]] \
 fi
 if [[ -v COOKEPIC_HARNESS && -n ${COOKEPIC_HARNESS} && -z ${COOKEPIC_WORKER_CMD:-} ]]; then
   case "$COOKEPIC_HARNESS" in
-    auto|kimi|claude|ccx|codex|opencode) ;;
+    auto|prime|kimi|claude|ccx|codex|opencode) ;;
     *) fail "invalid COOKEPIC_HARNESS $COOKEPIC_HARNESS" \
-      'use auto, kimi, claude, ccx, codex, or opencode' ;;
+      'use auto, prime, kimi, claude, ccx, codex, or opencode' ;;
   esac
 fi
 
@@ -119,7 +119,7 @@ detect_ccx_environment() {
 detect_harness() {
   [ -z "${COOKEPIC_WORKER_CMD:-}" ] || { printf 'worker-cmd\n'; return; }
   case "${COOKEPIC_HARNESS:-auto}" in
-    kimi|claude|codex|opencode) printf '%s\n' "$COOKEPIC_HARNESS"; return ;;
+    prime|kimi|claude|codex|opencode) printf '%s\n' "$COOKEPIC_HARNESS"; return ;;
     ccx) detect_ccx_environment && { printf 'ccx\n'; return; } || return 3 ;;
     auto|'') ;;
     *) return 2 ;;
@@ -131,6 +131,7 @@ detect_harness() {
     read -r comm parent <<< "$row"
     comm=${comm##*/}
     case "$comm" in
+      prime-agent|prime-agent-*) printf 'prime\n'; return ;;
       kimi|kimi-*) printf 'kimi\n'; return ;;
       codex|codex-*) printf 'codex\n'; return ;;
       claude|claude-*) printf 'claude\n'; return ;;
@@ -159,10 +160,10 @@ fi
 case "$harness_status" in
   0) export COOKEPIC_HARNESS ;;
   2) fail "invalid COOKEPIC_HARNESS ${COOKEPIC_HARNESS:-}" \
-    'use auto, kimi, claude, ccx, codex, or opencode' ;;
+    'use auto, prime, kimi, claude, ccx, codex, or opencode' ;;
   3) fail 'COOKEPIC_HARNESS=ccx requires the inherited ccx proxy environment' 'launch from ccx' ;;
   *) fail 'could not identify the invoking harness' \
-    'set COOKEPIC_HARNESS to kimi, claude, ccx, codex, or opencode' ;;
+    'set COOKEPIC_HARNESS to prime, kimi, claude, ccx, codex, or opencode' ;;
 esac
 
 # First hit wins: $COOKEPIC_T3_BIN, t3 on PATH, the built server CLI, then the

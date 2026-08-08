@@ -17,7 +17,14 @@ import {
 import { wrapWorkerScopeSpawn, type WorkerScopePreparation } from "../workerScope.ts";
 import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
 
-export type TerminalHarness = "worker-cmd" | "kimi" | "claude" | "ccx" | "codex" | "opencode";
+export type TerminalHarness =
+  | "worker-cmd"
+  | "prime"
+  | "kimi"
+  | "claude"
+  | "ccx"
+  | "codex"
+  | "opencode";
 
 export interface TerminalAgentDispatchOptions {
   readonly harness: TerminalHarness;
@@ -94,6 +101,25 @@ const findStructuredError = (value: unknown): string | null => {
   return null;
 };
 
+const primeAssistantText = (item: Record<string, unknown>): string | null => {
+  if (item["type"] !== "message_end" && item["type"] !== "turn_end") return null;
+  const message = item["message"];
+  if (typeof message !== "object" || message === null || Array.isArray(message)) return null;
+  const messageRecord = message as Record<string, unknown>;
+  if (messageRecord["role"] !== "assistant" || !Array.isArray(messageRecord["content"]))
+    return null;
+  const text = messageRecord["content"]
+    .flatMap((block) => {
+      if (typeof block !== "object" || block === null || Array.isArray(block)) return [];
+      const content = block as Record<string, unknown>;
+      return content["type"] === "text" && typeof content["text"] === "string"
+        ? [content["text"]]
+        : [];
+    })
+    .join("");
+  return text === "" ? null : text;
+};
+
 /** Extract only the harness's final assistant channel. */
 export const parseTerminalArtifact = (harness: TerminalHarness, text: string): ParsedArtifact => {
   if (harness === "worker-cmd")
@@ -107,9 +133,11 @@ export const parseTerminalArtifact = (harness: TerminalHarness, text: string): P
     if (item === null) continue;
     if (typeof item["session_id"] === "string") sessionId = item["session_id"];
     if (typeof item["sessionID"] === "string") sessionId = item["sessionID"];
-    providerError = findStructuredError(item) ?? providerError;
+    if (harness !== "prime") providerError = findStructuredError(item) ?? providerError;
 
-    if ((harness === "claude" || harness === "ccx") && item["type"] === "result") {
+    if (harness === "prime") {
+      finalText = primeAssistantText(item) ?? finalText;
+    } else if ((harness === "claude" || harness === "ccx") && item["type"] === "result") {
       if (typeof item["session_id"] === "string") sessionId = item["session_id"];
       if (typeof item["result"] === "string") finalText = item["result"];
       if (item["is_error"] === true && typeof item["result"] === "string") {
@@ -155,18 +183,20 @@ export const parseTerminalArtifact = (harness: TerminalHarness, text: string): P
 
 const capabilities = (harness: TerminalHarness): IterationHandle["capabilities"] => ({
   terminalSignal: "process-exit",
-  continuation: harness === "worker-cmd" ? "none" : "resume-command",
+  continuation: harness === "worker-cmd" || harness === "prime" ? "none" : "resume-command",
   subagentLiveness: "unavailable",
   finalMessage:
     harness === "worker-cmd"
       ? "raw-text"
-      : harness === "claude" || harness === "ccx"
-        ? "result-field"
-        : harness === "kimi"
-          ? "assistant-jsonl"
-          : harness === "codex"
-            ? "agent-item-jsonl"
-            : "step-text-jsonl",
+      : harness === "prime"
+        ? "assistant-jsonl"
+        : harness === "claude" || harness === "ccx"
+          ? "result-field"
+          : harness === "kimi"
+            ? "assistant-jsonl"
+            : harness === "codex"
+              ? "agent-item-jsonl"
+              : "step-text-jsonl",
   cost:
     harness === "claude" || harness === "ccx"
       ? "total-cost-usd"
@@ -194,14 +224,46 @@ const codexReasoningArgs = (selection: AgentSelection): ReadonlyArray<string> =>
     : [];
 };
 
+const primeInvocation = (input: {
+  readonly options: TerminalAgentDispatchOptions;
+  readonly cwd: string;
+  readonly prompt: string;
+  readonly selection: AgentSelection;
+  readonly inspector: boolean;
+}): { readonly command: string; readonly args: ReadonlyArray<string> } => ({
+  command: input.options.binary ?? "prime-agent",
+  args: [
+    "--mode",
+    "json",
+    "--no-session",
+    "--cwd",
+    input.cwd,
+    ...(input.inspector
+      ? [
+          "--no-tools",
+          "--no-skills",
+          "--no-context-files",
+          "--no-extensions",
+          "--no-prompt-templates",
+        ]
+      : []),
+    ...(input.selection.model.length === 0 || input.options.useHarnessDefaultModel
+      ? []
+      : ["--model", input.selection.model]),
+    "--",
+    input.prompt,
+  ],
+});
+
 const invocation = (input: {
   readonly options: TerminalAgentDispatchOptions;
   readonly prompt: string;
   readonly promptPath: string;
   readonly selection: AgentSelection;
   readonly sessionId: string | null;
+  readonly cwd: string;
 }): { readonly command: string; readonly args: ReadonlyArray<string> } => {
-  const { options, prompt, promptPath, selection, sessionId } = input;
+  const { options, prompt, promptPath, selection, sessionId, cwd } = input;
   const model = selection.model;
   switch (options.harness) {
     case "worker-cmd":
@@ -215,6 +277,8 @@ const invocation = (input: {
           promptPath,
         ],
       };
+    case "prime":
+      return primeInvocation({ options, cwd, prompt, selection, inspector: false });
     case "kimi":
       return {
         command: options.binary ?? "kimi",
@@ -303,6 +367,20 @@ const routeOptions = (
   };
 };
 
+type PrimeRole = "worker" | "fold" | "inspector";
+
+const primeRoleEnvironment = (
+  environment: NodeJS.ProcessEnv | undefined,
+  role: PrimeRole,
+): NodeJS.ProcessEnv => {
+  const resolved: NodeJS.ProcessEnv = { ...process.env, ...environment, COOKEPIC_ROLE: role };
+  delete resolved.COOKEPIC_FOLD;
+  delete resolved.COOKEPIC_INSPECTOR;
+  if (role === "fold") resolved.COOKEPIC_FOLD = "1";
+  if (role === "inspector") resolved.COOKEPIC_INSPECTOR = "1";
+  return resolved;
+};
+
 const killGroup = (pid: number, signal: NodeJS.Signals): void => {
   try {
     process.kill(-pid, signal);
@@ -351,6 +429,18 @@ const waitForGroupExit = async (
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return !ownedGroupExists(pgid, expectedStartTicks);
+};
+
+const stopOwnedGroup = async (
+  pgid: number,
+  expectedStartTicks: string | null,
+  stopGraceSeconds: number,
+): Promise<void> => {
+  if (!ownedGroupExists(pgid, expectedStartTicks)) return;
+  killGroup(pgid, "SIGTERM");
+  if (await waitForGroupExit(pgid, expectedStartTicks, stopGraceSeconds * 1_000)) return;
+  killGroup(pgid, "SIGKILL");
+  await waitForGroupExit(pgid, expectedStartTicks, 1_000);
 };
 
 const updateSubagentBookkeeping = (
@@ -417,6 +507,7 @@ export const makeTerminalAgentDispatch = (
         let sessionId: string | null = null;
         let released = false;
         let childStartTicks: string | null = null;
+        let streamPrimeFinalText: string | null = null;
         const subagentStates = new Map<string, boolean>();
 
         const spawn = (prompt: string): void => {
@@ -426,6 +517,7 @@ export const makeTerminalAgentDispatch = (
             promptPath,
             selection: input.selection,
             sessionId,
+            cwd: input.worktreePath ?? input.cwd,
           });
           const scoped =
             options.workerScope === undefined
@@ -443,7 +535,10 @@ export const makeTerminalAgentDispatch = (
           let timeoutKillTimer: NodeJS.Timeout | undefined;
           child = NodeChildProcess.spawn(scoped.command, scoped.args, {
             cwd: input.worktreePath ?? input.cwd,
-            env: { ...process.env, ...options.environment },
+            env:
+              iterationHarness === "prime"
+                ? primeRoleEnvironment(iterationOptions.environment, "worker")
+                : { ...process.env, ...iterationOptions.environment },
             detached: true,
             stdio: ["ignore", "pipe", "pipe"],
           });
@@ -453,17 +548,21 @@ export const makeTerminalAgentDispatch = (
             const next = String(value);
             chunks += next;
             parseBuffer += next;
+            const lines = parseBuffer.split(/\r?\n/);
+            parseBuffer = lines.pop() ?? "";
             if (Buffer.byteLength(parseBuffer) > 64 * 1024) {
               parseBuffer = Buffer.from(parseBuffer)
                 .subarray(-(64 * 1024))
                 .toString();
             }
-            const lines = parseBuffer.split(/\r?\n/);
-            parseBuffer = lines.pop() ?? "";
             for (const line of lines) {
               const item = record(line);
               if (item === null) continue;
-              streamProviderError = findStructuredError(item) ?? streamProviderError;
+              if (iterationHarness === "prime") {
+                streamPrimeFinalText = primeAssistantText(item) ?? streamPrimeFinalText;
+              } else {
+                streamProviderError = findStructuredError(item) ?? streamProviderError;
+              }
               updateSubagentBookkeeping(item, subagentStates);
               if (typeof item["session_id"] === "string") sessionId = item["session_id"];
               if (typeof item["sessionID"] === "string") sessionId = item["sessionID"];
@@ -507,6 +606,9 @@ export const makeTerminalAgentDispatch = (
               const bounded = Buffer.from(chunks).subarray(-max).toString();
               await NodeFSP.writeFile(artifactPath, bounded);
               parsed = parseTerminalArtifact(iterationHarness, bounded);
+              if (streamPrimeFinalText !== null) {
+                parsed = { ...parsed, finalText: streamPrimeFinalText };
+              }
               if (streamProviderError !== null) {
                 parsed = { ...parsed, providerError: streamProviderError };
               }
@@ -615,8 +717,101 @@ export const makeTerminalAgentDispatch = (
         new DispatchError({ operation: "startIteration", detail: detail(cause), cause }),
     });
 
+  const runAuxiliary: AgentDispatchShape["runAuxiliary"] = (input) => {
+    if (options.harness !== "prime") return Effect.succeed({ output: "", succeeded: false });
+    return Effect.tryPromise({
+      try: async () => {
+        const role: PrimeRole = input.purpose === "epic-note-fold" ? "fold" : "inspector";
+        const call = primeInvocation({
+          options,
+          cwd: input.cwd,
+          prompt: input.prompt,
+          selection: input.selection,
+          inspector: role === "inspector",
+        });
+        const scoped =
+          options.workerScope === undefined
+            ? call
+            : wrapWorkerScopeSpawn(options.workerScope, role, call.command, call.args);
+        const max = options.maxArtifactBytes ?? 1024 * 1024;
+        let chunks = "";
+        let parseBuffer = "";
+        let primeFinalText: string | null = null;
+        let timedOut = false;
+        let spawnError: string | null = null;
+        let timeoutKillTimer: NodeJS.Timeout | undefined;
+        const child = NodeChildProcess.spawn(scoped.command, scoped.args, {
+          cwd: input.cwd,
+          env: primeRoleEnvironment(options.environment, role),
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        const childStartTicks = child.pid === undefined ? null : processStartTicks(child.pid);
+        const append = (value: Buffer | string): void => {
+          const next = String(value);
+          chunks += next;
+          parseBuffer += next;
+          const lines = parseBuffer.split(/\r?\n/);
+          parseBuffer = lines.pop() ?? "";
+          if (Buffer.byteLength(parseBuffer) > 64 * 1024) {
+            parseBuffer = Buffer.from(parseBuffer)
+              .subarray(-(64 * 1024))
+              .toString();
+          }
+          for (const line of lines) {
+            const item = record(line);
+            if (item !== null) primeFinalText = primeAssistantText(item) ?? primeFinalText;
+          }
+          if (Buffer.byteLength(chunks) > max * 2) {
+            chunks = Buffer.from(chunks).subarray(-max).toString();
+          }
+        };
+        child.stdout?.on("data", append);
+        child.stderr?.on("data", append);
+        child.on("error", (error) => {
+          spawnError = error.message;
+        });
+        const timer =
+          options.timeoutSeconds == null
+            ? undefined
+            : setTimeout(() => {
+                timedOut = true;
+                if (child.pid === undefined) return;
+                killGroup(child.pid, "SIGTERM");
+                timeoutKillTimer = setTimeout(
+                  () => {
+                    if (ownedGroupExists(child.pid!, childStartTicks)) {
+                      killGroup(child.pid!, "SIGKILL");
+                    }
+                  },
+                  (options.stopGraceSeconds ?? 15) * 1_000,
+                );
+                timeoutKillTimer.unref();
+              }, options.timeoutSeconds * 1_000);
+        timer?.unref();
+        return await new Promise<{ output: string; succeeded: boolean }>((resolve) => {
+          child.on("close", async (code, signal) => {
+            if (timer !== undefined) clearTimeout(timer);
+            if (timeoutKillTimer !== undefined) clearTimeout(timeoutKillTimer);
+            if (child.pid !== undefined) {
+              await stopOwnedGroup(child.pid, childStartTicks, options.stopGraceSeconds ?? 15);
+            }
+            const bounded = Buffer.from(chunks).subarray(-max).toString();
+            const parsed = parseTerminalArtifact("prime", bounded);
+            resolve({
+              output: primeFinalText ?? parsed.finalText ?? "",
+              succeeded: !timedOut && signal === null && code === 0 && spawnError === null,
+            });
+          });
+        });
+      },
+      catch: (cause) =>
+        new DispatchError({ operation: "runAuxiliary", detail: detail(cause), cause }),
+    });
+  };
+
   return {
     startIteration,
-    runAuxiliary: () => Effect.succeed({ output: "", succeeded: false }),
+    runAuxiliary,
   };
 };
