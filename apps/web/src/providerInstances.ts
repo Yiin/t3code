@@ -24,9 +24,8 @@ import {
   type ServerSettings,
   type ServerProviderState,
 } from "@t3tools/contracts";
-import { getDefaultLiveModel } from "@t3tools/shared/model";
 
-import { formatProviderDriverKindLabel } from "./providerModels";
+import { formatProviderDriverKindLabel, getDefaultLiveModel } from "./providerModels";
 
 /**
  * Local-only placeholder used while a draft has no provider it can safely

@@ -7,11 +7,7 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import {
-  createModelCapabilities,
-  getDefaultLiveModel,
-  normalizeModelSlug,
-} from "@t3tools/shared/model";
+import { createModelCapabilities, normalizeModelSlug } from "@t3tools/shared/model";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -31,6 +27,13 @@ export function getProviderModels(
   provider: ProviderDriverKind,
 ): ReadonlyArray<ServerProviderModel> {
   return getProviderSnapshot(providers, provider)?.models ?? [];
+}
+
+/** Select the declared live default, or the first live model when none is declared. */
+export function getDefaultLiveModel(
+  models: ReadonlyArray<ServerProviderModel>,
+): ServerProviderModel | undefined {
+  return models.find((model) => model.isDefault === true) ?? models[0];
 }
 
 export function getProviderSnapshot(

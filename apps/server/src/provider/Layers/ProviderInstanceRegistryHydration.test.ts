@@ -1,6 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
-  PRIME_AGENT_DRIVER_KIND,
+  ProviderDriverKind,
   ProviderInstanceId,
   type ServerSettings,
 } from "@t3tools/contracts";
@@ -8,9 +8,26 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
 
+const PRIME_AGENT_DRIVER_KIND = ProviderDriverKind.make("primeAgent");
+const primeSettings = {
+  enabled: true,
+  binaryPath: "prime-agent",
+  launchArgs: [],
+};
+
+const settingsWithPrime = (providerInstances: ServerSettings["providerInstances"] = {}) =>
+  ({
+    ...DEFAULT_SERVER_SETTINGS,
+    providers: {
+      ...DEFAULT_SERVER_SETTINGS.providers,
+      primeAgent: primeSettings,
+    },
+    providerInstances,
+  }) as unknown as ServerSettings;
+
 describe("deriveProviderInstanceConfigMap", () => {
   it("creates exactly one default Prime entry from the contracts catalog", () => {
-    const configMap = deriveProviderInstanceConfigMap(DEFAULT_SERVER_SETTINGS);
+    const configMap = deriveProviderInstanceConfigMap(settingsWithPrime());
     const primeEntries = Object.entries(configMap).filter(
       ([, config]) => config.driver === PRIME_AGENT_DRIVER_KIND,
     );
@@ -20,7 +37,7 @@ describe("deriveProviderInstanceConfigMap", () => {
       "primeAgent",
       {
         driver: PRIME_AGENT_DRIVER_KIND,
-        config: DEFAULT_SERVER_SETTINGS.providers.primeAgent,
+        config: primeSettings,
       },
     ]);
   });
@@ -34,12 +51,9 @@ describe("deriveProviderInstanceConfigMap", () => {
       environment: [{ name: "PRIME_TOKEN", value: "secret", sensitive: true }],
       config: { binaryPath: "/opt/bin/prime-agent", futureField: 1 },
     } as const;
-    const settings: ServerSettings = {
-      ...DEFAULT_SERVER_SETTINGS,
-      providerInstances: {
-        [primeId]: explicitPrime,
-      },
-    };
+    const settings = settingsWithPrime({
+      [primeId]: explicitPrime,
+    });
 
     const configMap = deriveProviderInstanceConfigMap(settings);
     expect(configMap[primeId]).toEqual(explicitPrime);

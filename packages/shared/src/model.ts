@@ -8,7 +8,6 @@ import {
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
-  type ServerProviderModel,
 } from "@t3tools/contracts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -16,13 +15,6 @@ const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 export interface SelectableModelOption {
   slug: string;
   name: string;
-}
-
-/** Select the declared live default, or the first live model when none is declared. */
-export function getDefaultLiveModel(
-  models: ReadonlyArray<ServerProviderModel>,
-): ServerProviderModel | undefined {
-  return models.find((model) => model.isDefault === true) ?? models[0];
 }
 
 export function createModelCapabilities(input: {
