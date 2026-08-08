@@ -22,19 +22,6 @@
 - `packages/contracts`: Shared effect/Schema schemas and TypeScript contracts for provider events, WebSocket protocol, and model/session types. Keep this package schema-only — no runtime logic.
 - `packages/shared`: Shared runtime utilities consumed by both server and client applications. Uses explicit subpath exports (e.g. `@t3tools/shared/git`) — no barrel index.
 - `packages/client-runtime`: Shared runtime package for sharing client code across web and mobile.
-
-## Prime Agent Integration Orientation
-
-- `packages/contracts/src/`: provider settings, instance, model, runtime-event, and EpicRunner launch contracts.
-- `apps/server/src/provider/`: provider-neutral registry/service seams; keep Prime RPC transport, event mapping, adapter, probes, and driver scoped here.
-- `apps/server/src/runner/`: EpicRunner model inheritance, trusted provider fallback, ownership, and settlement.
-- `skills/plan-epic/` and `skills/cook-epic/`: canonical cross-harness skills and terminal worktree coordinator; never create Prime-only copies.
-- `apps/web/src/` and `apps/mobile/src/`: data-driven provider presentation; preserve instance/model/options through resume.
-- Focused checks: `vp test run <changed-test-files>`; `vp run --filter t3 typecheck`; `vp run --filter @t3tools/web typecheck`; `vp run --filter @t3tools/mobile typecheck`; `vp fmt --check <changed-files>`; `vp lint <changed-files>`; run only the changed `skills/cook-epic/tests/*.sh` scripts.
-- Use `primeAgent` as the built-in driver slug. Keep unknown driver envelopes opaque and downgrade-safe.
-- The first-class backend uses Prime's documented RPC mode for permissions, model switching, resume/fork, and rollback. Do not route it through the shared ACP adapter unless the epic records a new decision.
-- Prime is source-only in automatic fallback: Prime → Claude → Codex → Kimi. Switch only on structured provider evidence, never assistant prose.
-- Provider and cook-epic tests use fake Prime processes only. Do not require credentials, network, or a user daemon.
 - Do not inspect or edit generated `dist` files when source exists.
 
 ## Reference Repos
