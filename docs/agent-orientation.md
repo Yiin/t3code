@@ -54,7 +54,10 @@ check there reports a pass the gate never gave.
 ## Runner contracts and traps
 
 - Both terminal and server runners use `packages/epic-core`.
-- `skills/cook-epic/run.sh` is a shim. Edit it here, then run `./skills/install.sh`.
+- `skills/cook-epic/run.sh` is a shim. Edit it here; committing the edit is
+  enough. Do not run `./skills/install.sh` from a worktree — it rewrites the
+  machine's global skill links, and they break when the worktree is pruned.
+  It now refuses, but only the canonical checkout should install.
 - Provider fallback uses structured provider evidence only.
 - `primeAgent` work belongs to `t3code-b93.13`. Do not duplicate it.
 - Do not parse issue prose to infer file conflicts.
