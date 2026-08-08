@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ModelCapabilities,
+  type ServerProviderModel,
+} from "@t3tools/contracts";
 
 import {
   buildProviderOptionSelectionsFromDescriptors,
@@ -7,12 +12,46 @@ import {
   createModelSelection,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
+  getDefaultLiveModel,
   getProviderOptionDescriptors,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
   normalizeCustomModelSlug,
   normalizeModelSlug,
 } from "./model.ts";
+
+const liveModel = (
+  slug: string,
+  options: { readonly isCustom?: boolean; readonly isDefault?: boolean } = {},
+): ServerProviderModel => ({
+  slug,
+  name: slug,
+  isCustom: options.isCustom ?? false,
+  ...(options.isDefault === undefined ? {} : { isDefault: options.isDefault }),
+  capabilities: null,
+});
+
+describe("getDefaultLiveModel", () => {
+  it("prefers a live model marked as default", () => {
+    expect(
+      getDefaultLiveModel([liveModel("first"), liveModel("preferred", { isDefault: true })])?.slug,
+    ).toBe("preferred");
+  });
+
+  it("allows a custom live model to be the declared default", () => {
+    expect(
+      getDefaultLiveModel([
+        liveModel("built-in"),
+        liveModel("custom", { isCustom: true, isDefault: true }),
+      ])?.slug,
+    ).toBe("custom");
+  });
+
+  it("uses the first live model or returns undefined for an empty inventory", () => {
+    expect(getDefaultLiveModel([liveModel("first"), liveModel("second")])?.slug).toBe("first");
+    expect(getDefaultLiveModel([])).toBeUndefined();
+  });
+});
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [

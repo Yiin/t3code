@@ -70,6 +70,25 @@ const slugSchema = TrimmedNonEmptyString.check(
 export const ProviderDriverKind = slugSchema.pipe(Schema.brand("ProviderDriverKind"));
 export type ProviderDriverKind = typeof ProviderDriverKind.Type;
 
+/** Canonical driver slug for the first-party Prime Agent provider. */
+export const PRIME_AGENT_DRIVER_KIND = ProviderDriverKind.make("primeAgent");
+
+/**
+ * First-party provider kinds with legacy settings slots.
+ *
+ * This catalog is safe to import in browser code. Runtime driver availability
+ * remains a server concern and must not be inferred from this list.
+ */
+export const BUILT_IN_PROVIDER_DRIVER_KINDS: ReadonlyArray<ProviderDriverKind> = [
+  ProviderDriverKind.make("codex"),
+  ProviderDriverKind.make("claudeAgent"),
+  ProviderDriverKind.make("cursor"),
+  ProviderDriverKind.make("grok"),
+  ProviderDriverKind.make("kimi"),
+  ProviderDriverKind.make("opencode"),
+  PRIME_AGENT_DRIVER_KIND,
+];
+
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 export const isProviderDriverKind = (value: unknown): value is ProviderDriverKind =>
   isProviderDriverKindValue(value);

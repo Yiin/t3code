@@ -516,9 +516,9 @@ function modelSelectionByProviderToOptions(
 ): ProviderOptionSelectionsByProvider | null {
   if (!map) return null;
   const result: ProviderOptionSelectionsByProvider = {};
-  for (const [provider, selection] of Object.entries(map)) {
-    if (selection?.options && selection.options.length > 0) {
-      result[provider] = selection.options;
+  for (const [instanceId, selection] of Object.entries(map)) {
+    if (selection?.instanceId === instanceId && selection.options && selection.options.length > 0) {
+      result[instanceId] = selection.options;
     }
   }
   return Object.keys(result).length > 0 ? result : null;
@@ -960,38 +960,43 @@ export function deriveEffectiveComposerModelState(input: {
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
-  const baseModelCandidate =
-    input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
-  const baseModel =
-    (input.selectedInstanceId
-      ? resolveAppModelSelectionForInstance(
-          input.selectedInstanceId,
-          input.settings,
-          input.providers,
-          baseModelCandidate,
-        )
-      : null) ??
-    resolveAppModelSelection(
-      input.selectedProvider,
-      input.settings,
-      input.providers,
-      baseModelCandidate,
-    ) ??
-    normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
-    getDefaultServerModel(input.providers, input.selectedProvider);
-  // Look up the instance's saved selection first; fall back to the
-  // driver-kind bucket so legacy kind-keyed drafts still resolve. Every
-  // `ProviderDriverKind` literal is a valid `ProviderInstanceId` slug, so the
-  // cast to the branded type is safe.
-  const instanceSelection = input.selectedInstanceId
+  const exactBaseSelection = input.selectedInstanceId
+    ? [input.threadModelSelection, input.projectModelSelection].find(
+        (selection) => selection?.instanceId === input.selectedInstanceId,
+      )
+    : undefined;
+  const baseModelCandidate = input.selectedInstanceId
+    ? (exactBaseSelection?.model ?? null)
+    : (input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null);
+  const baseModel = input.selectedInstanceId
+    ? (resolveAppModelSelectionForInstance(
+        input.selectedInstanceId,
+        input.settings,
+        input.providers,
+        baseModelCandidate,
+      ) ?? "")
+    : (resolveAppModelSelection(
+        input.selectedProvider,
+        input.settings,
+        input.providers,
+        baseModelCandidate,
+      ) ??
+      normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
+      getDefaultServerModel(input.providers, input.selectedProvider) ??
+      "");
+  // Exact instance routing also requires the stored payload to name that
+  // instance. The legacy driver-kind bucket only applies when no exact
+  // instance was selected.
+  const defaultInstanceId = ProviderInstanceId.make(input.selectedProvider);
+  const keyedInstanceSelection = input.selectedInstanceId
     ? input.draft?.modelSelectionByProvider?.[input.selectedInstanceId]
     : undefined;
-  const legacySelection =
-    input.draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
-  const activeSelection = instanceSelection ?? legacySelection;
-  const activeSelectionInstanceId = instanceSelection
-    ? (input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider))
-    : ProviderInstanceId.make(input.selectedProvider);
+  const activeSelection = input.selectedInstanceId
+    ? keyedInstanceSelection?.instanceId === input.selectedInstanceId
+      ? keyedInstanceSelection
+      : undefined
+    : input.draft?.modelSelectionByProvider?.[defaultInstanceId];
+  const activeSelectionInstanceId = input.selectedInstanceId ?? defaultInstanceId;
   const selectedModel = activeSelection?.model
     ? (resolveAppModelSelectionForInstance(
         activeSelectionInstanceId,
@@ -999,12 +1004,15 @@ export function deriveEffectiveComposerModelState(input: {
         input.providers,
         activeSelection.model,
       ) ??
-      resolveAppModelSelection(
-        input.selectedProvider,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ))
+      (input.selectedInstanceId
+        ? null
+        : resolveAppModelSelection(
+            input.selectedProvider,
+            input.settings,
+            input.providers,
+            activeSelection.model,
+          )) ??
+      baseModel)
     : baseModel;
   const modelOptions =
     modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
