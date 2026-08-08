@@ -1,21 +1,33 @@
-import { ProviderDriverKind, type ModelSelection, type ServerProvider } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  ProviderDriverKind,
+  type ModelSelection,
+  type ServerProvider,
+} from "@t3tools/contracts";
 
+const PRIME_DRIVER = ProviderDriverKind.make("primeAgent");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const KIMI_DRIVER = ProviderDriverKind.make("kimi");
+
+const CLAUDE_MODEL = DEFAULT_MODEL_BY_PROVIDER[CLAUDE_DRIVER] ?? "claude-sonnet-5";
+const CODEX_MODEL = DEFAULT_MODEL_BY_PROVIDER[CODEX_DRIVER] ?? "gpt-5.6-sol";
+const KIMI_MODEL = DEFAULT_MODEL_BY_PROVIDER[KIMI_DRIVER] ?? "kimi-code/k3";
 
 const FALLBACK_STAGES: ReadonlyArray<{
   readonly driver: ProviderDriverKind;
   readonly model: string;
   readonly options?: ModelSelection["options"];
 }> = [
-  { driver: CLAUDE_DRIVER, model: "" },
+  // Prime is source-only. Its placeholder model is never selected as a target.
+  { driver: PRIME_DRIVER, model: "" },
+  { driver: CLAUDE_DRIVER, model: CLAUDE_MODEL },
   {
     driver: CODEX_DRIVER,
-    model: "gpt-5.6-sol",
+    model: CODEX_MODEL,
     options: [{ id: "reasoningEffort", value: "high" }],
   },
-  { driver: KIMI_DRIVER, model: "kimi-code/k3" },
+  { driver: KIMI_DRIVER, model: KIMI_MODEL },
 ];
 
 const isEligible = (provider: ServerProvider, model: string): boolean =>

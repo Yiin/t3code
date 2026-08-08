@@ -2,6 +2,7 @@
 import * as NodeChildProcess from "node:child_process";
 
 import {
+  DEFAULT_MODEL_BY_PROVIDER,
   ProviderDriverKind,
   ProviderInstanceId,
   type ModelSelection,
@@ -43,13 +44,14 @@ const defaultBinary = (harness: TerminalHarness): string =>
       : harness;
 
 const fallbackHarnesses = (harness: TerminalHarness): ReadonlyArray<TerminalHarness> => {
+  if (harness === "prime") return ["claude", "codex", "kimi"];
   if (harness === "claude" || harness === "ccx") return ["codex", "kimi"];
   if (harness === "codex") return ["kimi"];
   return [];
 };
 
 const fallbackModel = (harness: TerminalHarness): string =>
-  harness === "codex" ? "gpt-5.6-sol" : harness === "kimi" ? "kimi-code/k3" : "";
+  DEFAULT_MODEL_BY_PROVIDER[driverForHarness(harness)] ?? "";
 
 const isCommandAvailable = (command: string, environment: NodeJS.ProcessEnv): boolean =>
   NodeChildProcess.spawnSync(

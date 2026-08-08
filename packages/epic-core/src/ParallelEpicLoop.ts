@@ -12,6 +12,7 @@
 import {
   EpicRunId,
   type ModelSelection,
+  type ProviderDriverKind,
   ThreadId,
   epicRunIterationThreadId,
 } from "@t3tools/contracts";
@@ -230,8 +231,12 @@ interface WorkerSettlement {
 export type PoolSchedulerEvent = WorkerSettlement | { readonly _tag: "retune" };
 
 interface PendingProviderFallback {
+  readonly issueId: string;
+  readonly iterationIndex: number;
   readonly from: ModelSelection;
+  readonly fromDriver: ProviderDriverKind;
   readonly to: ModelSelection;
+  readonly toDriver: ProviderDriverKind;
   readonly failureReason: string;
 }
 
@@ -713,6 +718,8 @@ export const runParallelEpicLoop = (
                 sessionLastError: timedOut
                   ? null
                   : (final.sessionLastError ?? settle?.providerError ?? null),
+                assistantProviderErrorsTrusted:
+                  dispatched.handle?.capabilities.providerErrors === "session-and-assistant",
                 committed,
                 timedOut,
               });
@@ -1004,16 +1011,24 @@ export const runParallelEpicLoop = (
         failureReason: iterationResult.outcome.failureReason,
         providerFallbackEligible: true,
       });
-      return fallback === null
-        ? null
-        : {
-            from: modelSelection,
-            to: fallback,
-            failureReason:
-              iterationResult.outcome.failureReason ??
-              iterationResult.outcome.detail ??
-              iterationResult.outcome.kind,
-          };
+      if (fallback === null) return null;
+      const fromProvider = providers.find(
+        (provider) => provider.instanceId === modelSelection.instanceId,
+      );
+      const toProvider = providers.find((provider) => provider.instanceId === fallback.instanceId);
+      if (fromProvider === undefined || toProvider === undefined) return null;
+      return {
+        issueId: iterationResult.issueId,
+        iterationIndex: iterationResult.iterationIndex,
+        from: modelSelection,
+        fromDriver: fromProvider.driver,
+        to: fallback,
+        toDriver: toProvider.driver,
+        failureReason:
+          iterationResult.outcome.failureReason ??
+          iterationResult.outcome.detail ??
+          iterationResult.outcome.kind,
+      };
     });
 
   const applyPendingProviderFallback = (pending: PendingProviderFallback) =>
@@ -1040,6 +1055,19 @@ export const runParallelEpicLoop = (
         }),
       );
       if (!applied) return;
+      yield* ports.events.publish({
+        type: "provider-fallback",
+        runId,
+        issueId: pending.issueId,
+        iterationIndex: pending.iterationIndex,
+        failureReason: pending.failureReason,
+        fromInstanceId: pending.from.instanceId,
+        fromDriver: pending.fromDriver,
+        fromModel: pending.from.model,
+        toInstanceId: pending.to.instanceId,
+        toDriver: pending.toDriver,
+        toModel: pending.to.model,
+      });
       yield* Effect.logInfo("epic.runner.provider-fallback", {
         runId,
         fromInstanceId: pending.from.instanceId,

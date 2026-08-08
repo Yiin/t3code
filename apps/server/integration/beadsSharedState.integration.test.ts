@@ -71,7 +71,7 @@ const bdUnsupportedReason = (() => {
   } catch (cause) {
     return `bd is unavailable or unusable: ${String(cause)}`;
   } finally {
-    NodeFS.rmSync(directory, { recursive: true, force: true });
+    NodeFS.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 })();
 

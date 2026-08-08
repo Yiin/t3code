@@ -101,7 +101,30 @@ describe("TerminalAgentDispatch final assistant selection", () => {
     });
   });
 
-  it("does not classify Prime structured error records", () => {
+  it("classifies only documented Prime structured failures", () => {
+    const retryFailure = JSON.stringify({
+      type: "auto_retry_end",
+      success: false,
+      attempt: 3,
+      finalError: "rate limit exceeded",
+    });
+    assert.equal(parseTerminalArtifact("prime", retryFailure).providerError, "rate limit exceeded");
+
+    const assistantFailure = JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "provider-error: ignored prose" }],
+        stopReason: "error",
+        errorMessage: "authentication failed",
+      },
+    });
+    assert.deepEqual(parseTerminalArtifact("prime", assistantFailure), {
+      finalText: "provider-error: ignored prose",
+      sessionId: null,
+      providerError: "authentication failed",
+    });
+
     const artifact = JSON.stringify({
       type: "error",
       error: { kind: "provider", message: "rate limit exceeded" },
@@ -506,6 +529,7 @@ it.live("runs Prime workers with the effective cwd, model, and worker role", () 
       );
       assert.equal((yield* handle.finalMessage).text, "RALPH_DONE");
       assert.equal(handle.capabilities.continuation, "none");
+      assert.equal(handle.capabilities.providerErrors, "session-only");
       assert.equal(handle.capabilities.cost, "none");
     }),
   ),
@@ -560,6 +584,41 @@ printf '%s\\n' '"}]}'`),
   ),
 );
 
+it.live("settles a documented Prime retry failure as a provider error", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(
+            `printf '%s\n' '{"type":"auto_retry_end","success":false,"attempt":3,"finalError":"rate limit exceeded"}'`,
+          ),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "prime",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "prime-retry-failed",
+        iterationIndex: 0,
+        cwd: fixture.directory,
+        worktreePath: null,
+        prompt: "test",
+        selection: { instanceId: ProviderInstanceId.make("prime"), model: "default" },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      assert.deepEqual(yield* handle.awaitSettled, {
+        turnState: "error",
+        timedOut: false,
+        providerError: "rate limit exceeded",
+      });
+    }),
+  ),
+);
+
 it.live("reports a missing Prime binary through the existing settle diagnostic", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -586,6 +645,36 @@ it.live("reports a missing Prime binary through the existing settle diagnostic",
       assert.equal(settled.turnState, "error");
       assert.include(settled.providerError ?? "", "ENOENT");
       assert.include(settled.providerError ?? "", "missing-prime-agent");
+    }),
+  ),
+);
+
+it.live("separates unavailable commands from generic nonzero exits", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const unavailableBinary = yield* Effect.acquireRelease(
+        Effect.sync(() => makeWorker("exit 127")),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const unavailable = yield* startPrime({
+        binary: unavailableBinary.worker,
+      });
+      const unavailableSettle = yield* unavailable.handle.awaitSettled;
+      assert.equal(unavailableSettle.turnState, "error");
+      assert.equal(unavailableSettle.providerError, "provider command unavailable (exit 127)");
+
+      const genericBinary = yield* Effect.acquireRelease(
+        Effect.sync(() => makeWorker("exit 1")),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const generic = yield* startPrime({
+        binary: genericBinary.worker,
+      });
+      const genericSettle = yield* generic.handle.awaitSettled;
+      assert.equal(genericSettle.turnState, "error");
+      assert.isNull(genericSettle.providerError);
     }),
   ),
 );
@@ -685,6 +774,44 @@ printf '%s\\n' '"}]}'`),
         NodeFS.readFileSync(NodePath.join(fixture.directory, "fold.cwd"), "utf8").trim(),
         fixture.directory,
       );
+    }),
+  ),
+);
+
+it.live("stops Prime auxiliaries after fallback selects another harness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() => makeWorker("touch invoked")),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "prime",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        providerRoutes: [
+          {
+            instanceId: ProviderInstanceId.make("claude"),
+            driver: ProviderDriverKind.make("claudeAgent"),
+            harness: "claude",
+            binary: fixture.worker,
+            model: "claude-sonnet-5",
+            primary: false,
+          },
+        ],
+      });
+      const result = yield* dispatch.runAuxiliary({
+        purpose: "epic-note-fold",
+        cwd: fixture.directory,
+        prompt: "fold",
+        selection: {
+          instanceId: ProviderInstanceId.make("claude"),
+          model: "claude-sonnet-5",
+        },
+      });
+      assert.deepEqual(result, { output: "", succeeded: false });
+      assert.isFalse(NodeFS.existsSync(NodePath.join(fixture.directory, "invoked")));
     }),
   ),
 );

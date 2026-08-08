@@ -254,6 +254,7 @@ const fixture = (input: {
             continuation: "none",
             subagentLiveness: "unavailable",
             finalMessage: "result-field",
+            providerErrors: "session-and-assistant",
             cost: "none",
           },
           awaitSettled: Effect.sync(() => {
@@ -379,21 +380,27 @@ const fixture = (input: {
   };
 };
 
-it.live("persists Claude to Codex to Kimi fallback across dispatches", () =>
+it.live("persists Prime to Claude to Codex to Kimi fallback across dispatches", () =>
   Effect.gen(function* () {
-    const claude = provider("claude", "claudeAgent", "sonnet");
+    const prime = provider("prime", "primeAgent", "prime/custom-model");
+    const claude = provider("claude", "claudeAgent", "claude-sonnet-5");
     const codex = provider("codex", "codex", "gpt-5.6-sol");
     const kimi = provider("kimi", "kimi", "kimi-code/k3");
     const test = fixture({
       attempts: [
         { providerError: "rate limit" },
         { providerError: "rate limit" },
+        { providerError: "rate limit" },
         { commit: true, close: true },
       ],
-      providers: [claude, codex, kimi],
-      selection: { instanceId: claude.instanceId, model: "sonnet" },
+      providers: [prime, claude, codex, kimi],
+      selection: { instanceId: prime.instanceId, model: "prime/custom-model" },
       config: config({
-        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 3 },
+        limits: {
+          ...DEFAULT_EPIC_RUN_CONFIG.limits,
+          maxAttemptsPerChild: 1,
+          maxIterations: 4,
+        },
         server: {
           ...DEFAULT_EPIC_RUN_CONFIG.server,
           infraFailureBudget: 1,
@@ -407,7 +414,8 @@ it.live("persists Claude to Codex to Kimi fallback across dispatches", () =>
     assert.equal(result.status, "done");
     assert.equal(result.infraStreak, 0);
     assert.deepEqual(test.selections, [
-      { instanceId: claude.instanceId, model: "sonnet" },
+      { instanceId: prime.instanceId, model: "prime/custom-model" },
+      { instanceId: claude.instanceId, model: "claude-sonnet-5" },
       {
         instanceId: codex.instanceId,
         model: "gpt-5.6-sol",
@@ -424,9 +432,22 @@ it.live("persists Claude to Codex to Kimi fallback across dispatches", () =>
           issueId: "epic.1",
           iterationIndex: 0,
           failureReason: "provider-error:rate-limit",
+          fromInstanceId: "prime",
+          fromDriver: "primeAgent",
+          fromModel: "prime/custom-model",
+          toInstanceId: "claude",
+          toDriver: "claudeAgent",
+          toModel: "claude-sonnet-5",
+        },
+        {
+          type: "provider-fallback",
+          runId: "run",
+          issueId: "epic.1",
+          iterationIndex: 1,
+          failureReason: "provider-error:rate-limit",
           fromInstanceId: "claude",
           fromDriver: "claudeAgent",
-          fromModel: "sonnet",
+          fromModel: "claude-sonnet-5",
           toInstanceId: "codex",
           toDriver: "codex",
           toModel: "gpt-5.6-sol",
@@ -435,7 +456,7 @@ it.live("persists Claude to Codex to Kimi fallback across dispatches", () =>
           type: "provider-fallback",
           runId: "run",
           issueId: "epic.1",
-          iterationIndex: 1,
+          iterationIndex: 2,
           failureReason: "provider-error:rate-limit",
           fromInstanceId: "codex",
           fromDriver: "codex",
@@ -445,6 +466,10 @@ it.live("persists Claude to Codex to Kimi fallback across dispatches", () =>
           toModel: "kimi-code/k3",
         },
       ],
+    );
+    assert.isBelow(
+      test.ordering.indexOf("run:saved:claude"),
+      test.ordering.indexOf("event:provider-fallback:claude"),
     );
     assert.isBelow(
       test.ordering.indexOf("run:saved:codex"),

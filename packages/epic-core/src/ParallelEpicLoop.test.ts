@@ -375,6 +375,7 @@ const fixture = (input: {
           continuation: "same-thread",
           subagentLiveness: "native",
           finalMessage: "projection",
+          providerErrors: "session-and-assistant",
           cost: "none",
         },
         awaitSettled:
@@ -701,32 +702,44 @@ it.live("never dispatches the provider turn when a pause lands between the two p
   }),
 );
 
-it.live("applies a provider fallback and persists the degradation", () =>
+it.live("drains a Prime worker before one forward fallback", () =>
   Effect.gen(function* () {
-    const claude = provider("claude", "claudeAgent", "sonnet");
-    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const prime = provider("prime", "primeAgent", "prime/custom-model");
+    const claude = provider("claude", "claudeAgent", "claude-sonnet-5");
     const test = fixture({
       attempts: [{ providerError: "rate limit" }, { commit: true, close: true }],
-      providers: [claude, codex],
-      selection: { instanceId: claude.instanceId, model: "sonnet" },
+      sequential: false,
+      providers: [prime, claude],
+      selection: { instanceId: prime.instanceId, model: "prime/custom-model" },
+      policy: policy({ maxAttemptsPerChild: 1 }),
     });
     yield* test.run;
 
     assert.equal(test.runRecord().status, "done");
     assert.deepEqual(test.providerDegradations, [
-      { providerInstanceId: "claude", failureReason: "provider-error:rate-limit" },
+      { providerInstanceId: "prime", failureReason: "provider-error:rate-limit" },
     ]);
     // The degradation record lands before the run row switches providers.
     assert.isBelow(
-      test.ordering.indexOf("journal:degrade:claude"),
-      test.ordering.indexOf("run:saved:running:codex"),
+      test.ordering.indexOf("journal:degrade:prime"),
+      test.ordering.indexOf("run:saved:running:claude"),
+    );
+    assert.isBelow(
+      test.ordering.indexOf("handle:release"),
+      test.ordering.indexOf("run:saved:running:claude"),
     );
     assert.equal(test.beginTurnCalls.length, 2);
-    assert.equal(test.beginTurnCalls[0]?.selection.instanceId, "claude");
-    assert.equal(test.beginTurnCalls[1]?.selection.instanceId, "codex");
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection),
+      [
+        { instanceId: prime.instanceId, model: "prime/custom-model" },
+        { instanceId: claude.instanceId, model: "claude-sonnet-5" },
+      ],
+    );
+    assert.equal(test.events.filter((event) => event.type === "provider-fallback").length, 1);
     // The recovered turn clears its own provider's degradation.
-    assert.deepEqual(test.providerClears, ["codex"]);
-    assert.equal(test.runRecord().modelSelection.instanceId, "codex");
+    assert.deepEqual(test.providerClears, ["claude"]);
+    assert.equal(test.runRecord().modelSelection.instanceId, "claude");
     assert.equal(test.iterations[0]?.failureReason, "infra:provider-error:rate-limit");
   }),
 );
