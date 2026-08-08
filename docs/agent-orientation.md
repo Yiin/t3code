@@ -1,98 +1,67 @@
 # Agent orientation
 
-Operational facts for agents working in this repo. `cook-epic` splices this file
-into every worker prompt (`apps/server/src/cli/epicCook.ts:324-333` prefers it
-over `AGENTS.md`). Keep it short and literal.
+Operational facts for agents in this repo. EpicRunner injects this card into
+worker prompts. `AGENTS.md` is authoritative when the two files differ.
 
 ## Check commands
 
-Node is pinned to 24.18.0 via `mise.toml`. Package manager is pnpm.
+Node is pinned by `mise.toml`. Use pnpm through `vp`.
 
-| Purpose                 | Command                                    |
-| ----------------------- | ------------------------------------------ |
-| Focused tests           | `vp test run <test-files>`                 |
-| One package's tests     | `vp run test` (from that package)          |
-| One package's typecheck | `tsgo --noEmit` (from that package)        |
-| Repo typecheck          | `bun run typecheck`                        |
-| Repo lint               | `bun run lint`                             |
-| Repo tests              | `bun run test`                             |
-| Repo build              | `bun run build`                            |
-| Format                  | `bun run fmt` (check: `bun run fmt:check`) |
-| Dev                     | `bun run dev`, or `bun run dev:server`     |
+| Purpose             | Command                                     |
+| ------------------- | ------------------------------------------- |
+| Focused tests       | `vp test run <test-files>`                  |
+| Package tests       | `vp run test` from the affected package     |
+| Server typecheck    | `vp run --filter t3 typecheck`              |
+| Web typecheck       | `vp run --filter @t3tools/web typecheck`    |
+| Mobile typecheck    | `vp run --filter @t3tools/mobile typecheck` |
+| Touched-file format | `vp fmt --check <changed-files>`            |
+| Touched-file lint   | `vp lint <changed-files>`                   |
 
-**CI does not gate this work.** `.github/workflows/ci.yml` triggers only on
-`pull_request` and on push to `main`. Day-to-day work happens on branch `mine`.
-Run focused checks while you work, and run the repo-wide gate yourself before you
-call a change done. Do not assume CI will catch anything.
+Run focused local checks only. Do not run repository-wide tests, typecheck, or
+lint unless the user requests them. CI runs the full suite on pull requests and
+pushes to `main` or `mine`.
 
 ## Repo layout
 
-- `apps/server` — the t3code server: runner, orchestration, persistence, beads.
-- `apps/web` — the UI.
-- `packages/contracts` — schemas only. No runtime logic belongs here.
-- `packages/shared` — no barrel index; import the exact module path.
-- `packages/client-runtime` — client state.
-- `skills/` — the agent skills this repo ships. Canonical source.
-- `.repos/` — vendored reference checkouts, synced by `bun run sync:repos`.
+- `apps/server` owns provider drivers, sessions, persistence, and runner ports.
+- `apps/web` owns the React web client.
+- `apps/mobile` owns the Expo client.
+- `packages/contracts` contains schemas only. Put no runtime logic there.
+- `packages/epic-core` owns shared loop policy, scheduling, gates, and ports.
+- `packages/shared` uses explicit subpath exports. Do not add a barrel index.
+- `skills/cook-epic` owns the canonical terminal coordinator and worker contract.
+- `.repos` contains read-only reference checkouts. Do not import from it.
 
-## Epic runner
+## EpicRunner path map
 
-The server runner is a thin adapter over the shared loop in `packages/epic-core`;
-the terminal's `t3 epic cook` entry uses the same core. `run.sh` is a shim
-that execs `t3 epic cook`; the legacy Bash coordinator retired on 2026-08-07
-(t3code-06s.42).
+- `packages/epic-core/src/ParallelEpicLoop.ts` owns the parallel scheduling loop.
+- `packages/epic-core/src/policy.ts` classifies iteration boundaries.
+- `packages/epic-core/src/MergeQueue.ts` owns trial merges and integration gates.
+- `packages/epic-core/src/workerLiveness.ts` is a pure state machine. No production loop drives it as of 2026-08-08.
+- `packages/epic-core/src/ports/AgentDispatch.ts` defines worker handle capabilities.
+- `packages/contracts/src/epicRunConfig.ts` defines run defaults and supervision settings.
+- `apps/server/src/runner/Layers/EpicRunner.ts` owns server lifecycle and restart reconciliation.
+- `apps/server/src/runner/Layers/EpicRunnerPoolPorts.ts` adapts dispatch, journal, backlog, merge, and VCS ports.
+- `apps/server/src/provider/Services/ProviderAdapter.ts` defines provider capabilities and session start.
+- `apps/server/src/persistence/Layers/EpicRuns.ts` implements the durable run store.
+- `apps/server/integration/epicRunnerConformance.integration.test.ts` runs server conformance scenarios.
+- `docs/epic-runs.md` describes run behavior. Treat old line citations as stale.
 
-- `skills/cook-epic/run.sh` (191 lines) — the terminal shim: usage validation,
-  harness detection, t3 entrypoint resolution, COOKEPIC\_\* mapping, exec. This
-  copy is canonical; `skills/install.sh` symlinks it into `~/.agents/skills`.
-  Edit it here, then run `./skills/install.sh`. Never edit the installed
-  symlink target.
-- `skills/cook-epic/SKILL.md` — the terminal coordinator's contract.
-- `packages/epic-core` — the shared loop, policy, ports, and conformance core.
-- `apps/server/src/runner/Layers/EpicRunner.ts` — the server adapter: lifecycle
-  and loop supervision only. The loop is `runParallelEpicLoop` from epic-core.
-- `apps/server/src/runner/Layers/EpicRunnerPoolPorts.ts` — the server port
-  adapters (dispatch, journal, events, backlog, workspace, merge drain, VCS).
-- `apps/server/src/runner/Services/EpicRunner.ts` — the service shape.
-- `packages/epic-core/src/ralphProtocol.ts` — `RALPH_MSG`/`RALPH_DONE` parsing and
-  the outcome kinds.
-- `packages/epic-core/src/providerFallback.ts` — claude to codex to kimi.
-- `packages/epic-core/src/ports/EpicRunLock.ts` — the run lock port, shared with
-  `skills/ralph/run.sh`. Both owners take the same file.
-- `packages/epic-core/src/EpicRunPreflight.ts` — blockers and warnings. The lock
-  is observed before all other checks; parallel mode warns on untracked files,
-  exempts clean registered nested worktrees, and blocks integration leftovers.
-- `packages/epic-core/src/workerLiveness.ts` — the pure per-worker liveness
-  state machine (progress signals, repo probe, inspector stop gating), fed by
-  `ports/WorkerEvidence.ts`. Ported from the retired Bash coordinator's
-  `supervise_workers`.
-- `packages/epic-core/src/workerScope.ts` — optional systemd scope governance
-  for worker spawns (named scopes under `cook-epic.slice`, CPUWeight and
-  MemoryHigh only). Fail-soft except for a run-identity collision. Server runs
-  prepare one scope per run in `EpicRunner.runLoop` and bind iteration threads
-  through `apps/server/src/provider/workerScope.ts`
-  (`EpicWorkerScopeRegistry`); `ProviderService` resolves the binding at
-  session start and each provider runtime wraps its CLI spawn.
-- `apps/server/integration/epicRunnerConformance.integration.test.ts` — runs
-  every conformance scenario whose `appliesTo` includes "server" through the
-  server adapter.
-- `packages/contracts/src/epicRuns.ts` — `EpicRunInput`, `LaunchEpicRunInput`, the
-  iteration report and its `failureReason` vocabulary.
-- `apps/server/src/persistence/Layers/EpicRuns.ts` — the run store.
-- `docs/epic-runs.md` — describes the sequential server runner only. Treat its
-  line-range citations as stale.
+## Runner contracts and traps
 
-## Do not
-
-- Do not write runtime logic into `packages/contracts`. Schemas only.
-- Do not add a barrel index to `packages/shared`. Import the module path.
-- Do not write Effect code before reading `.repos/effect-smol/LLMS.md`.
-- Do not edit the installed skill symlinks. Edit `skills/` here and reinstall.
-- Do not trust `AGENTS.md` on verification. It says CI runs the full suite; on
-  branch `mine` it does not.
+- Both terminal and server runners use `packages/epic-core`.
+- `skills/cook-epic/run.sh` is a shim. Edit it here, then run `./skills/install.sh`.
+- Provider fallback uses structured provider evidence only.
+- `primeAgent` work belongs to `t3code-b93.13`. Do not duplicate it.
+- Do not parse issue prose to infer file conflicts.
+- Do not mark a run done until Beads confirms no open child remains.
+- Keep worker checks focused. The merge gate provides integration proof.
+- `workerLiveness.ts` is not active supervision until a production driver calls it.
+- Client turn ingress has no epic-thread ownership gate as of 2026-08-08.
+- Restart reconciliation abandons running iterations as of 2026-08-08. It does not resume the same row.
+- Read `.repos/effect-smol/LLMS.md` before writing Effect code.
 
 ## Local service
 
-The running server is a systemd user unit built from this checkout:
-`systemctl --user restart t3code.service` after `bun run build`. Logs go to
-`~/.t3/userdata/logs/boot-service.log`.
+The service is `t3code.service`. Build before `systemctl --user restart t3code.service`.
+Logs are in `~/.t3/userdata/logs/boot-service.log`.
