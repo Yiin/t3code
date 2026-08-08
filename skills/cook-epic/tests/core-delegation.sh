@@ -112,6 +112,27 @@ CAPTURE="$capture" run_core_shim "$checkout/skills/cook-epic/run.sh" \
   || fail 'auto harness entrypoint failed'
 assert_contains "$capture" 'harness=claude'
 
+capture="$resolution_root/prime-explicit.args"
+CAPTURE="$capture" run_core_shim "$checkout/skills/cook-epic/run.sh" \
+  "$resolution_root/prime-explicit-run" "$resolution_root/prime-explicit.out" "$path_bin" \
+  COOKEPIC_HARNESS=prime COOKEPIC_T3_BIN="$explicit" \
+  || fail 'explicit Prime harness entrypoint failed'
+assert_contains "$capture" 'harness=prime'
+
+prime_parent="$resolution_root/prime-agent-test"
+cp "$BASH_BIN" "$prime_parent"
+ln -s "$(command -v ps)" "$path_bin/ps"
+capture="$resolution_root/prime-ancestor.args"
+set +e
+env PATH="$path_bin" CAPTURE="$capture" COOKEPIC_EPIC=epic COOKEPIC_HARNESS=auto \
+  COOKEPIC_T3_BIN="$explicit" "$prime_parent" -c '"$1" "$2" "$3"; rc=$?; true; exit "$rc"' \
+  prime-parent "$BASH_BIN" "$checkout/skills/cook-epic/run.sh" \
+  "$resolution_root/prime-ancestor-run" > "$resolution_root/prime-ancestor.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail 'Prime ancestor detection failed'
+assert_contains "$capture" 'harness=prime'
+
 rm "$path_t3"
 mkdir -p "$checkout/apps/server/src"
 cat > "$checkout/apps/server/src/bin.ts" <<'EOF'
