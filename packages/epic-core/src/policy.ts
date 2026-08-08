@@ -102,10 +102,13 @@ export const mergeFixDescription = (input: {
   description += input.pushEnabled
     ? ". Push the branch, close this issue, and note the epic."
     : ". Do not push (disabled this run). Close this issue and note the epic.";
+  // Stated as ownership rather than prohibition: the coordinator owns landing,
+  // and a branch merged into base by hand corrupts the merge queue's view of
+  // what it has accepted.
   description +=
     touched.length > 0
-      ? " Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes."
-      : ` Do NOT merge into ${input.baseBranch} yourself.`;
+      ? " The coordinator lands the whole set when this issue closes, so leave the base branches and the sibling remotes to it."
+      : ` The coordinator lands this branch when the issue closes, so leave \`${input.baseBranch}\` to it.`;
   if (input.failureDetail !== undefined && input.failureDetail.length > 0) {
     description += `\n\nWhat the gate reported:\n\n    ${input.failureDetail}`;
   }
@@ -129,12 +132,36 @@ export const trialMergeMessage = (branch: string, childId: string): string =>
 export const INTEGRATION_BRANCH_PREFIX = "cook-epic-integration-";
 export const integrationBranch = (runId: string): string => `${INTEGRATION_BRANCH_PREFIX}${runId}`;
 
-export const EPIC_RUN_ITERATION_PROMPT = `Complete one well-scoped unit of work for this epic end-to-end. Use bd to select and claim the top-priority ready child, implement it, run the focused quality gates, commit and push, close the child, and update the epic progress note. Stop after one child. This is an unattended one-turn iteration: nothing re-invokes you after your turn ends. Run all work in the foreground. Never end your turn while a background task, workflow, or watchdog is still running; if you started one, wait for it and report its outcome before ending the turn. If no work remains, output RALPH_DONE. End a completed iteration with exactly one line: RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}`;
+/**
+ * The base prompt for one epic iteration.
+ *
+ * Kept to what a worker cannot work out for itself: that its turn is the whole
+ * iteration, what the coordinator counts as done, and the two lines the
+ * coordinator parses. How to implement, what to check, and house style come
+ * from the repository and the orientation card, which are injected at dispatch
+ * — restating them here would just be a second, staler copy.
+ */
+export const epicRunIterationPrompt = (input: { readonly pushEnabled: boolean }): string => {
+  const land = input.pushEnabled
+    ? "commit and push it"
+    : "commit it locally — pushing is disabled for this run";
+  return `Cook one child of this epic end-to-end: claim it in bd, implement it, satisfy yourself that it works, ${land}, close the child, and record the outcome on the epic. Stop after one child.
+
+Your turn is the whole iteration. Nothing re-invokes you once it ends, and anything still in flight when you stop — a background job, a subagent, a watchdog — dies with it, so finish the work inside the turn.
+
+End the turn with exactly one line:
+
+RALPH_MSG: {"summary":"<what you built, one clause>","why":"<why it was needed, one clause>"}
+
+or, if the epic has no work left:
+
+RALPH_DONE`;
+};
 
 /** The follow-up turn used after an iteration's background agents settle. */
-export const EPIC_RUN_CONTINUATION_PROMPT = `Your background tasks finished. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
+export const EPIC_RUN_CONTINUATION_PROMPT = `Your background tasks finished. Finish the child and end the turn with the RALPH_MSG line, or RALPH_DONE if no work remains.`;
 
-export const EPIC_RUN_STALLED_PROGRESS_PROMPT = `Your turn ended early while work was still in progress. Complete the iteration per the original instructions: finish the child end-to-end, then end your turn with the required RALPH_MSG line (or RALPH_DONE if no work remains).`;
+export const EPIC_RUN_STALLED_PROGRESS_PROMPT = `Your turn ended while the work was unfinished. Complete the child and end the turn with the RALPH_MSG line, or RALPH_DONE if no work remains.`;
 
 /** How long the runner waits for a still-running subagent before grace ends. */
 export const DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS = 15 * 60 * 1_000;

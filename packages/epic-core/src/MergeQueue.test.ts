@@ -623,7 +623,7 @@ describe("MergeQueue", () => {
         expect(description).toContain("lands all-or-nothing");
         expect(description).toContain("- this repository (`/repo`, base `mine`)");
         expect(description).toContain("- sibling `/sib` (base `sib-main`)");
-        expect(description).toContain("never push sibling repos");
+        expect(description).toContain("leave the base branches and the sibling remotes to it");
       }),
     );
 

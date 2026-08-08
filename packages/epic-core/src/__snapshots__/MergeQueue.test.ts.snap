@@ -3,23 +3,23 @@
 exports[`merge policy > snapshots conflict with pushEnabled=false 1`] = `
 "Branch \`epic/child-1\` (child \`child-1\`) failed to land on \`mine\`: conflict.
 
-Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Do not push (disabled this run). Close this issue and note the epic. Do NOT merge into mine yourself."
+Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Do not push (disabled this run). Close this issue and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it."
 `;
 
 exports[`merge policy > snapshots conflict with pushEnabled=true 1`] = `
 "Branch \`epic/child-1\` (child \`child-1\`) failed to land on \`mine\`: conflict.
 
-Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. Do NOT merge into mine yourself."
+Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it."
 `;
 
 exports[`merge policy > snapshots gate-failed with pushEnabled=false 1`] = `
 "Branch \`epic/child-1\` (child \`child-1\`) failed to land on \`mine\`: gate-failed.
 
-Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts. The integration gate is: \`vp check\` — run it and fix what it reports. Do not push (disabled this run). Close this issue and note the epic. Do NOT merge into mine yourself."
+Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts. The integration gate is: \`vp check\` — run it and fix what it reports. Do not push (disabled this run). Close this issue and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it."
 `;
 
 exports[`merge policy > snapshots gate-failed with pushEnabled=true 1`] = `
 "Branch \`epic/child-1\` (child \`child-1\`) failed to land on \`mine\`: gate-failed.
 
-Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts. The integration gate is: \`vp check\` — run it and fix what it reports. Push the branch, close this issue, and note the epic. Do NOT merge into mine yourself."
+Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts. The integration gate is: \`vp check\` — run it and fix what it reports. Push the branch, close this issue, and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it."
 `;

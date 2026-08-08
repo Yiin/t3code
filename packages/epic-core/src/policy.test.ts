@@ -539,7 +539,7 @@ describe("mergeFixDescription branch-set variant", () => {
         "- this repository (`/repo`, base `mine`)\n" +
         "- sibling `/work/proga-api` (base `main`)\n" +
         "\n" +
-        "Repair procedure: you will be on branch `epic/child-1` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into `epic/child-1` and resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes.",
+        "Repair procedure: you will be on branch `epic/child-1` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into `epic/child-1` and resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. The coordinator lands the whole set when this issue closes, so leave the base branches and the sibling remotes to it.",
     );
   });
 
@@ -557,9 +557,7 @@ describe("mergeFixDescription branch-set variant", () => {
       "The integration gate is: `vp check` — run it and fix what it reports",
     );
     expect(description).toContain("Do not push (disabled this run).");
-    expect(description).toContain(
-      "Do NOT merge into any base branch yourself, and never push sibling repos",
-    );
+    expect(description).toContain("leave the base branches and the sibling remotes to it");
   });
 
   it("omits the main-repo bullet when only siblings have commits", () => {
