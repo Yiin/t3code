@@ -62,6 +62,21 @@ import {
   type ProviderSessionReaperLiveOptions,
 } from "./ProviderSessionReaper.ts";
 
+/**
+ * Open the sequential scope and start the reaper inside it.
+ *
+ * Only for the cases that run on the default Effect runtime. The
+ * `runtime!.runPromise` sites elsewhere in this file run on the test's own
+ * ManagedRuntime and are not interchangeable with these.
+ */
+const startReaperScope = async (reaper: {
+  readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+}) => {
+  const scope = await Effect.runPromise(Scope.make("sequential"));
+  await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+  return scope;
+};
+
 const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5-codex",
@@ -924,8 +939,7 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    scope = await startReaperScope(reaper);
 
     await waitFor(() => dispatchedSessionStops(harness).length === 1);
 
@@ -979,8 +993,7 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    scope = await startReaperScope(reaper);
     await Effect.runPromise(drainFibers);
 
     expect(harness.dispatch).not.toHaveBeenCalled();
@@ -1084,8 +1097,7 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    scope = await startReaperScope(reaper);
     await Effect.runPromise(drainFibers);
 
     expect(harness.dispatch).not.toHaveBeenCalled();
@@ -1134,8 +1146,7 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    scope = await startReaperScope(reaper);
     await Effect.runPromise(drainFibers);
 
     expect(harness.dispatch).not.toHaveBeenCalled();
@@ -1232,8 +1243,7 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    scope = await startReaperScope(reaper);
 
     await waitFor(() => dispatchedSessionStops(harness).length === 2);
 
@@ -1322,8 +1332,7 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    scope = await startReaperScope(reaper);
 
     await waitFor(() => dispatchedSessionStops(harness).length === 2);
 

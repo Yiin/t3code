@@ -54,6 +54,16 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
+/**
+ * Dispatch a command through the engine and await it. Collapses the
+ * `Effect.runPromise(engine.dispatch(...))` wrapper repeated throughout
+ * this file into one place.
+ */
+const dispatch = <C, A, E>(
+  engine: { readonly dispatch: (command: C) => Effect.Effect<A, E> },
+  command: C,
+): Promise<A> => Effect.runPromise(engine.dispatch(command));
+
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
 }
@@ -814,23 +824,21 @@ describe("ProviderRuntimeIngestion", () => {
     const harness = await createHarness();
     const seededAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-seed-claude-placeholder"),
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-seed-claude-placeholder"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
         threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "claudeAgent",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          updatedAt: seededAt,
-          lastError: null,
-        },
-        createdAt: seededAt,
-      }),
-    );
+        status: "ready",
+        providerName: "claudeAgent",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        updatedAt: seededAt,
+        lastError: null,
+      },
+      createdAt: seededAt,
+    });
 
     harness.emit({
       type: "turn.started",
@@ -1326,76 +1334,68 @@ describe("ProviderRuntimeIngestion", () => {
     const targetTurnId = asTurnId("turn-plan-implement");
     const createdAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("cmd-thread-create-plan-source"),
+    await dispatch(harness.engine, {
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-plan-source"),
+      threadId: sourceThreadId,
+      projectId: asProjectId("project-1"),
+      title: "Plan Source",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: "plan",
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-plan-source"),
+      threadId: sourceThreadId,
+      session: {
         threadId: sourceThreadId,
-        projectId: asProjectId("project-1"),
-        title: "Plan Source",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        interactionMode: "plan",
+        status: "ready",
+        providerName: "codex",
         runtimeMode: "approval-required",
-        branch: null,
-        worktreePath: null,
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-plan-source"),
-        threadId: sourceThreadId,
-        session: {
-          threadId: sourceThreadId,
-          status: "ready",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          updatedAt: createdAt,
-          lastError: null,
-        },
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("cmd-thread-create-plan-target"),
+        activeTurnId: null,
+        updatedAt: createdAt,
+        lastError: null,
+      },
+      createdAt,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-plan-target"),
+      threadId: targetThreadId,
+      projectId: asProjectId("project-1"),
+      title: "Plan Target",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-plan-target"),
+      threadId: targetThreadId,
+      session: {
         threadId: targetThreadId,
-        projectId: asProjectId("project-1"),
-        title: "Plan Target",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        status: "ready",
+        providerName: "codex",
         runtimeMode: "approval-required",
-        branch: null,
-        worktreePath: null,
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-plan-target"),
-        threadId: targetThreadId,
-        session: {
-          threadId: targetThreadId,
-          status: "ready",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          updatedAt: createdAt,
-          lastError: null,
-        },
-        createdAt,
-      }),
-    );
+        activeTurnId: null,
+        updatedAt: createdAt,
+        lastError: null,
+      },
+      createdAt,
+    });
     harness.setProviderSession({
       provider: ProviderDriverKind.make("codex"),
       status: "ready",
@@ -1438,26 +1438,24 @@ describe("ProviderRuntimeIngestion", () => {
       throw new Error("Expected source plan to exist.");
     }
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-plan-target"),
-        threadId: targetThreadId,
-        message: {
-          messageId: asMessageId("msg-plan-target"),
-          role: "user",
-          text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
-          attachments: [],
-        },
-        sourceProposedPlan: {
-          threadId: sourceThreadId,
-          planId: sourcePlan.id,
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      }),
-    );
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-plan-target"),
+      threadId: targetThreadId,
+      message: {
+        messageId: asMessageId("msg-plan-target"),
+        role: "user",
+        text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+        attachments: [],
+      },
+      sourceProposedPlan: {
+        threadId: sourceThreadId,
+        planId: sourcePlan.id,
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
 
     const sourceThreadBeforeStart = await waitForThread(
       harness.readModel,
@@ -1607,26 +1605,24 @@ describe("ProviderRuntimeIngestion", () => {
       throw new Error("Expected source plan to exist.");
     }
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-plan-target-guarded"),
-        threadId: targetThreadId,
-        message: {
-          messageId: asMessageId("msg-plan-target-guarded"),
-          role: "user",
-          text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
-          attachments: [],
-        },
-        sourceProposedPlan: {
-          threadId: sourceThreadId,
-          planId: sourcePlan.id,
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      }),
-    );
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-plan-target-guarded"),
+      threadId: targetThreadId,
+      message: {
+        messageId: asMessageId("msg-plan-target-guarded"),
+        role: "user",
+        text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+        attachments: [],
+      },
+      sourceProposedPlan: {
+        threadId: sourceThreadId,
+        planId: sourcePlan.id,
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
 
     harness.emit({
       type: "turn.started",
@@ -1694,22 +1690,20 @@ describe("ProviderRuntimeIngestion", () => {
     );
 
     // The steer: a user-requested turn start while the old turn still runs.
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-steer"),
-        threadId,
-        message: {
-          messageId: asMessageId("msg-steer"),
-          role: "user",
-          text: "actually, do 15 instead",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt,
-      }),
-    );
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-steer"),
+      threadId,
+      message: {
+        messageId: asMessageId("msg-steer"),
+        role: "user",
+        text: "actually, do 15 instead",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
 
     // The provider session tracks the new turn before emitting turn.started
     // (sendTurn updates the session first).
@@ -1775,22 +1769,20 @@ describe("ProviderRuntimeIngestion", () => {
       threadId,
     );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-codex-absorbed-steer"),
-        threadId,
-        message: {
-          messageId: asMessageId("msg-codex-absorbed-steer"),
-          role: "user",
-          text: "adjust the running turn",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:01.000Z",
-      }),
-    );
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-codex-absorbed-steer"),
+      threadId,
+      message: {
+        messageId: asMessageId("msg-codex-absorbed-steer"),
+        role: "user",
+        text: "adjust the running turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
 
     // Codex emits no second turn.started for an absorbed steer. A stale
     // response id must not pass the pending-turn exception in the guard.
@@ -1839,76 +1831,68 @@ describe("ProviderRuntimeIngestion", () => {
     const replayedTurnId = asTurnId("turn-replayed");
     const createdAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("cmd-thread-create-plan-source-unrelated"),
+    await dispatch(harness.engine, {
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-plan-source-unrelated"),
+      threadId: sourceThreadId,
+      projectId: asProjectId("project-1"),
+      title: "Plan Source",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: "plan",
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-plan-source-unrelated"),
+      threadId: sourceThreadId,
+      session: {
         threadId: sourceThreadId,
-        projectId: asProjectId("project-1"),
-        title: "Plan Source",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        interactionMode: "plan",
+        status: "ready",
+        providerName: "codex",
         runtimeMode: "approval-required",
-        branch: null,
-        worktreePath: null,
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-plan-source-unrelated"),
-        threadId: sourceThreadId,
-        session: {
-          threadId: sourceThreadId,
-          status: "ready",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          updatedAt: createdAt,
-          lastError: null,
-        },
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("cmd-thread-create-plan-target-unrelated"),
+        activeTurnId: null,
+        updatedAt: createdAt,
+        lastError: null,
+      },
+      createdAt,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-plan-target-unrelated"),
+      threadId: targetThreadId,
+      projectId: asProjectId("project-1"),
+      title: "Plan Target",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-plan-target-unrelated"),
+      threadId: targetThreadId,
+      session: {
         threadId: targetThreadId,
-        projectId: asProjectId("project-1"),
-        title: "Plan Target",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        status: "ready",
+        providerName: "codex",
         runtimeMode: "approval-required",
-        branch: null,
-        worktreePath: null,
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-plan-target-unrelated"),
-        threadId: targetThreadId,
-        session: {
-          threadId: targetThreadId,
-          status: "ready",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          updatedAt: createdAt,
-          lastError: null,
-        },
-        createdAt,
-      }),
-    );
+        activeTurnId: null,
+        updatedAt: createdAt,
+        lastError: null,
+      },
+      createdAt,
+    });
 
     harness.emit({
       type: "turn.proposed.completed",
@@ -1942,26 +1926,24 @@ describe("ProviderRuntimeIngestion", () => {
       throw new Error("Expected source plan to exist.");
     }
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-plan-target-unrelated"),
-        threadId: targetThreadId,
-        message: {
-          messageId: asMessageId("msg-plan-target-unrelated"),
-          role: "user",
-          text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
-          attachments: [],
-        },
-        sourceProposedPlan: {
-          threadId: sourceThreadId,
-          planId: sourcePlan.id,
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: "2026-01-01T00:00:00.000Z",
-      }),
-    );
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-plan-target-unrelated"),
+      threadId: targetThreadId,
+      message: {
+        messageId: asMessageId("msg-plan-target-unrelated"),
+        role: "user",
+        text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+        attachments: [],
+      },
+      sourceProposedPlan: {
+        threadId: sourceThreadId,
+        planId: sourcePlan.id,
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
 
     harness.setProviderSession({
       provider: ProviderDriverKind.make("codex"),
@@ -2715,22 +2697,20 @@ describe("ProviderRuntimeIngestion", () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-streaming-mode"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("message-streaming-mode"),
-          role: "user",
-          text: "stream please",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-streaming-mode"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-streaming-mode"),
+        role: "user",
+        text: "stream please",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
     await harness.drain();
 
     harness.emit({
