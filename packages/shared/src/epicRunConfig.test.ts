@@ -66,8 +66,8 @@ describe("resolveEpicRunConfig", () => {
       name: "run input over environment",
       file: { engine: "core" as const },
       environment: { engine: "shadow" as const },
-      override: { engine: "legacy" as const },
-      expected: "legacy",
+      override: { engine: "core" as const },
+      expected: "core",
       source: "override",
     },
     {
