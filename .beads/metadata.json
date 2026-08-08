@@ -1,7 +1,9 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
+  "dolt_mode": "server",
   "dolt_database": "t3code",
-  "project_id": "9d7552d0-9c9e-4837-a43d-d982a21c77f0"
+  "project_id": "9d7552d0-9c9e-4837-a43d-d982a21c77f0",
+  "dolt_server_host": "100.107.50.39",
+  "dolt_server_user": "root"
 }

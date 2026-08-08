@@ -70,3 +70,7 @@ repos:
   primary: "."
   additional:
     - "/home/yiin/.beads-planning"
+dolt:
+  host: "100.107.50.39"
+  port: 3306
+  user: "root"
