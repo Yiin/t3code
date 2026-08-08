@@ -54,6 +54,14 @@ check there reports a pass the gate never gave.
 ## Runner contracts and traps
 
 - Both terminal and server runners use `packages/epic-core`.
+- Never run `vp install`, `pnpm install`, or any dependency install inside an
+  epic worktree. Its root `node_modules` is a link into the source checkout, so
+  an install writes through it and repoints the real checkout's dependency
+  links at your temporary worktree. When the worktree is pruned, every other
+  worker and the integration gate fail with `ERR_MODULE_NOT_FOUND`. This
+  already happened once and cost a whole run. Your worktree is provisioned
+  with the dependencies already mirrored — if something is genuinely missing,
+  say so on the issue instead of installing. Tracked as `t3code-b93.22`.
 - `skills/cook-epic/run.sh` is a shim. Edit it here; committing the edit is
   enough. Do not run `./skills/install.sh` from a worktree — it rewrites the
   machine's global skill links, and they break when the worktree is pruned.
