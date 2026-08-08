@@ -39,7 +39,7 @@ import {
 import { layer as epicRunConfigSourceLayer } from "@t3tools/epic-core/EpicRunConfigSource";
 import { layer as epicRunPreflightLayer } from "@t3tools/epic-core/EpicRunPreflight";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
-import { DEFAULT_MAX_NO_COMMIT_STREAK, EPIC_RUN_ITERATION_PROMPT } from "@t3tools/epic-core/policy";
+import { DEFAULT_MAX_NO_COMMIT_STREAK, epicRunIterationPrompt } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -753,7 +753,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
         epicId: scenario.beads.epicId,
         projectId,
         cwd: workspace.cwd,
-        prompt: EPIC_RUN_ITERATION_PROMPT,
+        prompt: epicRunIterationPrompt({ pushEnabled: true }),
         orientationFile: null,
         modelSelection: initialSelection,
         config: configOverride(scenario),

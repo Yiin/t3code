@@ -24,7 +24,7 @@ import {
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
-  EPIC_RUN_ITERATION_PROMPT,
+  epicRunIterationPrompt,
 } from "@t3tools/epic-core/policy";
 import {
   runParallelEpicLoop,
@@ -498,7 +498,7 @@ export const cookCommand = Command.make("cook", {
               epicId: flags.epic,
               projectId: ProjectId.make(`local-${flags.epic}`),
               cwd,
-              prompt: EPIC_RUN_ITERATION_PROMPT,
+              prompt: epicRunIterationPrompt({ pushEnabled: !snapshot.config.vcs.noPush }),
               orientationFile: snapshot.config.orientation.file,
               modelSelection,
               runtimeMode: snapshot.config.runtime.mode,

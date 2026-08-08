@@ -21,7 +21,7 @@ import {
   type EpicRunnerError,
   EpicRunnerStoreError,
 } from "@t3tools/epic-core/Errors";
-import { EPIC_RUN_ITERATION_PROMPT } from "@t3tools/epic-core/policy";
+import { epicRunIterationPrompt } from "@t3tools/epic-core/policy";
 import {
   EpicRunPreflight,
   formatEpicRunPreflightBlocker,
@@ -425,7 +425,7 @@ export const makeEpicRunnerLaunch = (deps: {
       return yield* startNewRun(
         {
           ...input,
-          prompt: EPIC_RUN_ITERATION_PROMPT,
+          prompt: epicRunIterationPrompt({ pushEnabled: !configSnapshot.config.vcs.noPush }),
           orientationFile: null,
           modelSelection,
           runtimeMode: DEFAULT_RUNTIME_MODE,

@@ -20,7 +20,7 @@ import {
 } from "@t3tools/contracts";
 import {
   EPIC_RUN_CONTINUATION_PROMPT,
-  EPIC_RUN_ITERATION_PROMPT,
+  epicRunIterationPrompt,
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
@@ -1061,16 +1061,24 @@ describe("EpicRunner", () => {
   // ever re-invokes the agent. Agents that backgrounded work and yielded
   // ("waiting for the workflow to notify me") lost that work when the session
   // was killed, so the prompt must state the contract explicitly.
-  it("iteration prompt states the no-re-invocation and no-background-yield contract", () => {
-    assert.include(EPIC_RUN_ITERATION_PROMPT, "nothing re-invokes you after your turn ends");
-    assert.include(EPIC_RUN_ITERATION_PROMPT, "Run all work in the foreground");
-    assert.include(
-      EPIC_RUN_ITERATION_PROMPT,
-      "Never end your turn while a background task, workflow, or watchdog is still running",
-    );
+  it("iteration prompt states the one-shot turn contract and the parsed markers", () => {
+    const prompt = epicRunIterationPrompt({ pushEnabled: true });
+    // Assert the contract, not the phrasing: the worker has to learn that its
+    // turn is the whole iteration and that in-flight work dies with it.
+    assert.include(prompt, "Nothing re-invokes you");
+    assert.include(prompt, "dies with it");
     // The RALPH protocol markers the runner parses must stay intact.
-    assert.include(EPIC_RUN_ITERATION_PROMPT, "RALPH_DONE");
-    assert.include(EPIC_RUN_ITERATION_PROMPT, 'RALPH_MSG: {"summary":');
+    assert.include(prompt, "RALPH_DONE");
+    assert.include(prompt, 'RALPH_MSG: {"summary":');
+  });
+
+  it("iteration prompt follows the run's push policy", () => {
+    // The prompt used to hardcode "commit and push", so a no-push run told
+    // every worker to do the one thing the run had disabled.
+    assert.include(epicRunIterationPrompt({ pushEnabled: true }), "commit and push it");
+    const noPush = epicRunIterationPrompt({ pushEnabled: false });
+    assert.include(noPush, "pushing is disabled");
+    assert.notInclude(noPush, "commit and push it");
   });
 
   it.live("dispatches fresh epic context and the AGENTS orientation card", () =>
