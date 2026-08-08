@@ -1,5 +1,6 @@
 [mcp_servers.xcodebuildmcp]
-enabled = true
+# Drives Xcode/iOS simulators, which this Linux host does not have.
+enabled = false
 required = false
 command = "npx"
 args = ["--yes", "xcodebuildmcp@2.6.2", "mcp"]
