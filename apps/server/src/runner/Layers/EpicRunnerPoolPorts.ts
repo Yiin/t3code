@@ -166,6 +166,49 @@ const setupWorktreeAssets = (
         }
       });
 
+    /**
+     * Rebuild a package's `node_modules` as a tree of its own, copying every
+     * symlink target verbatim.
+     *
+     * Linking the directory itself would be wrong: pnpm records workspace
+     * dependencies as repo-relative links (`@t3tools/contracts -> ../../../contracts`),
+     * and through a directory link those resolve against the SOURCE checkout.
+     * The worktree would then typecheck the source copy of its own siblings
+     * instead of the branch under test. Copied verbatim into a real directory
+     * here, the same relative target resolves inside the worktree, while
+     * store links (`../../../node_modules/.pnpm/...`) still reach the shared
+     * store through the root `node_modules` link.
+     */
+    const replicateLinkTree = (
+      source: string,
+      targetDir: string,
+    ): Effect.Effect<void, PlatformError.PlatformError> =>
+      Effect.gen(function* () {
+        yield* deps.fileSystem.makeDirectory(targetDir, { recursive: true });
+        const entries = yield* deps.fileSystem.readDirectory(source);
+        for (const entry of entries) {
+          const from = deps.path.join(source, entry);
+          const to = deps.path.join(targetDir, entry);
+          if (yield* deps.fileSystem.exists(to)) continue;
+          // readLink doubles as the symlink test; stat would follow the link.
+          const linkTarget = yield* deps.fileSystem
+            .readLink(from)
+            .pipe(Effect.catchCause(() => Effect.succeed(null)));
+          if (linkTarget !== null) {
+            yield* deps.fileSystem.symlink(linkTarget, to);
+            continue;
+          }
+          const info = yield* deps.fileSystem.stat(from);
+          if (info.type === "Directory") {
+            yield* replicateLinkTree(from, to);
+            continue;
+          }
+          yield* deps.fileSystem.symlink(from, to);
+        }
+      });
+
+    // The root node_modules holds no workspace links — only the .pnpm store
+    // and the root package's own dependencies — so a directory link is right.
     yield* linkNodeModules(NODE_MODULES);
 
     // Best-effort: a directory we cannot read contributes no workspace
@@ -189,7 +232,16 @@ const setupWorktreeAssets = (
       (...segments) => deps.path.join(...segments),
     );
     for (const relative of workspaceNodeModules) {
-      yield* linkNodeModules(relative);
+      const source = deps.path.join(sourceRepo, relative);
+      const targetDir = deps.path.join(target, relative);
+      const targetParent = deps.path.dirname(targetDir);
+      if (
+        (yield* deps.fileSystem.exists(source)) &&
+        (yield* deps.fileSystem.exists(targetParent)) &&
+        !(yield* deps.fileSystem.exists(targetDir))
+      ) {
+        yield* replicateLinkTree(source, targetDir);
+      }
     }
 
     for (const name of WORKTREE_ASSET_ENV_FILES) {

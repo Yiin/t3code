@@ -40,17 +40,21 @@ const linkedPaths = async (target: string): Promise<ReadonlyArray<string>> => {
 };
 
 describe("linkNodeModulesTree", () => {
-  it("links the root and every workspace package node_modules", async () => {
-    const { root, source, target } = await scaffold(["apps/web", "packages/shared", "scripts"]);
+  it("provides node_modules for the root and every workspace package", async () => {
+    const packages = ["apps/web", "packages/shared", "scripts"];
+    const { root, source, target } = await scaffold(packages);
 
     await linkNodeModulesTree(source, target);
 
-    expect(await linkedPaths(target)).toStrictEqual([
-      "apps/web/node_modules",
-      "node_modules",
-      "packages/shared/node_modules",
-      "scripts/node_modules",
-    ]);
+    // The root is a plain directory link into the source checkout.
+    expect(await linkedPaths(target)).toStrictEqual(["node_modules"]);
+    // Each package gets a real directory instead, so the links inside it
+    // resolve against the worktree rather than the source.
+    for (const dir of packages) {
+      const stat = await NodeFSP.lstat(NodePath.join(target, dir, "node_modules"));
+      expect(stat.isDirectory()).toBe(true);
+      expect(stat.isSymbolicLink()).toBe(false);
+    }
     await NodeFSP.rm(root, { recursive: true, force: true });
   });
 
@@ -68,6 +72,57 @@ describe("linkNodeModulesTree", () => {
       "utf8",
     );
     expect(throughLink).toBe("resolved");
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  });
+
+  it("resolves a workspace sibling to the worktree's copy, not the source's", async () => {
+    // Regression (t3code-b93.18): pnpm records workspace deps as repo-relative
+    // links. Linking the package's node_modules directory made them resolve
+    // against the source checkout, so a worktree typechecked the source copy
+    // of its own siblings instead of the branch under test.
+    const { root, source, target } = await scaffold(["packages/app", "packages/lib"]);
+    await NodeFSP.mkdir(NodePath.join(source, "packages/app/node_modules/@scope"), {
+      recursive: true,
+    });
+    await NodeFSP.symlink(
+      "../../../lib",
+      NodePath.join(source, "packages/app/node_modules/@scope/lib"),
+    );
+    await NodeFSP.writeFile(NodePath.join(source, "packages/lib/marker.txt"), "source");
+    await NodeFSP.mkdir(NodePath.join(target, "packages/lib"), { recursive: true });
+    await NodeFSP.writeFile(NodePath.join(target, "packages/lib/marker.txt"), "branch");
+
+    await linkNodeModulesTree(source, target);
+
+    const seen = await NodeFSP.readFile(
+      NodePath.join(target, "packages/app/node_modules/@scope/lib/marker.txt"),
+      "utf8",
+    );
+    expect(seen).toBe("branch");
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  });
+
+  it("still reaches the shared store through the root node_modules link", async () => {
+    const { root, source, target } = await scaffold(["packages/app"]);
+    await NodeFSP.mkdir(NodePath.join(source, "node_modules/.pnpm/dep/node_modules/dep"), {
+      recursive: true,
+    });
+    await NodeFSP.writeFile(
+      NodePath.join(source, "node_modules/.pnpm/dep/node_modules/dep/index.js"),
+      "module.exports = 1;\n",
+    );
+    await NodeFSP.symlink(
+      "../../../node_modules/.pnpm/dep/node_modules/dep",
+      NodePath.join(source, "packages/app/node_modules/dep"),
+    );
+
+    await linkNodeModulesTree(source, target);
+
+    const resolved = await NodeFSP.readFile(
+      NodePath.join(target, "packages/app/node_modules/dep/index.js"),
+      "utf8",
+    );
+    expect(resolved).toBe("module.exports = 1;\n");
     await NodeFSP.rm(root, { recursive: true, force: true });
   });
 

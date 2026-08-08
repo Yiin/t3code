@@ -13,6 +13,38 @@ import {
   WORKSPACE_SCAN_MAX_DEPTH,
 } from "../workspaceNodeModules.ts";
 
+/**
+ * Rebuild a package's `node_modules` as a tree of its own, copying every
+ * symlink target verbatim.
+ *
+ * Linking the directory itself would be wrong: pnpm records workspace
+ * dependencies as repo-relative links (`@t3tools/contracts -> ../../../contracts`),
+ * and through a directory link those resolve against the SOURCE checkout, so
+ * the worktree would typecheck the source copy of its own siblings instead of
+ * the branch under test. Copied verbatim into a real directory, the same
+ * relative target resolves inside the worktree, while store links
+ * (`../../../node_modules/.pnpm/...`) still reach the shared store through the
+ * root `node_modules` link.
+ */
+const replicateLinkTree = async (source: string, targetDir: string): Promise<void> => {
+  await NodeFSP.mkdir(targetDir, { recursive: true });
+  const entries = await NodeFSP.readdir(source, { withFileTypes: true });
+  for (const entry of entries) {
+    const from = NodePath.join(source, entry.name);
+    const to = NodePath.join(targetDir, entry.name);
+    if (await pathExists(to)) continue;
+    if (entry.isSymbolicLink()) {
+      await NodeFSP.symlink(await NodeFSP.readlink(from), to);
+      continue;
+    }
+    if (entry.isDirectory()) {
+      await replicateLinkTree(from, to);
+      continue;
+    }
+    await NodeFSP.symlink(from, to);
+  }
+};
+
 const pathExists = async (target: string): Promise<boolean> => {
   try {
     await NodeFSP.lstat(target);
@@ -57,15 +89,21 @@ export const linkNodeModulesTree = async (sourceRepo: string, target: string): P
     return found;
   };
 
-  const relatives = [NODE_MODULES, ...(await walk([]))];
+  // The root node_modules holds no workspace links — only the .pnpm store and
+  // the root package's own dependencies — so a directory link is right there.
+  const rootSource = NodePath.join(sourceRepo, NODE_MODULES);
+  const rootLink = NodePath.join(target, NODE_MODULES);
+  if ((await pathExists(rootSource)) && !(await pathExists(rootLink))) {
+    await NodeFSP.symlink(rootSource, rootLink, "dir");
+  }
 
-  for (const relative of relatives) {
+  for (const relative of await walk([])) {
     const source = NodePath.join(sourceRepo, relative);
-    const link = NodePath.join(target, relative);
+    const targetDir = NodePath.join(target, relative);
     if (!(await pathExists(source))) continue;
     // The owning package directory has to exist in this worktree.
-    if (!(await pathExists(NodePath.dirname(link)))) continue;
-    if (await pathExists(link)) continue;
-    await NodeFSP.symlink(source, link, "dir");
+    if (!(await pathExists(NodePath.dirname(targetDir)))) continue;
+    if (await pathExists(targetDir)) continue;
+    await replicateLinkTree(source, targetDir);
   }
 };
