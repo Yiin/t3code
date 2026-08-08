@@ -12,8 +12,11 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
 
 import { EpicRunnerDispatchError, EpicRunnerStoreError } from "./Errors.ts";
@@ -140,6 +143,8 @@ const fixture = (input: {
   readonly siblingRule?: string;
   /** Fail workspace release with an EpicRunnerStoreError. */
   readonly releaseFails?: boolean;
+  /** Make every merge drain defer, as an absent or stale merge slot does. */
+  readonly drainDefersForever?: boolean;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -297,7 +302,14 @@ const fixture = (input: {
   };
 
   const workspace: WorkspaceShape = {
-    ensureIntegration: () => Effect.succeed(sequential ? null : { entries: [] }),
+    ensureIntegration: () =>
+      Effect.succeed(
+        sequential
+          ? null
+          : // A queued entry makes the loop drain before it dispatches, which
+            // is the path an unavailable merge slot defers on.
+            { entries: input.drainDefersForever ? [{ status: "queued" as const }] : [] },
+      ),
     acquire: (_runCtx, acquireInput) =>
       Effect.sync((): IterationWorkspace => {
         if (acquireInput.sequential) {
@@ -431,7 +443,9 @@ const fixture = (input: {
       Effect.sync(() => {
         drainCalls += 1;
         ordering.push("merge:drain");
-        return { _tag: "drained" } as const;
+        return input.drainDefersForever
+          ? ({ _tag: "deferred" } as const)
+          : ({ _tag: "drained" } as const);
       }),
     enqueueMerge: (merge) =>
       Effect.sync(() => {
@@ -603,6 +617,23 @@ it.live("fails the run as infra:merge-reconciliation when workspace release fail
     assert.equal(run.status, "failed");
     assert.include(run.lastError ?? "", "infra:merge-reconciliation");
     assert.equal(test.workspaceReleases(), 1);
+  }),
+);
+
+it.effect("fails the run when the merge drain cannot acquire the slot", () =>
+  Effect.gen(function* () {
+    // Regression: a deferred drain used to retry forever with no log and no
+    // bound, while the run lock kept heartbeating. The run reported "running"
+    // and landed nothing for 8 hours.
+    const test = fixture({ sequential: false, drainDefersForever: true });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(11));
+    yield* Fiber.join(fiber);
+
+    const run = test.runRecord();
+    assert.equal(run.status, "failed");
+    assert.include(run.lastError ?? "", "infra:merge-slot-unavailable");
+    assert.equal(test.dispatchCount(), 0);
   }),
 );
 

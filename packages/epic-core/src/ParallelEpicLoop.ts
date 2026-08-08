@@ -16,6 +16,7 @@ import {
   epicRunIterationThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -199,6 +200,20 @@ type LoopBoundary =
     };
 
 const LOOP_STOP: LoopBoundary = { _tag: "stop" };
+
+/**
+ * How long the merge drain may keep deferring before the run gives up.
+ *
+ * A deferral means the merge slot is held by someone else. That is legitimate
+ * while another holder finishes a merge set, so the bound is generous. It is
+ * not legitimate indefinitely: an absent or stale slot defers every attempt,
+ * and without a bound the loop spins on it for as long as the process lives
+ * while still heartbeating its run lock.
+ */
+const MERGE_DRAIN_DEFERRAL_LIMIT_MS = 600_000;
+
+/** How often a still-deferring drain says so, so the spin is visible early. */
+const MERGE_DRAIN_DEFERRAL_LOG_INTERVAL_MS = 30_000;
 
 interface ActiveIteration {
   charged: boolean;
@@ -1049,6 +1064,13 @@ export const runParallelEpicLoop = (
       initialMergeState?.entries.some(
         (entry) => entry.status === "queued" || entry.status === "draining",
       ) ?? false;
+    // A deferred drain used to retry forever, silently. Because the run lock
+    // keeps heartbeating and no worker is alive to look wrong, that presents
+    // as a healthy run for as long as it lasts — one such spin ran 8 hours
+    // before anyone noticed. Track the streak so it is visible, and give up
+    // rather than hang.
+    let deferredSince: number | null = null;
+    let deferredLoggedAt = 0;
     let terminalWorkerError: EpicRunnerError | null = null;
     let pendingFallback: PendingProviderFallback | null = null;
     let syntheticSequence = 0;
@@ -1107,9 +1129,41 @@ export const runParallelEpicLoop = (
           return;
         }
         if (result._tag === "deferred") {
+          const now = yield* Clock.currentTimeMillis;
+          deferredSince ??= now;
+          const stalledFor = now - deferredSince;
+          if (stalledFor >= MERGE_DRAIN_DEFERRAL_LIMIT_MS) {
+            yield* withTransition(
+              Effect.gen(function* () {
+                const current = yield* requireRun(runId);
+                if (current.status === "running") {
+                  yield* saveRun({
+                    ...current,
+                    status: "failed" as const,
+                    lastError:
+                      `infra:merge-slot-unavailable: the merge drain could not acquire the ` +
+                      `merge slot for ${String(Math.round(stalledFor / 1000))}s, so no ` +
+                      `branch can land. Check \`bd merge-slot check\`; an absent or stale ` +
+                      `slot defers every attempt.`,
+                    updatedAt: yield* nowIso,
+                  });
+                }
+              }),
+            );
+            return;
+          }
+          if (now - deferredLoggedAt >= MERGE_DRAIN_DEFERRAL_LOG_INTERVAL_MS) {
+            deferredLoggedAt = now;
+            yield* Effect.logWarning("epic.runner.merge-drain-deferred", {
+              runId,
+              stalledForMs: stalledFor,
+            });
+          }
           yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
           continue;
         }
+        deferredSince = null;
+        deferredLoggedAt = 0;
         drainBeforeDispatch = false;
       }
       if (active.size === 0 && terminalWorkerError !== null) {

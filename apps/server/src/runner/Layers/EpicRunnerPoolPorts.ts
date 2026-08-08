@@ -1469,6 +1469,15 @@ export const makeServerMergeDrain = (deps: {
         git: gitVcsDriver,
         setupWorktree: restoreIntegrationWorktreeAssets,
       });
+      // The merge slot is a bd coordination primitive nothing else creates.
+      // Without it every acquire fails and the drain defers forever, which
+      // reads as a healthy run: the lock keeps heartbeating and no worker is
+      // alive to look wrong. Terminal parity: TerminalMergeDrain does the
+      // same. Create is idempotent and best-effort — a real contention
+      // failure still defers the drain.
+      yield* processRunner
+        .run({ command: "bd", args: ["merge-slot", "create"], cwd: run.cwd })
+        .pipe(Effect.ignore);
       const result = yield* drainMergeQueue(
         {
           runId: run.runId,

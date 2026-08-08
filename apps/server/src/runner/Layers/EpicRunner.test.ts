@@ -5569,6 +5569,44 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("creates the merge slot before trying to acquire it", () => {
+    // Regression: nothing else creates `<prefix>-merge-slot`. Without it every
+    // acquire fails, the drain defers, and the loop spins on that forever while
+    // still heartbeating its run lock — so the run looks healthy and lands
+    // nothing. One such spin ran 8 hours before it was noticed.
+    const harness = createHarness({
+      readyChildren: ["child-a"],
+      openChildren: [],
+      separateWorkerHead: true,
+      childEvidence: {
+        "child-a": [{ title: "Build child A", status: "closed", commentCount: 1 }],
+      },
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"built A","why":"needed"}',
+          head: "child-a-head",
+          branchCommitCount: 1,
+        },
+      ],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 1);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status !== "running");
+
+      const slotCalls = harness.processRequests.filter(
+        (request) => request.command === "bd" && request.args[0] === "merge-slot",
+      );
+      const createdAt = slotCalls.findIndex((request) => request.args[1] === "create");
+      const acquiredAt = slotCalls.findIndex((request) => request.args[1] === "acquire");
+
+      assert.isAtLeast(createdAt, 0, "the drain never created the merge slot");
+      if (acquiredAt >= 0) {
+        assert.isBelow(createdAt, acquiredAt, "the slot was acquired before it was created");
+      }
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("restores integration assets after clean and before the trial merge", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -5683,9 +5721,15 @@ describe("EpicRunner", () => {
       yield* runner.resumeRun({ runId });
       yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
       assert.strictEqual(harness.store.mergeStates.get(runId)?.entries[0]?.status, "queued");
+      // The point is that the drain bailed before ACQUIRING the slot. The
+      // drain also creates the slot up front, which is idempotent setup and
+      // not an acquisition, so match on the subcommand.
       assert.isFalse(
         harness.processRequests.some(
-          (request) => request.command === "bd" && request.args[0] === "merge-slot",
+          (request) =>
+            request.command === "bd" &&
+            request.args[0] === "merge-slot" &&
+            request.args[1] === "acquire",
         ),
       );
       assert.include(
