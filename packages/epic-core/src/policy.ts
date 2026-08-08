@@ -78,6 +78,10 @@ export const mergeFixDescription = (input: {
   readonly gateCommand: string | null;
   readonly pushEnabled: boolean;
   readonly touchedRepos?: ReadonlyArray<MergeFixTouchedRepo>;
+  /** What the gate actually reported, so the repair does not start blind. */
+  readonly failureDetail?: string;
+  /** How many times this branch has already been parked for this reason. */
+  readonly priorAttempts?: number;
 }): string => {
   const touched = input.touchedRepos ?? [];
   let description: string;
@@ -98,9 +102,23 @@ export const mergeFixDescription = (input: {
   description += input.pushEnabled
     ? ". Push the branch, close this issue, and note the epic."
     : ". Do not push (disabled this run). Close this issue and note the epic.";
-  return touched.length > 0
-    ? `${description} Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes.`
-    : `${description} Do NOT merge into ${input.baseBranch} yourself.`;
+  description +=
+    touched.length > 0
+      ? " Do NOT merge into any base branch yourself, and never push sibling repos — the coordinator re-lands the whole set when this issue closes."
+      : ` Do NOT merge into ${input.baseBranch} yourself.`;
+  if (input.failureDetail !== undefined && input.failureDetail.length > 0) {
+    description += `\n\nWhat the gate reported:\n\n    ${input.failureDetail}`;
+  }
+  if (input.priorAttempts !== undefined && input.priorAttempts > 0) {
+    // Repeating a repair that already failed is the failure mode this text
+    // exists to prevent: the branch may be innocent.
+    description +=
+      `\n\nThis branch has already been repaired ${String(input.priorAttempts)} time(s) for the ` +
+      `same reason and still fails. Before changing it again, confirm the failure is actually ` +
+      `caused by this branch — reproduce the gate on \`${input.baseBranch}\` with nothing merged. ` +
+      `If it fails there too, do not "fix" this branch: report that on the epic and close this issue.`;
+  }
+  return description;
 };
 
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2958`. */

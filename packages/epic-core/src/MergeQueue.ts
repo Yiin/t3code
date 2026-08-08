@@ -52,6 +52,16 @@ const activeEntries = (entries: ReadonlyArray<MergeQueueEntry>): ReadonlyArray<M
   entries.filter((entry) => entry.status === "queued" || entry.status === "draining");
 
 /**
+ * How many times one branch may be parked and handed to a repair child for the
+ * same reason before the run stops and asks for a human.
+ *
+ * Repair is only worth attempting while it converges. Past this the evidence
+ * says the branch is not the problem, and each further attempt costs a full
+ * worker iteration plus a full gate to learn nothing new.
+ */
+const MAX_MERGE_FIX_ATTEMPTS = 3;
+
+/**
  * The repos carrying commits on a branch set, main first
  * (`skills/cook-epic/run-legacy.sh:2845-2852`). Empty when the run has no
  * siblings, which keeps the single-repo park text.
@@ -95,8 +105,21 @@ const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(functi
   entry: MergeQueueEntry,
   reason: MergeParkReason,
   parkedTouched?: ReadonlyArray<MergeFixTouchedRepo>,
+  failureDetail?: string,
 ) {
   const touched = parkedTouched ?? (yield* touchedRepos(ports, snapshot, entry.branch));
+  const title = mergeFixTitle(entry.branch, reason);
+  const children = yield* ports.backlog.listChildren(input.epicId);
+  const existing = children.find(
+    (child) => child.title === title && (child.status === "open" || child.status === "in_progress"),
+  );
+  // Count CLOSED repairs too. Dedup alone only catches a repair still in
+  // flight; once an agent closes one, the next failure looks brand new and
+  // the queue happily opens another. That is how one run reached 15.
+  const priorAttempts = children.filter((child) => child.title === title).length;
+  if (existing === undefined && priorAttempts >= MAX_MERGE_FIX_ATTEMPTS) {
+    return { repaired: false as const, attempts: priorAttempts };
+  }
   const description = mergeFixDescription({
     childId: entry.childId,
     branch: entry.branch,
@@ -105,12 +128,9 @@ const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(functi
     gateCommand: input.gateCommand,
     pushEnabled: input.pushEnabled,
     ...(touched.length > 0 ? { touchedRepos: touched } : {}),
+    ...(failureDetail === undefined ? {} : { failureDetail }),
+    ...(priorAttempts > 0 ? { priorAttempts } : {}),
   });
-  const title = mergeFixTitle(entry.branch, reason);
-  const children = yield* ports.backlog.listChildren(input.epicId);
-  const existing = children.find(
-    (child) => child.title === title && (child.status === "open" || child.status === "in_progress"),
-  );
   const fix =
     existing ??
     (yield* ports.backlog.createChild({
@@ -136,7 +156,26 @@ const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(functi
     reason,
     fix: fix.id,
   });
+  return { repaired: true as const, attempts: priorAttempts };
 });
+
+/**
+ * Pull the most useful line out of a gate's output for a one-line diagnosis.
+ *
+ * Prefers the first line that looks like the actual error, because gate output
+ * usually ends in a summary ("2 failed") that says nothing about the cause.
+ */
+const gateDiagnosis = (output: string): string => {
+  const lines = output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const signal = lines.find((line) =>
+    /(^|\b)(error|cannot find|not found|failed to resolve|missing)\b/i.test(line),
+  );
+  const chosen = signal ?? lines.at(-1) ?? "no gate output";
+  return chosen.length > 300 ? `${chosen.slice(0, 300)}…` : chosen;
+};
 
 const parkEntry = Effect.fn("MergeQueue.parkEntry")(function* (
   input: DrainMergeQueueInput,
@@ -145,13 +184,22 @@ const parkEntry = Effect.fn("MergeQueue.parkEntry")(function* (
   entry: MergeQueueEntry,
   reason: MergeParkReason,
   parkedTouched?: ReadonlyArray<MergeFixTouchedRepo>,
+  failureDetail?: string,
 ) {
   yield* ports.store.beginPark({
     runId: input.runId,
     sequence: entry.sequence,
     reason,
   });
-  yield* reconcileParkedEntry(input, ports, snapshot, entry, reason, parkedTouched);
+  return yield* reconcileParkedEntry(
+    input,
+    ports,
+    snapshot,
+    entry,
+    reason,
+    parkedTouched,
+    failureDetail,
+  );
 });
 
 /** Serialized single-repository landing loop. Terminal parity: `run-legacy.sh:2893-3069`. */
@@ -166,13 +214,13 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     }
   }
   const beforeDrain = activeEntries(snapshot.entries);
-  if (beforeDrain.length === 0) return { _tag: "idle", queueLength: 0 };
+  if (beforeDrain.length === 0) return { _tag: "idle" as const, queueLength: 0 as const };
 
   // Terminal parity: `skills/cook-epic/run-legacy.sh:2894-2897`.
   const currentHead = yield* ports.git.head(snapshot.repositoryPath);
   if (currentHead !== snapshot.lastAcceptedHead) {
     return {
-      _tag: "fatal",
+      _tag: "fatal" as const,
       detail: `base branch ${snapshot.baseBranch} moved externally; cannot trial-merge — operator must reconcile`,
       queueLength: beforeDrain.length,
     };
@@ -184,7 +232,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     const siblingHead = yield* ports.git.head(sibling.repositoryPath);
     if (siblingHead !== sibling.lastAcceptedHead) {
       return {
-        _tag: "fatal",
+        _tag: "fatal" as const,
         detail: `sibling ${sibling.repositoryPath} branch ${sibling.baseBranch} moved externally; cannot trial-merge — operator must reconcile`,
         queueLength: beforeDrain.length,
       };
@@ -193,7 +241,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
 
   // Terminal parity: `skills/cook-epic/run-legacy.sh:2912-2918`.
   const lease = yield* ports.slot.tryAcquire(input.holder);
-  if (Option.isNone(lease)) return { _tag: "deferred", queueLength: beforeDrain.length };
+  if (Option.isNone(lease)) return { _tag: "deferred" as const, queueLength: beforeDrain.length };
 
   return yield* Effect.gen(function* () {
     const queue = yield* ports.store.beginDrain(input.runId);
@@ -298,7 +346,16 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         }
       }
       if (conflicted) {
-        yield* parkEntry(input, ports, snapshot, entry, "conflict", touched);
+        const repair = yield* parkEntry(input, ports, snapshot, entry, "conflict", touched);
+        if (!repair.repaired) {
+          return {
+            _tag: "fatal" as const,
+            detail:
+              `${entry.branch} still conflicts after ${String(repair.attempts)} repair attempts; ` +
+              `stopping instead of opening another.`,
+            queueLength: activeEntries(snapshot.entries).length,
+          };
+        }
         parked += 1;
         continue;
       }
@@ -307,7 +364,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
       // relative sibling references resolve against the sibling trial merges
       // (`skills/cook-epic/run-legacy.sh:2975-2988`).
       if (input.gateCommand !== null) {
-        const gate = yield* ports.gate.run({
+        const gateInput = {
           command: input.gateCommand,
           repositories: [
             {
@@ -323,13 +380,51 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           ],
           cwd: snapshot.integrationWorktreePath,
           maxOutputBytes: input.maxGateOutputBytes,
-        });
+        };
+        const gate = yield* ports.gate.run(gateInput);
         if (!gate.passed) {
           yield* ports.git.resetHard(snapshot.integrationWorktreePath, snapshot.baseBranch);
           for (const sibling of snapshot.siblings) {
             yield* ports.git.resetHard(sibling.integrationWorktreePath, sibling.baseBranch);
           }
-          yield* parkEntry(input, ports, snapshot, entry, "gate-failed", touched);
+
+          // Classify before blaming the branch. The worktrees are back at
+          // their base branches now, so the same gate here tests the base
+          // with nothing merged. If that fails too, no branch in this set
+          // caused it — the toolchain or the environment did. Parking the
+          // branch and asking an agent to repair working code only burns
+          // iterations: one such loop spent 15 of them on a missing native
+          // binding that no branch had touched.
+          const control = yield* ports.gate.run(gateInput);
+          if (!control.passed) {
+            return {
+              _tag: "fatal" as const,
+              detail:
+                `gate also fails on ${snapshot.baseBranch} with nothing merged, ` +
+                `so ${entry.branch} is not at fault: ${gateDiagnosis(control.output)}`,
+              queueLength: activeEntries(snapshot.entries).length,
+            };
+          }
+
+          const repair = yield* parkEntry(
+            input,
+            ports,
+            snapshot,
+            entry,
+            "gate-failed",
+            touched,
+            gateDiagnosis(gate.output),
+          );
+          if (!repair.repaired) {
+            return {
+              _tag: "fatal" as const,
+              detail:
+                `${entry.branch} has failed the gate after ${String(repair.attempts)} repair ` +
+                `attempts and is not converging; stopping instead of opening another. ` +
+                `Last failure: ${gateDiagnosis(gate.output)}`,
+              queueLength: activeEntries(snapshot.entries).length,
+            };
+          }
           parked += 1;
           continue;
         }
@@ -345,7 +440,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         if (!landed.landed) {
           yield* ports.store.restoreTail({ runId: input.runId, fromSequence: entry.sequence });
           return {
-            _tag: "fatal",
+            _tag: "fatal" as const,
             detail: `base branch ${snapshot.baseBranch} moved externally; cannot fast-forward — operator must reconcile`,
             queueLength: queue.length - index,
           };
@@ -360,7 +455,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         if (!landed.landed) {
           yield* ports.store.restoreTail({ runId: input.runId, fromSequence: entry.sequence });
           return {
-            _tag: "fatal",
+            _tag: "fatal" as const,
             detail: `sibling ${sibling.repositoryPath} branch ${sibling.baseBranch} moved externally; cannot fast-forward — operator must reconcile`,
             queueLength: queue.length - index,
           };
@@ -376,7 +471,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           if (!pushed.pushed) {
             yield* ports.store.restoreTail({ runId: input.runId, fromSequence: entry.sequence });
             return {
-              _tag: "fatal",
+              _tag: "fatal" as const,
               detail: `push of ${snapshot.baseBranch} rejected (remote moved?); operator must reconcile`,
               queueLength: queue.length - index,
             };
@@ -392,7 +487,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           if (!pushed.pushed) {
             yield* ports.store.restoreTail({ runId: input.runId, fromSequence: entry.sequence });
             return {
-              _tag: "fatal",
+              _tag: "fatal" as const,
               detail: `push of sibling ${sibling.repositoryPath} branch ${sibling.baseBranch} rejected (remote moved?); operator must reconcile`,
               queueLength: queue.length - index,
             };
@@ -459,6 +554,6 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
       merged += 1;
     }
 
-    return { _tag: "drained", merged, parked };
+    return { _tag: "drained" as const, merged, parked };
   }).pipe(Effect.ensuring(ports.slot.release(input.holder).pipe(Effect.ignore)));
 });
