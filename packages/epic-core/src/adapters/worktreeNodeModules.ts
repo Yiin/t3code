@@ -14,6 +14,16 @@ import {
 } from "../workspaceNodeModules.ts";
 
 /**
+ * Materialise `node_modules/` and `node_modules/.pnpm/`, then link each store
+ * package whole. Two levels is the least that keeps a worker's install off the
+ * shared store; going deeper would mean replicating every file in it.
+ */
+const ROOT_NODE_MODULES_DEPTH = 2;
+
+/** A package's own node_modules is shallow — scopes and `.bin` at most. */
+const PACKAGE_NODE_MODULES_DEPTH = 4;
+
+/**
  * Rebuild a package's `node_modules` as a tree of its own, copying every
  * symlink target verbatim.
  *
@@ -26,7 +36,11 @@ import {
  * (`../../../node_modules/.pnpm/...`) still reach the shared store through the
  * root `node_modules` link.
  */
-const replicateLinkTree = async (source: string, targetDir: string): Promise<void> => {
+const replicateLinkTree = async (
+  source: string,
+  targetDir: string,
+  depth: number,
+): Promise<void> => {
   await NodeFSP.mkdir(targetDir, { recursive: true });
   const entries = await NodeFSP.readdir(source, { withFileTypes: true });
   for (const entry of entries) {
@@ -38,7 +52,13 @@ const replicateLinkTree = async (source: string, targetDir: string): Promise<voi
       continue;
     }
     if (entry.isDirectory()) {
-      await replicateLinkTree(from, to);
+      // Past the budget, link the directory whole. Materialising every level
+      // of the pnpm store would mean hundreds of thousands of entries.
+      if (depth <= 1) {
+        await NodeFSP.symlink(from, to, "dir");
+        continue;
+      }
+      await replicateLinkTree(from, to, depth - 1);
       continue;
     }
     await NodeFSP.symlink(from, to);
@@ -89,12 +109,17 @@ export const linkNodeModulesTree = async (sourceRepo: string, target: string): P
     return found;
   };
 
-  // The root node_modules holds no workspace links — only the .pnpm store and
-  // the root package's own dependencies — so a directory link is right there.
+  // The root node_modules is materialised, not linked. Linking it made the
+  // worktree share the source's dependency links, so `pnpm install` in a
+  // worker wrote straight through and repointed the real checkout at a
+  // temporary worktree; pruning that worktree then broke every other worker
+  // and the gate with ERR_MODULE_NOT_FOUND. Materialised two levels deep, the
+  // worktree owns node_modules/ and node_modules/.pnpm/, and an install or
+  // prune there rewrites its own symlinks instead of the shared store.
   const rootSource = NodePath.join(sourceRepo, NODE_MODULES);
-  const rootLink = NodePath.join(target, NODE_MODULES);
-  if ((await pathExists(rootSource)) && !(await pathExists(rootLink))) {
-    await NodeFSP.symlink(rootSource, rootLink, "dir");
+  const rootTarget = NodePath.join(target, NODE_MODULES);
+  if ((await pathExists(rootSource)) && !(await pathExists(rootTarget))) {
+    await replicateLinkTree(rootSource, rootTarget, ROOT_NODE_MODULES_DEPTH);
   }
 
   for (const relative of await walk([])) {
@@ -104,6 +129,6 @@ export const linkNodeModulesTree = async (sourceRepo: string, target: string): P
     // The owning package directory has to exist in this worktree.
     if (!(await pathExists(NodePath.dirname(targetDir)))) continue;
     if (await pathExists(targetDir)) continue;
-    await replicateLinkTree(source, targetDir);
+    await replicateLinkTree(source, targetDir, PACKAGE_NODE_MODULES_DEPTH);
   }
 };

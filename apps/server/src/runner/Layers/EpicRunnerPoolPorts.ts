@@ -48,6 +48,15 @@ import {
 } from "@t3tools/epic-core/ports/RunJournal";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 import { findWorkspaceNodeModules, NODE_MODULES } from "@t3tools/epic-core/workspaceNodeModules";
+
+/**
+ * Materialise `node_modules/` and `node_modules/.pnpm/`, then link each store
+ * package whole — the least that keeps a worker's install off the shared store.
+ */
+const ROOT_NODE_MODULES_DEPTH = 2;
+
+/** A package's own node_modules is shallow — scopes and `.bin` at most. */
+const PACKAGE_NODE_MODULES_DEPTH = 4;
 import {
   decideGraceStep,
   integrationBranch as integrationBranchName,
@@ -182,6 +191,7 @@ const setupWorktreeAssets = (
     const replicateLinkTree = (
       source: string,
       targetDir: string,
+      depth: number,
     ): Effect.Effect<void, PlatformError.PlatformError> =>
       Effect.gen(function* () {
         yield* deps.fileSystem.makeDirectory(targetDir, { recursive: true });
@@ -200,16 +210,35 @@ const setupWorktreeAssets = (
           }
           const info = yield* deps.fileSystem.stat(from);
           if (info.type === "Directory") {
-            yield* replicateLinkTree(from, to);
+            // Past the budget, link the directory whole; materialising every
+            // level of the pnpm store would be hundreds of thousands of entries.
+            if (depth <= 1) {
+              yield* deps.fileSystem.symlink(from, to);
+              continue;
+            }
+            yield* replicateLinkTree(from, to, depth - 1);
             continue;
           }
           yield* deps.fileSystem.symlink(from, to);
         }
       });
 
-    // The root node_modules holds no workspace links — only the .pnpm store
-    // and the root package's own dependencies — so a directory link is right.
-    yield* linkNodeModules(NODE_MODULES);
+    // The root node_modules is materialised, not linked. Linking it made a
+    // worker share the source's dependency links, so `pnpm install` in a
+    // worktree wrote through and repointed the real checkout at a temporary
+    // directory; pruning it then broke every other worker and the gate with
+    // ERR_MODULE_NOT_FOUND. Two levels deep the worktree owns node_modules/
+    // and node_modules/.pnpm/, so an install or prune rewrites its own links.
+    {
+      const rootSource = deps.path.join(sourceRepo, NODE_MODULES);
+      const rootTarget = deps.path.join(target, NODE_MODULES);
+      if (
+        (yield* deps.fileSystem.exists(rootSource)) &&
+        !(yield* deps.fileSystem.exists(rootTarget))
+      ) {
+        yield* replicateLinkTree(rootSource, rootTarget, ROOT_NODE_MODULES_DEPTH);
+      }
+    }
 
     // Best-effort: a directory we cannot read contributes no workspace
     // packages rather than failing the whole worktree. A link we miss here
@@ -240,7 +269,7 @@ const setupWorktreeAssets = (
         (yield* deps.fileSystem.exists(targetParent)) &&
         !(yield* deps.fileSystem.exists(targetDir))
       ) {
-        yield* replicateLinkTree(source, targetDir);
+        yield* replicateLinkTree(source, targetDir, PACKAGE_NODE_MODULES_DEPTH);
       }
     }
 
