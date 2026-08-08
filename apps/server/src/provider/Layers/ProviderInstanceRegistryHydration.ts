@@ -42,10 +42,10 @@
  * @module provider/Layers/ProviderInstanceRegistryHydration
  */
 import {
-  BUILT_IN_PROVIDER_DRIVER_KINDS,
   defaultInstanceIdForDriver,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
+  ProviderDriverKind,
   ServerSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -77,7 +77,8 @@ export const deriveProviderInstanceConfigMap = (
 ): ProviderInstanceConfigMap => {
   const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
 
-  for (const driverKind of BUILT_IN_PROVIDER_DRIVER_KINDS) {
+  for (const legacyKey of Object.keys(settings.providers)) {
+    const driverKind = ProviderDriverKind.make(legacyKey);
     const instanceId = defaultInstanceIdForDriver(driverKind);
     if (instanceId in merged) {
       // Explicit `providerInstances` entry for this slot — user-authored
@@ -85,13 +86,9 @@ export const deriveProviderInstanceConfigMap = (
       continue;
     }
 
-    // Only built-in catalog entries have a legacy mirror; the settings
-    // `providers` struct is keyed on the same literal slug as
-    // `driverKind`. Access is dynamic (the driver kind is a branded string),
-    // but it's constrained to `keyof settings.providers` by the union of
-    // built-in driver kinds.
-    const legacyKey = driverKind as keyof ServerSettings["providers"];
-    const legacyConfig = settings.providers[legacyKey];
+    // The settings schema owns this catalog. A settings slot can land before
+    // its runtime driver and still hydrate as an unavailable shadow.
+    const legacyConfig = (settings.providers as Readonly<Record<string, unknown>>)[legacyKey];
     if (legacyConfig === undefined) {
       continue;
     }
