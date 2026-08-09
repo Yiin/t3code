@@ -50,6 +50,7 @@ import {
 } from "../prime/PrimeEventMapper.ts";
 import { resolvePrimePermissionExtensionPath } from "../prime/PrimeExtension.ts";
 import { PrimeRpcMappableEvent } from "../prime/PrimeRpcEvents.ts";
+import { findReservedPrimeLaunchArg } from "../prime/PrimeLaunchArgs.ts";
 import {
   makePrimeRpcTransport,
   type PrimeRpcImage,
@@ -71,22 +72,6 @@ export const PRIME_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 const CURSOR_VERSION = 1;
-const RESERVED_FLAGS = new Set([
-  "--mode",
-  "--session",
-  "--session-id",
-  "--session-dir",
-  "--fork",
-  "--continue",
-  "--resume",
-  "--no-session",
-  "--provider",
-  "--model",
-  "--thinking",
-  "--extension",
-  "-e",
-  "--no-extensions",
-]);
 
 export interface PrimeResumeCursor {
   readonly schemaVersion: 1;
@@ -149,12 +134,6 @@ export function decodePrimeResumeCursor(value: unknown): PrimeResumeCursor | und
     sessionId: value.sessionId,
     ownerThreadId: value.ownerThreadId,
   };
-}
-
-function validateLaunchArgs(args: ReadonlyArray<string>): string | undefined {
-  return args.find(
-    (arg) => RESERVED_FLAGS.has(arg) || [...RESERVED_FLAGS].some((f) => arg.startsWith(`${f}=`)),
-  );
 }
 
 function splitPrimeModel(model: string): { provider?: string; modelId: string } {
@@ -452,7 +431,7 @@ export const makePrimeAdapter = Effect.fn("makePrimeAdapter")(function* (
                 issue: "Prime Agent does not support auto-accept-edits mode.",
               });
             }
-            const reserved = validateLaunchArgs(config.launchArgs);
+            const reserved = findReservedPrimeLaunchArg(config.launchArgs);
             if (reserved) {
               return yield* new ProviderAdapterValidationError({
                 provider: PROVIDER,

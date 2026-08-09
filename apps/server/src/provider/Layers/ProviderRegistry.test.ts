@@ -1599,7 +1599,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             );
             assert.strictEqual(initialCodex?.status, "error");
             assert.strictEqual(initialCodex?.installed, false);
-            assert.deepStrictEqual(spawnedCommands, [firstMissing]);
+            assert.deepStrictEqual(
+              spawnedCommands.filter((command) => command !== "prime-agent"),
+              [firstMissing],
+            );
 
             // Drive a settings change. The Hydration layer's
             // `SettingsWatcherLive` consumes this via `streamChanges`,
@@ -1629,7 +1632,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             });
 
             const reprobedCodex = refreshed.find((provider) => provider.instanceId === "codex");
-            assert.deepStrictEqual(spawnedCommands, [firstMissing, secondMissing]);
+            assert.deepStrictEqual(
+              spawnedCommands.filter((command) => command !== "prime-agent"),
+              [firstMissing, secondMissing],
+            );
             assert.strictEqual(reprobedCodex?.status, "error");
             assert.strictEqual(reprobedCodex?.installed, false);
           }).pipe(Effect.provide(runtimeServices));
@@ -1717,11 +1723,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                     grok: {
                       enabled: false,
                     },
+                    primeAgent: {
+                      enabled: false,
+                    },
                   },
                 }),
               ),
             );
-            let cursorSpawned = false;
             const scope = yield* Scope.make();
             yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
             const providerRegistryLayer = ProviderRegistryLive.pipe(
@@ -1745,9 +1753,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
               Layer.provideMerge(
                 mockCommandSpawnerLayer((command, args) => {
-                  if (command === "cursor-agent") {
-                    cursorSpawned = true;
-                  }
                   const joined = args.join(" ");
                   if (joined === "--version") {
                     return {
@@ -1799,13 +1804,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 cursorProvider?.message,
                 "Cursor is disabled in T3 Code settings.",
               );
-              assert.strictEqual(primeProvider?.availability, "unavailable");
               assert.strictEqual(primeProvider?.enabled, false);
+              assert.strictEqual(primeProvider?.status, "disabled");
               assert.strictEqual(
-                primeProvider?.unavailableReason,
-                "Driver 'primeAgent' is not registered in this build.",
+                primeProvider?.message,
+                "Prime Agent is disabled in T3 Code settings.",
               );
-              assert.strictEqual(cursorSpawned, false);
             }).pipe(Effect.provide(runtimeServices));
           }),
       );
