@@ -1415,6 +1415,26 @@ function describeUnknownSdkMessage(kind: string, message: unknown): string {
   return preview ? `${kind} — ${preview}` : `${kind} (no displayable text content)`;
 }
 
+/**
+ * Extracts the errno-style code from a stream failure cause.
+ *
+ * The SDK reports spawn failures — a deleted worktree, a missing binary — as
+ * plain Node errors, so without a hint the feed only says "Claude runtime
+ * stream failed." and the operator has to read server logs to tell a missing
+ * directory from a broken binary.
+ *
+ * Only the code crosses into the event payload. Provider error text can carry
+ * credential material, so it stays in the cause chain — see "keeps Claude
+ * stream failure events structural".
+ */
+function streamFailureCode(cause: unknown): string | undefined {
+  if (!(cause instanceof Error)) {
+    return undefined;
+  }
+  const code = (cause as { readonly code?: unknown }).code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : undefined;
+}
+
 function sdkNativeItemId(message: SDKMessage): string | undefined {
   if (message.type === "assistant") {
     const maybeId = (message.message as { id?: unknown }).id;
@@ -1797,9 +1817,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     message: string,
     cause?: unknown,
   ) {
-    if (cause !== undefined) {
-      void cause;
-    }
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
     yield* offerRuntimeEvent({
@@ -3494,9 +3511,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           Cause.isFailReason(reason) ? [reason.error] : [],
         );
         const message = failures[0]?.detail ?? "Claude runtime stream failed.";
+        const errorCode = streamFailureCode(failures[0]?.cause);
         yield* emitRuntimeError(context, message, {
           failureCount: failures.length,
           failureTags: failures.map((failure) => failure._tag),
+          ...(errorCode !== undefined ? { errorCode } : {}),
         });
         yield* completeTurn(context, "failed", message);
       }

@@ -2095,6 +2095,64 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("reports the errno code of a stream failure without its message", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+
+      // What a spawn into a deleted worktree looks like coming out of the SDK.
+      const spawnFailure = Object.assign(new Error("spawn /secret/path?token=abc123 ENOENT"), {
+        code: "ENOENT",
+      });
+      harness.query.fail(spawnFailure);
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        assert.equal(runtimeError.payload.message, "Claude runtime stream failed.");
+        assert.deepEqual(runtimeError.payload.detail, {
+          failureCount: 1,
+          failureTags: ["ProviderAdapterProcessError"],
+          errorCode: "ENOENT",
+        });
+      }
+
+      // The raw error text can carry credential material; it must not reach
+      // the event feed. `detail` is pinned exactly above, so the remaining
+      // free-text surfaces are the two messages.
+      const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.errorMessage, "Claude runtime stream failed.");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("closes the previous session before replacing an existing thread session", () => {
     const queries: FakeClaudeQuery[] = [];
     const layer = Layer.effect(

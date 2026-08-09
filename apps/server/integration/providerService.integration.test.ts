@@ -83,6 +83,9 @@ const makeIntegrationFixture = Effect.gen(function* () {
   const layer = makeProviderServiceLive().pipe(
     Layer.provide(shared),
     Layer.provide(EpicWorkerScopeRegistry.layer),
+    // Real file system: this fixture runs against a real `cwd` on disk, so the
+    // session-restart cwd check resolves it the same way production does.
+    Layer.provide(NodeServices.layer),
   );
 
   return {

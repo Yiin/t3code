@@ -35,6 +35,7 @@ import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -302,6 +303,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const fileSystem = yield* FileSystem.FileSystem;
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -785,6 +787,72 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ).pipe(Effect.forkScoped);
   }
 
+  const pathExists = (path: string): Effect.Effect<boolean> =>
+    fileSystem.exists(path).pipe(Effect.orElseSucceed(() => false));
+
+  /**
+   * Resolves the working directory for a session restart that reuses a
+   * persisted cwd.
+   *
+   * A thread outlives the directory it ran in: an epic worker gets a throwaway
+   * worktree that the runner deletes once the child lands. Restarting into that
+   * deleted path makes the provider spawn fail with a bare ENOENT, which the
+   * adapter reports as an opaque "runtime stream failed". Check the path first
+   * and fall back to the workspace root so the thread stays usable.
+   */
+  const resolvePersistedCwd = Effect.fn("ProviderService.resolvePersistedCwd")(function* (input: {
+    readonly operation: string;
+    readonly threadId: ThreadId;
+    readonly provider: ProviderDriverKind;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly persistedCwd: string | undefined;
+    readonly fallbackCwd: string | undefined;
+  }) {
+    const { persistedCwd, fallbackCwd } = input;
+    if (persistedCwd === undefined || (yield* pathExists(persistedCwd))) {
+      return persistedCwd;
+    }
+    if (
+      fallbackCwd === undefined ||
+      fallbackCwd === persistedCwd ||
+      !(yield* pathExists(fallbackCwd))
+    ) {
+      return yield* toValidationError(
+        input.operation,
+        `Cannot restart thread '${String(input.threadId)}': its working directory '${persistedCwd}' no longer exists and no workspace root is available to fall back to.`,
+      );
+    }
+    const message = `Working directory '${persistedCwd}' no longer exists; continuing in '${fallbackCwd}'.`;
+    const createdAt = yield* nowIso;
+    yield* publishRuntimeEvent({
+      type: "runtime.warning",
+      // Timestamped: one thread can fall back on every restart, and a repeated
+      // event id would let a consumer dedupe the later warnings away.
+      eventId: EventId.make(`provider-cwd-fallback:${String(input.threadId)}:${createdAt}`),
+      provider: input.provider,
+      providerInstanceId: input.providerInstanceId,
+      threadId: input.threadId,
+      createdAt,
+      payload: {
+        message,
+        detail: { missingCwd: persistedCwd, fallbackCwd },
+      },
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.cwd-fallback-publish-failed", {
+          threadId: input.threadId,
+          cause,
+        }),
+      ),
+    );
+    yield* Effect.logWarning("provider.session.cwd-fallback", {
+      threadId: input.threadId,
+      missingCwd: persistedCwd,
+      fallbackCwd,
+    });
+    return fallbackCwd;
+  });
+
   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
     readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
     readonly operation: string;
@@ -827,11 +895,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
 
-      const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
       const persistedT3EnvironmentContext = readPersistedT3EnvironmentContext(
         input.binding.runtimePayload,
       );
+      const persistedCwd = yield* resolvePersistedCwd({
+        operation: input.operation,
+        threadId: input.binding.threadId,
+        provider: input.binding.provider,
+        providerInstanceId: bindingInstanceId,
+        persistedCwd: readPersistedCwd(input.binding.runtimePayload),
+        fallbackCwd: persistedT3EnvironmentContext?.workspaceRoot,
+      });
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const t3Environment = yield* resolveT3SessionEnvironment({
@@ -1009,11 +1084,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (persistedBinding?.providerInstanceId === resolvedInstanceId
             ? persistedBinding.resumeCursor
             : undefined);
+        const persistedCwdCandidate =
+          persistedBinding?.providerInstanceId === resolvedInstanceId
+            ? readPersistedCwd(persistedBinding.runtimePayload)
+            : undefined;
         const effectiveCwd =
           input.cwd ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
-            ? readPersistedCwd(persistedBinding.runtimePayload)
-            : undefined);
+          (yield* resolvePersistedCwd({
+            operation: "ProviderService.startSession",
+            threadId,
+            provider: resolvedProvider,
+            providerInstanceId: resolvedInstanceId,
+            persistedCwd: persistedCwdCandidate,
+            fallbackCwd:
+              parsed.workspaceRoot ??
+              (persistedBinding
+                ? readPersistedT3EnvironmentContext(persistedBinding.runtimePayload)?.workspaceRoot
+                : undefined),
+          }));
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":

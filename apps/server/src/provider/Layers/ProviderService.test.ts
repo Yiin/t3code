@@ -33,6 +33,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
@@ -85,9 +86,20 @@ const environmentAuthTestLayer = Layer.succeed(
   makeUnconfiguredEnvironmentAuth(),
 );
 
-const makeProviderServiceLiveForTest = (options?: Parameters<typeof makeProviderServiceLive>[0]) =>
+// Suites here use synthetic cwd paths (`/tmp/project`) that never exist on
+// disk. Default to "every path resolves" so only the tests that care about a
+// vanished working directory opt into a stricter file system.
+const presentFileSystemLayer = FileSystem.layerNoop({
+  exists: () => Effect.succeed(true),
+});
+
+const makeProviderServiceLiveForTest = (
+  options?: Parameters<typeof makeProviderServiceLive>[0],
+  fileSystemLayer: Layer.Layer<FileSystem.FileSystem> = presentFileSystemLayer,
+) =>
   makeProviderServiceLive(options).pipe(
     Layer.provide(environmentAuthTestLayer),
+    Layer.provide(fileSystemLayer),
     Layer.provideMerge(EpicWorkerScopeRegistry.layer),
   );
 
@@ -575,6 +587,7 @@ function makeT3EnvironmentTestLayers(auth: ReturnType<typeof makeEnvironmentAuth
     Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
     Layer.provide(directoryLayer),
     Layer.provide(defaultServerSettingsLayer),
+    Layer.provide(presentFileSystemLayer),
     Layer.provide(auth.layer),
     Layer.provide(AnalyticsService.layerTest),
     Layer.provide(EpicWorkerScopeRegistry.layer),
@@ -2932,3 +2945,134 @@ lastSeenRefresh.layer("ProviderServiceLive lastSeenAt refresh", (it) => {
     }),
   );
 });
+
+// A thread outlives the directory it ran in: an epic worker gets a throwaway
+// worktree that the runner deletes once the child lands. Restarting the thread
+// used to spawn straight into the deleted path, and the provider reported a
+// bare ENOENT as an opaque "runtime stream failed".
+const VANISHED_CWD = "/tmp/epic-worker-worktree";
+const WORKSPACE_ROOT = "/tmp/workspace-root";
+
+function makeVanishedCwdFixture(presentPaths: ReadonlyArray<string>) {
+  const codex = makeFakeCodexAdapter();
+  const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const canonicalEvents: ProviderRuntimeEvent[] = [];
+  const layer = makeProviderServiceLiveForTest(
+    {
+      canonicalEventLogger: {
+        filePath: "memory://vanished-cwd",
+        write: (event) => {
+          canonicalEvents.push(event as ProviderRuntimeEvent);
+          return Effect.void;
+        },
+        close: () => Effect.void,
+      },
+    },
+    FileSystem.layerNoop({
+      exists: (path: string) => Effect.succeed(presentPaths.includes(path)),
+    }),
+  ).pipe(
+    Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+    Layer.provide(directoryLayer),
+    Layer.provide(defaultServerSettingsLayer),
+    Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+  return { codex, layer, canonicalEvents };
+}
+
+const startAndStopVanishedCwdSession = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const provider = yield* ProviderService.ProviderService;
+    yield* provider.startSession(threadId, {
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      threadId,
+      cwd: VANISHED_CWD,
+      projectId: ProjectId.make("project-1"),
+      workspaceRoot: WORKSPACE_ROOT,
+      runtimeMode: "full-access",
+    });
+    yield* provider.stopSession({ threadId });
+    return provider;
+  });
+
+const resumedCwd = (codex: ReturnType<typeof makeFakeCodexAdapter>): string | undefined => {
+  const startInput = codex.startSession.mock.calls.at(-1)?.[0];
+  return startInput && typeof startInput === "object"
+    ? (startInput as { cwd?: string }).cwd
+    : undefined;
+};
+
+it.effect("restarts a thread in the workspace root when its persisted cwd is gone", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("thread-vanished-cwd");
+    const fixture = makeVanishedCwdFixture([WORKSPACE_ROOT]);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* startAndStopVanishedCwdSession(threadId);
+      fixture.codex.startSession.mockClear();
+      yield* provider.sendTurn({ threadId, input: "after-worktree-removal", attachments: [] });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.equal(fixture.codex.startSession.mock.calls.length, 1);
+    assert.equal(resumedCwd(fixture.codex), WORKSPACE_ROOT);
+
+    const warning = fixture.canonicalEvents.find((event) => event.type === "runtime.warning");
+    assert.equal(warning !== undefined, true);
+    assert.equal(
+      typeof warning?.payload === "object" &&
+        warning.payload !== null &&
+        String((warning.payload as { message?: unknown }).message).includes(VANISHED_CWD),
+      true,
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("keeps the persisted cwd when the directory still exists", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("thread-live-cwd");
+    const fixture = makeVanishedCwdFixture([VANISHED_CWD, WORKSPACE_ROOT]);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* startAndStopVanishedCwdSession(threadId);
+      fixture.codex.startSession.mockClear();
+      yield* provider.sendTurn({ threadId, input: "still-there", attachments: [] });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.equal(resumedCwd(fixture.codex), VANISHED_CWD);
+    assert.equal(
+      fixture.canonicalEvents.some((event) => event.type === "runtime.warning"),
+      false,
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fails with the missing path when no fallback directory exists", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("thread-no-fallback");
+    const fixture = makeVanishedCwdFixture([]);
+
+    const error = yield* Effect.gen(function* () {
+      const provider = yield* startAndStopVanishedCwdSession(threadId);
+      fixture.codex.startSession.mockClear();
+      return yield* provider.sendTurn({ threadId, input: "nowhere-to-go", attachments: [] });
+    }).pipe(Effect.provide(fixture.layer), Effect.flip);
+
+    assert.equal(fixture.codex.startSession.mock.calls.length, 0);
+    assert.equal(error._tag, "ProviderValidationError");
+    assert.equal(
+      String((error as { readonly message?: string }).message).includes(VANISHED_CWD),
+      true,
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
