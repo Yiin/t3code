@@ -49,12 +49,18 @@ const bootId = async (): Promise<string> => {
   }
 };
 
+/**
+ * `EPERM` means the process is alive and owned by somebody else — signal 0 was
+ * refused, not undeliverable. Only `ESRCH` proves absence. Collapsing the two
+ * would let one user's boot declare another user's live run dead and steal its
+ * lock, which matters now that death alone can reclaim a fresh lock.
+ */
 const processExists = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
 
@@ -90,12 +96,13 @@ const startSupervisor = () => {
   };
 };
 
+/** Same `EPERM`-is-alive rule as {@link processExists}, for a process group. */
 const groupExists = (pgid: number): boolean => {
   try {
     process.kill(-pgid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
 
@@ -169,6 +176,25 @@ const readHolder = async (file: string): Promise<EpicRunLockOwner | undefined> =
   }
 };
 
+/**
+ * Whether the recorded owner is provably gone on this host.
+ *
+ * "Provably" is the whole point: an absent pid, or a pid whose process is
+ * alive but started at a different time (the number was reused), with no
+ * surviving process group either. Anything short of that — no pid recorded,
+ * an unreadable `/proc`, a live matching process — is not evidence of death
+ * and must leave the lock alone.
+ */
+const ownerIsDead = async (value: Partial<EpicRunLockOwner>): Promise<boolean> => {
+  if (!Number.isInteger(value.pid) || value.pid! < 1) return false;
+  if (processExists(value.pid!)) {
+    if (!value.startTicks || value.startTicks === (await startTicks(value.pid!))) return false;
+  }
+  // The leader is gone. Its process group is the last evidence of life: a
+  // terminal coordinator's workers outlive the leader that spawned them.
+  return !(Number.isInteger(value.pgid) && value.pgid! > 0 && groupExists(value.pgid!));
+};
+
 const isStale = async (file: string, now: number): Promise<boolean> => {
   let value: Partial<EpicRunLockOwner>;
   try {
@@ -180,14 +206,19 @@ const isStale = async (file: string, now: number): Promise<boolean> => {
   if (value.host !== NodeOS.hostname()) return false;
   const currentBoot = await bootId();
   if (value.bootId && value.bootId !== currentBoot) return true;
+  // Liveness BEFORE heartbeat freshness, or a crashed run can never resume.
+  // The owner heartbeats until the instant it dies, and a restart is always
+  // faster than the staleness window, so the fresh heartbeat of a corpse used
+  // to read as a live holder: the server came back, found a lock naming its
+  // own dead pid, and failed the run with "another epic run owns this
+  // repository". That is a hard kill locking a run out of its own recovery.
+  if (await ownerIsDead(value)) return true;
   if (now - (Number.isInteger(value.heartbeatAt) ? value.heartbeatAt! : 0) < staleSeconds) {
     return false;
   }
-  if (!Number.isInteger(value.pid) || value.pid! < 1) return true;
-  if (processExists(value.pid!)) {
-    if (!value.startTicks || value.startTicks === (await startTicks(value.pid!))) return false;
-  }
-  return !(Number.isInteger(value.pgid) && value.pgid! > 0 && groupExists(value.pgid!));
+  // Past the staleness window with no pid to check, nothing can vouch for the
+  // owner and the lock has to be reclaimable.
+  return !Number.isInteger(value.pid) || value.pid! < 1;
 };
 
 const withGuard = async <A>(file: string, body: () => Promise<A>): Promise<A> => {

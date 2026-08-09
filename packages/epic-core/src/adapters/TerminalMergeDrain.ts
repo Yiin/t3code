@@ -23,6 +23,7 @@ import type { BacklogShape } from "../ports/Backlog.ts";
 import type { GateShape } from "../ports/Gate.ts";
 import type { MergeRepairShape, MergeSlotShape } from "../ports/MergeQueue.ts";
 import { MergeQueuePortError } from "../ports/MergeQueue.ts";
+import { mergeSlotHolder } from "../policy.ts";
 import { RunJournalError, type RunJournalShape } from "../ports/RunJournal.ts";
 import type * as ProcessRunner from "../processRunner.ts";
 import { linkNodeModulesTree } from "./worktreeNodeModules.ts";
@@ -189,7 +190,7 @@ export const makeTerminalMergeDrain = (deps: {
       {
         runId: run.runId,
         epicId: run.epicId,
-        holder: `cook-epic-${run.runId}`,
+        holder: mergeSlotHolder(run.runId),
         gateCommand: run.config.gate.disabled ? null : run.config.gate.command,
         pushEnabled: !run.config.vcs.noPush,
         verified: !run.config.gate.disabled,

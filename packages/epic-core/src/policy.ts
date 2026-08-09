@@ -133,6 +133,16 @@ export const INTEGRATION_BRANCH_PREFIX = "cook-epic-integration-";
 export const integrationBranch = (runId: string): string => `${INTEGRATION_BRANCH_PREFIX}${runId}`;
 
 /**
+ * The merge-slot holder id for one run, on every surface.
+ *
+ * Shared because two different things now depend on it being the same string:
+ * the drain acquires under it, and the boot reclaim releases a leaked slot
+ * only when the recorded holder matches it exactly. Drift between the two
+ * would mean either never reclaiming, or reclaiming another run's slot.
+ */
+export const mergeSlotHolder = (runId: string): string => `cook-epic-${runId}`;
+
+/**
  * The base prompt for one epic iteration.
  *
  * Kept to what a worker cannot work out for itself: that its turn is the whole

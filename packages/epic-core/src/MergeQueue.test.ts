@@ -185,6 +185,11 @@ const makeHarness = (
           return options.slotHeld === true ? Option.none() : Option.some({ holder });
         }),
       release: (holder) => Effect.sync(() => void calls.push(`slot-release:${holder}`)),
+      reclaim: (holder) =>
+        Effect.sync(() => {
+          calls.push(`slot-reclaim:${holder}`);
+          return { reclaimed: false };
+        }),
     },
     store: {
       read: () => Effect.succeed(snapshot),

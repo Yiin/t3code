@@ -60,6 +60,7 @@ const PACKAGE_NODE_MODULES_DEPTH = 4;
 import {
   decideGraceStep,
   integrationBranch as integrationBranchName,
+  mergeSlotHolder,
   parseMergeFixTitle,
 } from "@t3tools/epic-core/policy";
 import {
@@ -1577,7 +1578,7 @@ export const makeServerMergeDrain = (deps: {
         {
           runId: run.runId,
           epicId: run.epicId,
-          holder: `cook-epic-${run.runId}`,
+          holder: mergeSlotHolder(run.runId),
           gateCommand: run.config.gate.disabled ? null : run.config.gate.command,
           pushEnabled: !run.config.vcs.noPush,
           verified: !run.config.gate.disabled,

@@ -297,6 +297,8 @@ function createHarness(input: {
    * `releaseClaimedChild` treats them as unknown and leaves them alone).
    */
   readonly childStatuses?: Record<string, string>;
+  /** Who `bd merge-slot check` reports as holding the slot; absent means free. */
+  readonly mergeSlotHolder?: string;
   /** Ordered `bd show` evidence reads for each child, clamped at the final entry. */
   readonly childEvidence?: Record<string, ReadonlyArray<ScriptedIssueEvidence>>;
   /** `bd label list <id>` output for children whose title is not research-prefixed. */
@@ -769,6 +771,25 @@ function createHarness(input: {
           if (newStatus !== undefined) {
             childStatuses.set(issueId, newStatus);
           }
+        }
+        if (
+          request.command === "bd" &&
+          subcommand === "merge-slot" &&
+          request.args[1] === "check"
+        ) {
+          const holder = input.mergeSlotHolder ?? null;
+          return {
+            stdout: encodeUnknownJson({
+              available: holder === null,
+              holder,
+              id: "epic-merge-slot",
+            }),
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
         }
         // The run loop prepares one systemd worker scope per run
         // (prepareWorkerScope): the probe succeeds, no pre-existing units
@@ -4462,6 +4483,65 @@ describe("EpicRunner", () => {
       assert.strictEqual(completed.iterationsCompleted, 1);
     }).pipe(Effect.provide(harness.layer));
   });
+
+  for (const [label, slotHolder, expectReclaim] of [
+    ["reclaims a merge slot this run's own hard kill leaked", "cook-epic-run-slot", true],
+    ["leaves a merge slot held by another run alone", "cook-epic-someone-else", false],
+  ] as const) {
+    it.live(label, () => {
+      // A SIGKILL skips the finalizer that releases the slot, so the slot
+      // survives holding this run's own id. Nothing else can free it: every
+      // later drain defers, and the run neither fails nor progresses.
+      const runId = "run-slot";
+      const staleRun: EpicRun = {
+        runId: runId as EpicRun["runId"],
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        orientationFile: null,
+        modelSelection,
+        runtimeMode: "full-access",
+        ...defaultConfigSnapshot,
+        originThreadId: null,
+        status: "running",
+        maxIterations: 1,
+        workers: 1,
+        iterationsDispatched: 0,
+        iterationsCompleted: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        noCommitStreak: 0,
+        infraStreak: 0,
+        lastError: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        seedRuns: [staleRun],
+        mergeSlotHolder: slotHolder,
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+
+        const slotCalls = harness.processRequests.filter(
+          (request) => request.command === "bd" && request.args[0] === "merge-slot",
+        );
+        const released = slotCalls.filter(
+          (request) => request.args[1] === "release" && request.args[3] === `cook-epic-${runId}`,
+        );
+        // This run queues nothing, so it never acquires the slot legitimately.
+        // Any release here is the boot reclaim and nothing else.
+        assert.isFalse(slotCalls.some((request) => request.args[1] === "acquire"));
+        assert.strictEqual(released.length, expectReclaim ? 1 : 0);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
 
   it.live("reconciles every running worker after restart", () => {
     const runId = EpicRunId.make("run-restart-pool");
