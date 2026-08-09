@@ -11,6 +11,7 @@ import type {
   MergeQueueSiblingSnapshot,
   MergeQueueSnapshot,
   MergeQueueStoreShape,
+  MergeRepairShape,
   MergeSlotShape,
 } from "./ports/MergeQueue.ts";
 import {
@@ -43,6 +44,7 @@ export interface MergeQueuePorts {
   readonly git: MergeGitShape;
   readonly slot: MergeSlotShape;
   readonly gate: GateShape;
+  readonly repair: MergeRepairShape;
   readonly backlog: Pick<BacklogShape, "createChild" | "listChildren" | "writeNotes">;
   readonly events: MergeEventsShape;
   readonly fold: FoldShape;
@@ -177,6 +179,26 @@ const gateDiagnosis = (output: string): string => {
   return chosen.length > 300 ? `${chosen.slice(0, 300)}…` : chosen;
 };
 
+/**
+ * Base-gate failures a dependency install can plausibly repair.
+ *
+ * Deliberately narrow. A fault outside this set is one no mechanical repair
+ * understands, and attempting one costs a full install plus a full gate to
+ * learn nothing — those must still fail fast with the diagnosis.
+ */
+const DEPENDENCY_FAULT =
+  /ERR_MODULE_NOT_FOUND|cannot find (?:module|package|native binding)|failed to resolve (?:import|entry)/i;
+
+/**
+ * The fault signature a repair would answer, or `null` when nothing in the
+ * output looks mechanically repairable.
+ *
+ * The signature is the diagnosis line itself, so two different faults never
+ * look like a repeat of each other.
+ */
+const dependencyFaultSignature = (output: string): string | null =>
+  DEPENDENCY_FAULT.test(output) ? gateDiagnosis(output) : null;
+
 const parkEntry = Effect.fn("MergeQueue.parkEntry")(function* (
   input: DrainMergeQueueInput,
   ports: MergeQueuePorts,
@@ -247,6 +269,15 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     const queue = yield* ports.store.beginDrain(input.runId);
     let merged = 0;
     let parked = 0;
+    /**
+     * The one repair this drain may spend, once it is spent.
+     *
+     * One per drain is the whole bound. A repair that does not restore the
+     * base ends the run below, so the run can never grind through repair after
+     * repair — unbounded self-healing looks alive while making no progress,
+     * which is the failure mode this queue already learned the hard way.
+     */
+    let remediation: { readonly signature: string } | null = null;
 
     for (let index = 0; index < queue.length; index += 1) {
       const entry = queue[index]!;
@@ -397,13 +428,76 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           // binding that no branch had touched.
           const control = yield* ports.gate.run(gateInput);
           if (!control.passed) {
-            return {
-              _tag: "fatal" as const,
-              detail:
-                `gate also fails on ${snapshot.baseBranch} with nothing merged, ` +
-                `so ${entry.branch} is not at fault: ${gateDiagnosis(control.output)}`,
-              queueLength: activeEntries(snapshot.entries).length,
-            };
+            const blameless =
+              `gate also fails on ${snapshot.baseBranch} with nothing merged, ` +
+              `so ${entry.branch} is not at fault: ${gateDiagnosis(control.output)}`;
+            const signature = dependencyFaultSignature(control.output);
+            // Say what is broken and stop. Only a fault a dependency install
+            // understands is worth a repair; anything else needs a human, and
+            // pretending otherwise just spends the run finding that out.
+            if (signature === null) {
+              return {
+                _tag: "fatal" as const,
+                detail: blameless,
+                queueLength: activeEntries(snapshot.entries).length,
+              };
+            }
+            if (remediation !== null) {
+              return {
+                _tag: "fatal" as const,
+                detail:
+                  `${blameless} — the integration worktrees were already repaired once ` +
+                  `this drain (${remediation.signature}); not repeating it`,
+                queueLength: activeEntries(snapshot.entries).length,
+              };
+            }
+
+            const worktrees = [
+              snapshot.integrationWorktreePath,
+              ...snapshot.siblings.map((sibling) => sibling.integrationWorktreePath),
+            ];
+            remediation = { signature };
+            yield* ports.events.emit({
+              event: "remediating",
+              branch: entry.branch,
+              worktrees,
+              signature,
+            });
+            const restored = yield* ports.repair.restoreDependencies({ worktrees });
+            // Repairing something is not a pass. The base has to clear the
+            // same gate on its own merits before the drain trusts it again.
+            const recheck = restored.restored ? yield* ports.gate.run(gateInput) : null;
+            const recovered = recheck?.passed === true;
+            yield* ports.events.emit({
+              event: "remediated",
+              branch: entry.branch,
+              worktrees,
+              signature,
+              recovered,
+              detail: restored.detail,
+            });
+            yield* ports.backlog.writeNotes({
+              issueId: input.epicId,
+              note:
+                `cook-epic: ${snapshot.baseBranch} failed its own gate (${signature}); ` +
+                `restored integration worktree dependencies — ` +
+                `${recovered ? "gate recovered" : "gate still red"}`,
+            });
+            if (!recovered) {
+              return {
+                _tag: "fatal" as const,
+                detail:
+                  `${blameless} — restoring the integration worktree dependencies did not fix it: ` +
+                  `${recheck === null ? restored.detail : gateDiagnosis(recheck.output)}`,
+                queueLength: activeEntries(snapshot.entries).length,
+              };
+            }
+            // The environment is healthy now, but everything this entry's gate
+            // said was measured in a broken one. Re-run the entry rather than
+            // park a branch on void evidence. The one-repair-per-drain bound
+            // makes this retry unrepeatable.
+            index -= 1;
+            continue;
           }
 
           const repair = yield* parkEntry(

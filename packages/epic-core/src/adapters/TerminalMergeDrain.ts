@@ -21,7 +21,7 @@ import { drainMergeQueue } from "../MergeQueue.ts";
 import type { MergeDrainShape } from "../ParallelEpicLoop.ts";
 import type { BacklogShape } from "../ports/Backlog.ts";
 import type { GateShape } from "../ports/Gate.ts";
-import type { MergeSlotShape } from "../ports/MergeQueue.ts";
+import type { MergeRepairShape, MergeSlotShape } from "../ports/MergeQueue.ts";
 import { MergeQueuePortError } from "../ports/MergeQueue.ts";
 import { RunJournalError, type RunJournalShape } from "../ports/RunJournal.ts";
 import type * as ProcessRunner from "../processRunner.ts";
@@ -63,13 +63,14 @@ export const makeTerminalMergeDrain = (deps: {
   readonly journal: RunJournalShape;
   readonly mergeQueueStore: FileMergeQueueStoreShape;
   readonly gate: GateShape;
+  readonly repair: MergeRepairShape;
   /** Test seams; the process adapters are the real defaults. */
   readonly slot?: (repositoryPath: string) => MergeSlotShape;
   readonly backlog?: (
     repositoryPath: string,
   ) => Pick<BacklogShape, "createChild" | "listChildren" | "writeNotes">;
 }): MergeDrainShape => {
-  const { processRunner, journal, mergeQueueStore, gate } = deps;
+  const { processRunner, journal, mergeQueueStore, gate, repair } = deps;
 
   const writeBeadsRedirect = (runCwd: string, worktreeCwd: string) =>
     Effect.tryPromise({
@@ -200,6 +201,7 @@ export const makeTerminalMergeDrain = (deps: {
         slot:
           deps.slot?.(run.cwd) ?? makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner }),
         gate,
+        repair,
         backlog:
           deps.backlog?.(run.cwd) ?? makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
         events: {

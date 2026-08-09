@@ -159,6 +159,10 @@
       "types": "./src/adapters/ProcessMergeGit.ts",
       "import": "./src/adapters/ProcessMergeGit.ts"
     },
+    "./adapters/ProcessMergeRepair": {
+      "types": "./src/adapters/ProcessMergeRepair.ts",
+      "import": "./src/adapters/ProcessMergeRepair.ts"
+    },
     "./adapters/ProcessMergeSlot": {
       "types": "./src/adapters/ProcessMergeSlot.ts",
       "import": "./src/adapters/ProcessMergeSlot.ts"

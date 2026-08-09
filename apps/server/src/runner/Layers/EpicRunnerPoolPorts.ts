@@ -71,6 +71,7 @@ import {
 import { drainMergeQueue } from "@t3tools/epic-core/MergeQueue";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
+import { makeProcessMergeRepair } from "@t3tools/epic-core/adapters/ProcessMergeRepair";
 import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import { MergeQueuePortError } from "@t3tools/epic-core/ports/MergeQueue";
@@ -1470,6 +1471,11 @@ export const makeServerMergeDrain = (deps: {
     environment: process.env,
     uid: process.getuid?.() ?? 0,
   });
+  const mergeRepair = makeProcessMergeRepair({
+    processRunner,
+    environment: process.env,
+    uid: process.getuid?.() ?? 0,
+  });
 
   const writeBeadsRedirect = (runCwd: string, worktreeCwd: string) =>
     Effect.gen(function* () {
@@ -1582,6 +1588,7 @@ export const makeServerMergeDrain = (deps: {
           git,
           slot: makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner }),
           gate: mergeGate,
+          repair: mergeRepair,
           backlog: makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
           events: {
             emit: (event) =>

@@ -45,6 +45,7 @@ import * as FileRunJournal from "@t3tools/epic-core/adapters/FileRunJournal";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
+import { makeProcessMergeRepair } from "@t3tools/epic-core/adapters/ProcessMergeRepair";
 import { makeProcessPoolBacklog } from "@t3tools/epic-core/adapters/ProcessPoolBacklog";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import { makeProcessVcs } from "@t3tools/epic-core/adapters/ProcessVcs";
@@ -540,6 +541,11 @@ export const cookCommand = Command.make("cook", {
                 journal,
                 mergeQueueStore,
                 gate: makeProcessGate({
+                  processRunner: runner,
+                  environment: process.env,
+                  uid: process.getuid?.() ?? 0,
+                }),
+                repair: makeProcessMergeRepair({
                   processRunner: runner,
                   environment: process.env,
                   uid: process.getuid?.() ?? 0,

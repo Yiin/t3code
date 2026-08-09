@@ -131,6 +131,23 @@ export interface MergeGitShape {
   ) => Effect.Effect<void, MergeQueuePortError>;
 }
 
+/**
+ * One bounded, mechanical repair of the integration worktrees.
+ *
+ * Only the integration worktrees are ever touched. The source checkout is off
+ * limits: a repair that reaches it can break every other worker at once, which
+ * is exactly how run 87a9d295 lost its dependency store.
+ *
+ * The port decides *how* to repair; `MergeQueue` decides *whether* to, and
+ * proves the repair worked by re-running the same gate afterwards.
+ */
+export interface MergeRepairShape {
+  readonly restoreDependencies: (input: {
+    /** Main integration worktree first, then every sibling's. */
+    readonly worktrees: ReadonlyArray<string>;
+  }) => Effect.Effect<{ readonly restored: boolean; readonly detail: string }, MergeQueuePortError>;
+}
+
 export interface MergeSlotShape {
   /** `None` means another coordinator owns the nonblocking slot. */
   readonly tryAcquire: (
@@ -140,6 +157,26 @@ export interface MergeSlotShape {
 }
 
 export type MergeQueueEvent =
+  | {
+      /** A repair of the integration worktrees is about to start. */
+      readonly event: "remediating";
+      readonly branch: string;
+      readonly worktrees: ReadonlyArray<string>;
+      readonly signature: string;
+    }
+  | {
+      /**
+       * The repair finished. `recovered` is true only when the same gate then
+       * passed on the base with nothing merged — repairing something is never
+       * itself a pass.
+       */
+      readonly event: "remediated";
+      readonly branch: string;
+      readonly worktrees: ReadonlyArray<string>;
+      readonly signature: string;
+      readonly recovered: boolean;
+      readonly detail: string;
+    }
   | {
       readonly event: "parked";
       readonly child: string;
