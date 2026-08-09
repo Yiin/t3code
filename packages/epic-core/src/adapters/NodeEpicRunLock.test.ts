@@ -365,7 +365,27 @@ describe("EpicRunLock", () => {
             expect(error._tag).toBe("EpicRunLockHeldError");
           });
 
-        yield* expectHeld({ ...base, pid: 999_999_999, pgid: 999_999_999, heartbeatAt: now });
+        // A fresh heartbeat no longer vouches for an owner that is provably
+        // gone. It used to: a crashed server restarted in seconds, found the
+        // lock its own corpse had just heartbeated, and failed the run with
+        // "another epic run owns this repository" — locked out of its own
+        // recovery by a heartbeat it wrote moments before dying.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            file,
+            JSON.stringify({ ...base, pid: 999_999_999, pgid: 999_999_999, heartbeatAt: now }),
+          ),
+        );
+        const afterCrash = yield* locks.acquire({
+          workspaceRoot: directory,
+          epicId: "epic",
+          owner: "t3code",
+          runDir: "/tmp/after-crash",
+        });
+        yield* afterCrash.release;
+
+        // A live owner still holds it, heartbeat fresh or long stale.
+        yield* expectHeld({ ...base, startTicks: ticks, heartbeatAt: now });
         yield* expectHeld({ ...base, startTicks: ticks, heartbeatAt: 1 });
         yield* expectHeld({ ...base, startTicks: "recycled", heartbeatAt: 1 });
 
