@@ -361,6 +361,46 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
   ),
 );
 
+it.live("lets Claude iterations use the harness default model", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' "$@" > args
+printf '%s\n' '{"type":"result","result":"final"}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        useHarnessDefaultModel: true,
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "claude-default-model",
+        iterationIndex: 0,
+        cwd: fixture.directory,
+        worktreePath: null,
+        prompt: "test",
+        selection: {
+          instanceId: ProviderInstanceId.make("claude"),
+          model: "claude-sonnet-5",
+        },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8").split(
+        "\n",
+      );
+      assert.notInclude(args, "--model");
+      assert.notInclude(args, "claude-sonnet-5");
+      assert.notInclude(args, "--no-session-persistence");
+    }),
+  ),
+);
+
 it.live("routes a fallback selection to its own harness", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -778,30 +818,141 @@ printf '%s\\n' '"}]}'`),
   ),
 );
 
-it.live("stops Prime auxiliaries after fallback selects another harness", () =>
+it.live("runs a Claude note fold and returns its final result", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const fixture = yield* Effect.acquireRelease(
-        Effect.sync(() => makeWorker("touch invoked")),
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' "$@" > args
+printf '%s\n' '{"type":"result","result":"folded notes","session_id":"aux-session"}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        permissionMode: "bypassPermissions",
+      });
+      const result = yield* dispatch.runAuxiliary({
+        purpose: "epic-note-fold",
+        cwd: fixture.directory,
+        prompt: "fold notes",
+        selection: {
+          instanceId: ProviderInstanceId.make("claude"),
+          model: "claude-sonnet-5",
+        },
+      });
+      assert.deepEqual(result, { output: "folded notes", succeeded: true });
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8").trim().split("\n"),
+        [
+          "-p",
+          "--permission-mode",
+          "bypassPermissions",
+          "--output-format",
+          "json",
+          "--model",
+          "claude-sonnet-5",
+          "--exclude-dynamic-system-prompt-sections",
+          "--no-session-persistence",
+          "--",
+          "fold notes",
+        ],
+      );
+    }),
+  ),
+);
+
+it.live("routes CCX idle inspection with tool and slash command restrictions", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' "$@" > args
+pwd > cwd
+printf '%s' "\${AUX_TEST_VALUE:-}" > env
+printf '%s\n' '{"type":"result","result":"idle"}'`),
+        ),
         ({ directory }) =>
           Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
       );
       const dispatch = makeTerminalAgentDispatch({
         harness: "prime",
         artifactsDirectory: fixture.directory,
-        binary: fixture.worker,
+        environment: { AUX_TEST_VALUE: "routed-environment" },
         providerRoutes: [
           {
-            instanceId: ProviderInstanceId.make("claude"),
+            instanceId: ProviderInstanceId.make("ccx-account"),
             driver: ProviderDriverKind.make("claudeAgent"),
-            harness: "claude",
+            harness: "ccx",
             binary: fixture.worker,
-            model: "claude-sonnet-5",
+            model: "claude-opus-5",
             primary: false,
           },
         ],
       });
       const result = yield* dispatch.runAuxiliary({
+        purpose: "idle-inspection",
+        cwd: fixture.directory,
+        prompt: "inspect worker",
+        selection: {
+          instanceId: ProviderInstanceId.make("ccx-account"),
+          model: "claude-opus-5",
+        },
+      });
+      assert.deepEqual(result, { output: "idle", succeeded: true });
+      assert.deepEqual(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8").split("\n"),
+        [
+          "-p",
+          "--permission-mode",
+          "auto",
+          "--output-format",
+          "json",
+          "--model",
+          "claude-opus-5",
+          "--exclude-dynamic-system-prompt-sections",
+          "--no-session-persistence",
+          "--tools",
+          "",
+          "--disable-slash-commands",
+          "--",
+          "inspect worker",
+          "",
+        ],
+      );
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "cwd"), "utf8").trim(),
+        fixture.directory,
+      );
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(fixture.directory, "env"), "utf8"),
+        "routed-environment",
+      );
+    }),
+  ),
+);
+
+it.live("lets Claude auxiliaries use the harness default model", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' "$@" > args
+printf '%s\n' '{"type":"result","result":"folded"}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        useHarnessDefaultModel: true,
+      });
+      yield* dispatch.runAuxiliary({
         purpose: "epic-note-fold",
         cwd: fixture.directory,
         prompt: "fold",
@@ -810,10 +961,87 @@ it.live("stops Prime auxiliaries after fallback selects another harness", () =>
           model: "claude-sonnet-5",
         },
       });
-      assert.deepEqual(result, { output: "", succeeded: false });
-      assert.isFalse(NodeFS.existsSync(NodePath.join(fixture.directory, "invoked")));
+      const args = NodeFS.readFileSync(NodePath.join(fixture.directory, "args"), "utf8").split(
+        "\n",
+      );
+      assert.notInclude(args, "--model");
+      assert.notInclude(args, "claude-sonnet-5");
     }),
   ),
+);
+
+it.live("fails a Claude auxiliary with a structured provider error", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' '{"type":"result","is_error":true,"result":"rate limited"}'`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+      });
+      const result = yield* dispatch.runAuxiliary({
+        purpose: "epic-note-fold",
+        cwd: fixture.directory,
+        prompt: "fold",
+        selection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
+      });
+      assert.deepEqual(result, { output: "rate limited", succeeded: false });
+    }),
+  ),
+);
+
+it.live("preserves a Claude auxiliary result before bounded output", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`printf '%s\n' '{"type":"result","result":"folded notes"}'
+head -c 4096 /dev/zero | tr '\\0' x`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        maxArtifactBytes: 256,
+      });
+      const result = yield* dispatch.runAuxiliary({
+        purpose: "epic-note-fold",
+        cwd: fixture.directory,
+        prompt: "fold",
+        selection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
+      });
+      assert.deepEqual(result, { output: "folded notes", succeeded: true });
+    }),
+  ),
+);
+
+it.live("rejects unsupported auxiliary harnesses with a dispatch error", () =>
+  Effect.gen(function* () {
+    const dispatch = makeTerminalAgentDispatch({
+      harness: "opencode",
+      artifactsDirectory: NodeOS.tmpdir(),
+    });
+    const error = yield* dispatch
+      .runAuxiliary({
+        purpose: "idle-inspection",
+        cwd: NodeOS.tmpdir(),
+        prompt: "inspect",
+        selection: { instanceId: ProviderInstanceId.make("opencode"), model: "test" },
+      })
+      .pipe(Effect.flip);
+    assert.equal(error._tag, "DispatchError");
+    assert.include(error.detail, "opencode");
+    assert.include(error.detail, "idle-inspection");
+  }),
 );
 
 it.live("kills a TERM-resistant Prime auxiliary process group after timeout", () =>
