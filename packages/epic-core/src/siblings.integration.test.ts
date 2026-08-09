@@ -279,6 +279,10 @@ const makeDrainFixture = (input: {
       gate: gate ?? {
         run: () => Effect.succeed({ passed: true, repositoryPaths: [], output: "" }),
       },
+      repair: {
+        restoreDependencies: () =>
+          Effect.succeed({ restored: false, detail: "no repair in this fixture" }),
+      },
       backlog: {
         listChildren: () => Effect.succeed(children),
         createChild: ({ title, description }) =>

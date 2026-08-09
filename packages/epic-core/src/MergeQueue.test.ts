@@ -48,6 +48,10 @@ const makeHarness = (
     /** Per-call gate answers: [merge set, control on base, …]. */
     readonly gateSequence?: ReadonlyArray<boolean>;
     readonly gateOutput?: string;
+    /** Per-call gate output, for a control that differs from the merge set. */
+    readonly gateOutputSequence?: ReadonlyArray<string>;
+    /** Whether the dependency repair reports success; defaults to true. */
+    readonly repairRestores?: boolean;
     readonly fastForwardFails?: ReadonlyArray<string>;
     readonly fastForwardFailCwds?: ReadonlyArray<string>;
     readonly pushFails?: ReadonlyArray<string>;
@@ -267,11 +271,23 @@ const makeHarness = (
           // merged, so tests need to answer the two calls differently:
           // [set, control]. Without a sequence every call answers the same.
           const sequenced = options.gateSequence?.[gateCall];
+          const sequencedOutput = options.gateOutputSequence?.[gateCall];
           gateCall += 1;
           return {
             passed: sequenced ?? options.gatePasses ?? true,
             repositoryPaths: ["/repo"],
-            output: options.gateOutput ?? "",
+            output: sequencedOutput ?? options.gateOutput ?? "",
+          };
+        }),
+    },
+    repair: {
+      restoreDependencies: ({ worktrees }) =>
+        Effect.sync(() => {
+          calls.push(`repair:${worktrees.join(",")}`);
+          const restored = options.repairRestores ?? true;
+          return {
+            restored,
+            detail: restored ? "install completed" : "install failed: lockfile is out of date",
           };
         }),
     },
@@ -412,7 +428,148 @@ describe("MergeQueue", () => {
       expect(result._tag).toBe("fatal");
       expect(result._tag === "fatal" ? result.detail : "").toContain("nothing merged");
       expect(result._tag === "fatal" ? result.detail : "").toContain("vite-plus/binding");
-      // Nothing was blamed and no repair was opened.
+      // Nothing was blamed and no repair child was opened. A missing binding
+      // is mechanically repairable, so the drain does try the install first —
+      // and still refuses to blame the branch when it does not help.
+      expect(harness.fixes).toHaveLength(0);
+      expect(harness.calls).toContain("repair:/worktrees/integration");
+    }),
+  );
+
+  it.effect("stops fast, without a repair, on an environment fault no install can fix", () =>
+    Effect.gen(function* () {
+      // The bound that matters is the one on guessing. A fault an install does
+      // not understand costs a full install plus a full gate to learn nothing.
+      const harness = makeHarness({
+        gatePasses: false,
+        gateOutput: "Error: expected 3 to equal 4\n2 failed",
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      expect(result._tag === "fatal" ? result.detail : "").toContain("nothing merged");
+      expect(harness.calls.some((call) => call.startsWith("repair:"))).toBe(false);
+      expect(harness.calls.filter((call) => call === "gate")).toHaveLength(2);
+      expect(harness.fixes).toHaveLength(0);
+    }),
+  );
+
+  it.effect("recovers from a broken integration worktree and re-gates the branch on merit", () =>
+    Effect.gen(function* () {
+      // Run 14064278 died here: the integration worktree had no dependencies
+      // for one workspace package, every gate failed, and the runner could
+      // only report that the environment was broken.
+      const harness = makeHarness({
+        siblings: [
+          {
+            repositoryPath: "/sib",
+            baseBranch: "sib-main",
+            integrationWorktreePath: "/worktrees/integ-sib",
+            lastAcceptedHead: "sib-0",
+          },
+        ],
+        // [set, control, control after the repair, set again].
+        gateSequence: [false, false, true, true],
+        gateOutputSequence: [
+          "2 failed",
+          "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'effect' imported from /worktrees/integration/oxlint-plugin-t3code/rules/x.ts",
+          "",
+          "",
+        ],
+      });
+
+      expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+      // Every integration worktree is repaired, and only those.
+      expect(harness.calls.filter((call) => call.startsWith("repair:"))).toEqual([
+        "repair:/worktrees/integration,/worktrees/integ-sib",
+      ]);
+      // The branch landed on a gate run after the repair, never on the red one
+      // measured in the broken worktree.
+      expect(harness.calls.filter((call) => call === "gate")).toHaveLength(4);
+      expect(harness.fixes).toHaveLength(0);
+      expect(harness.events.slice(0, 2)).toEqual([
+        {
+          event: "remediating",
+          branch: "epic/child-1",
+          worktrees: ["/worktrees/integration", "/worktrees/integ-sib"],
+          signature:
+            "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'effect' imported from /worktrees/integration/oxlint-plugin-t3code/rules/x.ts",
+        },
+        {
+          event: "remediated",
+          branch: "epic/child-1",
+          worktrees: ["/worktrees/integration", "/worktrees/integ-sib"],
+          signature:
+            "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'effect' imported from /worktrees/integration/oxlint-plugin-t3code/rules/x.ts",
+          recovered: true,
+          detail: "install completed",
+        },
+      ]);
+      expect(harness.notes[0]).toContain("gate recovered");
+    }),
+  );
+
+  for (const repairRestores of [true, false]) {
+    it.effect(
+      `fails with a diagnosis naming the fault and the attempted repair (install ${
+        repairRestores ? "ran" : "failed"
+      })`,
+      () =>
+        Effect.gen(function* () {
+          const harness = makeHarness({
+            gateSequence: [false, false, false],
+            gateOutputSequence: [
+              "2 failed",
+              "Cannot find native binding for rolldown",
+              "Cannot find native binding for rolldown",
+            ],
+            repairRestores,
+          });
+
+          const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+          expect(result._tag).toBe("fatal");
+          const detail = result._tag === "fatal" ? result.detail : "";
+          // Both halves of the story: what failed, and that a repair was tried.
+          expect(detail).toContain("Cannot find native binding for rolldown");
+          expect(detail).toContain(
+            "restoring the integration worktree dependencies did not fix it",
+          );
+          if (!repairRestores) expect(detail).toContain("lockfile is out of date");
+          // A failed install is never worth a gate.
+          expect(harness.calls.filter((call) => call === "gate")).toHaveLength(
+            repairRestores ? 3 : 2,
+          );
+          expect(harness.events.at(-1)).toMatchObject({ event: "remediated", recovered: false });
+          expect(harness.notes[0]).toContain("gate still red");
+          expect(harness.fixes).toHaveLength(0);
+        }),
+    );
+  }
+
+  it.effect("repairs at most once per drain, even when the same fault returns", () =>
+    Effect.gen(function* () {
+      // Unbounded self-healing is the failure mode this queue exists to
+      // prevent: a repair loop keeps the run looking alive while it makes no
+      // progress at all.
+      const harness = makeHarness({
+        // [set, control, control after repair, set again, control again].
+        gateSequence: [false, false, true, false, false],
+        gateOutputSequence: [
+          "2 failed",
+          "ERR_MODULE_NOT_FOUND: Cannot find package 'effect'",
+          "",
+          "2 failed",
+          "ERR_MODULE_NOT_FOUND: Cannot find package 'effect'",
+        ],
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      expect(result._tag === "fatal" ? result.detail : "").toContain("not repeating it");
+      expect(harness.calls.filter((call) => call.startsWith("repair:"))).toHaveLength(1);
       expect(harness.fixes).toHaveLength(0);
     }),
   );
