@@ -177,6 +177,15 @@ const buildCmd = Command.make(
         }),
       );
 
+      const primeExtensionSource = path.join(
+        serverDir,
+        "src/provider/prime/extensions/t3-permission-extension.mjs",
+      );
+      const primeExtensionTarget = path.join(serverDir, "dist/prime/t3-permission-extension.mjs");
+      yield* fs.makeDirectory(path.dirname(primeExtensionTarget), { recursive: true });
+      yield* fs.copyFile(primeExtensionSource, primeExtensionTarget);
+      yield* Effect.log("[cli] Bundled Prime permission extension");
+
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
 
