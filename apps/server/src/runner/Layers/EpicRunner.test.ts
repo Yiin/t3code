@@ -5673,6 +5673,72 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.live("mirrors workspace dependencies past a dangling symlink in the repo root", () =>
+    Effect.gen(function* () {
+      // Regression: the scan stat'd every root entry and caught failures for
+      // the whole directory, so one dangling symlink — this repo shipped a
+      // committed `CLAUDE.md -> "AGENTS.md\n"` — hid every workspace package.
+      // Nothing per-package was mirrored and the gate died on a missing
+      // dependency that looked nothing like the cause.
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      yield* fileSystem.makeDirectory(path.join(root, ".beads"), { recursive: true });
+      yield* fileSystem.makeDirectory(path.join(root, "node_modules"), { recursive: true });
+      yield* fileSystem.makeDirectory(path.join(root, "packages", "lib", "node_modules"), {
+        recursive: true,
+      });
+      yield* fileSystem.symlink("does-not-exist.md", path.join(root, "DANGLING.md"));
+
+      // The provisioner is a fake, so stand the integration worktree up in its
+      // own scoped temp dir, with the tracked package directory the mirror
+      // needs to write into. A shared path would carry state between runs and
+      // make this assertion pass on a leftover directory.
+      const integrationPath = yield* makeTempWorkspace;
+      yield* fileSystem.makeDirectory(path.join(integrationPath, "packages", "lib"), {
+        recursive: true,
+      });
+
+      const harness = createHarness({
+        workspaceRoot: root,
+        integrationProvisionPath: integrationPath,
+        readyChildren: ["child-1"],
+        openChildren: [],
+        separateWorkerHead: true,
+        childEvidence: {
+          "child-1": [{ title: "Build child", status: "closed", commentCount: 1 }],
+        },
+        script: [
+          {
+            text: 'RALPH_MSG: {"summary":"built child","why":"needed"}',
+            head: "child-head",
+            branchCommitCount: 1,
+          },
+        ],
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.startRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: root,
+          prompt: "do one unit of work",
+          orientationFile: null,
+          modelSelection,
+          config: { parallel: { workers: 1 } },
+          maxIterations: 10,
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+        // The package beside the broken link still gets its dependencies.
+        assert.isTrue(
+          yield* fileSystem.exists(path.join(integrationPath, "packages", "lib", "node_modules")),
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.live("freezes a queued branch when the base moved before slot acquisition", () => {
     const runId = EpicRunId.make("run-external-base-move");
     const pausedRun: EpicRun = {

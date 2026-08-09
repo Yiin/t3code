@@ -249,8 +249,16 @@ const setupWorktreeAssets = (
         const entries = yield* deps.fileSystem.readDirectory(absolutePath);
         const directories: Array<string> = [];
         for (const entry of entries) {
-          const info = yield* deps.fileSystem.stat(deps.path.join(absolutePath, entry));
-          if (info.type === "Directory") directories.push(entry);
+          // Catch per ENTRY, not per directory. `stat` follows symlinks and
+          // throws on a dangling one, and a repo-root catch meant a single
+          // broken link hid every workspace package beside it: no per-package
+          // node_modules was mirrored, and the gate died on a missing
+          // dependency that looked nothing like the cause. A name we cannot
+          // stat is simply not a directory.
+          const info = yield* deps.fileSystem
+            .stat(deps.path.join(absolutePath, entry))
+            .pipe(Effect.catchCause(() => Effect.succeed(null)));
+          if (info !== null && info.type === "Directory") directories.push(entry);
         }
         return directories;
       }).pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<string>>([])));
