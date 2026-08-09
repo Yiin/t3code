@@ -28,12 +28,14 @@ import {
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
+  mergeSlotHolder,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
 import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
 import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
+import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
 import { makeProcessPoolBacklog } from "@t3tools/epic-core/adapters/ProcessPoolBacklog";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import {
@@ -505,6 +507,45 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    /**
+     * Free the merge slot if this run is still recorded as holding it.
+     *
+     * The drain releases the slot from a finalizer, and a SIGKILL or a systemd
+     * stop skips finalizers, so a hard-killed run leaves the slot held under
+     * its own holder id. Nothing else can free it: the next boot cannot
+     * acquire it, every drain returns deferred, and the loop just sleeps and
+     * retries. The run neither fails nor progresses, and from outside it looks
+     * healthy — the lock keeps heartbeating and no worker is alive to look
+     * wrong.
+     *
+     * Only this run's own holder id is evidence. A slot held by another run,
+     * another epic, or the terminal coordinator is left alone, because
+     * deferring to a live holder is what should happen.
+     */
+    const reclaimLeakedMergeSlot = (run: {
+      readonly runId: EpicRunId;
+      readonly cwd: string;
+    }): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const holder = mergeSlotHolder(run.runId);
+        const slot = makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner });
+        const { reclaimed } = yield* slot.reclaim(holder);
+        if (!reclaimed) return;
+        yield* Effect.logInfo("epic.runner.merge-slot-reclaimed", {
+          runId: run.runId,
+          holder,
+        });
+      }).pipe(
+        // A reclaim that cannot run is not worth failing a boot over: the run
+        // then behaves exactly as it does today, deferring its drains.
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.merge-slot-reclaim-failed", {
+            runId: run.runId,
+            cause,
+          }),
+        ),
+      );
+
     const listRuns: EpicRunnerShape["listRuns"] = (input) =>
       store
         .listRuns(input ?? {})
@@ -582,6 +623,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               "server-restart",
               "restart",
             );
+            // Before the loop, not inside it: the first drain is what a leaked
+            // slot silently blocks.
+            yield* reclaimLeakedMergeSlot(run);
             yield* forkLoop(run.runId);
           }).pipe(releaseLeaseOnFailure(run.runId));
         }
