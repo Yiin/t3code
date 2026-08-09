@@ -185,6 +185,13 @@ export const materializeConformanceWorkspace = (
 
   const env = {
     PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    // The gate serializes heavy work on a lock under XDG_RUNTIME_DIR
+    // (`ProcessGate.heavyGateLockPath`). Inheriting the real one makes this
+    // fixture take the machine's production gate lock, and a real gate holds
+    // that lock while it runs the test suite — so a conformance scenario that
+    // reaches its own gate waits for the gate that is running it. That is a
+    // deadlock, not a slow test, and it ends at the gate's two-hour timeout.
+    XDG_RUNTIME_DIR: root,
     CONFORMANCE_ROOT: root,
     CONFORMANCE_STATE: statePath,
     CONFORMANCE_JOURNAL: journalPath,
