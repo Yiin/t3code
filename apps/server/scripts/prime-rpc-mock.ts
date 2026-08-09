@@ -12,6 +12,19 @@ let activeThinking = "medium";
 let stateRequests = 0;
 const receivedMessages: Array<Record<string, unknown>> = [];
 
+if (argv.includes("--version")) {
+  if (scenario === "version-timeout") {
+    // @effect-diagnostics-next-line globalTimers:off - Standalone fake CLI scheduling.
+    NodeTimers.setInterval(() => undefined, 60_000);
+  } else if (scenario === "version-nonzero") {
+    NodeProcess.stderr.write("Prime Agent unavailable\n");
+    NodeProcess.exit(7);
+  } else {
+    NodeProcess.stdout.write("prime-agent 1.2.3\n");
+    NodeProcess.exit(0);
+  }
+}
+
 function valueAfter(flag: string): string | undefined {
   const index = argv.indexOf(flag);
   return index >= 0 ? argv[index + 1] : undefined;
@@ -49,6 +62,7 @@ function respondWithState(command: Record<string, unknown>): void {
     messageCount: 2,
     pendingMessageCount: 0,
     mockArgv: argv,
+    ...(scenario === "health-unauthenticated" ? { authenticated: false } : {}),
   });
   emit({ type: "mock_after_response" });
 }
@@ -80,7 +94,7 @@ function handle(command: Record<string, unknown>): void {
         NodeProcess.exit(9);
       }
       emit({ type: "mock_before_response", text: "line\u2028separator" }, "\r\n");
-      if (adapterScenario) {
+      if (adapterScenario || scenario.startsWith("health")) {
         respondWithState(command);
       } else if (scenario === "delayed") {
         // @effect-diagnostics-next-line globalTimers:off - Standalone fake CLI scheduling.
@@ -91,13 +105,30 @@ function handle(command: Record<string, unknown>): void {
       return;
     }
     case "get_available_models": {
+      const models =
+        scenario === "health-no-models"
+          ? []
+          : scenario.startsWith("health")
+            ? [
+                {
+                  provider: "prime",
+                  id: "prime-model",
+                  name: "Prime Model",
+                  reasoning: true,
+                  thinkingLevelMap: { high: "High", low: null, unsupported: "Unsupported" },
+                  input: ["text", "image"],
+                },
+                { provider: "prime", id: "prime-model", name: "Duplicate" },
+                { provider: "other", id: "basic", name: "Basic", isCustom: true },
+              ]
+            : [{ provider: "prime", id: "prime-model", name: "Prime Model" }];
       NodeProcess.stdout.write(
         `${JSON.stringify({
           id: command.id,
           type: "response",
           command: command.type,
           success: true,
-          data: { models: [{ provider: "prime", id: "prime-model", name: "Prime Model" }] },
+          data: { models },
         })}\n${JSON.stringify({ type: "mock_models_sent" })}\n`,
       );
       if (pendingStateCommand !== undefined) {
@@ -136,13 +167,33 @@ function handle(command: Record<string, unknown>): void {
       return;
     case "prompt": {
       if (adapterScenario) receivedMessages.push(command);
-      if (adapterScenario) {
+      if (adapterScenario || scenario.startsWith("text")) {
         emit({ type: "agent_start" });
         emit({ type: "message_start", message: { id: "assistant-1", role: "assistant" } });
+        const message = String(command.message ?? "");
+        const generated = message.includes("git commit messages")
+          ? { subject: "Add Prime support.", body: "body", branch: "Prime Support" }
+          : message.includes("pull request content")
+            ? { title: "Add Prime support", body: "## Summary\n\n- Prime\n\n## Testing\n\n- Tests" }
+            : message.includes("branch names")
+              ? { branch: "Prime Support" }
+              : { title: "Prime Support!" };
         emit({
           type: "message_update",
           message: { id: "assistant-1", role: "assistant" },
-          assistantMessageEvent: { type: "text_delta", delta: "adapter reply" },
+          assistantMessageEvent: {
+            type: scenario === "text-error" ? "error" : "text_delta",
+            ...(scenario === "text-error"
+              ? { reason: "mock failure" }
+              : {
+                  delta:
+                    scenario === "text-empty"
+                      ? ""
+                      : scenario === "text-malformed"
+                        ? "no json"
+                        : JSON.stringify(generated),
+                }),
+          },
         });
       }
       const response = `${JSON.stringify({
@@ -156,7 +207,7 @@ function handle(command: Record<string, unknown>): void {
       // @effect-diagnostics-next-line globalTimers:off - Standalone fake CLI chunk scheduling.
       NodeTimers.setTimeout(() => {
         NodeProcess.stdout.write(response.slice(middle));
-        if (!adapterScenario) return;
+        if (!adapterScenario && !scenario.startsWith("text")) return;
         emit({ type: "message_end", message: { id: "assistant-1", role: "assistant" } });
         if (command.message === "permission" || command.message === "permission-crash") {
           emit({
@@ -172,7 +223,10 @@ function handle(command: Record<string, unknown>): void {
           }
         } else if (command.message === "crash") {
           NodeProcess.exit(9);
-        } else {
+        } else if (scenario === "text-eof") {
+          NodeProcess.exit(0);
+        } else if (scenario !== "text-timeout") {
+          emit({ type: "agent_end", messages: [], willRetry: false });
           emit({ type: "agent_settled" });
         }
       }, 5);

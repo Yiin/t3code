@@ -62,6 +62,13 @@ const claudeCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("descriptor helpers", () => {
+  it("preserves image capability metadata", () => {
+    expect(createModelCapabilities({ optionDescriptors: [], supportsImages: true })).toEqual({
+      optionDescriptors: [],
+      supportsImages: true,
+    });
+  });
+
   it("applies selection values to capability descriptors", () => {
     expect(
       getProviderOptionDescriptors({

@@ -19,9 +19,11 @@ export interface SelectableModelOption {
 
 export function createModelCapabilities(input: {
   optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
+  supportsImages?: boolean;
 }): ModelCapabilities {
   return {
     optionDescriptors: input.optionDescriptors.map(cloneDescriptor),
+    ...(typeof input.supportsImages === "boolean" ? { supportsImages: input.supportsImages } : {}),
   };
 }
 
