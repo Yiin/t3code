@@ -1342,6 +1342,122 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("persists a resume cursor returned by rollback without changing binding state", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-rollback-cursor");
+      const initialResumeCursor = { opaque: "resume-before-rollback" };
+      const updatedResumeCursor = { opaque: "resume-after-rollback" };
+      const modelSelection = createModelSelection(codexInstanceId, "gpt-5.4", [
+        { id: "reasoningEffort", value: "high" },
+      ]);
+      const runtimePayload = {
+        cwd: "/tmp/project-rollback-cursor",
+        model: "gpt-5.4",
+        activeTurnId: "turn-before-rollback",
+        lastError: "provider exited",
+        modelSelection,
+        t3EnvironmentContext: {
+          projectId: ProjectId.make("project-rollback-cursor"),
+          workspaceRoot: "/tmp/project-rollback-cursor",
+        },
+      };
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-rollback-cursor",
+        modelSelection,
+        resumeCursor: initialResumeCursor,
+        runtimeMode: "approval-required",
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        adapterKey: "codex-rollback-adapter",
+        runtimeMode: "approval-required",
+        status: "error",
+        resumeCursor: initialResumeCursor,
+        runtimePayload,
+      });
+      routing.codex.rollbackThread.mockImplementationOnce(() =>
+        Effect.succeed({ threadId, turns: [], resumeCursor: updatedResumeCursor }),
+      );
+
+      yield* provider.rollbackConversation({ threadId, numTurns: 1 });
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.equal(persisted.value.providerName, CODEX_DRIVER);
+        assert.equal(persisted.value.providerInstanceId, codexInstanceId);
+        assert.equal(persisted.value.adapterKey, "codex-rollback-adapter");
+        assert.equal(persisted.value.runtimeMode, "approval-required");
+        assert.equal(persisted.value.status, "error");
+        assert.deepEqual(persisted.value.resumeCursor, updatedResumeCursor);
+        assert.deepEqual(persisted.value.runtimePayload, runtimePayload);
+      }
+    }),
+  );
+
+  it.effect("preserves the resume cursor and binding when rollback omits a cursor", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-rollback-without-cursor");
+      const initialResumeCursor = { opaque: "resume-before-rollback" };
+      const runtimePayload = {
+        cwd: "/tmp/project-rollback-without-cursor",
+        model: "gpt-5.4-mini",
+        activeTurnId: null,
+        lastError: null,
+        modelSelection: createModelSelection(codexInstanceId, "gpt-5.4-mini", []),
+        t3EnvironmentContext: {
+          projectId: ProjectId.make("project-rollback-without-cursor"),
+          workspaceRoot: "/tmp/project-rollback-without-cursor",
+        },
+      };
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-rollback-without-cursor",
+        resumeCursor: initialResumeCursor,
+        runtimeMode: "auto-accept-edits",
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        adapterKey: "codex-rollback-omission-adapter",
+        runtimeMode: "auto-accept-edits",
+        status: "stopped",
+        resumeCursor: initialResumeCursor,
+        runtimePayload,
+      });
+
+      yield* provider.rollbackConversation({ threadId, numTurns: 1 });
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.equal(persisted.value.providerName, CODEX_DRIVER);
+        assert.equal(persisted.value.providerInstanceId, codexInstanceId);
+        assert.equal(persisted.value.adapterKey, "codex-rollback-omission-adapter");
+        assert.equal(persisted.value.runtimeMode, "auto-accept-edits");
+        assert.equal(persisted.value.status, "stopped");
+        assert.deepEqual(persisted.value.resumeCursor, initialResumeCursor);
+        assert.deepEqual(persisted.value.runtimePayload, runtimePayload);
+      }
+    }),
+  );
+
   it.effect("checks adapter session liveness without recovery", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
