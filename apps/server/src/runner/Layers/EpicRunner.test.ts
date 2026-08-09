@@ -4484,9 +4484,21 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  for (const [label, slotHolder, expectReclaim] of [
-    ["reclaims a merge slot this run's own hard kill leaked", "cook-epic-run-slot", true],
-    ["leaves a merge slot held by another run alone", "cook-epic-someone-else", false],
+  for (const [label, slotHolder, expectReclaim, otherRunStatus] of [
+    ["reclaims a merge slot this run's own hard kill leaked", "cook-epic-run-slot", true, null],
+    // The gap that killed run 4f11d14b: it deferred for 602s and failed on a
+    // slot held by a run the same OOM had killed ten hours earlier. A dead
+    // run's slot blocks every later drain exactly as thoroughly as one's own.
+    [
+      "reclaims a merge slot left by a run that has since finished",
+      "cook-epic-run-dead",
+      true,
+      "failed",
+    ],
+    // A holder whose run this server has never heard of proves nothing: the
+    // terminal coordinator's slot must survive a server boot.
+    ["leaves a merge slot held by an unknown run alone", "cook-epic-someone-else", false, null],
+    ["leaves a merge slot with an unrecognised holder alone", "some-other-tool", false, null],
   ] as const) {
     it.live(label, () => {
       // A SIGKILL skips the finalizer that releases the slot, so the slot
@@ -4518,9 +4530,22 @@ describe("EpicRunner", () => {
         createdAt: NOW,
         updatedAt: NOW,
       };
+      const otherRun: EpicRun | null =
+        otherRunStatus === null
+          ? null
+          : {
+              ...staleRun,
+              runId: slotHolder.replace("cook-epic-", "") as EpicRun["runId"],
+              status: otherRunStatus,
+              // A different repository and epic, so seeding this row exercises
+              // the status lookup without the boot path also resuming it into
+              // the run under test.
+              epicId: "epic-slot-owner",
+              cwd: "/tmp/epic-runner-slot-owner",
+            };
       const harness = createHarness({
         script: [{ text: "RALPH_DONE", head: "head-0" }],
-        seedRuns: [staleRun],
+        seedRuns: otherRun === null ? [staleRun] : [staleRun, otherRun],
         mergeSlotHolder: slotHolder,
       });
 
@@ -4533,7 +4558,7 @@ describe("EpicRunner", () => {
           (request) => request.command === "bd" && request.args[0] === "merge-slot",
         );
         const released = slotCalls.filter(
-          (request) => request.args[1] === "release" && request.args[3] === `cook-epic-${runId}`,
+          (request) => request.args[1] === "release" && request.args[3] === slotHolder,
         );
         // This run queues nothing, so it never acquires the slot legitimately.
         // Any release here is the boot reclaim and nothing else.

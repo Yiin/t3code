@@ -276,6 +276,7 @@ const makeDrainFixture = (input: {
         tryAcquire: (holder) => Effect.succeed(Option.some({ holder })),
         release: () => Effect.void,
         reclaim: () => Effect.succeed({ reclaimed: false }),
+        holder: Effect.succeed(Option.none()),
       },
       gate: gate ?? {
         run: () => Effect.succeed({ passed: true, repositoryPaths: [], output: "" }),

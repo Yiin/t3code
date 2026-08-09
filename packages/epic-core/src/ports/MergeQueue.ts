@@ -171,6 +171,14 @@ export interface MergeSlotShape {
   readonly reclaim: (
     holder: string,
   ) => Effect.Effect<{ readonly reclaimed: boolean }, MergeQueuePortError>;
+  /**
+   * Who holds the slot, or `None` when it is free, missing, or unreadable.
+   *
+   * The boot path needs the holder itself, not just a yes/no on its own id: a
+   * slot left by a DIFFERENT run that has since finished blocks every drain
+   * just as thoroughly, and only the caller knows which runs are still going.
+   */
+  readonly holder: Effect.Effect<Option.Option<string>, MergeQueuePortError>;
 }
 
 export type MergeQueueEvent =

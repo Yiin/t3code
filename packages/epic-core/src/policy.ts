@@ -140,7 +140,50 @@ export const integrationBranch = (runId: string): string => `${INTEGRATION_BRANC
  * only when the recorded holder matches it exactly. Drift between the two
  * would mean either never reclaiming, or reclaiming another run's slot.
  */
-export const mergeSlotHolder = (runId: string): string => `cook-epic-${runId}`;
+const MERGE_SLOT_HOLDER_PREFIX = "cook-epic-";
+
+export const mergeSlotHolder = (runId: string): string => `${MERGE_SLOT_HOLDER_PREFIX}${runId}`;
+
+/**
+ * The run id inside a merge-slot holder, or `null` for a holder this does not
+ * recognise.
+ *
+ * A holder that names a run is evidence: the boot path can ask whether that
+ * run is still going and free a slot whose owner is provably finished. A
+ * holder it cannot parse — the terminal coordinator's, another tool's — has to
+ * be left alone, because nothing about it can be proven.
+ */
+/**
+ * Whether a boot may free the merge slot it found held.
+ *
+ * Two things count as proof, and nothing else does. The holder is this run's
+ * own id, so a hard kill skipped the finalizer that would have released it.
+ * Or the holder names a different run that has already finished — run 4f11d14b
+ * deferred for 602s and failed on a slot held by a run the same crash had
+ * killed ten hours earlier, and a dead run's slot blocks every later drain
+ * just as thoroughly as one's own.
+ *
+ * `ownerStatus` is `null` when this server has no row for the owning run. That
+ * is not evidence of anything: the terminal coordinator's slot must survive a
+ * server boot untouched.
+ */
+export const shouldReclaimMergeSlot = (input: {
+  readonly holder: string;
+  readonly thisRunId: string;
+  readonly ownerStatus: EpicRunStatus | null;
+}): boolean => {
+  const ownerRunId = parseMergeSlotHolder(input.holder);
+  if (ownerRunId === null) return false;
+  if (ownerRunId === input.thisRunId) return true;
+  return input.ownerStatus !== null && input.ownerStatus !== "running";
+};
+
+export const parseMergeSlotHolder = (holder: string): string | null => {
+  const runId = holder.startsWith(MERGE_SLOT_HOLDER_PREFIX)
+    ? holder.slice(MERGE_SLOT_HOLDER_PREFIX.length)
+    : "";
+  return runId.length > 0 ? runId : null;
+};
 
 /**
  * The base prompt for one epic iteration.

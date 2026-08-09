@@ -28,7 +28,8 @@ import {
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
-  mergeSlotHolder,
+  parseMergeSlotHolder,
+  shouldReclaimMergeSlot,
 } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
@@ -518,22 +519,46 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * healthy — the lock keeps heartbeating and no worker is alive to look
      * wrong.
      *
-     * Only this run's own holder id is evidence. A slot held by another run,
-     * another epic, or the terminal coordinator is left alone, because
-     * deferring to a live holder is what should happen.
+     * A slot left by a DIFFERENT run counts too, once that run has finished.
+     * Reclaiming only this run's own id was not enough: run 4f11d14b deferred
+     * for 602s and failed on a slot held by 94c6b175, which the same OOM had
+     * killed ten hours earlier. A dead run's slot blocks every later drain
+     * just as thoroughly as one's own.
+     *
+     * The evidence is the same in both cases — the holder names a run, and
+     * that run is provably not going. A holder this cannot parse, or one whose
+     * run is still running or unknown, is left alone: deferring to a live
+     * holder is what should happen.
      */
     const reclaimLeakedMergeSlot = (run: {
       readonly runId: EpicRunId;
       readonly cwd: string;
     }): Effect.Effect<void> =>
       Effect.gen(function* () {
-        const holder = mergeSlotHolder(run.runId);
         const slot = makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner });
-        const { reclaimed } = yield* slot.reclaim(holder);
-        if (!reclaimed) return;
+        const held = yield* slot.holder;
+        if (Option.isNone(held)) return;
+        const holder = held.value;
+        const ownerRunId = parseMergeSlotHolder(holder);
+        if (ownerRunId === null) return;
+        const owner =
+          ownerRunId === run.runId
+            ? Option.none()
+            : yield* store.getRun({ runId: EpicRunId.make(ownerRunId) });
+        if (
+          !shouldReclaimMergeSlot({
+            holder,
+            thisRunId: run.runId,
+            ownerStatus: Option.isSome(owner) ? owner.value.status : null,
+          })
+        ) {
+          return;
+        }
+        yield* slot.release(holder);
         yield* Effect.logInfo("epic.runner.merge-slot-reclaimed", {
           runId: run.runId,
           holder,
+          ownedByThisRun: ownerRunId === run.runId,
         });
       }).pipe(
         // A reclaim that cannot run is not worth failing a boot over: the run
