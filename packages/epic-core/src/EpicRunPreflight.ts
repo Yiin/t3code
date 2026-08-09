@@ -15,7 +15,7 @@ import {
 import { resolveEpicRunConfig, type EpicRunConfigViolation } from "@t3tools/shared/epicRunConfig";
 
 import { EpicRunConfigSource, type EpicRunConfigFileResult } from "./EpicRunConfigSource.ts";
-import { INTEGRATION_BRANCH_PREFIX } from "./policy.ts";
+import { INTEGRATION_BRANCH_PREFIX, integrationBranch } from "./policy.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
 import { makeSiblingResolver } from "./siblings.ts";
@@ -344,14 +344,24 @@ export const layer = Layer.effect(
             "--format=%(refname:short)",
             `${INTEGRATION_BRANCH_PREFIX}*`,
           ]);
+          // A resuming run still owns its own integration branch and worktree;
+          // they are not leftovers to reconcile, they are where it left off.
+          // Treating them as leftovers refused a crashed run permission to
+          // continue itself, naming its own run id back at the operator.
+          const ownIntegrationBranch =
+            input.resumingRunId === undefined ? null : integrationBranch(input.resumingRunId);
+          const isOwn = (value: string): boolean =>
+            ownIntegrationBranch !== null && value === ownIntegrationBranch;
           const leftoverBranch =
             branchList.stdout
               .split(/\r?\n/)
               .map((line) => line.trim())
-              .find((line) => line.length > 0) ?? null;
+              .find((line) => line.length > 0 && !isOwn(line)) ?? null;
           const leftoverWorktree =
-            worktrees.find((worktree) =>
-              worktree.branch?.startsWith(`refs/heads/${INTEGRATION_BRANCH_PREFIX}`),
+            worktrees.find(
+              (worktree) =>
+                worktree.branch?.startsWith(`refs/heads/${INTEGRATION_BRANCH_PREFIX}`) === true &&
+                !isOwn(worktree.branch.slice("refs/heads/".length)),
             )?.path ?? null;
           if (leftoverBranch !== null || leftoverWorktree !== null) {
             blockers.push({

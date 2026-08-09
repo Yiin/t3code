@@ -152,6 +152,7 @@ export const makeEpicRunnerLaunch = (deps: {
     runId: EpicRunId,
     input: Pick<StartEpicRunInput, "cwd" | "epicId">,
     configSnapshot: EpicRunConfigSnapshot,
+    resuming?: boolean,
   ) {
     const result = yield* preflight
       .check(
@@ -159,6 +160,9 @@ export const makeEpicRunnerLaunch = (deps: {
           workspaceRoot: input.cwd,
           epicId: input.epicId,
           mode: configSnapshot.config.execution.sequential ? "sequential" : "parallel",
+          // Resuming this run forgives this run's own integration leftovers.
+          // A fresh launch passes no run id, so nothing is forgiven there.
+          ...(resuming === true ? { resumingRunId: runId } : {}),
         },
         configSnapshot,
       )
