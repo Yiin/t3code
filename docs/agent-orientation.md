@@ -71,10 +71,43 @@ check there reports a pass the gate never gave.
 - Do not parse issue prose to infer file conflicts.
 - Do not mark a run done until Beads confirms no open child remains.
 - Keep worker checks focused. The merge gate provides integration proof.
-- `workerLiveness.ts` is not active supervision until a production driver calls it.
 - Client turn ingress has no epic-thread ownership gate as of 2026-08-08.
 - Restart reconciliation abandons running iterations as of 2026-08-08. It does not resume the same row.
 - Read `.repos/effect-smol/LLMS.md` before writing Effect code.
+
+## Settings and persistence traps
+
+- Settings flow through `packages/contracts/src/settings.ts` (schema plus a
+  hand-written `*Patch` mirror), `packages/shared/src/serverSettings.ts` (apply),
+  `apps/server/src/serverSettings.ts` (persist), `apps/web/src/hooks/useSettings.ts` (patch).
+- A patch is applied by deep merge, so a nested record cannot delete a key.
+  Give a record-shaped setting a whole-value replacement branch and list it in
+  `ATOMIC_SETTINGS_KEYS`. `providerInstances` is the precedent for both.
+- A new settings page needs an entry in
+  `apps/web/src/components/settings/SettingsSidebarNav.tsx`, a route file at
+  `apps/web/src/routes/settings.<name>.tsx`, and the regenerated
+  `apps/web/src/routeTree.gen.ts` committed with them.
+- Migrations are `apps/server/src/persistence/Migrations/NNN_Name.ts`, numbered
+  in sequence. A new table also needs a `Services/` shape and a `Layers/` SQL
+  implementation. Follow `EpicRuns.ts`.
+
+## Provider seams
+
+- A Claude query can be opened with a never-yielding prompt, so control requests
+  cost no inference tokens. `ClaudeProvider.ts` does this to probe capabilities
+  and `ClaudeDriver.ts` caches it per instance for 5 minutes. Extend that probe
+  instead of spawning new processes.
+- Treat any new SDK control method as optional. Guard it the way
+  `getContextUsage` is guarded in `ClaudeAdapter.ts`: presence check, `try`/`catch`,
+  timeout, falsy check.
+- An instance's `homePath` becomes `CLAUDE_CONFIG_DIR`, so instances are separate
+  accounts. A session id belongs to the config dir that made it, so `--resume`
+  never crosses instances.
+- In `packages/epic-core/src/adapters/TerminalAgentDispatch.ts`, `runAuxiliary`
+  returns `succeeded: false` with empty output for every harness except prime and
+  logs nothing, so the idle inspector and note fold do nothing elsewhere. The
+  claude and ccx branch also always passes `--model`, ignoring
+  `useHarnessDefaultModel`, unlike the kimi, codex and opencode branches.
 
 ## Local service
 
