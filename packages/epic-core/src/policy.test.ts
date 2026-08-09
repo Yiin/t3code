@@ -11,6 +11,9 @@ import {
   persistedFailureReason,
   type IterationBoundaryDecision,
   type IterationBoundaryInput,
+  mergeSlotHolder,
+  parseMergeSlotHolder,
+  shouldReclaimMergeSlot,
 } from "./policy.ts";
 import {
   iterationFailureClass,
@@ -572,5 +575,68 @@ describe("mergeFixDescription branch-set variant", () => {
     });
     expect(description).not.toContain("this repository");
     expect(description).toContain("- sibling `/work/proga-api` (base `main`)");
+  });
+});
+
+describe("shouldReclaimMergeSlot", () => {
+  const holderOf = (runId: string) => mergeSlotHolder(runId);
+
+  it("frees a slot this run's own hard kill leaked", () => {
+    // The finalizer that releases the slot is skipped by a SIGKILL.
+    expect(
+      shouldReclaimMergeSlot({
+        holder: holderOf("run-1"),
+        thisRunId: "run-1",
+        ownerStatus: null,
+      }),
+    ).toBe(true);
+  });
+
+  for (const status of ["failed", "done", "cancelled", "paused"] as const) {
+    it(`frees a slot left by another run that is ${status}`, () => {
+      // Run 4f11d14b failed after deferring 602s on a slot held by a run the
+      // same crash had killed ten hours earlier.
+      expect(
+        shouldReclaimMergeSlot({
+          holder: holderOf("run-dead"),
+          thisRunId: "run-1",
+          ownerStatus: status,
+        }),
+      ).toBe(true);
+    });
+  }
+
+  it("leaves a slot held by a run that is still going", () => {
+    // The safety half: deferring to a live holder is the correct behaviour.
+    expect(
+      shouldReclaimMergeSlot({
+        holder: holderOf("run-live"),
+        thisRunId: "run-1",
+        ownerStatus: "running",
+      }),
+    ).toBe(false);
+  });
+
+  it("leaves a slot whose owning run this server has never heard of", () => {
+    // The terminal coordinator's slot must survive a server boot.
+    expect(
+      shouldReclaimMergeSlot({
+        holder: holderOf("run-elsewhere"),
+        thisRunId: "run-1",
+        ownerStatus: null,
+      }),
+    ).toBe(false);
+  });
+
+  for (const holder of ["some-other-tool", "cook-epic-", ""]) {
+    it(`leaves an unrecognised holder ${JSON.stringify(holder)} alone`, () => {
+      expect(shouldReclaimMergeSlot({ holder, thisRunId: "run-1", ownerStatus: "failed" })).toBe(
+        false,
+      );
+    });
+  }
+
+  it("round-trips a run id through the holder id", () => {
+    expect(parseMergeSlotHolder(mergeSlotHolder("run-1"))).toBe("run-1");
   });
 });

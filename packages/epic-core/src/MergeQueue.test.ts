@@ -190,6 +190,7 @@ const makeHarness = (
           calls.push(`slot-reclaim:${holder}`);
           return { reclaimed: false };
         }),
+      holder: Effect.succeed(Option.none()),
     },
     store: {
       read: () => Effect.succeed(snapshot),

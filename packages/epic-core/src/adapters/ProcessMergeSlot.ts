@@ -97,6 +97,7 @@ export const makeProcessMergeSlot = (input: {
         ),
       ),
     release,
+    holder: heldBy,
     reclaim: (holder) =>
       heldBy.pipe(
         Effect.flatMap(
