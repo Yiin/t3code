@@ -33,7 +33,6 @@ import { DEFAULT_MAX_NO_COMMIT_STREAK } from "@t3tools/epic-core/policy";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import type { RunEvent } from "@t3tools/epic-core/ports/RunEvents";
 import * as Effect from "effect/Effect";
-import * as Clock from "effect/Clock";
 import * as Layer from "effect/Layer";
 
 import { decodeConformanceScenario, type ConformanceScenario } from "./scenario.ts";
@@ -517,34 +516,33 @@ const describeDiff = (
     : `${scenario.name} diverged at index ${String(diff.index)}\nactual: ${JSON.stringify(diff.left)}\nexpected: ${JSON.stringify(diff.right)}`;
 };
 
+/**
+ * A runaway guard, not a performance benchmark.
+ *
+ * Every scenario drives real git and bd subprocesses, so its wall clock
+ * measures host load as much as it measures the code — the whole set runs in
+ * ~13s alone and takes more than 90s beside the rest of the suite. One budget
+ * for all 14 made that load the thing under test: the gate went red for a
+ * timing artifact, which parks an innocent branch and costs a merge cycle
+ * (t3code-27p). Per scenario, generously bounded, is the honest shape. Backoff
+ * is configured down to 5ms here, so nothing legitimate approaches this.
+ */
+const SCENARIO_TIMEOUT_MS = 120_000;
+
 describe("epic-core conformance", () => {
-  it.live(
-    "matches every core scenario through real git and bd subprocesses",
-    () =>
-      Effect.gen(function* () {
-        for (const scenario of scenarios()) {
-          const startedAt = yield* Clock.currentTimeMillis;
+  for (const scenario of scenarios()) {
+    it.live(
+      `matches ${scenario.name} through real git and bd subprocesses`,
+      () =>
+        Effect.gen(function* () {
           const actual = yield* runCoreScenario(scenario);
           assert.equal(
             diffTranscripts(actual, scenario.expectedTranscript),
             null,
             describeDiff(scenario, actual),
           );
-          // A runaway guard, not a performance benchmark. Each scenario
-          // drives real git and bd subprocesses, so this measures host load
-          // as much as it measures the code: at 5 seconds it went red at
-          // 5.6s merely from running beside the rest of the suite, and an
-          // epic run gates while its own workers compete for the same CPU.
-          // Backoff here is configured down to 5ms, so nothing legitimate
-          // approaches this bound; the outer 90s timeout is the real
-          // backstop.
-          assert.isBelow(
-            (yield* Clock.currentTimeMillis) - startedAt,
-            30_000,
-            `${scenario.name} exceeded 30 seconds`,
-          );
-        }
-      }),
-    90_000,
-  );
+        }),
+      SCENARIO_TIMEOUT_MS,
+    );
+  }
 });
