@@ -36,6 +36,7 @@ const run = (
     readonly mode?: "parallel" | "sequential";
     readonly worktreeList?: string;
     readonly branchList?: string;
+    readonly resumingRunId?: string;
     readonly nestedStatus?: Readonly<
       Record<string, { readonly stdout: string; readonly code?: number }>
     >;
@@ -131,7 +132,12 @@ const run = (
   );
   return Effect.flatMap(EpicRunPreflight, (service) =>
     service.check(
-      { workspaceRoot: "/repo", epicId: "epic-1", mode: options?.mode ?? "sequential" },
+      {
+        workspaceRoot: "/repo",
+        epicId: "epic-1",
+        mode: options?.mode ?? "sequential",
+        ...(options?.resumingRunId === undefined ? {} : { resumingRunId: options.resumingRunId }),
+      },
       options?.configSnapshot,
     ),
   ).pipe(Effect.provide(testLayer));
@@ -627,6 +633,41 @@ describe("EpicRunPreflight", () => {
           _tag: "integration_leftover",
           branch: null,
           worktreePath: "/worktrees/epic-run-9/integration",
+        });
+      }),
+    );
+
+    it.effect("lets a resuming run past its own integration branch and worktree", () =>
+      Effect.gen(function* () {
+        // A parallel run owns these for its whole life. Treating them as
+        // leftovers refused a crashed run permission to continue itself,
+        // quoting its own run id back at the operator.
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          branchList: "cook-epic-integration-run-9\n",
+          worktreeList:
+            "worktree /repo\nbranch refs/heads/main\n\nworktree /worktrees/epic-run-9/integration\nbranch refs/heads/cook-epic-integration-run-9\n",
+          resumingRunId: "run-9",
+        });
+        expect(result.blockers.some((blocker) => blocker._tag === "integration_leftover")).toBe(
+          false,
+        );
+      }),
+    );
+
+    it.effect("still blocks another run's integration leftovers while resuming", () =>
+      Effect.gen(function* () {
+        // Forgiveness is exact: only this run id's own branch is its own.
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          branchList: "cook-epic-integration-run-other\n",
+          resumingRunId: "run-9",
+        });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "integration_leftover",
+          branch: "cook-epic-integration-run-other",
+          worktreePath: null,
         });
       }),
     );

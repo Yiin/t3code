@@ -594,6 +594,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               run.runId,
               { cwd: run.cwd, epicId: run.epicId },
               launch.persistedConfigSnapshot(run),
+              // This is a resume: the run's own integration branch and
+              // worktree are where it left off, not leftovers to reconcile.
+              true,
             )
             .pipe(
               Effect.match({

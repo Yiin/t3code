@@ -106,6 +106,16 @@ export const EpicRunPreflightInput = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   epicId: TrimmedNonEmptyString,
   mode: EpicRunPreflightMode,
+  /**
+   * The run being resumed, when this check is a resume rather than a launch.
+   *
+   * A parallel run owns an integration branch and worktree for its whole life,
+   * so on resume they are still there. Without this, the run's own leftovers
+   * read as "a previous parallel run left these behind" and the run is refused
+   * permission to continue itself. Only leftovers carrying this exact run id
+   * are forgiven; anything else still blocks.
+   */
+  resumingRunId: Schema.optional(TrimmedNonEmptyString),
 });
 export type EpicRunPreflightInput = typeof EpicRunPreflightInput.Type;
 
