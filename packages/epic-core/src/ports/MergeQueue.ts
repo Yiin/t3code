@@ -154,6 +154,23 @@ export interface MergeSlotShape {
     holder: string,
   ) => Effect.Effect<Option.Option<{ readonly holder: string }>, MergeQueuePortError>;
   readonly release: (holder: string) => Effect.Effect<void, MergeQueuePortError>;
+  /**
+   * Release the slot only if `holder` is provably the one holding it, and
+   * report whether that happened.
+   *
+   * For the boot path. The slot is released from a finalizer, which a SIGKILL
+   * or a systemd stop skips, so a hard-killed run leaves the slot held under
+   * its own holder id. The next boot then cannot acquire it, every drain
+   * defers, and the run neither fails nor progresses — a silent hang that
+   * reads as a healthy run.
+   *
+   * Holder identity is the only evidence used. A slot held by another run,
+   * another epic, or the terminal coordinator is left alone, because deferring
+   * to a live holder is the correct behaviour.
+   */
+  readonly reclaim: (
+    holder: string,
+  ) => Effect.Effect<{ readonly reclaimed: boolean }, MergeQueuePortError>;
 }
 
 export type MergeQueueEvent =
