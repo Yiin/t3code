@@ -46,6 +46,33 @@ agents.
 - When writing relay infrastructure code with Alchemy, inspect `.repos/alchemy-effect/` for examples of
   idiomatic usage, tests, module structure, and API design.
 
+## Beads Topology (this repo)
+
+This section is hand-written and outranks the generated Beads blocks below. `bd setup <recipe>` rewrites
+those blocks from an upstream template that assumes a local database. That assumption is wrong here. If
+the two ever disagree, this section wins.
+
+- Beads for this repo live in the **shared Dolt server on yiin-lt**, not in a local database:
+  `dolt.host 100.107.50.39`, port `3306`, database `t3code` (`.beads/config.yaml`, `.beads/metadata.json`).
+  Confirm with `bd config show | grep dolt`.
+- Every `bd` write lands on that server immediately. Other machines and other projects read the same server,
+  so there is nothing to sync for them to see your change. Do not tell the user their work is "local" or
+  "unpushed".
+- `bd dolt push` mirrors the database to `refs/dolt/data` on the git remote. That is an **off-site backup**,
+  not the sync path. It is optional, and it is not needed for cross-machine visibility.
+- `.beads/issues.jsonl` is a passive export. Never edit it, and never treat it as the source of truth.
+- `.beads/embeddeddolt/` is a leftover from the pre-server setup. Ignore it.
+- To verify data really landed, query the server directly rather than trusting `bd`'s own read path:
+
+  ```bash
+  dolt --host 100.107.50.39 --port 3306 --user root --password '' --no-tls --use-db t3code \
+    sql -r csv -q "select id, status from issues where id = '<id>';"
+  ```
+
+- Known benign `bd doctor` error: "Database belongs to different repository" (stored `96efd996`, current
+  `3b2da1be`). The git remote is SSH (`git@github.com:Yiin/t3code.git`) while `sync.remote` is HTTPS, and the
+  two URL forms hash differently. It blocks nothing. Do not "fix" it with `rm -rf .beads && bd init`.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 
 ## Beads Issue Tracker
@@ -67,7 +94,7 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line (corrected for this repo):** issues live in the shared Dolt **server** on yiin-lt (`100.107.50.39:3306`, database `t3code`), so every write is instantly visible to every machine pointed at it; `bd dolt push` to `refs/dolt/data` is an off-site backup, not the sync path; `.beads/issues.jsonl` is a passive export. See "Beads Topology (this repo)" above, which outranks this generated block. Upstream reference: https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md
 
 ## Agent Context Profiles
 
@@ -92,7 +119,8 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
    # Team-maintainer opt-in only, unless current instructions forbid it:
    git pull --rebase
-   bd dolt push
+   bd dolt push   # optional off-site backup only. Beads writes already landed on the
+                  # shared server. Never report bd work as unsynced without this.
    git push
    git status
    ```
@@ -128,6 +156,6 @@ bd prime                # Refresh Beads context
 - Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
 - Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line (corrected for this repo):** issues live in the shared Dolt **server** on yiin-lt (`100.107.50.39:3306`, database `t3code`), so every write is instantly visible to every machine pointed at it; `bd dolt push` to `refs/dolt/data` is an off-site backup, not the sync path; `.beads/issues.jsonl` is a passive export. See "Beads Topology (this repo)" above, which outranks this generated block. Upstream reference: https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md
 
 <!-- END BEADS CODEX SETUP -->
