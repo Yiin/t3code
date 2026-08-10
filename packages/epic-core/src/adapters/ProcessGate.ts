@@ -38,11 +38,31 @@ export const heavyGateLockPath = (input: {
     "cook-epic-heavy.lock",
   );
 
+/**
+ * Exit status `flock` reports when `-w` expires without the lock.
+ *
+ * It must not collide with an exit code the gate command itself can produce.
+ * flock's own default is 1, which is exactly what a failing test suite exits
+ * with, so contention would be indistinguishable from a red gate.
+ */
+const LOCK_UNAVAILABLE_EXIT_CODE = 75;
+
+/**
+ * How long to wait for the shared heavy-work lock before giving up.
+ *
+ * Far below the process timeout on purpose. The lock is machine-global, so a
+ * run in another repository can hold it; waiting the full process budget turns
+ * that into an indistinguishable two-hour stall, which is what happened to
+ * three epic runs on 2026-08-09/10.
+ */
+const DEFAULT_LOCK_WAIT_SECONDS = 15 * 60;
+
 export const makeProcessGate = (input: {
   readonly processRunner: ProcessRunner["Service"];
   readonly environment: NodeJS.ProcessEnv;
   readonly uid: number;
   readonly timeoutMs?: number;
+  readonly lockWaitSeconds?: number;
 }): GateShape => {
   const run: GateShape["run"] = Effect.fn("ProcessGate.run")(function* ({
     command,
@@ -73,10 +93,26 @@ export const makeProcessGate = (input: {
       });
     }
 
+    const lockWaitSeconds = input.lockWaitSeconds ?? DEFAULT_LOCK_WAIT_SECONDS;
+    const startedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    yield* Effect.logInfo("epic.gate.start", { command, cwd, lockPath, lockWaitSeconds });
+
     const output = yield* input.processRunner
       .run({
         command: "flock",
-        args: [lockPath, "bash", "-c", command],
+        args: [
+          // Bound the wait and report contention with a code the gate command
+          // cannot produce, so "the lock was busy" never masquerades as "the
+          // gate failed" — and never silently consumes the process timeout.
+          "-w",
+          String(lockWaitSeconds),
+          "-E",
+          String(LOCK_UNAVAILABLE_EXIT_CODE),
+          lockPath,
+          "bash",
+          "-c",
+          command,
+        ],
         cwd,
         env,
         extendEnv: false,
@@ -98,6 +134,21 @@ export const makeProcessGate = (input: {
             }),
         ),
       );
+
+    const finishedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    const durationMs = finishedAt - startedAt;
+    yield* Effect.logInfo("epic.gate.finished", {
+      cwd,
+      exitCode: output.code,
+      durationMs,
+    });
+
+    if (output.code === LOCK_UNAVAILABLE_EXIT_CODE) {
+      return yield* new GateError({
+        operation: "lock",
+        detail: `Could not take the shared gate lock ${lockPath} within ${String(lockWaitSeconds)}s; another epic run on this host holds it`,
+      });
+    }
 
     return {
       passed: output.code === 0,

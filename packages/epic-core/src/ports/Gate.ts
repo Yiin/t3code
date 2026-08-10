@@ -2,13 +2,19 @@
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import { describePortFailure } from "./portFailure.ts";
 import type { RepoRef } from "./Vcs.ts";
 
 export class GateError extends Schema.TaggedErrorClass<GateError>()("GateError", {
   operation: Schema.String,
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),
-}) {}
+}) {
+  /** See `describePortFailure`: without this the gate's own timeout is invisible. */
+  override get message(): string {
+    return describePortFailure(this.operation, this.detail, this.cause);
+  }
+}
 
 export interface GateResult {
   readonly passed: boolean;

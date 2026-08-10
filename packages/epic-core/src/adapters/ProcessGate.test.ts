@@ -68,7 +68,16 @@ describe("ProcessGate", () => {
       });
       expect(calls[1]).toMatchObject({
         command: "flock",
-        args: ["/runtime/t3code/cook-epic-heavy.lock", "bash", "-c", "bun run test"],
+        args: [
+          "-w",
+          "900",
+          "-E",
+          "75",
+          "/runtime/t3code/cook-epic-heavy.lock",
+          "bash",
+          "-c",
+          "bun run test",
+        ],
         cwd: "/integration",
         maxOutputBytes: 2048,
         outputMode: "truncate",
@@ -100,6 +109,69 @@ describe("ProcessGate", () => {
 
       expect(new TextEncoder().encode(result.output).byteLength).toBeLessThanOrEqual(5);
       expect(result.output).toBe("éé");
+    }),
+  );
+
+  /**
+   * Three epic runs stalled for two hours each on an unbounded lock wait and
+   * then reported a bare `Epic runner failed to dispatch git.merge-queue:`.
+   * Contention has to be its own outcome, distinguishable from a red gate.
+   */
+  it.effect("reports an unavailable lock distinctly from a failing gate command", () =>
+    Effect.gen(function* () {
+      const processRunner = ProcessRunner.of({
+        run: (command) => Effect.succeed(output(command.command === "mkdir" ? 0 : 75)),
+      });
+      const gate = makeProcessGate({
+        processRunner,
+        uid: 1000,
+        environment: {},
+        lockWaitSeconds: 60,
+      });
+
+      const error = yield* gate
+        .run({
+          command: "check",
+          repositories: [repository("/repo")],
+          cwd: "/integration",
+          maxOutputBytes: 2048,
+        })
+        .pipe(Effect.flip);
+
+      expect(error.operation).toBe("lock");
+      expect(error.detail).toContain("cook-epic-heavy.lock");
+      expect(error.detail).toContain("60s");
+      // The empty-message defect this pairs with: the rendered message must
+      // carry the detail, not an empty string.
+      expect(error.message).toContain("cook-epic-heavy.lock");
+    }),
+  );
+
+  it.effect("passes the configured lock wait to flock", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunInput[] = [];
+      const processRunner = ProcessRunner.of({
+        run: (command) =>
+          Effect.sync(() => {
+            calls.push(command);
+            return output(0);
+          }),
+      });
+      const gate = makeProcessGate({
+        processRunner,
+        uid: 1000,
+        environment: {},
+        lockWaitSeconds: 42,
+      });
+
+      yield* gate.run({
+        command: "check",
+        repositories: [repository("/repo")],
+        cwd: "/integration",
+        maxOutputBytes: 2048,
+      });
+
+      expect(calls[1]?.args?.slice(0, 4)).toEqual(["-w", "42", "-E", "75"]);
     }),
   );
 });

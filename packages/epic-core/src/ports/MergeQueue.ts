@@ -3,6 +3,7 @@ import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { MergeParkReason } from "../policy.ts";
+import { describePortFailure } from "./portFailure.ts";
 
 export class MergeQueuePortError extends Schema.TaggedErrorClass<MergeQueuePortError>()(
   "MergeQueuePortError",
@@ -11,7 +12,18 @@ export class MergeQueuePortError extends Schema.TaggedErrorClass<MergeQueuePortE
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
   },
-) {}
+) {
+  /**
+   * Without this the class inherits an empty `message`, and every reader of it
+   * reports nothing. `EpicRunnerPoolPorts` renders a drain failure as
+   * `Epic runner failed to dispatch git.merge-queue: ${message}`, so three epic
+   * runs failed with a bare trailing colon while the real cause — a gate that
+   * timed out after two hours — sat populated one level down.
+   */
+  override get message(): string {
+    return describePortFailure(this.operation, this.detail, this.cause);
+  }
+}
 
 export type MergeQueueEntryStatus = "queued" | "draining" | "parked";
 

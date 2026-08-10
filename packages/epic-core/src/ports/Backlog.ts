@@ -3,12 +3,19 @@ import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { describePortFailure } from "./portFailure.ts";
+
 export class BacklogError extends Schema.TaggedErrorClass<BacklogError>()("BacklogError", {
   operation: Schema.String,
   issueId: Schema.optional(Schema.String),
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),
-}) {}
+}) {
+  /** See `describePortFailure`. The issue id rides along when the failure names one. */
+  override get message(): string {
+    return describePortFailure(this.operation, this.detail, this.cause, this.issueId);
+  }
+}
 
 export interface BacklogIssue {
   readonly id: string;
