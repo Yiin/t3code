@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
+  EpicTierId,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettings,
@@ -525,6 +526,39 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         },
         automaticGitFetchInterval: 10_000,
       });
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("round-trips the epic role policy through settings.json", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const primaryId = EpicTierId.make("primary");
+      const claudeId = ProviderInstanceId.make("claude_work");
+      const policy = {
+        tiers: {
+          [primaryId]: {
+            label: "Primary",
+            hops: [
+              {
+                selection: { instanceId: claudeId, model: "opus" },
+                skipAboveUtilization: 75,
+              },
+            ],
+          },
+        },
+        roles: {},
+      } as const;
+
+      const next = yield* serverSettings.updateSettings({ epicRolePolicy: policy });
+      assert.deepEqual(next.epicRolePolicy, policy);
+
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const stored = JSON.parse(raw);
+      assert.deepEqual(stored.epicRolePolicy, policy);
+      assert.deepEqual((yield* decodeServerSettings(stored)).epicRolePolicy, policy);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 

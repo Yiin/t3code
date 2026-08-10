@@ -83,6 +83,7 @@ export function applyServerSettingsPatch(
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
       : {}),
+    ...(patch.epicRolePolicy !== undefined ? { epicRolePolicy: patch.epicRolePolicy } : {}),
     ...(automaticGitFetchInterval !== undefined ? { automaticGitFetchInterval } : {}),
   };
   if (!selectionPatch) {

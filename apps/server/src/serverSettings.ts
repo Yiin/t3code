@@ -218,6 +218,7 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
 // Values under these keys are compared as a whole — never stripped field-by-field.
 const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "automaticGitFetchInterval",
+  "epicRolePolicy",
   "textGenerationModelSelection",
 ]);
 
