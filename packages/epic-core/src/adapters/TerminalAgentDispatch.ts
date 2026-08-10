@@ -283,6 +283,33 @@ const primeInvocation = (input: {
   ],
 });
 
+const claudeInvocation = (input: {
+  readonly options: TerminalAgentDispatchOptions;
+  readonly prompt: string;
+  readonly selection: AgentSelection;
+  readonly sessionId: string | null;
+  readonly persistSession: boolean;
+  readonly inspector: boolean;
+}): { readonly command: string; readonly args: ReadonlyArray<string> } => ({
+  command: input.options.binary ?? "claude",
+  args: [
+    "-p",
+    ...(input.sessionId === null ? [] : ["--resume", input.sessionId]),
+    "--permission-mode",
+    input.options.permissionMode ?? "auto",
+    "--output-format",
+    "json",
+    ...(input.selection.model.length === 0 || input.options.useHarnessDefaultModel
+      ? []
+      : ["--model", input.selection.model]),
+    "--exclude-dynamic-system-prompt-sections",
+    ...(input.persistSession ? [] : ["--no-session-persistence"]),
+    ...(input.inspector ? ["--tools", "", "--disable-slash-commands"] : []),
+    "--",
+    input.prompt,
+  ],
+});
+
 const invocation = (input: {
   readonly options: TerminalAgentDispatchOptions;
   readonly prompt: string;
@@ -321,21 +348,14 @@ const invocation = (input: {
       };
     case "claude":
     case "ccx":
-      return {
-        command: options.binary ?? "claude",
-        args: [
-          "-p",
-          ...(sessionId === null ? [] : ["--resume", sessionId]),
-          "--permission-mode",
-          options.permissionMode ?? "auto",
-          "--output-format",
-          "json",
-          ...(model.length === 0 || options.useHarnessDefaultModel ? [] : ["--model", model]),
-          "--exclude-dynamic-system-prompt-sections",
-          "--",
-          prompt,
-        ],
-      };
+      return claudeInvocation({
+        options,
+        prompt,
+        selection,
+        sessionId,
+        persistSession: true,
+        inspector: false,
+      });
     case "codex":
       return {
         command: options.binary ?? "codex",
@@ -754,17 +774,34 @@ export const makeTerminalAgentDispatch = (
 
   const runAuxiliary: AgentDispatchShape["runAuxiliary"] = (input) => {
     const routed = routeOptions(options, input.selection);
-    if (routed.harness !== "prime") return Effect.succeed({ output: "", succeeded: false });
+    if (routed.harness !== "prime" && routed.harness !== "claude" && routed.harness !== "ccx") {
+      return Effect.fail(
+        new DispatchError({
+          operation: "runAuxiliary",
+          detail: `${routed.harness} does not support ${input.purpose}`,
+        }),
+      );
+    }
     return Effect.tryPromise({
       try: async () => {
         const role: PrimeRole = input.purpose === "epic-note-fold" ? "fold" : "inspector";
-        const call = primeInvocation({
-          options: routed.options,
-          cwd: input.cwd,
-          prompt: input.prompt,
-          selection: input.selection,
-          inspector: role === "inspector",
-        });
+        const call =
+          routed.harness === "prime"
+            ? primeInvocation({
+                options: routed.options,
+                cwd: input.cwd,
+                prompt: input.prompt,
+                selection: input.selection,
+                inspector: role === "inspector",
+              })
+            : claudeInvocation({
+                options: routed.options,
+                prompt: input.prompt,
+                selection: input.selection,
+                sessionId: null,
+                persistSession: false,
+                inspector: role === "inspector",
+              });
         const scoped =
           options.workerScope === undefined
             ? call
@@ -772,13 +809,17 @@ export const makeTerminalAgentDispatch = (
         const max = routed.options.maxArtifactBytes ?? 1024 * 1024;
         let chunks = "";
         let parseBuffer = "";
-        let primeFinalText: string | null = null;
+        let streamFinalText: string | null = null;
+        let streamProviderError: string | null = null;
         let timedOut = false;
         let spawnError: string | null = null;
         let timeoutKillTimer: NodeJS.Timeout | undefined;
         const child = NodeChildProcess.spawn(scoped.command, scoped.args, {
           cwd: input.cwd,
-          env: primeRoleEnvironment(routed.options.environment, role),
+          env:
+            routed.harness === "prime"
+              ? primeRoleEnvironment(routed.options.environment, role)
+              : { ...process.env, ...routed.options.environment },
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],
         });
@@ -796,7 +837,14 @@ export const makeTerminalAgentDispatch = (
           }
           for (const line of lines) {
             const item = record(line);
-            if (item !== null) primeFinalText = primeAssistantText(item) ?? primeFinalText;
+            if (item === null) continue;
+            if (routed.harness === "prime") {
+              streamFinalText = primeAssistantText(item) ?? streamFinalText;
+            } else {
+              const parsed = parseTerminalArtifact(routed.harness, line);
+              streamFinalText = parsed.finalText ?? streamFinalText;
+              streamProviderError = parsed.providerError ?? streamProviderError;
+            }
           }
           if (Buffer.byteLength(chunks) > max * 2) {
             chunks = Buffer.from(chunks).subarray(-max).toString();
@@ -837,10 +885,17 @@ export const makeTerminalAgentDispatch = (
               );
             }
             const bounded = Buffer.from(chunks).subarray(-max).toString();
-            const parsed = parseTerminalArtifact("prime", bounded);
+            const parsed = parseTerminalArtifact(routed.harness, bounded);
+            const providerError =
+              routed.harness === "prime" ? null : (streamProviderError ?? parsed.providerError);
             resolve({
-              output: primeFinalText ?? parsed.finalText ?? "",
-              succeeded: !timedOut && signal === null && code === 0 && spawnError === null,
+              output: streamFinalText ?? parsed.finalText ?? "",
+              succeeded:
+                !timedOut &&
+                signal === null &&
+                code === 0 &&
+                spawnError === null &&
+                providerError === null,
             });
           });
         });
