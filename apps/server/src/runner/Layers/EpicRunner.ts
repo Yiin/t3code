@@ -79,6 +79,7 @@ import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { EpicRunner, type EpicRunnerShape } from "../Services/EpicRunner.ts";
 import { makeEpicRunnerLaunch } from "./EpicRunnerLaunch.ts";
 import { makeEpicRunnerLifecycle } from "./EpicRunnerLifecycle.ts";
+import { makeServerWorkerEvidence } from "./EpicRunnerWorkerEvidence.ts";
 import {
   makeAbandonRunningIterations,
   makeEpicRunReadModel,
@@ -234,6 +235,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       providerInventory: Option.isNone(providerRegistry)
         ? null
         : { getProviders: providerRegistry.value.getProviders },
+      workerEvidence: makeServerWorkerEvidence({ workerScopeRegistry, processRunner }),
     };
     const readOrientation = makeReadOrientation({ fileSystem, path });
     const abandonRunningIterations = makeAbandonRunningIterations({

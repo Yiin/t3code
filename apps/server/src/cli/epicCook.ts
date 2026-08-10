@@ -553,6 +553,14 @@ export const cookCommand = Command.make("cook", {
               }),
               vcs: makeProcessPoolVcs(runner),
               providerInventory: terminalProviders.inventory,
+              /**
+               * Liveness supervision is server-only for now. The terminal
+               * dispatch adapter owns a real worker pid and its own kill path
+               * (`TerminalAgentDispatch.ts`), but its worker key is an
+               * artifact path, not a scope binding, so it needs its own
+               * evidence adapter rather than the cgroup one.
+               */
+              workerEvidence: null,
             };
             // The terminal seed mirrors the server layer's defaults
             // (`EpicRunner.ts`); a persisted non-default run config replaces

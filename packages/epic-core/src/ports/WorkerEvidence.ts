@@ -24,26 +24,52 @@ export class WorkerEvidenceError extends Schema.TaggedErrorClass<WorkerEvidenceE
   },
 ) {}
 
+/**
+ * Everything the dispatching loop knows about a live worker.
+ *
+ * Passed on every call rather than registered once, so an adapter needs no
+ * per-worker state and cannot outlive the run that dispatched the worker.
+ */
+export interface WorkerRef {
+  /** The loop's key for this worker. The server runner uses its thread id. */
+  readonly worker: string;
+  /**
+   * The checkout the worker's commits land in, or `null` when it has none.
+   * Without it the repository probe has nowhere to run and reports its
+   * timeout marker, which never counts as progress.
+   */
+  readonly repositoryPath: string | null;
+}
+
 export interface WorkerEvidenceShape {
+  /**
+   * Whether this harness can launch the locked-down inspector at all.
+   *
+   * Feeds `WorkerLivenessConfig.inspectorSupported`. Codex answers false: it
+   * cannot enforce the no-tool contract, so the machine records an uncertain
+   * reason instead of launching (run-legacy.sh:1427-1430). The adapter that
+   * would run the inspector is the only honest source for this.
+   */
+  readonly inspectorSupported: boolean;
   /**
    * One tick of activity signals. `outputBytes` is the cumulative counter
    * that survives tail compaction (run-legacy.sh:946-949); `cpuUsec` and
    * `ioBytes` come from cgroup v2 cpu.stat/io.stat or /proc (run-legacy.sh:1195-1222).
    */
   readonly sampleSignals: (
-    worker: string,
+    ref: WorkerRef,
   ) => Effect.Effect<WorkerSignalSample, WorkerEvidenceError>;
   /**
    * The bounded repository probe: git status plus diff checksum plus HEAD,
    * folded to one checksum line. Any timeout yields the literal
    * `hash=probe-timeout` (run-legacy.sh:1224-1240).
    */
-  readonly probeRepository: (worker: string) => Effect.Effect<string, WorkerEvidenceError>;
+  readonly probeRepository: (ref: WorkerRef) => Effect.Effect<string, WorkerEvidenceError>;
   /**
    * sha256 of the process comm histogram with sleep and timeout filtered
    * out, or `unavailable` when no process is live (run-legacy.sh:1302-1315).
    */
-  readonly processFingerprint: (worker: string) => Effect.Effect<string, WorkerEvidenceError>;
+  readonly processFingerprint: (ref: WorkerRef) => Effect.Effect<string, WorkerEvidenceError>;
   /** True while a provider fallback is pending; inspections pause (run-legacy.sh:1790). */
   readonly providerFallbackPending: Effect.Effect<boolean, WorkerEvidenceError>;
   /**
@@ -51,15 +77,18 @@ export interface WorkerEvidenceShape {
    * structural evidence — never raw worker text, argv, environment, URLs or
    * file contents (run-legacy.sh:1321-1354). The agent runs with tools denied
    * (run-legacy.sh:1394-1416).
+   *
+   * Must return once the inspector is running, not once it has finished:
+   * `inspectorStatus` reports its progress and `stopInspector` ends it.
    */
   readonly launchInspector: (
-    worker: string,
+    ref: WorkerRef,
     input: { readonly timeoutSeconds: number },
   ) => Effect.Effect<void, WorkerEvidenceError>;
   /** Inspector lifecycle state for the current tick. */
   readonly inspectorStatus: (
-    worker: string,
+    ref: WorkerRef,
   ) => Effect.Effect<InspectorRunEvidence, WorkerEvidenceError>;
   /** Kill an inspector that exceeded its timeout (run-legacy.sh:1574-1587). */
-  readonly stopInspector: (worker: string) => Effect.Effect<void, WorkerEvidenceError>;
+  readonly stopInspector: (ref: WorkerRef) => Effect.Effect<void, WorkerEvidenceError>;
 }

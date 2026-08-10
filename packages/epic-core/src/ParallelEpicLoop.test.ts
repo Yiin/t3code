@@ -35,6 +35,8 @@ import type { PoolPolicy } from "./runPolicy.ts";
 import type { IterationHandle } from "./ports/AgentDispatch.ts";
 import type { BacklogIssue } from "./ports/Backlog.ts";
 import type { RunEvent } from "./ports/RunEvents.ts";
+import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
+import type { SupervisionClock } from "./workerSupervision.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
 import type { IterationWorkspace, WorkspaceShape } from "./ports/Workspace.ts";
 
@@ -145,6 +147,10 @@ const fixture = (input: {
   readonly releaseFails?: boolean;
   /** Make every merge drain defer, as an absent or stale merge slot does. */
   readonly drainDefersForever?: boolean;
+  /** Supply the liveness evidence port; absent means supervision is off. */
+  readonly workerEvidence?: WorkerEvidenceShape;
+  /** Drive the supervision cadence off a fake clock. */
+  readonly supervisionClock?: SupervisionClock;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -489,6 +495,8 @@ const fixture = (input: {
     vcs,
     providerInventory:
       input.providers === undefined ? null : { getProviders: Effect.succeed(input.providers) },
+    workerEvidence: input.workerEvidence ?? null,
+    supervisionClock: input.supervisionClock,
   };
 
   const run = Effect.gen(function* () {
@@ -787,6 +795,110 @@ it.live("interrupts a timed-out turn and classifies it as an infra timeout", () 
     );
     assert.equal(test.iterations[0]?.turnStatus, "failed");
     assert.equal(test.iterations[0]?.failureReason, "infra:timeout");
+  }),
+);
+
+/**
+ * A worker that is alive, inside its iteration timeout, and doing nothing.
+ *
+ * This is the 2026-08-09 shape: `awaitSettled` never returns, `HEAD` never
+ * moves, and no wall-clock cap is armed. Before supervision was wired the
+ * iteration held its pool slot until the run died — 3h16m in the incident.
+ */
+const wedgedWorkerEvidence = (): WorkerEvidenceShape => {
+  const condemned = JSON.stringify({
+    decision: "stop",
+    confidence: "high",
+    rationale: "every process is asleep and the repository has not changed",
+  });
+  return {
+    inspectorSupported: true,
+    sampleSignals: () => Effect.succeed({ isActive: true, outputBytes: 0, cpuUsec: 0, ioBytes: 0 }),
+    probeRepository: () => Effect.succeed("deadbeef hash=stable"),
+    processFingerprint: () => Effect.succeed("fingerprint-a"),
+    providerFallbackPending: Effect.succeed(false),
+    launchInspector: () => Effect.void,
+    inspectorStatus: () =>
+      Effect.succeed({
+        _tag: "finished",
+        rc: 0,
+        result: { text: condemned, byteSize: condemned.length, overflowed: false },
+      }),
+    stopInspector: () => Effect.void,
+  };
+};
+
+const instantSupervisionClock = (): SupervisionClock => {
+  let now = 0;
+  return {
+    nowSeconds: Effect.sync(() => now),
+    sleepSeconds: (seconds) =>
+      Effect.sync(() => {
+        now += seconds;
+      }),
+  };
+};
+
+it.live("stops a wedged worker that would otherwise never settle", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ neverSettles: true }],
+      // No wall-clock cap: only liveness supervision can end this iteration.
+      policy: policy({ iterationTimeoutMs: null, infraFailureBudget: 1 }),
+      runConfig: config({
+        supervision: {
+          ...DEFAULT_EPIC_RUN_CONFIG.supervision,
+          idleThresholdSeconds: 30,
+          inspectMinDelaySeconds: 5,
+          inspectRetryDelaySeconds: 10,
+        },
+      }),
+      workerEvidence: wedgedWorkerEvidence(),
+      supervisionClock: instantSupervisionClock(),
+    });
+    yield* test.run;
+
+    assert.equal(test.iterations[0]?.turnStatus, "failed");
+    assert.equal(test.iterations[0]?.failureReason, "infra:worker-liveness-stop");
+    assert.include(test.iterations[0]?.summary ?? "", "worker liveness supervision stopped");
+    // Interrupt first, then the forced stop, exactly as the timeout path does.
+    assert.equal(test.interrupts(), 1);
+    assert.deepEqual(test.stopForcedCalls, [
+      epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+    ]);
+    assert.isBelow(
+      test.ordering.indexOf("handle:interrupt"),
+      test.ordering.indexOf("dispatch:stopForced"),
+    );
+    // Every stage the machine passed through is on the run's event stream.
+    const stages = test.events
+      .filter((event) => event.type === "worker-liveness")
+      .map((event) => event.stage);
+    assert.deepEqual(stages, [
+      "worker-idle",
+      "inspection-started",
+      "inspection-stop-pending",
+      "worker-idle",
+      "inspection-started",
+      "inspection-stop",
+    ]);
+  }),
+);
+
+it.live("leaves a healthy worker alone when supervision is wired", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ commit: true, close: true, comment: true }],
+      workerEvidence: wedgedWorkerEvidence(),
+      supervisionClock: instantSupervisionClock(),
+    });
+    yield* test.run;
+
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "worker-liveness"),
+      [],
+    );
   }),
 );
 

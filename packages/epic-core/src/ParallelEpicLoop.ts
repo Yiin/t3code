@@ -42,9 +42,16 @@ import type { PoolDispatchShape } from "./ports/PoolDispatch.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEvent } from "./ports/RunEvents.ts";
 import type { RunJournalShape } from "./ports/RunJournal.ts";
+import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { IterationWorkspace, PoolRunContext, WorkspaceShape } from "./ports/Workspace.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
 import { resolveEpicProviderFallback } from "./providerFallback.ts";
+import {
+  makeWorkerLivenessConfig,
+  superviseWorker,
+  workerLivenessEventDetail,
+  type SupervisionClock,
+} from "./workerSupervision.ts";
 
 /** The per-run resolved timing the dispatch adapter needs. */
 export type PoolTimings = Pick<
@@ -183,7 +190,19 @@ type RunIterationResult =
 type IterationSettleResult =
   | { readonly _tag: "settled"; readonly settle: IterationSettle }
   | { readonly _tag: "timeout" }
+  /** The liveness machine confirmed the worker was dead before it settled. */
+  | { readonly _tag: "supervision-stopped"; readonly reason: string }
   | { readonly _tag: "dispatch-failed"; readonly detail: string };
+
+/**
+ * The persisted failure reason for a supervision stop.
+ *
+ * Distinct from `timeout` on purpose: a wedged worker stopped after 30 idle
+ * minutes and a worker that ran past its wall-clock cap are different faults
+ * with different fixes, and reading them as one hid the 2026-08-09 incident
+ * for 3h16m.
+ */
+const WORKER_LIVENESS_STOP_REASON = "worker-liveness-stop";
 
 /**
  * What the loop does when it reaches an iteration boundary.
@@ -267,6 +286,18 @@ export interface ParallelEpicLoopPorts {
   readonly vcs: PoolVcsShape;
   /** `null` disables provider fallback, mirroring an absent registry. */
   readonly providerInventory: ProviderInventoryShape | null;
+  /**
+   * `null` disables per-worker liveness supervision, mirroring a host with no
+   * sampling target. A run with no evidence port behaves exactly as it did
+   * before supervision was wired: only `iterationTimeoutMs` bounds a worker.
+   */
+  readonly workerEvidence: WorkerEvidenceShape | null;
+  /**
+   * Overrides the clock the supervision cadence runs on. Absent means the
+   * host clock; tests inject a fake so a 30-minute idle window costs no wall
+   * time.
+   */
+  readonly supervisionClock?: SupervisionClock | undefined;
 }
 
 export const assembleIterationPrompt = (input: {
@@ -663,7 +694,58 @@ export const runParallelEpicLoop = (
                   Option.isNone(result) ? { _tag: "timeout" } : result.value,
               ),
             );
-      const settleResult: IterationSettleResult = yield* boundedIteration.pipe(
+      /**
+       * Per-worker liveness supervision, raced against the worker's own
+       * settlement so a wedged worker ends its iteration instead of holding a
+       * pool slot until the run dies.
+       *
+       * `iterationTimeoutMs` only catches a worker that runs too *long*. The
+       * 2026-08-09 incident was a worker that stopped running at all: 0.8s of
+       * CPU across 12 minutes, every process asleep, held for 3h16m. The
+       * liveness machine reads exactly those deltas.
+       *
+       * Supervision never completes on a healthy worker, so `raceFirst`
+       * interrupts it as soon as the turn settles.
+       */
+      const supervised: Effect.Effect<
+        IterationSettleResult,
+        EpicRunnerDispatchError | DispatchError
+      > =
+        ports.workerEvidence === null || dispatched.handle === null
+          ? boundedIteration
+          : Effect.raceFirst(
+              boundedIteration,
+              superviseWorker({
+                ref: { worker: dispatched.handle.ref, repositoryPath: workspace.cwd },
+                child: issueId,
+                config: makeWorkerLivenessConfig({
+                  supervision: dispatched.run.config.supervision,
+                  inspectorSupported: ports.workerEvidence.inspectorSupported,
+                }),
+                evidence: ports.workerEvidence,
+                clock: ports.supervisionClock,
+                emit: (event) =>
+                  ports.events
+                    .publish({
+                      type: "worker-liveness",
+                      runId,
+                      iterationIndex,
+                      issueId,
+                      stage: event.type,
+                      detail: workerLivenessEventDetail(event),
+                    })
+                    .pipe(Effect.ignore),
+              }).pipe(
+                Effect.map(
+                  (verdict): IterationSettleResult => ({
+                    _tag: "supervision-stopped",
+                    reason: verdict.reason,
+                  }),
+                ),
+              ),
+            );
+
+      const settleResult: IterationSettleResult = yield* supervised.pipe(
         Effect.catch((error) =>
           Effect.succeed<IterationSettleResult>({
             _tag: "dispatch-failed",
@@ -672,8 +754,13 @@ export const runParallelEpicLoop = (
         ),
       );
 
+      const supervisionStop =
+        settleResult._tag === "supervision-stopped" ? settleResult.reason : null;
       const timedOut = settleResult._tag === "timeout";
-      if (timedOut && dispatched.handle !== null) {
+      // Both early ends interrupt the turn before it is classified. A worker
+      // the machine confirmed dead is treated like a timed-out one: interrupt
+      // first, then the forced stop further down.
+      if ((timedOut || supervisionStop !== null) && dispatched.handle !== null) {
         yield* dispatched.handle.interrupt.pipe(Effect.ignore);
       }
 
@@ -684,46 +771,56 @@ export const runParallelEpicLoop = (
               detail: settleResult.detail,
               report: null,
             }
-          : yield* Effect.gen(function* () {
-              const committed = yield* iterationCommitted({
-                workspace,
-                headBefore,
-                branchBase,
-                siblingHeadsBefore,
+          : supervisionStop !== null
+            ? {
+                // `timeout` is the right budget: the worker never delivered
+                // and the fault is infrastructure, not the agent. The reason
+                // below keeps it separable from a wall-clock timeout.
+                kind: "timeout",
+                detail: `worker liveness supervision stopped this worker: ${supervisionStop}`,
+                report: null,
+                failureReason: WORKER_LIVENESS_STOP_REASON,
+              }
+            : yield* Effect.gen(function* () {
+                const committed = yield* iterationCommitted({
+                  workspace,
+                  headBefore,
+                  branchBase,
+                  siblingHeadsBefore,
+                });
+                // A timed-out turn was just interrupted and may still be
+                // streaming, so there is nothing to wait for.
+                const final: FinalMessageRead =
+                  timedOut || dispatched.handle === null
+                    ? {
+                        text: null,
+                        streaming: false,
+                        waitExhausted: false,
+                      }
+                    : yield* dispatched.handle.finalMessage.pipe(
+                        Effect.orElseSucceed(
+                          (): FinalMessageRead => ({
+                            text: null,
+                            streaming: false,
+                            waitExhausted: false,
+                          }),
+                        ),
+                      );
+                const settle = settleResult._tag === "settled" ? settleResult.settle : null;
+                return classifyIteration({
+                  turnState: timedOut ? null : (final.turnState ?? settle?.turnState ?? null),
+                  finalMessage:
+                    final.text === null ? null : { text: final.text, streaming: final.streaming },
+                  finalMessageWaitExhausted: final.waitExhausted,
+                  sessionLastError: timedOut
+                    ? null
+                    : (final.sessionLastError ?? settle?.providerError ?? null),
+                  assistantProviderErrorsTrusted:
+                    dispatched.handle?.capabilities.providerErrors === "session-and-assistant",
+                  committed,
+                  timedOut,
+                });
               });
-              // A timed-out turn was just interrupted and may still be
-              // streaming, so there is nothing to wait for.
-              const final: FinalMessageRead =
-                timedOut || dispatched.handle === null
-                  ? {
-                      text: null,
-                      streaming: false,
-                      waitExhausted: false,
-                    }
-                  : yield* dispatched.handle.finalMessage.pipe(
-                      Effect.orElseSucceed(
-                        (): FinalMessageRead => ({
-                          text: null,
-                          streaming: false,
-                          waitExhausted: false,
-                        }),
-                      ),
-                    );
-              const settle = settleResult._tag === "settled" ? settleResult.settle : null;
-              return classifyIteration({
-                turnState: timedOut ? null : (final.turnState ?? settle?.turnState ?? null),
-                finalMessage:
-                  final.text === null ? null : { text: final.text, streaming: final.streaming },
-                finalMessageWaitExhausted: final.waitExhausted,
-                sessionLastError: timedOut
-                  ? null
-                  : (final.sessionLastError ?? settle?.providerError ?? null),
-                assistantProviderErrorsTrusted:
-                  dispatched.handle?.capabilities.providerErrors === "session-and-assistant",
-                committed,
-                timedOut,
-              });
-            });
 
       const finishedAt = yield* nowIso;
 

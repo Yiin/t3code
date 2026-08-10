@@ -12,6 +12,17 @@ import { PersistedEpicRun, PersistedEpicRunIteration } from "./RunJournal.ts";
 
 export const CHILD_CLAIM_RELEASED_REASON = "retry budget exhausted; child reopened" as const;
 
+/** Mirrors `WorkerLivenessEvent["type"]` in `../workerLiveness.ts`. */
+export const WorkerLivenessStage = Schema.Literals([
+  "worker-idle",
+  "inspection-started",
+  "inspection-continue",
+  "inspection-uncertain",
+  "inspection-stop-pending",
+  "inspection-stop",
+]);
+export type WorkerLivenessStage = typeof WorkerLivenessStage.Type;
+
 export const RunEvent = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("run-state-changed"),
@@ -32,6 +43,22 @@ export const RunEvent = Schema.Union([
     runId: EpicRunId,
     iterationIndex: NonNegativeInt,
     reason: Schema.String,
+  }),
+  /**
+   * One decision of the per-worker liveness machine (`workerLiveness.ts`).
+   *
+   * Every stage is surfaced, not just the stop: an inspection that keeps a
+   * worker alive is the evidence that supervision is running and chose not to
+   * act, which is the only way to tell "supervised and healthy" from "not
+   * supervised at all".
+   */
+  Schema.Struct({
+    type: Schema.Literal("worker-liveness"),
+    runId: EpicRunId,
+    iterationIndex: NonNegativeInt,
+    issueId: Schema.String,
+    stage: WorkerLivenessStage,
+    detail: Schema.String,
   }),
   Schema.Struct({
     type: Schema.Literal("child-claim-released"),

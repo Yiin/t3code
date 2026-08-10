@@ -91,6 +91,14 @@
       "types": "./src/workerScope.ts",
       "import": "./src/workerScope.ts"
     },
+    "./workerSupervision": {
+      "types": "./src/workerSupervision.ts",
+      "import": "./src/workerSupervision.ts"
+    },
+    "./adapters/CgroupWorkerEvidence": {
+      "types": "./src/adapters/CgroupWorkerEvidence.ts",
+      "import": "./src/adapters/CgroupWorkerEvidence.ts"
+    },
     "./workspaceNodeModules": {
       "types": "./src/workspaceNodeModules.ts",
       "import": "./src/workspaceNodeModules.ts"
