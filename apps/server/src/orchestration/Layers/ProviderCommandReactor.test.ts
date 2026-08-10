@@ -156,6 +156,8 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  const HARNESS_WORKTREE_PATH = "/tmp/provider-project-worktree";
+
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
@@ -169,6 +171,9 @@ describe("ProviderCommandReactor", () => {
     readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
     readonly useTestClock?: boolean;
   }) {
+    // The reactor drops a thread's `worktreePath` when the directory is gone,
+    // so a worktree a test attaches has to exist on disk to stay attached.
+    NodeFS.mkdirSync(HARNESS_WORKTREE_PATH, { recursive: true });
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
       input?.baseDir ?? NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-"));
@@ -1652,7 +1657,7 @@ describe("ProviderCommandReactor", () => {
       commandId: CommandId.make("cmd-thread-branch"),
       threadId: ThreadId.make("thread-1"),
       branch: "t3code/1234abcd",
-      worktreePath: "/tmp/provider-project-worktree",
+      worktreePath: HARNESS_WORKTREE_PATH,
     });
 
     harness.generateBranchName.mockImplementation((input: unknown) =>
@@ -2164,7 +2169,7 @@ describe("ProviderCommandReactor", () => {
       type: "thread.meta.update",
       commandId: CommandId.make("cmd-thread-worktree-change"),
       threadId: ThreadId.make("thread-1"),
-      worktreePath: "/tmp/provider-project-worktree",
+      worktreePath: HARNESS_WORKTREE_PATH,
     });
 
     await dispatch(harness.engine, {
@@ -2187,13 +2192,58 @@ describe("ProviderCommandReactor", () => {
     expect(harness.stopSession.mock.calls.length).toBe(0);
     expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      cwd: "/tmp/provider-project-worktree",
+      cwd: HARNESS_WORKTREE_PATH,
       resumeCursor: { opaque: "resume-1" },
       modelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",
       },
       runtimeMode: "approval-required",
+    });
+  });
+
+  it("falls back to the project root and clears a worktree path that is gone", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    // An epic worker's worktree, deleted by the runner after the child landed.
+    const deletedWorktree = "/tmp/provider-project-worktree-deleted";
+    NodeFS.rmSync(deletedWorktree, { recursive: true, force: true });
+
+    await dispatch(harness.engine, {
+      type: "thread.meta.update",
+      commandId: CommandId.make("cmd-thread-worktree-deleted"),
+      threadId: ThreadId.make("thread-1"),
+      worktreePath: deletedWorktree,
+    });
+
+    await dispatch(harness.engine, {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-worktree-deleted"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-worktree-deleted"),
+        role: "user",
+        text: "hello?",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    // The provider is started in the project root, not the deleted directory.
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+
+    // And the dead path is dropped, so checkpointing and vcs status stop
+    // resolving to it too.
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return thread?.worktreePath === null;
     });
   });
 

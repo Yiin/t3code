@@ -31,6 +31,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -235,6 +236,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
+  const fileSystem = yield* FileSystem.FileSystem;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
@@ -457,6 +459,68 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
+  /**
+   * The cwd for a thread's provider session, healing a worktree that is gone.
+   *
+   * A thread outlives the directory it was created in: an epic worker gets a
+   * throwaway worktree that the runner deletes once the child lands, but the
+   * thread keeps naming it in `worktreePath`. Every later turn then started
+   * the provider in a directory that no longer exists, and because this path
+   * supplies `cwd` explicitly it beat every downstream fallback — so the
+   * thread failed the same way forever.
+   *
+   * Clearing the stale path once fixes each reader of it, not just this one:
+   * checkpointing and the vcs status broadcaster resolve the same field.
+   */
+  const resolveSessionCwdHealingStaleWorktree = Effect.fnUntraced(function* (input: {
+    readonly thread: {
+      readonly id: ThreadId;
+      readonly projectId: ProjectId;
+      readonly worktreePath: string | null;
+    };
+    readonly project: { readonly id: ProjectId; readonly workspaceRoot: string } | undefined;
+  }) {
+    const projects = input.project ? [input.project] : [];
+    const worktreePath = input.thread.worktreePath;
+    if (worktreePath === null) {
+      return resolveThreadWorkspaceCwd({ thread: input.thread, projects });
+    }
+    const worktreeExists = yield* fileSystem
+      .exists(worktreePath)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (worktreeExists) {
+      return resolveThreadWorkspaceCwd({ thread: input.thread, projects });
+    }
+    // Only drop the path once a replacement exists. Clearing it with no
+    // project workspace to fall back to would trade a dead cwd for none.
+    const workspaceRoot = input.project?.workspaceRoot;
+    if (workspaceRoot === undefined) {
+      return resolveThreadWorkspaceCwd({ thread: input.thread, projects });
+    }
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.meta.update",
+        commandId: yield* serverCommandId("worktree-path-heal"),
+        threadId: input.thread.id,
+        worktreePath: null,
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider command reactor failed to clear a stale worktree path", {
+            threadId: input.thread.id,
+            worktreePath,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+    yield* Effect.logWarning("thread.worktree-path-healed", {
+      threadId: input.thread.id,
+      missingWorktreePath: worktreePath,
+      workspaceRoot,
+    });
+    return workspaceRoot;
+  });
+
   const rejectStartedThreadModelChangeIfRequired = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly currentModelSelection: ModelSelection;
@@ -623,9 +687,9 @@ const make = Effect.gen(function* () {
       }
     }
     const project = yield* resolveProject(thread.projectId);
-    const effectiveCwd = resolveThreadWorkspaceCwd({
+    const effectiveCwd = yield* resolveSessionCwdHealingStaleWorktree({
       thread,
-      projects: project ? [project] : [],
+      project,
     });
 
     const startProviderSession = (input?: {
