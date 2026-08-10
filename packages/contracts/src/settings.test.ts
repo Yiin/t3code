@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { EpicTierId } from "./epicRolePolicy.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -137,6 +138,106 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
         providerInstances: { "1bad": { driver: "codex" } },
       }),
     ).toThrow();
+  });
+});
+
+describe("ServerSettings.epicRolePolicy", () => {
+  it("defaults to empty tiers and role assignments", () => {
+    expect(DEFAULT_SERVER_SETTINGS.epicRolePolicy).toEqual({ tiers: {}, roles: {} });
+    expect(decodeServerSettings({}).epicRolePolicy).toEqual({ tiers: {}, roles: {} });
+  });
+
+  it("preserves ordered tier hops through decode, encode, and decode", () => {
+    const decoded = decodeServerSettings({
+      epicRolePolicy: {
+        tiers: {
+          primary: {
+            label: "Primary",
+            hops: [
+              { selection: { instanceId: "claude_work", model: "opus" } },
+              {
+                selection: { instanceId: "claude_personal", model: "sonnet" },
+                skipAboveUtilization: 80,
+              },
+              { selection: { instanceId: "codex", model: "gpt-5.6" } },
+            ],
+          },
+          background: {
+            hops: [{ selection: { instanceId: "claude_personal", model: "haiku" } }],
+          },
+        },
+        roles: {
+          "iteration-worker": "primary",
+          "idle-inspection": "background",
+        },
+      },
+    });
+    const roundTripped = decodeServerSettings(encodeServerSettings(decoded));
+    const primaryId = EpicTierId.make("primary");
+
+    expect(roundTripped.epicRolePolicy.tiers[primaryId]?.hops).toHaveLength(3);
+    expect(
+      roundTripped.epicRolePolicy.tiers[primaryId]?.hops.map((hop) => hop.selection.model),
+    ).toEqual(["opus", "sonnet", "gpt-5.6"]);
+    expect(roundTripped.epicRolePolicy.roles).toEqual({
+      "iteration-worker": "primary",
+      "idle-inspection": "background",
+    });
+  });
+
+  it("migrates a legacy provider key through ModelSelection", () => {
+    const decoded = decodeServerSettings({
+      epicRolePolicy: {
+        tiers: {
+          primary: {
+            hops: [{ selection: { provider: "claudeAgent", model: "sonnet" } }],
+          },
+        },
+      },
+    });
+
+    expect(
+      decoded.epicRolePolicy.tiers[EpicTierId.make("primary")]?.hops[0]?.selection.instanceId,
+    ).toBe("claudeAgent");
+  });
+
+  it("rejects invalid tier ids and utilization ceilings", () => {
+    expect(() =>
+      decodeServerSettings({
+        epicRolePolicy: { tiers: { "1bad": { hops: [] } } },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettings({
+        epicRolePolicy: {
+          tiers: {
+            primary: {
+              hops: [
+                {
+                  selection: { instanceId: "claudeAgent", model: "sonnet" },
+                  skipAboveUtilization: 101,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("decodes patches with and without the whole policy value", () => {
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("epicRolePolicy");
+    expect(
+      decodeServerSettingsPatch({
+        epicRolePolicy: {
+          tiers: { primary: { hops: [] } },
+          roles: { "merge-fix": "primary" },
+        },
+      }).epicRolePolicy,
+    ).toEqual({
+      tiers: { primary: { hops: [] } },
+      roles: { "merge-fix": "primary" },
+    });
   });
 });
 

@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  EpicTierId,
   ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -193,5 +194,47 @@ describe("serverSettings helpers", () => {
       enabled: true,
       config: { homePath: "~/.codex" },
     });
+  });
+
+  it("replaces epic role policies so omitted tiers and hops are cleared", () => {
+    const primaryId = EpicTierId.make("primary");
+    const backgroundId = EpicTierId.make("background");
+    const claudeId = ProviderInstanceId.make("claudeAgent");
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      epicRolePolicy: {
+        tiers: {
+          [primaryId]: {
+            hops: [
+              { selection: { instanceId: claudeId, model: "opus" } },
+              { selection: { instanceId: claudeId, model: "sonnet" } },
+              { selection: { instanceId: claudeId, model: "haiku" } },
+            ],
+          },
+          [backgroundId]: {
+            hops: [{ selection: { instanceId: claudeId, model: "haiku" } }],
+          },
+        },
+        roles: {
+          "iteration-worker": primaryId,
+          "idle-inspection": backgroundId,
+        },
+      },
+    };
+
+    const result = applyServerSettingsPatch(current, {
+      epicRolePolicy: {
+        tiers: {
+          [primaryId]: {
+            hops: [{ selection: { instanceId: claudeId, model: "opus" } }],
+          },
+        },
+        roles: { "iteration-worker": primaryId },
+      },
+    }).epicRolePolicy;
+
+    expect(Object.keys(result.tiers)).toEqual(["primary"]);
+    expect(result.tiers[primaryId]?.hops).toHaveLength(1);
+    expect(result.roles).toEqual({ "iteration-worker": primaryId });
   });
 });
