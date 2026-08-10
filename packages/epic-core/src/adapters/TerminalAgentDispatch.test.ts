@@ -455,6 +455,79 @@ const primeEvent = JSON.stringify({
   message: { role: "assistant", content: [{ type: "text", text: "RALPH_DONE" }] },
 });
 
+const startClaude = (input: {
+  readonly model?: string;
+  readonly useHarnessDefaultModel?: boolean;
+}) =>
+  Effect.gen(function* () {
+    const fixture = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        makeWorker(`printf '%s\\n' "$@" > "$CAPTURE_DIR/args"
+printf '%s\\n' '{"type":"result","result":"RALPH_DONE","session_id":"s"}'`),
+      ),
+      ({ directory }) =>
+        Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+    );
+    const dispatch = makeTerminalAgentDispatch({
+      harness: "claude",
+      artifactsDirectory: fixture.directory,
+      binary: fixture.worker,
+      environment: { CAPTURE_DIR: fixture.directory },
+      ...(input.useHarnessDefaultModel === undefined
+        ? {}
+        : { useHarnessDefaultModel: input.useHarnessDefaultModel }),
+    });
+    const handle = yield* dispatch.startIteration({
+      runId: "claude",
+      iterationIndex: 0,
+      cwd: fixture.directory,
+      worktreePath: null,
+      prompt: "cook child",
+      selection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: input.model ?? "claude-opus-4-6",
+      },
+    });
+    yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+    return { ...fixture, handle };
+  });
+
+it.live("passes the configured Claude model to the harness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({});
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").trim().split("\n");
+      const modelFlagIndex = args.indexOf("--model");
+      assert.isAtLeast(modelFlagIndex, 0);
+      assert.equal(args[modelFlagIndex + 1], "claude-opus-4-6");
+    }),
+  ),
+);
+
+it.live("omits the Claude model when the harness default is selected", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({ useHarnessDefaultModel: true });
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").split("\n");
+      assert.notInclude(args, "--model");
+      assert.notInclude(args, "sonnet");
+    }),
+  ),
+);
+
+it.live("omits the Claude model when no model was configured", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({ model: "" });
+      yield* handle.awaitSettled;
+      const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").split("\n");
+      assert.notInclude(args, "--model");
+    }),
+  ),
+);
+
 const startPrime = (input: {
   readonly useHarnessDefaultModel?: boolean;
   readonly worktreePath?: string | null;
