@@ -18,6 +18,7 @@ import { epicRunsHttpApiLayer } from "./runner/http.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
+import { ProviderUsageLedgerStoreLive } from "./persistence/Layers/ProviderUsageLedger.ts";
 import { EpicRunnerLive } from "./runner/Layers/EpicRunner.ts";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -29,6 +30,7 @@ import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { EpicWorkerScopeRegistry } from "./provider/workerScope.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
+import { ProviderUsagePollerLive } from "./provider/Layers/ProviderUsagePoller.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -357,9 +359,15 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 
+const ProviderUsagePollerLayerLive = ProviderUsagePollerLive.pipe(
+  Layer.provide(ProviderUsageLedgerStoreLive),
+  Layer.provide(ProviderInstanceRegistryLayerLive),
+);
+
 const ProviderRuntimeLayerLive = Layer.mergeAll(
   ProviderSessionReaperLive,
   EpicRunnerLayerLive,
+  ProviderUsagePollerLayerLive,
 ).pipe(Layer.provideMerge(ProviderLayerLive), Layer.provideMerge(OrchestrationLayerLive));
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
