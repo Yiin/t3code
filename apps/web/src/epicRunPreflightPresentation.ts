@@ -24,6 +24,8 @@ export function epicRunPreflightBlockerText(blocker: EpicRunPreflightBlocker): s
       } behind; reconcile it before launching.`;
     case "sibling_invalid":
       return blocker.detail;
+    case "run_base_branch_checked_out":
+      return `${blocker.branch} is checked out here, and the run lands by updating that ref. Switch to another branch before launching.`;
   }
 }
 
@@ -39,6 +41,10 @@ export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): s
       return `${warning.key}: ${warning.message}`;
     case "untracked_files":
       return `The worktree has untracked files: ${warning.paths.join(", ")}`;
+    case "run_base_branch_stale":
+      return `${warning.branch} is ${String(warning.commitsBehind)} commit(s) behind the checked-out branch; a run reusing it starts fresh workers from old code.`;
+    case "tracked_changes_ignored":
+      return `The run excludes your uncommitted changes to: ${warning.paths.join(", ")}`;
   }
 }
 

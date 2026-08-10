@@ -108,7 +108,13 @@ export interface MergeQueueStoreShape {
 }
 
 export interface MergeGitShape {
-  readonly head: (cwd: string) => Effect.Effect<string, MergeQueuePortError>;
+  /**
+   * `git rev-parse <ref>`. `ref` defaults to `HEAD` — the branch actually
+   * checked out at `cwd` — which is exactly what a run sharing the operator's
+   * checkout needs. A run-owned base branch (t3code-5m4) is never checked out
+   * at `cwd`, so its callers pass the branch name explicitly instead.
+   */
+  readonly head: (cwd: string, ref?: string) => Effect.Effect<string, MergeQueuePortError>;
   readonly commitsAhead: (input: {
     readonly repositoryPath: string;
     readonly baseBranch: string;
@@ -123,9 +129,19 @@ export interface MergeGitShape {
     readonly message: string;
   }) => Effect.Effect<{ readonly merged: boolean; readonly output: string }, MergeQueuePortError>;
   readonly abortMerge: (cwd: string) => Effect.Effect<void, MergeQueuePortError>;
+  /**
+   * Advance the base branch to `ref`, fast-forward only.
+   *
+   * Without `branch`, this is `git merge --ff-only <ref>` at `cwd` — it
+   * assumes the base branch is the branch checked out there. With `branch`,
+   * it instead updates that ref directly (`git fetch . <ref>:<branch>`)
+   * without touching `cwd`'s working tree at all: the run-owned base branch
+   * case, where `cwd` still has the operator's own branch checked out.
+   */
   readonly fastForward: (input: {
     readonly cwd: string;
     readonly ref: string;
+    readonly branch?: string;
   }) => Effect.Effect<{ readonly landed: boolean; readonly output: string }, MergeQueuePortError>;
   readonly push: (input: {
     readonly cwd: string;

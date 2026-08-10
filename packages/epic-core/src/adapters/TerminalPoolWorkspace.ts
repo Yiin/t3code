@@ -26,9 +26,10 @@ import type {
   SiblingWorktree,
   WorkspaceShape,
 } from "../ports/Workspace.ts";
-import type { RunJournalShape } from "../ports/RunJournal.ts";
+import type { PersistedEpicRun, RunJournalShape } from "../ports/RunJournal.ts";
 import { integrationBranch as integrationBranchName, parseMergeFixTitle } from "../policy.ts";
 import type * as ProcessRunner from "../processRunner.ts";
+import { resolveRunBaseBranch } from "../runBaseBranch.ts";
 import {
   makeSiblingResolver,
   mirrorPath,
@@ -120,9 +121,13 @@ export const makeTerminalPoolWorkspace = (deps: {
       }),
     );
 
-  /** The repo's `HEAD`, or `null` when it cannot be read. */
-  const headCommit = (cwd: string) =>
-    git({ operation: "git.head", cwd, args: ["rev-parse", "--verify", "-q", "HEAD"] }).pipe(
+  /**
+   * The repo's `HEAD` (or `ref`, when given), or `null` when it cannot be
+   * read. Pass `ref` to resolve a branch that is not checked out at `cwd` —
+   * a run-owned base branch (t3code-5m4).
+   */
+  const headCommit = (cwd: string, ref?: string) =>
+    git({ operation: "git.head", cwd, args: ["rev-parse", "--verify", "-q", ref ?? "HEAD"] }).pipe(
       Effect.map((output) => {
         const sha = output.stdout.trim();
         return output.code === 0 && sha.length > 0 ? sha : null;
@@ -135,6 +140,26 @@ export const makeTerminalPoolWorkspace = (deps: {
       cwd,
       args: ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
     }).pipe(Effect.map((output) => output.code === 0));
+
+  /**
+   * The base branch a parallel run's worktrees start from: the operator's
+   * checked-out branch, or the run's own `epic/<epicId>/base`, created
+   * idempotently on first use and reused verbatim after (t3code-5m4).
+   */
+  const resolveBaseBranch = (run: PersistedEpicRun) =>
+    resolveRunBaseBranch(
+      {
+        currentBranch: readCurrentBranch,
+        branchExists,
+        createBranch: (cwd, branch, startPoint) =>
+          gitRequired({
+            operation: "git.run-base-branch-create",
+            cwd,
+            args: ["branch", branch, startPoint],
+          }).pipe(Effect.asVoid),
+      },
+      { cwd: run.cwd, epicId: run.epicId, runOwnedBaseBranch: run.config.vcs.runOwnedBaseBranch },
+    );
 
   /**
    * The server WorktreeProvisioner's branch rule: an existing branch is
@@ -316,8 +341,16 @@ export const makeTerminalPoolWorkspace = (deps: {
         return { entries: persisted.entries.map((entry) => ({ status: entry.status })) };
       }
 
-      const baseBranch = yield* readCurrentBranch(run.cwd);
-      const lastAcceptedHead = yield* headCommit(run.cwd);
+      const baseBranch = yield* resolveBaseBranch(run);
+      // A run-owned base branch (t3code-5m4) is never checked out at
+      // `run.cwd`, so seeding from `HEAD` there would read the operator's
+      // branch instead — reused verbatim by every later resume and fatal on
+      // the first drain once the two disagree. Read the resolved base branch
+      // itself so this agrees with what MergeQueue lands against.
+      const lastAcceptedHead = yield* headCommit(
+        run.cwd,
+        run.config.vcs.runOwnedBaseBranch ? baseBranch : undefined,
+      );
       if (lastAcceptedHead === null) {
         return yield* new EpicRunnerDispatchError({
           commandType: "git.integration-worktree",
@@ -479,7 +512,7 @@ export const makeTerminalPoolWorkspace = (deps: {
           });
         }
       }
-      const baseBranch = yield* readCurrentBranch(run.cwd);
+      const baseBranch = yield* resolveBaseBranch(run);
       const siblings = yield* runSiblings(
         run.runId,
         run.cwd,

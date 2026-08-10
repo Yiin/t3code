@@ -92,8 +92,8 @@ export const makeProcessMergeGit = (input: {
   });
 
   return {
-    head: (cwd) =>
-      requireSuccess({ operation: "head", cwd, args: ["rev-parse", "HEAD"] }).pipe(
+    head: (cwd, ref) =>
+      requireSuccess({ operation: "head", cwd, args: ["rev-parse", ref ?? "HEAD"] }).pipe(
         Effect.map((output) => output.stdout.trim()),
       ),
     commitsAhead: ({ repositoryPath, baseBranch, branch }) =>
@@ -140,11 +140,17 @@ export const makeProcessMergeGit = (input: {
           Effect.asVoid,
         ),
       ),
-    fastForward: ({ cwd, ref }) =>
-      // Terminal parity: `skills/cook-epic/run-legacy.sh:2992-3000`.
-      mutate(cwd, run({ operation: "fastForward", cwd, args: ["merge", "--ff-only", ref] })).pipe(
-        Effect.map((output) => ({ landed: output.code === 0, output: outputDetail(output) })),
-      ),
+    fastForward: ({ cwd, ref, branch }) =>
+      // Terminal parity: `skills/cook-epic/run-legacy.sh:2992-3000`. `branch`
+      // takes the ref-only path (t3code-5m4): a local `fetch` fast-forwards
+      // `branch` without touching `cwd`'s working tree, and git itself refuses
+      // it if `branch` turns out to be checked out anywhere.
+      mutate(
+        cwd,
+        branch === undefined
+          ? run({ operation: "fastForward", cwd, args: ["merge", "--ff-only", ref] })
+          : run({ operation: "fastForwardRef", cwd, args: ["fetch", ".", `${ref}:${branch}`] }),
+      ).pipe(Effect.map((output) => ({ landed: output.code === 0, output: outputDetail(output) }))),
     push: ({ cwd, remote, refspec }) =>
       // Terminal parity: `skills/cook-epic/run-legacy.sh:3014-3021`.
       mutate(cwd, run({ operation: "push", cwd, args: ["push", remote, refspec] })).pipe(

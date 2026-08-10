@@ -50,11 +50,18 @@ describe("epic run preflight presentation", () => {
         key: "parallel.workers",
         message: "Pinned to 1.",
       }),
+      epicRunPreflightWarningText({
+        _tag: "run_base_branch_stale",
+        epicId: "t3code-5m4",
+        branch: "epic/t3code-5m4/base",
+        commitsBehind: 3,
+      }),
     ]).toEqual([
       "These children have stale claims: epic-1.1",
       "Epic epic-1 has no ready children.",
       "/repo/config.json has unknown keys: future.key",
       "parallel.workers: Pinned to 1.",
+      "epic/t3code-5m4/base is 3 commit(s) behind the checked-out branch; a run reusing it starts fresh workers from old code.",
     ]);
   });
 });

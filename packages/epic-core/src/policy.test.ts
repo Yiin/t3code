@@ -4,6 +4,7 @@ import {
   EPIC_RUN_CONTINUATION_PROMPT,
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
   backoffDelayMs,
+  childBranch,
   decideGraceStep,
   decideIterationBoundary,
   failureReasonForOutcome,
@@ -13,6 +14,7 @@ import {
   type IterationBoundaryInput,
   mergeSlotHolder,
   parseMergeSlotHolder,
+  runBaseBranch,
   shouldReclaimMergeSlot,
 } from "./policy.ts";
 import {
@@ -638,5 +640,15 @@ describe("shouldReclaimMergeSlot", () => {
 
   it("round-trips a run id through the holder id", () => {
     expect(parseMergeSlotHolder(mergeSlotHolder("run-1"))).toBe("run-1");
+  });
+});
+
+describe("runBaseBranch", () => {
+  it("never collides with a child branch", () => {
+    // Child branches are `epic/<childId>`; child ids contain dots
+    // (`t3code-5m4.1`), never a bare `base` segment, so the two namespaces
+    // cannot collide.
+    expect(runBaseBranch("t3code-5m4")).toBe("epic/t3code-5m4/base");
+    expect(runBaseBranch("t3code-5m4")).not.toBe(childBranch("t3code-5m4"));
   });
 });

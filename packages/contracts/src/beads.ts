@@ -145,6 +145,17 @@ export const EpicRunPreflightBlocker = Schema.Union([
     path: TrimmedNonEmptyString,
     detail: TrimmedNonEmptyString,
   }),
+  /**
+   * The operator has the run-owned base branch itself checked out.
+   *
+   * Landing updates that ref with `git fetch . <ref>:<branch>`, and git refuses
+   * to fetch into a branch that is checked out anywhere. Without this blocker
+   * the run starts, workers complete whole children, and every drain then fails
+   * — the mid-run fatal that strands finished work on branches.
+   */
+  Schema.TaggedStruct("run_base_branch_checked_out", {
+    branch: TrimmedNonEmptyString,
+  }),
 ]);
 export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
 
@@ -164,6 +175,20 @@ export const EpicRunPreflightWarning = Schema.Union([
     message: TrimmedNonEmptyString,
   }),
   Schema.TaggedStruct("untracked_files", {
+    paths: Schema.Array(TrimmedNonEmptyString),
+  }),
+  Schema.TaggedStruct("run_base_branch_stale", {
+    epicId: TrimmedNonEmptyString,
+    branch: TrimmedNonEmptyString,
+    commitsBehind: PositiveInt,
+  }),
+  /**
+   * Tracked modifications that no longer block, because the run owns its base
+   * branch. Reported so the operator still sees that the run excludes their
+   * uncommitted work — silently dropping the signal is how a run quietly cooks
+   * against code the operator thought it had.
+   */
+  Schema.TaggedStruct("tracked_changes_ignored", {
     paths: Schema.Array(TrimmedNonEmptyString),
   }),
 ]);

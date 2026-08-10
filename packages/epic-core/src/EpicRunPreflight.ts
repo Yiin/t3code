@@ -15,7 +15,7 @@ import {
 import { resolveEpicRunConfig, type EpicRunConfigViolation } from "@t3tools/shared/epicRunConfig";
 
 import { EpicRunConfigSource, type EpicRunConfigFileResult } from "./EpicRunConfigSource.ts";
-import { INTEGRATION_BRANCH_PREFIX, integrationBranch } from "./policy.ts";
+import { INTEGRATION_BRANCH_PREFIX, integrationBranch, runBaseBranch } from "./policy.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
 import { makeSiblingResolver } from "./siblings.ts";
@@ -53,6 +53,10 @@ export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker):
       );
     case "sibling_invalid":
       return boundedBlockerText(blocker.detail);
+    case "run_base_branch_checked_out":
+      return boundedBlockerText(
+        `${blocker.branch} is checked out here, and the run lands by updating that ref. Switch to another branch before launching.`,
+      );
   }
 }
 
@@ -213,6 +217,20 @@ export const layer = Layer.effect(
         const blockers: Array<EpicRunPreflightResult["blockers"][number]> = [];
         const warnings: Array<EpicRunPreflightWarning> = [];
 
+        // Resolved before anything else, including the git status parse below:
+        // the parallel dirty-tree rule reads `vcs.runOwnedBaseBranch` off it
+        // (t3code-5m4), and the lock branch and the final return both need it
+        // too. The check mode is not a launch override — resolve with `null`
+        // so the returned config and provenance match what a launch with no
+        // override would use.
+        const configSnapshot =
+          suppliedConfigSnapshot ??
+          makeEpicRunConfigSnapshot({
+            fileResult: yield* configSource.read({ repoRoot: input.workspaceRoot }),
+            override: null,
+            harness: null,
+          });
+
         // The run lock is observed BEFORE the ordinary preflight, mirroring
         // run-legacy.sh:510-519: a live sequential holder legitimately has a dirty
         // checkout, so a contender must report the held lock rather than fail
@@ -231,16 +249,7 @@ export const layer = Layer.effect(
           typeof held.pid === "number"
         ) {
           // The result stays total even on the early lock return: the launch
-          // form prefills from these fields regardless of the blockers. The
-          // check mode is not a launch override — resolve with `null` so the
-          // returned config matches what a launch with no override would use.
-          const lockSnapshot =
-            suppliedConfigSnapshot ??
-            makeEpicRunConfigSnapshot({
-              fileResult: yield* configSource.read({ repoRoot: input.workspaceRoot }),
-              override: null,
-              harness: null,
-            });
+          // form prefills from these fields regardless of the blockers.
           return {
             ok: false,
             blockers: [
@@ -253,8 +262,8 @@ export const layer = Layer.effect(
               },
             ],
             warnings,
-            resolvedConfig: lockSnapshot.config,
-            configProvenance: lockSnapshot.provenance,
+            resolvedConfig: configSnapshot.config,
+            configProvenance: configSnapshot.provenance,
           };
         }
 
@@ -265,11 +274,14 @@ export const layer = Layer.effect(
           "--untracked-files=all",
         ]);
         let detached = true;
+        let currentBranchName: string | null = null;
         const trackedDirtyPaths = new Set<string>();
         const untrackedPaths = new Set<string>();
         for (const line of status.stdout.split(/\r?\n/)) {
           if (line.startsWith("# branch.head ")) {
-            detached = line.slice("# branch.head ".length).trim().startsWith("(");
+            const head = line.slice("# branch.head ".length).trim();
+            detached = head.startsWith("(");
+            currentBranchName = detached ? null : head;
           } else if (line.length > 0 && !line.startsWith("#")) {
             const path = porcelainPath(line);
             if (path === null || isBeadsPath(path)) continue;
@@ -328,9 +340,26 @@ export const layer = Layer.effect(
               dirtyWorktrees.push(relative);
             }
           }
-          const dirtyPaths = [...trackedDirtyPaths, ...dirtyWorktrees].toSorted();
+          // With a run-owned base branch (t3code-5m4) the operator's own
+          // tracked modifications no longer block: nothing in the run ever
+          // fast-forwards the operator's checkout. A dirty registered nested
+          // worktree still blocks regardless — that is crash residue from a
+          // previous run, not the operator's own edits.
+          const dirtyPaths = [
+            ...(configSnapshot.config.vcs.runOwnedBaseBranch ? [] : trackedDirtyPaths),
+            ...dirtyWorktrees,
+          ].toSorted();
           if (dirtyPaths.length > 0) {
             blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+          }
+          // Dropping the blocker must not drop the signal: the run cooks
+          // against committed code, so the operator should know their
+          // uncommitted work is not in it.
+          if (configSnapshot.config.vcs.runOwnedBaseBranch && trackedDirtyPaths.size > 0) {
+            warnings.push({
+              _tag: "tracked_changes_ignored",
+              paths: [...trackedDirtyPaths].toSorted(),
+            });
           }
           if (untrackedPaths.size > 0) {
             warnings.push({ _tag: "untracked_files", paths: [...untrackedPaths].toSorted() });
@@ -370,18 +399,56 @@ export const layer = Layer.effect(
               worktreePath: leftoverWorktree,
             });
           }
+
+          // The run-owned base branch (t3code-5m4) is deliberately reused
+          // across separate runs of the same epic, so it has no end-of-run
+          // deletion — but that means it can silently seed fresh workers from
+          // code weeks stale if nobody ever lands into it again. Warn rather
+          // than block: reuse is the intended behaviour, staleness is just
+          // worth the operator's attention.
+          if (configSnapshot.config.vcs.runOwnedBaseBranch && currentBranchName !== null) {
+            const ownedBranch = runBaseBranch(input.epicId);
+            // Landing updates this ref with `git fetch . <ref>:<branch>`, and
+            // git refuses to fetch into a branch checked out anywhere. Catch it
+            // here: otherwise the run starts, workers finish whole children,
+            // and every drain fails afterwards. This slice never merges the
+            // run branch back, so the operator has a real reason to check it
+            // out by hand, which makes the case reachable rather than exotic.
+            if (currentBranchName === ownedBranch) {
+              blockers.push({ _tag: "run_base_branch_checked_out", branch: ownedBranch });
+            }
+            const ownedBranchCheck = yield* processRunner
+              .run({
+                command: "git",
+                args: ["show-ref", "--verify", "--quiet", `refs/heads/${ownedBranch}`],
+                cwd: input.workspaceRoot,
+                timeout: COMMAND_TIMEOUT,
+              })
+              .pipe(
+                Effect.mapError(
+                  (error) =>
+                    new EpicRunPreflightError({ message: `git show-ref: ${error.message}` }),
+                ),
+              );
+            if (ownedBranchCheck.code === 0) {
+              const behindCount = yield* runGit(input.workspaceRoot, [
+                "rev-list",
+                "--count",
+                `${ownedBranch}..${currentBranchName}`,
+              ]);
+              const commitsBehind = Number.parseInt(behindCount.stdout.trim(), 10);
+              if (Number.isFinite(commitsBehind) && commitsBehind > 0) {
+                warnings.push({
+                  _tag: "run_base_branch_stale",
+                  epicId: input.epicId,
+                  branch: ownedBranch,
+                  commitsBehind,
+                });
+              }
+            }
+          }
         }
 
-        // The check mode is not a launch override: resolve with `null` so the
-        // returned config and provenance match what a launch with no override
-        // would use. The mode still drives the dirtiness rules above directly.
-        const configSnapshot =
-          suppliedConfigSnapshot ??
-          makeEpicRunConfigSnapshot({
-            fileResult: yield* configSource.read({ repoRoot: input.workspaceRoot }),
-            override: null,
-            harness: null,
-          });
         const configFile = configSnapshot.fileResult;
         if (configFile._tag === "invalid") {
           blockers.push({

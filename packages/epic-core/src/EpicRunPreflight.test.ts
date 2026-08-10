@@ -18,6 +18,7 @@ import {
   type EpicRunConfigFileResult,
 } from "./EpicRunConfigSource.ts";
 import { EpicRunPreflight, layer, type EpicRunConfigSnapshot } from "./EpicRunPreflight.ts";
+import { runBaseBranch } from "./policy.ts";
 
 const run = (
   status: string,
@@ -563,6 +564,200 @@ describe("EpicRunPreflight", () => {
         });
       }),
     );
+
+    describe("with vcs.runOwnedBaseBranch (t3code-5m4)", () => {
+      const runOwnedConfig = {
+        _tag: "loaded" as const,
+        configPath: "/repo/.t3code/epic-run.json",
+        override: { vcs: { runOwnedBaseBranch: true } },
+        config: {} as never,
+        presentKeys: ["vcs.runOwnedBaseBranch"],
+        unknownKeys: [],
+      };
+
+      it.effect("no longer blocks tracked modifications in parallel mode", () =>
+        Effect.gen(function* () {
+          const result = yield* run(
+            "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n",
+            undefined,
+            undefined,
+            { mode: "parallel", config: runOwnedConfig },
+          );
+          expect(result.ok).toBe(true);
+          expect(result.blockers.some((blocker) => blocker._tag === "dirty_tree")).toBe(false);
+        }),
+      );
+
+      it.effect("still reports the ignored tracked changes as a warning", () =>
+        Effect.gen(function* () {
+          // Dropping the blocker must not drop the signal. The run cooks
+          // against committed code only, and the operator has to know that.
+          const result = yield* run(
+            "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n",
+            undefined,
+            undefined,
+            { mode: "parallel", config: runOwnedConfig },
+          );
+          expect(result.ok).toBe(true);
+          expect(
+            result.warnings.find((warning) => warning._tag === "tracked_changes_ignored"),
+          ).toEqual({ _tag: "tracked_changes_ignored", paths: ["modified.ts"] });
+        }),
+      );
+
+      it.effect("blocks when the operator has the run-owned base branch checked out", () =>
+        Effect.gen(function* () {
+          // Landing updates that ref with `git fetch . <ref>:<branch>`, which
+          // git refuses for a branch checked out anywhere. Caught at launch,
+          // this is a refusal; missed, it is a mid-run fatal after workers
+          // have already finished children.
+          const result = yield* run(
+            `# branch.head ${runBaseBranch("epic-1")}\n`,
+            undefined,
+            undefined,
+            { mode: "parallel", config: runOwnedConfig },
+          );
+          expect(result.ok).toBe(false);
+          expect(
+            result.blockers.find((blocker) => blocker._tag === "run_base_branch_checked_out"),
+          ).toEqual({
+            _tag: "run_base_branch_checked_out",
+            branch: runBaseBranch("epic-1"),
+          });
+        }),
+      );
+
+      it.effect("still blocks tracked modifications in sequential mode", () =>
+        Effect.gen(function* () {
+          // Sequential workers still commit directly in the main checkout, so
+          // the run-owned base branch (which sequential mode never creates)
+          // changes nothing here.
+          const result = yield* run(
+            "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n",
+            undefined,
+            undefined,
+            { mode: "sequential", config: runOwnedConfig },
+          );
+          expect(result.ok).toBe(false);
+          expect(result.blockers).toContainEqual({
+            _tag: "dirty_tree",
+            paths: ["modified.ts"],
+          });
+        }),
+      );
+
+      it.effect("leaves untracked-file handling unchanged", () =>
+        Effect.gen(function* () {
+          const result = yield* run("# branch.head main\n? untracked.ts\n", undefined, undefined, {
+            mode: "parallel",
+            config: runOwnedConfig,
+          });
+          expect(result.ok).toBe(true);
+          expect(result.blockers).toEqual([]);
+          expect(result.warnings).toContainEqual({
+            _tag: "untracked_files",
+            paths: ["untracked.ts"],
+          });
+        }),
+      );
+
+      it.effect("still blocks a dirty registered nested worktree", () =>
+        Effect.gen(function* () {
+          // The flag exempts the operator's own tracked edits, not crash
+          // residue from a previous parallel run's worker worktrees.
+          const result = yield* run(
+            "# branch.head main\n? .claude/worktrees/wt-1/\n",
+            undefined,
+            undefined,
+            {
+              mode: "parallel",
+              config: runOwnedConfig,
+              worktreeList:
+                "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.claude/worktrees/wt-1\nbranch refs/heads/child-branch\n",
+              nestedStatus: {
+                "/repo/.claude/worktrees/wt-1": { stdout: " M scratch.ts\n" },
+              },
+            },
+          );
+          expect(result.ok).toBe(false);
+          expect(result.blockers).toContainEqual({
+            _tag: "dirty_tree",
+            paths: [".claude/worktrees/wt-1"],
+          });
+        }),
+      );
+
+      const ownedBranchOutput = (code: number) =>
+        Object.freeze({
+          stdout: "",
+          stderr: "",
+          code: code as never,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        });
+
+      it.effect("warns when the reused base branch is behind the operator's branch", () =>
+        Effect.gen(function* () {
+          const result = yield* run("# branch.head main\n", undefined, undefined, {
+            mode: "parallel",
+            config: runOwnedConfig,
+            processOverride: (input) => {
+              if (input.command !== "git") return undefined;
+              if (input.args[0] === "show-ref") return ownedBranchOutput(0);
+              if (input.args[0] === "rev-list") {
+                return { ...ownedBranchOutput(0), stdout: "3\n" };
+              }
+              return undefined;
+            },
+          });
+          expect(result.ok).toBe(true);
+          expect(result.warnings).toContainEqual({
+            _tag: "run_base_branch_stale",
+            epicId: "epic-1",
+            branch: "epic/epic-1/base",
+            commitsBehind: 3,
+          });
+        }),
+      );
+
+      it.effect("does not warn when the reused base branch is caught up", () =>
+        Effect.gen(function* () {
+          const result = yield* run("# branch.head main\n", undefined, undefined, {
+            mode: "parallel",
+            config: runOwnedConfig,
+            processOverride: (input) => {
+              if (input.command !== "git") return undefined;
+              if (input.args[0] === "show-ref") return ownedBranchOutput(0);
+              if (input.args[0] === "rev-list") {
+                return { ...ownedBranchOutput(0), stdout: "0\n" };
+              }
+              return undefined;
+            },
+          });
+          expect(result.warnings.some((warning) => warning._tag === "run_base_branch_stale")).toBe(
+            false,
+          );
+        }),
+      );
+
+      it.effect("does not warn when the base branch does not exist yet", () =>
+        Effect.gen(function* () {
+          const result = yield* run("# branch.head main\n", undefined, undefined, {
+            mode: "parallel",
+            config: runOwnedConfig,
+            processOverride: (input) => {
+              if (input.command !== "git") return undefined;
+              if (input.args[0] === "show-ref") return ownedBranchOutput(1);
+              return undefined;
+            },
+          });
+          expect(result.warnings.some((warning) => warning._tag === "run_base_branch_stale")).toBe(
+            false,
+          );
+        }),
+      );
+    });
 
     it.effect("ignores a clean registered nested worktree", () =>
       Effect.gen(function* () {

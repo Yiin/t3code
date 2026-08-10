@@ -15,15 +15,17 @@ export const makeProcessPoolVcs = (
   processRunner: ProcessRunner.ProcessRunner["Service"],
 ): PoolVcsShape => ({
   /**
-   * The repo's `HEAD`, or `null` when it cannot be read (no repo, no commits,
-   * git missing). `null` never counts as movement, mirroring terminal ralph's
-   * `head_after != none` guard (`run-legacy.sh:155`).
+   * The repo's `HEAD` (or `ref`, when given), or `null` when it cannot be read
+   * (no repo, no commits, git missing). `null` never counts as movement,
+   * mirroring terminal ralph's `head_after != none` guard
+   * (`run-legacy.sh:155`). Pass `ref` to resolve a branch that is not
+   * checked out at `cwd` — a run-owned base branch (t3code-5m4).
    */
-  headCommit: (cwd: string) =>
+  headCommit: (cwd: string, ref?: string) =>
     processRunner
       .run({
         command: "git",
-        args: ["rev-parse", "--verify", "-q", "HEAD"],
+        args: ["rev-parse", "--verify", "-q", ref ?? "HEAD"],
         cwd,
         timeout: GIT_HEAD_TIMEOUT,
       })

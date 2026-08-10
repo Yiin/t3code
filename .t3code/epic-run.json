@@ -3,5 +3,6 @@
     "command": "vp check && vpr typecheck && vp run --concurrency-limit 2 test",
     "disabled": false
   },
-  "parallel": { "workers": 2 }
+  "parallel": { "workers": 2 },
+  "vcs": { "runOwnedBaseBranch": true }
 }

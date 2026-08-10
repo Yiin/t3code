@@ -45,8 +45,8 @@ export const makeEpicRunMergeGit = (input: {
   });
 
   return {
-    head: (cwd) =>
-      requireSuccess("head", cwd, ["rev-parse", "HEAD"]).pipe(
+    head: (cwd, ref) =>
+      requireSuccess("head", cwd, ["rev-parse", ref ?? "HEAD"]).pipe(
         Effect.map((output) => output.stdout.trim()),
       ),
     commitsAhead: ({ repositoryPath, baseBranch, branch }) =>
@@ -78,8 +78,14 @@ export const makeEpicRunMergeGit = (input: {
       ),
     abortMerge: (cwd) =>
       requireSuccess("abortMerge", cwd, ["merge", "--abort"]).pipe(Effect.asVoid),
-    fastForward: ({ cwd, ref }) =>
-      run("fastForward", cwd, ["merge", "--ff-only", ref]).pipe(
+    fastForward: ({ cwd, ref, branch }) =>
+      // `branch` takes the ref-only path (t3code-5m4): a local `fetch`
+      // fast-forwards `branch` without touching `cwd`'s working tree, and git
+      // itself refuses it if `branch` turns out to be checked out anywhere.
+      (branch === undefined
+        ? run("fastForward", cwd, ["merge", "--ff-only", ref])
+        : run("fastForwardRef", cwd, ["fetch", ".", `${ref}:${branch}`])
+      ).pipe(
         Effect.map((output) => ({
           landed: output.exitCode === 0,
           output: outputDetail(output),

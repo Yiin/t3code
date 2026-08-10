@@ -141,7 +141,13 @@ export interface MergeDrainShape {
 
 /** Never-failing git probes; `null` never counts as progress. */
 export interface PoolVcsShape {
-  readonly headCommit: (cwd: string) => Effect.Effect<string | null>;
+  /**
+   * `git rev-parse --verify -q <ref>`. `ref` defaults to `HEAD` — the branch
+   * actually checked out at `cwd`. A run-owned base branch (t3code-5m4) is
+   * never checked out at `cwd`, so its callers pass the branch name
+   * explicitly instead.
+   */
+  readonly headCommit: (cwd: string, ref?: string) => Effect.Effect<string | null>;
   readonly worktreeFingerprint: (cwd: string) => Effect.Effect<string | null>;
   readonly commitsAhead: (input: {
     readonly cwd: string;

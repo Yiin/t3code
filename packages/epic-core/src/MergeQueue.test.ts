@@ -9,6 +9,7 @@ import {
   mergeFixDescription,
   mergeFixTitle,
   parseMergeFixTitle,
+  runBaseBranch,
 } from "./policy.ts";
 import type {
   MergeGitShape,
@@ -68,11 +69,14 @@ const makeHarness = (
     readonly siblingExternalHeads?: Readonly<Record<string, string>>;
     readonly createFailure?: "before" | "after";
     readonly existingFixStatuses?: ReadonlyArray<string>;
+    /** Overrides the main repository's base branch (default `"mine"`). */
+    readonly baseBranch?: string;
   } = {},
 ) => {
   const siblings = options.siblings ?? [];
   let snapshot: MergeQueueSnapshot = {
     ...baseSnapshot(options.entries ?? [entry(0, "child-1")]),
+    ...(options.baseBranch === undefined ? {} : { baseBranch: options.baseBranch }),
     siblings,
   };
   const heads: Record<string, string> = { "/repo": options.currentHead ?? "base-0" };
@@ -110,9 +114,9 @@ const makeHarness = (
   let gateCall = 0;
 
   const git: MergeGitShape = {
-    head: (cwd) =>
+    head: (cwd, ref) =>
       Effect.sync(() => {
-        calls.push(`head:${cwd}`);
+        calls.push(ref === undefined ? `head:${cwd}` : `head:${cwd}:${ref}`);
         return heads[cwd] ?? "base-0";
       }),
     commitsAhead: ({ repositoryPath, branch }) =>
@@ -143,9 +147,10 @@ const makeHarness = (
         };
       }),
     abortMerge: (cwd) => Effect.sync(() => void calls.push(`abort:${cwd}`)),
-    fastForward: ({ cwd, ref }) =>
+    fastForward: ({ cwd, ref, branch }) =>
       Effect.sync(() => {
-        calls.push(cwd === "/repo" ? `ff:${ref}` : `ff:${cwd}:${ref}`);
+        const label = cwd === "/repo" ? `ff:${ref}` : `ff:${cwd}:${ref}`;
+        calls.push(branch === undefined ? label : `${label}:owned:${branch}`);
         if (
           options.fastForwardFails?.includes(ref) === true ||
           options.fastForwardFailCwds?.includes(cwd) === true
@@ -899,6 +904,91 @@ describe("MergeQueue", () => {
             },
           ],
         });
+      }),
+    );
+  });
+
+  describe("owned base branch (t3code-5m4)", () => {
+    const ownedBranch = runBaseBranch("epic-1");
+
+    it.effect("lands by ref-only update and reads the branch by name, not HEAD", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ baseBranch: ownedBranch, currentHead: "base-0" });
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+        expect(harness.calls).toEqual([
+          `head:/repo:${ownedBranch}`,
+          "slot-acquire:cook-epic-run-1",
+          "begin-drain",
+          "ahead:epic/child-1",
+          `reset:/worktrees/integration:${ownedBranch}`,
+          "clean:/worktrees/integration",
+          "setup:/worktrees/integration",
+          "merge:epic/child-1:cook-epic: merge epic/child-1 (child-1)",
+          "gate",
+          `ff:cook-epic-integration-run-1:owned:${ownedBranch}`,
+          `push:${ownedBranch}`,
+          `head:/repo:${ownedBranch}`,
+          "fold:child-1",
+          "delete-local:epic/child-1",
+          "delete-remote:epic/child-1",
+          "slot-release:cook-epic-run-1",
+        ]);
+      }),
+    );
+
+    it.effect("uses the legacy checkout-based land when the base branch is not owned", () =>
+      Effect.gen(function* () {
+        // Same drive, ordinary `baseBranch` ("mine"): every head read and the
+        // fast-forward stay on the unqualified, checkout-based form.
+        const harness = makeHarness();
+        yield* drain(harness.ports);
+        expect(harness.calls).toContain("head:/repo");
+        expect(harness.calls).toContain("ff:cook-epic-integration-run-1");
+        expect(harness.calls.some((call) => call.includes(":owned:"))).toBe(false);
+      }),
+    );
+
+    it.effect("still freezes before the slot when the owned branch moved externally", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ baseBranch: ownedBranch, currentHead: "external" });
+        expect(yield* drain(harness.ports)).toMatchObject({ _tag: "fatal", queueLength: 1 });
+        expect(harness.calls).toEqual([`head:/repo:${ownedBranch}`]);
+        expect(harness.snapshot().entries[0]?.status).toBe("queued");
+      }),
+    );
+
+    it.effect("restores the tail fatally when the ref-only update cannot fast-forward", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          baseBranch: ownedBranch,
+          entries: [entry(0, "first"), entry(1, "second")],
+          fastForwardFails: ["cook-epic-integration-run-1"],
+        });
+        expect(yield* drain(harness.ports)).toMatchObject({ _tag: "fatal", queueLength: 2 });
+        expect(harness.calls).toContain("restore:0");
+        expect(harness.snapshot().entries.map((item) => item.status)).toEqual(["queued", "queued"]);
+      }),
+    );
+
+    it.effect("leaves sibling landing on the legacy checkout-based path", () =>
+      Effect.gen(function* () {
+        // Siblings are out of scope for owned base branches in this slice: only
+        // the main repository's landing changes.
+        const harness = makeHarness({
+          baseBranch: ownedBranch,
+          siblings: [
+            {
+              repositoryPath: "/sib",
+              baseBranch: "sib-main",
+              integrationWorktreePath: "/worktrees/integ-sib",
+              lastAcceptedHead: "sib-0",
+            },
+          ],
+        });
+        yield* drain(harness.ports);
+        expect(harness.calls).toContain("head:/sib");
+        expect(harness.calls).toContain("ff:/sib:cook-epic-integration-run-1");
+        expect(harness.calls.some((call) => call.startsWith("head:/sib:"))).toBe(false);
       }),
     );
   });

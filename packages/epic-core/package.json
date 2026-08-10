@@ -19,6 +19,10 @@
       "types": "./src/policy.ts",
       "import": "./src/policy.ts"
     },
+    "./runBaseBranch": {
+      "types": "./src/runBaseBranch.ts",
+      "import": "./src/runBaseBranch.ts"
+    },
     "./processRunner": {
       "types": "./src/processRunner.ts",
       "import": "./src/processRunner.ts"

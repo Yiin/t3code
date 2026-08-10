@@ -104,7 +104,7 @@ const workerDeadlineSeconds = (scenario: ConformanceScenario): number =>
 const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
   gate: { command: "true", disabled: false },
-  vcs: { noPush: true },
+  vcs: { noPush: true, runOwnedBaseBranch: false },
   execution: { sequential: true },
   limits: {
     ...DEFAULT_EPIC_RUN_CONFIG.limits,

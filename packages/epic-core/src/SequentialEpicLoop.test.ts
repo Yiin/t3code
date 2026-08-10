@@ -649,7 +649,7 @@ it.live("fails safely after push failure without dispatching duplicate work", ()
   Effect.gen(function* () {
     const test = fixture({
       attempts: [{ commit: true, close: true }],
-      config: config({ vcs: { noPush: false } }),
+      config: config({ vcs: { noPush: false, runOwnedBaseBranch: false } }),
       pushFails: true,
     });
     const result = yield* test.run();
@@ -665,7 +665,7 @@ it.live("counts a sibling-only commit as committed and pushes the moved sibling"
     const test = fixture({
       siblings: [{ repositoryPath: "/sib", baseBranch: "sib-main", worktreeRoot: "/wt-sib" }],
       attempts: [{ close: true, siblingCommit: true }],
-      config: config({ vcs: { noPush: false } }),
+      config: config({ vcs: { noPush: false, runOwnedBaseBranch: false } }),
     });
     const result = yield* test.run();
     assert.equal(result.status, "done");
@@ -685,7 +685,7 @@ it.live("fails fatally when a moved sibling push is rejected", () =>
     const test = fixture({
       siblings: [{ repositoryPath: "/sib", baseBranch: "sib-main", worktreeRoot: "/wt-sib" }],
       attempts: [{ close: true, siblingCommit: true }],
-      config: config({ vcs: { noPush: false } }),
+      config: config({ vcs: { noPush: false, runOwnedBaseBranch: false } }),
       pushFails: true,
     });
     const result = yield* test.run();
@@ -700,7 +700,7 @@ it.live("pushes the main repo only when its head moved since first dispatch", ()
     const test = fixture({
       siblings: [{ repositoryPath: "/sib", baseBranch: "sib-main", worktreeRoot: "/wt-sib" }],
       attempts: [{ commit: true, close: true }],
-      config: config({ vcs: { noPush: false } }),
+      config: config({ vcs: { noPush: false, runOwnedBaseBranch: false } }),
     });
     const result = yield* test.run();
     assert.equal(result.status, "done");

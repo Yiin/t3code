@@ -38,6 +38,23 @@ export const landingDescription = (input: {
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2675-2681`. */
 export const childBranch = (childId: string): string => `epic/${childId}`;
 
+/**
+ * The run-owned base branch a parallel run targets when `vcs.runOwnedBaseBranch`
+ * is on, instead of sharing the operator's checked-out branch (t3code-5m4).
+ *
+ * Child branches are `epic/<childId>` with no `/base` suffix, and child ids
+ * never contain a bare `base` segment, so this can never collide with one.
+ *
+ * A nested epic is a different story: if `epic/<epicId>` itself exists as a
+ * branch — because this epic was cooked as a child of an outer epic — git's
+ * directory/file ref rule makes `epic/<epicId>/base` uncreatable (a ref
+ * cannot be both a branch and a directory of branches). `runBaseBranch.ts`'s
+ * create-then-retry-as-existence-check treats that git error as a hard
+ * failure rather than silent corruption, but the error text names a lock
+ * conflict, not the conflicting `epic/<epicId>` branch.
+ */
+export const runBaseBranch = (epicId: string): string => `epic/${epicId}/base`;
+
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2845-2890`. */
 export type MergeParkReason = "conflict" | "gate-failed";
 

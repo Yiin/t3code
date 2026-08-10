@@ -103,8 +103,11 @@ const ProviderConfig = Schema.Struct({
   modelSelection: defaultTo(ProviderModelSelection, null),
 });
 
+const RunOwnedBaseBranch = Schema.Boolean;
+
 const VcsConfig = Schema.Struct({
   noPush: defaultTo(NoPush, false),
+  runOwnedBaseBranch: defaultTo(RunOwnedBaseBranch, false),
 });
 
 const OrientationConfig = Schema.Struct({
@@ -208,6 +211,7 @@ export const EpicRunConfigOverride = Schema.Struct({
   vcs: Schema.optionalKey(
     Schema.Struct({
       noPush: Schema.optionalKey(NoPush),
+      runOwnedBaseBranch: Schema.optionalKey(RunOwnedBaseBranch),
     }),
   ),
   orientation: Schema.optionalKey(
@@ -377,6 +381,13 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     scope: "core",
     label: "Do not push",
     doc: "Lands changes locally without pushing repositories.",
+    control: "toggle",
+  },
+  {
+    key: "vcs.runOwnedBaseBranch",
+    scope: "core",
+    label: "Run-owned base branch",
+    doc: "Parallel runs land on their own epic/<epicId>/base branch instead of the operator's checked-out branch.",
     control: "toggle",
   },
   {

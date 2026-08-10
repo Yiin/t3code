@@ -18,6 +18,7 @@ import {
   landingDescription,
   mergeFixDescription,
   mergeFixTitle,
+  runBaseBranch,
   trialMergeMessage,
   type MergeFixTouchedRepo,
   type MergeParkReason,
@@ -238,8 +239,19 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
   const beforeDrain = activeEntries(snapshot.entries);
   if (beforeDrain.length === 0) return { _tag: "idle" as const, queueLength: 0 as const };
 
-  // Terminal parity: `skills/cook-epic/run-legacy.sh:2894-2897`.
-  const currentHead = yield* ports.git.head(snapshot.repositoryPath);
+  // Whether this run owns its base branch (t3code-5m4) rather than sharing
+  // the operator's checkout, derived from the branch name alone — no extra
+  // persisted field, and correct across every resume for free. Only the main
+  // repository can be owned in this slice; siblings keep today's rules.
+  const ownedBaseBranch = snapshot.baseBranch === runBaseBranch(input.epicId);
+
+  // Terminal parity: `skills/cook-epic/run-legacy.sh:2894-2897`. An owned base
+  // branch is never checked out at `repositoryPath` — the operator's own
+  // branch is — so its head is read by name, not by `HEAD`.
+  const currentHead = yield* ports.git.head(
+    snapshot.repositoryPath,
+    ownedBaseBranch ? snapshot.baseBranch : undefined,
+  );
   if (currentHead !== snapshot.lastAcceptedHead) {
     return {
       _tag: "fatal" as const,
@@ -525,17 +537,27 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
       }
 
       // Land: fast-forward every repo in the set, then push each
-      // (`skills/cook-epic/run-legacy.sh:2990-3034`).
+      // (`skills/cook-epic/run-legacy.sh:2990-3034`). An owned base branch
+      // lands by ref-only update (t3code-5m4): `repositoryPath` still has the
+      // operator's own branch checked out, so a checkout-based merge there
+      // would advance the wrong branch.
       if (commits > 0) {
         const landed = yield* ports.git.fastForward({
           cwd: snapshot.repositoryPath,
           ref: snapshot.integrationBranch,
+          ...(ownedBaseBranch ? { branch: snapshot.baseBranch } : {}),
         });
         if (!landed.landed) {
           yield* ports.store.restoreTail({ runId: input.runId, fromSequence: entry.sequence });
+          // `landed.output` carries the real cause — including the distinct
+          // "refusing to fetch into branch ... checked out at ..." git raises
+          // when the owned base branch is checked out somewhere (t3code-5m4)
+          // — which "moved externally" alone does not describe.
           return {
             _tag: "fatal" as const,
-            detail: `base branch ${snapshot.baseBranch} moved externally; cannot fast-forward — operator must reconcile`,
+            detail:
+              `base branch ${snapshot.baseBranch} moved externally; cannot fast-forward — ` +
+              `operator must reconcile${landed.output.length > 0 ? `: ${landed.output}` : ""}`,
             queueLength: queue.length - index,
           };
         }
@@ -591,7 +613,10 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
 
       // Record the new head for the main repo and every sibling, even siblings
       // without commits (`skills/cook-epic/run-legacy.sh:3035-3048`).
-      const head = yield* ports.git.head(snapshot.repositoryPath);
+      const head = yield* ports.git.head(
+        snapshot.repositoryPath,
+        ownedBaseBranch ? snapshot.baseBranch : undefined,
+      );
       const siblingHeads: Array<{
         readonly repositoryPath: string;
         readonly lastAcceptedHead: string;

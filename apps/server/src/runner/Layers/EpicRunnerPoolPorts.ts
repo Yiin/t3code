@@ -27,6 +27,7 @@ import {
   EpicRunNotFoundError,
 } from "@t3tools/epic-core/Errors";
 import type * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import { resolveRunBaseBranch } from "@t3tools/epic-core/runBaseBranch";
 import type {
   MergeDrainShape,
   PoolBacklogShape,
@@ -547,6 +548,72 @@ export const makeServerPoolWorkspace = (deps: {
         ),
       );
 
+  const branchExistsAt = (
+    cwd: string,
+    branch: string,
+  ): Effect.Effect<boolean, EpicRunnerDispatchError> =>
+    processRunner
+      .run({
+        command: "git",
+        args: ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+        cwd,
+        timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+      })
+      .pipe(
+        Effect.map((output) => output.code === 0),
+        Effect.mapError(
+          (cause) =>
+            new EpicRunnerDispatchError({
+              commandType: "git.run-base-branch-check",
+              detail: `Could not check branch ${branch}`,
+              cause,
+            }),
+        ),
+      );
+
+  /**
+   * The base branch a parallel run's worktrees start from: the operator's
+   * checked-out branch, or the run's own `epic/<epicId>/base`, created
+   * idempotently on first use and reused verbatim after (t3code-5m4).
+   */
+  const resolveBaseBranch = (run: EpicRun) =>
+    resolveRunBaseBranch(
+      {
+        currentBranch: readCurrentBranch,
+        branchExists: branchExistsAt,
+        createBranch: (cwd, branch, startPoint) =>
+          processRunner
+            .run({
+              command: "git",
+              args: ["branch", branch, startPoint],
+              cwd,
+              timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new EpicRunnerDispatchError({
+                    commandType: "git.run-base-branch-create",
+                    detail: `Could not create branch ${branch}`,
+                    cause,
+                  }),
+              ),
+              Effect.flatMap((output) =>
+                output.code === 0
+                  ? Effect.void
+                  : Effect.fail(
+                      new EpicRunnerDispatchError({
+                        commandType: "git.run-base-branch-create",
+                        detail:
+                          output.stderr.trim() || `git exited with code ${String(output.code)}`,
+                      }),
+                    ),
+              ),
+            ),
+      },
+      { cwd: run.cwd, epicId: run.epicId, runOwnedBaseBranch: run.config.vcs.runOwnedBaseBranch },
+    );
+
   const resolveBeadsDirectory = (cwd: string) =>
     Effect.gen(function* () {
       const beadsDirectory = path.join(cwd, ".beads");
@@ -646,9 +713,17 @@ export const makeServerPoolWorkspace = (deps: {
         .pipe(Effect.mapError(storeError("getMergeState")));
       if (Option.isSome(persisted)) return persisted.value;
 
-      const baseBranch = yield* readCurrentBranch(run.cwd);
+      const baseBranch = yield* resolveBaseBranch(run);
       const vcs = makeProcessPoolVcs(processRunner);
-      const lastAcceptedHead = yield* vcs.headCommit(run.cwd);
+      // A run-owned base branch (t3code-5m4) is never checked out at
+      // `run.cwd`, so seeding from `HEAD` there would read the operator's
+      // branch instead — reused verbatim by every later resume and fatal on
+      // the first drain once the two disagree. Read the resolved base branch
+      // itself so this agrees with what MergeQueue lands against.
+      const lastAcceptedHead = yield* vcs.headCommit(
+        run.cwd,
+        run.config.vcs.runOwnedBaseBranch ? baseBranch : undefined,
+      );
       if (lastAcceptedHead === null) {
         return yield* new EpicRunnerDispatchError({
           commandType: "git.integration-worktree",
@@ -980,8 +1055,8 @@ export const makeServerPoolWorkspace = (deps: {
             });
           }
         }
-        const baseBranch = yield* readCurrentBranch(runCtx.cwd);
         const run = yield* requireRun(runCtx.runId);
+        const baseBranch = yield* resolveBaseBranch(run);
         const siblings = yield* runSiblings(run);
         if (siblings.length > 0) {
           // Layout mode: the worker sandbox is a run-scoped layout root

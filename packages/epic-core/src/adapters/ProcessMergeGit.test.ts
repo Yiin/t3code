@@ -54,6 +54,55 @@ it.effect("serializes mutations from sibling worktrees by Git common directory",
   }),
 );
 
+it.effect("reads HEAD by default and a named ref when one is supplied", () =>
+  Effect.gen(function* () {
+    const seen: Array<ReadonlyArray<string>> = [];
+    const processRunner = ProcessRunner.of({
+      run: (request: ProcessRunInput) => {
+        seen.push(request.args);
+        return Effect.succeed(output("deadbeef\n"));
+      },
+    });
+    const git = makeProcessMergeGit({ processRunner });
+
+    expect(yield* git.head("/repo")).toBe("deadbeef");
+    expect(yield* git.head("/repo", "epic/e1/base")).toBe("deadbeef");
+    expect(seen).toEqual([
+      ["rev-parse", "HEAD"],
+      ["rev-parse", "epic/e1/base"],
+    ]);
+  }),
+);
+
+it.effect("fast-forwards by checkout-based merge without a branch, ref-only fetch with one", () =>
+  Effect.gen(function* () {
+    const seen: Array<ReadonlyArray<string>> = [];
+    const processRunner = ProcessRunner.of({
+      run: (request: ProcessRunInput) => {
+        if (request.args[0] === "rev-parse") return Effect.succeed(output("/repo/.git\n"));
+        seen.push(request.args);
+        return Effect.succeed(output());
+      },
+    });
+    const git = makeProcessMergeGit({ processRunner });
+
+    expect(
+      (yield* git.fastForward({ cwd: "/repo", ref: "cook-epic-integration-run-1" })).landed,
+    ).toBe(true);
+    expect(
+      (yield* git.fastForward({
+        cwd: "/repo",
+        ref: "cook-epic-integration-run-1",
+        branch: "epic/e1/base",
+      })).landed,
+    ).toBe(true);
+    expect(seen).toEqual([
+      ["merge", "--ff-only", "cook-epic-integration-run-1"],
+      ["fetch", ".", "cook-epic-integration-run-1:epic/e1/base"],
+    ]);
+  }),
+);
+
 for (const failure of ["show-ref", "rev-list"] as const) {
   it.effect(`treats a ${failure} failure as a missing branch`, () =>
     Effect.gen(function* () {
