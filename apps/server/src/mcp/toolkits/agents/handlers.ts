@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -29,6 +30,14 @@ import {
 } from "../../../orchestration/ThreadSettleWatch.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { mirrorChildLifecycle, type ChildMirrorTarget } from "./childMirror.ts";
+import {
+  deregisterSpawn,
+  listSpawnsOfParent,
+  makeCancelChild,
+  registerSpawn,
+  spawnParentDepth,
+  type SpawnWaiterOutcome,
+} from "./SpawnRegistry.ts";
 import { decideSpawn, makeSubagentChildThreadId, type SpawnPolicy } from "./spawnPolicy.ts";
 import { readSpawnPolicy } from "./spawnPolicySource.ts";
 import { AgentsToolkit, SpawnAgentError, type SpawnAgentStatus } from "./tools.ts";
@@ -140,17 +149,31 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
   );
 
   // Depth: 0 for a top-level thread, +1 for each thread-backed ancestor.
-  let parentDepth = 0;
+  //
+  // Two sources, deeper wins. The projection is the durable link and the
+  // registry is the live one; a spawn registered in this process but not yet
+  // projected must not read as top-level and slip past the depth cap.
+  let projectedDepth = 0;
   let ancestorId = parentShell.parentThreadId;
-  while (ancestorId !== null && parentDepth < MAX_DEPTH_WALK) {
-    parentDepth += 1;
+  while (ancestorId !== null && projectedDepth < MAX_DEPTH_WALK) {
+    projectedDepth += 1;
     const ancestor = yield* readShell(ancestorId);
     ancestorId = Option.isSome(ancestor) ? ancestor.value.parentThreadId : null;
   }
+  const parentDepth = Math.max(projectedDepth, spawnParentDepth(scope.threadId));
 
-  // Count live children, stopping as soon as the cap is reached: a long-lived
-  // parent accumulates finished children and there is no reason to read them
-  // all once the answer cannot change.
+  // Count live children from both sides, deduplicated by child thread id.
+  //
+  // The registry knows the spawns this process is waiting on right now; the
+  // projection knows every child whose turn is still running, including one this
+  // parent already timed out on and can no longer see. Neither alone bounds the
+  // cap honestly, so a child counts if either says it is alive. The read stops
+  // as soon as the cap is reached: a long-lived parent accumulates finished
+  // children and there is no reason to read them all once the answer cannot
+  // change.
+  const liveChildIds = new Set<string>(
+    listSpawnsOfParent(scope.threadId).map((registration) => registration.childThreadId),
+  );
   const childThreadIds = yield* projection.listChildThreadIds(scope.threadId).pipe(
     Effect.mapError(
       (cause) =>
@@ -160,12 +183,12 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
         }),
     ),
   );
-  let liveChildCount = 0;
   for (const childThreadId of childThreadIds) {
-    if (liveChildCount >= policy.maxConcurrentChildren) break;
+    if (liveChildIds.size >= policy.maxConcurrentChildren) break;
+    if (liveChildIds.has(childThreadId)) continue;
     const childShell = yield* readShell(childThreadId);
     if (Option.isSome(childShell) && isLiveChild(childShell.value.latestTurn)) {
-      liveChildCount += 1;
+      liveChildIds.add(childThreadId);
     }
   }
 
@@ -173,7 +196,7 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
     agentType: input.agent_type,
     parentThreadId: scope.threadId,
     parentDepth,
-    liveChildCount,
+    liveChildCount: liveChildIds.size,
     policy,
   });
   if (decision._tag === "refused") {
@@ -300,22 +323,68 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
     return { status, finalMessage };
   });
 
-  const outcome = yield* mirrorChildLifecycle(
+  /**
+   * The second way this wait can end: someone cancelled one side of the pair.
+   *
+   * `SpawnRegistry` completes this deferred when the parent is interrupted or
+   * the child is stopped from the drawer. Without it the parent would keep
+   * polling a dead child until its 30-minute bound.
+   */
+  const completion = yield* Deferred.make<SpawnWaiterOutcome>();
+  registerSpawn({
+    parentThreadId: scope.threadId,
+    childThreadId,
+    startedAtMs,
     target,
-    settle.pipe(
-      Effect.timeoutOption(Duration.millis(policy.spawnWaitTimeoutMs)),
-      Effect.map(
-        Option.match({
-          onNone: () => ({ _tag: "timeout" as const }),
-          onSome: (result) => ({
-            _tag: "settled" as const,
-            // The mirror's vocabulary calls an interrupted child "stopped".
-            status: result.status === "interrupted" ? ("stopped" as const) : result.status,
-            ...(result.finalMessage !== null ? { summary: result.finalMessage } : {}),
-          }),
-        }),
-      ),
+    // Bound to this call's engine so the registry entry needs no context of its
+    // own: whoever cancels runs the dispatches, but this decides what they are.
+    cancel: makeCancelChild(childThreadId).pipe(
+      Effect.provideService(OrchestrationEngineService, engine),
     ),
+    complete: (outcome) => Deferred.succeed(completion, outcome).pipe(Effect.ignore),
+  });
+
+  // The mirror's vocabulary collapses "interrupted" and "stopped" into one row,
+  // and the note the model reads needs them apart. The wait writes the finer
+  // word here on its way through.
+  const ended: { status: SpawnWaiterOutcome["status"] | "completed" | "failed" } = {
+    status: "completed",
+  };
+
+  const wait = Effect.raceFirst(settle, Deferred.await(completion)).pipe(
+    Effect.timeoutOption(Duration.millis(policy.spawnWaitTimeoutMs)),
+    Effect.map(
+      Option.match({
+        onNone: () => ({ _tag: "timeout" as const }),
+        onSome: (result) => {
+          ended.status = result.status;
+          return {
+            _tag: "settled" as const,
+            status:
+              result.status === "interrupted" || result.status === "stopped"
+                ? ("stopped" as const)
+                : result.status,
+            ...(result.finalMessage !== null ? { summary: result.finalMessage } : {}),
+          };
+        },
+      }),
+    ),
+  );
+
+  const outcome = yield* mirrorChildLifecycle(target, wait).pipe(
+    // Rule 3: the parent's MCP request went away. Detach — deregister, let the
+    // progress fiber die with the scope, and leave the child running. Whether
+    // an abort even reaches this handler is unverified, and killing a child on
+    // an unproven signal is the worse failure.
+    Effect.onInterrupt(() =>
+      Effect.logInfo("subagent.spawn.detached", {
+        parentThreadId: scope.threadId,
+        childThreadId,
+      }),
+    ),
+    // Every exit path drops the registration: settled, timeout, detach, and the
+    // cancellation paths that already dropped it themselves.
+    Effect.ensuring(Effect.sync(() => deregisterSpawn(scope.threadId, childThreadId))),
   );
 
   const elapsedMs = Math.max(0, Date.parse(yield* nowIso) - startedAtMs);
@@ -356,7 +425,9 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
         ? `Subagent ${childThreadId} finished.`
         : status === "failed"
           ? `Subagent ${childThreadId} failed. Its answer, if any, is in finalMessage.`
-          : `Subagent ${childThreadId} was interrupted before it finished.`,
+          : ended.status === "stopped"
+            ? `Subagent ${childThreadId} was stopped from its own thread before it finished. Its answer, if any, is in finalMessage. Do not spawn it again unless you are asked to.`
+            : `Subagent ${childThreadId} was interrupted before it finished.`,
   };
 });
 

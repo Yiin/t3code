@@ -14,6 +14,7 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { AgentsToolkitHandlersLive } from "./toolkits/agents/handlers.ts";
+import { SpawnCancellationWatchLive } from "./toolkits/agents/SpawnRegistry.ts";
 import { AgentsToolkit } from "./toolkits/agents/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
@@ -205,8 +206,11 @@ const PreviewSnapshotRegistrationLive = Layer.effectDiscard(registerPreviewSnaps
   Layer.provide(PreviewSnapshotToolkitHandlersLive),
 );
 
-const AgentsToolkitRegistrationLive = McpServer.toolkit(AgentsToolkit).pipe(
-  Layer.provide(AgentsToolkitHandlersLive),
+const AgentsToolkitRegistrationLive = Layer.mergeAll(
+  McpServer.toolkit(AgentsToolkit).pipe(Layer.provide(AgentsToolkitHandlersLive)),
+  // Ships with the toolkit, not with the provider reactor: a parent's
+  // cancellation must not queue behind the provider work it is cancelling.
+  SpawnCancellationWatchLive,
 );
 
 export const PreviewToolkitRegistrationLive = Layer.mergeAll(
