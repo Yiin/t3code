@@ -3,6 +3,8 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_SPAWN_POLICY,
   decideSpawn,
+  isSubagentChildThreadId,
+  makeSubagentChildThreadId,
   resolveSpawnPolicy,
   type SpawnPolicy,
 } from "./spawnPolicy.ts";
@@ -84,5 +86,19 @@ describe("decideSpawn", () => {
     const decision = decideSpawn(input({ agentType: "nope", policy }));
 
     assert.strictEqual(decision._tag === "refused" ? decision.reason : null, "disabled");
+  });
+});
+
+describe("subagent child thread ids", () => {
+  it("round-trips: a minted child id reads back as a child", () => {
+    const childThreadId = makeSubagentChildThreadId("thread-parent", "0f7c-uuid");
+
+    assert.strictEqual(childThreadId, "subagent-thread-parent-0f7c-uuid");
+    assert.strictEqual(isSubagentChildThreadId(childThreadId), true);
+  });
+
+  it("does not read an ordinary thread id as a child", () => {
+    assert.strictEqual(isSubagentChildThreadId("thread-parent"), false);
+    assert.strictEqual(isSubagentChildThreadId("epic-run-1-iteration-2"), false);
   });
 });

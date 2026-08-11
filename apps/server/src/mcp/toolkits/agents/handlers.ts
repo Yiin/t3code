@@ -20,7 +20,12 @@ import * as Option from "effect/Option";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import { decideSpawn, resolveSpawnPolicy, type SpawnPolicy } from "./spawnPolicy.ts";
+import {
+  decideSpawn,
+  makeSubagentChildThreadId,
+  resolveSpawnPolicy,
+  type SpawnPolicy,
+} from "./spawnPolicy.ts";
 import { AgentsToolkit, SpawnAgentError } from "./tools.ts";
 
 /**
@@ -138,7 +143,7 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
   // Reads as `interactive` to `sessionReapPolicy.ts` (only epic-run iteration
   // ids parse out), so an idle finished child holds its provider session for
   // the 36 h interactive backstop. Known cost, not an accident.
-  const childThreadId = ThreadId.make(`subagent-${scope.threadId}-${uuid}`);
+  const childThreadId = ThreadId.make(makeSubagentChildThreadId(scope.threadId, uuid));
   const trimmedDescription = input.description.trim();
   const title =
     trimmedDescription.length > 0 ? trimmedDescription : `Subagent: ${input.agent_type}`;

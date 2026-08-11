@@ -15,6 +15,23 @@
  * @module spawnPolicy
  */
 
+/**
+ * Prefix every thread-backed child thread id carries.
+ *
+ * The id is the only marker a provider session has for "I am a subagent", so
+ * mint and parse live here together and round-trip in one test. `handlers.ts`
+ * mints it; `apps/server/src/provider/subagentSpawn.ts` reads it back.
+ */
+export const SUBAGENT_CHILD_THREAD_ID_PREFIX = "subagent-";
+
+/** Mint the id of a thread-backed child of `parentThreadId`. */
+export const makeSubagentChildThreadId = (parentThreadId: string, uuid: string): string =>
+  `${SUBAGENT_CHILD_THREAD_ID_PREFIX}${parentThreadId}-${uuid}`;
+
+/** True when this thread is itself a thread-backed subagent. */
+export const isSubagentChildThreadId = (threadId: string): boolean =>
+  threadId.startsWith(SUBAGENT_CHILD_THREAD_ID_PREFIX);
+
 /** Why a spawn request was refused. Each maps to one prose `detail`. */
 export type SpawnRefusalReason =
   | "disabled"

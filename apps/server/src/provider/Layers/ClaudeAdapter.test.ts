@@ -15,6 +15,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -36,6 +37,8 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { DEFAULT_SPAWN_POLICY, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
@@ -166,6 +169,7 @@ function makeHarness(config?: {
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly subagentSpawnPolicy?: SpawnPolicy;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -178,6 +182,7 @@ function makeHarness(config?: {
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.environment ? { environment: config.environment } : {}),
+    ...(config?.subagentSpawnPolicy ? { subagentSpawnPolicy: config.subagentSpawnPolicy } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -280,6 +285,40 @@ async function readFirstPromptMessage(
 // test asserts. Same helper as ProviderService.test.ts.
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
+const enabledSpawnPolicy = (overrides: Partial<SpawnPolicy> = {}): SpawnPolicy => ({
+  ...DEFAULT_SPAWN_POLICY,
+  enabled: true,
+  ...overrides,
+});
+
+/** Registers a T3 MCP session for the duration of one effect, then clears it. */
+const withMcpProviderSession = <A, E, R>(
+  threadId: ThreadId,
+  body: () => Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("env-claude-test"),
+        threadId,
+        providerSessionId: "mcp-session-claude-test",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:3773/mcp",
+        authorizationHeader: "Bearer mcp-token",
+      });
+    }),
+    () => body(),
+    () => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId)),
+  );
+
+/** The system prompt is a preset object or a raw block list; only the preset appends. */
+const readSystemPromptAppend = (
+  systemPrompt: ClaudeQueryOptions["systemPrompt"],
+): string | undefined =>
+  typeof systemPrompt === "object" && !Array.isArray(systemPrompt) && systemPrompt.type === "preset"
+    ? systemPrompt.append
+    : undefined;
 
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
@@ -2667,6 +2706,114 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("leaves the built-in Task tool alone while thread-backed spawning is off", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.disallowedTools, undefined);
+      assert.deepEqual(options?.systemPrompt, { type: "preset", preset: "claude_code" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("denies Task and points at spawn_agent when the policy is on", () => {
+    const harness = makeHarness({ subagentSpawnPolicy: enabledSpawnPolicy() });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* withMcpProviderSession(THREAD_ID, () =>
+        adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        }),
+      );
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(options?.disallowedTools, ["Task"]);
+      assert.include(
+        readSystemPromptAppend(options?.systemPrompt) ?? "",
+        "mcp__t3-code__spawn_agent",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the built-in Task tool when the session has no MCP session", () => {
+    const harness = makeHarness({ subagentSpawnPolicy: enabledSpawnPolicy() });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.disallowedTools, undefined);
+      assert.deepEqual(options?.systemPrompt, { type: "preset", preset: "claude_code" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("denies Task inside a thread-backed child and offers it no delegation", () => {
+    const childThreadId = ThreadId.make(`subagent-${THREAD_ID}-child-1`);
+    const harness = makeHarness({ subagentSpawnPolicy: enabledSpawnPolicy() });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* withMcpProviderSession(childThreadId, () =>
+        adapter.startSession({
+          threadId: childThreadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        }),
+      );
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(options?.disallowedTools, ["Task"]);
+      assert.include(readSystemPromptAppend(options?.systemPrompt) ?? "", "cannot delegate");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("leaves Task alone when the session ships per-role subagent definitions", () => {
+    // t3code-pg7.13 invokes its tiered definitions through the Task tool, so the
+    // guard must win even with the policy on and an MCP session present.
+    const harness = makeHarness({ subagentSpawnPolicy: enabledSpawnPolicy() });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* withMcpProviderSession(THREAD_ID, () =>
+        adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          subagents: { planner: {}, implementer: {} },
+        } as Parameters<typeof adapter.startSession>[0]),
+      );
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.disallowedTools, undefined);
+      assert.deepEqual(options?.systemPrompt, { type: "preset", preset: "claude_code" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("opts into forwardSubagentText on the SDK query by default", () => {
     const harness = makeHarness();

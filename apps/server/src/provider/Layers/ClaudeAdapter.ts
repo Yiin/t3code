@@ -70,6 +70,13 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { resolveSpawnPolicy, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
+import {
+  readSubagentDefinitionCount,
+  resolveSubagentSpawnMode,
+  subagentSpawnSystemPromptAppend,
+  SUBAGENT_SPAWN_DISALLOWED_TOOLS,
+} from "../subagentSpawn.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
 import { spawnWorkerScopeWrappedProcess } from "../workerScope.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
@@ -281,6 +288,12 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /**
+   * Overrides the resolved spawn policy. The one settings seam stays in
+   * `spawnPolicy.ts`, so this exists only for tests, which otherwise could
+   * never reach the enabled branch while the policy ships off.
+   */
+  readonly subagentSpawnPolicy?: SpawnPolicy;
 }
 
 function isUuid(value: string): boolean {
@@ -1478,6 +1491,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     claudeEnvironment,
   );
   const forwardSubagentText = resolveForwardSubagentTextFlag(options?.environment ?? process.env);
+  // Read once per adapter, never per session: `spawnPolicy.ts` owns the single
+  // settings seam and the adapter must not grow a second one.
+  const subagentSpawnPolicy = options?.subagentSpawnPolicy ?? resolveSpawnPolicy();
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -4035,11 +4051,33 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       const workerScope = input.workerScope;
+      // Who owns subagent spawning for this session. `in-process` changes
+      // nothing at all: today's built-in Task path, its task.started /
+      // task_progress / task.completed events, and the parent-tagged subagent
+      // transcript forwarding all stay exactly as they are.
+      const subagentDefinitionCount = readSubagentDefinitionCount(input);
+      const subagentSpawn = resolveSubagentSpawnMode({
+        threadId: input.threadId,
+        hasMcpSession: mcpSession !== undefined,
+        subagentDefinitionCount,
+        policy: subagentSpawnPolicy,
+      });
+      const subagentSpawnPromptAppend = subagentSpawnSystemPromptAppend(
+        subagentSpawn,
+        subagentSpawnPolicy,
+      );
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          ...(subagentSpawnPromptAppend ? { append: subagentSpawnPromptAppend } : {}),
+        },
+        ...(subagentSpawn.mode === "in-process"
+          ? {}
+          : { disallowedTools: [...SUBAGENT_SPAWN_DISALLOWED_TOOLS] }),
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
         // normalized to `xhigh` above and paired with `settings.ultracode`.
@@ -4117,6 +4155,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.session_id": newSessionId ?? "",
         "claude.query.include_partial_messages": true,
         "claude.query.forward_subagent_text": forwardSubagentText,
+        "claude.query.subagent_spawn_mode": subagentSpawn.mode,
+        "claude.query.subagent_spawn_reason": subagentSpawn.reason,
+        "claude.query.subagent_spawn_task_denied": subagentSpawn.mode !== "in-process",
+        "claude.query.subagent_definition_count": subagentDefinitionCount,
         "claude.query.additional_directories": input.cwd ? [input.cwd] : [],
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
