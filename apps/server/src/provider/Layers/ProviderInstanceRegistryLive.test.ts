@@ -48,6 +48,7 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import {
   defaultProviderContinuationIdentity,
   type AnyProviderDriver,
@@ -63,6 +64,7 @@ import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { GrokDriver } from "../Drivers/GrokDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
+import type { BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
 
@@ -72,6 +74,13 @@ const TestHttpClientLive = Layer.succeed(
     Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ version: "0.0.0" }))),
   ),
 );
+
+const NoOpProviderUsageLedgerStoreLive = Layer.succeed(ProviderUsageLedgerStore, {
+  recordSamples: () => Effect.void,
+  listForInstance: () => Effect.succeed([]),
+  listAll: Effect.succeed([]),
+  pruneObservedBefore: () => Effect.void,
+});
 
 const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   enabled: false,
@@ -391,6 +400,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(NoOpProviderUsageLedgerStoreLive),
     Layer.provideMerge(NoOpProviderInstanceTeardownLive),
   );
 
@@ -445,7 +455,13 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       };
 
       const { registry } = yield* makeProviderInstanceRegistry({
-        drivers: [CodexDriver, ClaudeDriver, CursorDriver, GrokDriver, OpenCodeDriver],
+        drivers: [
+          CodexDriver,
+          ClaudeDriver,
+          CursorDriver,
+          GrokDriver,
+          OpenCodeDriver,
+        ] as ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>>,
         configMap,
       });
 

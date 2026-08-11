@@ -21,6 +21,7 @@ import {
   type RuntimeMode,
   ThreadId,
   ProviderInstanceId,
+  type ProviderUsageSample,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
@@ -37,6 +38,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
@@ -166,6 +168,7 @@ function makeHarness(config?: {
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly recordUsageSamples?: ClaudeAdapterLiveOptions["recordUsageSamples"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -178,6 +181,7 @@ function makeHarness(config?: {
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.environment ? { environment: config.environment } : {}),
+    ...(config?.recordUsageSamples ? { recordUsageSamples: config.recordUsageSamples } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -1941,6 +1945,146 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("records normalized live rate-limit samples and skips incomplete events", () => {
+    const recordedSamples: Array<ProviderUsageSample> = [];
+    const instanceId = ProviderInstanceId.make("claude-work");
+    const harness = makeHarness({
+      instanceId,
+      recordUsageSamples: ({ samples }) =>
+        Effect.sync(() => {
+          recordedSamples.push(...samples);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber } = yield* startFailureScoringTurn(adapter);
+
+      const emitRateLimit = (rateLimitInfo: Record<string, unknown>, uuid: string) =>
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: { status: "allowed", ...rateLimitInfo },
+          session_id: "sdk-session-usage",
+          uuid,
+        } as unknown as SDKMessage);
+
+      emitRateLimit(
+        { rateLimitType: "five_hour", utilization: 10, resetsAt: 1_700_000_000 },
+        "rate-limit-seconds",
+      );
+      emitRateLimit(
+        { rateLimitType: "seven_day", utilization: 20, resetsAt: 1_700_000_000_000 },
+        "rate-limit-milliseconds",
+      );
+      emitRateLimit(
+        { rateLimitType: "seven_day_opus", utilization: 30, resetsAt: Number.POSITIVE_INFINITY },
+        "rate-limit-invalid-date",
+      );
+      emitRateLimit({ utilization: 40 }, "rate-limit-missing-type");
+      emitRateLimit({ rateLimitType: "seven_day_sonnet" }, "rate-limit-missing-utilization");
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-usage",
+        uuid: "result-usage",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.deepEqual(
+        recordedSamples.map(({ observedAt: _, ...sample }) => sample),
+        [
+          {
+            providerInstanceId: instanceId,
+            window: "five_hour",
+            utilization: 10,
+            resetsAt: "2023-11-14T22:13:20.000Z",
+            source: "claude.sdk.rate_limit_event",
+          },
+          {
+            providerInstanceId: instanceId,
+            window: "seven_day",
+            utilization: 20,
+            resetsAt: "2023-11-14T22:13:20.000Z",
+            source: "claude.sdk.rate_limit_event",
+          },
+          {
+            providerInstanceId: instanceId,
+            window: "seven_day_opus",
+            utilization: 30,
+            resetsAt: null,
+            source: "claude.sdk.rate_limit_event",
+          },
+        ],
+      );
+      const emittedRateLimitEvents = runtimeEvents.filter(
+        (event) => event.type === "account.rate-limits.updated",
+      );
+      assert.deepEqual(
+        recordedSamples.map((sample) => sample.observedAt),
+        emittedRateLimitEvents.slice(0, recordedSamples.length).map((event) => event.createdAt),
+      );
+
+      const rateLimitEvent = runtimeEvents.find(
+        (event) => event.type === "account.rate-limits.updated",
+      );
+      assert.equal(rateLimitEvent?.type, "account.rate-limits.updated");
+      if (rateLimitEvent?.type === "account.rate-limits.updated") {
+        assert.equal(
+          (rateLimitEvent.payload.rateLimits as { uuid?: string }).uuid,
+          "rate-limit-seconds",
+        );
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("continues the turn when a live rate-limit ledger write fails", () => {
+    const harness = makeHarness({
+      recordUsageSamples: () =>
+        Effect.fail(
+          new PersistenceSqlError({ operation: "ClaudeAdapter.test", cause: "write failed" }),
+        ),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed",
+          rateLimitType: "five_hour",
+          utilization: 50,
+          resetsAt: 1_700_000_000,
+        },
+        session_id: "sdk-session-usage-failure",
+        uuid: "rate-limit-failed-write",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-usage-failure",
+        uuid: "result-usage-failure",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.equal(runtimeEvents.at(-1)?.type, "turn.completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("keeps plain successful turns unaffected by failure scoring", () => {
     const harness = makeHarness();

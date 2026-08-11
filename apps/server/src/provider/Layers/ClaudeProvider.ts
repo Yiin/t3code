@@ -2,6 +2,9 @@ import {
   type ClaudeSettings,
   type ModelCapabilities,
   type ModelSelection,
+  type ProviderUsageReading,
+  type ProviderUsageSource,
+  type ProviderUsageWindow,
   type ServerProviderModel,
   type ServerProviderSkill,
   type ServerProviderSlashCommand,
@@ -25,6 +28,8 @@ import {
   type Options as ClaudeQueryOptions,
   type SlashCommand as ClaudeSlashCommand,
   type SDKUserMessage,
+  type SDKControlGetUsageResponse,
+  type SDKRateLimitInfo,
   type SettingSource,
 } from "@anthropic-ai/claude-agent-sdk";
 
@@ -566,7 +571,117 @@ type ClaudeCapabilitiesProbe = {
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  readonly usage: ReadonlyArray<ProviderUsageReading>;
 };
+
+type ClaudeUsageReadingInput = {
+  readonly window: ProviderUsageWindow | undefined;
+  readonly utilization: number | null | undefined;
+  readonly resetsAt: string | number | null | undefined;
+};
+
+function normalizeClaudeResetsAt(value: string | number | null | undefined): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  const milliseconds = value < 1e11 ? value * 1_000 : value;
+  return Option.match(DateTime.make(milliseconds), {
+    onNone: () => null,
+    onSome: DateTime.formatIso,
+  });
+}
+
+function normalizeClaudeUsageReading(
+  input: ClaudeUsageReadingInput,
+  source: ProviderUsageSource,
+): ProviderUsageReading | undefined {
+  if (!input.window || input.utilization == null) {
+    return undefined;
+  }
+  return {
+    window: input.window,
+    utilization: input.utilization,
+    resetsAt: normalizeClaudeResetsAt(input.resetsAt),
+    source,
+  };
+}
+
+export function mapClaudeRateLimitInfo(info: SDKRateLimitInfo): ProviderUsageReading | undefined {
+  return normalizeClaudeUsageReading(
+    {
+      window: info.rateLimitType,
+      utilization: info.utilization,
+      resetsAt: info.resetsAt,
+    },
+    "claude.sdk.rate_limit_event",
+  );
+}
+
+export function mapClaudeUsageResponse(
+  response: SDKControlGetUsageResponse,
+): ReadonlyArray<ProviderUsageReading> {
+  if (!response.rate_limits_available || response.rate_limits === null) {
+    return [];
+  }
+
+  const readings: Array<ProviderUsageReading> = [];
+  const addWindow = (
+    window: Extract<
+      ProviderUsageWindow,
+      "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet"
+    >,
+    value:
+      | { readonly utilization: number | null; readonly resets_at: string | null }
+      | null
+      | undefined,
+  ) => {
+    if (!value) return;
+    const reading = normalizeClaudeUsageReading(
+      { window, utilization: value.utilization, resetsAt: value.resets_at },
+      "claude.sdk.get_usage",
+    );
+    if (reading) readings.push(reading);
+  };
+
+  addWindow("five_hour", response.rate_limits.five_hour);
+  addWindow("seven_day", response.rate_limits.seven_day);
+  addWindow("seven_day_opus", response.rate_limits.seven_day_opus);
+  addWindow("seven_day_sonnet", response.rate_limits.seven_day_sonnet);
+  // seven_day_oauth_apps has no slot in the settled ProviderUsageWindow vocabulary.
+
+  const extraUsage = response.rate_limits.extra_usage;
+  if (extraUsage) {
+    const reading = normalizeClaudeUsageReading(
+      { window: "overage", utilization: extraUsage.utilization, resetsAt: null },
+      "claude.sdk.get_usage",
+    );
+    if (reading) readings.push(reading);
+  }
+  return readings;
+}
+
+type ClaudeUsageProbeQuery = {
+  readonly usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<SDKControlGetUsageResponse>;
+};
+
+export async function readClaudeUsageForProbe(
+  query: ClaudeUsageProbeQuery,
+  timeoutMs = USAGE_PROBE_TIMEOUT_MS,
+): Promise<ReadonlyArray<ProviderUsageReading>> {
+  const usageMethod = query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  if (typeof usageMethod !== "function") {
+    return [];
+  }
+  try {
+    const response = await raceWithTimeout(usageMethod.call(query), timeoutMs);
+    return response ? mapClaudeUsageResponse(response) : [];
+  } catch {
+    return [];
+  }
+}
 
 function parseClaudeSkills(
   skills: ReadonlyArray<ClaudeSlashCommand> | undefined,
@@ -667,6 +782,7 @@ function dedupeSlashCommands(
 }
 
 const SKILLS_PROBE_TIMEOUT_MS = 5_000;
+const USAGE_PROBE_TIMEOUT_MS = 5_000;
 
 // Runs inside the SDK's promise-based query lifecycle, not Effect code.
 function raceWithTimeout<A>(promise: Promise<A>, timeoutMs: number): Promise<A | undefined> {
@@ -742,10 +858,12 @@ const probeClaudeCapabilities = (
       // control request is the only way to tell them apart from plain
       // slash commands. Older CLIs may not answer it, so a missing or slow
       // response degrades to "no skills" instead of failing the probe.
-      const skills = await raceWithTimeout(
+      const skillsRead = raceWithTimeout(
         q.reloadSkills().then((response) => parseClaudeSkills(response.skills)),
         SKILLS_PROBE_TIMEOUT_MS,
       ).catch(() => undefined);
+      const usageRead = readClaudeUsageForProbe(q as ClaudeUsageProbeQuery);
+      const [skills, usage] = await Promise.all([skillsRead, usageRead]);
       const slashCommands = parseClaudeInitializationCommands(init.commands);
       return {
         email: account?.email,
@@ -754,6 +872,7 @@ const probeClaudeCapabilities = (
         apiProvider: account?.apiProvider,
         slashCommands: excludeSkillCommands(slashCommands, skills ?? []),
         skills: skills ?? [],
+        usage,
       } satisfies ClaudeCapabilitiesProbe;
     });
   }).pipe(

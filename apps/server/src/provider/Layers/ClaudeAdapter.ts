@@ -69,6 +69,7 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import type { ProviderUsageLedgerStoreShape } from "../../persistence/Services/ProviderUsageLedger.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
 import { spawnWorkerScopeWrappedProcess } from "../workerScope.ts";
@@ -81,6 +82,7 @@ import {
   resolveClaudeApiModelId,
   resolveClaudeContextWindow,
   resolveClaudeEffort,
+  mapClaudeRateLimitInfo,
 } from "./ClaudeProvider.ts";
 import {
   ProviderAdapterProcessError,
@@ -281,6 +283,7 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly recordUsageSamples?: ProviderUsageLedgerStoreShape["recordSamples"];
 }
 
 function isUuid(value: string): boolean {
@@ -3402,6 +3405,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           rateLimits: message,
         },
       });
+      const usageReading = mapClaudeRateLimitInfo(message.rate_limit_info);
+      const recordUsageSamples = options?.recordUsageSamples;
+      if (usageReading && recordUsageSamples) {
+        yield* recordUsageSamples({
+          samples: [
+            {
+              ...usageReading,
+              providerInstanceId: boundInstanceId,
+              observedAt: base.createdAt,
+            },
+          ],
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("claude.usage-ledger.record-failed", { cause }),
+          ),
+        );
+      }
       const rateLimitInfo = (
         message as { rate_limit_info?: { status?: string; overageDisabledReason?: string } }
       ).rate_limit_info;
