@@ -20,6 +20,7 @@ import * as Option from "effect/Option";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { appendChildSpawned } from "./childMirror.ts";
 import {
   decideSpawn,
   makeSubagentChildThreadId,
@@ -199,6 +200,19 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
     runtimeMode: parentShell.runtimeMode,
     interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
     createdAt: yield* nowIso,
+  });
+
+  // Only after the child's turn is really starting: the parent's roster row is
+  // the promise that a subagent exists, and a failed start would leave that
+  // promise standing for the 15-minute freshness window with nothing behind it.
+  // Best-effort from here on — see `./childMirror.ts`.
+  yield* appendChildSpawned({
+    parentThreadId: scope.threadId,
+    parentTurnId: parentShell.latestTurn?.turnId ?? null,
+    childThreadId,
+    agentType: input.agent_type,
+    description: title,
+    prompt: input.prompt,
   });
 
   return {

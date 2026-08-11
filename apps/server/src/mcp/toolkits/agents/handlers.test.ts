@@ -141,10 +141,23 @@ describe("spawn_agent handler", () => {
       assert.strictEqual(result.success.agentType, "Explore");
       assert.strictEqual(result.success.description, "Audit the settings migrations");
 
+      // The two trailing appends mirror the child onto the parent's subagent
+      // read model; `childMirror.test.ts` owns their contents.
       assert.deepStrictEqual(
         dispatched.map((command) => command.type),
-        ["thread.create", "thread.turn.start"],
+        ["thread.create", "thread.turn.start", "thread.activity.append", "thread.activity.append"],
       );
+      const started = dispatched[2];
+      assert.strictEqual(started?.type, "thread.activity.append");
+      if (started?.type !== "thread.activity.append") return;
+      assert.strictEqual(started.threadId, PARENT_THREAD_ID);
+      assert.strictEqual(started.activity.kind, "task.started");
+      assert.deepStrictEqual(started.activity.payload, {
+        taskId: result.success.childThreadId,
+        subagentType: "Explore",
+        detail: "Audit the settings migrations",
+        prompt: spawnInput.prompt,
+      });
 
       const create = dispatched[0];
       assert.strictEqual(create?.type, "thread.create");
