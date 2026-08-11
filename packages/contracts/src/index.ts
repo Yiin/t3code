@@ -16,6 +16,7 @@ export * from "./keybindings.ts";
 export * from "./server.ts";
 export * from "./settings.ts";
 export * from "./epicRolePolicy.ts";
+export * from "./epicSubagent.ts";
 export * from "./beads.ts";
 export * from "./epicRuns.ts";
 export * from "./epicRunTranscript.ts";
