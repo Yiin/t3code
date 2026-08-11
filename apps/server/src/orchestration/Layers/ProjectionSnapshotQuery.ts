@@ -9,6 +9,8 @@ import {
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
   OrchestrationGetSubagentActivitiesInput,
+  OrchestrationMessageDeliveryState,
+  OrchestrationMessageOrigin,
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
@@ -81,6 +83,8 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
     isStreaming: Schema.Number,
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
     correlation: Schema.NullOr(Schema.fromJsonString(EpicPlanCorrelation)),
+    origin: Schema.NullOr(OrchestrationMessageOrigin),
+    deliveryState: Schema.NullOr(OrchestrationMessageDeliveryState),
   }),
 );
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
@@ -655,6 +659,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           text,
           attachments_json AS "attachments",
           correlation_json AS "correlation",
+          origin,
+          delivery_state AS "deliveryState",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
           updated_at AS "updatedAt"
@@ -1153,6 +1159,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           text,
           attachments_json AS "attachments",
           correlation_json AS "correlation",
+          origin,
+          delivery_state AS "deliveryState",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
           updated_at AS "updatedAt"
@@ -1530,6 +1538,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   text: row.text,
                   ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                   ...(row.correlation !== null ? { correlation: row.correlation } : {}),
+                  ...(row.origin !== null ? { origin: row.origin } : {}),
+                  ...(row.deliveryState !== null ? { deliveryState: row.deliveryState } : {}),
                   turnId: row.turnId,
                   streaming: row.isStreaming === 1,
                   createdAt: row.createdAt,
@@ -2600,6 +2610,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             message,
             row.attachments !== null ? { attachments: row.attachments } : {},
             row.correlation !== null ? { correlation: row.correlation } : {},
+            row.origin !== null ? { origin: row.origin } : {},
+            row.deliveryState !== null ? { deliveryState: row.deliveryState } : {},
           );
         }),
         proposedPlans: proposedPlanRows.map(mapProposedPlanRow),

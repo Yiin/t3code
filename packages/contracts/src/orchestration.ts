@@ -256,6 +256,31 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
+/**
+ * Who authored a message. A parent thread writing into a thread-backed
+ * subagent's chat is `agent`; a person typing in the composer is `human`.
+ * Absent means `human` — every message written before this field existed.
+ */
+export const OrchestrationMessageOrigin = Schema.Literals(["human", "agent"]);
+export type OrchestrationMessageOrigin = typeof OrchestrationMessageOrigin.Type;
+
+/**
+ * The observed delivery state of a message, as opposed to the caller's intent
+ * on the command (`delivery` on `thread.turn.start`). `queued` means the
+ * message is waiting for the target thread's next turn boundary. Absent means
+ * nothing is pending — a redelivery re-sends the same `messageId` with this
+ * field omitted, and that omission is what clears the queued flag.
+ */
+export const OrchestrationMessageDeliveryState = Schema.Literals(["queued"]);
+export type OrchestrationMessageDeliveryState = typeof OrchestrationMessageDeliveryState.Type;
+
+/**
+ * The caller's delivery intent on a turn-start command. Absent means
+ * `immediate`, which is what every caller did before this field existed.
+ */
+export const ThreadTurnStartDelivery = Schema.Literals(["immediate", "turn-boundary"]);
+export type ThreadTurnStartDelivery = typeof ThreadTurnStartDelivery.Type;
+
 export const EpicPlanCorrelation = Schema.Struct({
   threadId: ThreadId,
   epicId: TrimmedNonEmptyString,
@@ -270,6 +295,8 @@ export const OrchestrationMessage = Schema.Struct({
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   correlation: Schema.optional(EpicPlanCorrelation),
+  origin: Schema.optional(OrchestrationMessageOrigin),
+  deliveryState: Schema.optional(OrchestrationMessageDeliveryState),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
@@ -1221,6 +1248,10 @@ export const ThreadTurnStartCommand = Schema.Struct({
       Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
     ),
   }),
+  // `origin` describes who wrote the message; `delivery` is the caller's
+  // intent for when it reaches the thread. Absent `delivery` means immediate.
+  origin: Schema.optional(OrchestrationMessageOrigin),
+  delivery: Schema.optional(ThreadTurnStartDelivery),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
@@ -1244,6 +1275,8 @@ const ClientThreadTurnStartCommand = Schema.Struct({
       Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS),
     ),
   }),
+  origin: Schema.optional(OrchestrationMessageOrigin),
+  delivery: Schema.optional(ThreadTurnStartDelivery),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
@@ -1582,6 +1615,8 @@ export const ThreadMessageSentPayload = Schema.Struct({
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   correlation: Schema.optional(EpicPlanCorrelation),
+  origin: Schema.optional(OrchestrationMessageOrigin),
+  deliveryState: Schema.optional(OrchestrationMessageDeliveryState),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,

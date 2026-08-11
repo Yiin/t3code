@@ -463,6 +463,10 @@ export function projectEvent(
             text: payload.text,
             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
             ...(payload.correlation !== undefined ? { correlation: payload.correlation } : {}),
+            ...(payload.origin !== undefined ? { origin: payload.origin } : {}),
+            ...(payload.deliveryState !== undefined
+              ? { deliveryState: payload.deliveryState }
+              : {}),
             turnId: payload.turnId,
             streaming: payload.streaming,
             createdAt: payload.createdAt,
@@ -474,27 +478,33 @@ export function projectEvent(
 
         const existingMessage = thread.messages.find((entry) => entry.id === message.id);
         const messages = existingMessage
-          ? thread.messages.map((entry) =>
-              entry.id === message.id
-                ? {
-                    ...entry,
-                    text: message.streaming
-                      ? `${entry.text}${message.text}`
-                      : message.text.length > 0
-                        ? message.text
-                        : entry.text,
-                    streaming: message.streaming,
-                    updatedAt: message.updatedAt,
-                    turnId: message.turnId,
-                    ...(message.attachments !== undefined
-                      ? { attachments: message.attachments }
-                      : {}),
-                    ...(message.correlation !== undefined
-                      ? { correlation: message.correlation }
-                      : {}),
-                  }
-                : entry,
-            )
+          ? thread.messages.map((entry) => {
+              if (entry.id !== message.id) {
+                return entry;
+              }
+              // `deliveryState` is the one field an omission clears: a
+              // redelivery re-sends the same messageId without it, and that is
+              // what drops the queued flag. Every other optional field keeps
+              // its stored value when the payload leaves it out.
+              const { deliveryState: _clearedDeliveryState, ...previous } = entry;
+              return {
+                ...previous,
+                text: message.streaming
+                  ? `${entry.text}${message.text}`
+                  : message.text.length > 0
+                    ? message.text
+                    : entry.text,
+                streaming: message.streaming,
+                updatedAt: message.updatedAt,
+                turnId: message.turnId,
+                ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+                ...(message.correlation !== undefined ? { correlation: message.correlation } : {}),
+                ...(message.origin !== undefined ? { origin: message.origin } : {}),
+                ...(message.deliveryState !== undefined
+                  ? { deliveryState: message.deliveryState }
+                  : {}),
+              };
+            })
           : [...thread.messages, message];
         const cappedMessages = messages.slice(-MAX_THREAD_MESSAGES);
 

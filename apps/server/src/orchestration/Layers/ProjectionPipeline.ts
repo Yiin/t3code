@@ -895,6 +895,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 })
               : previousMessage?.attachments;
           const nextCorrelation = event.payload.correlation ?? previousMessage?.correlation;
+          const nextOrigin = event.payload.origin ?? previousMessage?.origin;
+          // Deliberately not the `??` pattern above: a redelivery re-sends the
+          // same messageId with `deliveryState` omitted, and that omission is
+          // what clears the queued flag. Preserving the stored value would
+          // leave every delivered message stuck showing "queued".
+          const nextDeliveryState = event.payload.deliveryState ?? null;
           yield* projectionThreadMessageRepository.upsert({
             messageId: event.payload.messageId,
             threadId: event.payload.threadId,
@@ -903,6 +909,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             text: nextText,
             ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
             ...(nextCorrelation !== undefined ? { correlation: nextCorrelation } : {}),
+            ...(nextOrigin !== undefined ? { origin: nextOrigin } : {}),
+            ...(nextDeliveryState !== null ? { deliveryState: nextDeliveryState } : {}),
             isStreaming: event.payload.streaming,
             createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
             updatedAt: event.payload.updatedAt,

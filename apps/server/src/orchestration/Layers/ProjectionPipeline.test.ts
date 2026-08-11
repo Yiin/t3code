@@ -753,6 +753,138 @@ it.layer(
       ]);
     }),
   );
+
+  it.effect("clears a queued delivery state on redelivery while preserving the origin", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-01-01T00:00:00.000Z";
+      const later = "2026-01-01T00:00:01.000Z";
+
+      yield* eventStore.append({
+        type: "project.created",
+        eventId: EventId.make("evt-delivery-1"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-delivery"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-delivery-1"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-delivery-1"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-delivery"),
+          title: "Project Delivery",
+          workspaceRoot: "/tmp/project-delivery",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("evt-delivery-2"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-delivery"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-delivery-2"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-delivery-2"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-delivery"),
+          projectId: ProjectId.make("project-delivery"),
+          title: "Thread Delivery",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      // The parent thread writes into a busy child: queued until its next
+      // turn boundary.
+      yield* eventStore.append({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-delivery-3"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-delivery"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-delivery-3"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-delivery-3"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-delivery"),
+          messageId: MessageId.make("message-delivery"),
+          role: "user",
+          text: "do the thing",
+          origin: "agent",
+          deliveryState: "queued",
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const queuedRows = yield* sql<{
+        readonly origin: string | null;
+        readonly deliveryState: string | null;
+      }>`
+        SELECT origin, delivery_state AS "deliveryState"
+        FROM projection_thread_messages
+        WHERE message_id = 'message-delivery'
+      `;
+      assert.deepStrictEqual(queuedRows, [{ origin: "agent", deliveryState: "queued" }]);
+
+      // Redelivery re-sends the same messageId with neither field. The omitted
+      // delivery state clears the queued flag; the omitted origin does not
+      // reset the stored author.
+      yield* eventStore.append({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-delivery-4"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-delivery"),
+        occurredAt: later,
+        commandId: CommandId.make("cmd-delivery-4"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-delivery-4"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-delivery"),
+          messageId: MessageId.make("message-delivery"),
+          role: "user",
+          text: "do the thing",
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: later,
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const deliveredRows = yield* sql<{
+        readonly origin: string | null;
+        readonly deliveryState: string | null;
+      }>`
+        SELECT origin, delivery_state AS "deliveryState"
+        FROM projection_thread_messages
+        WHERE message_id = 'message-delivery'
+      `;
+      assert.deepStrictEqual(deliveredRows, [{ origin: "agent", deliveryState: null }]);
+    }),
+  );
 });
 
 it.layer(
