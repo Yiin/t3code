@@ -37,6 +37,8 @@ import {
   SubagentSteerFailedActivityPayload,
   SubagentSteerRequestedActivityPayload,
   decodeSubagentTranscriptActivityPayload,
+  OrchestrationMessage,
+  ThreadMessageSentPayload,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
@@ -87,6 +89,109 @@ const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPaylo
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+const decodeOrchestrationMessage = Schema.decodeUnknownEffect(OrchestrationMessage);
+const decodeThreadMessageSentPayload = Schema.decodeUnknownEffect(ThreadMessageSentPayload);
+
+it.effect("decodes a message written before origin and delivery state existed", () =>
+  Effect.gen(function* () {
+    const historical = {
+      id: "msg-historical",
+      role: "user",
+      text: "hello",
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    const message = yield* decodeOrchestrationMessage(historical);
+    assert.strictEqual(message.origin, undefined);
+    assert.strictEqual(message.deliveryState, undefined);
+
+    const payload = yield* decodeThreadMessageSentPayload({
+      ...historical,
+      threadId: "thread-1",
+      messageId: historical.id,
+    });
+    assert.strictEqual(payload.origin, undefined);
+    assert.strictEqual(payload.deliveryState, undefined);
+  }),
+);
+
+it.effect("carries an agent origin and a queued delivery state on messages", () =>
+  Effect.gen(function* () {
+    const message = yield* decodeOrchestrationMessage({
+      id: "msg-queued",
+      role: "user",
+      text: "do the thing",
+      origin: "agent",
+      deliveryState: "queued",
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(message.origin, "agent");
+    assert.strictEqual(message.deliveryState, "queued");
+
+    const payload = yield* decodeThreadMessageSentPayload({
+      threadId: "thread-1",
+      messageId: "msg-queued",
+      role: "user",
+      text: "do the thing",
+      origin: "agent",
+      deliveryState: "queued",
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.origin, "agent");
+    assert.strictEqual(payload.deliveryState, "queued");
+  }),
+);
+
+it.effect("reads origin and delivery intent off thread.turn.start", () =>
+  Effect.gen(function* () {
+    const base = {
+      type: "thread.turn.start",
+      commandId: "cmd-turn-origin",
+      threadId: "thread-child",
+      message: {
+        messageId: "msg-turn-origin",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    // Absent means a human typed it and it goes out immediately.
+    const legacy = yield* decodeThreadTurnStartCommand(base);
+    assert.strictEqual(legacy.origin, undefined);
+    assert.strictEqual(legacy.delivery, undefined);
+
+    const parked = yield* decodeThreadTurnStartCommand({
+      ...base,
+      origin: "agent",
+      delivery: "turn-boundary",
+    });
+    assert.strictEqual(parked.origin, "agent");
+    assert.strictEqual(parked.delivery, "turn-boundary");
+
+    const clientParked = yield* decodeClientOrchestrationCommand({
+      ...base,
+      interactionMode: "default",
+      origin: "agent",
+      delivery: "turn-boundary",
+    });
+    assert.strictEqual(
+      clientParked.type === "thread.turn.start" ? clientParked.delivery : undefined,
+      "turn-boundary",
+    );
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {

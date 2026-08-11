@@ -501,6 +501,96 @@ describe("orchestration projector", () => {
     });
   });
 
+  effectIt.effect("clears a queued delivery state on redelivery and keeps the agent origin", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-02-23T09:30:00.000Z";
+      const queuedAt = "2026-02-23T09:30:01.000Z";
+      const deliveredAt = "2026-02-23T09:30:02.000Z";
+
+      const afterCreate = yield* projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5.3-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      );
+
+      const afterQueued = yield* projectEvent(
+        afterCreate,
+        makeEvent({
+          sequence: 2,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: queuedAt,
+          commandId: "cmd-queued",
+          payload: {
+            threadId: "thread-1",
+            messageId: "user:msg-queued",
+            role: "user",
+            text: "do the thing",
+            origin: "agent",
+            deliveryState: "queued",
+            turnId: null,
+            streaming: false,
+            createdAt: queuedAt,
+            updatedAt: queuedAt,
+          },
+        }),
+      );
+
+      expect(afterQueued.threads[0]?.messages[0]?.origin).toBe("agent");
+      expect(afterQueued.threads[0]?.messages[0]?.deliveryState).toBe("queued");
+
+      // Redelivery re-sends the same messageId without either field. The
+      // omitted delivery state clears the queued flag; the omitted origin does
+      // not reset the stored author.
+      const afterDelivered = yield* projectEvent(
+        afterQueued,
+        makeEvent({
+          sequence: 3,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: deliveredAt,
+          commandId: "cmd-delivered",
+          payload: {
+            threadId: "thread-1",
+            messageId: "user:msg-queued",
+            role: "user",
+            text: "do the thing",
+            turnId: null,
+            streaming: false,
+            createdAt: queuedAt,
+            updatedAt: deliveredAt,
+          },
+        }),
+      );
+
+      const message = afterDelivered.threads[0]?.messages[0];
+      expect(message?.deliveryState).toBeUndefined();
+      expect(message?.origin).toBe("agent");
+    }),
+  );
+
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {
     const createdAt = "2026-02-23T10:00:00.000Z";
     const model = createEmptyReadModel(createdAt);

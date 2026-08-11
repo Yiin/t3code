@@ -66,6 +66,7 @@ import Migration0050 from "./Migrations/050_EpicRunLandingEffectsPerRepository.t
 import Migration0051 from "./Migrations/051_ProviderUsageLedger.ts";
 import Migration0052 from "./Migrations/052_EpicRunMergeStateOperatorBaseBranch.ts";
 import Migration0053 from "./Migrations/053_ThreadParentChildLink.ts";
+import Migration0054 from "./Migrations/054_ProjectionThreadMessageOriginDelivery.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -131,6 +132,7 @@ export const migrationEntries = [
   [51, "ProviderUsageLedger", Migration0051],
   [52, "EpicRunMergeStateOperatorBaseBranch", Migration0052],
   [53, "ThreadParentChildLink", Migration0053],
+  [54, "ProjectionThreadMessageOriginDelivery", Migration0054],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -253,6 +253,10 @@ export function applyThreadDetailEvent(
         ...(event.payload.correlation !== undefined
           ? { correlation: event.payload.correlation }
           : {}),
+        ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
+        ...(event.payload.deliveryState !== undefined
+          ? { deliveryState: event.payload.deliveryState }
+          : {}),
         turnId: event.payload.turnId,
         streaming: event.payload.streaming,
         createdAt: event.payload.createdAt,
@@ -261,27 +265,33 @@ export function applyThreadDetailEvent(
 
       const existingMessage = thread.messages.find((entry) => entry.id === message.id);
       const messages = existingMessage
-        ? Arr.map(thread.messages, (entry) =>
-            entry.id !== message.id
-              ? entry
-              : {
-                  ...entry,
-                  text: message.streaming
-                    ? `${entry.text}${message.text}`
-                    : message.text.length > 0
-                      ? message.text
-                      : entry.text,
-                  streaming: message.streaming,
-                  ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
-                  ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
-                  ...(message.attachments !== undefined
-                    ? { attachments: message.attachments }
-                    : {}),
-                  ...(message.correlation !== undefined
-                    ? { correlation: message.correlation }
-                    : {}),
-                },
-          )
+        ? Arr.map(thread.messages, (entry) => {
+            if (entry.id !== message.id) {
+              return entry;
+            }
+            // `deliveryState` is the one field an omission clears: a redelivery
+            // re-sends the same messageId without it, and that is what drops
+            // the queued flag. Every other optional field keeps its stored
+            // value when the payload leaves it out.
+            const { deliveryState: _clearedDeliveryState, ...previous } = entry;
+            return {
+              ...previous,
+              text: message.streaming
+                ? `${entry.text}${message.text}`
+                : message.text.length > 0
+                  ? message.text
+                  : entry.text,
+              streaming: message.streaming,
+              ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
+              ...(message.streaming ? {} : { updatedAt: message.updatedAt }),
+              ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+              ...(message.correlation !== undefined ? { correlation: message.correlation } : {}),
+              ...(message.origin !== undefined ? { origin: message.origin } : {}),
+              ...(message.deliveryState !== undefined
+                ? { deliveryState: message.deliveryState }
+                : {}),
+            };
+          })
         : Arr.append(thread.messages, message);
       // Update latestTurn for assistant messages bound to a turn. A completed
       // assistant message only settles the turn once the session is no longer

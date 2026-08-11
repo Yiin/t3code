@@ -354,6 +354,50 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("clears a queued delivery state on redelivery and keeps the agent origin", () => {
+      const threadWithQueuedMessage: OrchestrationThread = {
+        ...baseThread,
+        messages: [
+          {
+            id: MessageId.make("msg-queued"),
+            role: "user",
+            text: "do the thing",
+            origin: "agent",
+            deliveryState: "queued",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T06:00:00.000Z",
+            updatedAt: "2026-04-01T06:00:00.000Z",
+          },
+        ],
+      };
+
+      const result = applyThreadDetailEvent(threadWithQueuedMessage, {
+        ...baseEventFields,
+        sequence: 8,
+        occurredAt: "2026-04-01T06:01:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-queued"),
+          role: "user",
+          text: "do the thing",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T06:00:00.000Z",
+          updatedAt: "2026-04-01T06:01:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages[0]?.deliveryState).toBeUndefined();
+        expect(result.thread.messages[0]?.origin).toBe("agent");
+      }
+    });
+
     it("preserves correlation when a streaming delta is completed", () => {
       const correlation = {
         threadId: ThreadId.make("thread-1"),
