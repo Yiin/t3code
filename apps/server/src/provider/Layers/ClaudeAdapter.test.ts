@@ -2726,7 +2726,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("denies Task and points at spawn_agent when the policy is on", () => {
+  it.effect("denies both delegation tools and points at spawn_agent when the policy is on", () => {
     const harness = makeHarness({ subagentSpawnPolicy: enabledSpawnPolicy() });
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -2739,7 +2739,9 @@ describe("ClaudeAdapterLive", () => {
       );
 
       const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.disallowedTools, ["Task"]);
+      // Workflow is the second built-in delegation path; leaving it on let 1 run
+      // in 10 escape the roster entirely (t3code-vzb.23).
+      assert.deepEqual(options?.disallowedTools, ["Task", "Workflow"]);
       assert.include(
         readSystemPromptAppend(options?.systemPrompt) ?? "",
         "mcp__t3-code__spawn_agent",
@@ -2769,7 +2771,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("denies Task inside a thread-backed child and offers it no delegation", () => {
+  it.effect("denies delegation inside a thread-backed child and offers it nothing", () => {
     const childThreadId = ThreadId.make(`subagent-${THREAD_ID}-child-1`);
     const harness = makeHarness({ subagentSpawnPolicy: enabledSpawnPolicy() });
     return Effect.gen(function* () {
@@ -2783,7 +2785,7 @@ describe("ClaudeAdapterLive", () => {
       );
 
       const options = harness.getLastCreateQueryInput()?.options;
-      assert.deepEqual(options?.disallowedTools, ["Task"]);
+      assert.deepEqual(options?.disallowedTools, ["Task", "Workflow"]);
       assert.include(readSystemPromptAppend(options?.systemPrompt) ?? "", "cannot delegate");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

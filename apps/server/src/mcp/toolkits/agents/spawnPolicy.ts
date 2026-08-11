@@ -112,6 +112,15 @@ const refused = (reason: SpawnRefusalReason, detail: string): SpawnDecision => (
  *
  * Every refusal `detail` is prose handed straight back to the model, so it must
  * say what to do instead rather than just what went wrong.
+ *
+ * What it may say depends on which refusal it is. Reaching `disabled` means the
+ * policy is off, and a session with the policy off keeps its built-in delegation
+ * tools, so that one refusal can honestly point at them. Every other refusal
+ * needs `policy.enabled`, and an enabled policy is exactly when
+ * `SUBAGENT_SPAWN_DISALLOWED_TOOLS` takes `Task` and `Workflow` away. Telling
+ * the model to fall back to a tool it no longer has produced the measured
+ * pathology in t3code-vzb.23: 8 refused retries with a different `agent_type` in
+ * one run, or an escape to `Workflow`. So they tell it to do the work itself.
  */
 export const decideSpawn = (input: SpawnPolicyInput): SpawnDecision => {
   const { policy } = input;
@@ -131,7 +140,7 @@ export const decideSpawn = (input: SpawnPolicyInput): SpawnDecision => {
     if (!allowed) {
       return refused(
         "agent-type-not-allowed",
-        `Agent type "${input.agentType}" is not allowed to run as its own thread. Allowed types: ${policy.allowedAgentTypes.join(", ")}. Use your built-in Task tool for this agent type.`,
+        `Agent type "${input.agentType}" is not allowed to run as its own thread. Allowed types: ${policy.allowedAgentTypes.join(", ")}. Spawn one of those if it fits the task, otherwise do this work yourself: your built-in delegation tools are turned off on this session, so there is nothing to fall back to.`,
       );
     }
   }
@@ -139,14 +148,14 @@ export const decideSpawn = (input: SpawnPolicyInput): SpawnDecision => {
   if (input.parentDepth >= policy.maxDepth) {
     return refused(
       "depth-cap",
-      `Thread ${input.parentThreadId} is already ${String(input.parentDepth)} level(s) deep and the limit is ${String(policy.maxDepth)}. A subagent may not spawn its own thread-backed subagent. Use your built-in Task tool instead.`,
+      `Thread ${input.parentThreadId} is already ${String(input.parentDepth)} level(s) deep and the limit is ${String(policy.maxDepth)}. A subagent may not spawn its own thread-backed subagent. Do this work yourself: your built-in delegation tools are turned off on this session, so there is nothing to fall back to.`,
     );
   }
 
   if (input.liveChildCount >= policy.maxConcurrentChildren) {
     return refused(
       "concurrency-cap",
-      `Thread ${input.parentThreadId} already has ${String(input.liveChildCount)} thread-backed subagents running and the limit is ${String(policy.maxConcurrentChildren)}. Wait for one to finish before spawning another, or use your built-in Task tool.`,
+      `Thread ${input.parentThreadId} already has ${String(input.liveChildCount)} thread-backed subagents running and the limit is ${String(policy.maxConcurrentChildren)}. Wait for one to finish before spawning another, or do this work yourself: your built-in delegation tools are turned off on this session, so there is nothing to fall back to.`,
     );
   }
 

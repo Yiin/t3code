@@ -25,8 +25,24 @@ import { isSubagentChildThreadId, type SpawnPolicy } from "../mcp/toolkits/agent
  * `disallowedTools` is preferred over `toolAliases` here because the model must
  * know its own tool surface: an alias would keep advertising `Task` while the
  * call landed somewhere with a different input shape.
+ *
+ * Both built-in delegation paths must go, not just `Task`. Measured over 40
+ * sessions in t3code-vzb.23 (SDK 0.3.170): with `Task` alone denied, 1 run in 10
+ * escaped through `Workflow` even with the prompt append, and 6 in 10 without
+ * it; with both denied, 6 of 6 runs routed every delegation to `spawn_agent` and
+ * none collapsed to inline work. A `Workflow` escape is also the worst kind: it
+ * emits one `task_started` for the whole workflow however many agents it runs,
+ * so the roster cannot see it, and it cost 1.10-4.22 USD per run against
+ * 0.44-0.80 for a routed one.
  */
-export const SUBAGENT_SPAWN_DISALLOWED_TOOLS: ReadonlyArray<string> = ["Task"];
+export const SUBAGENT_SPAWN_DISALLOWED_TOOLS: ReadonlyArray<string> = ["Task", "Workflow"];
+
+/** The denied tools as prose for a system prompt, e.g. "Task and Workflow". */
+const disallowedToolsSentenceFragment = (): string => {
+  const names = SUBAGENT_SPAWN_DISALLOWED_TOOLS.map((name) => `\`${name}\``);
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1] ?? ""}`;
+};
 
 /** The T3 tool that replaces the built-in in-process subagent tool. */
 export const SPAWN_AGENT_TOOL_NAME = "mcp__t3-code__spawn_agent";
@@ -129,16 +145,16 @@ export const subagentSpawnSystemPromptAppend = (
     case "thread-backed":
       return [
         `Subagent delegation on this server runs through the \`${SPAWN_AGENT_TOOL_NAME}\` tool.`,
-        "Your built-in Task tool is turned off for this session; call that tool instead, with an agent_type, a short description, and the full prompt.",
+        `Your built-in ${disallowedToolsSentenceFragment()} tools are turned off for this session; call that tool instead, with an agent_type, a short description, and the full prompt.`,
         "It runs the subagent in its own thread, waits for it, and returns the subagent's final message.",
         "If it returns status: timeout, the subagent outran the server's wait bound and is still running: use whatever partial text came back and carry on.",
-        "If it returns spawned: false, read the detail it gives you and do what it says.",
+        "If it returns spawned: false, read the detail it gives you and do that work yourself: no built-in delegation tool is left to fall back to.",
         allowedAgentTypesSentence(policy),
       ].join(" ");
     case "child-restricted":
       return [
         "You are a T3 subagent running in your own thread.",
-        `You cannot delegate any further: your built-in Task tool is turned off, and \`${SPAWN_AGENT_TOOL_NAME}\` refuses a nested spawn.`,
+        `You cannot delegate any further: your built-in ${disallowedToolsSentenceFragment()} tools are turned off, and \`${SPAWN_AGENT_TOOL_NAME}\` refuses a nested spawn.`,
         "Do this work yourself.",
       ].join(" ");
   }

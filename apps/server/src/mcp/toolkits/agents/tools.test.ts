@@ -37,6 +37,17 @@ it("exports provider-compatible object schemas with described parameters", () =>
   }
 });
 
+it("tells the model to do a refused spawn itself, not to reach for a denied tool", () => {
+  // The built-in Task and Workflow tools are denied on every session where this
+  // tool can spawn, so "fall back to Task" is advice the model cannot follow.
+  // t3code-vzb.23 measured what it does instead: retry with a different
+  // agent_type, or escape to Workflow.
+  const description = AgentsToolkit.tools.spawn_agent.description ?? "";
+
+  expect(description).toMatch(/do that work yourself/);
+  expect(description).not.toMatch(/fall back to your built-in/i);
+});
+
 it("takes no parent thread parameter, so a model cannot spawn under another thread", () => {
   const schema = Tool.getJsonSchema(AgentsToolkit.tools.spawn_agent) as {
     readonly properties?: Readonly<Record<string, unknown>>;

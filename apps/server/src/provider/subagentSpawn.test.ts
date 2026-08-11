@@ -24,6 +24,14 @@ const input = (overrides: Partial<SubagentSpawnModeInput> = {}): SubagentSpawnMo
   ...overrides,
 });
 
+describe("SUBAGENT_SPAWN_DISALLOWED_TOOLS", () => {
+  it("denies both built-in delegation paths, not just Task", () => {
+    // t3code-vzb.23, 40 sessions: with Task alone denied the model still escaped
+    // through Workflow, which the roster cannot see. Both denied, 6 of 6 routed.
+    assert.deepStrictEqual([...SUBAGENT_SPAWN_DISALLOWED_TOOLS], ["Task", "Workflow"]);
+  });
+});
+
 describe("resolveSubagentSpawnMode", () => {
   it("leaves the built-in tool alone while the policy ships off", () => {
     assert.strictEqual(DEFAULT_SPAWN_POLICY.enabled, false);
@@ -116,12 +124,27 @@ describe("subagentSpawnSystemPromptAppend", () => {
     );
 
     assert.include(append ?? "", SPAWN_AGENT_TOOL_NAME);
-    assert.include(append ?? "", SUBAGENT_SPAWN_DISALLOWED_TOOLS[0] ?? "");
+    // Every denied tool is named, so the model is never told to reach for one
+    // the session took away.
+    for (const denied of SUBAGENT_SPAWN_DISALLOWED_TOOLS) {
+      assert.include(append ?? "", denied);
+    }
     // spawn_agent blocks on the child's settle, so the model is told it gets
     // an answer — and told the one case where it does not.
     assert.include(append ?? "", "returns the subagent's final message");
     assert.include(append ?? "", "status: timeout");
     assert.include(append ?? "", "Any agent type is allowed.");
+  });
+
+  it("sends a refused spawn to the model's own hands, never to a denied tool", () => {
+    const append =
+      subagentSpawnSystemPromptAppend(
+        { mode: "thread-backed", reason: "policy-enabled" },
+        enabled(),
+      ) ?? "";
+
+    assert.include(append, "do that work yourself");
+    assert.notMatch(append, /fall back to (your |the )?built-in/i);
   });
 
   it("lists the allowlist when the policy has one", () => {
@@ -141,5 +164,8 @@ describe("subagentSpawnSystemPromptAppend", () => {
 
     assert.include(append ?? "", "cannot delegate");
     assert.include(append ?? "", "Do this work yourself.");
+    for (const denied of SUBAGENT_SPAWN_DISALLOWED_TOOLS) {
+      assert.include(append ?? "", denied);
+    }
   });
 });

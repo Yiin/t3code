@@ -49,7 +49,7 @@ describe("decideSpawn", () => {
     });
   });
 
-  it("tells the model to use its built-in Task tool for a disallowed agent type", () => {
+  it("names the allowed types and then hands a disallowed one back to the model", () => {
     const policy = enabled({ allowedAgentTypes: ["Explore"] });
 
     const decision = decideSpawn(input({ agentType: "general-purpose", policy }));
@@ -57,7 +57,8 @@ describe("decideSpawn", () => {
     assert.strictEqual(decision._tag, "refused");
     if (decision._tag !== "refused") return;
     assert.strictEqual(decision.reason, "agent-type-not-allowed");
-    assert.match(decision.detail, /built-in Task tool/);
+    assert.match(decision.detail, /Allowed types: Explore\./);
+    assert.match(decision.detail, /do this work yourself/);
   });
 
   it("refuses a grandchild at the default depth cap of 1", () => {
@@ -78,6 +79,36 @@ describe("decideSpawn", () => {
 
   it("allows one more child just under the concurrency cap", () => {
     assert.deepStrictEqual(decideSpawn(input({ liveChildCount: 2 })), { _tag: "threadBacked" });
+  });
+
+  it("never sends an enabled-policy refusal to a tool the session denied", () => {
+    // An enabled policy is exactly when Task and Workflow are taken away
+    // (SUBAGENT_SPAWN_DISALLOWED_TOOLS), so pointing at them here is advice the
+    // model cannot follow. Measured cost in t3code-vzb.23: 8 refused retries in
+    // one run, or an escape to Workflow.
+    const refusals = [
+      decideSpawn(
+        input({ agentType: "nope", policy: enabled({ allowedAgentTypes: ["Explore"] }) }),
+      ),
+      decideSpawn(input({ parentDepth: 1 })),
+      decideSpawn(input({ liveChildCount: 3 })),
+    ];
+
+    for (const decision of refusals) {
+      assert.strictEqual(decision._tag, "refused");
+      if (decision._tag !== "refused") continue;
+      assert.notMatch(decision.detail, /built-in Task tool|Workflow tool/);
+      assert.match(decision.detail, /do this work yourself/i);
+    }
+  });
+
+  it("still points a policy-off refusal at the built-in tool it left in place", () => {
+    // The one refusal reachable with the policy off, so the built-in delegation
+    // tools are still on the session and are the honest answer.
+    const decision = decideSpawn(input({ policy: DEFAULT_SPAWN_POLICY }));
+
+    assert.strictEqual(decision._tag === "refused" ? decision.reason : null, "disabled");
+    assert.match(decision._tag === "refused" ? decision.detail : "", /built-in Task tool/);
   });
 
   it("reports the disabled refusal before the allowlist one", () => {

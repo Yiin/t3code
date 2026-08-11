@@ -37,8 +37,11 @@ import { ProjectionSnapshotQuery } from "../../../orchestration/Services/Project
  * A spawn failure the model cannot fix by retrying with different arguments.
  *
  * A *refused* spawn is not one of these — a refusal is a successful tool result
- * carrying `spawned: false`, so the model falls back to its built-in Task tool
- * instead of retrying the call.
+ * carrying `spawned: false` and a `detail` that tells the model what to do
+ * instead, which is to do that work itself. Every refusal but `disabled` needs
+ * an enabled policy, and an enabled policy is exactly when the built-in `Task`
+ * and `Workflow` tools are denied on the session, so there is no delegation left
+ * to fall back to. See `spawnPolicy.ts`.
  */
 export class SpawnAgentError extends Schema.TaggedErrorClass<SpawnAgentError>()("SpawnAgentError", {
   reason: Schema.Literals(["capability-unavailable", "parent-thread-missing", "dispatch-failed"]),
@@ -104,7 +107,7 @@ export const SpawnAgentResult = Schema.Union([
 
 export const SpawnAgentTool = Tool.make("spawn_agent", {
   description:
-    "Spawn a subagent as its own T3 thread with its own provider session, so the human can watch it and message it directly. Waits for the subagent to finish and returns its final message, like your built-in Task tool. If the subagent runs past the server's wait limit the call returns status=timeout with whatever it had said so far; the subagent keeps running, so carry on without its answer. When the server refuses, the call still succeeds with spawned=false and a reason — fall back to your built-in Task tool rather than retrying.",
+    "Spawn a subagent as its own T3 thread with its own provider session, so the human can watch it and message it directly. Waits for the subagent to finish and returns its final message, like your built-in Task tool. If the subagent runs past the server's wait limit the call returns status=timeout with whatever it had said so far; the subagent keeps running, so carry on without its answer. When the server refuses, the call still succeeds with spawned=false and a detail saying what to do instead — do that work yourself. Do not retry with a different agent_type, and do not look for another way to delegate: your built-in delegation tools are turned off whenever this tool can spawn at all.",
   parameters: SpawnAgentInput,
   success: SpawnAgentResult,
   failure: SpawnAgentError,

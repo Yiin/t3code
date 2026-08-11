@@ -181,8 +181,9 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
     policy,
   });
   if (decision._tag === "refused") {
-    // A successful result on purpose. A hard tool error makes the model retry;
-    // a clear refusal makes it fall back to its built-in Task tool.
+    // A successful result on purpose. A hard tool error makes the model retry
+    // the call; a clear refusal carries a `detail` telling it to do the work
+    // itself, which is the only path left once `Task` and `Workflow` are denied.
     return { spawned: false as const, reason: decision.reason, detail: decision.detail };
   }
 
