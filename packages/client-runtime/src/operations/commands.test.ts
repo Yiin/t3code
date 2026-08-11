@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
@@ -25,6 +26,7 @@ import {
   archiveThread,
   createProject,
   settleThread,
+  startThreadTurn,
   stopThreadSession,
   unsettleThread,
 } from "./commands.ts";
@@ -118,6 +120,37 @@ describe("environment commands", () => {
           createdAt: "2026-06-06T00:01:00.000Z",
         },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("carries the delivery intent and the message author to the server", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      yield* startThreadTurn({
+        commandId: CommandId.make("turn-command"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("message-1"),
+          role: "user",
+          text: "keep going",
+          attachments: [],
+        },
+        origin: "agent",
+        delivery: "turn-boundary",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-08-11T00:00:00.000Z",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      // Both are what the server's parking rule reads. A command shape that
+      // dropped them would park nothing and attribute every message to a human.
+      expect(dispatched[0]).toMatchObject({
+        type: "thread.turn.start",
+        origin: "agent",
+        delivery: "turn-boundary",
+      });
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 

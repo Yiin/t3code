@@ -229,6 +229,19 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionRepositoryError>;
 
   /**
+   * List the active threads holding at least one message parked at a turn
+   * boundary, ascending by thread id.
+   *
+   * `QueuedTurnDeliveryReactor` sweeps this once at boot. Nothing else replays
+   * a pending delivery after a restart: `streamDomainEvents` is live-only, so
+   * without this sweep a message queued before a crash would sit forever.
+   */
+  readonly listThreadIdsWithQueuedMessages: () => Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionRepositoryError
+  >;
+
+  /**
    * Read a single active thread detail snapshot by id.
    */
   readonly getThreadDetailById: (

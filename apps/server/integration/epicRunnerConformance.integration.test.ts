@@ -604,6 +604,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
       ),
     getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
     listChildThreadIds: () => Effect.die("unused"),
+    listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
     getThreadShellById: (threadId) =>

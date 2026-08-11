@@ -658,6 +658,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Proposed plan '${sourceProposedPlan?.planId}' belongs to thread '${sourceThread.id}' in a different project.`,
         });
       }
+      // Park the message instead of starting a turn when the caller asked for
+      // turn-boundary delivery and the thread is mid-turn. The parked message
+      // row IS the queue — `QueuedTurnDeliveryReactor` re-dispatches this same
+      // command with `delivery` omitted once the turn ends, and every
+      // projection upserts by `messageId`, so that second dispatch flips the
+      // row from queued to delivered and starts the turn through the untouched
+      // path below. Never an interrupt: a running turn is never preempted.
+      const parkAtTurnBoundary =
+        command.delivery === "turn-boundary" &&
+        targetThread.latestTurn !== null &&
+        targetThread.latestTurn.state === "running";
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -672,38 +683,46 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           role: "user",
           text: command.message.text,
           attachments: command.message.attachments,
+          origin: command.origin ?? "human",
+          ...(parkAtTurnBoundary ? { deliveryState: "queued" as const } : {}),
           turnId: null,
           streaming: false,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
       };
-      const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        causationEventId: userMessageEvent.eventId,
-        type: "thread.turn-start-requested",
-        payload: {
-          threadId: command.threadId,
-          messageId: command.message.messageId,
-          ...(command.modelSelection !== undefined
-            ? { modelSelection: command.modelSelection }
-            : {}),
-          ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
-          runtimeMode: targetThread.runtimeMode,
-          interactionMode: targetThread.interactionMode,
-          ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
-          createdAt: command.createdAt,
-        },
-      };
+      const turnStartRequestedEvents: ReadonlyArray<Omit<OrchestrationEvent, "sequence">> =
+        parkAtTurnBoundary
+          ? []
+          : [
+              {
+                ...(yield* withEventBase({
+                  aggregateKind: "thread",
+                  aggregateId: command.threadId,
+                  occurredAt: command.createdAt,
+                  commandId: command.commandId,
+                })),
+                causationEventId: userMessageEvent.eventId,
+                type: "thread.turn-start-requested",
+                payload: {
+                  threadId: command.threadId,
+                  messageId: command.message.messageId,
+                  ...(command.modelSelection !== undefined
+                    ? { modelSelection: command.modelSelection }
+                    : {}),
+                  ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
+                  runtimeMode: targetThread.runtimeMode,
+                  interactionMode: targetThread.interactionMode,
+                  ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+                  createdAt: command.createdAt,
+                },
+              },
+            ];
       // Real activity resets any override. It wakes an explicitly settled
-      // thread and clears an explicit active override.
+      // thread and clears an explicit active override. A queued message is
+      // real activity too — it just does not start the turn yet.
       if (targetThread.settledOverride === null) {
-        return [userMessageEvent, turnStartRequestedEvent];
+        return [userMessageEvent, ...turnStartRequestedEvents];
       }
       const unsettledEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
@@ -719,7 +738,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: command.createdAt,
         },
       };
-      return [unsettledEvent, userMessageEvent, turnStartRequestedEvent];
+      return [unsettledEvent, userMessageEvent, ...turnStartRequestedEvents];
     }
 
     case "thread.turn.interrupt": {

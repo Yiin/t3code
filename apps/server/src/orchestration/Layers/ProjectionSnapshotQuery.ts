@@ -1109,6 +1109,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const listThreadIdsWithQueuedMessageRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadIdLookupRowSchema,
+    execute: () =>
+      sql`
+        SELECT DISTINCT
+          messages.thread_id AS "threadId"
+        FROM projection_thread_messages AS messages
+        JOIN projection_threads AS threads
+          ON threads.thread_id = messages.thread_id
+        WHERE messages.delivery_state = 'queued'
+          AND threads.deleted_at IS NULL
+        ORDER BY messages.thread_id ASC
+      `,
+  });
+
   const getThreadCheckpointContextThreadRow = SqlSchema.findOneOption({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadCheckpointContextThreadRowSchema,
@@ -2340,6 +2356,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.map((rows) => rows.map((row) => row.threadId)),
     );
 
+  const listThreadIdsWithQueuedMessages: ProjectionSnapshotQueryShape["listThreadIdsWithQueuedMessages"] =
+    () =>
+      listThreadIdsWithQueuedMessageRows().pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listThreadIdsWithQueuedMessages:query",
+            "ProjectionSnapshotQuery.listThreadIdsWithQueuedMessages:decodeRow",
+          ),
+        ),
+        Effect.map((rows) => rows.map((row) => row.threadId)),
+      );
+
   const getThreadCheckpointContext: ProjectionSnapshotQueryShape["getThreadCheckpointContext"] = (
     threadId,
   ) =>
@@ -2788,6 +2816,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
     listChildThreadIds,
+    listThreadIdsWithQueuedMessages,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,

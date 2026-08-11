@@ -213,6 +213,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
       ),
     getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
     listChildThreadIds: () => Effect.die("unused"),
+    listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
     getThreadShellById: (threadId) =>

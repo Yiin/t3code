@@ -229,6 +229,7 @@ const startSpawn = (options: RunOptions = {}) =>
       getThreadSubagentLiveness: () => Effect.die("unused"),
       getSubagentActivities: () => Effect.die("unused"),
       listChildThreadIds: () => Effect.succeed([]),
+      listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
       getThreadDetailById: (threadId) =>
         Effect.succeed(
           isChild(threadId) ? Option.some(runningChildThread(threadId, turnState)) : Option.none(),

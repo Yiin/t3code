@@ -9,6 +9,7 @@ import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { QueuedTurnDeliveryReactor } from "../Services/QueuedTurnDeliveryReactor.ts";
 import { ThreadTeardownReactor } from "../Services/ThreadTeardownReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
@@ -24,7 +25,7 @@ describe("OrchestrationReactor", () => {
     runtime = null;
   });
 
-  it("starts provider ingestion, provider command, checkpoint, thread deletion, and thread settle reactors", async () => {
+  it("starts provider ingestion, provider command, checkpoint, thread deletion, thread settle, and queued turn delivery reactors", async () => {
     const started: string[] = [];
 
     runtime = ManagedRuntime.make(
@@ -75,6 +76,15 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(QueuedTurnDeliveryReactor, {
+            start: () => {
+              started.push("queued-turn-delivery-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
             publishThread: () => Effect.void,
             publishEpicRun: () => Effect.void,
@@ -97,6 +107,7 @@ describe("OrchestrationReactor", () => {
       "checkpoint-reactor",
       "thread-deletion-reactor",
       "thread-settle-reactor",
+      "queued-turn-delivery-reactor",
       "agent-awareness-relay",
     ]);
 
