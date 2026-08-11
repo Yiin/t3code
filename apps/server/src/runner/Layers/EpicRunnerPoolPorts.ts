@@ -16,10 +16,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   type EpicRun as TransportEpicRun,
-  type OrchestrationSessionStatus,
-  type OrchestrationThread,
   type ThreadId,
-  type TurnId,
 } from "@t3tools/contracts";
 import {
   EpicRunnerDispatchError,
@@ -66,12 +63,7 @@ import {
   parseMergeFixTitle,
   runBaseBranch as runBaseBranchName,
 } from "@t3tools/epic-core/policy";
-import {
-  hasRalphBlocked,
-  hasRalphDone,
-  parseRalphReport,
-  type IterationTurnState,
-} from "@t3tools/epic-core/ralphProtocol";
+import { hasRalphBlocked, hasRalphDone, parseRalphReport } from "@t3tools/epic-core/ralphProtocol";
 import { drainMergeQueue } from "@t3tools/epic-core/MergeQueue";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
@@ -103,6 +95,11 @@ import {
   countFreshRunningSubagents,
   isRunningSubagentLivenessRefusal,
 } from "../../orchestration/subagentLiveness.ts";
+import {
+  makeThreadSettleWatch,
+  resolveFinalAssistantMessage,
+  threadTurnState,
+} from "../../orchestration/ThreadSettleWatch.ts";
 import type { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   EpicRunStore,
@@ -118,15 +115,6 @@ import { makeEpicRunMergeQueueStore } from "../EpicRunMergeQueueStore.ts";
 import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
 
 const GIT_HEAD_TIMEOUT_MS = 15_000;
-const MAX_SETTLE_READS = 20;
-/**
- * The bound for the one absence worth waiting out: a completed turn whose
- * assistant row has not projected at all. Two minutes at the default quiet
- * period, which is far past any projection lag but nothing against an iteration
- * measured in hours — and it is only ever spent when the alternative is calling
- * a pending message a missing one.
- */
-const MAX_ABSENT_MESSAGE_SETTLE_READS = 120;
 const RECENT_ITERATIONS_LIMIT = 25;
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1776,93 +1764,6 @@ export const makeServerMergeDrain = (deps: {
   };
 };
 
-/**
- * The turn state a session status implies, or null while the session is
- * (re)starting or running and turns must stay unsettled.
- *
- * Mirrors `settledTurnStateForSessionStatus`
- * (`orchestration/Layers/ProjectionPipeline.ts:78-94`) exactly, because the
- * projector settles a thread's running turns from this same status in the same
- * transaction that writes it. That shared origin is what makes this a safe
- * stand-in when the turn row cannot be read.
- */
-const settledTurnStateFromSessionStatus = (
-  status: OrchestrationSessionStatus,
-): "completed" | "interrupted" | "error" | null => {
-  switch (status) {
-    case "idle":
-    case "ready":
-      return "completed";
-    case "error":
-      return "error";
-    case "interrupted":
-    case "stopped":
-      return "interrupted";
-    case "starting":
-    case "running":
-      return null;
-  }
-};
-
-/**
- * Whether a session status settles the turn.
- *
- * Derived from `settledTurnStateFromSessionStatus` so the two cannot drift. It
- * is not simply `status !== "running"`, and the difference matters: a fresh
- * thread's session is `"starting"` before its turn begins, which under that
- * looser test would end the turn before the agent had said a word.
- */
-const isTurnEndSessionStatus = (status: OrchestrationSessionStatus): boolean =>
-  settledTurnStateFromSessionStatus(status) !== null;
-
-/**
- * The assistant message an iteration's verdict is read from.
- *
- * Prefers the turn's own pointer, but resolves it against the projected rows
- * first: `CheckpointReactor.ts:294-299` synthesizes an `assistant:<turnId>`
- * pointer for turns that produced no message, and that synthetic id names no
- * row. Falling back to the last projected assistant row matches terminal
- * ralph, whose result is the last agent message of the run.
- */
-const resolveFinalAssistantMessage = (
-  thread: OrchestrationThread | undefined,
-): { readonly text: string; readonly streaming: boolean } | null => {
-  if (thread === undefined) {
-    return null;
-  }
-  const assistantMessages = thread.messages.filter((message) => message.role === "assistant");
-  const pointer = thread.latestTurn?.assistantMessageId ?? null;
-  const named =
-    pointer === null ? undefined : assistantMessages.find((message) => message.id === pointer);
-  const message = named ?? assistantMessages[assistantMessages.length - 1];
-  return message === undefined ? null : { text: message.text, streaming: message.streaming };
-};
-
-/**
- * The turn state a thread detail implies, turn row first and session status
- * second.
- *
- * `latestTurn` resolves through an inner join on `threads.latest_turn_id`
- * (`ProjectionSnapshotQuery.ts:1122-1130`), and the same transaction that
- * settles the turn nulls that pointer (`ProjectionPipeline.ts:757-771`). The
- * pointer is only restored later, by `thread.turn-diff-completed` after the
- * CheckpointReactor has captured a git checkpoint and diffed it — seconds of
- * work unrelated to the turn, and skipped entirely when that capture fails. So
- * a settled turn routinely reads back as `null` here, which `classifyIteration`
- * cannot distinguish from "never ran".
- *
- * The session row is the reliable stand-in: the projector writes it in the same
- * transaction it settles the turn with, from this exact mapping, so it can never
- * disagree with the turn row that eventually reappears.
- */
-const iterationTurnState = (thread: OrchestrationThread | undefined): IterationTurnState => {
-  const sessionStatus = thread?.session?.status ?? null;
-  return (
-    thread?.latestTurn?.state ??
-    (sessionStatus === null ? null : settledTurnStateFromSessionStatus(sessionStatus))
-  );
-};
-
 /** Preserve the pre-extraction dispatch error's persisted message shape. */
 const dispatchErrorFromRunner = (error: EpicRunnerDispatchError) =>
   // The loop renders DispatchError as `${operation}: ${detail}`; with the
@@ -1928,90 +1829,10 @@ export const makeServerPoolDispatch = (deps: {
       Effect.catchCause((cause) => Effect.logWarning(label, { cause })),
     );
 
-  const readThreadShell = (threadId: ThreadId) =>
-    projectionSnapshotQuery.getThreadShellById(threadId).pipe(
-      Effect.map(Option.getOrUndefined),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("epic.runner.shell-read-failed", { threadId, cause }).pipe(
-          Effect.as(undefined),
-        ),
-      ),
-    );
-
-  /**
-   * Wait until the iteration's turn has ended.
-   *
-   * Polls the projection rather than subscribing to `streamDomainEvents`.
-   * That is a deliberate trade. The event stream is lower-latency, but there
-   * is no way to know a subscription is live before dispatching: neither
-   * `Stream.toPull`, `Stream.toQueue`, nor `Stream.onStart` opens the
-   * underlying `Stream.fromPubSub` (`OrchestrationEngine.ts:326-331`) eagerly,
-   * so a fast turn can publish its entire lifecycle into a subscription that
-   * does not exist yet — and the iteration then hangs until its multi-hour
-   * timeout. Polling has no such window: projections are committed in the
-   * same transaction as the append (`OrchestrationEngine.ts:170-180`), so
-   * every read is consistent and no signal can be missed. At iteration
-   * timescales the added latency is irrelevant, and the read is the cheap
-   * shell row, not the full thread.
-   *
-   * Turn end is the same signal the projector uses — a turn leaving
-   * `running` (`ProjectionPipeline.ts:1059-1073`). The session is a fallback
-   * for the case where the provider dies before a turn row ever exists, which
-   * would otherwise be indistinguishable from "still starting".
-   */
-  const awaitTurnEnd = (
-    threadId: ThreadId,
-    timings: PoolTimings,
-    priorTurnId: TurnId | null = null,
-  ) =>
-    Effect.gen(function* () {
-      let observedActive = false;
-      while (true) {
-        const shell = yield* readThreadShell(threadId);
-        // A continuation turn is dispatched while the thread's PREVIOUS turn
-        // is still the projected latest — turn rows are created at provider
-        // adoption, not at turn.start — so until the new turn appears, the
-        // prior turn's settled state must not read as this turn's end.
-        const latestTurn =
-          shell?.latestTurn != null && shell.latestTurn.turnId !== priorTurnId
-            ? shell.latestTurn
-            : null;
-        const turnState = latestTurn?.state ?? null;
-        const sessionStatus = shell?.session?.status ?? null;
-
-        if (
-          turnState === "running" ||
-          sessionStatus === "starting" ||
-          sessionStatus === "running"
-        ) {
-          observedActive = true;
-        }
-        if (turnState !== null && turnState !== "running") {
-          return;
-        }
-        if (observedActive && sessionStatus !== null && isTurnEndSessionStatus(sessionStatus)) {
-          return;
-        }
-
-        yield* Effect.sleep(Duration.millis(timings.pollIntervalMs));
-      }
-    });
-
-  /**
-   * The thread detail read every subagent-liveness check shares. `undefined`
-   * (missing thread, read failure) reads as "no subagents" for the advisory
-   * drain. The guarded stop still checks liveness atomically, so a broken
-   * read cannot authorize a destructive stop.
-   */
-  const readThreadDetail = (threadId: ThreadId) =>
-    projectionSnapshotQuery.getThreadDetailSnapshot(threadId).pipe(
-      Effect.map(Option.getOrUndefined),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("epic.runner.snapshot-read-failed", { threadId, cause }).pipe(
-          Effect.as(undefined),
-        ),
-      ),
-    );
+  const { readThreadDetail, awaitTurnEnd, readSettledFinalMessage } = makeThreadSettleWatch({
+    projectionSnapshotQuery,
+    logPrefix: "epic.runner",
+  });
 
   /**
    * Wait for the thread to have no FRESH running subagents, bounded by
@@ -2036,76 +1857,6 @@ export const makeServerPoolDispatch = (deps: {
       Effect.timeoutOption(Duration.millis(timings.subagentGraceTimeoutMs)),
       Effect.map(Option.isSome),
     );
-
-  /**
-   * Read the turn's final assistant message once it has stopped changing.
-   *
-   * The turn-end signal is not the read point: ingestion dispatches
-   * `thread.session.set` (`ProviderRuntimeIngestion.ts:1666`) before it
-   * finalizes the turn's assistant messages, so reading immediately returns a
-   * still-streaming row — empty, on ACP providers whose text exists only as
-   * deltas. Waiting for two consecutive identical reads closes that gap.
-   *
-   * An absent message (`resolveFinalAssistantMessage` returning `null`) is
-   * never treated as settled on its own: it means the assistant row hasn't
-   * projected yet, not that the turn produced none, so `null === null` across
-   * two reads must keep polling rather than return early. A genuinely
-   * message-less completed turn is indistinguishable from this in-flight gap
-   * until the bound below is exhausted — that is the correct, if slower,
-   * outcome, since guessing wrong here silently drops the rest of the epic's
-   * backlog (`classifyIteration` treats a spurious `null` as a protocol
-   * error, and three of those trip `maxConsecutiveFailures`).
-   *
-   * Bounded: a provider that never stops rewriting the message — or one
-   * whose turn truly ends with no assistant row — would otherwise hold the
-   * loop here forever, so after `MAX_SETTLE_READS` the last read is used
-   * as-is and classification decides what it means.
-   *
-   * That base bound is short because a rewriting provider is still working.
-   * A *completed* turn with no assistant row at all is a different wait: the
-   * only outstanding work is ingestion's own finalize, so the wait extends to
-   * `MAX_ABSENT_MESSAGE_SETTLE_READS` for as long as the turn keeps reading
-   * back completed. The extension is why the exhausted flag below means
-   * something: when even that runs out, the absence has been watched for as
-   * long as it is worth watching.
-   */
-  const readSettledFinalMessage = (threadId: ThreadId, timings: PoolTimings) =>
-    Effect.gen(function* () {
-      const read = () => readThreadDetail(threadId);
-
-      let previous = yield* read();
-      // Raised, in the loop, the first time a completed turn reads back with
-      // no assistant row — the one absence worth waiting out.
-      let maxReads = MAX_SETTLE_READS;
-      let watchedCompletedTurnWithoutMessage = false;
-      for (let attempt = 0; attempt < maxReads; attempt += 1) {
-        yield* Effect.sleep(Duration.millis(timings.quietPeriodMs));
-        const current = yield* read();
-        const previousMessage = resolveFinalAssistantMessage(previous?.thread);
-        const currentMessage = resolveFinalAssistantMessage(current?.thread);
-        if (
-          currentMessage !== null &&
-          previousMessage?.text === currentMessage.text &&
-          previousMessage?.streaming === currentMessage.streaming
-        ) {
-          return { snapshot: current, messageWaitExhausted: false };
-        }
-        if (currentMessage === null && iterationTurnState(current?.thread) === "completed") {
-          watchedCompletedTurnWithoutMessage = true;
-          maxReads = MAX_ABSENT_MESSAGE_SETTLE_READS;
-        }
-        previous = current;
-      }
-      const settledMessage = resolveFinalAssistantMessage(previous?.thread);
-      yield* Effect.logWarning("epic.runner.final-message-never-settled", {
-        threadId,
-        messageProjected: settledMessage !== null,
-      });
-      return {
-        snapshot: previous,
-        messageWaitExhausted: watchedCompletedTurnWithoutMessage && settledMessage === null,
-      };
-    });
 
   /**
    * The grace path for an agent that ended its turn while its subagents were
@@ -2162,7 +1913,7 @@ export const makeServerPoolDispatch = (deps: {
 
         const snapshot = yield* readThreadDetail(input.threadId);
         const thread = snapshot?.thread;
-        const turnStatus = iterationTurnState(thread);
+        const turnStatus = threadTurnState(thread);
         if (turnStatus !== "completed") {
           const decision = decideGraceStep({
             headMoved,
@@ -2400,7 +2151,7 @@ export const makeServerPoolDispatch = (deps: {
               timings: input.policy,
             });
             const snapshot = yield* readThreadDetail(input.threadId);
-            const turnState = iterationTurnState(snapshot?.thread);
+            const turnState = threadTurnState(snapshot?.thread);
             return {
               turnState: turnState === "running" || turnState === null ? "completed" : turnState,
               timedOut: false,
@@ -2483,7 +2234,7 @@ export const makeServerPoolDispatch = (deps: {
             Effect.map((settled): FinalMessageRead => {
               const thread = settled.snapshot?.thread;
               const message = resolveFinalAssistantMessage(thread);
-              const turnState = iterationTurnState(thread);
+              const turnState = threadTurnState(thread);
               return {
                 text: message?.text ?? null,
                 streaming: message?.streaming ?? false,

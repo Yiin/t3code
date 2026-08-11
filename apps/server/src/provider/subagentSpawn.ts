@@ -115,9 +115,9 @@ const allowedAgentTypesSentence = (policy: SpawnPolicy): string =>
 /**
  * The paragraph appended to the Claude Code system prompt preset.
  *
- * It states only what is true today: `spawn_agent` starts the child thread and
- * returns its id, it does not wait for the child's answer. When the bounded
- * wait lands (t3code-vzb.16) this text names it too.
+ * It states only what is true today: `spawn_agent` waits for the subagent and
+ * returns its final message, and it names the one case where it comes back
+ * without an answer — a subagent that outran the server's wait bound.
  */
 export const subagentSpawnSystemPromptAppend = (
   decision: SubagentSpawnDecision,
@@ -130,7 +130,8 @@ export const subagentSpawnSystemPromptAppend = (
       return [
         `Subagent delegation on this server runs through the \`${SPAWN_AGENT_TOOL_NAME}\` tool.`,
         "Your built-in Task tool is turned off for this session; call that tool instead, with an agent_type, a short description, and the full prompt.",
-        "It starts the subagent in its own thread and returns as soon as the subagent starts, so its result is the subagent's id, not the subagent's answer.",
+        "It runs the subagent in its own thread, waits for it, and returns the subagent's final message.",
+        "If it returns status: timeout, the subagent outran the server's wait bound and is still running: use whatever partial text came back and carry on.",
         "If it returns spawned: false, read the detail it gives you and do what it says.",
         allowedAgentTypesSentence(policy),
       ].join(" ");

@@ -3,9 +3,10 @@
  * already injected into every provider session.
  *
  * The tool turns a subagent request into a real T3 child thread with its own
- * provider session, so a human can watch it and talk to it. It returns as soon
- * as the child's turn has started; blocking on the child's result is a separate
- * concern.
+ * provider session, so a human can watch it and talk to it. It blocks until the
+ * child's first turn settles, so the parent gets the child's answer as its tool
+ * result — the same bargain the built-in Task tool makes. A child that outlives
+ * `spawnWaitTimeoutMs` returns a `timeout` status and keeps running.
  *
  * **Worktree decision.** The child runs in the *parent's* worktree, verbatim. A
  * subagent exists to work on what the parent is working on, exactly as an
@@ -71,12 +72,28 @@ export const SpawnAgentInput = Schema.Struct({
   description: "Arguments for spawning a subagent as its own T3 thread.",
 });
 
+/**
+ * How the parent's wait on the child ended.
+ *
+ * `timeout` is not an error: the child is still running, and the parent is told
+ * so in plain words rather than being handed a transport failure.
+ */
+export const SpawnAgentStatus = Schema.Literals(["completed", "failed", "interrupted", "timeout"]);
+export type SpawnAgentStatus = typeof SpawnAgentStatus.Type;
+
 export const SpawnAgentResult = Schema.Union([
   Schema.Struct({
     spawned: Schema.Literal(true),
     childThreadId: Schema.String,
     agentType: Schema.String,
     description: Schema.String,
+    status: SpawnAgentStatus,
+    /** The child's last assistant message, or null when it produced none. */
+    finalMessage: Schema.NullOr(Schema.String),
+    /** Wall time from thread creation to this result, in milliseconds. */
+    elapsedMs: Schema.Number,
+    /** One line of prose for the model: what happened and what to do next. */
+    note: Schema.String,
   }),
   Schema.Struct({
     spawned: Schema.Literal(false),
@@ -87,7 +104,7 @@ export const SpawnAgentResult = Schema.Union([
 
 export const SpawnAgentTool = Tool.make("spawn_agent", {
   description:
-    "Spawn a subagent as its own T3 thread with its own provider session, so the human can watch it and message it directly. Returns as soon as the child's first turn has started; it does not wait for the result. When the server refuses, the call still succeeds with spawned=false and a reason — fall back to your built-in Task tool rather than retrying.",
+    "Spawn a subagent as its own T3 thread with its own provider session, so the human can watch it and message it directly. Waits for the subagent to finish and returns its final message, like your built-in Task tool. If the subagent runs past the server's wait limit the call returns status=timeout with whatever it had said so far; the subagent keeps running, so carry on without its answer. When the server refuses, the call still succeeds with spawned=false and a reason — fall back to your built-in Task tool rather than retrying.",
   parameters: SpawnAgentInput,
   success: SpawnAgentResult,
   failure: SpawnAgentError,

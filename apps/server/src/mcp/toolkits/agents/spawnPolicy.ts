@@ -55,6 +55,18 @@ export interface SpawnPolicy {
   readonly maxDepth: number;
   /** How many thread-backed children of one parent may run at once. */
   readonly maxConcurrentChildren: number;
+  /**
+   * How long the parent's `spawn_agent` call waits for the child before it
+   * returns a `timeout` result and carries on.
+   *
+   * A tenth of the epic runner's `DEFAULT_ITERATION_TIMEOUT_MS`
+   * (`packages/epic-core/src/policy.ts:11`): a subagent is not an epic
+   * iteration, and the parent is holding an HTTP request open the whole time.
+   * If a provider's own MCP tool-call ceiling turns out to be shorter than this,
+   * lower it below that ceiling — a transport error loses the child thread id,
+   * where our timeout result keeps it.
+   */
+  readonly spawnWaitTimeoutMs: number;
 }
 
 export const DEFAULT_SPAWN_POLICY: SpawnPolicy = {
@@ -62,6 +74,7 @@ export const DEFAULT_SPAWN_POLICY: SpawnPolicy = {
   allowedAgentTypes: [],
   maxDepth: 1,
   maxConcurrentChildren: 3,
+  spawnWaitTimeoutMs: 30 * 60_000,
 };
 
 /**

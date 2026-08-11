@@ -109,7 +109,7 @@ describe("subagentSpawnSystemPromptAppend", () => {
     );
   });
 
-  it("names the replacement tool and says the call does not wait", () => {
+  it("names the replacement tool and what its result carries", () => {
     const append = subagentSpawnSystemPromptAppend(
       { mode: "thread-backed", reason: "policy-enabled" },
       enabled(),
@@ -117,9 +117,10 @@ describe("subagentSpawnSystemPromptAppend", () => {
 
     assert.include(append ?? "", SPAWN_AGENT_TOOL_NAME);
     assert.include(append ?? "", SUBAGENT_SPAWN_DISALLOWED_TOOLS[0] ?? "");
-    // spawn_agent returns as soon as the child starts. Promising the child's
-    // answer would be a lie until the bounded wait lands (t3code-vzb.16).
-    assert.include(append ?? "", "not the subagent's answer");
+    // spawn_agent blocks on the child's settle, so the model is told it gets
+    // an answer — and told the one case where it does not.
+    assert.include(append ?? "", "returns the subagent's final message");
+    assert.include(append ?? "", "status: timeout");
     assert.include(append ?? "", "Any agent type is allowed.");
   });
 
