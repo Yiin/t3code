@@ -114,7 +114,11 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(["preview"]),
+        // Granted unconditionally: the registry has no read-model or settings
+        // access, so it cannot gate per thread. The `spawn_agent` handler
+        // enforces policy and returns a typed refusal instead. The capability
+        // check only fails a credential issued before this line existed.
+        capabilities: new Set<McpInvocationContext.McpCapability>(["preview", "spawn-agent"]),
         issuedAt,
         expiresAt,
       };

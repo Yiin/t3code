@@ -608,7 +608,10 @@ export type PreviewAutomationResponse = typeof PreviewAutomationResponse.Type;
 export class PreviewAutomationUnavailableError extends Schema.TaggedErrorClass<PreviewAutomationUnavailableError>()(
   "PreviewAutomationUnavailableError",
   {
-    capability: Schema.Literal("preview"),
+    // Widened past "preview" because one MCP credential now carries several
+    // capabilities; `requireMcpCapability` reports every missing one through
+    // this error.
+    capability: Schema.Literals(["preview", "spawn-agent"]),
     environmentId: EnvironmentId,
     threadId: ThreadId,
     providerSessionId: TrimmedNonEmptyString,
