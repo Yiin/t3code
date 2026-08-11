@@ -78,6 +78,7 @@ const readModel: OrchestrationReadModel = {
       subagents: [],
       checkpoints: [],
       deletedAt: null,
+      parentThreadId: null,
     },
     {
       id: ThreadId.make("thread-2"),
@@ -104,6 +105,7 @@ const readModel: OrchestrationReadModel = {
       subagents: [],
       checkpoints: [],
       deletedAt: null,
+      parentThreadId: null,
     },
   ],
 };

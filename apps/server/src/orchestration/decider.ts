@@ -299,6 +299,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const parentThreadId = command.parentThreadId;
+      if (parentThreadId !== undefined) {
+        const parentThread = yield* requireThread({
+          readModel,
+          command,
+          threadId: parentThreadId,
+        });
+        // A child must live in the parent's project, or the sidebar filter
+        // and the subagent roster scope disagree about where it belongs.
+        if (parentThread.projectId !== command.projectId) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Parent thread '${parentThreadId}' belongs to a different project.`,
+          });
+        }
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -316,6 +332,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          parentThreadId: parentThreadId ?? null,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },

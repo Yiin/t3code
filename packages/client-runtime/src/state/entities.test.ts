@@ -104,6 +104,7 @@ const THREAD_SHELL = {
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
   activeSubagentCount: 0,
+  parentThreadId: null,
 } as const;
 
 const SNAPSHOT: OrchestrationShellSnapshot = {
@@ -207,6 +208,7 @@ describe("environment entity projections", () => {
       branch: "stale-branch",
       worktreePath: "/repo/stale-worktree",
       deletedAt: null,
+      parentThreadId: null,
       messages,
       proposedPlans: [],
       subagents: [],

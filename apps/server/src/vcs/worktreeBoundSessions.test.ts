@@ -69,6 +69,7 @@ const makeThread = (input: {
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     activeSubagentCount: 0,
+    parentThreadId: null,
   };
 };
 

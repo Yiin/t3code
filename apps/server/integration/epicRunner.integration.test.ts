@@ -254,6 +254,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
           activeSubagentCount: 0,
+          parentThreadId: null,
         });
       }),
     getThreadSessionById: () => Effect.succeed(Option.none()),

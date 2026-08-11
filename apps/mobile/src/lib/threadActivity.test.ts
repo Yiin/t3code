@@ -96,6 +96,7 @@ function makeThread(
     activities: [],
     checkpoints: [],
     session: null,
+    parentThreadId: null,
     ...input,
     settledOverride: input.settledOverride ?? null,
     settledAt: input.settledAt ?? null,

@@ -192,6 +192,7 @@ const makeDefaultOrchestrationReadModel = () => {
         subagents: [],
         checkpoints: [],
         deletedAt: null,
+        parentThreadId: null,
       },
     ],
   };
@@ -222,6 +223,7 @@ const makeDefaultOrchestrationThreadShell = (
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     activeSubagentCount: 0,
+    parentThreadId: null,
     ...overrides,
   };
 };
@@ -5795,6 +5797,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             subagents: [],
             checkpoints: [],
             deletedAt: null,
+            parentThreadId: null,
           },
         ],
       };

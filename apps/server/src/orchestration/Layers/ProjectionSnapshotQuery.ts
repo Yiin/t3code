@@ -106,6 +106,7 @@ const ProjectionThreadSubagentDbRowSchema = ProjectionThreadSubagent.mapFields(
     lastToolName: Schema.NullOr(TrimmedNonEmptyString),
     usage: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
     spawnedByItemId: Schema.NullOr(TrimmedNonEmptyString),
+    childThreadId: Schema.NullOr(ThreadId),
   }),
 );
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
@@ -273,6 +274,7 @@ function mapThreadSubagentRow(
     ...(row.lastToolName !== null ? { lastToolName: row.lastToolName } : {}),
     ...(row.usage !== null ? { usage: row.usage } : {}),
     ...(row.spawnedByItemId !== null ? { spawnedByItemId: row.spawnedByItemId } : {}),
+    ...(row.childThreadId !== null ? { childThreadId: row.childThreadId } : {}),
     startedAt: row.startedAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
@@ -557,7 +559,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         pending_approval_count AS "pendingApprovalCount",
         pending_user_input_count AS "pendingUserInputCount",
         has_actionable_proposed_plan AS "hasActionableProposedPlan",
-        deleted_at AS "deletedAt"
+        deleted_at AS "deletedAt",
+        parent_thread_id AS "parentThreadId"
       FROM projection_threads
       ORDER BY created_at ASC, thread_id ASC
     `;
@@ -598,7 +601,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          parent_thread_id AS "parentThreadId"
         FROM projection_threads
         WHERE deleted_at IS NULL
           AND archived_at IS NULL
@@ -629,7 +633,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          parent_thread_id AS "parentThreadId"
         FROM projection_threads
         WHERE deleted_at IS NULL
           AND archived_at IS NOT NULL
@@ -800,6 +805,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           last_tool_name AS "lastToolName",
           usage_json AS "usage",
           spawned_by_item_id AS "spawnedByItemId",
+          child_thread_id AS "childThreadId",
           started_at AS "startedAt",
           updated_at AS "updatedAt",
           completed_at AS "completedAt"
@@ -823,6 +829,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           last_tool_name AS "lastToolName",
           usage_json AS "usage",
           spawned_by_item_id AS "spawnedByItemId",
+          child_thread_id AS "childThreadId",
           started_at AS "startedAt",
           updated_at AS "updatedAt",
           completed_at AS "completedAt"
@@ -870,6 +877,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           last_tool_name AS "lastToolName",
           usage_json AS "usage",
           spawned_by_item_id AS "spawnedByItemId",
+          child_thread_id AS "childThreadId",
           started_at AS "startedAt",
           updated_at AS "updatedAt",
           completed_at AS "completedAt"
@@ -1123,7 +1131,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           pending_approval_count AS "pendingApprovalCount",
           pending_user_input_count AS "pendingUserInputCount",
           has_actionable_proposed_plan AS "hasActionableProposedPlan",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          parent_thread_id AS "parentThreadId"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
@@ -1667,6 +1676,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 settledOverride: row.settledOverride,
                 settledAt: row.settledAt,
                 deletedAt: row.deletedAt,
+                parentThreadId: row.parentThreadId,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                 subagents: subagentsByThread.get(row.threadId) ?? [],
@@ -1884,6 +1894,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   settledOverride: row.settledOverride,
                   settledAt: row.settledAt,
                   deletedAt: row.deletedAt,
+                  parentThreadId: row.parentThreadId,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                   // Only the `running` rows: they are all the settle invariant
@@ -2026,6 +2037,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                         hasPendingUserInput: row.pendingUserInputCount > 0,
                         hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
                         activeSubagentCount: activeSubagentCountByThread.get(row.threadId) ?? 0,
+                        parentThreadId: row.parentThreadId,
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
                 ),
@@ -2162,6 +2174,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     hasPendingUserInput: row.pendingUserInputCount > 0,
                     hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
                     activeSubagentCount: activeSubagentCountByThread.get(row.threadId) ?? 0,
+                    parentThreadId: row.parentThreadId,
                   }),
                 ),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
@@ -2418,6 +2431,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         hasPendingUserInput: threadRow.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.hasActionableProposedPlan > 0,
         activeSubagentCount: subagentCountRow.activeSubagentCount,
+        parentThreadId: threadRow.parentThreadId,
       } satisfies OrchestrationThreadShell);
     });
 

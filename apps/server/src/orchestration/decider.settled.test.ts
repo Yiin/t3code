@@ -73,6 +73,7 @@ function makeReadModel(
         activities,
         checkpoints: [],
         session,
+        parentThreadId: null,
       },
     ],
     updatedAt: NOW,

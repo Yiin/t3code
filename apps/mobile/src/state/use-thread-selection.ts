@@ -66,6 +66,7 @@ function threadDetailToShell(
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     activeSubagentCount: 0,
+    parentThreadId: thread.parentThreadId,
   };
 }
 

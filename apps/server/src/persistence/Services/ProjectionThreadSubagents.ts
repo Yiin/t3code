@@ -32,6 +32,7 @@ export const ProjectionThreadSubagent = Schema.Struct({
   lastToolName: Schema.optional(TrimmedNonEmptyString),
   usage: Schema.optional(Schema.Unknown),
   spawnedByItemId: Schema.optional(TrimmedNonEmptyString),
+  childThreadId: Schema.optional(ThreadId),
   startedAt: IsoDateTime,
   updatedAt: IsoDateTime,
   completedAt: Schema.NullOr(IsoDateTime),

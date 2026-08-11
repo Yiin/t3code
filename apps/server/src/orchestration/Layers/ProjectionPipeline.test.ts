@@ -253,6 +253,85 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       assert.deepEqual(unsettledRows, [{ settledOverride: "active", settledAt: null }]);
     }),
   );
+
+  it.effect("writes the parent thread id from thread.created", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-08-11T00:00:00.000Z";
+
+      yield* eventStore.append({
+        type: "project.created",
+        eventId: EventId.make("evt-parent-project"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-parent"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-parent-project"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-parent-project"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-parent"),
+          title: "Parent project",
+          workspaceRoot: "/tmp/project-parent",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      for (const [threadId, parentThreadId] of [
+        [ThreadId.make("thread-parent"), null],
+        [ThreadId.make("thread-child"), ThreadId.make("thread-parent")],
+      ] as const) {
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make(`evt-created-${threadId}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make(`cmd-created-${threadId}`),
+          causationEventId: null,
+          correlationId: CommandId.make(`cmd-created-${threadId}`),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-parent"),
+            title: `Thread ${threadId}`,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            parentThreadId,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{
+        readonly threadId: string;
+        readonly parentThreadId: string | null;
+      }>`
+        SELECT
+          thread_id AS "threadId",
+          parent_thread_id AS "parentThreadId"
+        FROM projection_threads
+        WHERE project_id = 'project-parent'
+        ORDER BY thread_id ASC
+      `;
+      assert.deepEqual(rows, [
+        { threadId: "thread-child", parentThreadId: "thread-parent" },
+        { threadId: "thread-parent", parentThreadId: null },
+      ]);
+    }),
+  );
 });
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(

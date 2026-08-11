@@ -63,6 +63,7 @@ function makeShell(input: {
     hasPendingUserInput: input.pending === "user-input",
     hasActionableProposedPlan: false,
     activeSubagentCount: input.activeSubagentCount ?? 0,
+    parentThreadId: null,
   };
 }
 

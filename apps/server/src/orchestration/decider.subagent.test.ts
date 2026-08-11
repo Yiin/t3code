@@ -79,6 +79,7 @@ function makeReadModel(input?: {
         activities: [],
         checkpoints: [],
         session: null,
+        parentThreadId: null,
       },
     ],
     updatedAt: now,

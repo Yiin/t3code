@@ -1,6 +1,6 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
-import { TrimmedNonEmptyString } from "@t3tools/contracts";
+import { ThreadId, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -26,6 +26,7 @@ const ProjectionThreadSubagentDbRowSchema = ProjectionThreadSubagent.mapFields(
     lastToolName: Schema.NullOr(TrimmedNonEmptyString),
     usage: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
     spawnedByItemId: Schema.NullOr(TrimmedNonEmptyString),
+    childThreadId: Schema.NullOr(ThreadId),
   }),
 );
 
@@ -58,6 +59,7 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
               last_tool_name,
               usage_json,
               spawned_by_item_id,
+              child_thread_id,
               started_at,
               updated_at,
               completed_at
@@ -73,6 +75,7 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
               ${row.lastToolName ?? null},
               ${row.usage !== undefined ? JSON.stringify(row.usage) : null},
               ${row.spawnedByItemId ?? null},
+              ${row.childThreadId ?? null},
               ${row.startedAt},
               ${row.updatedAt},
               ${row.completedAt}
@@ -87,6 +90,7 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
               last_tool_name = excluded.last_tool_name,
               usage_json = excluded.usage_json,
               spawned_by_item_id = excluded.spawned_by_item_id,
+              child_thread_id = excluded.child_thread_id,
               started_at = excluded.started_at,
               updated_at = excluded.updated_at,
               completed_at = excluded.completed_at
@@ -109,6 +113,7 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
           last_tool_name AS "lastToolName",
           usage_json AS "usage",
           spawned_by_item_id AS "spawnedByItemId",
+          child_thread_id AS "childThreadId",
           started_at AS "startedAt",
           updated_at AS "updatedAt",
           completed_at AS "completedAt"
@@ -187,6 +192,7 @@ const makeProjectionThreadSubagentRepository = Effect.gen(function* () {
           ...(row.lastToolName !== null ? { lastToolName: row.lastToolName } : {}),
           ...(row.usage !== null ? { usage: row.usage } : {}),
           ...(row.spawnedByItemId !== null ? { spawnedByItemId: row.spawnedByItemId } : {}),
+          ...(row.childThreadId !== null ? { childThreadId: row.childThreadId } : {}),
           startedAt: row.startedAt,
           updatedAt: row.updatedAt,
           completedAt: row.completedAt,
