@@ -3,10 +3,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import {
+  type ChatAttachment,
   type ClientOrchestrationCommand,
   type IsoDateTime,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 
@@ -14,6 +16,10 @@ import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+
+// A data URL header carries no parameters past the mime type, so anything
+// outside the RFC 6838 token characters means the client sent junk.
+const ATTACHMENT_MIME_TYPE_PATTERN = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 
 export const canonicalizeClientCommandTimestamps = (
   command: ClientOrchestrationCommand,
@@ -109,16 +115,29 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       (attachment) =>
         Effect.gen(function* () {
           const parsed = parseBase64DataUrl(attachment.dataUrl);
-          if (!parsed || !parsed.mimeType.startsWith("image/")) {
+          if (!parsed || !ATTACHMENT_MIME_TYPE_PATTERN.test(parsed.mimeType)) {
             return yield* new OrchestrationDispatchCommandError({
-              message: `Invalid image attachment payload for '${attachment.name}'.`,
+              message: `Attachment '${attachment.name}' is not a readable data URL.`,
             });
           }
 
+          // The persisted type follows the data URL, not the client's claim,
+          // so every screenshot keeps decoding as an image for older readers.
+          const mimeType = parsed.mimeType.toLowerCase();
+          const isImage = mimeType.startsWith("image/");
+          const maxBytes = isImage
+            ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+            : PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES;
+
           const bytes = Buffer.from(parsed.base64, "base64");
-          if (bytes.byteLength === 0 || bytes.byteLength > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          if (bytes.byteLength === 0) {
             return yield* new OrchestrationDispatchCommandError({
-              message: `Image attachment '${attachment.name}' is empty or too large.`,
+              message: `Attachment '${attachment.name}' is empty.`,
+            });
+          }
+          if (bytes.byteLength > maxBytes) {
+            return yield* new OrchestrationDispatchCommandError({
+              message: `Attachment '${attachment.name}' is larger than ${maxBytes} bytes.`,
             });
           }
 
@@ -129,13 +148,21 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
             });
           }
 
-          const persistedAttachment = {
-            type: "image" as const,
-            id: attachmentId,
-            name: attachment.name,
-            mimeType: parsed.mimeType.toLowerCase(),
-            sizeBytes: bytes.byteLength,
-          };
+          const persistedAttachment: ChatAttachment = isImage
+            ? {
+                type: "image",
+                id: attachmentId,
+                name: attachment.name,
+                mimeType,
+                sizeBytes: bytes.byteLength,
+              }
+            : {
+                type: "file",
+                id: attachmentId,
+                name: attachment.name,
+                mimeType,
+                sizeBytes: bytes.byteLength,
+              };
 
           const attachmentPath = resolveAttachmentPath({
             attachmentsDir: serverConfig.attachmentsDir,
