@@ -2,6 +2,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   ProviderDriverKind,
   type ModelSelection,
+  type ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
 
@@ -37,6 +38,51 @@ const isEligible = (provider: ServerProvider, model: string): boolean =>
   provider.status === "ready" &&
   provider.auth.status !== "unauthenticated" &&
   provider.models.some((candidate) => candidate.slug === model);
+
+export interface EpicFallbackHop {
+  readonly instanceId: ProviderInstanceId;
+  readonly model: string;
+  readonly options?: ModelSelection["options"];
+}
+
+export const resolveEpicProviderChainFallback = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly chain: ReadonlyArray<EpicFallbackHop>;
+  readonly current: ModelSelection;
+  readonly failureReason: string | undefined;
+  readonly providerFallbackEligible: boolean;
+  readonly isBlocked?: (hop: EpicFallbackHop) => boolean;
+}): ModelSelection | null => {
+  if (!input.providerFallbackEligible || !input.failureReason?.startsWith("provider-error")) {
+    return null;
+  }
+
+  const currentIndex = input.chain.findIndex((hop) => hop.instanceId === input.current.instanceId);
+  const candidates = currentIndex === -1 ? input.chain : input.chain.slice(currentIndex + 1);
+
+  for (const hop of candidates) {
+    if (hop.instanceId === input.current.instanceId) {
+      continue;
+    }
+
+    const provider = input.providers.find((candidate) => candidate.instanceId === hop.instanceId);
+    if (
+      provider === undefined ||
+      !isEligible(provider, hop.model) ||
+      input.isBlocked?.(hop) === true
+    ) {
+      continue;
+    }
+
+    return {
+      instanceId: hop.instanceId,
+      model: hop.model,
+      ...(hop.options === undefined ? {} : { options: hop.options }),
+    };
+  }
+
+  return null;
+};
 
 /**
  * Resolve the next configured provider after a provider-attributed failure.

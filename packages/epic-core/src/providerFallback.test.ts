@@ -6,7 +6,10 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveEpicProviderFallback } from "./providerFallback.ts";
+import {
+  resolveEpicProviderChainFallback,
+  resolveEpicProviderFallback,
+} from "./providerFallback.ts";
 import { classifyIteration } from "./ralphProtocol.ts";
 
 const selection = (instanceId: string, model = "primary"): ModelSelection => ({
@@ -39,6 +42,110 @@ const claude = provider("claude-work", "claudeAgent", "claude-sonnet-5");
 const codex = provider("codex-personal", "codex", "gpt-5.6-sol");
 const kimi = provider("kimi-team", "kimi", "kimi-code/k3");
 const prime = provider("prime-work", "primeAgent", "prime/custom-model");
+
+describe("resolveEpicProviderChainFallback", () => {
+  const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+  const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+  const claudeC = provider("claude-c", "claudeAgent", "claude-sonnet-5");
+  const claudeChain = [
+    selection("claude-a", "claude-sonnet-5"),
+    selection("claude-b", "claude-sonnet-5"),
+    selection("claude-c", "claude-sonnet-5"),
+  ];
+
+  const resolve = (
+    overrides: Partial<Parameters<typeof resolveEpicProviderChainFallback>[0]> = {},
+  ) =>
+    resolveEpicProviderChainFallback({
+      providers: [claudeA, claudeB, claudeC],
+      chain: claudeChain,
+      current: selection("claude-a", "claude-sonnet-5"),
+      failureReason: "provider-error:rate-limit",
+      providerFallbackEligible: true,
+      ...overrides,
+    });
+
+  it("advances between instances of the same provider driver", () => {
+    expect(resolve()).toEqual(selection("claude-b", "claude-sonnet-5"));
+  });
+
+  it("skips a blocked intermediate instance", () => {
+    expect(resolve({ isBlocked: (hop) => hop.instanceId === claudeB.instanceId })).toEqual(
+      selection("claude-c", "claude-sonnet-5"),
+    );
+  });
+
+  it("skips an ineligible intermediate instance", () => {
+    const ineligibleClaudeB = { ...claudeB, installed: false };
+
+    expect(resolve({ providers: [claudeA, ineligibleClaudeB, claudeC] })).toEqual(
+      selection("claude-c", "claude-sonnet-5"),
+    );
+  });
+
+  it("skips a disabled intermediate instance whose status remains ready", () => {
+    const disabledClaudeB = { ...claudeB, enabled: false };
+
+    expect(resolve({ providers: [claudeA, disabledClaudeB, claudeC] })).toEqual(
+      selection("claude-c", "claude-sonnet-5"),
+    );
+  });
+
+  it("returns null when the current instance is the last hop", () => {
+    expect(resolve({ current: selection("claude-c", "claude-sonnet-5") })).toBeNull();
+  });
+
+  it("starts at the first eligible hop when the current instance is absent", () => {
+    expect(resolve({ current: selection("claude-outside", "claude-sonnet-5") })).toEqual(
+      selection("claude-a", "claude-sonnet-5"),
+    );
+  });
+
+  it("never returns a duplicate of the current instance later in the chain", () => {
+    expect(
+      resolve({
+        chain: [
+          selection("claude-a", "claude-sonnet-5"),
+          selection("claude-a", "claude-sonnet-5"),
+          selection("claude-c", "claude-sonnet-5"),
+        ],
+      }),
+    ).toEqual(selection("claude-c", "claude-sonnet-5"));
+  });
+
+  it("preserves options from the selected hop", () => {
+    const options: NonNullable<ModelSelection["options"]> = [
+      { id: "reasoningEffort", value: "high" },
+    ];
+    const result = resolve({
+      providers: [claudeA, codex],
+      chain: [
+        selection("claude-a", "claude-sonnet-5"),
+        { instanceId: codex.instanceId, model: "gpt-5.6-sol", options },
+      ],
+    });
+
+    expect(result).toEqual({
+      instanceId: codex.instanceId,
+      model: "gpt-5.6-sol",
+      options,
+    });
+    expect(result?.options).toBe(options);
+  });
+
+  it.each([
+    { failureReason: "infra:timeout", providerFallbackEligible: true },
+    { failureReason: "provider-error:rate-limit", providerFallbackEligible: false },
+  ])("rejects ineligible fallback evidence: $failureReason", (evidence) => {
+    expect(resolve(evidence)).toBeNull();
+  });
+
+  it("skips a hop without a provider snapshot", () => {
+    expect(resolve({ providers: [claudeA, claudeC] })).toEqual(
+      selection("claude-c", "claude-sonnet-5"),
+    );
+  });
+});
 
 describe("resolveEpicProviderFallback", () => {
   it("moves Prime to Claude without inheriting Prime's model", () => {
