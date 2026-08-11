@@ -219,6 +219,16 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<OrchestrationGetSubagentActivitiesResult, ProjectionRepositoryError>;
 
   /**
+   * List the active threads spawned by one parent thread, oldest first.
+   *
+   * These are the thread-backed subagents of that thread. The roster reads them
+   * to open a child, and any future cascade needs the same list.
+   */
+  readonly listChildThreadIds: (
+    parentThreadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionRepositoryError>;
+
+  /**
    * Read a single active thread detail snapshot by id.
    */
   readonly getThreadDetailById: (

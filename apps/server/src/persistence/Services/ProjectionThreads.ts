@@ -63,6 +63,11 @@ export const ListProjectionThreadsByProjectInput = Schema.Struct({
 });
 export type ListProjectionThreadsByProjectInput = typeof ListProjectionThreadsByProjectInput.Type;
 
+export const PromoteProjectionThreadChildrenInput = Schema.Struct({
+  parentThreadId: ThreadId,
+});
+export type PromoteProjectionThreadChildrenInput = typeof PromoteProjectionThreadChildrenInput.Type;
+
 /**
  * ProjectionThreadRepositoryShape - Service API for projected thread records.
  */
@@ -95,6 +100,18 @@ export interface ProjectionThreadRepositoryShape {
    */
   readonly deleteById: (
     input: DeleteProjectionThreadInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Clear `parentThreadId` on every child of one parent thread.
+   *
+   * A deleted or reverted parent loses its subagent rows, so a thread-backed
+   * child would keep a link to a thread that can no longer open it, and stay
+   * filtered out of the sidebar. Promoting the children to top level keeps
+   * them reachable.
+   */
+  readonly promoteChildrenOfParent: (
+    input: PromoteProjectionThreadChildrenInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 }
 

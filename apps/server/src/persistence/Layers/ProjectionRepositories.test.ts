@@ -256,4 +256,52 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       );
     }),
   );
+
+  it.effect("promotes only the children of the named parent", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const doomedParentId = ThreadId.make("thread-doomed-parent");
+      const otherParentId = ThreadId.make("thread-other-parent");
+
+      const seedThread = (threadId: ThreadId, parentThreadId: ThreadId | null) =>
+        threads.upsert({
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: `Thread ${threadId}`,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.4",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          latestTurnId: null,
+          createdAt: "2026-08-11T00:00:00.000Z",
+          updatedAt: "2026-08-11T00:00:00.000Z",
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          latestUserMessageAt: null,
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 0,
+          hasActionableProposedPlan: 0,
+          deletedAt: null,
+          parentThreadId,
+        });
+
+      yield* seedThread(ThreadId.make("thread-doomed-child-a"), doomedParentId);
+      yield* seedThread(ThreadId.make("thread-doomed-child-b"), doomedParentId);
+      yield* seedThread(ThreadId.make("thread-kept-child"), otherParentId);
+
+      yield* threads.promoteChildrenOfParent({ parentThreadId: doomedParentId });
+
+      for (const threadId of ["thread-doomed-child-a", "thread-doomed-child-b"] as const) {
+        const promoted = yield* threads.getById({ threadId: ThreadId.make(threadId) });
+        assert.strictEqual(Option.getOrNull(promoted)?.parentThreadId, null, threadId);
+      }
+      const kept = yield* threads.getById({ threadId: ThreadId.make("thread-kept-child") });
+      assert.strictEqual(Option.getOrNull(kept)?.parentThreadId, otherParentId);
+    }),
+  );
 });

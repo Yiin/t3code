@@ -2213,6 +2213,164 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  // The roster the composer banner opens reads `thread.subagents`, which comes
+  // from `projection_thread_subagents`, never from the capped activity list.
+  // Nothing pins `task.*` activities against the cap, so this is the test that
+  // keeps the roster whole. Pinning by kind would pin every tool row and still
+  // miss the `collab_agent_tool_call` work-log entry the banner needs.
+  it.effect("keeps the subagent roster after the activity cap evicts its task.started row", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      // Sequence 1, older than every filler row, so the newest-N window drops it.
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        VALUES (
+          'activity-task-started',
+          'thread-1',
+          'turn-1',
+          'info',
+          'task.started',
+          'Subagent started',
+          '{"taskId":"task-1","detail":"Scan the repo","subagentType":"Explore","toolUseId":"toolu-1"}',
+          1,
+          '2026-04-01T00:00:10.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_subagents (
+          subagent_id,
+          thread_id,
+          turn_id,
+          agent_type,
+          description,
+          status,
+          spawned_by_item_id,
+          child_thread_id,
+          started_at,
+          updated_at
+        )
+        VALUES (
+          'task-1',
+          'thread-1',
+          'turn-1',
+          'Explore',
+          'Scan the repo',
+          'running',
+          'toolu-1',
+          'thread-child',
+          '2026-04-01T00:00:10.000Z',
+          '2026-04-01T00:00:10.000Z'
+        )
+      `;
+      yield* insertFillerActivities(600);
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag !== "Some") {
+        return;
+      }
+      assert.equal(threadDetail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+      assert.equal(
+        threadDetail.value.activities.some((activity) => activity.kind === "task.started"),
+        false,
+      );
+      assert.deepEqual(threadDetail.value.subagents, [
+        {
+          subagentId: "task-1",
+          turnId: asTurnId("turn-1"),
+          agentType: "Explore",
+          description: "Scan the repo",
+          status: "running",
+          spawnedByItemId: "toolu-1",
+          childThreadId: ThreadId.make("thread-child"),
+          startedAt: "2026-04-01T00:00:10.000Z",
+          updatedAt: "2026-04-01T00:00:10.000Z",
+          completedAt: null,
+        },
+      ]);
+    }),
+  );
+
+  it.effect("lists the live child threads of one parent, oldest first", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      for (const [threadId, parentThreadId, createdAt, deletedAt] of [
+        ["thread-child-late", "thread-1", "2026-04-01T00:00:20.000Z", null],
+        ["thread-child-early", "thread-1", "2026-04-01T00:00:10.000Z", null],
+        [
+          "thread-child-deleted",
+          "thread-1",
+          "2026-04-01T00:00:15.000Z",
+          "2026-04-01T00:00:16.000Z",
+        ],
+        ["thread-child-other", "thread-other-parent", "2026-04-01T00:00:10.000Z", null],
+      ] as const) {
+        yield* sql`
+          INSERT INTO projection_threads (
+            thread_id,
+            project_id,
+            title,
+            model_selection_json,
+            runtime_mode,
+            interaction_mode,
+            branch,
+            worktree_path,
+            latest_turn_id,
+            latest_user_message_at,
+            pending_approval_count,
+            pending_user_input_count,
+            has_actionable_proposed_plan,
+            created_at,
+            updated_at,
+            deleted_at,
+            parent_thread_id
+          )
+          VALUES (
+            ${threadId},
+            'project-1',
+            ${threadId},
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            ${createdAt},
+            ${createdAt},
+            ${deletedAt},
+            ${parentThreadId}
+          )
+        `;
+      }
+
+      const children = yield* snapshotQuery.listChildThreadIds(ThreadId.make("thread-1"));
+      assert.deepEqual(children, [
+        ThreadId.make("thread-child-early"),
+        ThreadId.make("thread-child-late"),
+      ]);
+    }),
+  );
+
   it.effect("counts pinned request rows as returned, not omitted", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

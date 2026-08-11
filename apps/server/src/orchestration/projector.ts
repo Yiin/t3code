@@ -75,6 +75,25 @@ function updateThread(
   return threads.map((thread) => (thread.id === threadId ? { ...thread, ...patch } : thread));
 }
 
+/**
+ * Cut the parent link on every child of one thread.
+ *
+ * Mirrors `promoteChildrenOfParent` in the SQL projection, which runs on
+ * `thread.deleted` and `thread.reverted`: both drop the parent's subagent rows,
+ * so a still-linked child would have no roster entry left to open it and would
+ * stay filtered out of the sidebar. Revert over-promotes children spawned
+ * before the revert point, and that is the accepted trade: a visible extra
+ * thread beats an unreachable one.
+ */
+function promoteChildThreads(
+  threads: ReadonlyArray<OrchestrationThread>,
+  parentThreadId: ThreadId,
+): OrchestrationThread[] {
+  return threads.map((thread) =>
+    thread.parentThreadId === parentThreadId ? { ...thread, parentThreadId: null } : thread,
+  );
+}
+
 function decodeForEvent<A>(
   schema: Schema.Decoder<A, never>,
   value: unknown,
@@ -199,6 +218,16 @@ const openRequestKinds: ReadonlySet<string> = new Set(THREAD_ACTIVITY_OPEN_REQUE
  *
  * `activities` must already be sorted by `compareThreadActivities`; filtering
  * keeps that order.
+ *
+ * The same policy is implemented twice. This copy feeds only the decider's
+ * command read model. The copy clients see is
+ * `listThreadActivityRawRowsByThread` in
+ * `Layers/ProjectionSnapshotQuery.ts`. Change both or neither.
+ *
+ * Neither copy pins subagent activities, and that is deliberate: the subagent
+ * read model is folded into its own rows by `applySubagentActivity` and
+ * survives the cap on its own. Locked by "keeps the subagent roster after the
+ * activity cap evicts its task.started row" in `projector.test.ts`.
  */
 function capThreadActivities(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
@@ -346,10 +375,14 @@ export function projectEvent(
       return decodeForEvent(ThreadDeletedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
           ...nextBase,
-          threads: updateThread(nextBase.threads, payload.threadId, {
-            deletedAt: payload.deletedAt,
-            updatedAt: payload.deletedAt,
-          }),
+          threads: updateThread(
+            promoteChildThreads(nextBase.threads, payload.threadId),
+            payload.threadId,
+            {
+              deletedAt: payload.deletedAt,
+              updatedAt: payload.deletedAt,
+            },
+          ),
         })),
       );
 
@@ -731,17 +764,21 @@ export function projectEvent(
 
           return {
             ...nextBase,
-            threads: updateThread(nextBase.threads, payload.threadId, {
-              checkpoints,
-              messages,
-              proposedPlans,
-              activities,
-              // Mirrors the SQL projector, which deletes every subagent row on
-              // thread.reverted rather than trimming by retained turn.
-              subagents: [],
-              latestTurn,
-              updatedAt: event.occurredAt,
-            }),
+            threads: updateThread(
+              promoteChildThreads(nextBase.threads, payload.threadId),
+              payload.threadId,
+              {
+                checkpoints,
+                messages,
+                proposedPlans,
+                activities,
+                // Mirrors the SQL projector, which deletes every subagent row
+                // on thread.reverted rather than trimming by retained turn.
+                subagents: [],
+                latestTurn,
+                updatedAt: event.occurredAt,
+              },
+            ),
           };
         }),
       );

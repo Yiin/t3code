@@ -154,6 +154,9 @@ const ProjectIdLookupInput = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+const ParentThreadIdLookupInput = Schema.Struct({
+  parentThreadId: ThreadId,
+});
 
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
@@ -1091,6 +1094,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // Rides `idx_projection_threads_parent_thread`.
+  const listChildThreadIdRows = SqlSchema.findAll({
+    Request: ParentThreadIdLookupInput,
+    Result: ProjectionThreadIdLookupRowSchema,
+    execute: ({ parentThreadId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId"
+        FROM projection_threads
+        WHERE parent_thread_id = ${parentThreadId}
+          AND deleted_at IS NULL
+        ORDER BY created_at ASC, thread_id ASC
+      `,
+  });
+
   const getThreadCheckpointContextThreadRow = SqlSchema.findOneOption({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadCheckpointContextThreadRowSchema,
@@ -1203,6 +1221,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   //
   // The two CTEs select `activity_id` only so the dedupe never compares
   // `payload_json`, which is 75-97% of this table's bytes.
+  //
+  // The same policy is implemented twice. This copy is the one clients see.
+  // The other is `capThreadActivities` in `orchestration/projector.ts`, which
+  // feeds only the decider's command read model. Change both or neither.
+  //
+  // Neither copy pins subagent activities, and that is deliberate: subagents
+  // reach clients from `projection_thread_subagents`, not from this list, so
+  // the roster survives the cap on its own. Locked by "keeps the subagent
+  // roster after the activity cap evicts its task.started row" in
+  // `ProjectionSnapshotQuery.test.ts`.
   const listThreadActivityRawRowsByThread = tracedFindAllRaw({
     Request: ThreadIdLookupInput,
     execute: ({ threadId }) =>
@@ -2301,6 +2329,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.map(Option.map((row) => row.threadId)),
       );
 
+  const listChildThreadIds: ProjectionSnapshotQueryShape["listChildThreadIds"] = (parentThreadId) =>
+    listChildThreadIdRows({ parentThreadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listChildThreadIds:query",
+          "ProjectionSnapshotQuery.listChildThreadIds:decodeRow",
+        ),
+      ),
+      Effect.map((rows) => rows.map((row) => row.threadId)),
+    );
+
   const getThreadCheckpointContext: ProjectionSnapshotQueryShape["getThreadCheckpointContext"] = (
     threadId,
   ) =>
@@ -2748,6 +2787,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
+    listChildThreadIds,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,

@@ -5,6 +5,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
   type OrchestrationThreadSubagent,
+  SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND,
   subagentCloseStatusForSessionStatus,
   ThreadId,
 } from "@t3tools/contracts";
@@ -144,6 +145,7 @@ function toThreadSubagentReadModel(row: ProjectionThreadSubagent): Orchestration
     ...(row.lastToolName !== undefined ? { lastToolName: row.lastToolName } : {}),
     ...(row.usage !== undefined ? { usage: row.usage } : {}),
     ...(row.spawnedByItemId !== undefined ? { spawnedByItemId: row.spawnedByItemId } : {}),
+    ...(row.childThreadId !== undefined ? { childThreadId: row.childThreadId } : {}),
     startedAt: row.startedAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
@@ -759,6 +761,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         case "thread.deleted": {
           attachmentSideEffects.deletedThreadIds.add(event.payload.threadId);
+          // A deleted parent keeps its own row (soft delete) but loses every
+          // subagent row, so a thread-backed child would point at a dead parent
+          // with no roster entry left to open it: unreachable. Cut the link so
+          // the child returns to the sidebar as a normal thread.
+          yield* projectionThreadRepository.promoteChildrenOfParent({
+            parentThreadId: event.payload.threadId,
+          });
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
           });
@@ -825,6 +834,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.reverted": {
+          // A revert drops every subagent row of this thread, roster entries
+          // included, so its thread-backed children would be unreachable the
+          // same way a delete strands them. This over-promotes children spawned
+          // before the revert point, because the subagent rows carry no turn to
+          // trim by. Accept that: a visible extra thread beats a lost one.
+          yield* projectionThreadRepository.promoteChildrenOfParent({
+            parentThreadId: event.payload.threadId,
+          });
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
           });
@@ -1065,7 +1082,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       switch (event.type) {
         case "thread.activity-appended": {
           const kind = event.payload.activity.kind;
-          if (kind !== "task.started" && kind !== "task.progress" && kind !== "task.completed") {
+          if (
+            kind !== "task.started" &&
+            kind !== "task.progress" &&
+            kind !== "task.completed" &&
+            kind !== SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND
+          ) {
             return;
           }
           const existingRows = yield* projectionThreadSubagentRepository.listByThreadId({

@@ -332,6 +332,185 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       ]);
     }),
   );
+
+  it.effect("links a child thread onto its subagent row, then promotes it on delete", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-08-11T01:00:00.000Z";
+      const parentThreadId = ThreadId.make("thread-link-parent");
+      const childThreadId = ThreadId.make("thread-link-child");
+
+      yield* eventStore.append({
+        type: "project.created",
+        eventId: EventId.make("evt-link-project"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-link"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-link-project"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-link-project"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-link"),
+          title: "Link project",
+          workspaceRoot: "/tmp/project-link",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      for (const [threadId, parentId] of [
+        [parentThreadId, null],
+        [childThreadId, parentThreadId],
+      ] as const) {
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make(`evt-link-created-${threadId}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make(`cmd-link-created-${threadId}`),
+          causationEventId: null,
+          correlationId: CommandId.make(`cmd-link-created-${threadId}`),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-link"),
+            title: `Thread ${threadId}`,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            parentThreadId: parentId,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+
+      // A thread-backed spawner emits `task.started` first, then the link.
+      yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-link-task-started"),
+        aggregateKind: "thread",
+        aggregateId: parentThreadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-link-task-started"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-link-task-started"),
+        metadata: {},
+        payload: {
+          threadId: parentThreadId,
+          activity: {
+            id: EventId.make("activity-link-task-started"),
+            tone: "info",
+            kind: "task.started",
+            summary: "Subagent started",
+            payload: {
+              taskId: "subagent-link",
+              detail: "Scan the repo",
+              subagentType: "Explore",
+              toolUseId: "toolu-link",
+            },
+            turnId: null,
+            createdAt: now,
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-link-child-linked"),
+        aggregateKind: "thread",
+        aggregateId: parentThreadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-link-child-linked"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-link-child-linked"),
+        metadata: {},
+        payload: {
+          threadId: parentThreadId,
+          activity: {
+            id: EventId.make("activity-link-child-linked"),
+            tone: "info",
+            kind: "subagent.child-thread.linked",
+            summary: "Subagent runs as a child thread",
+            payload: {
+              subagentId: "subagent-link",
+              childThreadId,
+            },
+            turnId: null,
+            createdAt: now,
+          },
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      const linkedRows = yield* sql<{
+        readonly subagentId: string;
+        readonly childThreadId: string | null;
+      }>`
+        SELECT
+          subagent_id AS "subagentId",
+          child_thread_id AS "childThreadId"
+        FROM projection_thread_subagents
+        WHERE thread_id = ${parentThreadId}
+      `;
+      assert.deepEqual(linkedRows, [
+        { subagentId: "subagent-link", childThreadId: "thread-link-child" },
+      ]);
+
+      // Deleting the parent drops every subagent row, so the child would keep a
+      // link nothing can open. The promotion returns it to the sidebar.
+      yield* eventStore.append({
+        type: "thread.deleted",
+        eventId: EventId.make("evt-link-parent-deleted"),
+        aggregateKind: "thread",
+        aggregateId: parentThreadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-link-parent-deleted"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-link-parent-deleted"),
+        metadata: {},
+        payload: {
+          threadId: parentThreadId,
+          deletedAt: now,
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      const promotedRows = yield* sql<{
+        readonly threadId: string;
+        readonly parentThreadId: string | null;
+        readonly deletedAt: string | null;
+      }>`
+        SELECT
+          thread_id AS "threadId",
+          parent_thread_id AS "parentThreadId",
+          deleted_at AS "deletedAt"
+        FROM projection_threads
+        WHERE project_id = 'project-link'
+        ORDER BY thread_id ASC
+      `;
+      assert.deepEqual(promotedRows, [
+        { threadId: "thread-link-child", parentThreadId: null, deletedAt: null },
+        { threadId: "thread-link-parent", parentThreadId: null, deletedAt: now },
+      ]);
+
+      const survivingSubagentRows = yield* sql<{ readonly subagentId: string }>`
+        SELECT subagent_id AS "subagentId"
+        FROM projection_thread_subagents
+        WHERE thread_id = ${parentThreadId}
+      `;
+      assert.deepEqual(survivingSubagentRows, []);
+    }),
+  );
 });
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(

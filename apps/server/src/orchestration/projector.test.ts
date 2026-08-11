@@ -3,6 +3,7 @@ import {
   EventId,
   ProjectId,
   ProviderDriverKind,
+  THREAD_DETAIL_ACTIVITY_LIMIT,
   ThreadId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
@@ -1340,4 +1341,214 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
     expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
   });
+
+  // The roster the composer banner opens reads `thread.subagents`, never the
+  // capped activity list. Nothing pins `task.*` activities against the cap, so
+  // this is the test that keeps the roster whole. See the note on
+  // `capThreadActivities` for why pinning is the wrong fix.
+  effectIt.effect(
+    "keeps the subagent roster after the activity cap evicts its task.started row",
+    () =>
+      Effect.gen(function* () {
+        const createdAt = "2026-03-01T10:00:00.000Z";
+
+        const afterCreate = yield* projectEvent(
+          createEmptyReadModel(createdAt),
+          makeEvent({
+            sequence: 1,
+            type: "thread.created",
+            aggregateKind: "thread",
+            aggregateId: "thread-roster",
+            occurredAt: createdAt,
+            commandId: "cmd-create-roster",
+            payload: {
+              threadId: "thread-roster",
+              projectId: "project-1",
+              title: "roster",
+              modelSelection: {
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5-codex",
+              },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          }),
+        );
+
+        const activityEvent = (input: {
+          sequence: number;
+          activityId: string;
+          kind: string;
+          summary: string;
+          payload: unknown;
+        }) =>
+          makeEvent({
+            sequence: input.sequence,
+            type: "thread.activity-appended",
+            aggregateKind: "thread",
+            aggregateId: "thread-roster",
+            occurredAt: createdAt,
+            commandId: `cmd-activity-${input.sequence}`,
+            payload: {
+              threadId: "thread-roster",
+              activity: {
+                id: input.activityId,
+                tone: "info",
+                kind: input.kind,
+                summary: input.summary,
+                payload: input.payload,
+                turnId: "turn-1",
+                sequence: input.sequence,
+                createdAt,
+              },
+            },
+          });
+
+        const events: ReadonlyArray<OrchestrationEvent> = [
+          activityEvent({
+            sequence: 2,
+            activityId: "activity-task-started",
+            kind: "task.started",
+            summary: "Subagent started",
+            payload: {
+              taskId: "task-1",
+              detail: "Scan the repo",
+              subagentType: "Explore",
+              toolUseId: "toolu-1",
+            },
+          }),
+          ...Array.from({ length: THREAD_DETAIL_ACTIVITY_LIMIT }, (_, index) =>
+            activityEvent({
+              sequence: index + 3,
+              activityId: `activity-filler-${index}`,
+              kind: "runtime.note",
+              summary: `filler ${index}`,
+              payload: { source: "filler" },
+            }),
+          ),
+        ];
+
+        let finalState = afterCreate;
+        for (const event of events) {
+          finalState = yield* projectEvent(finalState, event);
+        }
+
+        const thread = finalState.threads[0];
+        expect(thread?.activities).toHaveLength(THREAD_DETAIL_ACTIVITY_LIMIT);
+        expect(thread?.activities.some((activity) => activity.id === "activity-task-started")).toBe(
+          false,
+        );
+        expect(thread?.subagents).toEqual([
+          {
+            subagentId: "task-1",
+            turnId: "turn-1",
+            agentType: "Explore",
+            description: "Scan the repo",
+            status: "running",
+            spawnedByItemId: "toolu-1",
+            startedAt: createdAt,
+            updatedAt: createdAt,
+            completedAt: null,
+          },
+        ]);
+      }),
+  );
+
+  effectIt.effect("promotes child threads when their parent is deleted or reverted", () =>
+    Effect.gen(function* () {
+      const now = "2026-03-02T10:00:00.000Z";
+      const later = "2026-03-02T10:00:01.000Z";
+
+      const createThread = (input: {
+        sequence: number;
+        threadId: string;
+        parentThreadId: string | null;
+      }) =>
+        makeEvent({
+          sequence: input.sequence,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: input.threadId,
+          occurredAt: now,
+          commandId: `cmd-create-${input.threadId}`,
+          payload: {
+            threadId: input.threadId,
+            projectId: "project-1",
+            title: input.threadId,
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            parentThreadId: input.parentThreadId,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+      let seeded = createEmptyReadModel(now);
+      for (const event of [
+        createThread({ sequence: 1, threadId: "thread-parent", parentThreadId: null }),
+        createThread({ sequence: 2, threadId: "thread-child", parentThreadId: "thread-parent" }),
+        createThread({ sequence: 3, threadId: "thread-other", parentThreadId: "thread-elsewhere" }),
+      ]) {
+        seeded = yield* projectEvent(seeded, event);
+      }
+      expect(seeded.threads.map((thread) => thread.parentThreadId)).toEqual([
+        null,
+        "thread-parent",
+        "thread-elsewhere",
+      ]);
+
+      const afterRevert = yield* projectEvent(
+        seeded,
+        makeEvent({
+          sequence: 4,
+          type: "thread.reverted",
+          aggregateKind: "thread",
+          aggregateId: "thread-parent",
+          occurredAt: later,
+          commandId: "cmd-revert-parent",
+          payload: {
+            threadId: "thread-parent",
+            turnCount: 0,
+            checkpointRef: "refs/t3/checkpoints/thread-parent/turn/0",
+            revertedAt: later,
+          },
+        }),
+      );
+      expect(afterRevert.threads.map((thread) => thread.parentThreadId)).toEqual([
+        null,
+        null,
+        "thread-elsewhere",
+      ]);
+
+      const afterDelete = yield* projectEvent(
+        seeded,
+        makeEvent({
+          sequence: 5,
+          type: "thread.deleted",
+          aggregateKind: "thread",
+          aggregateId: "thread-parent",
+          occurredAt: later,
+          commandId: "cmd-delete-parent",
+          payload: {
+            threadId: "thread-parent",
+            deletedAt: later,
+          },
+        }),
+      );
+      expect(afterDelete.threads.map((thread) => thread.parentThreadId)).toEqual([
+        null,
+        null,
+        "thread-elsewhere",
+      ]);
+      expect(afterDelete.threads[0]?.deletedAt).toBe(later);
+    }),
+  );
 });

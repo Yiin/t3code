@@ -12,6 +12,7 @@ import {
   ListProjectionThreadsByProjectInput,
   ProjectionThread,
   ProjectionThreadRepository,
+  PromoteProjectionThreadChildrenInput,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
 import { ModelSelection } from "@t3tools/contracts";
@@ -170,6 +171,16 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const promoteProjectionThreadChildren = SqlSchema.void({
+    Request: PromoteProjectionThreadChildrenInput,
+    execute: ({ parentThreadId }) =>
+      sql`
+        UPDATE projection_threads
+        SET parent_thread_id = NULL
+        WHERE parent_thread_id = ${parentThreadId}
+      `,
+  });
+
   const upsert: ProjectionThreadRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
@@ -190,11 +201,21 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.deleteById:query")),
     );
 
+  const promoteChildrenOfParent: ProjectionThreadRepositoryShape["promoteChildrenOfParent"] = (
+    input,
+  ) =>
+    promoteProjectionThreadChildren(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadRepository.promoteChildrenOfParent:query"),
+      ),
+    );
+
   return {
     upsert,
     getById,
     listByProjectId,
     deleteById,
+    promoteChildrenOfParent,
   } satisfies ProjectionThreadRepositoryShape;
 });
 
