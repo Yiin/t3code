@@ -6,6 +6,7 @@ import {
   FlaskConicalIcon,
   GitBranchIcon,
   KeyboardIcon,
+  LayersIcon,
   Link2Icon,
   Settings2Icon,
 } from "lucide-react";
@@ -27,6 +28,7 @@ export type SettingsSectionPath =
   | "/settings/general"
   | "/settings/keybindings"
   | "/settings/providers"
+  | "/settings/epics"
   | "/settings/source-control"
   | "/settings/connections"
   | "/settings/beta"
@@ -40,6 +42,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "General", to: "/settings/general", icon: Settings2Icon },
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
+  { label: "Epics", to: "/settings/epics", icon: LayersIcon },
   { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },
   { label: "Beta", to: "/settings/beta", icon: FlaskConicalIcon },
