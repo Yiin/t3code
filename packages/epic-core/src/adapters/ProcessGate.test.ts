@@ -108,7 +108,34 @@ describe("ProcessGate", () => {
       });
 
       expect(new TextEncoder().encode(result.output).byteLength).toBeLessThanOrEqual(5);
-      expect(result.output).toBe("éé");
+      // The TAIL survives, not the head: a test runner prints its failures
+      // last, so keeping the beginning reports passing test names as the
+      // evidence for a red gate.
+      expect(result.output).toBe("tail");
+    }),
+  );
+
+  it.effect("keeps the failure at the end of a long gate output", () =>
+    Effect.gen(function* () {
+      const processRunner = ProcessRunner.of({
+        run: (command) =>
+          Effect.succeed({
+            ...output(command.command === "mkdir" ? 0 : 1),
+            stdout: command.command === "mkdir" ? "" : `${"✓ passing test\n".repeat(50)}`,
+            stderr: command.command === "mkdir" ? "" : "FAIL src/thing.test.ts > it broke",
+          }),
+      });
+      const gate = makeProcessGate({ processRunner, uid: 1000, environment: {} });
+
+      const result = yield* gate.run({
+        command: "check",
+        repositories: [repository("/repo")],
+        cwd: "/integration",
+        maxOutputBytes: 64,
+      });
+
+      expect(result.passed).toBe(false);
+      expect(result.output).toContain("FAIL src/thing.test.ts > it broke");
     }),
   );
 

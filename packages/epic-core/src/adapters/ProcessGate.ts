@@ -15,17 +15,29 @@ const cleanEnvironment = (environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
     ),
   );
 
+/**
+ * Keep the END of the gate's output, not the beginning.
+ *
+ * A test runner prints its failures last. Keeping the head means a failing
+ * gate reports a screen of passing test names and nothing about what broke:
+ * run d7580b6c reported `✓ does not emit a second process-exit error after a
+ * decode failure` as the evidence for a red gate, which says nothing at all.
+ * The tail is where the reason lives.
+ */
 const boundOutput = (output: string, maxBytes: number): string => {
   const encoder = new TextEncoder();
+  const characters = [...output];
   const chunks: string[] = [];
   let bytes = 0;
-  for (const character of output) {
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    const character = characters[index] ?? "";
     const characterBytes = encoder.encode(character).byteLength;
     if (bytes + characterBytes > maxBytes) break;
     chunks.push(character);
     bytes += characterBytes;
   }
-  return chunks.join("");
+  // The cut lands mid-line, so drop the partial leading fragment's whitespace.
+  return chunks.reverse().join("").trimStart();
 };
 
 export const heavyGateLockPath = (input: {
