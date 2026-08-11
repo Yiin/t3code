@@ -1184,6 +1184,228 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-atta
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-attachments-file-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("retains referenced file attachments and drops them with the thread", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const { attachmentsDir } = yield* ServerConfig;
+        const now = "2026-01-01T00:00:00.000Z";
+        const threadId = ThreadId.make("Thread File.Attachments");
+        const keepAttachmentId = "thread-file-attachments-00000000-0000-4000-8000-000000000001";
+        const dropAttachmentId = "thread-file-attachments-00000000-0000-4000-8000-000000000002";
+
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-file-attachments-1"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-file-attachments"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-1"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-file-attachments"),
+            title: "Project File Attachments",
+            workspaceRoot: "/tmp/project-file-attachments",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-file-attachments-2"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-2"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-2"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-file-attachments"),
+            title: "Thread File Attachments",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-file-attachments-3"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-3"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-3"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId: TurnId.make("turn-file-keep"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-file-attachments/turn/1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("message-file-keep"),
+            completedAt: now,
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-file-attachments-4"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-4"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-4"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-file-keep"),
+            role: "user",
+            text: "Keep this log",
+            attachments: [
+              {
+                type: "file",
+                id: keepAttachmentId,
+                name: "keep.log",
+                mimeType: "text/plain",
+                sizeBytes: 4,
+              },
+            ],
+            turnId: TurnId.make("turn-file-keep"),
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-file-attachments-5"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-5"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-5"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId: TurnId.make("turn-file-drop"),
+            checkpointTurnCount: 2,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-file-attachments/turn/2"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("message-file-drop"),
+            completedAt: now,
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-file-attachments-6"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-6"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-6"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-file-drop"),
+            role: "user",
+            text: "Drop this log",
+            attachments: [
+              {
+                type: "file",
+                id: dropAttachmentId,
+                name: "drop.log",
+                mimeType: "text/plain",
+                sizeBytes: 4,
+              },
+            ],
+            turnId: TurnId.make("turn-file-drop"),
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        const keepPath = path.join(attachmentsDir, `${keepAttachmentId}.log`);
+        const dropPath = path.join(attachmentsDir, `${dropAttachmentId}.log`);
+        yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+        yield* fileSystem.writeFileString(keepPath, "keep");
+        yield* fileSystem.writeFileString(dropPath, "drop");
+
+        yield* appendAndProject({
+          type: "thread.reverted",
+          eventId: EventId.make("evt-file-attachments-7"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-7"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-7"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnCount: 1,
+          },
+        });
+
+        // The prune pass keeps a still-referenced file attachment; before this
+        // it only ever collected images, so a file looked like an orphan.
+        assert.isTrue(yield* exists(keepPath));
+        assert.isFalse(yield* exists(dropPath));
+
+        yield* appendAndProject({
+          type: "thread.deleted",
+          eventId: EventId.make("evt-file-attachments-8"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-file-attachments-8"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-file-attachments-8"),
+          metadata: {},
+          payload: {
+            threadId,
+            deletedAt: now,
+          },
+        });
+
+        assert.isFalse(yield* exists(keepPath));
+      }),
+    );
+  },
+);
+
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("resumes from projector last_applied_sequence without replaying older events", () =>
     Effect.gen(function* () {

@@ -202,6 +202,33 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect("issues attachment capabilities for a non-image file", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const attachmentId = "thread-1-00000000-0000-4000-8000-000000000002";
+      const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.log`);
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      yield* fileSystem.writeFileString(attachmentPath, "gate output\n");
+
+      const result = yield* issueAssetUrl({
+        resource: { _tag: "attachment", attachmentId },
+      });
+      // The signed file name carries the real extension, so the route serves
+      // the attachment with a Content-Type derived from the stored file.
+      expect(result.relativeUrl.endsWith(`/${attachmentId}.log`)).toBe(true);
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      expect(yield* resolveAsset(token, suffix.slice(separatorIndex + 1))).toEqual({
+        kind: "file",
+        path: attachmentPath,
+      });
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("issues project favicon capabilities with a signed fallback", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

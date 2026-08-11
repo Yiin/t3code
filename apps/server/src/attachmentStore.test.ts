@@ -3,15 +3,37 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { ChatAttachment } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  attachmentRelativePath,
   createAttachmentId,
   parseThreadSegmentFromAttachmentId,
   resolveAttachmentPathById,
 } from "./attachmentStore.ts";
 
+const decodeChatAttachment = Schema.decodeUnknownSync(ChatAttachment);
+
 describe("attachmentStore", () => {
+  it.each([
+    ["report.log", "text/plain", ".log"],
+    ["report", "application/pdf", ".pdf"],
+    ["report", "application/x-unknown", ".bin"],
+    [".env", "application/x-unknown", ".bin"],
+  ])("uses a safe file extension for %s", (name, mimeType, extension) => {
+    const attachment = decodeChatAttachment({
+      type: "file",
+      id: "attachment-1",
+      name,
+      mimeType,
+      sizeBytes: 128,
+    });
+
+    expect(attachmentRelativePath(attachment)).toBe(`attachment-1${extension}`);
+  });
+
   it("sanitizes thread ids when creating attachment ids", () => {
     const attachmentId = createAttachmentId("thread.folder/unsafe space");
     expect(attachmentId).toBeTruthy();
@@ -58,6 +80,25 @@ describe("attachmentStore", () => {
         attachmentId,
       });
       expect(resolved).toBe(pngPath);
+    } finally {
+      NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a file attachment with an arbitrary safe extension", () => {
+    const attachmentsDir = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3code-attachment-store-"),
+    );
+    try {
+      const attachmentId = "thread-1-attachment";
+      const logPath = NodePath.join(attachmentsDir, `${attachmentId}.log`);
+      NodeFS.writeFileSync(logPath, Buffer.from("hello"));
+
+      const resolved = resolveAttachmentPathById({
+        attachmentsDir,
+        attachmentId,
+      });
+      expect(resolved).toBe(logPath);
     } finally {
       NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
     }

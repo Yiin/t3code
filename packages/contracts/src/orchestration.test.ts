@@ -4,6 +4,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
+  ChatAttachment,
+  ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   ModelSelection,
@@ -23,6 +25,8 @@ import {
   OrchestrationThread,
   OrchestrationThreadShell,
   ProjectCreateCommand,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
@@ -49,6 +53,8 @@ const decodeThreadTurnDiff = Schema.decodeUnknownEffect(ThreadTurnDiff);
 const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateCommand);
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
 const decodeProjectMetaUpdatedPayload = Schema.decodeUnknownEffect(ProjectMetaUpdatedPayload);
+const decodeChatAttachment = Schema.decodeUnknownEffect(ChatAttachment);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeThreadTurnStartCommand = Schema.decodeUnknownEffect(ThreadTurnStartCommand);
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
@@ -280,6 +286,117 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
     assert.strictEqual(parsed.modelSelection, undefined);
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
     assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
+  }),
+);
+
+it.effect("decodes existing image attachments unchanged", () =>
+  Effect.gen(function* () {
+    const attachment = {
+      type: "image",
+      id: "attachment-1",
+      name: "photo.png",
+      mimeType: "image/png",
+      sizeBytes: 128,
+    };
+    const parsed = yield* decodeChatAttachment(attachment);
+    assert.deepStrictEqual(parsed, attachment);
+  }),
+);
+
+it.effect("decodes file attachments", () =>
+  Effect.gen(function* () {
+    const attachment = {
+      type: "file",
+      id: "attachment-1",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 128,
+    };
+    const parsed = yield* decodeChatAttachment(attachment);
+    assert.deepStrictEqual(parsed, attachment);
+  }),
+);
+
+it.effect("rejects file attachments above the byte limit", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeChatAttachment({
+        type: "file",
+        id: "attachment-1",
+        name: "archive.bin",
+        mimeType: "application/octet-stream",
+        sizeBytes: PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES + 1,
+      }),
+    );
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("rejects file attachments with malformed MIME types", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeChatAttachment({
+        type: "file",
+        id: "attachment-1",
+        name: "notes.txt",
+        mimeType: "text plain",
+        sizeBytes: 128,
+      }),
+    );
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("rejects more than the attachment limit in server and client turn commands", () =>
+  Effect.gen(function* () {
+    const storedAttachments = Array.from(
+      { length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS + 1 },
+      (_, index) => ({
+        type: "file",
+        id: `attachment-${index}`,
+        name: `notes-${index}.txt`,
+        mimeType: "text/plain",
+        sizeBytes: 128,
+      }),
+    );
+    const uploadAttachments = storedAttachments.map(({ id: _id, ...attachment }) => ({
+      ...attachment,
+      dataUrl: "data:text/plain;base64,QQ==",
+    }));
+
+    const serverResult = yield* Effect.exit(
+      decodeThreadTurnStartCommand({
+        type: "thread.turn.start",
+        commandId: "cmd-server-attachments",
+        threadId: "thread-1",
+        message: {
+          messageId: "msg-server-attachments",
+          role: "user",
+          text: "hello",
+          attachments: storedAttachments,
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const clientResult = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.turn.start",
+        commandId: "cmd-client-attachments",
+        threadId: "thread-1",
+        message: {
+          messageId: "msg-client-attachments",
+          role: "user",
+          text: "hello",
+          attachments: uploadAttachments,
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    assert.strictEqual(serverResult._tag, "Failure");
+    assert.strictEqual(clientResult._tag, "Failure");
   }),
 );
 
