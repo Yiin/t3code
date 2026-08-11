@@ -7,6 +7,7 @@ import { DEFAULT_GIT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./m
 import { EpicRolePolicy } from "./epicRolePolicy.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import { SubagentSpawnSettings } from "./subagentSpawnSettings.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -496,6 +497,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   epicRolePolicy: EpicRolePolicy.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  subagentSpawn: SubagentSpawnSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
@@ -639,6 +641,9 @@ export const ServerSettingsPatch = Schema.Struct({
   // Whole-value replacement, same reason as providerInstances above: a partial
   // patch can never remove a tier, a hop, or a role assignment.
   epicRolePolicy: Schema.optionalKey(EpicRolePolicy),
+  // Whole-value replacement, same reason again: a partial patch can never
+  // shorten `allowedAgentTypes` back to empty.
+  subagentSpawn: Schema.optionalKey(SubagentSpawnSettings),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

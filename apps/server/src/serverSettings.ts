@@ -219,6 +219,7 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
 const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "automaticGitFetchInterval",
   "epicRolePolicy",
+  "subagentSpawn",
   "textGenerationModelSelection",
 ]);
 

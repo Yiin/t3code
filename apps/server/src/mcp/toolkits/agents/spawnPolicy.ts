@@ -14,6 +14,7 @@
  *
  * @module spawnPolicy
  */
+import type { SubagentSpawnSettings } from "@t3tools/contracts";
 
 /**
  * Prefix every thread-backed child thread id carries.
@@ -80,13 +81,22 @@ export const DEFAULT_SPAWN_POLICY: SpawnPolicy = {
 /**
  * SETTINGS SEAM: the only place the policy value is produced.
  *
- * When the contracts area lands a `subagentSpawn` settings block (mirroring the
- * `epicRolePolicy` precedent in `packages/contracts/src/epicRolePolicy.ts` and
- * `packages/contracts/src/settings.ts`), read it here and fall back to
- * `DEFAULT_SPAWN_POLICY` for the fields it omits. Nothing else in the toolkit
- * may reach for settings.
+ * Reads the `subagentSpawn` settings block and falls back to
+ * `DEFAULT_SPAWN_POLICY` field by field, so a block that sets only `enabled`
+ * still gets every cap. No argument means no block, which is the default
+ * policy: off. Nothing else in the toolkit may reach for settings.
+ *
+ * `./spawnPolicySource.ts` is what fetches the block from the settings service;
+ * this stays pure so the fallback rules are testable without one.
  */
-export const resolveSpawnPolicy = (): SpawnPolicy => DEFAULT_SPAWN_POLICY;
+export const resolveSpawnPolicy = (settings?: SubagentSpawnSettings): SpawnPolicy => ({
+  enabled: settings?.enabled ?? DEFAULT_SPAWN_POLICY.enabled,
+  allowedAgentTypes: settings?.allowedAgentTypes ?? DEFAULT_SPAWN_POLICY.allowedAgentTypes,
+  maxDepth: settings?.maxDepth ?? DEFAULT_SPAWN_POLICY.maxDepth,
+  maxConcurrentChildren:
+    settings?.maxConcurrentChildren ?? DEFAULT_SPAWN_POLICY.maxConcurrentChildren,
+  spawnWaitTimeoutMs: settings?.spawnWaitTimeoutMs ?? DEFAULT_SPAWN_POLICY.spawnWaitTimeoutMs,
+});
 
 export interface SpawnPolicyInput {
   /** The agent type exactly as the model asked for it. */

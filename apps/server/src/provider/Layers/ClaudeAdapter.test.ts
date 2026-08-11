@@ -170,6 +170,8 @@ function makeHarness(config?: {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly subagentSpawnPolicy?: SpawnPolicy;
+  /** For the one test that changes the policy between two sessions. */
+  readonly readSubagentSpawnPolicy?: Effect.Effect<SpawnPolicy>;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -182,7 +184,11 @@ function makeHarness(config?: {
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     ...(config?.environment ? { environment: config.environment } : {}),
-    ...(config?.subagentSpawnPolicy ? { subagentSpawnPolicy: config.subagentSpawnPolicy } : {}),
+    ...(config?.readSubagentSpawnPolicy
+      ? { subagentSpawnPolicy: config.readSubagentSpawnPolicy }
+      : config?.subagentSpawnPolicy
+        ? { subagentSpawnPolicy: Effect.succeed(config.subagentSpawnPolicy) }
+        : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -2746,6 +2752,47 @@ describe("ClaudeAdapterLive", () => {
         readSystemPromptAppend(options?.systemPrompt) ?? "",
         "mcp__t3-code__spawn_agent",
       );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reads the policy per session, so turning it on needs no restart", () => {
+    // The adapter outlives a settings change: the instance registry only
+    // rebuilds an adapter when that instance's own config changes, and
+    // `subagentSpawn` is a top-level setting.
+    let enabled = false;
+    const harness = makeHarness({
+      readSubagentSpawnPolicy: Effect.sync(() =>
+        enabled ? enabledSpawnPolicy() : DEFAULT_SPAWN_POLICY,
+      ),
+    });
+    const secondThreadId = ThreadId.make("thread-claude-spawn-2");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* withMcpProviderSession(THREAD_ID, () =>
+        adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        }),
+      );
+      assert.equal(harness.getLastCreateQueryInput()?.options.disallowedTools, undefined);
+
+      enabled = true;
+
+      yield* withMcpProviderSession(secondThreadId, () =>
+        adapter.startSession({
+          threadId: secondThreadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        }),
+      );
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.disallowedTools, [
+        "Task",
+        "Workflow",
+      ]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

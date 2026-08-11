@@ -289,11 +289,16 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   /**
-   * Overrides the resolved spawn policy. The one settings seam stays in
-   * `spawnPolicy.ts`, so this exists only for tests, which otherwise could
-   * never reach the enabled branch while the policy ships off.
+   * Reads the spawn policy for one session. `ClaudeDriver` passes the
+   * settings-backed reader from `spawnPolicySource.ts`; tests pass a constant
+   * with `Effect.succeed`, which is otherwise the only way to reach the enabled
+   * branch while the policy ships off.
+   *
+   * It is an effect rather than a value because the adapter outlives a settings
+   * change: the provider instance registry only rebuilds an adapter when that
+   * instance's own config changes, and `subagentSpawn` is a top-level setting.
    */
-  readonly subagentSpawnPolicy?: SpawnPolicy;
+  readonly subagentSpawnPolicy?: Effect.Effect<SpawnPolicy>;
 }
 
 function isUuid(value: string): boolean {
@@ -1491,9 +1496,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     claudeEnvironment,
   );
   const forwardSubagentText = resolveForwardSubagentTextFlag(options?.environment ?? process.env);
-  // Read once per adapter, never per session: `spawnPolicy.ts` owns the single
-  // settings seam and the adapter must not grow a second one.
-  const subagentSpawnPolicy = options?.subagentSpawnPolicy ?? resolveSpawnPolicy();
+  // Read per session, never cached here: `spawnPolicy.ts` owns the single
+  // settings seam and the adapter must not grow a second one. With no reader
+  // supplied the policy is the shipped default, which is off.
+  const readSubagentSpawnPolicy: Effect.Effect<SpawnPolicy> =
+    options?.subagentSpawnPolicy ?? Effect.succeed(resolveSpawnPolicy());
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -4056,6 +4063,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // task_progress / task.completed events, and the parent-tagged subagent
       // transcript forwarding all stay exactly as they are.
       const subagentDefinitionCount = readSubagentDefinitionCount(input);
+      const subagentSpawnPolicy = yield* readSubagentSpawnPolicy;
       const subagentSpawn = resolveSubagentSpawnMode({
         threadId: input.threadId,
         hasMcpSession: mcpSession !== undefined,

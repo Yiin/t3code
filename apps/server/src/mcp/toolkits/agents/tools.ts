@@ -32,6 +32,7 @@ import * as Crypto from "effect/Crypto";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 
 /**
  * A spawn failure the model cannot fix by retrying with different arguments.
@@ -116,6 +117,8 @@ export const SpawnAgentTool = Tool.make("spawn_agent", {
     OrchestrationEngineService,
     ProjectionSnapshotQuery,
     Crypto.Crypto,
+    // The handler reads the spawn policy from settings on every call.
+    ServerSettingsService,
   ],
 })
   .annotate(Tool.Title, "Spawn a subagent")

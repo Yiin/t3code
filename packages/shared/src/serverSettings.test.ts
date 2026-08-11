@@ -196,6 +196,23 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("replaces the subagent spawn block so an omitted allowlist is cleared", () => {
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      subagentSpawn: {
+        enabled: true,
+        allowedAgentTypes: ["Explore", "general-purpose"],
+        maxConcurrentChildren: 5,
+      },
+    };
+
+    expect(
+      applyServerSettingsPatch(current, {
+        subagentSpawn: { enabled: true },
+      }).subagentSpawn,
+    ).toEqual({ enabled: true });
+  });
+
   it("replaces epic role policies so omitted tiers and hops are cleared", () => {
     const primaryId = EpicTierId.make("primary");
     const backgroundId = EpicTierId.make("background");

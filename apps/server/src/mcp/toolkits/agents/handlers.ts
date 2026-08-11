@@ -29,12 +29,8 @@ import {
 } from "../../../orchestration/ThreadSettleWatch.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { mirrorChildLifecycle, type ChildMirrorTarget } from "./childMirror.ts";
-import {
-  decideSpawn,
-  makeSubagentChildThreadId,
-  resolveSpawnPolicy,
-  type SpawnPolicy,
-} from "./spawnPolicy.ts";
+import { decideSpawn, makeSubagentChildThreadId, type SpawnPolicy } from "./spawnPolicy.ts";
+import { readSpawnPolicy } from "./spawnPolicySource.ts";
 import { AgentsToolkit, SpawnAgentError, type SpawnAgentStatus } from "./tools.ts";
 
 /**
@@ -365,5 +361,7 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
 });
 
 export const AgentsToolkitHandlersLive = AgentsToolkit.toLayer({
-  spawn_agent: (input) => spawnAgent(resolveSpawnPolicy(), input),
+  // Read per call, not per layer: a settings change must reach the next spawn
+  // without a server restart.
+  spawn_agent: (input) => Effect.flatMap(readSpawnPolicy, (policy) => spawnAgent(policy, input)),
 });

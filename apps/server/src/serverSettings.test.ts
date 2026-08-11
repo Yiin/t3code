@@ -562,6 +562,36 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("round-trips the subagent spawn block and clears it whole", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const block = {
+        enabled: true,
+        allowedAgentTypes: ["Explore"],
+        maxConcurrentChildren: 2,
+      } as const;
+
+      const next = yield* serverSettings.updateSettings({ subagentSpawn: block });
+      assert.deepEqual(next.subagentSpawn, block);
+
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const stored = JSON.parse(raw);
+      assert.deepEqual(stored.subagentSpawn, block);
+      assert.deepEqual((yield* decodeServerSettings(stored)).subagentSpawn, block);
+
+      // Turning it back off is one whole-value patch: the allowlist goes with it.
+      const off = yield* serverSettings.updateSettings({ subagentSpawn: {} });
+      assert.deepEqual(off.subagentSpawn, {});
+      const rawAfterClear = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const storedAfterClear = JSON.parse(rawAfterClear);
+      assert.equal(storedAfterClear.subagentSpawn, undefined);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

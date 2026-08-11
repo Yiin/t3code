@@ -120,6 +120,51 @@ describe("decideSpawn", () => {
   });
 });
 
+describe("resolveSpawnPolicy", () => {
+  it("is the shipped default when no settings block exists", () => {
+    assert.deepStrictEqual(resolveSpawnPolicy(), DEFAULT_SPAWN_POLICY);
+    assert.deepStrictEqual(resolveSpawnPolicy({}), DEFAULT_SPAWN_POLICY);
+  });
+
+  it("turns spawning on from the block and keeps every default cap", () => {
+    const policy = resolveSpawnPolicy({ enabled: true });
+
+    assert.deepStrictEqual(policy, { ...DEFAULT_SPAWN_POLICY, enabled: true });
+    assert.deepStrictEqual(decideSpawn(input({ policy })), { _tag: "threadBacked" });
+  });
+
+  it("takes each field from the block on its own", () => {
+    const policy = resolveSpawnPolicy({
+      enabled: true,
+      allowedAgentTypes: ["Explore"],
+      maxDepth: 2,
+      maxConcurrentChildren: 1,
+      spawnWaitTimeoutMs: 120_000,
+    });
+
+    assert.deepStrictEqual(policy, {
+      enabled: true,
+      allowedAgentTypes: ["Explore"],
+      maxDepth: 2,
+      maxConcurrentChildren: 1,
+      spawnWaitTimeoutMs: 120_000,
+    });
+  });
+
+  it("keeps an explicit false off rather than reading it as absent", () => {
+    assert.strictEqual(resolveSpawnPolicy({ enabled: false }).enabled, false);
+  });
+
+  it("keeps an explicitly empty allowlist empty, which allows every type", () => {
+    const policy = resolveSpawnPolicy({ enabled: true, allowedAgentTypes: [] });
+
+    assert.deepStrictEqual(policy.allowedAgentTypes, []);
+    assert.deepStrictEqual(decideSpawn(input({ agentType: "anything", policy })), {
+      _tag: "threadBacked",
+    });
+  });
+});
+
 describe("subagent child thread ids", () => {
   it("round-trips: a minted child id reads back as a child", () => {
     const childThreadId = makeSubagentChildThreadId("thread-parent", "0f7c-uuid");
