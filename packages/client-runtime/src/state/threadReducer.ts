@@ -114,6 +114,7 @@ export function applyThreadDetailEvent(
           settledOverride: null,
           settledAt: null,
           deletedAt: null,
+          parentThreadId: event.payload.parentThreadId,
           messages: [],
           proposedPlans: [],
           subagents: [],

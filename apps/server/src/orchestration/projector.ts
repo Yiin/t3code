@@ -324,6 +324,7 @@ export function projectEvent(
             settledOverride: null,
             settledAt: null,
             deletedAt: null,
+            parentThreadId: payload.parentThreadId,
             messages: [],
             activities: [],
             checkpoints: [],

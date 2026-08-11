@@ -495,6 +495,11 @@ export const OrchestrationThreadSubagent = Schema.Struct({
    * progress under the spawning tool row.
    */
   spawnedByItemId: Schema.optional(TrimmedNonEmptyString),
+  /**
+   * The child thread this subagent runs as, when it is thread-backed.
+   * Absent for in-process Task subagents: they own no thread and no inbox.
+   */
+  childThreadId: Schema.optional(ThreadId),
   startedAt: IsoDateTime,
   updatedAt: IsoDateTime,
   completedAt: Schema.NullOr(IsoDateTime),
@@ -587,6 +592,24 @@ export const SubagentStopFailedActivityPayload = Schema.Struct({
 });
 export type SubagentStopFailedActivityPayload = typeof SubagentStopFailedActivityPayload.Type;
 
+/**
+ * Marks a subagent as thread-backed: it runs as the named child thread, so a
+ * client can open that thread and talk to it directly.
+ *
+ * A thread-backed spawner owns the whole subagent lifecycle and must emit, in
+ * order: `task.started` with `taskId` set to the chosen `subagentId`, then
+ * `subagent.child-thread.linked`, then `task.completed`. An MCP-spawned child
+ * produces no provider `task.*` events, so nothing else emits them for it.
+ */
+export const SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND = "subagent.child-thread.linked";
+
+export const SubagentChildThreadLinkedActivityPayload = Schema.Struct({
+  subagentId: TrimmedNonEmptyString,
+  childThreadId: ThreadId,
+});
+export type SubagentChildThreadLinkedActivityPayload =
+  typeof SubagentChildThreadLinkedActivityPayload.Type;
+
 export const SUBAGENT_TEXT_ACTIVITY_KIND = "subagent.text";
 export const SUBAGENT_THINKING_ACTIVITY_KIND = "subagent.thinking";
 
@@ -620,6 +643,9 @@ const decodeSubagentTaskCompletedPayload = Schema.decodeUnknownOption(
 );
 export const decodeSubagentTranscriptActivityPayload = Schema.decodeUnknownOption(
   SubagentTranscriptActivityPayload,
+);
+const decodeSubagentChildThreadLinkedPayload = Schema.decodeUnknownOption(
+  SubagentChildThreadLinkedActivityPayload,
 );
 
 const replaceSubagentAt = (
@@ -760,6 +786,37 @@ export const applySubagentActivity = (
       });
     }
 
+    case SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND: {
+      const decoded = decodeSubagentChildThreadLinkedPayload(activity.payload);
+      if (Option.isNone(decoded)) return subagents;
+      const payload = decoded.value;
+      const index = subagents.findIndex((entry) => entry.subagentId === payload.subagentId);
+      const existing = index === -1 ? undefined : subagents[index];
+      // Creating the row when it is absent makes the link order-independent,
+      // mirroring `task.progress` above. `updatedAt` never rolls on a link:
+      // `RUNNING_SUBAGENT_FRESHNESS_MS` consumers read it, and a replayed
+      // link must not refresh a stale row's freshness.
+      if (existing === undefined) {
+        return [
+          ...subagents,
+          {
+            subagentId: payload.subagentId,
+            turnId: activity.turnId,
+            status: "running",
+            childThreadId: payload.childThreadId,
+            startedAt: activity.createdAt,
+            updatedAt: activity.createdAt,
+            completedAt: null,
+          },
+        ];
+      }
+      if (existing.childThreadId === payload.childThreadId) return subagents;
+      return replaceSubagentAt(subagents, index, {
+        ...existing,
+        childThreadId: payload.childThreadId,
+      });
+    }
+
     default:
       return subagents;
   }
@@ -867,6 +924,8 @@ export const OrchestrationThread = Schema.Struct({
   ),
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   deletedAt: Schema.NullOr(IsoDateTime),
+  /** The thread that spawned this one as a thread-backed subagent, if any. */
+  parentThreadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -926,6 +985,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
   activeSubagentCount: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  /** The thread that spawned this one as a thread-backed subagent, if any. */
+  parentThreadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -1056,6 +1117,8 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  /** Set only when spawning a thread-backed subagent under an existing thread. */
+  parentThreadId: Schema.optionalKey(ThreadId),
   createdAt: IsoDateTime,
 });
 
@@ -1455,6 +1518,8 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  /** Absent from events persisted before the parent/child link shipped. */
+  parentThreadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

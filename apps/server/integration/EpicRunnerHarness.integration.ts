@@ -62,6 +62,7 @@ export const makeThreadDetail = (input: {
     settledOverride: null,
     settledAt: null,
     deletedAt: null,
+    parentThreadId: null,
     messages:
       input.text === null
         ? []

@@ -27,6 +27,7 @@ import {
   ProjectCreateCommand,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+  SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND,
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
@@ -871,6 +872,65 @@ it("keeps the subagent read model unchanged for transcript activities", () => {
 
   assert.strictEqual(applySubagentActivity(subagents, textActivity), subagents);
   assert.strictEqual(applySubagentActivity(subagents, thinkingActivity), subagents);
+});
+
+const childThreadLinked = subagentActivity({
+  id: "evt-child-thread-linked",
+  kind: SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND,
+  payload: {
+    subagentId: "a027ffbeca4f867d2",
+    childThreadId: "thread-child-1",
+  },
+  createdAt: "2026-01-01T00:00:02.000Z",
+});
+
+it("links a child thread onto an existing subagent row without rolling its freshness", () => {
+  const started = applySubagentActivity([], subagentStarted);
+  const progressed = applySubagentActivity(started, subagentProgress);
+  const linked = applySubagentActivity(progressed, childThreadLinked);
+
+  assert.strictEqual(linked.length, 1);
+  assert.strictEqual(linked[0]?.childThreadId, "thread-child-1");
+  // `RUNNING_SUBAGENT_FRESHNESS_MS` consumers read `updatedAt`; a link must
+  // never refresh a stale row.
+  assert.strictEqual(linked[0]?.updatedAt, progressed[0]?.updatedAt);
+  assert.strictEqual(linked[0]?.status, "running");
+});
+
+it("creates a running subagent row when the link arrives before task.started", () => {
+  const linked = applySubagentActivity([], childThreadLinked);
+
+  assert.strictEqual(linked.length, 1);
+  assert.strictEqual(linked[0]?.subagentId, "a027ffbeca4f867d2");
+  assert.strictEqual(linked[0]?.childThreadId, "thread-child-1");
+  assert.strictEqual(linked[0]?.status, "running");
+  assert.strictEqual(linked[0]?.completedAt, null);
+
+  // The later `task.started` fills metadata and keeps the link.
+  const started = applySubagentActivity(linked, subagentStarted);
+  assert.strictEqual(started[0]?.childThreadId, "thread-child-1");
+  assert.strictEqual(started[0]?.agentType, "Explore");
+});
+
+it("ignores a replayed child-thread link and an undecodable payload", () => {
+  const linked = applySubagentActivity(
+    applySubagentActivity([], subagentStarted),
+    childThreadLinked,
+  );
+
+  assert.strictEqual(applySubagentActivity(linked, childThreadLinked), linked);
+  assert.strictEqual(
+    applySubagentActivity(
+      linked,
+      subagentActivity({
+        id: "evt-child-thread-linked-bad",
+        kind: SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND,
+        payload: { subagentId: "a027ffbeca4f867d2" },
+        createdAt: "2026-01-01T00:00:03.000Z",
+      }),
+    ),
+    linked,
+  );
 });
 
 it.effect("round-trips subagent steer activity payloads", () =>

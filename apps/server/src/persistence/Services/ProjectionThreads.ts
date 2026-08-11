@@ -43,6 +43,8 @@ export const ProjectionThread = Schema.Struct({
   pendingUserInputCount: NonNegativeInt,
   hasActionableProposedPlan: NonNegativeInt,
   deletedAt: Schema.NullOr(IsoDateTime),
+  /** The thread that spawned this one as a thread-backed subagent, if any. */
+  parentThreadId: Schema.NullOr(ThreadId),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
 

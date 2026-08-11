@@ -565,6 +565,7 @@ function createHarness(input: {
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
           activeSubagentCount: 0,
+          parentThreadId: null,
         });
       }),
     getThreadSessionById: (threadId) =>

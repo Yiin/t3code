@@ -75,6 +75,7 @@ export function buildLocalDraftThread(
     settledOverride: null,
     settledAt: null,
     deletedAt: null,
+    parentThreadId: null,
     latestTurn: null,
     branch: draftThread.branch,
     worktreePath: draftThread.worktreePath,

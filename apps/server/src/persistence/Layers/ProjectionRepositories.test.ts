@@ -8,13 +8,16 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "./ProjectionProjects.ts";
 import { ProjectionThreadRepositoryLive } from "./ProjectionThreads.ts";
+import { ProjectionThreadSubagentRepositoryLive } from "./ProjectionThreadSubagents.ts";
 import { ProjectionProjectRepository } from "../Services/ProjectionProjects.ts";
 import { ProjectionThreadRepository } from "../Services/ProjectionThreads.ts";
+import { ProjectionThreadSubagentRepository } from "../Services/ProjectionThreadSubagents.ts";
 
 const projectionRepositoriesLayer = it.layer(
   Layer.mergeAll(
     ProjectionProjectRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ProjectionThreadSubagentRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     SqlitePersistenceMemory,
   ),
 );
@@ -98,6 +101,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         deletedAt: null,
+        parentThreadId: null,
       });
 
       const rows = yield* sql<{
@@ -158,6 +162,7 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
         deletedAt: null,
+        parentThreadId: null,
       });
 
       const persisted = yield* threads.getById({
@@ -182,6 +187,73 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       const updated = Option.getOrNull(repersisted);
       assert.strictEqual(updated?.settledOverride, "active");
       assert.strictEqual(updated?.settledAt, null);
+    }),
+  );
+
+  it.effect("round-trips the parent/child thread link through both repositories", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const subagents = yield* ProjectionThreadSubagentRepository;
+      const parentThreadId = ThreadId.make("thread-parent");
+      const childThreadId = ThreadId.make("thread-child");
+
+      yield* threads.upsert({
+        threadId: childThreadId,
+        projectId: ProjectId.make("project-1"),
+        title: "Child thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurnId: null,
+        createdAt: "2026-08-11T00:00:00.000Z",
+        updatedAt: "2026-08-11T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+        parentThreadId,
+      });
+      yield* subagents.upsert({
+        subagentId: "subagent-1",
+        threadId: parentThreadId,
+        turnId: null,
+        status: "running",
+        childThreadId,
+        startedAt: "2026-08-11T00:00:00.000Z",
+        updatedAt: "2026-08-11T00:00:00.000Z",
+        completedAt: null,
+      });
+
+      const persistedThread = yield* threads.getById({ threadId: childThreadId });
+      assert.strictEqual(Option.getOrNull(persistedThread)?.parentThreadId, parentThreadId);
+
+      const persistedSubagents = yield* subagents.listByThreadId({ threadId: parentThreadId });
+      assert.strictEqual(persistedSubagents[0]?.childThreadId, childThreadId);
+
+      // An in-process subagent owns no child thread; the key stays absent.
+      yield* subagents.upsert({
+        subagentId: "subagent-2",
+        threadId: parentThreadId,
+        turnId: null,
+        status: "running",
+        startedAt: "2026-08-11T00:00:01.000Z",
+        updatedAt: "2026-08-11T00:00:01.000Z",
+        completedAt: null,
+      });
+      const withInProcess = yield* subagents.listByThreadId({ threadId: parentThreadId });
+      assert.strictEqual(
+        withInProcess.find((row) => row.subagentId === "subagent-2")?.childThreadId,
+        undefined,
+      );
     }),
   );
 });

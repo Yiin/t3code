@@ -149,6 +149,7 @@ describe("OrchestrationEngine", () => {
           settledOverride: null,
           settledAt: null,
           deletedAt: null,
+          parentThreadId: null,
           messages: [],
           proposedPlans: [],
           subagents: [],

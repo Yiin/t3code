@@ -38,6 +38,7 @@ function makeThread(
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     activeSubagentCount: 0,
+    parentThreadId: null,
     ...input,
     settledOverride: input.settledOverride ?? null,
     settledAt: input.settledAt ?? null,

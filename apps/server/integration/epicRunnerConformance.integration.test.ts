@@ -651,6 +651,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
           activeSubagentCount: 0,
+          parentThreadId: null,
         });
       }),
     getThreadSessionById: () => Effect.die("unused"),

@@ -72,6 +72,7 @@ const BASE_THREAD: OrchestrationThread = {
   settledOverride: null,
   settledAt: null,
   deletedAt: null,
+  parentThreadId: null,
   messages: [],
   proposedPlans: [],
   subagents: [],

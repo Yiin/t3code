@@ -93,6 +93,7 @@ describe("orchestration projector", () => {
         settledOverride: null,
         settledAt: null,
         deletedAt: null,
+        parentThreadId: null,
         messages: [],
         proposedPlans: [],
         subagents: [],

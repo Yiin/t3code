@@ -44,6 +44,7 @@ const stubThread = {
   hasActionableProposedPlan: false,
   activeSubagentCount: 0,
   session: null,
+  parentThreadId: null,
 } as const;
 
 describe("applyShellStreamEvent", () => {

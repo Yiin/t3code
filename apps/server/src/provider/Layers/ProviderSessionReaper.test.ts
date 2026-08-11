@@ -174,6 +174,7 @@ function makeReadModel(
       proposedPlans: [],
       checkpoints: [],
       deletedAt: null,
+      parentThreadId: null,
     })),
   };
 }
