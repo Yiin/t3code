@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import { drainMergeQueue, type DrainMergeQueueResult, type MergeQueuePorts } from "./MergeQueue.ts";
 import { BacklogError, type BacklogIssue } from "./ports/Backlog.ts";
 import {
+  integrationFixTitle,
   landingDescription,
   mergeFixDescription,
   mergeFixTitle,
@@ -25,6 +26,7 @@ const baseSnapshot = (entries: ReadonlyArray<MergeQueueEntry>): MergeQueueSnapsh
   baseBranch: "mine",
   integrationBranch: "cook-epic-integration-run-1",
   integrationWorktreePath: "/worktrees/integration",
+  operatorBaseBranch: null,
   siblings: [],
   entries,
 });
@@ -71,12 +73,17 @@ const makeHarness = (
     readonly existingFixStatuses?: ReadonlyArray<string>;
     /** Overrides the main repository's base branch (default `"mine"`). */
     readonly baseBranch?: string;
+    /** The operator's branch this run continuously integrates (t3code-sha); defaults to `null`. */
+    readonly operatorBaseBranch?: string | null;
+    /** Existing integration-fix children (t3code-sha), reusing `existingFixStatuses`' shape. */
+    readonly existingIntegrationFixStatuses?: ReadonlyArray<string>;
   } = {},
 ) => {
   const siblings = options.siblings ?? [];
   let snapshot: MergeQueueSnapshot = {
     ...baseSnapshot(options.entries ?? [entry(0, "child-1")]),
     ...(options.baseBranch === undefined ? {} : { baseBranch: options.baseBranch }),
+    operatorBaseBranch: options.operatorBaseBranch ?? null,
     siblings,
   };
   const heads: Record<string, string> = { "/repo": options.currentHead ?? "base-0" };
@@ -99,17 +106,34 @@ const makeHarness = (
       readonly worktreeRoot: string;
     }>;
   }> = [];
-  const children: BacklogIssue[] = (options.existingFixStatuses ?? []).map((status, index) => ({
-    id: `existing-${index + 1}`,
-    title: mergeFixTitle("epic/child-1", "conflict"),
-    status,
-    priority: 1,
-    issueType: "task",
-    parentId: "epic-1",
-    description: "existing",
-    labels: [],
-    commentCount: 0,
-  }));
+  const children: BacklogIssue[] = [
+    ...(options.existingFixStatuses ?? []).map(
+      (status, index): BacklogIssue => ({
+        id: `existing-${index + 1}`,
+        title: mergeFixTitle("epic/child-1", "conflict"),
+        status,
+        priority: 1,
+        issueType: "task",
+        parentId: "epic-1",
+        description: "existing",
+        labels: [],
+        commentCount: 0,
+      }),
+    ),
+    ...(options.existingIntegrationFixStatuses ?? []).map(
+      (status, index): BacklogIssue => ({
+        id: `existing-integration-${index + 1}`,
+        title: integrationFixTitle(snapshot.baseBranch, options.operatorBaseBranch ?? ""),
+        status,
+        priority: 1,
+        issueType: "task",
+        parentId: "epic-1",
+        description: "existing",
+        labels: [],
+        commentCount: 0,
+      }),
+    ),
+  ];
   let createFailed = false;
   let gateCall = 0;
 
@@ -227,6 +251,11 @@ const makeHarness = (
                 : item,
             ),
           };
+        }),
+      advanceIntegration: ({ lastAcceptedHead }) =>
+        Effect.sync(() => {
+          calls.push(`advance-integration:${lastAcceptedHead}`);
+          snapshot = { ...snapshot, lastAcceptedHead };
         }),
       beginPark: ({ sequence, reason }) =>
         Effect.sync(() => {
@@ -990,6 +1019,233 @@ describe("MergeQueue", () => {
         expect(harness.calls).toContain("ff:/sib:cook-epic-integration-run-1");
         expect(harness.calls.some((call) => call.startsWith("head:/sib:"))).toBe(false);
       }),
+    );
+  });
+
+  describe("continuous base-branch integration (t3code-sha)", () => {
+    const ownedBranch = runBaseBranch("epic-1");
+    const operatorBranch = "operator/mine";
+
+    it.effect(
+      "integrates the operator's branch once, before any trial merge, and updates the base ref",
+      () =>
+        Effect.gen(function* () {
+          const harness = makeHarness({
+            baseBranch: ownedBranch,
+            operatorBaseBranch: operatorBranch,
+          });
+
+          const result = yield* drain(harness.ports);
+
+          expect(result).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+          const calls = harness.calls;
+          const aheadIndex = calls.indexOf(`ahead:${operatorBranch}`);
+          const resetIndex = calls.indexOf(`reset:/worktrees/integration:${ownedBranch}`);
+          const mergeIndex = calls.findIndex(
+            (call) => call === `merge:${operatorBranch}:cook-epic: integrate ${operatorBranch}`,
+          );
+          const ffIndex = calls.indexOf(`ff:cook-epic-integration-run-1:owned:${ownedBranch}`);
+          const advanceIndex = calls.indexOf("advance-integration:landed-1");
+          const beginDrainIndex = calls.indexOf("begin-drain");
+          const entryMergeIndex = calls.findIndex((call) => call.startsWith("merge:epic/child-1:"));
+
+          expect(aheadIndex).toBeGreaterThanOrEqual(0);
+          expect(resetIndex).toBeGreaterThan(aheadIndex);
+          expect(mergeIndex).toBeGreaterThan(resetIndex);
+          expect(ffIndex).toBeGreaterThan(mergeIndex);
+          expect(advanceIndex).toBeGreaterThan(ffIndex);
+          // Once per drain, before the per-entry loop even starts.
+          expect(beginDrainIndex).toBeGreaterThan(advanceIndex);
+          expect(entryMergeIndex).toBeGreaterThan(beginDrainIndex);
+        }),
+    );
+
+    it.effect(
+      "treats a no-op integration (already up to date) as success, with no merge attempt",
+      () =>
+        Effect.gen(function* () {
+          const harness = makeHarness({
+            baseBranch: ownedBranch,
+            operatorBaseBranch: operatorBranch,
+            empty: [operatorBranch],
+          });
+
+          const result = yield* drain(harness.ports);
+
+          expect(result).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+          expect(harness.calls).toContain(`ahead:${operatorBranch}`);
+          expect(
+            harness.calls.some(
+              (call) => call.includes(operatorBranch) && call.startsWith("merge:"),
+            ),
+          ).toBe(false);
+          expect(harness.calls.some((call) => call.startsWith("advance-integration:"))).toBe(false);
+        }),
+    );
+
+    it.effect(
+      "runs the gate on the post-integration tree in every path, including the control gate and repair recheck",
+      () =>
+        Effect.gen(function* () {
+          const harness = makeHarness({
+            baseBranch: ownedBranch,
+            operatorBaseBranch: operatorBranch,
+            gatePasses: false,
+            gateOutput: "Cannot find module 'vite-plus/binding'\n2 failed",
+          });
+
+          const result = yield* drain(harness.ports);
+
+          expect(result._tag).toBe("fatal");
+          const advanceIndex = harness.calls.indexOf("advance-integration:landed-1");
+          expect(advanceIndex).toBeGreaterThanOrEqual(0);
+          const gateIndices = harness.calls
+            .map((call, index) => (call === "gate" ? index : -1))
+            .filter((index) => index >= 0);
+          const repairIndex = harness.calls.indexOf("repair:/worktrees/integration");
+          expect(gateIndices.length).toBeGreaterThan(0);
+          for (const gateIndex of gateIndices) {
+            expect(gateIndex).toBeGreaterThan(advanceIndex);
+          }
+          expect(repairIndex).toBeGreaterThan(advanceIndex);
+          // Every reset targets the base branch by name, never a sha —
+          // integration lives in the ref itself (t3code-sha), so a reset to
+          // `lastAcceptedHead` or any other recorded sha would drop it again
+          // and put the gate back on a pre-integration tree.
+          const resetCalls = harness.calls.filter((call) => call.startsWith("reset:"));
+          expect(resetCalls.length).toBeGreaterThan(0);
+          for (const call of resetCalls) {
+            expect(call.endsWith(`:${ownedBranch}`)).toBe(true);
+          }
+          expect(resetCalls.some((call) => call.endsWith(":base-0"))).toBe(false);
+        }),
+    );
+
+    it.effect(
+      "an integration conflict creates exactly one fix child, touches no entry, gates nothing, and lands nothing",
+      () =>
+        Effect.gen(function* () {
+          const harness = makeHarness({
+            baseBranch: ownedBranch,
+            operatorBaseBranch: operatorBranch,
+            conflicts: [operatorBranch],
+          });
+
+          const result = yield* drain(harness.ports);
+
+          expect(result).toEqual({ _tag: "drained", merged: 0, parked: 0, blocked: 1 });
+          expect(harness.calls).toContain(`abort:/worktrees/integration`);
+          // Not touched: no drain begun, no entry ever left `draining`.
+          expect(harness.calls).not.toContain("begin-drain");
+          expect(harness.snapshot().entries.every((entry) => entry.status === "queued")).toBe(true);
+          expect(harness.calls).not.toContain("gate");
+          expect(harness.calls.some((call) => call.startsWith("ff:"))).toBe(false);
+          expect(harness.fixes).toHaveLength(1);
+          expect(harness.fixes[0]).toContain(
+            `Merge fix: integrate ${operatorBranch} into ${ownedBranch}`,
+          );
+          expect(harness.fixes[0]).toContain(ownedBranch);
+          expect(harness.fixes[0]).toContain(operatorBranch);
+          expect(harness.events).toEqual([
+            { event: "integration-blocked", operatorBranch, fix: "fix-1" },
+          ]);
+        }),
+    );
+
+    it.effect("reuses the open fix child instead of opening a second one", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          baseBranch: ownedBranch,
+          operatorBaseBranch: operatorBranch,
+          conflicts: [operatorBranch],
+          existingIntegrationFixStatuses: ["open"],
+        });
+
+        const result = yield* drain(harness.ports);
+
+        expect(result).toEqual({ _tag: "drained", merged: 0, parked: 0, blocked: 1 });
+        expect(harness.fixes).toHaveLength(0);
+        expect(harness.events).toEqual([]);
+      }),
+    );
+
+    it.effect("stops the run once integration conflicts have exhausted the repair budget", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          baseBranch: ownedBranch,
+          operatorBaseBranch: operatorBranch,
+          conflicts: [operatorBranch],
+          // MAX_MERGE_FIX_ATTEMPTS in MergeQueue.ts is 3; every one closed
+          // without resolving still counts against the bound.
+          existingIntegrationFixStatuses: ["closed", "closed", "closed"],
+        });
+
+        const result = yield* drain(harness.ports);
+
+        expect(result._tag).toBe("fatal");
+        expect(result._tag === "fatal" ? result.detail : "").toContain("still conflicts");
+        expect(result._tag === "fatal" ? result.detail : "").toContain("3 repair attempts");
+        expect(harness.fixes).toHaveLength(0);
+        expect(harness.calls).not.toContain("begin-drain");
+      }),
+    );
+
+    it.effect("makes zero new git calls when the flag is off (unowned base branch)", () =>
+      Effect.gen(function* () {
+        // `operatorBaseBranch` set but the base branch is not run-owned: the
+        // field is ignored, matching every call the flag-off harness makes.
+        const flagOff = makeHarness();
+        const withOperatorSet = makeHarness({ operatorBaseBranch: operatorBranch });
+
+        yield* drain(flagOff.ports);
+        yield* drain(withOperatorSet.ports);
+
+        expect(withOperatorSet.calls).toEqual(flagOff.calls);
+      }),
+    );
+
+    it.effect(
+      "makes zero new git calls when the flag is off (owned base, operatorBaseBranch null)",
+      () =>
+        Effect.gen(function* () {
+          // An old snapshot predating this field decodes `operatorBaseBranch`
+          // to `null` (t3code-sha) — indistinguishable from a harness that
+          // never sets it. Both must drive the drain identically, so a future
+          // change that special-cases "explicitly null" cannot silently break
+          // resumed runs from before this feature existed.
+          const fieldAbsent = makeHarness({ baseBranch: ownedBranch });
+          const fieldNull = makeHarness({ baseBranch: ownedBranch, operatorBaseBranch: null });
+
+          yield* drain(fieldAbsent.ports);
+          yield* drain(fieldNull.ports);
+
+          expect(fieldNull.calls).toEqual(fieldAbsent.calls);
+        }),
+    );
+
+    it.effect(
+      "an empty queue still defers on the merge slot when continuous integration is on",
+      () =>
+        Effect.gen(function* () {
+          // Deliberate: continuous integration (t3code-sha) needs the slot too
+          // — a run with nothing queued yet whose operator keeps landing
+          // commits still has integrating to do — so an empty queue must not
+          // skip the slot check the way it does with the flag off.
+          const harness = makeHarness({
+            baseBranch: ownedBranch,
+            operatorBaseBranch: operatorBranch,
+            entries: [],
+            slotHeld: true,
+          });
+
+          const result = yield* drain(harness.ports);
+
+          expect(result).toEqual({ _tag: "deferred", queueLength: 0 });
+          expect(harness.calls).toEqual([
+            `head:/repo:${ownedBranch}`,
+            "slot-acquire:cook-epic-run-1",
+          ]);
+        }),
     );
   });
 });

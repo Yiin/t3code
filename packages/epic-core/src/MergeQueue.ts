@@ -15,6 +15,9 @@ import type {
   MergeSlotShape,
 } from "./ports/MergeQueue.ts";
 import {
+  integrateOperatorBaseMessage,
+  integrationFixDescription,
+  integrationFixTitle,
   landingDescription,
   mergeFixDescription,
   mergeFixTitle,
@@ -37,7 +40,19 @@ export interface DrainMergeQueueInput {
 export type DrainMergeQueueResult =
   | { readonly _tag: "idle"; readonly queueLength: 0 }
   | { readonly _tag: "deferred"; readonly queueLength: number }
-  | { readonly _tag: "drained"; readonly merged: number; readonly parked: number }
+  | {
+      readonly _tag: "drained";
+      readonly merged: number;
+      readonly parked: number;
+      /**
+       * Active entries this drain left untouched because an operator-base
+       * integration conflict (t3code-sha) stopped the drain before the
+       * per-entry loop ran. Omitted (not `0`) on every drain that skipped
+       * nothing, so a plain `{ merged, parked }` equality check on an
+       * unaffected drain still holds.
+       */
+      readonly blocked?: number;
+    }
   | { readonly _tag: "fatal"; readonly detail: string; readonly queueLength: number };
 
 export interface MergeQueuePorts {
@@ -225,6 +240,64 @@ const parkEntry = Effect.fn("MergeQueue.parkEntry")(function* (
   );
 });
 
+/**
+ * Ensure exactly one run-level child exists to resolve a conflict merging the
+ * operator's branch into the run's owned base branch (t3code-sha).
+ *
+ * Deliberately NOT the entry-keyed park machinery (`beginPark`/`finalizePark`,
+ * `parkEntry`): the conflict is between the run's own base and the operator's
+ * branch, not any one queue entry, so there is no entry sequence to key a park
+ * to, and every entry in the queue would hit the identical conflict until this
+ * is fixed. Dedup is purely by title against the live backlog — no
+ * queue-store mutation — so a crash between creating the child and returning
+ * is self-healing: the next call just finds the same open child and does
+ * nothing.
+ *
+ * Bounded the same way `reconcileParkedEntry` bounds a per-branch repair
+ * (`MAX_MERGE_FIX_ATTEMPTS`): counts CLOSED children too, not just one still
+ * in flight, so a closed-without-resolving cycle cannot manufacture a fresh
+ * child forever.
+ */
+const ensureIntegrationFixChild = Effect.fn("MergeQueue.ensureIntegrationFixChild")(function* (
+  input: DrainMergeQueueInput,
+  ports: MergeQueuePorts,
+  snapshot: MergeQueueSnapshot,
+  operatorBranch: string,
+  failureDetail: string,
+) {
+  const title = integrationFixTitle(snapshot.baseBranch, operatorBranch);
+  const children = yield* ports.backlog.listChildren(input.epicId);
+  const existing = children.find(
+    (child) => child.title === title && (child.status === "open" || child.status === "in_progress"),
+  );
+  const priorAttempts = children.filter((child) => child.title === title).length;
+  if (existing !== undefined) return { blocked: false as const, attempts: priorAttempts };
+  if (priorAttempts >= MAX_MERGE_FIX_ATTEMPTS) {
+    return { blocked: true as const, attempts: priorAttempts };
+  }
+  const description = integrationFixDescription({
+    baseBranch: snapshot.baseBranch,
+    operatorBranch,
+    gateCommand: input.gateCommand,
+    ...(failureDetail.length > 0 ? { failureDetail } : {}),
+    ...(priorAttempts > 0 ? { priorAttempts } : {}),
+  });
+  const fix = yield* ports.backlog.createChild({
+    epicId: input.epicId,
+    title,
+    description,
+    priority: 1,
+  });
+  yield* ports.backlog.writeNotes({
+    issueId: input.epicId,
+    note:
+      `cook-epic: ${snapshot.baseBranch} cannot merge ${operatorBranch} automatically; ` +
+      `integration-fix child ${fix.id} created`,
+  });
+  yield* ports.events.emit({ event: "integration-blocked", operatorBranch, fix: fix.id });
+  return { blocked: false as const, attempts: priorAttempts };
+});
+
 /** Serialized single-repository landing loop. Terminal parity: `run-legacy.sh:2893-3069`. */
 export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function* (
   input: DrainMergeQueueInput,
@@ -237,13 +310,24 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     }
   }
   const beforeDrain = activeEntries(snapshot.entries);
-  if (beforeDrain.length === 0) return { _tag: "idle" as const, queueLength: 0 as const };
 
   // Whether this run owns its base branch (t3code-5m4) rather than sharing
   // the operator's checkout, derived from the branch name alone — no extra
   // persisted field, and correct across every resume for free. Only the main
   // repository can be owned in this slice; siblings keep today's rules.
   const ownedBaseBranch = snapshot.baseBranch === runBaseBranch(input.epicId);
+  // The operator branch this run continuously integrates (t3code-sha), or
+  // `null` for no integration: flag off, an unowned base branch, or a
+  // snapshot that predates the field. `null` here means this whole function
+  // makes zero new git calls beyond today's — the flag-off contract (t3code-sha).
+  const operatorBaseBranch = ownedBaseBranch ? snapshot.operatorBaseBranch : null;
+
+  // With nothing queued and no integration to attempt, there is nothing this
+  // drain can do — exactly today's early return when the flag is off or the
+  // run shares the operator's checkout.
+  if (beforeDrain.length === 0 && operatorBaseBranch === null) {
+    return { _tag: "idle" as const, queueLength: 0 as const };
+  }
 
   // Terminal parity: `skills/cook-epic/run-legacy.sh:2894-2897`. An owned base
   // branch is never checked out at `repositoryPath` — the operator's own
@@ -278,6 +362,110 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
   if (Option.isNone(lease)) return { _tag: "deferred" as const, queueLength: beforeDrain.length };
 
   return yield* Effect.gen(function* () {
+    // Continuous integration of the operator's base branch (t3code-sha): once
+    // per drain, before any trial merge and before any queue entry is even
+    // marked draining, so a conflict here never strands an entry mid-drain
+    // (D2) and every reset that follows — including the gate-failure control
+    // gate's — sees a base that already carries the operator's commits (D5),
+    // because this advances the base branch's ref directly, not just a
+    // worktree copy of it.
+    if (operatorBaseBranch !== null) {
+      const ahead = yield* ports.git.commitsAhead({
+        repositoryPath: snapshot.repositoryPath,
+        baseBranch: snapshot.baseBranch,
+        branch: operatorBaseBranch,
+      });
+      if (ahead > 0) {
+        yield* ports.git.resetHard(snapshot.integrationWorktreePath, snapshot.baseBranch);
+        yield* ports.git.clean(snapshot.integrationWorktreePath);
+        yield* ports.git.setupWorktree(snapshot.integrationWorktreePath);
+        const trial = yield* ports.git.trialMerge({
+          cwd: snapshot.integrationWorktreePath,
+          branch: operatorBaseBranch,
+          message: integrateOperatorBaseMessage(operatorBaseBranch),
+        });
+        if (!trial.merged) {
+          yield* ports.git.abortMerge(snapshot.integrationWorktreePath);
+          // Operator drift is a run-level concern, not a per-entry one: no
+          // entry caused this, so no entry is parked and the queue is left
+          // exactly as `beginDrain` never ran (D1, D2). Exactly one bounded
+          // fix child is created or reused instead (D3).
+          const fix = yield* ensureIntegrationFixChild(
+            input,
+            ports,
+            snapshot,
+            operatorBaseBranch,
+            trial.output,
+          );
+          if (fix.blocked) {
+            return {
+              _tag: "fatal" as const,
+              detail:
+                `integration of ${operatorBaseBranch} into ${snapshot.baseBranch} still conflicts ` +
+                `after ${String(fix.attempts)} repair attempts; stopping instead of opening another.`,
+              queueLength: beforeDrain.length,
+            };
+          }
+          return {
+            _tag: "drained" as const,
+            merged: 0,
+            parked: 0,
+            ...(beforeDrain.length > 0 ? { blocked: beforeDrain.length } : {}),
+          };
+        }
+        // A no-op integration ("Already up to date") never reaches here —
+        // `ahead > 0` guarantees the merge actually advances the base — so
+        // `trial.merged` at this point always means real progress to land.
+        const landed = yield* ports.git.fastForward({
+          cwd: snapshot.repositoryPath,
+          ref: snapshot.integrationBranch,
+          branch: snapshot.baseBranch,
+        });
+        if (!landed.landed) {
+          return {
+            _tag: "fatal" as const,
+            detail:
+              `base branch ${snapshot.baseBranch} moved externally while integrating ` +
+              `${operatorBaseBranch}; cannot fast-forward — operator must reconcile` +
+              (landed.output.length > 0 ? `: ${landed.output}` : ""),
+            queueLength: beforeDrain.length,
+          };
+        }
+        // Push now rather than deferring to the next landing: if every queue
+        // entry then drops as empty, or the queue was empty, nothing else
+        // would ever push this integration, and the operator's own commits
+        // would sit unpushed on a branch they do not check out locally.
+        if (input.pushEnabled) {
+          const pushed = yield* ports.git.push({
+            cwd: snapshot.repositoryPath,
+            remote: "origin",
+            refspec: snapshot.baseBranch,
+          });
+          if (!pushed.pushed) {
+            return {
+              _tag: "fatal" as const,
+              detail:
+                `push of ${snapshot.baseBranch} rejected after integrating ` +
+                `${operatorBaseBranch} (remote moved?); operator must reconcile`,
+              queueLength: beforeDrain.length,
+            };
+          }
+        }
+        const integratedHead = yield* ports.git.head(snapshot.repositoryPath, snapshot.baseBranch);
+        yield* ports.store.advanceIntegration({
+          runId: input.runId,
+          lastAcceptedHead: integratedHead,
+        });
+        if (beforeDrain.length === 0) {
+          return { _tag: "drained" as const, merged: 0, parked: 0 };
+        }
+      }
+    }
+
+    if (beforeDrain.length === 0) {
+      return { _tag: "idle" as const, queueLength: 0 as const };
+    }
+
     const queue = yield* ports.store.beginDrain(input.runId);
     let merged = 0;
     let parked = 0;

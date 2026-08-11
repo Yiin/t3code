@@ -179,6 +179,7 @@ const makeDrainFixture = (input: {
     baseBranch: "main",
     integrationBranch: INTEGRATION_BRANCH,
     integrationWorktreePath: mainIntegration,
+    operatorBaseBranch: null,
     siblings: [
       {
         repositoryPath: fixture.sibling,
@@ -215,6 +216,10 @@ const makeDrainFixture = (input: {
               : item,
           ),
         };
+      }),
+    advanceIntegration: ({ lastAcceptedHead }) =>
+      Effect.sync(() => {
+        snapshot = { ...snapshot, lastAcceptedHead };
       }),
     beginPark: ({ sequence, reason }) =>
       Effect.sync(() => {

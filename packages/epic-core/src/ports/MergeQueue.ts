@@ -54,6 +54,18 @@ export interface MergeQueueSnapshot {
   /** Empty for single-repo runs; persistence defaults old rows to `[]`. */
   readonly siblings: ReadonlyArray<MergeQueueSiblingSnapshot>;
   readonly entries: ReadonlyArray<MergeQueueEntry>;
+  /**
+   * The operator's branch at launch (t3code-sha), captured once when the run
+   * owns its base branch (`baseBranch === runBaseBranch(epicId)`) and reused
+   * verbatim for the run's whole life — never re-read from the working tree,
+   * so an operator who switches branches mid-run cannot silently change what
+   * gets integrated.
+   *
+   * `null` means either the run does not own its base branch, or the
+   * snapshot predates this field. Both read the same way: no continuous
+   * integration for this run.
+   */
+  readonly operatorBaseBranch: string | null;
 }
 
 export interface MergeQueueStoreShape {
@@ -105,6 +117,22 @@ export interface MergeQueueStoreShape {
     runId: string,
     branch: string,
   ) => Effect.Effect<Option.Option<string>, MergeQueuePortError>;
+  /**
+   * Record a run base branch advance that did not land any queue entry
+   * (t3code-sha): a successful continuous-integration merge, or an
+   * integration-fix child committing its resolution directly onto the base
+   * branch. Unlike `complete`, this touches no entry — there is none to
+   * remove.
+   *
+   * Every later drain's "moved externally" guard compares `lastAcceptedHead`
+   * against the base branch's live head, so a base advance the coordinator
+   * itself caused has to update this or the very next drain would mistake
+   * its own work for an external move and fail the run.
+   */
+  readonly advanceIntegration: (input: {
+    readonly runId: string;
+    readonly lastAcceptedHead: string;
+  }) => Effect.Effect<void, MergeQueuePortError>;
 }
 
 export interface MergeGitShape {
@@ -235,6 +263,18 @@ export type MergeQueueEvent =
       readonly child: string;
       readonly branch: string;
       readonly reason: MergeParkReason;
+      readonly fix: string;
+    }
+  | {
+      /**
+       * Merging the operator's branch into the run's owned base branch
+       * conflicted (t3code-sha). Not tied to any queue entry — the conflict
+       * is between the run's own base and the operator's branch, not any
+       * child — so this carries the operator branch and the one deduped fix
+       * child instead of an entry's `child`/`branch`.
+       */
+      readonly event: "integration-blocked";
+      readonly operatorBranch: string;
       readonly fix: string;
     }
   | {

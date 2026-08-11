@@ -8,7 +8,13 @@ import {
   decideGraceStep,
   decideIterationBoundary,
   failureReasonForOutcome,
+  integrateOperatorBaseMessage,
+  integrationFixDescription,
+  integrationFixTitle,
   mergeFixDescription,
+  mergeFixTitle,
+  parseIntegrationFixTitle,
+  parseMergeFixTitle,
   persistedFailureReason,
   type IterationBoundaryDecision,
   type IterationBoundaryInput,
@@ -650,5 +656,63 @@ describe("runBaseBranch", () => {
     // cannot collide.
     expect(runBaseBranch("t3code-5m4")).toBe("epic/t3code-5m4/base");
     expect(runBaseBranch("t3code-5m4")).not.toBe(childBranch("t3code-5m4"));
+  });
+});
+
+describe("integrationFixTitle (t3code-sha)", () => {
+  it("round-trips the operator and base branch through the title", () => {
+    const title = integrationFixTitle("epic/t3code-sha/base", "team/mine");
+    expect(parseIntegrationFixTitle(title)).toEqual({
+      operatorBranch: "team/mine",
+      baseBranch: "epic/t3code-sha/base",
+    });
+  });
+
+  it("is never mistaken for a per-branch merge-fix title", () => {
+    // `ParallelEpicLoop` routes any `parseMergeFixTitle` match through
+    // `findParkedOriginalChild`, which has no row for a run-level conflict.
+    const title = integrationFixTitle("epic/t3code-sha/base", "team/mine");
+    expect(parseMergeFixTitle(title)).toBeNull();
+  });
+
+  it("a merge-fix title is never mistaken for an integration-fix title", () => {
+    const title = mergeFixTitle("epic/child-1", "conflict");
+    expect(parseIntegrationFixTitle(title)).toBeNull();
+  });
+});
+
+describe("integrateOperatorBaseMessage", () => {
+  it("names the operator branch it integrates", () => {
+    expect(integrateOperatorBaseMessage("team/mine")).toBe("cook-epic: integrate team/mine");
+  });
+});
+
+describe("integrationFixDescription (t3code-sha)", () => {
+  it("names the run's own base branch as the thing to fix, not a per-entry branch", () => {
+    const description = integrationFixDescription({
+      baseBranch: "epic/t3code-sha/base",
+      operatorBranch: "team/mine",
+      gateCommand: "vp check",
+    });
+    expect(description).toContain("base branch `epic/t3code-sha/base`");
+    expect(description).toContain(
+      "you are already on `epic/t3code-sha/base`, checked out directly",
+    );
+    expect(description).toContain("merge `team/mine` into it");
+    expect(description).toContain("vp check");
+    expect(description).not.toContain("undefined");
+  });
+
+  it("includes the failure detail and prior-attempts warning when given", () => {
+    const description = integrationFixDescription({
+      baseBranch: "epic/t3code-sha/base",
+      operatorBranch: "team/mine",
+      gateCommand: null,
+      failureDetail: "CONFLICT (content): Merge conflict in foo.ts",
+      priorAttempts: 2,
+    });
+    expect(description).toContain("What the merge reported");
+    expect(description).toContain("CONFLICT (content): Merge conflict in foo.ts");
+    expect(description).toContain("already been repaired 2 time(s)");
   });
 });

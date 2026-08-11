@@ -12,6 +12,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -464,6 +465,10 @@ const fixture = (input: {
         parkedBranchReads.push(query.branch);
         return Option.some("orig.child");
       }),
+    recordIntegratedHead: () =>
+      Effect.sync(() => {
+        ordering.push("merge:recordIntegratedHead");
+      }),
   };
 
   const vcs: PoolVcsShape = {
@@ -771,6 +776,326 @@ it.live("enqueues the parked original child when a merge-fix child lands", () =>
     assert.isBelow(test.ordering.indexOf("merge:enqueue"), test.ordering.indexOf("merge:drain"));
     assert.equal(test.drainCalls(), 1);
   }),
+);
+
+it.live(
+  "resyncs the accepted head instead of enqueuing when an integration-fix child lands (t3code-sha)",
+  () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        sequential: false,
+        childTitle: "Merge fix: integrate team/mine into epic/epic-1/base",
+        attempts: [{ commit: true, close: true }],
+      });
+      yield* test.run;
+
+      assert.equal(test.runRecord().status, "done");
+      // Committing directly on the run base branch already landed the
+      // resolution: nothing goes through the entry queue, and no parked
+      // entry is looked up either.
+      assert.deepEqual(test.enqueuedMerges, []);
+      assert.deepEqual(test.parkedBranchReads, []);
+      assert.isTrue(test.ordering.includes("merge:recordIntegratedHead"));
+      assert.isBelow(
+        test.ordering.indexOf("merge:recordIntegratedHead"),
+        test.ordering.indexOf("merge:drain"),
+      );
+    }),
+);
+
+it.live(
+  "resyncs the accepted head even when an integration-fix child commits then errors out (t3code-sha)",
+  () =>
+    Effect.gen(function* () {
+      // The fix child commits the resolved merge onto the run base branch and
+      // then hits a provider error — the turn never ends `done`. Gating the
+      // resync on `outcome.kind === "done"` left `lastAcceptedHead` stale in
+      // exactly this case, so the next drain read the moved base as an
+      // external move and failed the run for the coordinator's own commit.
+      const test = fixture({
+        sequential: false,
+        childTitle: "Merge fix: integrate team/mine into epic/epic-1/base",
+        attempts: [{ commit: true, providerError: "boom" }],
+        policy: policy({ infraFailureBudget: 1 }),
+      });
+      yield* test.run;
+
+      assert.equal(test.runRecord().status, "failed");
+      assert.equal(test.iterations[0]?.turnStatus, "failed");
+      assert.deepEqual(test.enqueuedMerges, []);
+      assert.deepEqual(test.parkedBranchReads, []);
+      assert.isTrue(test.ordering.includes("merge:recordIntegratedHead"));
+    }),
+);
+
+it.live(
+  "does not drain while an integration-fix child still holds the run base branch (t3code-sha)",
+  () =>
+    Effect.gen(function* () {
+      // A dedicated two-worker harness: reusing `fixture()` cannot express
+      // two children settling at different times, which is exactly the race
+      // this guards. `fixChildBaseOwned` mirrors what the real base branch's
+      // checkout state would be — set the moment the fix child's workspace is
+      // acquired, cleared only once its workspace is released, spanning
+      // everything from "might have committed" through "store not yet
+      // resynced" — and the fake drain treats a call while it is `true` the
+      // way the real merge queue would: `fatal`.
+      const fixChildId = "fix.1";
+      const fixChildTitle = "Merge fix: integrate team/mine into epic/epic-1/base";
+      const fixBranch = "epic/epic-1/base";
+      const normalChildId = "normal.1";
+      const normalChildTitle = "Normal child";
+
+      let fixChildStatus: "open" | "closed" = "open";
+      let normalChildStatus: "open" | "closed" = "open";
+      let fixChildBaseOwned = false;
+      let sawDrainWhileOwned = false;
+      let drainCalls = 0;
+      let recordIntegratedHeadCalls = 0;
+      const headByCwd = new Map<string, number>();
+      const bumpHead = (cwd: string): void => {
+        headByCwd.set(cwd, (headByCwd.get(cwd) ?? 0) + 1);
+      };
+
+      const fixGate = yield* Deferred.make<void>();
+      const normalSettled = yield* Deferred.make<void>();
+
+      let persistedRun: PersistedEpicRun = {
+        runId: RUN_ID,
+        epicId: EPIC_ID,
+        projectId: ProjectId.make("project"),
+        cwd: "/repo",
+        prompt: "BASE PROMPT",
+        orientationFile: null,
+        modelSelection: { instanceId: ProviderInstanceId.make("worker"), model: "test" },
+        runtimeMode: "full-access",
+        config: config(),
+        configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+        originThreadId: null,
+        status: "running",
+        maxIterations: 10,
+        workers: 2,
+        iterationsDispatched: 0,
+        iterationsCompleted: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        noCommitStreak: 0,
+        infraStreak: 0,
+        lastError: null,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      };
+      const iterations: PersistedEpicRunIteration[] = [];
+      let nextIterationIndex = 0;
+
+      const journal: PoolRunJournalShape = {
+        createRun: (run) => Effect.sync(() => void (persistedRun = run)),
+        saveRun: (run) => Effect.sync(() => void (persistedRun = run)),
+        getRun: () => Effect.succeed(Option.some(persistedRun)),
+        appendIteration: (iteration) => Effect.sync(() => void iterations.push(iteration)),
+        updateIteration: (update) =>
+          Effect.sync(() => {
+            const index = iterations.findIndex(
+              (item) => item.iterationIndex === update.iterationIndex,
+            );
+            if (index >= 0) iterations[index] = { ...iterations[index]!, ...update };
+          }),
+        listIterations: () => Effect.succeed(iterations),
+        getLatestIteration: () => Effect.succeed(Option.none()),
+        allocateIteration: (allocation) =>
+          Effect.sync(() => {
+            const iterationIndex = nextIterationIndex++;
+            iterations.push({
+              runId: allocation.runId,
+              iterationIndex,
+              threadId: ThreadId.make(
+                epicRunIterationThreadId({ runId: allocation.runId, iterationIndex }),
+              ),
+              issueId: allocation.issueId,
+              turnStatus: "running",
+              summary: null,
+              why: null,
+              failureReason: null,
+              startedAt: allocation.startedAt,
+              finishedAt: null,
+            });
+            return iterationIndex;
+          }),
+        upsertProviderDegradation: () => Effect.void,
+        clearProviderDegradation: () => Effect.void,
+      };
+
+      const backlog: PoolBacklogShape = {
+        readyFrontier: () =>
+          Effect.succeed(
+            (() => {
+              const issueIds = [
+                ...(fixChildStatus === "open" ? [fixChildId] : []),
+                ...(normalChildStatus === "open" ? [normalChildId] : []),
+              ];
+              return issueIds.length === 0
+                ? ({ _tag: "empty" } as const)
+                : ({ _tag: "children", issueIds } as const);
+            })(),
+          ),
+        countOpenChildren: () =>
+          Effect.succeed(
+            (fixChildStatus === "open" ? 1 : 0) + (normalChildStatus === "open" ? 1 : 0),
+          ),
+        issueEvidence: (_cwd, issueId) =>
+          Effect.succeed(
+            issueId === fixChildId
+              ? { status: fixChildStatus, title: fixChildTitle, commentCount: 0 }
+              : { status: normalChildStatus, title: normalChildTitle, commentCount: 0 },
+          ),
+        issueIsResearch: () => Effect.succeed(false),
+        epicDescription: () => Effect.succeed("EPIC GOAL"),
+        releaseClaimedChild: () => Effect.succeed(false),
+      };
+
+      const workspace: WorkspaceShape = {
+        ensureIntegration: () => Effect.succeed({ entries: [] }),
+        acquire: (_run, acquireInput) =>
+          Effect.sync((): IterationWorkspace => {
+            const isFix = acquireInput.issueId === fixChildId;
+            if (isFix) fixChildBaseOwned = true;
+            return {
+              cwd: isFix ? "/repo" : `/wt/${acquireInput.issueId}`,
+              branch: isFix ? fixBranch : `epic/${acquireInput.issueId}`,
+              worktreePath: `/wt/${acquireInput.issueId}`,
+              siblingWorktrees: [],
+              siblingRule: null,
+            };
+          }),
+        release: (_run, ws) =>
+          Effect.sync(() => {
+            if (ws.branch === fixBranch) fixChildBaseOwned = false;
+          }),
+        releaseIntegration: () => Effect.void,
+      };
+
+      const dispatch: ParallelEpicLoopPorts["dispatch"] = {
+        createIteration: () => Effect.void,
+        prepareIteration: () => Effect.void,
+        beginTurn: (begin) =>
+          Effect.sync((): IterationHandle => {
+            const isFix = begin.workspace.worktreePath === `/wt/${fixChildId}`;
+            return {
+              ref: begin.threadId,
+              capabilities: {
+                terminalSignal: "projection",
+                continuation: "same-thread",
+                subagentLiveness: "native",
+                finalMessage: "projection",
+                providerErrors: "session-and-assistant",
+                cost: "none",
+              },
+              awaitSettled: isFix
+                ? Deferred.await(fixGate).pipe(
+                    Effect.map(() => {
+                      fixChildStatus = "closed";
+                      bumpHead(begin.workspace.cwd);
+                      return {
+                        turnState: "completed" as const,
+                        timedOut: false,
+                        providerError: null,
+                      };
+                    }),
+                  )
+                : Effect.sync(() => {
+                    normalChildStatus = "closed";
+                    bumpHead(begin.workspace.cwd);
+                    return {
+                      turnState: "completed" as const,
+                      timedOut: false,
+                      providerError: null,
+                    };
+                  }).pipe(Effect.tap(() => Deferred.succeed(normalSettled, undefined))),
+              continueTurn: () => Effect.void,
+              interrupt: Effect.void,
+              release: Effect.void,
+              runningSubagents: Effect.succeed({ mode: "native", running: 0 }),
+              finalMessage: Effect.succeed({
+                text: 'RALPH_MSG: {"summary":"did work","why":"needed"}',
+                streaming: false,
+                waitExhausted: false,
+              }),
+            };
+          }),
+        stopAbandoned: () => Effect.void,
+        stopForced: () => Effect.void,
+      };
+
+      const mergeDrain: MergeDrainShape = {
+        drain: () =>
+          Effect.sync(() => {
+            drainCalls += 1;
+            if (fixChildBaseOwned) {
+              sawDrainWhileOwned = true;
+              return {
+                _tag: "fatal",
+                detail: "base branch moved externally; cannot trial-merge",
+              } as const;
+            }
+            return { _tag: "drained" } as const;
+          }),
+        enqueueMerge: () => Effect.void,
+        findParkedOriginalChild: () => Effect.succeed(Option.some("orig.child")),
+        recordIntegratedHead: () => Effect.sync(() => void (recordIntegratedHeadCalls += 1)),
+      };
+
+      const vcs: PoolVcsShape = {
+        headCommit: (cwd) => Effect.succeed(`head-${String(headByCwd.get(cwd) ?? 0)}`),
+        worktreeFingerprint: () => Effect.succeed(""),
+        commitsAhead: () => Effect.succeed(0),
+      };
+
+      const ports: ParallelEpicLoopPorts = {
+        journal,
+        events: { publish: () => Effect.void },
+        backlog,
+        workspace,
+        dispatch,
+        mergeDrain,
+        vcs,
+        providerInventory: null,
+        workerEvidence: null,
+      };
+
+      const signals = yield* Queue.unbounded<PoolSchedulerEvent>();
+      const fiber = yield* Effect.forkChild(
+        runParallelEpicLoop(
+          {
+            runId: RUN_ID,
+            epicId: EPIC_ID,
+            cwd: "/repo",
+            policy: policy(),
+            withTransition: (effect) => effect,
+            signals,
+            readOrientation: () => Effect.succeed(null),
+            cleanupOwnedExternally: () => false,
+          },
+          ports,
+        ),
+      );
+
+      // Let the normal child settle while the fix child still holds the base
+      // branch, then give the loop time to react — this is exactly the
+      // window the unguarded loop drained in.
+      yield* Deferred.await(normalSettled);
+      yield* Effect.sleep(Duration.millis(50));
+      assert.isFalse(sawDrainWhileOwned);
+      assert.isTrue(fixChildBaseOwned);
+
+      yield* Deferred.succeed(fixGate, undefined);
+      yield* Fiber.join(fiber);
+
+      assert.equal(persistedRun.status, "done");
+      assert.isFalse(sawDrainWhileOwned);
+      assert.isAbove(drainCalls, 0);
+      assert.isAbove(recordIntegratedHeadCalls, 0);
+    }),
 );
 
 it.live("interrupts a timed-out turn and classifies it as an infra timeout", () =>

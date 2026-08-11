@@ -184,6 +184,13 @@ export const EpicRunMergeState = Schema.Struct({
   baseBranch: Schema.String,
   integrationBranch: Schema.String,
   integrationWorktreePath: Schema.String,
+  /**
+   * The operator's branch at launch (t3code-sha), for a run that owns its
+   * base branch; `null` otherwise, including every row written before
+   * migration 052 — `ALTER TABLE ... ADD COLUMN` backfills those with SQL
+   * `NULL`, so the column is always present and a plain `NullOr` decodes it.
+   */
+  operatorBaseBranch: Schema.NullOr(Schema.String),
   /** Empty for single-repo runs; old rows decode to `[]` (column default). */
   siblings: Schema.Array(EpicRunMergeStateSibling),
   entries: Schema.Array(EpicRunMergeEntry),
@@ -211,9 +218,17 @@ export const InitializeEpicRunMergeStateInput = Schema.Struct({
   baseBranch: Schema.String,
   integrationBranch: Schema.String,
   integrationWorktreePath: Schema.String,
+  /** Absent from callers written before t3code-sha; the row stores `null`. */
+  operatorBaseBranch: Schema.optional(Schema.NullOr(Schema.String)),
   siblings: Schema.Array(EpicRunMergeStateSibling),
 });
 export type InitializeEpicRunMergeStateInput = typeof InitializeEpicRunMergeStateInput.Type;
+
+export const AdvanceEpicRunMergeIntegrationInput = Schema.Struct({
+  runId: EpicRunId,
+  lastAcceptedHead: Schema.String,
+});
+export type AdvanceEpicRunMergeIntegrationInput = typeof AdvanceEpicRunMergeIntegrationInput.Type;
 
 export const EnqueueEpicRunMergeInput = Schema.Struct({
   runId: EpicRunId,
@@ -398,6 +413,14 @@ export interface EpicRunStoreShape {
   ) => Effect.Effect<ReadonlyArray<EpicRunMergeEntry>, EpicRunStoreError>;
   readonly restoreMergeTail: (
     input: RestoreEpicRunMergeTailInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+  /**
+   * Advance the accepted HEAD without touching any queue row (t3code-sha): a
+   * successful continuous-integration merge, or an integration-fix child
+   * committing its resolution directly onto the base branch.
+   */
+  readonly advanceMergeIntegration: (
+    input: AdvanceEpicRunMergeIntegrationInput,
   ) => Effect.Effect<void, EpicRunStoreError>;
   readonly beginParkMerge: (input: ParkEpicRunMergeInput) => Effect.Effect<void, EpicRunStoreError>;
   readonly finalizeParkMerge: (

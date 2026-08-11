@@ -773,6 +773,42 @@ describe("EpicRunStore", () => {
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 
+  it.effect("round-trips operatorBaseBranch (t3code-sha), and defaults to null when omitted", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      yield* store.upsertRun(makeRun({ runId: EpicRunId.make("run-operator-branch") }));
+      yield* store.initializeMergeState({
+        runId: EpicRunId.make("run-operator-branch"),
+        lastAcceptedHead: "base-0",
+        repositoryPath: "/repo",
+        baseBranch: "epic/t3code-sha/base",
+        integrationBranch: "cook-epic-integration-run-operator-branch",
+        integrationWorktreePath: "/worktrees/integration",
+        siblings: [],
+        operatorBaseBranch: "mine",
+      });
+      const persisted = Option.getOrThrow(
+        yield* store.getMergeState({ runId: EpicRunId.make("run-operator-branch") }),
+      );
+      assert.strictEqual(persisted.operatorBaseBranch, "mine");
+
+      yield* store.upsertRun(makeRun({ runId: EpicRunId.make("run-no-operator-branch") }));
+      yield* store.initializeMergeState({
+        runId: EpicRunId.make("run-no-operator-branch"),
+        lastAcceptedHead: "base-0",
+        repositoryPath: "/repo",
+        baseBranch: "mine",
+        integrationBranch: "cook-epic-integration-run-no-operator-branch",
+        integrationWorktreePath: "/worktrees/integration",
+        siblings: [],
+      });
+      const persistedWithoutOperator = Option.getOrThrow(
+        yield* store.getMergeState({ runId: EpicRunId.make("run-no-operator-branch") }),
+      );
+      assert.strictEqual(persistedWithoutOperator.operatorBaseBranch, null);
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
   it.effect("decodes sibling merge state written before initialHead existed", () =>
     Effect.gen(function* () {
       const store = yield* EpicRunStore;

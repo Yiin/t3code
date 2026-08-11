@@ -62,7 +62,9 @@ import {
   decideGraceStep,
   integrationBranch as integrationBranchName,
   mergeSlotHolder,
+  parseIntegrationFixTitle,
   parseMergeFixTitle,
+  runBaseBranch as runBaseBranchName,
 } from "@t3tools/epic-core/policy";
 import {
   hasRalphBlocked,
@@ -714,6 +716,29 @@ export const makeServerPoolWorkspace = (deps: {
       if (Option.isSome(persisted)) return persisted.value;
 
       const baseBranch = yield* resolveBaseBranch(run);
+      // The operator's branch at launch (t3code-sha), captured once and
+      // persisted verbatim below — never re-read from the working tree at
+      // drain time, so an operator who switches branches mid-run cannot
+      // silently change what a later drain integrates.
+      //
+      // `readCurrentBranch` fails on a detached `HEAD` (`git symbolic-ref`
+      // has nothing to report). That is a legitimate state to launch from —
+      // a resumed epic whose run base branch already exists, for one — and
+      // must not turn into a provisioning failure just because the operator
+      // has no branch to integrate from. `null` here means the same thing it
+      // means for a snapshot that predates this field: no continuous
+      // integration for this run.
+      const operatorBaseBranch = run.config.vcs.runOwnedBaseBranch
+        ? yield* readCurrentBranch(run.cwd).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("epic.runner.operator-base-branch-unresolved", {
+                runId: run.runId,
+                cwd: run.cwd,
+                detail: error.detail,
+              }).pipe(Effect.as(null)),
+            ),
+          )
+        : null;
       const vcs = makeProcessPoolVcs(processRunner);
       // A run-owned base branch (t3code-5m4) is never checked out at
       // `run.cwd`, so seeding from `HEAD` there would read the operator's
@@ -901,6 +926,7 @@ export const makeServerPoolWorkspace = (deps: {
             baseBranch,
             integrationBranch: provisioned.refName,
             integrationWorktreePath: provisioned.path,
+            operatorBaseBranch,
             siblings: siblingStates,
           })
           .pipe(Effect.mapError(storeError("initializeMergeState")));
@@ -1043,7 +1069,14 @@ export const makeServerPoolWorkspace = (deps: {
         }
 
         const mergeFix = parseMergeFixTitle(input.issueTitle);
-        const branch = mergeFix?.branch ?? `epic/${input.issueId}`;
+        // An integration-fix child (t3code-sha) is dispatched directly onto
+        // the run's own base branch — the same reused-branch pattern a
+        // per-entry merge-fix child gets — so committing there IS landing
+        // the resolution; there is no separate branch for the queue to land.
+        const integrationFix = parseIntegrationFixTitle(input.issueTitle);
+        const branch =
+          mergeFix?.branch ??
+          (integrationFix !== null ? runBaseBranchName(runCtx.epicId) : `epic/${input.issueId}`);
         if (mergeFix !== null) {
           const original = yield* store
             .findParkedOriginalChild({ runId: runCtx.runId, branch })
@@ -1696,7 +1729,12 @@ export const makeServerMergeDrain = (deps: {
         return { _tag: "fatal", detail: result.detail } as const;
       }
       if (result._tag === "deferred") return { _tag: "deferred" } as const;
-      if (result._tag === "drained") return { _tag: "drained" } as const;
+      if (result._tag === "drained") {
+        return {
+          _tag: "drained",
+          ...(result.blocked === undefined ? {} : { blocked: result.blocked }),
+        } as const;
+      }
       return { _tag: "idle" } as const;
     },
   );
@@ -1709,6 +1747,32 @@ export const makeServerMergeDrain = (deps: {
       store
         .findParkedOriginalChild(input)
         .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
+    recordIntegratedHead: (runCtx) =>
+      Effect.gen(function* () {
+        const state = Option.getOrThrow(
+          yield* store
+            .getMergeState({ runId: runCtx.runId })
+            .pipe(Effect.mapError(storeError("getMergeState"))),
+        );
+        const head = yield* makeEpicRunMergeGit({
+          git: gitVcsDriver,
+          setupWorktree: () => Effect.void,
+        })
+          .head(state.repositoryPath, state.baseBranch)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.integration-resync",
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+        yield* store
+          .advanceMergeIntegration({ runId: runCtx.runId, lastAcceptedHead: head })
+          .pipe(Effect.mapError(storeError("advanceMergeIntegration")));
+      }),
   };
 };
 

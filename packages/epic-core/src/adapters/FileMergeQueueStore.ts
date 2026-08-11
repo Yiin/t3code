@@ -29,6 +29,10 @@ const MergeQueueState = Schema.Struct({
   baseBranch: Schema.String,
   integrationBranch: Schema.String,
   integrationWorktreePath: Schema.String,
+  // Absent in files written before t3code-sha; `readState` normalizes a
+  // missing key the same way as an explicit `null` — no continuous
+  // integration for this run.
+  operatorBaseBranch: Schema.optionalKey(Schema.NullOr(Schema.String)),
   siblings: Schema.Array(
     Schema.Struct({
       repositoryPath: Schema.String,
@@ -101,7 +105,12 @@ export const makeFileMergeQueueStore = (options: { readonly runDirectory: string
           detail: `Merge state belongs to ${state.runId}, not ${runId}`,
         });
       }
-      return state;
+      // Normalize the optional key: a file written before t3code-sha decodes
+      // with the key absent, which reads identically to an explicit `null`.
+      return {
+        ...state,
+        operatorBaseBranch: state.operatorBaseBranch ?? null,
+      } satisfies MergeQueueSnapshot;
     });
 
     const writeState = Effect.fn("FileMergeQueueStore.writeState")(function* (
@@ -246,6 +255,11 @@ export const makeFileMergeQueueStore = (options: { readonly runDirectory: string
                 : entry,
             ),
           },
+          result: undefined,
+        })),
+      advanceIntegration: ({ runId, lastAcceptedHead }) =>
+        mutate("advanceIntegration", runId, (current) => ({
+          state: { ...current, lastAcceptedHead },
           result: undefined,
         })),
       beginPark: ({ runId, sequence, reason }) =>

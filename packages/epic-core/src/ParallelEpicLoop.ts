@@ -31,7 +31,12 @@ import {
   EpicRunNotFoundError,
   type EpicRunnerError,
 } from "./Errors.ts";
-import { decideIterationBoundary, parseMergeFixTitle, persistedFailureReason } from "./policy.ts";
+import {
+  decideIterationBoundary,
+  parseIntegrationFixTitle,
+  parseMergeFixTitle,
+  persistedFailureReason,
+} from "./policy.ts";
 import {
   classifyIteration,
   iterationFailureClass,
@@ -121,7 +126,16 @@ export interface PoolBacklogShape {
 
 export type MergeDrainResult =
   | { readonly _tag: "idle" }
-  | { readonly _tag: "drained" }
+  | {
+      readonly _tag: "drained";
+      /**
+       * Active queue entries this drain left untouched because an
+       * operator-base integration conflict (t3code-sha) stopped it before
+       * any entry was even marked draining. Omitted on every unaffected
+       * drain.
+       */
+      readonly blocked?: number;
+    }
   | { readonly _tag: "deferred" }
   | { readonly _tag: "fatal"; readonly detail: string };
 
@@ -137,6 +151,15 @@ export interface MergeDrainShape {
     readonly runId: EpicRunId;
     readonly branch: string;
   }) => Effect.Effect<Option.Option<string>, import("./ports/RunJournal.ts").RunJournalError>;
+  /**
+   * Resync the merge queue's accepted HEAD after a run-level integration-fix
+   * child (t3code-sha) commits its resolution directly onto the run's base
+   * branch. That commit advances the base branch's ref without landing any
+   * queue entry, so nothing else updates the persisted accepted HEAD — skip
+   * this and the very next drain reads the base branch as having "moved
+   * externally" and fails the run.
+   */
+  readonly recordIntegratedHead: (run: PoolRunContext) => Effect.Effect<void, EpicRunnerError>;
 }
 
 /** Never-failing git probes; `null` never counts as progress. */
@@ -244,6 +267,21 @@ const MERGE_DRAIN_DEFERRAL_LOG_INTERVAL_MS = 30_000;
 interface ActiveIteration {
   charged: boolean;
   readonly modelSelection: ModelSelection;
+  /**
+   * This worker is an integration-fix child (t3code-sha), dispatched directly
+   * onto the run's own base branch. Set as soon as the title is known — before
+   * the workspace is even acquired, so the window this covers is a superset
+   * of the base branch actually being checked out — and left `true` until the
+   * settlement event for this key is consumed, which is after this worker's
+   * whole iteration Effect (including its `workspace.release` finalizer and
+   * its `recordIntegratedHead` resync) has completed.
+   *
+   * The pool loop refuses to drain while any active worker has this set, so
+   * the merge queue's "moved externally" head guard and its fast-forward
+   * landing never run concurrently with the one worker allowed to move the
+   * base branch out from under them.
+   */
+  isIntegrationFix: boolean;
 }
 
 interface WorkerSettlement {
@@ -448,6 +486,18 @@ export const runParallelEpicLoop = (
     readonly run: import("./ports/RunJournal.ts").PersistedEpicRun;
     readonly selection: ReadyChildSelection;
     readonly onDispatched: (threadId: ThreadId) => void;
+    /**
+     * Fired once the child's title is known — before the workspace is
+     * acquired — when this iteration is an integration-fix child (t3code-sha).
+     * Never fired for any other child.
+     *
+     * `launch` already resolves the same title synchronously before forking
+     * this iteration's fiber, so in the ordinary case this only reconfirms a
+     * flag already set. It stays as a fallback: if that resolution and this
+     * one ever disagree (e.g. a re-fetch reads a different title), a late
+     * `true` here still corrects a `false` that slipped through.
+     */
+    readonly onIntegrationFixDetected: () => void;
   }): Effect.Effect<RunIterationResult, EpicRunnerError> => {
     let releaseContext: { readonly workspace: IterationWorkspace } | null = null;
     let releaseError: EpicRunnerError | null = null;
@@ -530,6 +580,13 @@ export const runParallelEpicLoop = (
 
       const issueId = selection.issueId;
       const issueEvidenceBefore = yield* ports.backlog.issueEvidence(input.cwd, issueId);
+      // Flag this worker to the pool loop before it can possibly touch the
+      // base branch (t3code-sha): the workspace acquire just below is what
+      // actually checks the base branch out for this child, so the flag is
+      // set with room to spare rather than tightly around the acquire call.
+      if (parseIntegrationFixTitle(issueEvidenceBefore.title ?? "") !== null) {
+        args.onIntegrationFixDetected();
+      }
       const workspace = yield* ports.workspace.acquire(args.runCtx, {
         issueId,
         issueTitle: issueEvidenceBefore.title?.trim() || issueId,
@@ -864,23 +921,36 @@ export const runParallelEpicLoop = (
             });
       const noCommitChildClosed = evidenceVerdict?.accepted ?? false;
 
-      if (
-        !run.config.execution.sequential &&
-        outcome.kind === "done" &&
-        workspace.branch !== null
-      ) {
-        const mergeFix = parseMergeFixTitle(issueEvidenceBefore.title ?? "");
-        const originalChild =
-          mergeFix === null
-            ? issueId
-            : Option.getOrThrow(
-                yield* ports.mergeDrain
-                  .findParkedOriginalChild({ runId, branch: workspace.branch })
-                  .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
-              );
-        yield* ports.mergeDrain
-          .enqueueMerge({ runId, childId: originalChild, branch: workspace.branch })
-          .pipe(Effect.mapError(journalError("enqueueMerge")));
+      if (!run.config.execution.sequential && workspace.branch !== null) {
+        const integrationFix = parseIntegrationFixTitle(issueEvidenceBefore.title ?? "");
+        if (integrationFix !== null) {
+          // The child was dispatched directly onto the run's base branch
+          // (t3code-sha); committing there already advanced it, whether or
+          // not the turn itself ended cleanly. A fix child that commits the
+          // resolved merge and then times out or hits a provider error still
+          // moved the base — gating this resync on `outcome.kind === "done"`
+          // left `lastAcceptedHead` stale in exactly that case, so the next
+          // drain read the moved base as an external move and failed the run
+          // for something the coordinator's own child did. Resync on the
+          // observable fact instead: the head actually moved.
+          const headAfter = yield* ports.vcs.headCommit(workspace.cwd);
+          if (headAfter !== null && headAfter !== headBefore) {
+            yield* ports.mergeDrain.recordIntegratedHead(args.runCtx);
+          }
+        } else if (outcome.kind === "done") {
+          const mergeFix = parseMergeFixTitle(issueEvidenceBefore.title ?? "");
+          const originalChild =
+            mergeFix === null
+              ? issueId
+              : Option.getOrThrow(
+                  yield* ports.mergeDrain
+                    .findParkedOriginalChild({ runId, branch: workspace.branch })
+                    .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
+                );
+          yield* ports.mergeDrain
+            .enqueueMerge({ runId, childId: originalChild, branch: workspace.branch })
+            .pipe(Effect.mapError(journalError("enqueueMerge")));
+        }
       }
 
       const iterationStatus =
@@ -1205,6 +1275,14 @@ export const runParallelEpicLoop = (
     let terminalWorkerError: EpicRunnerError | null = null;
     let pendingFallback: PendingProviderFallback | null = null;
     let syntheticSequence = 0;
+    // The most recent drain's `blocked` count (t3code-sha): entries this run
+    // left untouched because an operator-base integration conflict stopped
+    // the drain before the per-entry loop ran. Completion honesty (D2) is
+    // deferred — `done` below is still decided from the open-child count
+    // alone, not from this — so logging it here is the only place the value
+    // becomes observable at all; see the `done` transitions further down.
+    // Follow-up filed: t3code-xig.
+    let lastDrainBlocked = 0;
 
     const launch = (
       run: import("./ports/RunJournal.ts").PersistedEpicRun,
@@ -1212,9 +1290,36 @@ export const runParallelEpicLoop = (
       key: string,
     ) =>
       Effect.gen(function* () {
+        // Resolved here, synchronously, before this iteration's fiber is
+        // forked (t3code-sha): forking first and setting the flag inside the
+        // fiber left a window where a settlement already sitting in the
+        // queue could drive the loop back to the drain guard below while
+        // this worker's flag still read `false`, because the forked fiber
+        // had not yet run far enough to call `onIntegrationFixDetected`. A
+        // drain could then start concurrently with a fix child acquiring the
+        // base-branch worktree. `issueEvidence` never fails (`Effect<..,
+        // never>`), so this adds no new failure path to the loop.
+        //
+        // Gated on `vcs.runOwnedBaseBranch` first, and deliberately so: only
+        // a run that owns its base branch can ever produce an integration-fix
+        // child, and this read is an extra backlog call on top of the one
+        // `runIteration` already makes for the same issue. With the flag off
+        // that call is pure overhead the flag-off contract forbids — it is
+        // observable, because `issueEvidence` reads the child's live bead and
+        // the loop compares the before/after reads to decide whether a
+        // no-commit iteration earned its keep. Short-circuit `&&` skips the
+        // `yield*` entirely, so the flag-off path issues exactly the calls it
+        // issued before t3code-sha, in the same order.
+        const isIntegrationFix =
+          run.config.vcs.runOwnedBaseBranch &&
+          selection._tag === "child" &&
+          parseIntegrationFixTitle(
+            (yield* ports.backlog.issueEvidence(input.cwd, selection.issueId)).title ?? "",
+          ) !== null;
         const activeIteration: ActiveIteration = {
           charged: false,
           modelSelection: run.modelSelection,
+          isIntegrationFix,
         };
         active.set(key, activeIteration);
         yield* runIteration({
@@ -1223,6 +1328,9 @@ export const runParallelEpicLoop = (
           selection,
           onDispatched: () => {
             activeIteration.charged = true;
+          },
+          onIntegrationFixDetected: () => {
+            activeIteration.isIntegrationFix = true;
           },
         }).pipe(
           Effect.exit,
@@ -1241,7 +1349,21 @@ export const runParallelEpicLoop = (
     while (true) {
       const run = yield* requireRun(runId);
 
-      if (drainBeforeDispatch) {
+      // An integration-fix child (t3code-sha) is dispatched directly onto the
+      // run's own base branch, and stays flagged active in this map through
+      // its whole iteration — settlement, `recordIntegratedHead`, and its
+      // `workspace.release` all happen before the loop ever removes it
+      // (`launch` above). Draining while one is active races the merge
+      // queue's own view of the base branch against the one worker allowed to
+      // move it: a still-open trial sees the base moved out from under it
+      // ("moved externally"), and a still-checked-out worktree refuses the
+      // fast-forward that would land a queue entry. Waiting the fix child out
+      // costs nothing — no new dispatch happens either while a drain is
+      // pending — and the settlement event that clears this flag is what
+      // wakes the loop back up.
+      const integrationFixActive = [...active.values()].some((worker) => worker.isIntegrationFix);
+
+      if (drainBeforeDispatch && !integrationFixActive) {
         const result = yield* ports.mergeDrain.drain(runCtx);
         if (result._tag === "fatal") {
           yield* withTransition(
@@ -1296,6 +1418,13 @@ export const runParallelEpicLoop = (
         deferredSince = null;
         deferredLoggedAt = 0;
         drainBeforeDispatch = false;
+        lastDrainBlocked = result._tag === "drained" ? (result.blocked ?? 0) : 0;
+        if (lastDrainBlocked > 0) {
+          yield* Effect.logWarning("epic.runner.merge-drain-blocked", {
+            runId,
+            blocked: lastDrainBlocked,
+          });
+        }
       }
       if (active.size === 0 && terminalWorkerError !== null) {
         return yield* terminalWorkerError;
@@ -1330,6 +1459,12 @@ export const runParallelEpicLoop = (
               const openChildren = yield* ports.backlog
                 .countOpenChildren(input.cwd, input.epicId)
                 .pipe(Effect.mapError(backlogError));
+              // Completion honesty (D2, t3code-sha) is deferred: `done` below
+              // is decided from `openChildren` alone, not from whether the
+              // merge queue still holds entries this run never landed
+              // (`lastDrainBlocked`, logged as `epic.runner.merge-drain-blocked`
+              // above). A run can report `done` with parked or blocked work
+              // still sitting in the queue. Follow-up filed: t3code-xig.
               yield* withTransition(
                 Effect.gen(function* () {
                   const current = yield* requireRun(runId);
@@ -1366,6 +1501,8 @@ export const runParallelEpicLoop = (
             }
           }
         } else if (active.size === 0 && run.iterationsDispatched >= policy.maxIterations) {
+          // Same deferred gap as above: max-iterations also writes `done`
+          // without consulting the merge queue.
           yield* withTransition(
             Effect.gen(function* () {
               const current = yield* requireRun(runId);

@@ -145,6 +145,88 @@ export const mergeFixDescription = (input: {
 export const trialMergeMessage = (branch: string, childId: string): string =>
   `cook-epic: merge ${branch} (${childId})`;
 
+/**
+ * The trial-merge commit message for continuously integrating the operator's
+ * branch into a run's owned base branch (t3code-sha).
+ */
+export const integrateOperatorBaseMessage = (operatorBranch: string): string =>
+  `cook-epic: integrate ${operatorBranch}`;
+
+/**
+ * Title for the one run-level child that repairs a conflict merging the
+ * operator's branch into the run's owned base branch (t3code-sha).
+ *
+ * Deliberately NOT `mergeFixTitle`'s shape ("Merge fix: land X (reason)"):
+ * `ParallelEpicLoop` treats any title matching `MERGE_FIX_TITLE_PATTERN` as a
+ * per-branch park repair and looks up its original parked entry by branch
+ * (`findParkedOriginalChild`) — this child parks no queue entry and has no
+ * original branch, so reusing that shape would misroute it. `baseBranch`
+ * appears in the title so a human scanning the backlog sees at a glance which
+ * run base is stuck; the dispatcher itself re-resolves the run's own base
+ * branch rather than parsing it back out.
+ */
+export const integrationFixTitle = (baseBranch: string, operatorBranch: string): string =>
+  `Merge fix: integrate ${operatorBranch} into ${baseBranch}`;
+
+const INTEGRATION_FIX_TITLE_PATTERN = /^Merge fix: integrate (\S+) into (\S+)$/;
+
+/** Recognise an `integrationFixTitle`, so dispatch can route it distinctly from `parseMergeFixTitle`. */
+export const parseIntegrationFixTitle = (
+  title: string,
+): { readonly operatorBranch: string; readonly baseBranch: string } | null => {
+  const match = INTEGRATION_FIX_TITLE_PATTERN.exec(title);
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  return { operatorBranch: match[1], baseBranch: match[2] };
+};
+
+/**
+ * Body for the run-level integration-conflict repair child (t3code-sha).
+ *
+ * Names the run's own base branch as the thing to fix — not the entry-park
+ * `mergeFixDescription`'s `baseBranch`, which for this conflict never
+ * contains the operator's commits and gives the child nothing to resolve.
+ * The child is dispatched on that exact base branch, already checked out
+ * (`EpicRunnerPoolPorts.ts`/`TerminalPoolWorkspace.ts` route
+ * `parseIntegrationFixTitle` to it directly, the same reused-branch dispatch
+ * a per-entry merge-fix child gets), so resolving the conflict and
+ * committing is the whole fix — there is no separate branch to land.
+ */
+export const integrationFixDescription = (input: {
+  readonly baseBranch: string;
+  readonly operatorBranch: string;
+  readonly gateCommand: string | null;
+  /** What the conflicting merge reported, so the repair does not start blind. */
+  readonly failureDetail?: string;
+  /** How many times this exact conflict has already been repaired. */
+  readonly priorAttempts?: number;
+}): string => {
+  let description =
+    `This run continuously integrates the operator's branch \`${input.operatorBranch}\` into its own ` +
+    `base branch \`${input.baseBranch}\` before every landing, and that merge just conflicted.\n\n` +
+    `Repair procedure: you are already on \`${input.baseBranch}\`, checked out directly (not a copy) ` +
+    `— merge \`${input.operatorBranch}\` into it and resolve the conflicts right here.\n\n` +
+    `Two rules while you do:\n` +
+    `- Re-run the gate after resolving${
+      input.gateCommand === null ? "" : ` (\`${input.gateCommand}\`)`
+    }; a merge that "resolves" without a green gate is not resolved.\n` +
+    `- Never resolve by deleting a test or dropping one side wholesale; the losing side's intent has ` +
+    `to survive the merge.\n\n`;
+  description +=
+    "Commit the resolved merge here once the gate is green, close this issue, and note the epic. " +
+    `Committing here already advances \`${input.baseBranch}\` — there is no separate branch for the ` +
+    "coordinator to land, so do not push it yourself; the next landing carries it forward.";
+  if (input.failureDetail !== undefined && input.failureDetail.length > 0) {
+    description += `\n\nWhat the merge reported:\n\n    ${input.failureDetail}`;
+  }
+  if (input.priorAttempts !== undefined && input.priorAttempts > 0) {
+    description +=
+      `\n\nThis conflict has already been repaired ${String(input.priorAttempts)} time(s) and still ` +
+      `recurs. Before changing anything, confirm the conflict is real and not a symptom of something ` +
+      `else; if it is not resolvable here, report that on the epic and close this issue.`;
+  }
+  return description;
+};
+
 /** Terminal parity: integration branch creation near `skills/cook-epic/run-legacy.sh:873-881`. */
 export const INTEGRATION_BRANCH_PREFIX = "cook-epic-integration-";
 export const integrationBranch = (runId: string): string => `${INTEGRATION_BRANCH_PREFIX}${runId}`;

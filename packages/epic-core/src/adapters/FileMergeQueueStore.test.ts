@@ -18,6 +18,7 @@ const snapshot: MergeQueueSnapshot = {
   baseBranch: "mine",
   integrationBranch: "cook-epic-integration-run-1",
   integrationWorktreePath: "/run/worktrees/integration",
+  operatorBaseBranch: null,
   siblings: [
     {
       repositoryPath: "/sibling",
@@ -132,6 +133,41 @@ describe("FileMergeQueueStore", () => {
           state.entries.map((entry) => entry.status),
           ["draining", "queued"],
         );
+      }),
+    ),
+  );
+
+  it.effect("decodes a pre-t3code-sha file with no operator base branch key as null", () =>
+    withStore((store, runDirectory) =>
+      Effect.gen(function* () {
+        // A file written before t3code-sha never had this key at all — not
+        // an explicit `null`, an absent one.
+        const { operatorBaseBranch: _omit, ...legacy } = snapshot;
+        yield* Effect.tryPromise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(runDirectory, "merge-queue.json"),
+            // @effect-diagnostics-next-line preferSchemaOverJson:off
+            JSON.stringify(legacy),
+          ),
+        );
+        const state = yield* store.read("run-1");
+        assert.isNull(state.operatorBaseBranch);
+      }),
+    ),
+  );
+
+  it.effect("advances the accepted head without touching any entry", () =>
+    withStore((store) =>
+      Effect.gen(function* () {
+        yield* store.initialize(snapshot);
+        yield* store.enqueue({ runId: "run-1", childId: "epic.1", branch: "epic/epic.1" });
+
+        yield* store.advanceIntegration({ runId: "run-1", lastAcceptedHead: "integrated-head" });
+
+        const state = yield* store.read("run-1");
+        assert.equal(state.lastAcceptedHead, "integrated-head");
+        assert.equal(state.entries.length, 1);
+        assert.equal(state.entries[0]?.status, "queued");
       }),
     ),
   );

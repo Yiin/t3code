@@ -230,7 +230,12 @@ export const makeTerminalMergeDrain = (deps: {
       return { _tag: "fatal", detail: result.detail } as const;
     }
     if (result._tag === "deferred") return { _tag: "deferred" } as const;
-    if (result._tag === "drained") return { _tag: "drained" } as const;
+    if (result._tag === "drained") {
+      return {
+        _tag: "drained",
+        ...(result.blocked === undefined ? {} : { blocked: result.blocked }),
+      } as const;
+    }
     return { _tag: "idle" } as const;
   });
 
@@ -242,5 +247,26 @@ export const makeTerminalMergeDrain = (deps: {
       mergeQueueStore
         .parkedOriginalChild(input.runId, input.branch)
         .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
+    recordIntegratedHead: (runCtx) =>
+      Effect.gen(function* () {
+        const state = yield* mergeQueueStore
+          .read(runCtx.runId)
+          .pipe(Effect.mapError(storeError("read")));
+        const head = yield* makeProcessMergeGit({ processRunner })
+          .head(state.repositoryPath, state.baseBranch)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.integration-resync",
+                  detail: cause.message,
+                  cause,
+                }),
+            ),
+          );
+        yield* mergeQueueStore
+          .advanceIntegration({ runId: runCtx.runId, lastAcceptedHead: head })
+          .pipe(Effect.mapError(storeError("advanceIntegration")));
+      }),
   };
 };

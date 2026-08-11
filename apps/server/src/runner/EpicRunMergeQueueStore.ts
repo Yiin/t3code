@@ -42,6 +42,10 @@ export const makeEpicRunMergeQueueStore = (store: EpicRunStoreShape): MergeQueue
     store
       .restoreMergeTail({ runId: EpicRunId.make(runId), ...input })
       .pipe(Effect.mapError(mapStoreError("restoreTail"))),
+  advanceIntegration: ({ runId, ...input }) =>
+    store
+      .advanceMergeIntegration({ runId: EpicRunId.make(runId), ...input })
+      .pipe(Effect.mapError(mapStoreError("advanceIntegration"))),
   beginPark: ({ runId, ...input }) =>
     store
       .beginParkMerge({ runId: EpicRunId.make(runId), ...input })

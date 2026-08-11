@@ -21,6 +21,7 @@ import {
   type PersistenceErrorCorrelation,
 } from "../Errors.ts";
 import {
+  AdvanceEpicRunMergeIntegrationInput,
   AllocateEpicRunIterationInput,
   EpicRun,
   EpicRunIteration,
@@ -460,6 +461,9 @@ const makeEpicRunStore = Effect.gen(function* () {
     siblings: Schema.fromJsonString(Schema.Array(EpicRunMergeStateSibling)),
     initialHead: Schema.String,
     parkedCount: NonNegativeInt,
+    // The column always exists post-migration 052 and is always read back —
+    // never absent the way the input schema's caller-optional field is.
+    operatorBaseBranch: Schema.NullOr(Schema.String),
   });
 
   const initializeEpicRunMergeStateRow = SqlSchema.void({
@@ -467,12 +471,22 @@ const makeEpicRunStore = Effect.gen(function* () {
     execute: (row) => sql`
       INSERT INTO epic_run_merge_state (
         run_id, initial_head, last_accepted_head, repository_path, base_branch,
-        integration_branch, integration_worktree_path, siblings
+        integration_branch, integration_worktree_path, operator_base_branch, siblings
       ) VALUES (
         ${row.runId}, ${row.lastAcceptedHead}, ${row.lastAcceptedHead}, ${row.repositoryPath}, ${row.baseBranch},
-        ${row.integrationBranch}, ${row.integrationWorktreePath}, ${JSON.stringify(row.siblings)}
+        ${row.integrationBranch}, ${row.integrationWorktreePath}, ${row.operatorBaseBranch ?? null},
+        ${JSON.stringify(row.siblings)}
       )
       ON CONFLICT (run_id) DO NOTHING
+    `,
+  });
+
+  const advanceEpicRunMergeIntegration = SqlSchema.void({
+    Request: AdvanceEpicRunMergeIntegrationInput,
+    execute: ({ runId, lastAcceptedHead }) => sql`
+      UPDATE epic_run_merge_state
+      SET last_accepted_head = ${lastAcceptedHead}
+      WHERE run_id = ${runId}
     `,
   });
 
@@ -485,6 +499,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     base_branch AS "baseBranch",
     integration_branch AS "integrationBranch",
     integration_worktree_path AS "integrationWorktreePath",
+    operator_base_branch AS "operatorBaseBranch",
     siblings
   `);
   const getEpicRunMergeStateRow = SqlSchema.findOneOption({
@@ -888,6 +903,19 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const advanceMergeIntegration: EpicRunStoreShape["advanceMergeIntegration"] = (input) =>
+    advanceEpicRunMergeIntegration(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.advanceMergeIntegration:query",
+          "EpicRunStore.advanceMergeIntegration:encodeRequest",
+          {
+            runId: input.runId,
+          },
+        ),
+      ),
+    );
+
   const beginParkMerge: EpicRunStoreShape["beginParkMerge"] = (input) =>
     sql
       .withTransaction(
@@ -1046,6 +1074,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     enqueueMerge,
     beginMergeDrain,
     restoreMergeTail,
+    advanceMergeIntegration,
     beginParkMerge,
     finalizeParkMerge,
     completeMerge,

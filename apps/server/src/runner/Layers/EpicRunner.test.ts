@@ -5378,6 +5378,7 @@ describe("EpicRunner", () => {
       baseBranch: "mine",
       integrationBranch: `cook-epic-integration-${runId}`,
       integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      operatorBaseBranch: null,
       siblings: [],
       entries: [
         {
@@ -5525,6 +5526,7 @@ describe("EpicRunner", () => {
       baseBranch: "mine",
       integrationBranch: `cook-epic-integration-${runId}`,
       integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      operatorBaseBranch: null,
       siblings: [
         {
           repositoryPath: "/tmp/epic-runner-sibling",
@@ -5881,6 +5883,7 @@ describe("EpicRunner", () => {
       baseBranch: "mine",
       integrationBranch: `cook-epic-integration-${runId}`,
       integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      operatorBaseBranch: null,
       siblings: [],
       entries: [
         {

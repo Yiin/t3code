@@ -236,6 +236,7 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
         if (!mergeStates.has(input.runId)) {
           mergeStates.set(input.runId, {
             ...input,
+            operatorBaseBranch: input.operatorBaseBranch ?? null,
             initialHead: input.lastAcceptedHead,
             parkedCount: 0,
             entries: [],
@@ -287,6 +288,12 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
               : row,
           ),
         });
+      }),
+    advanceMergeIntegration: ({ runId, lastAcceptedHead }) =>
+      Effect.sync(() => {
+        const state = mergeStates.get(runId);
+        if (state === undefined) return;
+        mergeStates.set(runId, { ...state, lastAcceptedHead });
       }),
     beginParkMerge: ({ runId, sequence, reason }) =>
       Effect.sync(() => {

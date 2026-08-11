@@ -27,7 +27,12 @@ import type {
   WorkspaceShape,
 } from "../ports/Workspace.ts";
 import type { PersistedEpicRun, RunJournalShape } from "../ports/RunJournal.ts";
-import { integrationBranch as integrationBranchName, parseMergeFixTitle } from "../policy.ts";
+import {
+  integrationBranch as integrationBranchName,
+  parseIntegrationFixTitle,
+  parseMergeFixTitle,
+  runBaseBranch as runBaseBranchName,
+} from "../policy.ts";
 import type * as ProcessRunner from "../processRunner.ts";
 import { resolveRunBaseBranch } from "../runBaseBranch.ts";
 import {
@@ -342,6 +347,30 @@ export const makeTerminalPoolWorkspace = (deps: {
       }
 
       const baseBranch = yield* resolveBaseBranch(run);
+      // The operator's branch at launch (t3code-sha), captured once and
+      // persisted verbatim below — never re-read from the working tree at
+      // drain time, so an operator who switches branches mid-run cannot
+      // silently change what a later drain integrates.
+      //
+      // `readCurrentBranch` fails on a detached `HEAD` (`git symbolic-ref`
+      // has nothing to report). That is a legitimate state to launch from —
+      // a resumed epic whose run base branch already exists, for one — and
+      // must not turn into a provisioning failure just because the operator
+      // has no branch to integrate from. `null` here means the same thing it
+      // means for a snapshot that predates this field: no continuous
+      // integration for this run. Mirrors the server twin
+      // (`EpicRunnerPoolPorts.ts`).
+      const operatorBaseBranch = run.config.vcs.runOwnedBaseBranch
+        ? yield* readCurrentBranch(run.cwd).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("epic.runner.operator-base-branch-unresolved", {
+                runId: run.runId,
+                cwd: run.cwd,
+                detail: error.detail,
+              }).pipe(Effect.as(null)),
+            ),
+          )
+        : null;
       // A run-owned base branch (t3code-5m4) is never checked out at
       // `run.cwd`, so seeding from `HEAD` there would read the operator's
       // branch instead — reused verbatim by every later resume and fatal on
@@ -446,6 +475,7 @@ export const makeTerminalPoolWorkspace = (deps: {
             baseBranch,
             integrationBranch: branch,
             integrationWorktreePath: targetPath,
+            operatorBaseBranch,
             siblings: siblingStates,
             entries: [],
           })
@@ -500,7 +530,14 @@ export const makeTerminalPoolWorkspace = (deps: {
       }
 
       const mergeFix = parseMergeFixTitle(input.issueTitle);
-      const branch = mergeFix?.branch ?? `epic/${input.issueId}`;
+      // An integration-fix child (t3code-sha) is dispatched directly onto
+      // the run's own base branch — the same reused-branch pattern a
+      // per-entry merge-fix child gets — so committing there IS landing the
+      // resolution; there is no separate branch for the queue to land.
+      const integrationFix = parseIntegrationFixTitle(input.issueTitle);
+      const branch =
+        mergeFix?.branch ??
+        (integrationFix !== null ? runBaseBranchName(run.epicId) : `epic/${input.issueId}`);
       if (mergeFix !== null) {
         const original = yield* mergeQueueStore
           .parkedOriginalChild(run.runId, branch)
