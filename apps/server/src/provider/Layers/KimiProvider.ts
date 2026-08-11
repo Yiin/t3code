@@ -1,15 +1,21 @@
+import * as NodeOS from "node:os";
+
 import {
   type KimiSettings,
   type ModelCapabilities,
   type ServerProvider,
+  type ServerProviderAuth,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
@@ -39,6 +45,55 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
+
+const decodeUnknownJsonString = Schema.decodeUnknownOption(Schema.UnknownFromJsonString);
+
+/**
+ * Derive the provider auth state from the stored OAuth credentials file. The
+ * managed kimi-code provider refreshes its short-lived access token on
+ * demand, so the presence of either token counts as authenticated.
+ */
+export function kimiAuthFromCredentialsJson(raw: string): ServerProviderAuth {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return { status: "unauthenticated" };
+  }
+  const parsedOption = decodeUnknownJsonString(trimmed);
+  if (Option.isNone(parsedOption)) {
+    return { status: "unauthenticated" };
+  }
+  const parsed = parsedOption.value;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { status: "unauthenticated" };
+  }
+  const record = parsed as Record<string, unknown>;
+  const hasToken = (key: string) => {
+    const value = record[key];
+    return typeof value === "string" && value.trim().length > 0;
+  };
+  if (hasToken("refresh_token") || hasToken("access_token")) {
+    return { status: "authenticated", type: "oauth", label: "Kimi OAuth" };
+  }
+  return { status: "unauthenticated" };
+}
+
+/**
+ * Read the Kimi CLI OAuth credentials from `$KIMI_CODE_HOME/credentials/`
+ * (default `~/.kimi-code/credentials/`). A missing or unreadable file means
+ * the user has not completed `kimi login`.
+ */
+const probeKimiAuth = Effect.fn("probeKimiAuth")(function* (
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<ServerProviderAuth, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const kimiHome = environment.KIMI_CODE_HOME?.trim() || path.join(NodeOS.homedir(), ".kimi-code");
+  const credentialsPath = path.join(kimiHome, "credentials", "kimi-code.json");
+  const raw = yield* fileSystem
+    .readFileString(credentialsPath)
+    .pipe(Effect.orElseSucceed(() => ""));
+  return kimiAuthFromCredentialsJson(raw);
+});
 
 const KIMI_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -131,7 +186,7 @@ export const checkKimiProviderStatus = Effect.fn("checkKimiProviderStatus")(func
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
 > {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const models = kimiModelsFromSettings(kimiSettings.customModels);
@@ -218,6 +273,7 @@ export const checkKimiProviderStatus = Effect.fn("checkKimiProviderStatus")(func
     });
   }
 
+  const auth = yield* probeKimiAuth(environment);
   return buildServerProvider({
     presentation: KIMI_PRESENTATION,
     enabled: kimiSettings.enabled,
@@ -227,7 +283,10 @@ export const checkKimiProviderStatus = Effect.fn("checkKimiProviderStatus")(func
       installed: true,
       version,
       status: "ready",
-      auth: { status: "unknown" },
+      auth,
+      ...(auth.status === "unauthenticated"
+        ? { message: "Kimi CLI is installed but not logged in. Run `kimi login` to authenticate." }
+        : {}),
     },
   });
 });
