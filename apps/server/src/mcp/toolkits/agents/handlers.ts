@@ -23,8 +23,9 @@ import { ProjectionSnapshotQuery } from "../../../orchestration/Services/Project
 import {
   makeThreadSettleWatch,
   resolveFinalAssistantMessage,
-  threadTurnState,
+  resolveTurnAssistantMessage,
   type ThreadSettleTimings,
+  type ThreadTurnState,
 } from "../../../orchestration/ThreadSettleWatch.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { mirrorChildLifecycle, type ChildMirrorTarget } from "./childMirror.ts";
@@ -79,9 +80,7 @@ const formatWait = (ms: number): string =>
     : `${String(Math.round(ms / 1000))} seconds`;
 
 /** How a settled child's turn state reads as a tool-result status. */
-const statusFromTurnState = (
-  turnState: ReturnType<typeof threadTurnState>,
-): Exclude<SpawnAgentStatus, "timeout"> => {
+const statusFromTurnState = (turnState: ThreadTurnState): Exclude<SpawnAgentStatus, "timeout"> => {
   switch (turnState) {
     case "error":
       return "failed";
@@ -274,13 +273,29 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
    * The prior turn id is `null` on purpose: this child was created moments ago,
    * so it has no earlier turn whose settled state could be mistaken for this
    * one's end.
+   *
+   * Everything after the wait is pinned to the turn the wait settled. The child
+   * is idle for the length of this read, and a human can talk to it from the
+   * drawer — that message starts a NEW turn, whose streaming reply would
+   * otherwise be read as the newest assistant row and reported to the parent as
+   * the answer it asked for. Reading the turn's own row instead, and taking the
+   * status from the wait's own verdict rather than from whatever turn is latest
+   * by then, closes the window on both halves of the result.
    */
   const settle = Effect.gen(function* () {
-    yield* watch.awaitTurnEnd(childThreadId, SPAWN_SETTLE_TIMINGS, null);
-    const settled = yield* watch.readSettledFinalMessage(childThreadId, SPAWN_SETTLE_TIMINGS);
+    const settledTurn = yield* watch.awaitTurnEnd(childThreadId, SPAWN_SETTLE_TIMINGS, null);
+    const settled = yield* watch.readSettledFinalMessage(
+      childThreadId,
+      SPAWN_SETTLE_TIMINGS,
+      settledTurn.turnId,
+    );
     const thread = settled.snapshot?.thread;
-    const status = statusFromTurnState(threadTurnState(thread));
-    const text = resolveFinalAssistantMessage(thread)?.text ?? null;
+    const status = statusFromTurnState(settledTurn.state);
+    const text =
+      (settledTurn.turnId === null
+        ? resolveFinalAssistantMessage(thread)
+        : resolveTurnAssistantMessage(thread, settledTurn.turnId)
+      )?.text ?? null;
     // A session that errored usually leaves no assistant message, and an empty
     // result tells the parent nothing. Its `lastError` is the answer instead.
     const finalMessage =

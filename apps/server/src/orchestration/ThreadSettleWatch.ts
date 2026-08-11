@@ -50,6 +50,19 @@ export interface ThreadSettleTimings {
 export type ThreadTurnState = "running" | "completed" | "interrupted" | "error" | null;
 
 /**
+ * What `awaitTurnEnd` settled on.
+ *
+ * `turnId` is `null` when the wait ended on the session status with no turn row
+ * of its own to name — the provider died before a turn was ever projected. A
+ * caller that wants to pin a read to this turn must handle that, and today's
+ * unpinned behaviour is the right thing to fall back to.
+ */
+export interface SettledTurn {
+  readonly turnId: TurnId | null;
+  readonly state: "completed" | "interrupted" | "error";
+}
+
+/**
  * The turn state a session status implies, or null while the session is
  * (re)starting or running and turns must stay unsettled.
  *
@@ -109,6 +122,48 @@ export const resolveFinalAssistantMessage = (
     pointer === null ? undefined : assistantMessages.find((message) => message.id === pointer);
   const message = named ?? assistantMessages[assistantMessages.length - 1];
   return message === undefined ? null : { text: message.text, streaming: message.streaming };
+};
+
+/**
+ * The assistant message one named turn produced.
+ *
+ * Unlike `resolveFinalAssistantMessage`, this never widens to "the newest
+ * assistant row". That widening is only safe while the caller is the sole
+ * writer of the thread. A thread-backed subagent is not: a human can send it a
+ * message from the drawer the moment its turn ends, and the newest row is then
+ * the reply to the human, not the answer the spawner asked for.
+ *
+ * The pin is `message.turnId`, the same join
+ * `ProviderRuntimeIngestion.ts:229-247` uses, not `latestTurn.assistantMessageId`
+ * — that pointer names whatever turn is latest now, which is exactly the one
+ * that must not be trusted here.
+ *
+ * Untagged rows are the one concession. A provider that never stamps `turnId`
+ * would otherwise resolve to nothing at all, so an untagged row is accepted when
+ * the pinned turn has none of its own. A row tagged with a *different* turn is
+ * always rejected, which is what closes the window.
+ */
+export const resolveTurnAssistantMessage = (
+  thread: OrchestrationThread | undefined,
+  turnId: TurnId,
+): { readonly text: string; readonly streaming: boolean } | null => {
+  if (thread === undefined) {
+    return null;
+  }
+  let untagged: { readonly text: string; readonly streaming: boolean } | null = null;
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message === undefined || message.role !== "assistant") {
+      continue;
+    }
+    if (message.turnId === turnId) {
+      return { text: message.text, streaming: message.streaming };
+    }
+    if (message.turnId === null && untagged === null) {
+      untagged = { text: message.text, streaming: message.streaming };
+    }
+  }
+  return untagged;
 };
 
 /**
@@ -203,12 +258,16 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
    * `running` (`ProjectionPipeline.ts:1059-1073`). The session is a fallback
    * for the case where the provider dies before a turn row ever exists, which
    * would otherwise be indistinguishable from "still starting".
+   *
+   * Returns the turn it settled on. Every existing caller discards it; a caller
+   * that must not confuse this turn with the next one pins its read to the
+   * returned `turnId`.
    */
   const awaitTurnEnd = (
     threadId: ThreadId,
     timings: ThreadSettleTimings,
     priorTurnId: TurnId | null = null,
-  ) =>
+  ): Effect.Effect<SettledTurn> =>
     Effect.gen(function* () {
       let observedActive = false;
       while (true) {
@@ -232,10 +291,13 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
           observedActive = true;
         }
         if (turnState !== null && turnState !== "running") {
-          return;
+          return { turnId: latestTurn?.turnId ?? null, state: turnState };
         }
         if (observedActive && sessionStatus !== null && isTurnEndSessionStatus(sessionStatus)) {
-          return;
+          const state = settledTurnStateFromSessionStatus(sessionStatus);
+          // Non-null by `isTurnEndSessionStatus`, which is defined from this
+          // same mapping. The check keeps that dependency honest to the type.
+          return { turnId: latestTurn?.turnId ?? null, state: state ?? "completed" };
         }
 
         yield* Effect.sleep(Duration.millis(timings.pollIntervalMs));
@@ -273,10 +335,27 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
    * back completed. The extension is why the exhausted flag below means
    * something: when even that runs out, the absence has been watched for as
    * long as it is worth watching.
+   *
+   * `pinnedTurnId` narrows every read to that one turn's assistant message
+   * (`resolveTurnAssistantMessage`). Omit it and the read is exactly what it
+   * always was — the epic runner owns its thread and needs no pin. Pass it when
+   * something else can start a turn on the thread mid-read, which is the whole
+   * of `spawn_agent`'s problem: a human message that lands between turn end and
+   * this read otherwise rewrites the answer under it, and the new turn's
+   * streaming text never holds still, so the wait burns its full bound and
+   * hands back the wrong message as a clean result.
    */
-  const readSettledFinalMessage = (threadId: ThreadId, timings: ThreadSettleTimings) =>
+  const readSettledFinalMessage = (
+    threadId: ThreadId,
+    timings: ThreadSettleTimings,
+    pinnedTurnId: TurnId | null = null,
+  ) =>
     Effect.gen(function* () {
       const read = () => readThreadDetail(threadId);
+      const resolveMessage = (thread: OrchestrationThread | undefined) =>
+        pinnedTurnId === null
+          ? resolveFinalAssistantMessage(thread)
+          : resolveTurnAssistantMessage(thread, pinnedTurnId);
 
       let previous = yield* read();
       // Raised, in the loop, the first time a completed turn reads back with
@@ -286,8 +365,8 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
       for (let attempt = 0; attempt < maxReads; attempt += 1) {
         yield* Effect.sleep(Duration.millis(timings.quietPeriodMs));
         const current = yield* read();
-        const previousMessage = resolveFinalAssistantMessage(previous?.thread);
-        const currentMessage = resolveFinalAssistantMessage(current?.thread);
+        const previousMessage = resolveMessage(previous?.thread);
+        const currentMessage = resolveMessage(current?.thread);
         if (
           currentMessage !== null &&
           previousMessage?.text === currentMessage.text &&
@@ -301,7 +380,7 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
         }
         previous = current;
       }
-      const settledMessage = resolveFinalAssistantMessage(previous?.thread);
+      const settledMessage = resolveMessage(previous?.thread);
       yield* Effect.logWarning(`${logPrefix}.final-message-never-settled`, {
         threadId,
         messageProjected: settledMessage !== null,
@@ -319,6 +398,7 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
     readSettledFinalMessage,
     threadTurnState,
     resolveFinalAssistantMessage,
+    resolveTurnAssistantMessage,
   } as const;
 };
 

@@ -160,11 +160,50 @@ const childThread = (childThreadId: ThreadId, child: ChildFixture): Orchestratio
   };
 };
 
+const HUMAN_TURN_ID = TurnId.make("turn-human");
+const HUMAN_MESSAGE_ID = MessageId.make("child-assistant-2");
+
+/**
+ * The child as it looks once a human has spoken to it from the drawer.
+ *
+ * A second turn is running, and its reply is still streaming — so it grows on
+ * every read and never holds still. That is what made the unpinned read burn its
+ * whole bound and then hand this text back as the spawner's answer.
+ */
+const withHumanTurn = (thread: OrchestrationThread, read: number): OrchestrationThread => ({
+  ...thread,
+  latestTurn: {
+    turnId: HUMAN_TURN_ID,
+    state: "running",
+    requestedAt: "2026-08-11T00:00:06.000Z",
+    startedAt: "2026-08-11T00:00:06.000Z",
+    completedAt: null,
+    assistantMessageId: HUMAN_MESSAGE_ID,
+  },
+  messages: [
+    ...thread.messages,
+    {
+      id: HUMAN_MESSAGE_ID,
+      role: "assistant",
+      text: `Answering you now${".".repeat(read)}`,
+      turnId: HUMAN_TURN_ID,
+      streaming: true,
+      createdAt: "2026-08-11T00:00:07.000Z",
+      updatedAt: "2026-08-11T00:00:07.000Z",
+    },
+  ],
+});
+
 interface Fixture {
   readonly shells?: ReadonlyMap<string, OrchestrationThreadShell>;
   readonly childThreadIds?: ReadonlyArray<ThreadId>;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
   readonly child?: ChildFixture;
+  /**
+   * Whether a human message lands on the child after its first turn ended, in
+   * the window between the settle wait and the final read.
+   */
+  readonly humanMessageAfterSettle?: boolean;
   /** How far the test clock is advanced while the tool call waits. */
   readonly advance?: Duration.Duration;
 }
@@ -189,8 +228,17 @@ const run = (
       !shells.has(threadId) && threadId.startsWith(SUBAGENT_CHILD_THREAD_ID_PREFIX);
     const spawnedChildShell = (threadId: ThreadId) =>
       isSpawnedChild(threadId) ? childShell(threadId, child) : undefined;
-    const spawnedChild = (threadId: ThreadId) =>
-      isSpawnedChild(threadId) ? childThread(threadId, child) : undefined;
+    // The human speaks once the settle wait is over, which is exactly one
+    // detail read in. Every read after that carries the second turn.
+    let detailReads = 0;
+    const spawnedChild = (threadId: ThreadId) => {
+      if (!isSpawnedChild(threadId)) return undefined;
+      const thread = childThread(threadId, child);
+      detailReads += 1;
+      return fixture.humanMessageAfterSettle === true && detailReads > 1
+        ? withHumanTurn(thread, detailReads)
+        : thread;
+    };
 
     const fiber = yield* spawnAgent(policy, input).pipe(
       Effect.provideService(OrchestrationEngineService, {
@@ -466,6 +514,29 @@ describe("spawn_agent handler", () => {
           : [],
       );
       assert.strictEqual(completed.length, 1);
+    }),
+  );
+
+  it.effect("returns the settled turn's answer, not a reply meant for the human", () =>
+    Effect.gen(function* () {
+      const { result } = yield* run(enabledPolicy, spawnInput, {
+        humanMessageAfterSettle: true,
+        // Long enough for an unpinned read to burn `MAX_SETTLE_READS` and
+        // return, so this fails on the wrong text rather than on a hang.
+        advance: Duration.seconds(60),
+      });
+
+      assert.strictEqual(result._tag, "Success");
+      if (result._tag !== "Success" || !result.success.spawned) return;
+      assert.strictEqual(result.success.finalMessage, "Three migrations write settings.");
+      assert.strictEqual(result.success.status, "completed");
+      // The second turn is still running, so an unpinned read would have waited
+      // out `MAX_SETTLE_READS` before returning it. One quiet period proves the
+      // read never followed it.
+      assert.ok(
+        result.success.elapsedMs < 5000,
+        `the pinned read settles at once, took ${String(result.success.elapsedMs)}ms`,
+      );
     }),
   );
 
