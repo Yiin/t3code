@@ -16,6 +16,8 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import { epicRunsHttpApiLayer } from "./runner/http.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import { OrchestrationRetentionLive } from "./persistence/Layers/OrchestrationRetention.ts";
+import { OrchestrationRetentionSweeperLive } from "./persistence/Layers/OrchestrationRetentionSweeper.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
 import { ProviderUsageLedgerStoreLive } from "./persistence/Layers/ProviderUsageLedger.ts";
@@ -203,6 +205,13 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
+
+// The event store is the one table that grows with every turn and is never
+// trimmed by anything else, so the server carries its own retention sweep.
+const OrchestrationRetentionLayerLive = OrchestrationRetentionSweeperLive.pipe(
+  Layer.provide(OrchestrationRetentionLive),
+  Layer.provide(PersistenceLayerLive),
+);
 
 // `reconcile` stops the sessions on a removed or replaced provider instance
 // before it closes that instance's scope. The only path that writes a
@@ -425,6 +434,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(ProcessDiagnostics.layer),
   Layer.provideMerge(ProcessResourceMonitor.layer),
+  Layer.provideMerge(OrchestrationRetentionLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),
