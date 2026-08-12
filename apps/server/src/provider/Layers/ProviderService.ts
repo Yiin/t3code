@@ -190,6 +190,10 @@ function toRuntimePayloadFromSession(
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
+    // Written as null when the adapter reported nothing. The directory merges
+    // runtime payloads, so omitting the key would leave the previous session's
+    // origin in place and make an unknown session read as a resumed one.
+    sessionOrigin: session.sessionOrigin ?? null,
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -199,6 +203,39 @@ function toRuntimePayloadFromSession(
       ? { t3EnvironmentContext: extra.t3EnvironmentContext }
       : {}),
   };
+}
+
+/** Recorded when an adapter reports no origin at all. */
+const UNKNOWN_SESSION_ORIGIN = "unknown";
+
+/** What the adapter said the session start did, or `unknown` if it said nothing. */
+function sessionOriginLabel(session: ProviderSession): string {
+  return session.sessionOrigin ?? UNKNOWN_SESSION_ORIGIN;
+}
+
+/**
+ * A caller supplied a resume cursor and the provider answered with an empty
+ * session. The previous turns are gone and nothing downstream can get them
+ * back, so the loss has to be readable in the server log.
+ */
+function warnOnDiscardedConversation(input: {
+  readonly operation: string;
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly session: ProviderSession;
+  readonly requestedResume: boolean;
+}): Effect.Effect<void> {
+  if (!input.requestedResume || input.session.sessionOrigin !== "started-fresh") {
+    return Effect.void;
+  }
+  return Effect.logWarning("provider.session.started-fresh", {
+    operation: input.operation,
+    threadId: input.threadId,
+    provider: input.session.provider,
+    providerInstanceId: input.providerInstanceId,
+    detail:
+      "A resume cursor was supplied but the provider started an empty session. The earlier conversation is lost.",
+  });
 }
 
 interface T3EnvironmentContext {
@@ -889,7 +926,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
           yield* analytics.record("provider.session.recovered", {
             provider: existing.provider,
-            strategy: "adopt-existing",
+            // What the session actually is, not what the caller wanted. The
+            // path that produced it is a separate field.
+            strategy: sessionOriginLabel(existing),
+            recovery: "adopt-existing",
             hasResumeCursor: existing.resumeCursor !== undefined,
           });
           return { adapter, session: existing } as const;
@@ -957,13 +997,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
 
+      yield* Effect.annotateCurrentSpan({
+        "provider.session_origin": sessionOriginLabel(resumed),
+      });
+      yield* warnOnDiscardedConversation({
+        operation: input.operation,
+        threadId: input.binding.threadId,
+        providerInstanceId: bindingInstanceId,
+        session: resumed,
+        requestedResume: hasResumeCursor,
+      });
       yield* upsertSessionBinding(
         { ...resumed, providerInstanceId: bindingInstanceId },
         input.binding.threadId,
       );
       yield* analytics.record("provider.session.recovered", {
         provider: resumed.provider,
-        strategy: "resume-thread",
+        strategy: sessionOriginLabel(resumed),
+        recovery: "resume-thread",
         hasResumeCursor: resumed.resumeCursor !== undefined,
       });
       return { adapter, session: resumed } as const;
@@ -1172,6 +1223,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...session,
           providerInstanceId: resolvedInstanceId,
         };
+        yield* Effect.annotateCurrentSpan({
+          "provider.session_origin": sessionOriginLabel(session),
+        });
+        yield* warnOnDiscardedConversation({
+          operation: "ProviderService.startSession",
+          threadId,
+          providerInstanceId: resolvedInstanceId,
+          session,
+          requestedResume: effectiveResumeCursor !== undefined,
+        });
 
         yield* stopStaleSessionsForThread({
           threadId,

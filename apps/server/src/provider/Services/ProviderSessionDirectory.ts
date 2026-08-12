@@ -1,6 +1,7 @@
 import type {
   ProviderInstanceId,
   ProviderDriverKind,
+  ProviderSessionOrigin,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
   ThreadId,
@@ -32,6 +33,15 @@ export interface ProviderRuntimeBinding {
 
 export interface ProviderRuntimeBindingWithMetadata extends ProviderRuntimeBinding {
   readonly lastSeenAt: string;
+  /**
+   * How the persisted session opened, as the adapter reported it. Read-only:
+   * it is decoded out of `runtimePayload`, which is also where a writer must
+   * put it, so there is exactly one way to set it.
+   *
+   * Absent means the adapter reported nothing, or the value on disk is not a
+   * known origin. Treat that as unknown and fail safe.
+   */
+  readonly sessionOrigin?: ProviderSessionOrigin;
 }
 
 export type ProviderSessionDirectoryReadError = ProviderSessionDirectoryPersistenceError;

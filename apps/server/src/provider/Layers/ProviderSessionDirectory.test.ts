@@ -119,6 +119,49 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       }
     }));
 
+  it("exposes a known session origin from the payload and drops an unknown one", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+
+      const knownThreadId = ThreadId.make("thread-origin-known");
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: knownThreadId,
+        runtimePayload: { sessionOrigin: "forked" },
+      });
+      const known = yield* directory.getBinding(knownThreadId);
+      assert.equal(Option.isSome(known), true);
+      if (Option.isSome(known)) {
+        assert.equal(known.value.sessionOrigin, "forked");
+      }
+
+      // A value another build wrote must degrade to "unknown", not fail the
+      // read and not be smuggled through as a valid origin.
+      const strangeThreadId = ThreadId.make("thread-origin-strange");
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: strangeThreadId,
+        runtimePayload: { sessionOrigin: "teleported" },
+      });
+      const strange = yield* directory.getBinding(strangeThreadId);
+      assert.equal(Option.isSome(strange), true);
+      if (Option.isSome(strange)) {
+        assert.equal(strange.value.sessionOrigin, undefined);
+      }
+
+      const absentThreadId = ThreadId.make("thread-origin-absent");
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: absentThreadId,
+        runtimePayload: { cwd: "/tmp/project" },
+      });
+      const absent = yield* directory.getBinding(absentThreadId);
+      assert.equal(Option.isSome(absent), true);
+      if (Option.isSome(absent)) {
+        assert.equal(absent.value.sessionOrigin, undefined);
+      }
+    }));
+
   it("lists persisted bindings with metadata in oldest-first order", () =>
     Effect.gen(function* () {
       const directory = yield* ProviderSessionDirectory;

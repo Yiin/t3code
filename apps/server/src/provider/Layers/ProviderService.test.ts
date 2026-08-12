@@ -9,6 +9,7 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionOrigin,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import {
@@ -36,6 +37,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -133,6 +135,14 @@ type LegacyProviderRuntimeEvent = {
 function makeFakeCodexAdapter(
   provider: ProviderDriverKind = CODEX_DRIVER,
   capabilityOverrides?: { readonly sessionResume?: ProviderSessionResumeMode },
+  sessionOverrides?: {
+    /**
+     * What the fake reports when a start carries a resume cursor. Left unset
+     * it reports nothing at all, which is the state every adapter is in until
+     * the follow-up children teach them to answer.
+     */
+    readonly resumeOrigin?: ProviderSessionOrigin;
+  },
 ) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
@@ -152,6 +162,9 @@ function makeFakeCodexAdapter(
           resumeCursor: input.resumeCursor ?? {
             opaque: `resume-${String(input.threadId)}`,
           },
+          ...(input.resumeCursor !== undefined && sessionOverrides?.resumeOrigin !== undefined
+            ? { sessionOrigin: sessionOverrides.resumeOrigin }
+            : {}),
           cwd: input.cwd ?? process.cwd(),
           createdAt: now,
           updatedAt: now,
@@ -1058,6 +1071,188 @@ it.effect("refuses to recover a thread whose adapter cannot resume a session", (
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+interface RecordedAnalyticsEvent {
+  readonly event: string;
+  readonly properties: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Builds a single-adapter stack whose adapter reports the given origin for any
+ * start that carries a resume cursor, and captures every analytics event so a
+ * test can read what the recovery claimed happened.
+ */
+function makeSessionOriginStack(resumeOrigin?: ProviderSessionOrigin) {
+  const codex = makeFakeCodexAdapter(
+    CODEX_DRIVER,
+    undefined,
+    resumeOrigin === undefined ? undefined : { resumeOrigin },
+  );
+  const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+  const analyticsEvents: Array<RecordedAnalyticsEvent> = [];
+  const analyticsLayer = Layer.succeed(
+    AnalyticsService.AnalyticsService,
+    AnalyticsService.AnalyticsService.of({
+      record: (event, properties) =>
+        Effect.sync(() => {
+          analyticsEvents.push({ event, properties: properties ?? {} });
+        }),
+      flush: Effect.void,
+    }),
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = Layer.mergeAll(
+    makeProviderServiceLiveForTest().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(analyticsLayer),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+    ),
+    directoryLayer,
+  );
+  return { codex, providerLayer, analyticsEvents };
+}
+
+/**
+ * Starts a session, makes the adapter forget it, then sends a turn. That is
+ * the recovery path: `sendTurn` has to restart the session from the persisted
+ * cursor before it can route anything.
+ */
+const recoverThroughSendTurn = (
+  threadId: ThreadId,
+  stack: ReturnType<typeof makeSessionOriginStack>,
+) =>
+  Effect.gen(function* () {
+    const provider = yield* ProviderService.ProviderService;
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+    yield* provider.startSession(threadId, {
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      threadId,
+      cwd: "/tmp/project-session-origin",
+      runtimeMode: "full-access",
+    });
+    yield* stack.codex.stopAll();
+    stack.codex.startSession.mockClear();
+
+    yield* provider.sendTurn({ threadId, input: "continue", attachments: [] });
+
+    assert.equal(stack.codex.startSession.mock.calls.length, 1);
+    return yield* directory.getBinding(threadId);
+  });
+
+const recoveredAnalyticsEvent = (events: ReadonlyArray<RecordedAnalyticsEvent>) =>
+  events.findLast((entry) => entry.event === "provider.session.recovered");
+
+it.effect("warns and records the degraded origin when a resume starts an empty session", () => {
+  const stack = makeSessionOriginStack("started-fresh");
+  const logged: Array<unknown> = [];
+  const logger = Logger.make<unknown, void>(({ message }) => {
+    if (Array.isArray(message)) {
+      logged.push(...message);
+    } else {
+      logged.push(message);
+    }
+  });
+  const threadId = asThreadId("thread-origin-started-fresh");
+
+  return Effect.gen(function* () {
+    const binding = yield* recoverThroughSendTurn(threadId, stack).pipe(
+      Effect.provide(stack.providerLayer),
+    );
+
+    assert.include(logged, "provider.session.started-fresh");
+    const detail = logged.find(
+      (entry): entry is Record<string, unknown> =>
+        typeof entry === "object" && entry !== null && "threadId" in entry,
+    );
+    assert.exists(detail);
+    assert.equal(detail.threadId, threadId);
+
+    const recovered = recoveredAnalyticsEvent(stack.analyticsEvents);
+    assert.exists(recovered);
+    assert.equal(recovered.properties.strategy, "started-fresh");
+    assert.equal(recovered.properties.recovery, "resume-thread");
+
+    assert.equal(Option.isSome(binding), true);
+    if (Option.isSome(binding)) {
+      assert.equal(binding.value.sessionOrigin, "started-fresh");
+    }
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(Logger.layer([logger], { mergeWithExisting: false }), NodeServices.layer),
+    ),
+  );
+});
+
+it.effect("records an unreported origin as unknown and never as resumed", () => {
+  const stack = makeSessionOriginStack();
+  const logged: Array<unknown> = [];
+  const logger = Logger.make<unknown, void>(({ message }) => {
+    if (Array.isArray(message)) {
+      logged.push(...message);
+    } else {
+      logged.push(message);
+    }
+  });
+  const threadId = asThreadId("thread-origin-unreported");
+
+  return Effect.gen(function* () {
+    const binding = yield* recoverThroughSendTurn(threadId, stack).pipe(
+      Effect.provide(stack.providerLayer),
+    );
+
+    const recovered = recoveredAnalyticsEvent(stack.analyticsEvents);
+    assert.exists(recovered);
+    assert.equal(recovered.properties.strategy, "unknown");
+    // A cursor was supplied and honoured as far as the caller can tell, but
+    // the adapter said nothing. Silence is not proof of a continued session.
+    assert.equal(recovered.properties.hasResumeCursor, true);
+    assert.notInclude(logged, "provider.session.started-fresh");
+
+    assert.equal(Option.isSome(binding), true);
+    if (Option.isSome(binding)) {
+      assert.equal(binding.value.sessionOrigin, undefined);
+      const payload = binding.value.runtimePayload as Record<string, unknown>;
+      assert.equal(payload.sessionOrigin, null);
+    }
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(Logger.layer([logger], { mergeWithExisting: false }), NodeServices.layer),
+    ),
+  );
+});
+
+it.effect("round-trips a reported origin through runtimePayload onto the binding", () => {
+  const stack = makeSessionOriginStack("resumed");
+  const threadId = asThreadId("thread-origin-resumed");
+
+  return Effect.gen(function* () {
+    const binding = yield* recoverThroughSendTurn(threadId, stack).pipe(
+      Effect.provide(stack.providerLayer),
+    );
+
+    assert.equal(Option.isSome(binding), true);
+    if (Option.isSome(binding)) {
+      const payload = binding.value.runtimePayload as Record<string, unknown>;
+      assert.equal(payload.sessionOrigin, "resumed");
+      assert.equal(binding.value.sessionOrigin, "resumed");
+    }
+
+    const recovered = recoveredAnalyticsEvent(stack.analyticsEvents);
+    assert.exists(recovered);
+    assert.equal(recovered.properties.strategy, "resumed");
+  }).pipe(Effect.provide(NodeServices.layer));
+});
+
 const routing = makeProviderServiceLayer();
 
 it.effect("ProviderServiceLive writes canonical events to the emitting thread segment", () =>
@@ -1500,7 +1695,12 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(persisted.value.runtimeMode, "approval-required");
         assert.equal(persisted.value.status, "error");
         assert.deepEqual(persisted.value.resumeCursor, updatedResumeCursor);
-        assert.deepEqual(persisted.value.runtimePayload, runtimePayload);
+        // The `startSession` above wrote `sessionOrigin: null` — the fake
+        // adapter reports no origin — and the payload merge keeps it.
+        assert.deepEqual(persisted.value.runtimePayload, {
+          ...runtimePayload,
+          sessionOrigin: null,
+        });
       }
     }),
   );
@@ -1554,7 +1754,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(persisted.value.runtimeMode, "auto-accept-edits");
         assert.equal(persisted.value.status, "stopped");
         assert.deepEqual(persisted.value.resumeCursor, initialResumeCursor);
-        assert.deepEqual(persisted.value.runtimePayload, runtimePayload);
+        // Same as above: the start persisted a null origin before this upsert.
+        assert.deepEqual(persisted.value.runtimePayload, {
+          ...runtimePayload,
+          sessionOrigin: null,
+        });
       }
     }),
   );

@@ -33,6 +33,30 @@ const ProviderSessionStatus = Schema.Literals([
   "closed",
 ]);
 
+/**
+ * What the adapter says actually happened when a session opened.
+ *
+ * - `started`: no resume cursor was supplied, so the session is new by request.
+ * - `resumed`: a cursor was supplied and the provider continued that
+ *   conversation.
+ * - `started-fresh`: a cursor was supplied but the provider minted an empty
+ *   session. The prior conversation is gone — a data-loss event.
+ * - `forked`: a cursor was supplied and the provider branched it into a new
+ *   conversation that carries the old history.
+ *
+ * An absent origin means the adapter reported nothing. Treat that as unknown
+ * and fail safe. Never infer `resumed` from the presence of a cursor: several
+ * providers degrade a resume into a blank session and return a session that
+ * looks identical.
+ */
+export const ProviderSessionOrigin = Schema.Literals([
+  "started",
+  "resumed",
+  "started-fresh",
+  "forked",
+]);
+export type ProviderSessionOrigin = typeof ProviderSessionOrigin.Type;
+
 export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
   // Optional during the driver/instance migration. Once every producer
@@ -45,6 +69,9 @@ export const ProviderSession = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyString),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
+  // Optional so rows and test doubles written before adapters reported an
+  // origin still decode. Absent is "unknown", never "resumed".
+  sessionOrigin: Schema.optional(ProviderSessionOrigin),
   activeTurnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

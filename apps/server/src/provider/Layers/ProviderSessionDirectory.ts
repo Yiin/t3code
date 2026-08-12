@@ -1,4 +1,9 @@
-import { defaultInstanceIdForDriver, ProviderDriverKind, type ThreadId } from "@t3tools/contracts";
+import {
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  ProviderSessionOrigin,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -56,6 +61,20 @@ function mergeRuntimePayload(
   return next;
 }
 
+const decodeSessionOrigin = Schema.decodeUnknownOption(ProviderSessionOrigin);
+
+/**
+ * Reads the session origin the writer stored in `runtimePayload`. An unknown
+ * or missing value decodes to nothing, so a payload written by another build
+ * degrades to "unknown" instead of failing the whole binding read.
+ */
+function readSessionOrigin(runtimePayload: unknown | null) {
+  if (!isRecord(runtimePayload)) {
+    return Option.none();
+  }
+  return decodeSessionOrigin(runtimePayload.sessionOrigin);
+}
+
 function toRuntimeBinding(
   runtime: ProviderSessionRuntime.ProviderSessionRuntime,
   operation: string,
@@ -77,6 +96,10 @@ function toRuntimeBinding(
           resumeCursor: runtime.resumeCursor,
           runtimePayload: runtime.runtimePayload,
           lastSeenAt: runtime.lastSeenAt,
+          ...Option.match(readSessionOrigin(runtime.runtimePayload), {
+            onNone: () => ({}),
+            onSome: (sessionOrigin) => ({ sessionOrigin }),
+          }),
         }) satisfies ProviderRuntimeBindingWithMetadata,
     ),
   );
