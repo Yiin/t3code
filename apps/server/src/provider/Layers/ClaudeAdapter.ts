@@ -142,10 +142,19 @@ type PromptQueueItem =
       readonly type: "terminate";
     };
 
+/**
+ * Claude resumes at the tail of a session and nowhere else.
+ *
+ * The SDK's `resumeSessionAt` accepts a USER message uuid only: measured
+ * 2026-08-12, an assistant uuid that is present in the session JSONL fails
+ * with `No message found with message.uuid of: <uuid>`. This adapter only
+ * ever knew the last ASSISTANT uuid, so it persisted a checkpoint that could
+ * never be replayed. The key is gone from the cursor, and a legacy value on
+ * an older persisted cursor is discarded rather than carried forward.
+ */
 interface ClaudeResumeState {
   readonly threadId?: ThreadId;
   readonly resume?: string;
-  readonly resumeSessionAt?: string;
   readonly turnCount?: number;
 }
 
@@ -271,7 +280,6 @@ interface ClaudeSessionContext {
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
-  lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
   /**
    * Provider/API error observed mid-turn (tagged assistant error message or
@@ -701,7 +709,6 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     threadId?: unknown;
     resume?: unknown;
     sessionId?: unknown;
-    resumeSessionAt?: unknown;
     turnCount?: unknown;
   };
 
@@ -717,14 +724,11 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
         ? cursor.sessionId
         : undefined;
   const resume = resumeCandidate && isUuid(resumeCandidate) ? resumeCandidate : undefined;
-  const resumeSessionAt =
-    typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
 
   return {
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
-    ...(resumeSessionAt ? { resumeSessionAt } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
@@ -1695,7 +1699,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const resumeCursor = {
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
-      ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       turnCount: context.turns.length,
     };
 
@@ -3017,7 +3020,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (isApiErrorMessage) {
         // Synthetic error prose is not model output: surface it only as the
         // runtime.error above, never as assistant text.
-        context.lastAssistantUuid = message.uuid;
         yield* updateResumeCursor(context);
         return;
       }
@@ -3100,7 +3102,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
     }
 
-    context.lastAssistantUuid = message.uuid;
     yield* updateResumeCursor(context);
   });
 
@@ -4247,7 +4248,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           existingResumeSessionId !== undefined ? "resume-session" : "generated-session",
         "claude.resume.thread_id": resumeState?.threadId ?? "",
         "claude.resume.session_id": existingResumeSessionId ?? "",
-        "claude.resume.session_at": resumeState?.resumeSessionAt ?? "",
         "claude.resume.turn_count": resumeState?.turnCount ?? -1,
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
@@ -4296,7 +4296,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         resumeCursor: {
           ...(threadId ? { threadId } : {}),
           ...(sessionId ? { resume: sessionId } : {}),
-          ...(resumeState?.resumeSessionAt ? { resumeSessionAt: resumeState.resumeSessionAt } : {}),
           turnCount: resumeState?.turnCount ?? 0,
         },
         createdAt: startedAt,
@@ -4322,7 +4321,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
-        lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
         lastProviderError: undefined,
         interruptRequested: false,
