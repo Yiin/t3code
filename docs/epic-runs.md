@@ -82,6 +82,39 @@ the same file format. The `NodeEpicRunLock` interop test covers the shared file
 format and exclusive-create behavior across the TypeScript and Bash
 implementations.
 
+## Integration gate and host load
+
+The merge queue runs the integration gate once per merge set. The gate is the
+heaviest thing an epic run does, and its result depends on the machine it runs
+on, not only on the code it tests.
+
+Run d7580b6c ran one gate command at one commit twice. The main checkout took
+421s and exited 0. The integration worktree took 23m01s and exited 1. The
+difference was the host: load average 29.92 on 16 cores, with 17 vitest
+processes from other projects on the same machine. Timing-sensitive tests fail
+when starved of CPU, so a gate started on a loaded host reports a red gate that
+says nothing about the child under test. The worktree and its mirrored
+`node_modules` were correct; they were not the cause (t3code-z7x).
+
+The heavy gate lock at `$XDG_RUNTIME_DIR/t3code/cook-epic-heavy.lock` only
+serialises t3code gates against each other. It cannot see another project's
+test run, so the gate reads the host load itself
+([`packages/epic-core/src/hostContention.ts`](../packages/epic-core/src/hostContention.ts)):
+
+- Before taking the lock, the gate samples the 1-minute load average. Above 1.5
+  runnable processes per core it logs `epic.gate.host-busy` and resamples every
+  30 seconds until the load clears, for at most 10 minutes.
+- It waits without holding the lock, so a busy host never stalls another epic
+  run on this machine.
+- When the bound expires it runs the gate anyway and logs
+  `epic.gate.host-contended`. The wait never fails a run.
+- `epic.gate.start` and `epic.gate.finished` carry `loadPerCpu`, `cpuCount`, and
+  `hostWaitedMs`. `durationMs` excludes the wait, so it stays comparable with
+  earlier runs. A red gate logged next to a high `loadPerCpu` is the host.
+
+A gate that fails while the host is contended is still reported as a gate
+failure. Read the load in the surrounding log lines before blaming the child.
+
 ## Lifecycle
 
 - Closing a browser or mobile client does not stop work. WebSocket cleanup only

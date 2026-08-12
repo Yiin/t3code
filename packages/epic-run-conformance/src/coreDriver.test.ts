@@ -444,6 +444,10 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
           processRunner: runner,
           environment: { ...process.env, ...workspace.env },
           uid: process.getuid?.() ?? 0,
+          // The conformance gate is a fixture command, not real verification.
+          // A parallel test run pushes the host over the contention threshold,
+          // and this scenario must not sit in the quiet-host wait for it.
+          quietHostWaitSeconds: 0,
         }),
         vcs: makeProcessVcs({ processRunner: runner }),
       };

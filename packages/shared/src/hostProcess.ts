@@ -9,6 +9,28 @@ export const HostProcessPlatform = Context.Reference<NodeJS.Platform>(
   },
 );
 
+/**
+ * The one-minute load average, as a sampler rather than a reading.
+ *
+ * Load changes while a process runs, so a caller that wants to know whether the
+ * host is busy has to sample it more than once. On Windows `os.loadavg()`
+ * returns zeros, which reads as an idle host and disables any load-aware wait.
+ */
+export const HostProcessLoadAverage = Context.Reference<() => number>(
+  "@t3tools/shared/hostProcess/HostProcessLoadAverage",
+  {
+    defaultValue: () => () => NodeOS.loadavg()[0] ?? 0,
+  },
+);
+
+/** Cores this process may actually use, honouring an affinity mask or cgroup. */
+export const HostProcessCpuCount = Context.Reference<number>(
+  "@t3tools/shared/hostProcess/HostProcessCpuCount",
+  {
+    defaultValue: () => NodeOS.availableParallelism(),
+  },
+);
+
 export const HostProcessArchitecture = Context.Reference<NodeJS.Architecture>(
   "@t3tools/shared/hostProcess/HostProcessArchitecture",
   {

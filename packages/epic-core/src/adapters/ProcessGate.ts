@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
+import { awaitQuietHost, sampleHostLoad } from "../hostContention.ts";
 import { ProcessRunner } from "../processRunner.ts";
 import { GateError, type GateShape } from "../ports/Gate.ts";
 
@@ -75,6 +76,10 @@ export const makeProcessGate = (input: {
   readonly uid: number;
   readonly timeoutMs?: number;
   readonly lockWaitSeconds?: number;
+  /** See `hostContention.ts`. Zero `quietHostWaitSeconds` disables the wait. */
+  readonly quietHostWaitSeconds?: number;
+  readonly quietHostPollSeconds?: number;
+  readonly quietHostThresholdPerCpu?: number;
 }): GateShape => {
   const run: GateShape["run"] = Effect.fn("ProcessGate.run")(function* ({
     command,
@@ -107,7 +112,36 @@ export const makeProcessGate = (input: {
 
     const lockWaitSeconds = input.lockWaitSeconds ?? DEFAULT_LOCK_WAIT_SECONDS;
     const startedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
-    yield* Effect.logInfo("epic.gate.start", { command, cwd, lockPath, lockWaitSeconds });
+
+    // Hold nothing while waiting: the lock is machine-global, and a gate that
+    // sleeps on a busy host with the lock held stalls every other epic run too.
+    const host = yield* awaitQuietHost({
+      thresholdPerCpu: input.quietHostThresholdPerCpu,
+      pollSeconds: input.quietHostPollSeconds,
+      maxWaitSeconds: input.quietHostWaitSeconds,
+    });
+    if (!host.quiet) {
+      // Not an error. The gate still runs, but its result is now attributable:
+      // a red gate logged next to `loadPerCpu: 1.87` is the host, not the code.
+      yield* Effect.logWarning("epic.gate.host-contended", {
+        cwd,
+        loadAverage1m: host.load.loadAverage1m,
+        cpuCount: host.load.cpuCount,
+        loadPerCpu: host.load.loadPerCpu,
+        threshold: host.threshold,
+        waitedMs: host.waitedMs,
+      });
+    }
+
+    yield* Effect.logInfo("epic.gate.start", {
+      command,
+      cwd,
+      lockPath,
+      lockWaitSeconds,
+      loadPerCpu: host.load.loadPerCpu,
+      cpuCount: host.load.cpuCount,
+      hostWaitedMs: host.waitedMs,
+    });
 
     const output = yield* input.processRunner
       .run({
@@ -148,11 +182,17 @@ export const makeProcessGate = (input: {
       );
 
     const finishedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
-    const durationMs = finishedAt - startedAt;
+    // The command's own duration, excluding the quiet-host wait, so this number
+    // stays comparable with the pre-wait telemetry the diagnosis was built on.
+    const durationMs = finishedAt - startedAt - host.waitedMs;
+    const finishLoad = yield* sampleHostLoad;
     yield* Effect.logInfo("epic.gate.finished", {
       cwd,
       exitCode: output.code,
       durationMs,
+      hostWaitedMs: host.waitedMs,
+      loadPerCpu: finishLoad.loadPerCpu,
+      cpuCount: finishLoad.cpuCount,
     });
 
     if (output.code === LOCK_UNAVAILABLE_EXIT_CODE) {
