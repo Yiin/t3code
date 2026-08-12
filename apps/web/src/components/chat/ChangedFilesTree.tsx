@@ -1,4 +1,4 @@
-import { type TurnId } from "@t3tools/contracts";
+import { type ThreadTurnDiffSubagentContribution, type TurnId } from "@t3tools/contracts";
 import { memo, useCallback, useMemo, useState } from "react";
 import { type TurnDiffFileChange } from "../../types";
 import {
@@ -6,6 +6,11 @@ import {
   summarizeTurnDiffStats,
   type TurnDiffTreeNode,
 } from "../../lib/turnDiffTree";
+import {
+  buildSubagentDiffAttribution,
+  readSubagentDiffLabels,
+} from "../../lib/subagentDiffAttribution";
+import { SubagentDiffBadge } from "../diffs/SubagentDiffBadge";
 import {
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
@@ -25,6 +30,7 @@ const EMPTY_DIRECTORY_OVERRIDES: Record<string, boolean> = {};
 export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
   turnId: TurnId;
   files: ReadonlyArray<TurnDiffFileChange>;
+  subagentContributions?: ReadonlyArray<ThreadTurnDiffSubagentContribution> | undefined;
   allDirectoriesExpanded: boolean;
   resolvedTheme: "light" | "dark";
   onToggleAllDirectories: () => void;
@@ -33,6 +39,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
   const {
     turnId,
     files,
+    subagentContributions,
     allDirectoriesExpanded,
     resolvedTheme,
     onToggleAllDirectories,
@@ -104,6 +111,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
         key={`changed-files-tree:${turnId}`}
         turnId={turnId}
         files={files}
+        subagentContributions={subagentContributions}
         allDirectoriesExpanded={allDirectoriesExpanded}
         resolvedTheme={resolvedTheme}
         onOpenTurnDiff={onOpenTurnDiff}
@@ -115,12 +123,29 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
 export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   turnId: TurnId;
   files: ReadonlyArray<TurnDiffFileChange>;
+  /**
+   * Which of these files a subagent wrote, from the checkpoint's own read-time
+   * attribution. A thread-backed child shares its parent's worktree, so the
+   * parent's checkpoint holds the child's files too.
+   */
+  subagentContributions?: ReadonlyArray<ThreadTurnDiffSubagentContribution> | undefined;
   allDirectoriesExpanded: boolean;
   resolvedTheme: "light" | "dark";
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
 }) {
-  const { files, allDirectoriesExpanded, onOpenTurnDiff, resolvedTheme, turnId } = props;
+  const {
+    files,
+    subagentContributions,
+    allDirectoriesExpanded,
+    onOpenTurnDiff,
+    resolvedTheme,
+    turnId,
+  } = props;
   const treeNodes = useMemo(() => buildTurnDiffTree(files), [files]);
+  const subagentAttribution = useMemo(
+    () => buildSubagentDiffAttribution(subagentContributions),
+    [subagentContributions],
+  );
   const directoryPathsKey = useMemo(
     () => collectDirectoryPaths(treeNodes).join("\u0000"),
     [treeNodes],
@@ -218,6 +243,10 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
         <span className="truncate font-mono text-[11px] text-muted-foreground/80 group-hover:text-foreground/90">
           {node.name}
         </span>
+        <SubagentDiffBadge
+          filePath={node.path}
+          labels={readSubagentDiffLabels(subagentAttribution, node.path)}
+        />
         {node.stat && (
           <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums">
             <DiffStatLabel additions={node.stat.additions} deletions={node.stat.deletions} />

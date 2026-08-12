@@ -43,7 +43,14 @@ export interface ProjectionThreadCheckpointContext {
   readonly projectId: ProjectId;
   readonly workspaceRoot: string;
   readonly worktreePath: string | null;
-  readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
+  /**
+   * Subagent attribution is left out: the diff query reads it for the exact
+   * window it is diffing, so carrying an empty array here would only invite a
+   * caller to trust a field nothing fills.
+   */
+  readonly checkpoints: ReadonlyArray<
+    Omit<OrchestrationCheckpointSummary, "subagentContributions">
+  >;
 }
 
 /**

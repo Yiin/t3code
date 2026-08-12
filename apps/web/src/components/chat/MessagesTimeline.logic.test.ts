@@ -454,6 +454,7 @@ describe("deriveMessagesTimelineRows", () => {
       checkpointRef: "checkpoint-1" as never,
       status: "ready" as const,
       files: [{ path: "src/index.ts", kind: "modified", additions: 3, deletions: 1 }],
+      subagentContributions: [],
     };
 
     const rows = deriveMessagesTimelineRows({
@@ -517,6 +518,7 @@ describe("deriveMessagesTimelineRows", () => {
       checkpointRef: "checkpoint-1" as never,
       status: "ready" as const,
       files: [{ path: "src/index.ts", kind: "modified", additions: 1, deletions: 0 }],
+      subagentContributions: [],
     };
     const firstAssistant = {
       id: "assistant-entry-1",
@@ -591,6 +593,7 @@ describe("deriveMessagesTimelineRows", () => {
       checkpointRef: "checkpoint-1" as never,
       status: "ready" as const,
       files: [{ path: "src/index.ts", kind: "modified", additions: 1, deletions: 0 }],
+      subagentContributions: [],
     };
     const shared = {
       latestTurn: {
@@ -679,6 +682,7 @@ describe("deriveMessagesTimelineRows", () => {
       checkpointRef: "checkpoint-1" as never,
       status: "ready" as const,
       files: [{ path: "src/index.ts", kind: "modified", additions: 1, deletions: 0 }],
+      subagentContributions: [],
     };
     const baseInput = {
       timelineEntries,
@@ -713,6 +717,7 @@ describe("deriveMessagesTimelineRows", () => {
           checkpointRef: "checkpoint-1" as never,
           status: "ready" as const,
           files: [],
+          subagentContributions: [],
         },
       ],
       revertTurnCountByUserMessageId: new Map(),
@@ -1770,6 +1775,7 @@ describe("computeStableMessagesTimelineRows", () => {
         checkpointRef: "checkpoint-1" as never,
         status: "ready" as const,
         files: [{ path: "src/index.ts", kind: "modified", additions: 1, deletions: 0 }],
+        subagentContributions: [],
       },
     };
     const initial = computeStableMessagesTimelineRows([firstRow], {

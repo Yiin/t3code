@@ -931,6 +931,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               checkpointRef: asCheckpointRef("checkpoint-1"),
               status: "ready",
               files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
+              subagentContributions: [],
               assistantMessageId: asMessageId("message-1"),
               completedAt: "2026-02-24T00:00:08.000Z",
             },
@@ -2081,6 +2082,146 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("puts each subagent's files on the parent checkpoint that contains them", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_turns`;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at,
+          parent_thread_id
+        )
+        VALUES
+          (
+            'thread-1',
+            'project-1',
+            'Parent Thread',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            '2026-05-01T00:00:01.000Z',
+            '2026-05-01T00:00:01.000Z',
+            NULL,
+            NULL,
+            NULL
+          ),
+          (
+            'thread-child',
+            'project-1',
+            'Reviewer',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            '2026-05-01T00:00:02.000Z',
+            '2026-05-01T00:00:02.000Z',
+            NULL,
+            NULL,
+            'thread-1'
+          )
+      `;
+
+      // Two parent checkpoints. The child settles inside the second one only.
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          source_proposed_plan_thread_id,
+          source_proposed_plan_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES
+          (
+            'thread-1',
+            'parent-turn-1',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:10.000Z',
+            '2026-05-01T00:00:10.000Z',
+            '2026-05-01T00:00:10.000Z',
+            1,
+            'checkpoint-parent-1',
+            'ready',
+            '[{"path":"src/parent.ts","kind":"modified","additions":1,"deletions":0}]'
+          ),
+          (
+            'thread-1',
+            'parent-turn-2',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:30.000Z',
+            '2026-05-01T00:00:30.000Z',
+            '2026-05-01T00:00:30.000Z',
+            2,
+            'checkpoint-parent-2',
+            'ready',
+            '[{"path":"src/parent.ts","kind":"modified","additions":1,"deletions":0},{"path":"src/child.ts","kind":"modified","additions":4,"deletions":0}]'
+          ),
+          (
+            'thread-child',
+            'child-turn-1',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:20.000Z',
+            '2026-05-01T00:00:20.000Z',
+            '2026-05-01T00:00:20.000Z',
+            1,
+            'checkpoint-child-1',
+            'ready',
+            '[{"path":"src/child.ts","kind":"modified","additions":4,"deletions":0}]'
+          )
+      `;
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag === "Some") {
+        assert.deepEqual(
+          threadDetail.value.checkpoints.map((checkpoint) => checkpoint.subagentContributions),
+          [
+            [],
+            [
+              {
+                threadId: ThreadId.make("thread-child"),
+                title: "Reviewer",
+                paths: ["src/child.ts"],
+              },
+            ],
+          ],
+        );
+      }
+    }),
+  );
+
   it.effect("keeps thread detail activity ordering consistent with shell snapshot ordering", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -2863,6 +3004,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         "ProjectionSnapshotQuery.getThreadDetailById:listActivities": 3,
         "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints": 1,
         "ProjectionSnapshotQuery.getThreadDetailById:listSubagents": 0,
+        "ProjectionSnapshotQuery.getThreadDetailById:listSubagentContributions": 0,
       };
 
       const transactionSpan = spanNamed("sql.transaction");

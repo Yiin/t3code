@@ -1,4 +1,4 @@
-import { TurnId } from "@t3tools/contracts";
+import { ThreadId, TurnId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -168,4 +168,40 @@ describe("ChangedFilesTree", () => {
       }
     },
   );
+
+  it("labels only the files a subagent wrote", () => {
+    const markup = renderToStaticMarkup(
+      <ChangedFilesTree
+        turnId={TurnId.make("turn-1")}
+        files={[
+          { path: "src/child.ts", kind: "modified", additions: 4, deletions: 0 },
+          { path: "src/parent.ts", kind: "modified", additions: 1, deletions: 0 },
+        ]}
+        subagentContributions={[
+          { threadId: ThreadId.make("thread-child"), title: "Reviewer", paths: ["src/child.ts"] },
+        ]}
+        allDirectoriesExpanded
+        resolvedTheme="light"
+        onOpenTurnDiff={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('data-subagent-diff-badge="src/child.ts"');
+    expect(markup).not.toContain('data-subagent-diff-badge="src/parent.ts"');
+    expect(markup).toContain("Written by subagent Reviewer, not by this chat");
+  });
+
+  it("labels nothing when the checkpoint carries no attribution", () => {
+    const markup = renderToStaticMarkup(
+      <ChangedFilesTree
+        turnId={TurnId.make("turn-1")}
+        files={[{ path: "src/parent.ts", kind: "modified", additions: 1, deletions: 0 }]}
+        allDirectoriesExpanded
+        resolvedTheme="light"
+        onOpenTurnDiff={() => {}}
+      />,
+    );
+
+    expect(markup).not.toContain("data-subagent-diff-badge");
+  });
 });

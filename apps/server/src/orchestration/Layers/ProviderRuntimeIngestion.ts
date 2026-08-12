@@ -278,7 +278,7 @@ function findProposedPlanById(
 }
 
 function hasCheckpointForTurn(
-  checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
+  checkpoints: ReadonlyArray<Pick<OrchestrationCheckpointSummary, "turnId">>,
   turnId: TurnId,
 ): boolean {
   for (let index = 0; index < checkpoints.length; index += 1) {
@@ -290,7 +290,7 @@ function hasCheckpointForTurn(
 }
 
 function maxCheckpointTurnCount(
-  checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
+  checkpoints: ReadonlyArray<Pick<OrchestrationCheckpointSummary, "checkpointTurnCount">>,
 ): number {
   let maxTurnCount = 0;
   for (let index = 0; index < checkpoints.length; index += 1) {

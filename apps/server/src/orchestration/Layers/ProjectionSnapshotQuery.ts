@@ -60,6 +60,10 @@ import { ProjectionThreadSession } from "../../persistence/Services/ProjectionTh
 import { ProjectionThreadSubagent } from "../../persistence/Services/ProjectionThreadSubagents.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import {
+  attributeSubagentCheckpointContributions,
+  foldSubagentContributions,
+} from "../subagentCheckpointContributions.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
   ProjectionSnapshotQuery,
@@ -199,6 +203,10 @@ const ProjectionSubagentTurnContributionRowSchema = Schema.Struct({
   title: Schema.String,
   files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
 });
+const ProjectionSubagentCheckpointContributionRowSchema =
+  ProjectionSubagentTurnContributionRowSchema.mapFields(
+    Struct.assign({ completedAt: Schema.String }),
+  );
 const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.projects,
   ORCHESTRATION_PROJECTOR_NAMES.threads,
@@ -444,6 +452,8 @@ const THREAD_DETAIL_LIST_ACTIVITIES = "ProjectionSnapshotQuery.getThreadDetailBy
 const THREAD_DETAIL_LIST_CHECKPOINTS =
   "ProjectionSnapshotQuery.getThreadDetailById:listCheckpoints";
 const THREAD_DETAIL_LIST_SUBAGENTS = "ProjectionSnapshotQuery.getThreadDetailById:listSubagents";
+const THREAD_DETAIL_LIST_SUBAGENT_CONTRIBUTIONS =
+  "ProjectionSnapshotQuery.getThreadDetailById:listSubagentContributions";
 const SUBAGENT_ACTIVITY_LIST = "ProjectionSnapshotQuery.getSubagentActivities:listActivities";
 
 const decodeThreadRow = Schema.decodeUnknownEffect(ProjectionThreadDbRowSchema);
@@ -451,6 +461,9 @@ const decodeThreadMessageRows = tracedDecodeRows(ProjectionThreadMessageDbRowSch
 const decodeThreadActivityRows = tracedDecodeRows(ProjectionThreadActivityDbRowSchema);
 const decodeCheckpointRows = tracedDecodeRows(ProjectionCheckpointDbRowSchema);
 const decodeThreadSubagentRows = tracedDecodeRows(ProjectionThreadSubagentDbRowSchema);
+const decodeSubagentContributionRows = tracedDecodeRows(
+  ProjectionSubagentCheckpointContributionRowSchema,
+);
 
 /**
  * Operation names for the bulk-snapshot reads: one name per read, not one per
@@ -1467,6 +1480,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // Every checkpoint a thread's subagent children captured, in one read. The
+  // thread-detail assembly splits them across the parent's own checkpoints, so
+  // a thread with many turns still costs a single statement. Rides
+  // `idx_projection_threads_parent_thread`.
+  const listSubagentCheckpointContributionRawRows = tracedFindAllRaw({
+    Request: ThreadIdLookupInput,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId",
+          threads.title AS "title",
+          turns.checkpoint_files_json AS "files",
+          turns.completed_at AS "completedAt"
+        FROM projection_turns AS turns
+        INNER JOIN projection_threads AS threads
+          ON threads.thread_id = turns.thread_id
+        WHERE threads.parent_thread_id = ${threadId}
+          AND threads.deleted_at IS NULL
+          AND turns.checkpoint_turn_count IS NOT NULL
+          AND turns.completed_at IS NOT NULL
+        ORDER BY turns.completed_at ASC, threads.thread_id ASC
+      `,
+  });
+
   const getFullThreadDiffContextRow = SqlSchema.findOneOption({
     Request: FullThreadDiffContextLookupInput,
     Result: ProjectionFullThreadDiffContextRowSchema,
@@ -1714,6 +1751,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   checkpointRef: row.checkpointRef,
                   status: row.status,
                   files: row.files,
+                  // Subagent attribution rides the thread-detail read, which is
+                  // what every client surface renders from. This bulk snapshot
+                  // reads every thread at once, so it does not pay for it.
+                  subagentContributions: [],
                   assistantMessageId: row.assistantMessageId,
                   completedAt: row.completedAt,
                 });
@@ -2482,17 +2523,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         workspaceRoot: threadRow.value.workspaceRoot,
         worktreePath: threadRow.value.worktreePath,
-        checkpoints: checkpointRows.map(
-          (row): OrchestrationCheckpointSummary => ({
-            turnId: row.turnId,
-            checkpointTurnCount: row.checkpointTurnCount,
-            checkpointRef: row.checkpointRef,
-            status: row.status,
-            files: row.files,
-            assistantMessageId: row.assistantMessageId,
-            completedAt: row.completedAt,
-          }),
-        ),
+        checkpoints: checkpointRows.map((row) => ({
+          turnId: row.turnId,
+          checkpointTurnCount: row.checkpointTurnCount,
+          checkpointRef: row.checkpointRef,
+          status: row.status,
+          files: row.files,
+          assistantMessageId: row.assistantMessageId,
+          completedAt: row.completedAt,
+        })),
       });
     });
 
@@ -2539,28 +2578,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             "ProjectionSnapshotQuery.listSubagentTurnContributions:decodeRow",
           ),
         ),
-        Effect.map((rows) => {
-          // One child can checkpoint several turns inside one parent turn, so
-          // fold its rows into a single contribution with de-duplicated paths.
-          const byThreadId = new Map<string, { title: string; paths: Set<string> }>();
-          for (const row of rows) {
-            const existing = byThreadId.get(row.threadId);
-            const entry = existing ?? { title: row.title, paths: new Set<string>() };
-            for (const file of row.files) {
-              entry.paths.add(file.path);
-            }
-            if (!existing) {
-              byThreadId.set(row.threadId, entry);
-            }
-          }
-          return Array.from(byThreadId.entries())
-            .filter(([, entry]) => entry.paths.size > 0)
-            .map(([threadId, entry]) => ({
-              threadId: ThreadId.make(threadId),
-              title: entry.title,
-              paths: Array.from(entry.paths).toSorted((left, right) => left.localeCompare(right)),
-            }));
-        }),
+        Effect.map(foldSubagentContributions),
       );
 
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
@@ -2708,6 +2726,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       ),
       listThreadSubagentRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_SUBAGENTS),
       listCheckpointRawRowsByThread({ threadId }, THREAD_DETAIL_LIST_CHECKPOINTS),
+      listSubagentCheckpointContributionRawRows(
+        { threadId },
+        THREAD_DETAIL_LIST_SUBAGENT_CONTRIBUTIONS,
+      ),
       getLatestTurnRowByThread({ threadId }).pipe(
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
@@ -2744,6 +2766,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         activityCountRow,
         subagentRawRows,
         checkpointRawRows,
+        subagentContributionRawRows,
         latestTurnRow,
         sessionRow,
       ] = rows;
@@ -2752,16 +2775,35 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<OrchestrationThread>();
       }
 
-      const [threadRow, messageRows, activityRows, subagentRows, checkpointRows] =
-        yield* Effect.all([
-          decodeThreadRow(threadRawRow.value).pipe(
-            Effect.mapError(toPersistenceDecodeError(`${THREAD_DETAIL_GET_THREAD}:decodeRow`)),
-          ),
-          decodeThreadMessageRows(messageRawRows, THREAD_DETAIL_LIST_MESSAGES),
-          decodeThreadActivityRows(activityRawRows, THREAD_DETAIL_LIST_ACTIVITIES),
-          decodeThreadSubagentRows(subagentRawRows, THREAD_DETAIL_LIST_SUBAGENTS),
-          decodeCheckpointRows(checkpointRawRows, THREAD_DETAIL_LIST_CHECKPOINTS),
-        ]);
+      const [
+        threadRow,
+        messageRows,
+        activityRows,
+        subagentRows,
+        checkpointRows,
+        subagentContributionRows,
+      ] = yield* Effect.all([
+        decodeThreadRow(threadRawRow.value).pipe(
+          Effect.mapError(toPersistenceDecodeError(`${THREAD_DETAIL_GET_THREAD}:decodeRow`)),
+        ),
+        decodeThreadMessageRows(messageRawRows, THREAD_DETAIL_LIST_MESSAGES),
+        decodeThreadActivityRows(activityRawRows, THREAD_DETAIL_LIST_ACTIVITIES),
+        decodeThreadSubagentRows(subagentRawRows, THREAD_DETAIL_LIST_SUBAGENTS),
+        decodeCheckpointRows(checkpointRawRows, THREAD_DETAIL_LIST_CHECKPOINTS),
+        decodeSubagentContributionRows(
+          subagentContributionRawRows,
+          THREAD_DETAIL_LIST_SUBAGENT_CONTRIBUTIONS,
+        ),
+      ]);
+
+      // Name the children that wrote inside each of this thread's checkpoint
+      // windows, so the timeline's changed-files tree labels a subagent's files
+      // instead of letting this thread claim them. Same windows as the turn
+      // diff, computed from the same rows.
+      const subagentContributionsByCheckpoint = attributeSubagentCheckpointContributions({
+        checkpoints: checkpointRows,
+        rows: subagentContributionRows,
+      });
 
       // The capped read returns the newest window plus every pinned
       // request/response row, so the omitted count is whatever the thread holds
@@ -2825,12 +2867,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ...(omittedActivityCount > 0
           ? { activitiesTruncated: { omittedCount: omittedActivityCount } }
           : {}),
-        checkpoints: checkpointRows.map((row) => ({
+        checkpoints: checkpointRows.map((row, index) => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,
           checkpointRef: row.checkpointRef,
           status: row.status,
           files: row.files,
+          subagentContributions: subagentContributionsByCheckpoint[index] ?? [],
           assistantMessageId: row.assistantMessageId,
           completedAt: row.completedAt,
         })),

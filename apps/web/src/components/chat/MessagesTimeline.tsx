@@ -1688,6 +1688,7 @@ function AssistantChangedFilesSectionInner({
         key={`changed-files-tree:${turnSummary.turnId}`}
         turnId={turnSummary.turnId}
         files={checkpointFiles}
+        subagentContributions={turnSummary.subagentContributions}
         allDirectoriesExpanded={allDirectoriesExpanded}
         resolvedTheme={resolvedTheme}
         onOpenTurnDiff={onOpenTurnDiff}

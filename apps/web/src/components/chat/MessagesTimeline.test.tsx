@@ -253,6 +253,7 @@ describe("MessagesTimeline", () => {
             checkpointRef: CheckpointRef.make("checkpoint-with-files"),
             status: "ready",
             files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
+            subagentContributions: [],
             assistantMessageId,
             completedAt: MESSAGE_CREATED_AT,
           },

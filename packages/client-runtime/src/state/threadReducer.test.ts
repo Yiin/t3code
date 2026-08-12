@@ -530,6 +530,7 @@ describe("applyThreadDetailEvent", () => {
             checkpointRef: CheckpointRef.make("ref-1"),
             status: "ready",
             files: [],
+            subagentContributions: [],
             assistantMessageId: anchor,
             completedAt: "2026-04-01T06:59:00.000Z",
           },
@@ -1228,6 +1229,7 @@ describe("applyThreadDetailEvent", () => {
             checkpointRef: CheckpointRef.make("ref-missing"),
             status: "missing",
             files: [],
+            subagentContributions: [],
             assistantMessageId: MessageId.make("msg-first"),
             completedAt: "2026-04-01T11:59:00.000Z",
           },
@@ -1262,6 +1264,52 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("keeps the subagent attribution the last thread read gave the checkpoint", () => {
+      const contribution = {
+        threadId: ThreadId.make("thread-child"),
+        title: "Reviewer",
+        paths: ["src/child.ts"],
+      };
+      const threadWithCheckpoint: OrchestrationThread = {
+        ...baseThread,
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("ref-1"),
+            status: "ready",
+            files: [{ path: "src/child.ts", kind: "modified", additions: 1, deletions: 0 }],
+            subagentContributions: [contribution],
+            assistantMessageId: MessageId.make("msg-first"),
+            completedAt: "2026-04-01T11:59:00.000Z",
+          },
+        ],
+      };
+      const result = applyThreadDetailEvent(threadWithCheckpoint, {
+        ...baseEventFields,
+        sequence: 13,
+        occurredAt: "2026-04-01T12:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-diff-completed",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnId: TurnId.make("turn-1"),
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("ref-1"),
+          status: "ready",
+          files: [{ path: "src/child.ts", kind: "modified", additions: 2, deletions: 0 }],
+          assistantMessageId: MessageId.make("msg-first"),
+          completedAt: "2026-04-01T12:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.checkpoints[0]?.subagentContributions).toEqual([contribution]);
+      }
+    });
+
     it("replaces ready checkpoint files without changing its identity", () => {
       const threadWithCheckpoint: OrchestrationThread = {
         ...baseThread,
@@ -1272,6 +1320,7 @@ describe("applyThreadDetailEvent", () => {
             checkpointRef: CheckpointRef.make("ref-1"),
             status: "ready",
             files: [{ path: "OLD.md", kind: "modified", additions: 1, deletions: 0 }],
+            subagentContributions: [],
             assistantMessageId: MessageId.make("msg-first"),
             completedAt: "2026-04-01T11:59:00.000Z",
           },
@@ -1400,6 +1449,7 @@ describe("applyThreadDetailEvent", () => {
             checkpointRef: CheckpointRef.make("ref-1"),
             status: "ready",
             files: [],
+            subagentContributions: [],
             assistantMessageId: MessageId.make("msg-2"),
             completedAt: "2026-04-01T02:00:00.000Z",
           },
@@ -1409,6 +1459,7 @@ describe("applyThreadDetailEvent", () => {
             checkpointRef: CheckpointRef.make("ref-2"),
             status: "ready",
             files: [],
+            subagentContributions: [],
             assistantMessageId: MessageId.make("msg-3"),
             completedAt: "2026-04-01T03:00:00.000Z",
           },
