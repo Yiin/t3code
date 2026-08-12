@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import { buildSubagentRoster } from "./components/chat/subagentRoster.logic";
 import {
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
@@ -2336,6 +2337,83 @@ describe("deriveSubagentGroups", () => {
     expect(groups[0]?.name).toBe("reviewer");
     expect(groups[0]?.status).toBe("completed");
     expect(groups[0]?.completedAt).toBe("2026-02-23T00:00:08.000Z");
+  });
+
+  it("opens no group for the T3 MCP spawn tool, leaving only its mirrored row", () => {
+    // `mcp__t3-code__spawn_agent` trips classifyToolItemType's "agent" test, so
+    // it arrives as a collab row. Its mirrored read-model row can carry no
+    // `spawnedByItemId`, so a group here would list the subagent twice.
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-updated:thread-1:toolu_mcp_spawn",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: "Spawn a subagent",
+        sequence: 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Spawn a subagent",
+          data: {
+            toolName: "mcp__t3-code__spawn_agent",
+            input: { agent_type: "code-reviewer", prompt: "Review the diff" },
+          },
+        },
+      }),
+    ];
+    const readModelRow: OrchestrationThreadSubagent = {
+      subagentId: "child-thread-1",
+      turnId: null,
+      agentType: "code-reviewer",
+      description: "Review the diff",
+      status: "running",
+      childThreadId: ThreadId.make("child-thread-1"),
+      startedAt: "2026-02-23T00:00:05.000Z",
+      updatedAt: "2026-02-23T00:00:06.000Z",
+      completedAt: null,
+    };
+
+    const entries = deriveWorkLogEntries(activities);
+    // The call keeps its place in the work log; it just opens no group.
+    expect(entries.map((entry) => entry.itemType)).toEqual(["collab_agent_tool_call"]);
+
+    const groups = deriveSubagentGroups(entries, {
+      turnSettled: false,
+      subagents: [readModelRow],
+    });
+    expect(groups).toEqual([]);
+
+    const roster = buildSubagentRoster({ groups, subagents: [readModelRow] });
+    expect(roster).toHaveLength(1);
+    expect(roster[0]?.group).toBeNull();
+    expect(roster[0]?.subagentId).toBe("child-thread-1");
+    expect(roster[0]?.childThreadId).toBe("child-thread-1");
+    expect(roster[0]?.status).toBe("running");
+  });
+
+  it("still groups a provider tool that merely ends in spawn_agent", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-updated:thread-1:toolu_other",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        sequence: 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Subagent task",
+          data: {
+            toolName: "mcp__other-server__spawn_agent",
+            input: SUBAGENT_TASK_INPUT,
+          },
+        },
+      }),
+    ];
+
+    const groups = deriveSubagentGroups(deriveWorkLogEntries(activities), { turnSettled: false });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.toolCallId).toBe("toolu_other");
   });
 });
 

@@ -1127,6 +1127,13 @@ export function deriveSubagentGroups(
     if (operation !== null && operation !== "spawnAgent") {
       continue;
     }
+    if (isThreadBackedSpawnToolCall(entry)) {
+      // The T3 MCP spawn tool already has a `thread.subagents` row mirrored from
+      // the child thread, and MCP carries no tool_use id into the handler, so
+      // that row can never carry a `spawnedByItemId` to join on. A group here
+      // would list the same subagent twice. The row stays in the work log.
+      continue;
+    }
     const group = toSubagentGroup(
       entry,
       childrenByParent,
@@ -1146,6 +1153,23 @@ export function deriveSubagentGroups(
     groups.push(group);
   }
   return groups;
+}
+
+/** The T3 MCP server every adapter registers, and its thread-backed spawn tool. */
+const T3_MCP_SERVER_NAME = "t3-code";
+const T3_MCP_SPAWN_AGENT_TOOL = "spawn_agent";
+
+/**
+ * True for the T3 MCP spawn tool, however the provider namespaces it:
+ * `mcp__t3-code__spawn_agent` (Claude) or `t3-code__spawn_agent`.
+ */
+function isThreadBackedSpawnToolCall(entry: WorkLogEntry): boolean {
+  const toolName = asTrimmedString(asRecord(entry.toolData)?.toolName)?.toLowerCase();
+  if (toolName === undefined) {
+    return false;
+  }
+  const segments = toolName.split("__").filter((segment) => segment !== "" && segment !== "mcp");
+  return segments.at(-1) === T3_MCP_SPAWN_AGENT_TOOL && segments.at(-2) === T3_MCP_SERVER_NAME;
 }
 
 function subagentCollabOperation(entry: WorkLogEntry): string | null {
