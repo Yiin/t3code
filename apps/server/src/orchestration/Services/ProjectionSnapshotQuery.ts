@@ -19,6 +19,8 @@ import type {
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadShell,
+  MessageId,
+  OrchestrationLatestTurn,
   ProjectId,
   ThreadId,
   TurnId,
@@ -116,6 +118,12 @@ export interface ProjectionSubagentTurnContributionWindow {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Read the exact turn adopted from one user message. */
+  readonly getTurnByPendingMessageId?: (
+    threadId: ThreadId,
+    messageId: MessageId,
+  ) => Effect.Effect<Option.Option<OrchestrationLatestTurn>, ProjectionRepositoryError>;
+
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
    * orchestration engine without hydrating message/activity/checkpoint bodies.

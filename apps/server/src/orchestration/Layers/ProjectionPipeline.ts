@@ -1202,7 +1202,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 const pendingAgeMs =
                   Date.parse(event.payload.session.updatedAt) -
                   Date.parse(pendingTurnStart.value.requestedAt);
-                if (Number.isFinite(pendingAgeMs) && pendingAgeMs > PENDING_TURN_START_GRACE_MS) {
+                const existingTurns = yield* projectionTurnRepository.listByThreadId({
+                  threadId: event.payload.threadId,
+                });
+                const queuedBehindAdoptedTurn = existingTurns.some(
+                  (turn) =>
+                    turn.turnId !== null &&
+                    Date.parse(turn.requestedAt) < Date.parse(pendingTurnStart.value.requestedAt) &&
+                    (turn.completedAt === null ||
+                      Date.parse(turn.completedAt) >=
+                        Date.parse(pendingTurnStart.value.requestedAt)),
+                );
+                if (
+                  !queuedBehindAdoptedTurn &&
+                  Number.isFinite(pendingAgeMs) &&
+                  pendingAgeMs > PENDING_TURN_START_GRACE_MS
+                ) {
                   yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
                     threadId: event.payload.threadId,
                   });

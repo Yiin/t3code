@@ -6,12 +6,14 @@ import {
   EpicRunConfig as EpicRunConfigSchema,
   EpicRunId,
   EpicRunPreflightError,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
   type OrchestrationCommand,
+  type OrchestrationLatestTurn,
   type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
@@ -166,6 +168,8 @@ interface ScriptedIteration {
   readonly settleDelayMs?: number;
   /** Hold this turn at the running boundary until the test opens the gate. */
   readonly settleGate?: Deferred.Deferred<void>;
+  /** Start an unrelated human turn before the runner classifies this turn. */
+  readonly humanFollowupText?: string;
   /**
    * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
    * that report no assistant message before the scripted one appears —
@@ -355,6 +359,8 @@ function createHarness(input: {
 
   const dispatched: OrchestrationCommand[] = [];
   const details = new Map<string, OrchestrationThread>();
+  const activeTurnIds = new Map<string, TurnId>();
+  const turnsByMessageId = new Map<string, OrchestrationLatestTurn>();
   const shells = new Map<
     string,
     {
@@ -372,6 +378,7 @@ function createHarness(input: {
   const startedIssueIds: string[] = [];
   const readyChildren = new Set(input.readyChildren ?? []);
   let sequence = 0;
+  let shellReads = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
   let plantedScopeUnitStopped = false;
   const heldLocks = new Set<string>();
@@ -401,7 +408,7 @@ function createHarness(input: {
    * first and only then settles, exactly as the real projector would do it, so
    * the runner's poll cannot mistake a starting session for a finished turn.
    */
-  const simulateTurn = (threadId: ThreadId) =>
+  const simulateTurn = (threadId: ThreadId, messageId: MessageId) =>
     Effect.gen(function* () {
       const scriptIndex = turnsStarted;
       const scripted = input.script[scriptIndex];
@@ -417,6 +424,16 @@ function createHarness(input: {
       activeTurns += 1;
       maxActiveTurns = Math.max(maxActiveTurns, activeTurns);
 
+      const scriptedTurnId = TurnId.make(`${threadId}-turn-${scriptIndex + 1}`);
+      turnsByMessageId.set(messageId, {
+        turnId: scriptedTurnId,
+        state: "running",
+        requestedAt: NOW,
+        startedAt: NOW,
+        completedAt: null,
+        assistantMessageId: null,
+      });
+      activeTurnIds.set(threadId, scriptedTurnId);
       shells.set(threadId, { latestTurn: "running", session: "running" });
       if (scripted.stall === true) {
         return;
@@ -431,32 +448,60 @@ function createHarness(input: {
       if (scripted.worktreeFingerprint !== undefined) {
         worktreeFingerprint = scripted.worktreeFingerprint;
       }
-      details.set(
+      const settledDetail = makeThreadDetail({
         threadId,
-        makeThreadDetail({
+        // Unique per dispatched turn: a continuation turn on the same thread
+        // must project a NEW turn id, exactly as provider adoption would,
+        // or `awaitTurnEnd`'s prior-turn mask could never see it end.
+        turnId: scriptedTurnId,
+        turnState: scripted.turnState ?? "completed",
+        text: scripted.text,
+        streaming: scripted.streaming ?? false,
+        latestTurnPointerNull: scripted.detailTurnPointerNull ?? false,
+        sessionStatus: scripted.sessionStatus ?? "ready",
+        sessionLastError: scripted.sessionLastError,
+      });
+      turnsByMessageId.set(messageId, {
+        turnId: scriptedTurnId,
+        state: scripted.turnState ?? "completed",
+        requestedAt: NOW,
+        startedAt: NOW,
+        completedAt: NOW,
+        assistantMessageId: settledDetail.latestTurn?.assistantMessageId ?? null,
+      });
+      if (scripted.humanFollowupText === undefined) {
+        details.set(threadId, settledDetail);
+      } else {
+        const humanTurnId = TurnId.make(`${threadId}-human-turn-${scriptIndex + 1}`);
+        activeTurnIds.set(threadId, humanTurnId);
+        const humanDetail = makeThreadDetail({
           threadId,
-          // Unique per dispatched turn: a continuation turn on the same thread
-          // must project a NEW turn id, exactly as provider adoption would,
-          // or `awaitTurnEnd`'s prior-turn mask could never see it end.
-          turnId: TurnId.make(`${threadId}-turn-${scriptIndex + 1}`),
-          turnState: scripted.turnState ?? "completed",
-          text: scripted.text,
-          streaming: scripted.streaming ?? false,
-          latestTurnPointerNull: scripted.detailTurnPointerNull ?? false,
-          sessionStatus: scripted.sessionStatus ?? "ready",
-          sessionLastError: scripted.sessionLastError,
-        }),
-      );
+          turnId: humanTurnId,
+          turnState: "running",
+          text: scripted.humanFollowupText,
+          streaming: true,
+          sessionStatus: "running",
+        });
+        details.set(threadId, {
+          ...humanDetail,
+          messages: [...settledDetail.messages, ...humanDetail.messages],
+        });
+      }
       if (scripted.messageSettleDelayReads !== undefined) {
         messageSettleDelayReads.set(threadId, scripted.messageSettleDelayReads);
       }
       if (scripted.subagentDrainReads !== undefined) {
         subagentDrainReads.set(threadId, scripted.subagentDrainReads);
       }
-      shells.set(threadId, {
-        latestTurn: scripted.turnState ?? "completed",
-        session: scripted.sessionStatus ?? "ready",
-      });
+      shells.set(
+        threadId,
+        scripted.humanFollowupText === undefined
+          ? {
+              latestTurn: scripted.turnState ?? "completed",
+              session: scripted.sessionStatus ?? "ready",
+            }
+          : { latestTurn: "running", session: "running" },
+      );
       activeTurns -= 1;
       iterationLifecycle.push("turn-settled");
       if (issueId !== null && issueId !== undefined) readyChildren.delete(issueId);
@@ -510,7 +555,7 @@ function createHarness(input: {
         if (command.type === "thread.turn.start" && !targetsOriginThread) {
           // Forked so `dispatch` returns before the turn resolves, the way the
           // real engine behaves.
-          yield* Effect.forkDetach(simulateTurn(command.threadId));
+          yield* Effect.forkDetach(simulateTurn(command.threadId, command.message.messageId));
         }
         sequence += 1;
         return { sequence };
@@ -518,6 +563,8 @@ function createHarness(input: {
   });
 
   const snapshotLayer = Layer.succeed(ProjectionSnapshotQuery, {
+    getTurnByPendingMessageId: (_threadId, messageId) =>
+      Effect.succeed(Option.fromNullishOr(turnsByMessageId.get(messageId))),
     getCommandReadModel: () => Effect.die("unused"),
     getSnapshot: () => Effect.die("unused"),
     getShellSnapshot: () => Effect.die("unused"),
@@ -546,6 +593,7 @@ function createHarness(input: {
     listSubagentTurnContributions: () => Effect.succeed([]),
     getThreadShellById: (threadId) =>
       Effect.sync(() => {
+        shellReads += 1;
         const shell = shells.get(threadId);
         if (shell === undefined) {
           return Option.none();
@@ -564,7 +612,9 @@ function createHarness(input: {
               ? null
               : {
                   turnId:
-                    details.get(threadId)?.latestTurn?.turnId ?? TurnId.make(`${threadId}-turn`),
+                    activeTurnIds.get(threadId) ??
+                    details.get(threadId)?.latestTurn?.turnId ??
+                    TurnId.make(`${threadId}-turn`),
                   state: shell.latestTurn,
                   requestedAt: NOW,
                   startedAt: NOW,
@@ -1056,6 +1106,11 @@ function createHarness(input: {
     runLifecycle,
     store,
     turnsStarted: () => turnsStarted,
+    shellReads: () => shellReads,
+    setActiveTurn: (threadId: ThreadId, turnId: TurnId) => {
+      activeTurnIds.set(threadId, turnId);
+      shells.set(threadId, { latestTurn: "running", session: "running" });
+    },
     activeTurns: () => activeTurns,
     maxActiveTurns: () => maxActiveTurns,
     startedIssueIds,
@@ -2543,6 +2598,32 @@ describe("EpicRunner", () => {
     },
   );
 
+  it.live("classifies the iteration turn while a newer human turn is running", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: 'iteration answer\nRALPH_MSG: {"summary":"turn one","why":"assigned work"}',
+          head: "head-1",
+          settleDelayMs: 0,
+          humanFollowupText:
+            'human answer\nRALPH_MSG: {"summary":"wrong turn","why":"unrelated message"}',
+        },
+      ],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.iterations[0]?.turnStatus === "completed");
+
+      assert.strictEqual(harness.store.iterations[0]?.summary, "turn one");
+      assert.strictEqual(harness.store.iterations[0]?.why, "assigned work");
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+      yield* runner.cancelRun({ runId: run.runId });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("classifies a genuinely message-less completed turn as a protocol error", () => {
     // "No message ever". The turn completed, the settle wait ran out, and the
     // iteration left no commit behind — nothing to judge it by, so it fails.
@@ -2845,7 +2926,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("keeps each finished iteration active and stops its session once", () => {
+  it.live("leaves finished iteration sessions for idle reaping", () => {
     const harness = createHarness({
       script: [
         { text: "work", head: "head-1", subagentDrainReads: 3 },
@@ -2859,17 +2940,12 @@ describe("EpicRunner", () => {
 
       const stops = harness.commandsOfType("thread.session.stop");
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
-      assert.strictEqual(stops.length, 2);
-      assert.deepStrictEqual(
-        stops.map((command) => command.threadId),
-        harness.commandsOfType("thread.create").map((command) => command.threadId),
-      );
-      assert.isTrue(stops.every((command) => command.preserveRunningSubagents === true));
+      assert.strictEqual(stops.length, 0);
       assert.deepStrictEqual(harness.stopsWithRunningSubagents(), []);
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("drains and retries once when the atomic normal-stop guard refuses", () => {
+  it.live("does not dispatch normal session stops after settlement", () => {
     const harness = createHarness({
       script: [
         { text: "work", head: "head-1" },
@@ -2883,10 +2959,7 @@ describe("EpicRunner", () => {
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
 
       const stops = harness.commandsOfType("thread.session.stop");
-      assert.strictEqual(stops.length, 3);
-      assert.strictEqual(stops[0]!.threadId, stops[1]!.threadId);
-      assert.notStrictEqual(stops[0]!.commandId, stops[1]!.commandId);
-      assert.isTrue(stops.every((command) => command.preserveRunningSubagents === true));
+      assert.strictEqual(stops.length, 0);
       assert.deepStrictEqual(harness.stopsWithRunningSubagents(), []);
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
     }).pipe(Effect.provide(harness.layer));
@@ -2932,10 +3005,12 @@ describe("EpicRunner", () => {
       assert.strictEqual(continuation.message.text, EPIC_RUN_CONTINUATION_PROMPT);
       assert.strictEqual(continuation.message.messageId, `${iterationThreadId}-continue`);
 
-      const stop = harness
-        .commandsOfType("thread.session.stop")
-        .find((command) => command.threadId === iterationThreadId)!;
-      assert.isAbove(harness.commands.indexOf(stop), harness.commands.indexOf(continuation));
+      assert.strictEqual(
+        harness
+          .commandsOfType("thread.session.stop")
+          .filter((command) => command.threadId === iterationThreadId).length,
+        0,
+      );
 
       // The continuation's commit and report classified the iteration.
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
@@ -2945,7 +3020,7 @@ describe("EpicRunner", () => {
       // The zero-subagent iteration got one turn and one stop.
       assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 3);
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
-      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 2);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
       assert.isUndefined(
         logs.messages.find((message) => message[0] === "epic.runner.subagent-grace-cap"),
       );
@@ -3105,10 +3180,12 @@ describe("EpicRunner", () => {
         .filter((command) => command.threadId === iterationThreadId);
       assert.strictEqual(turnStarts.length, 3);
 
-      const stop = harness
-        .commandsOfType("thread.session.stop")
-        .find((command) => command.threadId === iterationThreadId)!;
-      assert.isAbove(harness.commands.indexOf(stop), harness.commands.indexOf(turnStarts[2]!));
+      assert.strictEqual(
+        harness
+          .commandsOfType("thread.session.stop")
+          .filter((command) => command.threadId === iterationThreadId).length,
+        0,
+      );
       assert.strictEqual(harness.store.iterations[0]?.summary, "classified at the cap");
       assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
 
@@ -3203,10 +3280,12 @@ describe("EpicRunner", () => {
         [EPIC_RUN_CONTINUATION_PROMPT, EPIC_RUN_CONTINUATION_PROMPT],
       );
 
-      const stop = harness
-        .commandsOfType("thread.session.stop")
-        .find((command) => command.threadId === iterationThreadId)!;
-      assert.isAbove(harness.commands.indexOf(stop), harness.commands.indexOf(turnStarts[2]!));
+      assert.strictEqual(
+        harness
+          .commandsOfType("thread.session.stop")
+          .filter((command) => command.threadId === iterationThreadId).length,
+        0,
+      );
       assert.strictEqual(harness.store.iterations[0]?.turnStatus, "completed");
       assert.strictEqual(harness.store.iterations[0]?.summary, "nested chain landed");
       assert.strictEqual(harness.store.runs.get(run.runId)?.consecutiveFailures, 0);
@@ -3236,7 +3315,7 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.turn.start").length, 1);
       assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
       assert.strictEqual(harness.commandsOfType("thread.settle").length, 0);
-      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 1);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -4484,6 +4563,8 @@ describe("EpicRunner", () => {
       const runner = yield* EpicRunner;
       const run = yield* startRun();
       yield* waitFor(() => harness.turnsStarted() === 1);
+      const shellReadsBeforeOwnership = harness.shellReads();
+      yield* waitFor(() => harness.shellReads() > shellReadsBeforeOwnership);
 
       const current = harness.store.runs.get(run.runId)!;
       harness.store.runs.set(run.runId, {
@@ -4505,6 +4586,10 @@ describe("EpicRunner", () => {
       const interrupts = harness.commandsOfType("thread.turn.interrupt");
       assert.strictEqual(interrupts.length, 1);
       assert.strictEqual(interrupts[0]?.threadId, harness.store.iterations[0]?.threadId);
+      assert.strictEqual(
+        interrupts[0]?.turnId,
+        TurnId.make(`${harness.store.iterations[0]?.threadId}-turn-1`),
+      );
       // A cancelled thread is abandoned mid-turn, not finished, so it keeps the
       // interrupt + session.stop pair. Settling it would claim the iteration
       // ran to completion.
@@ -4522,6 +4607,29 @@ describe("EpicRunner", () => {
       yield* settle;
       assert.strictEqual(harness.turnsStarted(), 1);
       assert.strictEqual(harness.store.runs.get(run.runId)!.status, "cancelled");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("targets the owned turn when a newer human turn is active at cancellation", () => {
+    const harness = createHarness({
+      script: [{ text: null, head: "head-0", stall: true }],
+      options: { iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.turnsStarted() === 1);
+      const shellReadsBeforeOwnership = harness.shellReads();
+      yield* waitFor(() => harness.shellReads() > shellReadsBeforeOwnership);
+      const iterationThreadId = harness.store.iterations[0]!.threadId;
+      harness.setActiveTurn(iterationThreadId, TurnId.make(`${iterationThreadId}-human-turn`));
+
+      yield* runner.cancelRun({ runId: run.runId });
+
+      const interrupts = harness.commandsOfType("thread.turn.interrupt");
+      assert.strictEqual(interrupts.length, 1);
+      assert.strictEqual(interrupts[0]?.turnId, TurnId.make(`${iterationThreadId}-turn-1`));
     }).pipe(Effect.provide(harness.layer));
   });
 

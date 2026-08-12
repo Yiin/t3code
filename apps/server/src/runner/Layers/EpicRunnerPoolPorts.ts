@@ -96,14 +96,13 @@ import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
-import {
-  countFreshRunningSubagents,
-  isRunningSubagentLivenessRefusal,
-} from "../../orchestration/subagentLiveness.ts";
+import { countFreshRunningSubagents } from "../../orchestration/subagentLiveness.ts";
 import {
   makeThreadSettleWatch,
   resolveFinalAssistantMessage,
+  resolveTurnAssistantMessage,
   threadTurnState,
+  type SettledTurn,
 } from "../../orchestration/ThreadSettleWatch.ts";
 import type { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -1936,6 +1935,7 @@ export const makeServerPoolDispatch = (deps: {
   readonly projectSetupScriptRunner: ProjectSetupScriptRunner["Service"];
   readonly crypto: Crypto.Crypto;
   readonly workerScopeRegistry: EpicWorkerScopeRegistry["Service"];
+  readonly ownedIterationTurnIds?: Map<ThreadId, TurnId>;
 }): PoolDispatchShape => {
   const {
     engine,
@@ -1945,6 +1945,7 @@ export const makeServerPoolDispatch = (deps: {
     crypto,
     workerScopeRegistry,
   } = deps;
+  const ownedIterationTurnIds = deps.ownedIterationTurnIds ?? new Map<ThreadId, TurnId>();
   const vcs = makeProcessPoolVcs(processRunner);
 
   const commandId = (tag: string) =>
@@ -2073,10 +2074,13 @@ export const makeServerPoolDispatch = (deps: {
     readonly branchBase: string | null;
     readonly initialWorktreeFingerprint: string | null;
     readonly timings: PoolTimings;
-  }): Effect.Effect<void, DispatchError> =>
+    readonly settledTurn: SettledTurn;
+    readonly onObservedTurn: (turnId: TurnId) => void;
+  }): Effect.Effect<SettledTurn, DispatchError> =>
     Effect.gen(function* () {
       let continuationIndex = 0;
       let worktreeFingerprintBefore = input.initialWorktreeFingerprint;
+      let settledTurn = input.settledTurn;
 
       while (true) {
         const headMoved = yield* iterationCommitted({
@@ -2096,12 +2100,12 @@ export const makeServerPoolDispatch = (deps: {
             continuationsUsed: continuationIndex,
             maxGraceContinuations: input.timings.maxGraceContinuations,
           });
-          if (decision.action === "settle") return;
+          if (decision.action === "settle") return settledTurn;
         }
 
         const snapshot = yield* readThreadDetail(input.threadId);
         const thread = snapshot?.thread;
-        const turnStatus = threadTurnState(thread);
+        const turnStatus = settledTurn.state;
         if (turnStatus !== "completed") {
           const decision = decideGraceStep({
             headMoved,
@@ -2114,7 +2118,7 @@ export const makeServerPoolDispatch = (deps: {
             continuationsUsed: continuationIndex,
             maxGraceContinuations: input.timings.maxGraceContinuations,
           });
-          if (decision.action === "settle") return;
+          if (decision.action === "settle") return settledTurn;
         }
 
         const freshRunning = countFreshRunningSubagents(
@@ -2144,10 +2148,18 @@ export const makeServerPoolDispatch = (deps: {
               continuationsUsed: continuationIndex,
               maxGraceContinuations: input.timings.maxGraceContinuations,
             });
-            if (decision.action === "settle") return;
+            if (decision.action === "settle") return settledTurn;
           }
-          const finalMessage = yield* readSettledFinalMessage(input.threadId, input.timings);
-          const finalAssistantMessage = resolveFinalAssistantMessage(finalMessage.snapshot?.thread);
+          const finalMessage = yield* readSettledFinalMessage(
+            input.threadId,
+            input.timings,
+            settledTurn.turnId,
+            settledTurn.state,
+          );
+          const finalAssistantMessage =
+            settledTurn.turnId === null
+              ? resolveFinalAssistantMessage(finalMessage.snapshot?.thread)
+              : resolveTurnAssistantMessage(finalMessage.snapshot?.thread, settledTurn.turnId);
           const text = finalAssistantMessage?.text ?? null;
           finalMessageMissing = text === null;
           finalMessageWaitExhausted = finalMessage.messageWaitExhausted;
@@ -2176,10 +2188,9 @@ export const makeServerPoolDispatch = (deps: {
               continuationIndex,
             });
           }
-          return;
+          return settledTurn;
         }
 
-        const priorTurnId = thread?.latestTurn?.turnId ?? null;
         if (decision.action === "awaitDrain") {
           yield* Effect.logInfo("epic.runner.subagent-grace-started", {
             runId: input.runId,
@@ -2196,7 +2207,7 @@ export const makeServerPoolDispatch = (deps: {
               threadId: input.threadId,
               continuationIndex,
             });
-            return;
+            return settledTurn;
           }
           worktreeFingerprintBefore = yield* vcs.worktreeFingerprint(input.workspace.cwd);
           yield* Effect.logInfo("epic.runner.subagent-grace-continuation", {
@@ -2217,6 +2228,15 @@ export const makeServerPoolDispatch = (deps: {
 
         continuationIndex = decision.nextContinuationCount;
         const createdAt = yield* nowIso;
+        // A human turn can start while subagents drain. Capture the turn that
+        // is active at dispatch time, so the continuation wait ignores it.
+        const priorTurnId =
+          (yield* readThreadDetail(input.threadId))?.thread.latestTurn?.turnId ?? null;
+        const continuationMessageId = MessageId.make(
+          continuationIndex === 1
+            ? `${input.threadId}-continue`
+            : `${input.threadId}-continue-${continuationIndex}`,
+        );
         yield* dispatchCommand({
           type: "thread.turn.start",
           commandId: yield* commandId("turn-continue"),
@@ -2224,11 +2244,7 @@ export const makeServerPoolDispatch = (deps: {
           message: {
             // Every continuation needs its own message id. Otherwise a later
             // cycle replaces the earlier continuation in the projection.
-            messageId: MessageId.make(
-              continuationIndex === 1
-                ? `${input.threadId}-continue`
-                : `${input.threadId}-continue-${continuationIndex}`,
-            ),
+            messageId: continuationMessageId,
             role: "user",
             text: decision.prompt,
             attachments: [],
@@ -2241,7 +2257,13 @@ export const makeServerPoolDispatch = (deps: {
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           createdAt,
         }).pipe(Effect.mapError(dispatchErrorFromRunner));
-        yield* awaitTurnEnd(input.threadId, input.timings, priorTurnId);
+        settledTurn = yield* awaitTurnEnd(
+          input.threadId,
+          input.timings,
+          priorTurnId,
+          input.onObservedTurn,
+          continuationMessageId,
+        );
       }
     });
 
@@ -2283,10 +2305,23 @@ export const makeServerPoolDispatch = (deps: {
     readonly branchBase: string | null;
     readonly initialWorktreeFingerprint: string | null;
     readonly priorTurnId: TurnId | null;
+    readonly messageId: MessageId;
   }): IterationHandle => {
+    let settledTurn: SettledTurn | null = null;
+    let ownedTurnId: TurnId | null = null;
+    const observeOwnedTurn = (turnId: TurnId) => {
+      ownedTurnId = turnId;
+      ownedIterationTurnIds.set(input.threadId, turnId);
+    };
     const awaitSettled: Effect.Effect<IterationSettle, DispatchError> = Effect.gen(function* () {
-      yield* awaitTurnEnd(input.threadId, input.policy, input.priorTurnId);
-      yield* graceContinuationForSubagents({
+      const initialSettledTurn = yield* awaitTurnEnd(
+        input.threadId,
+        input.policy,
+        input.priorTurnId,
+        observeOwnedTurn,
+        input.messageId,
+      );
+      settledTurn = yield* graceContinuationForSubagents({
         runId: input.runId,
         iterationIndex: input.iterationIndex,
         threadId: input.threadId,
@@ -2297,11 +2332,22 @@ export const makeServerPoolDispatch = (deps: {
         branchBase: input.branchBase,
         initialWorktreeFingerprint: input.initialWorktreeFingerprint,
         timings: input.policy,
+        settledTurn: initialSettledTurn,
+        onObservedTurn: observeOwnedTurn,
       });
       const snapshot = yield* readThreadDetail(input.threadId);
-      const turnState = threadTurnState(snapshot?.thread);
+      const projectedState = threadTurnState(snapshot?.thread);
+      if (
+        snapshot?.thread.latestTurn === null &&
+        projectedState !== null &&
+        projectedState !== "running"
+      ) {
+        // The detail pointer can be absent while checkpoint work catches up.
+        // In that window the session is the only projected terminal state.
+        settledTurn = { ...settledTurn, state: projectedState };
+      }
       return {
-        turnState: turnState === "running" || turnState === null ? "completed" : turnState,
+        turnState: settledTurn.state,
         timedOut: false,
         providerError: snapshot?.thread.session?.lastError ?? null,
       } satisfies IterationSettle;
@@ -2336,32 +2382,16 @@ export const makeServerPoolDispatch = (deps: {
           type: "thread.turn.interrupt",
           commandId: yield* commandId("turn-interrupt"),
           threadId: input.threadId,
+          ...(ownedTurnId === null ? {} : { turnId: ownedTurnId }),
           createdAt: yield* nowIso,
         });
       }),
       release: Effect.gen(function* () {
         yield* awaitSubagentDrain(input.threadId, input.policy);
-        const normalStop = {
-          type: "thread.session.stop",
-          commandId: yield* commandId("session-stop"),
-          threadId: input.threadId,
-          createdAt: yield* nowIso,
-          preserveRunningSubagents: true,
-        } as const;
-        yield* dispatchCommand(normalStop).pipe(
-          Effect.catch((error) => {
-            if (!isRunningSubagentLivenessRefusal(error.message)) {
-              return Effect.logWarning("epic.runner.session-stop-failed", { cause: error });
-            }
-            return Effect.gen(function* () {
-              yield* awaitSubagentDrain(input.threadId, input.policy);
-              yield* dispatchBestEffort("epic.runner.guarded-session-stop-retry-failed", {
-                ...normalStop,
-                commandId: yield* commandId("session-stop-retry"),
-              });
-            });
-          }),
-        );
+        // Do not stop a settled iteration session here. A queued human prompt
+        // can become active between any projection check and session.stop.
+        // The session reaper owns idle cleanup without racing message delivery.
+        ownedIterationTurnIds.delete(input.threadId);
       }),
       runningSubagents: Effect.gen(function* () {
         const snapshot = yield* readThreadDetail(input.threadId);
@@ -2371,19 +2401,28 @@ export const makeServerPoolDispatch = (deps: {
           running: countFreshRunningSubagents(snapshot?.thread.subagents ?? [], nowMs),
         };
       }),
-      finalMessage: readSettledFinalMessage(input.threadId, input.policy).pipe(
-        Effect.map((settled): FinalMessageRead => {
-          const thread = settled.snapshot?.thread;
-          const message = resolveFinalAssistantMessage(thread);
-          const turnState = threadTurnState(thread);
-          return {
-            text: message?.text ?? null,
-            streaming: message?.streaming ?? false,
-            waitExhausted: settled.messageWaitExhausted,
-            turnState: turnState === "running" ? null : turnState,
-            sessionLastError: thread?.session?.lastError ?? null,
-          };
-        }),
+      finalMessage: Effect.suspend(() =>
+        readSettledFinalMessage(
+          input.threadId,
+          input.policy,
+          settledTurn?.turnId ?? null,
+          settledTurn?.state ?? null,
+        ).pipe(
+          Effect.map((settled): FinalMessageRead => {
+            const thread = settled.snapshot?.thread;
+            const message =
+              settledTurn?.turnId == null
+                ? resolveFinalAssistantMessage(thread)
+                : resolveTurnAssistantMessage(thread, settledTurn.turnId);
+            return {
+              text: message?.text ?? null,
+              streaming: message?.streaming ?? false,
+              waitExhausted: settled.messageWaitExhausted,
+              turnState: settledTurn?.state ?? null,
+              sessionLastError: thread?.session?.lastError ?? null,
+            };
+          }),
+        ),
       ),
     };
     return handle;
@@ -2438,12 +2477,13 @@ export const makeServerPoolDispatch = (deps: {
 
     beginTurn: (input) =>
       Effect.gen(function* () {
+        const messageId = MessageId.make(`${input.threadId}-prompt`);
         yield* dispatchCommand({
           type: "thread.turn.start",
           commandId: yield* commandId("turn-start"),
           threadId: input.threadId,
           message: {
-            messageId: MessageId.make(`${input.threadId}-prompt`),
+            messageId,
             role: "user",
             text: input.prompt,
             attachments: [],
@@ -2454,7 +2494,7 @@ export const makeServerPoolDispatch = (deps: {
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           createdAt: yield* nowIso,
         });
-        return makeIterationHandle({ ...input, priorTurnId: null });
+        return makeIterationHandle({ ...input, priorTurnId: null, messageId });
       }),
 
     /**
@@ -2467,9 +2507,6 @@ export const makeServerPoolDispatch = (deps: {
     resumeIteration: (input) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make(input.ref);
-        // Pin the wait to the turn the dead process left behind. Without it
-        // `awaitTurnEnd` settles instantly on that turn's recorded state.
-        const priorTurnId = (yield* readThreadDetail(threadId))?.thread.latestTurn?.turnId ?? null;
         const resumeCommandId = yield* commandId("session-resume");
         yield* dispatchCommand({
           type: "thread.session.resume",
@@ -2516,6 +2553,10 @@ export const makeServerPoolDispatch = (deps: {
 
         // Only now, with continuity proved, does the agent hear anything.
         const promptId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+        const messageId = MessageId.make(`${threadId}-resume-${promptId}`);
+        // The resume handshake can overlap a human turn. Pin the wait to the
+        // turn active immediately before this runner prompt is dispatched.
+        const priorTurnId = (yield* readThreadDetail(threadId))?.thread.latestTurn?.turnId ?? null;
         yield* dispatchCommand({
           type: "thread.turn.start",
           commandId: yield* commandId("turn-resume"),
@@ -2523,7 +2564,7 @@ export const makeServerPoolDispatch = (deps: {
           message: {
             // Never `${threadId}-prompt`: that id already names the message
             // the interrupted iteration sent, and reusing it would replace it.
-            messageId: MessageId.make(`${threadId}-resume-${promptId}`),
+            messageId,
             role: "user",
             text: input.prompt,
             attachments: [],
@@ -2536,7 +2577,7 @@ export const makeServerPoolDispatch = (deps: {
         });
         return {
           _tag: "resumed",
-          handle: makeIterationHandle({ ...input, threadId, priorTurnId }),
+          handle: makeIterationHandle({ ...input, threadId, priorTurnId, messageId }),
         } as const;
       }),
 
@@ -2548,6 +2589,7 @@ export const makeServerPoolDispatch = (deps: {
           threadId,
           createdAt: yield* nowIso,
         });
+        ownedIterationTurnIds.delete(threadId);
       }),
 
     stopForced: (threadId) =>
@@ -2558,6 +2600,7 @@ export const makeServerPoolDispatch = (deps: {
           threadId,
           createdAt: yield* nowIso,
         });
+        ownedIterationTurnIds.delete(threadId);
       }),
   };
 };
@@ -2572,8 +2615,9 @@ export const makeAbandonRunningIterations = (deps: {
   readonly engine: OrchestrationEngineService["Service"];
   readonly crypto: Crypto.Crypto;
   readonly backlog: PoolBacklogShape;
+  readonly ownedIterationTurnIds: Map<ThreadId, TurnId>;
 }) => {
-  const { store, engine, crypto, backlog } = deps;
+  const { store, engine, crypto, backlog, ownedIterationTurnIds } = deps;
 
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -2615,6 +2659,9 @@ export const makeAbandonRunningIterations = (deps: {
           type: "thread.turn.interrupt",
           commandId: yield* commandId(`${commandPrefix}-interrupt`),
           threadId: iteration.threadId,
+          ...(ownedIterationTurnIds.has(iteration.threadId)
+            ? { turnId: ownedIterationTurnIds.get(iteration.threadId) }
+            : {}),
           createdAt: abandonedAt,
         });
         yield* dispatchBestEffort(`epic.runner.${commandPrefix}-session-stop-failed`, {
@@ -2638,6 +2685,7 @@ export const makeAbandonRunningIterations = (deps: {
       if (iteration.issueId !== null) {
         yield* backlog.releaseClaimedChild(run.cwd, iteration.issueId);
       }
+      ownedIterationTurnIds.delete(iteration.threadId);
     }
   });
 };

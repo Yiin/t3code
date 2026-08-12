@@ -44,6 +44,7 @@ import type {
   ProviderSessionStartInput,
   ProviderTurnStartResult,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 
 /** Every adapter fails with its own tagged union; the rows only need the tag. */
@@ -63,6 +64,10 @@ export interface MidTurnDeliveryAdapterUnderTest {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, MidTurnDeliveryAdapterError>;
+  readonly interruptTurn: (
+    threadId: ThreadId,
+    turnId?: TurnId,
+  ) => Effect.Effect<void, MidTurnDeliveryAdapterError>;
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, MidTurnDeliveryAdapterError>;
   readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
 }
@@ -386,6 +391,91 @@ export const describeAcpMidTurnDeliveryConformance = <R>(
         }),
       ),
     // Two real prompts at the mock's delay, plus process startup.
+    60_000,
+  );
+
+  it.effect(
+    row("a stale interrupt does not cancel the queued turn"),
+    () =>
+      input.runScenario((harness) =>
+        Effect.gen(function* () {
+          const threadId = `${name.toLowerCase()}-mid-turn-stale-interrupt` as ThreadId;
+          const events = yield* Ref.make<ReadonlyArray<ProviderRuntimeEvent>>([]);
+          const collector = yield* harness.adapter.streamEvents.pipe(
+            Stream.filter((event) => event.threadId === threadId),
+            Stream.runForEach((event) => Ref.update(events, (seen) => [...seen, event])),
+            Effect.forkChild,
+          );
+
+          yield* Effect.gen(function* () {
+            yield* harness.adapter.startSession({
+              threadId,
+              provider: input.provider,
+              runtimeMode: "full-access",
+              ...harness.startSessionInput,
+            });
+
+            const firstFiber = yield* harness.adapter
+              .sendTurn({
+                threadId,
+                input: FIRST_MESSAGE,
+                attachments: [],
+                ...harness.sendTurnInput,
+              })
+              .pipe(Effect.forkChild);
+
+            yield* Effect.gen(function* () {
+              for (let attempt = 0; attempt < 400; attempt += 1) {
+                if (promptRequests(yield* harness.readAgentRequests()).length >= 1) return;
+                yield* Effect.sleep("10 millis");
+              }
+              return yield* Effect.die(
+                new Error(`${input.name}: the mock agent never received the first prompt.`),
+              );
+            });
+
+            const secondFiber = yield* harness.adapter
+              .sendTurn({
+                threadId,
+                input: SECOND_MESSAGE,
+                attachments: [],
+                ...harness.sendTurnInput,
+              })
+              .pipe(Effect.forkChild);
+            const firstTurn = yield* Fiber.join(firstFiber);
+
+            const secondTurnId = yield* Effect.gen(function* () {
+              for (let attempt = 0; attempt < 400; attempt += 1) {
+                const secondStarted = (yield* Ref.get(events)).find(
+                  (event) => event.type === "turn.started" && event.turnId !== firstTurn.turnId,
+                );
+                if (secondStarted?.turnId !== undefined) return secondStarted.turnId;
+                yield* Effect.sleep("10 millis");
+              }
+              return yield* Effect.die(
+                new Error(`${input.name}: the queued prompt never started its own turn.`),
+              );
+            });
+
+            yield* harness.adapter.interruptTurn(threadId, firstTurn.turnId);
+            const secondTurn = yield* Fiber.join(secondFiber);
+            const secondCompleted = (yield* Ref.get(events)).find(
+              (event) => event.type === "turn.completed" && event.turnId === secondTurnId,
+            );
+
+            assert.equal(secondTurn.turnId, secondTurnId);
+            assert.equal(
+              secondCompleted?.type === "turn.completed"
+                ? secondCompleted.payload.state
+                : undefined,
+              "completed",
+              "an interrupt for the settled turn must not cancel the queued turn",
+            );
+
+            yield* harness.adapter.stopSession(threadId);
+          }).pipe(Effect.ensuring(Fiber.interrupt(collector)), TestClock.withLive);
+        }),
+      ),
     60_000,
   );
 };

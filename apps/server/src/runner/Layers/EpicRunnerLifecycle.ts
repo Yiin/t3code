@@ -10,7 +10,7 @@
  *
  * @module EpicRunnerLifecycle
  */
-import { CommandId, type EpicRunId, type ThreadId } from "@t3tools/contracts";
+import { CommandId, type EpicRunId, type ThreadId, type TurnId } from "@t3tools/contracts";
 import {
   EpicRunNotFoundError,
   EpicRunnerStoreError,
@@ -61,6 +61,7 @@ export const makeEpicRunnerLifecycle = (deps: {
     configSnapshot: EpicRunConfigSnapshot,
   ) => Effect.Effect<void, import("@t3tools/epic-core/Errors").EpicRunnerError | EpicRunLeaseHeld>;
   readonly persistedConfigSnapshot: (run: EpicRun) => EpicRunConfigSnapshot;
+  readonly ownedIterationTurnIds: Map<ThreadId, TurnId>;
 }) => {
   const {
     store,
@@ -81,6 +82,7 @@ export const makeEpicRunnerLifecycle = (deps: {
     releaseLeaseOnFailure,
     acquireLease,
     persistedConfigSnapshot,
+    ownedIterationTurnIds,
   } = deps;
 
   const storeError = (operation: string) => (cause: unknown) =>
@@ -111,6 +113,7 @@ export const makeEpicRunnerLifecycle = (deps: {
     command: {
       readonly type: "thread.turn.interrupt" | "thread.session.stop";
       readonly threadId: ThreadId;
+      readonly turnId?: TurnId;
       readonly createdAt: string;
     },
   ): Effect.Effect<void> =>
@@ -253,6 +256,9 @@ export const makeEpicRunnerLifecycle = (deps: {
       // observes the cancelled row at its boundary or is interrupted here,
       // while its lease remains held until the cancelled state is visible.
       cancelCleanupOwned.add(runId);
+      // Removing the loop can run handle finalizers. Keep the turn targets
+      // before that removal so cancellation cannot lose iteration ownership.
+      const ownedTurnIdsAtCancel = new Map(ownedIterationTurnIds);
       yield* Effect.gen(function* () {
         yield* FiberMap.remove(loops, runId);
 
@@ -260,9 +266,11 @@ export const makeEpicRunnerLifecycle = (deps: {
           .listRunningIterations({ runId })
           .pipe(Effect.mapError(storeError("listRunningIterations")));
         for (const iteration of runningIterations) {
+          const ownedTurnId = ownedTurnIdsAtCancel.get(iteration.threadId);
           yield* dispatchBestEffort("epic.runner.cancel-interrupt-failed", {
             type: "thread.turn.interrupt",
             threadId: iteration.threadId,
+            ...(ownedTurnId === undefined ? {} : { turnId: ownedTurnId }),
             createdAt: cancelledAt,
           });
           yield* dispatchBestEffort("epic.runner.cancel-session-stop-failed", {
@@ -284,6 +292,7 @@ export const makeEpicRunnerLifecycle = (deps: {
           if (iteration.issueId !== null) {
             yield* backlog.releaseClaimedChild(cancelled.cwd, iteration.issueId);
           }
+          ownedIterationTurnIds.delete(iteration.threadId);
         }
       }).pipe(
         Effect.ensuring(

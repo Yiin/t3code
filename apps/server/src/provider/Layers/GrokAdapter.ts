@@ -73,6 +73,7 @@ import {
   XAiAskUserQuestionRequest,
 } from "../acp/XAiAcpExtension.ts";
 import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
+import { isInterruptTargetCurrent } from "../interruptTarget.ts";
 import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
@@ -1145,7 +1146,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             };
           }
           const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
-          if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+          if (!isInterruptTargetCurrent(activeTurnId, turnId)) {
             return { _tag: "Ignore" as const };
           }
           const interruptedTurnId = turnId ?? activeTurnId;
@@ -1170,7 +1171,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               return;
             }
             const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
-            if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+            if (!isInterruptTargetCurrent(activeTurnId, turnId)) {
               return;
             }
             if (

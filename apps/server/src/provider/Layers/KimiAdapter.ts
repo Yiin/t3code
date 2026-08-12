@@ -82,6 +82,7 @@ import {
   trackKimiSubagentToolCall,
 } from "../acp/KimiAcpSupport.ts";
 import { type KimiAdapterShape } from "../Services/KimiAdapter.ts";
+import { isInterruptTargetCurrent } from "../interruptTarget.ts";
 import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
@@ -893,64 +894,70 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               prompt: promptParts,
             },
             {
-              onStarted: Effect.gen(function* () {
-                yield* ctx.acp.drainEvents;
-                if (sessions.get(input.threadId) !== ctx || ctx.stopped) {
-                  return yield* new ProviderAdapterSessionNotFoundError({
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                  });
-                }
-                yield* applyRequestedSessionConfiguration({
-                  runtime: ctx.acp,
-                  runtimeMode: ctx.session.runtimeMode,
-                  interactionMode: input.interactionMode,
-                  model,
-                  mapError: ({ cause, method }) =>
-                    mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
-                });
-                ctx.activeTurnId = turnId;
-                turnStarted = true;
-                ctx.lastPlanFingerprint = undefined;
-                ctx.session = {
-                  ...ctx.session,
-                  activeTurnId: turnId,
-                  updatedAt: yield* nowIso,
-                };
-                yield* offerRuntimeEvent({
-                  type: "turn.started",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  payload: { model: resolvedModel },
-                });
-              }),
-              onCompleted: (result) =>
+              onStarted: withThreadLock(
+                input.threadId,
                 Effect.gen(function* () {
-                  if (sessions.get(input.threadId) !== ctx || ctx.stopped) return;
                   yield* ctx.acp.drainEvents;
-                  if (sessions.get(input.threadId) !== ctx || ctx.stopped) return;
-                  ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
-                  const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
-                  ctx.activeTurnId = undefined;
+                  if (sessions.get(input.threadId) !== ctx || ctx.stopped) {
+                    return yield* new ProviderAdapterSessionNotFoundError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                    });
+                  }
+                  yield* applyRequestedSessionConfiguration({
+                    runtime: ctx.acp,
+                    runtimeMode: ctx.session.runtimeMode,
+                    interactionMode: input.interactionMode,
+                    model,
+                    mapError: ({ cause, method }) =>
+                      mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
+                  });
+                  ctx.activeTurnId = turnId;
+                  turnStarted = true;
+                  ctx.lastPlanFingerprint = undefined;
                   ctx.session = {
-                    ...readySession,
+                    ...ctx.session,
+                    activeTurnId: turnId,
                     updatedAt: yield* nowIso,
-                    model: resolvedModel,
                   };
                   yield* offerRuntimeEvent({
-                    type: "turn.completed",
+                    type: "turn.started",
                     ...(yield* makeEventStamp()),
                     provider: PROVIDER,
                     threadId: input.threadId,
                     turnId,
-                    payload: {
-                      state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                      stopReason: result.stopReason ?? null,
-                    },
+                    payload: { model: resolvedModel },
                   });
                 }),
+              ),
+              onCompleted: (result) =>
+                withThreadLock(
+                  input.threadId,
+                  Effect.gen(function* () {
+                    if (sessions.get(input.threadId) !== ctx || ctx.stopped) return;
+                    yield* ctx.acp.drainEvents;
+                    if (sessions.get(input.threadId) !== ctx || ctx.stopped) return;
+                    ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+                    const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
+                    ctx.activeTurnId = undefined;
+                    ctx.session = {
+                      ...readySession,
+                      updatedAt: yield* nowIso,
+                      model: resolvedModel,
+                    };
+                    yield* offerRuntimeEvent({
+                      type: "turn.completed",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId,
+                      payload: {
+                        state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+                        stopReason: result.stopReason ?? null,
+                      },
+                    });
+                  }),
+                ),
             },
           )
           .pipe(
@@ -958,21 +965,28 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               mapAcpOrAdapterError(PROVIDER, input.threadId, "session/prompt", error),
             ),
             Effect.tapError((error) =>
-              !turnStarted || sessions.get(input.threadId) !== ctx || ctx.stopped
-                ? Effect.void
-                : Effect.gen(function* () {
-                    const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
-                    ctx.activeTurnId = undefined;
-                    ctx.session = { ...readySession, updatedAt: yield* nowIso };
-                    yield* offerRuntimeEvent({
-                      type: "turn.completed",
-                      ...(yield* makeEventStamp()),
-                      provider: PROVIDER,
-                      threadId: input.threadId,
-                      turnId,
-                      payload: { state: "failed", errorMessage: error.message },
-                    });
-                  }),
+              withThreadLock(
+                input.threadId,
+                Effect.gen(function* () {
+                  if (!turnStarted || sessions.get(input.threadId) !== ctx || ctx.stopped) {
+                    return;
+                  }
+                  if (ctx.activeTurnId !== turnId) {
+                    return;
+                  }
+                  const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
+                  ctx.activeTurnId = undefined;
+                  ctx.session = { ...readySession, updatedAt: yield* nowIso };
+                  yield* offerRuntimeEvent({
+                    type: "turn.completed",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId,
+                    payload: { state: "failed", errorMessage: error.message },
+                  });
+                }),
+              ),
             ),
             Effect.as({
               threadId: input.threadId,
@@ -982,19 +996,25 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
           );
       });
 
-    const interruptTurn: KimiAdapterShape["interruptTurn"] = (threadId) =>
-      Effect.gen(function* () {
-        const ctx = yield* requireSession(threadId);
-        yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
-        yield* Effect.ignore(
-          ctx.acp.cancel.pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
+    const interruptTurn: KimiAdapterShape["interruptTurn"] = (threadId, turnId) =>
+      withThreadLock(
+        threadId,
+        Effect.gen(function* () {
+          const ctx = yield* requireSession(threadId);
+          if (!isInterruptTargetCurrent(ctx.activeTurnId, turnId)) {
+            return;
+          }
+          yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
+          yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
+          yield* Effect.ignore(
+            ctx.acp.cancel.pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
+              ),
             ),
-          ),
-        );
-      });
+          );
+        }),
+      );
 
     const respondToRequest: KimiAdapterShape["respondToRequest"] = (
       threadId,

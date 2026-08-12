@@ -166,6 +166,10 @@ const ProjectIdLookupInput = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+const TurnByPendingMessageLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
 const ParentThreadIdLookupInput = Schema.Struct({
   parentThreadId: ThreadId,
 });
@@ -1459,6 +1463,42 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         LIMIT 1
       `,
   });
+
+  const getTurnRowByPendingMessage = SqlSchema.findOneOption({
+    Request: TurnByPendingMessageLookupInput,
+    Result: ProjectionLatestTurnDbRowSchema,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          state,
+          requested_at AS "requestedAt",
+          started_at AS "startedAt",
+          completed_at AS "completedAt",
+          assistant_message_id AS "assistantMessageId",
+          source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+          source_proposed_plan_id AS "sourceProposedPlanId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND pending_message_id = ${messageId}
+          AND turn_id IS NOT NULL
+        LIMIT 1
+      `,
+  });
+
+  const getTurnByPendingMessageId: NonNullable<
+    ProjectionSnapshotQueryShape["getTurnByPendingMessageId"]
+  > = (threadId, messageId) =>
+    getTurnRowByPendingMessage({ threadId, messageId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getTurnByPendingMessageId:query",
+          "ProjectionSnapshotQuery.getTurnByPendingMessageId:decodeRow",
+        ),
+      ),
+      Effect.map(Option.map(mapLatestTurn)),
+    );
 
   const listCheckpointRawRowsByThread = tracedFindAllRaw({
     Request: ThreadIdLookupInput,
@@ -2989,6 +3029,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFullThreadDiffContext,
     listSubagentTurnContributions,
     getThreadShellById,
+    getTurnByPendingMessageId,
     getThreadSessionById,
     getThreadSubagentLiveness,
     getSubagentActivities,

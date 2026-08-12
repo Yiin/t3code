@@ -4050,6 +4050,54 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
           },
         ]) {
           const threadId = ThreadId.make(`thread-clean-terminal-${pending.suffix}`);
+          if (pending.suffix === "stale") {
+            const historicalTurnId = TurnId.make("turn-clean-terminal-history");
+            yield* eventStore.append({
+              type: "thread.turn-start-requested",
+              eventId: EventId.make("evt-clean-terminal-history-start"),
+              aggregateKind: "thread",
+              aggregateId: threadId,
+              occurredAt: "2026-02-26T13:00:00.000Z",
+              commandId: CommandId.make("cmd-clean-terminal-history-start"),
+              causationEventId: null,
+              correlationId: CorrelationId.make("cmd-clean-terminal-history-start"),
+              metadata: {},
+              payload: {
+                threadId,
+                messageId: MessageId.make("message-clean-terminal-history"),
+                runtimeMode: "approval-required",
+                createdAt: "2026-02-26T13:00:00.000Z",
+              },
+            });
+            for (const [status, activeTurnId, at] of [
+              ["running", historicalTurnId, "2026-02-26T13:00:01.000Z"],
+              ["ready", null, "2026-02-26T13:00:02.000Z"],
+            ] as const) {
+              yield* eventStore.append({
+                type: "thread.session-set",
+                eventId: EventId.make(`evt-clean-terminal-history-${status}`),
+                aggregateKind: "thread",
+                aggregateId: threadId,
+                occurredAt: at,
+                commandId: CommandId.make(`cmd-clean-terminal-history-${status}`),
+                causationEventId: null,
+                correlationId: CorrelationId.make(`cmd-clean-terminal-history-${status}`),
+                metadata: {},
+                payload: {
+                  threadId,
+                  session: {
+                    threadId,
+                    status,
+                    providerName: "codex",
+                    runtimeMode: "approval-required",
+                    activeTurnId,
+                    lastError: null,
+                    updatedAt: at,
+                  },
+                },
+              });
+            }
+          }
           yield* eventStore.append({
             type: "thread.turn-start-requested",
             eventId: EventId.make(`evt-clean-terminal-pending-${pending.suffix}`),
@@ -4127,6 +4175,98 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
           },
         });
         yield* projectionPipeline.projectEvent(cleanupEvent);
+      }),
+    );
+
+    it.effect("keeps an aged turn start that was queued behind a running turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-aged-queued-turn");
+        const turnOne = TurnId.make("turn-aged-queued-one");
+        const turnTwo = TurnId.make("turn-aged-queued-two");
+
+        const appendSession = (status: "running" | "ready", turnId: TurnId | null, at: string) =>
+          eventStore.append({
+            type: "thread.session-set",
+            eventId: EventId.make(`evt-aged-queued-${status}-${turnId ?? "none"}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: at,
+            commandId: CommandId.make(`cmd-aged-queued-${status}-${turnId ?? "none"}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-aged-queued-${status}-${turnId ?? "none"}`),
+            metadata: {},
+            payload: {
+              threadId,
+              session: {
+                threadId,
+                status,
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: turnId,
+                lastError: null,
+                updatedAt: at,
+              },
+            },
+          });
+        const appendStart = (messageId: string, at: string) =>
+          eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-aged-queued-${messageId}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: at,
+            commandId: CommandId.make(`cmd-aged-queued-${messageId}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-aged-queued-${messageId}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(messageId),
+              runtimeMode: "approval-required",
+              createdAt: at,
+            },
+          });
+
+        yield* appendStart("message-aged-one", "2026-02-26T14:00:00.000Z");
+        yield* appendSession("running", turnOne, "2026-02-26T14:00:01.000Z");
+        yield* appendStart("message-aged-two", "2026-02-26T14:00:02.000Z");
+        yield* eventStore.append({
+          type: "thread.turn-interrupt-requested",
+          eventId: EventId.make("evt-aged-queued-interrupt-one"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T14:00:03.000Z",
+          commandId: CommandId.make("cmd-aged-queued-interrupt-one"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-aged-queued-interrupt-one"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId: turnOne,
+            createdAt: "2026-02-26T14:00:03.000Z",
+          },
+        });
+        yield* appendSession("ready", null, "2026-02-26T14:03:00.000Z");
+        yield* appendSession("running", turnTwo, "2026-02-26T14:03:01.000Z");
+
+        yield* projectionPipeline.bootstrap;
+
+        const rows = yield* sql<{
+          readonly turnId: string;
+          readonly pendingMessageId: string | null;
+        }>`
+          SELECT turn_id AS "turnId", pending_message_id AS "pendingMessageId"
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+          ORDER BY turn_id
+        `;
+        assert.deepEqual(rows, [
+          { turnId: turnOne, pendingMessageId: "message-aged-one" },
+          { turnId: turnTwo, pendingMessageId: "message-aged-two" },
+        ]);
       }),
     );
 

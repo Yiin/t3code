@@ -18,6 +18,7 @@
 import type {
   OrchestrationSessionStatus,
   OrchestrationThread,
+  MessageId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -267,22 +268,51 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
     threadId: ThreadId,
     timings: ThreadSettleTimings,
     priorTurnId: TurnId | null = null,
+    onObservedTurn?: (turnId: TurnId) => void,
+    targetMessageId?: MessageId,
   ): Effect.Effect<SettledTurn> =>
     Effect.gen(function* () {
       let observedActive = false;
+      let observedTurnId: TurnId | null = null;
       while (true) {
         const shell = yield* readThreadShell(threadId);
         // A continuation turn is dispatched while the thread's PREVIOUS turn
         // is still the projected latest — turn rows are created at provider
         // adoption, not at turn.start — so until the new turn appears, the
         // prior turn's settled state must not read as this turn's end.
-        const latestTurn =
+        const shellLatestTurn =
           shell?.latestTurn != null && shell.latestTurn.turnId !== priorTurnId
             ? shell.latestTurn
             : null;
+        const targetedTurn =
+          targetMessageId === undefined ||
+          projectionSnapshotQuery.getTurnByPendingMessageId === undefined
+            ? Option.none()
+            : yield* projectionSnapshotQuery
+                .getTurnByPendingMessageId(threadId, targetMessageId)
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+        const latestTurn =
+          targetMessageId !== undefined &&
+          projectionSnapshotQuery.getTurnByPendingMessageId !== undefined
+            ? Option.getOrNull(targetedTurn)
+            : shellLatestTurn;
         const turnState = latestTurn?.state ?? null;
         const sessionStatus = shell?.session?.status ?? null;
 
+        if (
+          observedTurnId !== null &&
+          latestTurn !== null &&
+          latestTurn.turnId !== observedTurnId
+        ) {
+          // The projector completes a running turn when a different provider
+          // turn becomes active. Keep ownership of the turn this wait first
+          // observed instead of following the thread's moving latest pointer.
+          return { turnId: observedTurnId, state: "completed" };
+        }
+        if (observedTurnId === null && latestTurn !== null) {
+          observedTurnId = latestTurn.turnId;
+          onObservedTurn?.(observedTurnId);
+        }
         if (
           turnState === "running" ||
           sessionStatus === "starting" ||
@@ -291,13 +321,16 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
           observedActive = true;
         }
         if (turnState !== null && turnState !== "running") {
-          return { turnId: latestTurn?.turnId ?? null, state: turnState };
+          return { turnId: observedTurnId ?? latestTurn?.turnId ?? null, state: turnState };
         }
         if (observedActive && sessionStatus !== null && isTurnEndSessionStatus(sessionStatus)) {
           const state = settledTurnStateFromSessionStatus(sessionStatus);
           // Non-null by `isTurnEndSessionStatus`, which is defined from this
           // same mapping. The check keeps that dependency honest to the type.
-          return { turnId: latestTurn?.turnId ?? null, state: state ?? "completed" };
+          return {
+            turnId: observedTurnId ?? latestTurn?.turnId ?? null,
+            state: state ?? "completed",
+          };
         }
 
         yield* Effect.sleep(Duration.millis(timings.pollIntervalMs));
@@ -349,6 +382,7 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
     threadId: ThreadId,
     timings: ThreadSettleTimings,
     pinnedTurnId: TurnId | null = null,
+    pinnedTurnState: SettledTurn["state"] | null = null,
   ) =>
     Effect.gen(function* () {
       const read = () => readThreadDetail(threadId);
@@ -374,7 +408,11 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
         ) {
           return { snapshot: current, messageWaitExhausted: false };
         }
-        if (currentMessage === null && threadTurnState(current?.thread) === "completed") {
+        const completedTurnMissingMessage =
+          pinnedTurnId === null
+            ? threadTurnState(current?.thread) === "completed"
+            : pinnedTurnState === "completed";
+        if (currentMessage === null && completedTurnMissingMessage) {
           watchedCompletedTurnWithoutMessage = true;
           maxReads = MAX_ABSENT_MESSAGE_SETTLE_READS;
         }

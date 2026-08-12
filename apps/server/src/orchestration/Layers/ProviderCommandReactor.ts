@@ -1221,8 +1221,27 @@ const make = Effect.gen(function* () {
       });
     }
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    const targetTurnId = event.payload.turnId;
+    if (
+      targetTurnId !== undefined &&
+      (thread.session?.status !== "running" || thread.session.activeTurnId !== targetTurnId)
+    ) {
+      return;
+    }
+    if (targetTurnId !== undefined) {
+      const liveSessions = yield* providerService.listSessions();
+      const liveSession = liveSessions.find(
+        (session) => session.threadId === event.payload.threadId && session.status === "running",
+      );
+      if (liveSession !== undefined && liveSession.activeTurnId !== targetTurnId) {
+        return;
+      }
+    }
+
+    yield* providerService.interruptTurn({
+      threadId: event.payload.threadId,
+      ...(targetTurnId === undefined ? {} : { turnId: targetTurnId }),
+    });
   });
 
   const processSubagentSteerRequested = Effect.fn("processSubagentSteerRequested")(function* (

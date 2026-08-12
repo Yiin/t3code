@@ -2817,7 +2817,81 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
       threadId: "thread-1",
+      turnId: "turn-1",
     });
+  });
+
+  it("does not interrupt a newer active turn for an older targeted request", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-newer-turn"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-2"),
+        lastError: null,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+
+    await dispatch(harness.engine, {
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-old-turn"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await harness.drain();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("uses the live provider turn to reject a stale targeted interrupt", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: ThreadId.make("thread-1"),
+      activeTurnId: asTurnId("turn-2"),
+      createdAt: now,
+      updatedAt: now,
+    });
+    await dispatch(harness.engine, {
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-stale-projection"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-1"),
+        lastError: null,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+
+    await dispatch(harness.engine, {
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-stale-live"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await harness.drain();
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
   });
 
   it("starts a fresh session when only projected session state exists", async () => {

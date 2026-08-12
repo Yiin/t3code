@@ -18,6 +18,8 @@ import {
   type EpicRun as TransportEpicRun,
   EpicRunId,
   MessageId,
+  type ThreadId,
+  type TurnId,
 } from "@t3tools/contracts";
 import {
   EpicRunNotFoundError,
@@ -206,6 +208,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
      * window is handed to the live loop instead of relaunching.
      */
     const liveLoops = new Set<EpicRunId>();
+    const ownedIterationTurnIds = new Map<ThreadId, TurnId>();
     /** Wake a pool blocked on worker settlement after a live cap change. */
     const workerCapSignals = new Map<EpicRunId, Queue.Queue<PoolSchedulerEvent>>();
     /** Cancellation owns lease release after it abandons every running row. */
@@ -338,6 +341,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         projectSetupScriptRunner,
         crypto,
         workerScopeRegistry,
+        ownedIterationTurnIds,
       }),
       mergeDrain: makeServerMergeDrain({ store, processRunner, fileSystem, path, gitVcsDriver }),
       vcs: makeProcessPoolVcs(processRunner),
@@ -352,6 +356,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       engine,
       crypto,
       backlog,
+      ownedIterationTurnIds,
     });
 
     const storeError = (operation: string) => (cause: unknown) =>
@@ -593,6 +598,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       releaseLeaseOnFailure,
       acquireLease: launch.acquireLease,
       persistedConfigSnapshot: launch.persistedConfigSnapshot,
+      ownedIterationTurnIds,
     });
 
     /**
