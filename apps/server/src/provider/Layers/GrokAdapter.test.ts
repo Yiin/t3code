@@ -1197,4 +1197,144 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+  it.effect("sends an image inline and links a file when embedded context is unavailable", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-attachment-prompt-parts");
+      const serverConfig = yield* ServerConfig;
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-attachment-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      const fileText = "grok attachment body";
+      const filePath = NodePath.join(serverConfig.attachmentsDir, "grok-file-1.txt");
+      yield* Effect.promise(() => NodeFSP.mkdir(serverConfig.attachmentsDir, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(serverConfig.attachmentsDir, "grok-image-1.png"),
+          imageBytes,
+        ),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(filePath, fileText, "utf8"));
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "look at both attachments",
+        attachments: [
+          {
+            type: "image",
+            id: "grok-image-1",
+            name: "shot.png",
+            mimeType: "image/png",
+            sizeBytes: imageBytes.byteLength,
+          },
+          {
+            type: "file",
+            id: "grok-file-1",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: fileText.length,
+          },
+        ],
+      });
+
+      yield* waitForFileContent(requestLogPath, 80, "session/prompt");
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptRequest = requests.find((entry) => entry.method === "session/prompt");
+      const promptBlocks = (
+        promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
+      )?.prompt;
+
+      assert.deepEqual(promptBlocks, [
+        { type: "text", text: "look at both attachments" },
+        { type: "image", data: Buffer.from(imageBytes).toString("base64"), mimeType: "image/png" },
+        {
+          type: "resource_link",
+          name: "notes.txt",
+          uri: NodeURL.pathToFileURL(filePath).href,
+          mimeType: "text/plain",
+          size: fileText.length,
+        },
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("embeds a file as a resource when the agent advertises embedded context", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-attachment-embedded-resource");
+      const serverConfig = yield* ServerConfig;
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-embedded-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_ADVERTISE_EMBEDDED_CONTEXT: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const fileText = "grok embedded body";
+      const filePath = NodePath.join(serverConfig.attachmentsDir, "grok-file-2.txt");
+      yield* Effect.promise(() => NodeFSP.mkdir(serverConfig.attachmentsDir, { recursive: true }));
+      yield* Effect.promise(() => NodeFSP.writeFile(filePath, fileText, "utf8"));
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "read the note",
+        attachments: [
+          {
+            type: "file",
+            id: "grok-file-2",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: fileText.length,
+          },
+        ],
+      });
+
+      yield* waitForFileContent(requestLogPath, 80, "session/prompt");
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptRequest = requests.find((entry) => entry.method === "session/prompt");
+      const promptBlocks = (
+        promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
+      )?.prompt;
+
+      assert.deepEqual(promptBlocks, [
+        { type: "text", text: "read the note" },
+        {
+          type: "resource",
+          resource: {
+            uri: NodeURL.pathToFileURL(filePath).href,
+            mimeType: "text/plain",
+            text: fileText,
+          },
+        },
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
 });

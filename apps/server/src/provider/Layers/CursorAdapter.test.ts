@@ -1429,4 +1429,92 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       }).pipe(Effect.provide(customAdapterLayer));
     },
   );
+
+  it.effect("sends an image inline and a file as an ACP resource link", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const serverConfig = yield* ServerConfig;
+      const threadId = ThreadId.make("cursor-attachment-prompt-parts");
+
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-attachment-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      const fileText = "cursor attachment body";
+      const filePath = NodePath.join(serverConfig.attachmentsDir, "cursor-file-1.txt");
+      yield* Effect.promise(() => NodeFSP.mkdir(serverConfig.attachmentsDir, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(serverConfig.attachmentsDir, "cursor-image-1.png"),
+          imageBytes,
+        ),
+      );
+      yield* Effect.promise(() => NodeFSP.writeFile(filePath, fileText, "utf8"));
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "look at both attachments",
+        attachments: [
+          {
+            type: "image",
+            id: "cursor-image-1",
+            name: "shot.png",
+            mimeType: "image/png",
+            sizeBytes: imageBytes.byteLength,
+          },
+          {
+            type: "file",
+            id: "cursor-file-1",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: fileText.length,
+          },
+        ],
+      });
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/prompt",
+      );
+      const promptRequest = requests.find((entry) => entry.method === "session/prompt");
+      const promptBlocks = (
+        promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
+      )?.prompt;
+
+      assert.deepEqual(promptBlocks, [
+        { type: "text", text: "look at both attachments" },
+        {
+          type: "image",
+          data: Buffer.from(imageBytes).toString("base64"),
+          mimeType: "image/png",
+        },
+        {
+          type: "resource_link",
+          name: "notes.txt",
+          uri: NodeURL.pathToFileURL(filePath).href,
+          mimeType: "text/plain",
+          size: fileText.length,
+        },
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
 });

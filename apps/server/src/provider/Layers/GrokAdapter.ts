@@ -33,7 +33,6 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
-import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
@@ -44,6 +43,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { toAcpAttachmentContentBlocks } from "../acp/AcpAttachmentContent.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -129,6 +129,9 @@ interface GrokSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  /** Prompt content blocks this agent advertised at `initialize`; decides how
+   * a non-image attachment is encoded. */
+  readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
   stopped: boolean;
 }
 
@@ -798,6 +801,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
             currentModelId: boundModelId,
+            promptCapabilities: started.initializeResult.agentCapabilities?.promptCapabilities,
             stopped: false,
           };
 
@@ -971,42 +975,16 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               });
 
               const text = input.input?.trim();
-              const imagePromptParts = yield* Effect.forEach(
-                input.attachments ?? [],
-                (attachment) =>
-                  Effect.gen(function* () {
-                    const attachmentPath = resolveAttachmentPath({
-                      attachmentsDir: serverConfig.attachmentsDir,
-                      attachment,
-                    });
-                    if (!attachmentPath) {
-                      return yield* new ProviderAdapterRequestError({
-                        provider: PROVIDER,
-                        method: "session/prompt",
-                        detail: `Invalid attachment id '${attachment.id}'.`,
-                      });
-                    }
-                    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-                      Effect.mapError(
-                        (cause) =>
-                          new ProviderAdapterRequestError({
-                            provider: PROVIDER,
-                            method: "session/prompt",
-                            detail: cause.message,
-                            cause,
-                          }),
-                      ),
-                    );
-                    return {
-                      type: "image",
-                      data: Buffer.from(bytes).toString("base64"),
-                      mimeType: attachment.mimeType,
-                    } satisfies EffectAcpSchema.ContentBlock;
-                  }),
-              );
+              const attachmentPromptParts = yield* toAcpAttachmentContentBlocks({
+                provider: PROVIDER,
+                attachments: input.attachments,
+                attachmentsDir: serverConfig.attachmentsDir,
+                promptCapabilities: ctx.promptCapabilities,
+                fileSystem,
+              });
               const promptParts: Array<EffectAcpSchema.ContentBlock> = [
                 ...(text ? [{ type: "text" as const, text }] : []),
-                ...imagePromptParts,
+                ...attachmentPromptParts,
               ];
 
               if (promptParts.length === 0) {

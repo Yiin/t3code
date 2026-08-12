@@ -41,7 +41,6 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
-import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
@@ -52,6 +51,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { toAcpAttachmentContentBlocks } from "../acp/AcpAttachmentContent.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -152,6 +152,9 @@ interface CursorSessionContext {
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
+  /** Prompt content blocks this agent advertised at `initialize`; decides how
+   * a non-image attachment is encoded. */
+  readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
   stopped: boolean;
 }
 
@@ -860,6 +863,7 @@ export function makeCursorAdapter(
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             promptsInFlight: 0,
+            promptCapabilities: started.initializeResult.agentCapabilities?.promptCapabilities,
             stopped: false,
           };
 
@@ -1045,37 +1049,15 @@ export function makeCursorAdapter(
           if (input.input?.trim()) {
             promptParts.push({ type: "text", text: input.input.trim() });
           }
-          if (input.attachments && input.attachments.length > 0) {
-            for (const attachment of input.attachments) {
-              const attachmentPath = resolveAttachmentPath({
-                attachmentsDir: serverConfig.attachmentsDir,
-                attachment,
-              });
-              if (!attachmentPath) {
-                return yield* new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session/prompt",
-                  detail: `Invalid attachment id '${attachment.id}'.`,
-                });
-              }
-              const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapterRequestError({
-                      provider: PROVIDER,
-                      method: "session/prompt",
-                      detail: cause.message,
-                      cause,
-                    }),
-                ),
-              );
-              promptParts.push({
-                type: "image",
-                data: Buffer.from(bytes).toString("base64"),
-                mimeType: attachment.mimeType,
-              });
-            }
-          }
+          promptParts.push(
+            ...(yield* toAcpAttachmentContentBlocks({
+              provider: PROVIDER,
+              attachments: input.attachments,
+              attachmentsDir: serverConfig.attachmentsDir,
+              promptCapabilities: ctx.promptCapabilities,
+              fileSystem,
+            })),
+          );
 
           if (promptParts.length === 0) {
             return yield* new ProviderAdapterValidationError({
