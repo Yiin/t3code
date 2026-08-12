@@ -6,6 +6,28 @@
 - The `test` job runs `vp run test` across the workspace.
 - The `epic_runs` job installs Beads `v1.1.2`, verifies `bd --version`, runs `skills/cook-epic/tests/all.sh`, then runs the terminal conformance driver with `T3CODE_CONFORMANCE_TERMINAL=1`.
 
+## Runner labels
+
+Every job that targets a `blacksmith-*` runner reads a repository variable first and falls back to the
+original label:
+
+```yaml
+runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
+```
+
+The Blacksmith runners belong to the upstream organization. A fork has none, so a job pinned to a
+`blacksmith-*` label queues forever there. Set `CI_RUNNER_LINUX`, `CI_RUNNER_MACOS`, or
+`CI_RUNNER_WINDOWS` as repository variables in the fork to redirect those jobs to GitHub-hosted runners,
+for example `ubuntu-24.04`, `macos-latest`, and `windows-latest`. Leave the variables unset upstream and
+nothing changes.
+
+One variable covers every Linux job, so the 8, 16, and 32 vCPU tiers all collapse to the same label when
+the override is set. `pr-size.yml`, `pr-vouch.yml`, and `issue-labels.yml` already use `ubuntu-24.04`
+directly and ignore the variables.
+
+`scripts/workflow-runner-labels.test.ts` fails the `test` job if any workflow pins a bare `blacksmith-*`
+label again, which is the shape an upstream merge brings back.
+
 ## Conformance drivers
 
 Three drivers replay the same scenario set through a different adapter.
