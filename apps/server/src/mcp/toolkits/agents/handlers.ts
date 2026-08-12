@@ -38,7 +38,12 @@ import {
   spawnParentDepth,
   type SpawnWaiterOutcome,
 } from "./SpawnRegistry.ts";
-import { decideSpawn, makeSubagentChildThreadId, type SpawnPolicy } from "./spawnPolicy.ts";
+import {
+  decideSpawn,
+  makeSubagentChildThreadId,
+  resolveSpawnWaitTimeoutMs,
+  type SpawnPolicy,
+} from "./spawnPolicy.ts";
 import { readSpawnPolicy } from "./spawnPolicySource.ts";
 import { AgentsToolkit, SpawnAgentError, type SpawnAgentStatus } from "./tools.ts";
 
@@ -121,6 +126,10 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
   const engine = yield* OrchestrationEngineService;
   const projection = yield* ProjectionSnapshotQuery;
   const crypto = yield* Crypto.Crypto;
+
+  // The client started its own tool-call clock before this handler ran, so the
+  // wait's budget is measured from as early as this code can see.
+  const handlerStartedAtMs = Date.parse(yield* nowIso);
 
   const readShell = (threadId: ThreadId) =>
     projection.getThreadShellById(threadId).pipe(
@@ -351,8 +360,18 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
     status: "completed",
   };
 
+  // Bounded by whichever runs out first: the configured wait, or what is left of
+  // the calling client's own MCP tool-call ceiling. Overrunning that ceiling
+  // replaces every result below with a transport error, and the child thread id
+  // goes with it.
+  const spawnWaitTimeoutMs = resolveSpawnWaitTimeoutMs({
+    policy,
+    driver: scope.providerDriver,
+    elapsedMs: Math.max(0, Date.parse(yield* nowIso) - handlerStartedAtMs),
+  });
+
   const wait = Effect.raceFirst(settle, Deferred.await(completion)).pipe(
-    Effect.timeoutOption(Duration.millis(policy.spawnWaitTimeoutMs)),
+    Effect.timeoutOption(Duration.millis(spawnWaitTimeoutMs)),
     Effect.map(
       Option.match({
         onNone: () => ({ _tag: "timeout" as const }),
@@ -406,7 +425,7 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
       status: "timeout" as const,
       finalMessage: resolveFinalAssistantMessage(partial?.thread)?.text ?? null,
       elapsedMs,
-      note: `Subagent ${childThreadId} did not finish within ${formatWait(policy.spawnWaitTimeoutMs)}, so this call stopped waiting. The subagent is still running and was not stopped. Open it from the subagent roster to watch it or talk to it. Carry on without its answer.`,
+      note: `Subagent ${childThreadId} did not finish within ${formatWait(spawnWaitTimeoutMs)}, so this call stopped waiting. The subagent is still running and was not stopped. Open it from the subagent roster to watch it or talk to it. Carry on without its answer.`,
     };
   }
 

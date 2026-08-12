@@ -70,6 +70,7 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS } from "../../mcp/mcpToolCallCeiling.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveSpawnPolicy, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import {
@@ -4224,6 +4225,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   headers: {
                     Authorization: mcpSession.authorizationHeader,
                   },
+                  // Raises the SDK's 60 s per-call default. `spawn_agent` holds
+                  // one call open while a child agent works, and 60 s is short
+                  // enough that every such call died as a transport error
+                  // instead of returning the child's thread id. See
+                  // `apps/server/src/mcp/mcpToolCallCeiling.ts` for the measured
+                  // walls this number sits between.
+                  timeout: CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS,
                 },
               },
             }

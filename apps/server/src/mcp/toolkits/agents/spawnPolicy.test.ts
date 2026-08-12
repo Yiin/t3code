@@ -1,11 +1,16 @@
 import { assert, describe, it } from "@effect/vitest";
+import { ProviderDriverKind } from "@t3tools/contracts";
 
+import { CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS } from "../../mcpToolCallCeiling.ts";
 import {
   DEFAULT_SPAWN_POLICY,
   decideSpawn,
   isSubagentChildThreadId,
   makeSubagentChildThreadId,
+  MIN_SPAWN_WAIT_MS,
   resolveSpawnPolicy,
+  resolveSpawnWaitTimeoutMs,
+  SPAWN_WAIT_CLIENT_MARGIN_MS,
   type SpawnPolicy,
 } from "./spawnPolicy.ts";
 
@@ -176,5 +181,59 @@ describe("subagent child thread ids", () => {
   it("does not read an ordinary thread id as a child", () => {
     assert.strictEqual(isSubagentChildThreadId("thread-parent"), false);
     assert.strictEqual(isSubagentChildThreadId("epic-run-1-iteration-2"), false);
+  });
+});
+
+describe("resolveSpawnWaitTimeoutMs", () => {
+  const claude = ProviderDriverKind.make("claudeAgent");
+
+  it("cuts the configured wait down to what the calling client allows", () => {
+    // The bug this closes: 30 minutes against a client that abandons the call
+    // long before, so the parent got a transport error instead of a result.
+    assert.strictEqual(DEFAULT_SPAWN_POLICY.spawnWaitTimeoutMs, 30 * 60_000);
+
+    assert.strictEqual(
+      resolveSpawnWaitTimeoutMs({ policy: DEFAULT_SPAWN_POLICY, driver: claude, elapsedMs: 0 }),
+      CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS - SPAWN_WAIT_CLIENT_MARGIN_MS,
+    );
+  });
+
+  it("assumes the 60 s default for a driver nobody measured", () => {
+    assert.strictEqual(
+      resolveSpawnWaitTimeoutMs({
+        policy: DEFAULT_SPAWN_POLICY,
+        driver: ProviderDriverKind.make("someForkDriver"),
+        elapsedMs: 0,
+      }),
+      60_000 - SPAWN_WAIT_CLIENT_MARGIN_MS,
+    );
+  });
+
+  it("takes the time already spent out of the budget", () => {
+    assert.strictEqual(
+      resolveSpawnWaitTimeoutMs({
+        policy: DEFAULT_SPAWN_POLICY,
+        driver: claude,
+        elapsedMs: 4_000,
+      }),
+      CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS - SPAWN_WAIT_CLIENT_MARGIN_MS - 4_000,
+    );
+  });
+
+  it("still waits a little when the budget is already gone", () => {
+    assert.strictEqual(
+      resolveSpawnWaitTimeoutMs({
+        policy: DEFAULT_SPAWN_POLICY,
+        driver: claude,
+        elapsedMs: 10 * 60_000,
+      }),
+      MIN_SPAWN_WAIT_MS,
+    );
+  });
+
+  it("leaves a configured wait shorter than the client's ceiling alone", () => {
+    const policy: SpawnPolicy = { ...DEFAULT_SPAWN_POLICY, spawnWaitTimeoutMs: 60_000 };
+
+    assert.strictEqual(resolveSpawnWaitTimeoutMs({ policy, driver: claude, elapsedMs: 0 }), 60_000);
   });
 });

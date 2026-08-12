@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   PreviewAutomationUnavailableError,
+  type ProviderDriverKind,
   type ProviderInstanceId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -14,6 +15,13 @@ export interface McpInvocationScope {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  /**
+   * The driver behind `providerInstanceId`, carried so a handler can branch on
+   * client behaviour without a settings lookup. `spawn_agent` needs it to bound
+   * its wait below that client's MCP tool-call ceiling
+   * (`./mcpToolCallCeiling.ts`).
+   */
+  readonly providerDriver: ProviderDriverKind;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
   readonly expiresAt: number;

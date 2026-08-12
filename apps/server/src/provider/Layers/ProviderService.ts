@@ -311,8 +311,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // Auth sessions minted for `t3Environment` injection, keyed by thread so the
   // token is revoked when the thread's MCP session is cleared.
   const t3EnvironmentAuthSessions = new Map<ThreadId, AuthSessionId>();
-  const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
-    McpSessionRegistry.issueActiveMcpCredential({ threadId, providerInstanceId }).pipe(
+  const prepareMcpSession = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+    providerDriver: ProviderDriverKind,
+  ) =>
+    McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId,
+      providerDriver,
+    }).pipe(
       Effect.tap((credential) =>
         credential
           ? Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config))
@@ -908,7 +916,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         fallbackCwd: persistedT3EnvironmentContext?.workspaceRoot,
       });
 
-      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId, input.binding.provider);
       const t3Environment = yield* resolveT3SessionEnvironment({
         threadId: input.binding.threadId,
         projectId: persistedT3EnvironmentContext?.projectId,
@@ -1122,7 +1130,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareMcpSession(threadId, resolvedInstanceId, resolvedProvider);
         const t3Environment = yield* resolveT3SessionEnvironment({
           threadId,
           projectId: parsed.projectId,

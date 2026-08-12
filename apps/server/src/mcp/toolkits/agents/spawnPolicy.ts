@@ -14,7 +14,9 @@
  *
  * @module spawnPolicy
  */
-import type { SubagentSpawnSettings } from "@t3tools/contracts";
+import type { ProviderDriverKind, SubagentSpawnSettings } from "@t3tools/contracts";
+
+import { mcpToolCallCeilingMs } from "../../mcpToolCallCeiling.ts";
 
 /**
  * Prefix every thread-backed child thread id carries.
@@ -63,12 +65,56 @@ export interface SpawnPolicy {
    * A tenth of the epic runner's `DEFAULT_ITERATION_TIMEOUT_MS`
    * (`packages/epic-core/src/policy.ts:11`): a subagent is not an epic
    * iteration, and the parent is holding an HTTP request open the whole time.
-   * If a provider's own MCP tool-call ceiling turns out to be shorter than this,
-   * lower it below that ceiling — a transport error loses the child thread id,
-   * where our timeout result keeps it.
+   *
+   * This is the ceiling a human asks for, not the wait that runs. Every calling
+   * client cuts a tool call long before 30 minutes, so
+   * {@link resolveSpawnWaitTimeoutMs} lowers it to fit inside that client's own
+   * wall — a transport error loses the child thread id, where our timeout
+   * result keeps it.
    */
   readonly spawnWaitTimeoutMs: number;
 }
+
+/**
+ * Headroom left between the end of the spawn wait and the client's own ceiling.
+ *
+ * The wait is not the last thing that happens: the timeout branch still reads
+ * the child's partial answer, the mirror writes its last row, and the result
+ * still has to serialize back over HTTP. All of it is local and fast, so 10 s
+ * is generous — and generous is the right side to err on, because overrunning
+ * the ceiling by a millisecond costs the whole result.
+ */
+export const SPAWN_WAIT_CLIENT_MARGIN_MS = 10_000;
+
+/**
+ * The shortest wait worth running. A handler that already burned its whole
+ * budget still waits this long rather than returning a timeout it never waited
+ * for.
+ */
+export const MIN_SPAWN_WAIT_MS = 5_000;
+
+export interface SpawnWaitBudgetInput {
+  readonly policy: SpawnPolicy;
+  /** The driver of the client holding the `spawn_agent` request open. */
+  readonly driver: ProviderDriverKind;
+  /** How long the handler already spent before the wait starts. */
+  readonly elapsedMs: number;
+}
+
+/**
+ * How long this `spawn_agent` call may actually wait for its child.
+ *
+ * The configured bound, the calling client's measured tool-call ceiling, and
+ * the time already spent getting here, whichever runs out first. Claude is the
+ * case that forced this: its ceiling is far below any useful configured bound,
+ * so before the clamp every thread-backed spawn on Claude ended as a transport
+ * abort instead of the typed timeout result that names the child thread id.
+ */
+export const resolveSpawnWaitTimeoutMs = (input: SpawnWaitBudgetInput): number => {
+  const clientBudgetMs =
+    mcpToolCallCeilingMs(input.driver) - SPAWN_WAIT_CLIENT_MARGIN_MS - Math.max(0, input.elapsedMs);
+  return Math.max(MIN_SPAWN_WAIT_MS, Math.min(input.policy.spawnWaitTimeoutMs, clientBudgetMs));
+};
 
 export const DEFAULT_SPAWN_POLICY: SpawnPolicy = {
   enabled: false,

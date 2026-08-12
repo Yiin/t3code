@@ -8,6 +8,7 @@ import {
   type OrchestrationThreadShell,
   type OrchestrationLatestTurnState,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
@@ -24,6 +25,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS } from "../../mcpToolCallCeiling.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { spawnAgent } from "./handlers.ts";
 import {
@@ -64,6 +66,7 @@ const invocation: McpInvocationContext.McpInvocationScope = {
   threadId: PARENT_THREAD_ID,
   providerSessionId: "provider-session-1",
   providerInstanceId: ProviderInstanceId.make("claude"),
+  providerDriver: ProviderDriverKind.make("claudeAgent"),
   capabilities: new Set(["preview", "spawn-agent"]),
   issuedAt: 1,
   expiresAt: 2,
@@ -610,6 +613,33 @@ describe("spawn_agent handler", () => {
             command.type === "thread.session.stop" || command.type === "thread.turn.interrupt",
         ),
       );
+    }),
+  );
+
+  it.effect("gives up before the calling client's own tool-call ceiling does", () =>
+    Effect.gen(function* () {
+      // The invocation is a Claude one, and Claude abandons a t3-code tool call
+      // at `CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS`. Waiting the configured 30 minutes
+      // there loses the whole result, child thread id included, to a transport
+      // abort. This advance is under that ceiling and far under the configured
+      // wait, so only the clamp can produce a timeout here.
+      const advance = Duration.millis(CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS);
+      assert.ok(Duration.toMillis(advance) < enabledPolicy.spawnWaitTimeoutMs);
+
+      const { result } = yield* run(enabledPolicy, spawnInput, {
+        child: { turnState: "running", sessionStatus: "running" },
+        advance,
+      });
+
+      assert.strictEqual(result._tag, "Success");
+      if (result._tag !== "Success" || !result.success.spawned) return;
+      assert.strictEqual(result.success.status, "timeout");
+      assert.ok(
+        result.success.note.includes(result.success.childThreadId),
+        "the result the client still receives names the child thread",
+      );
+      // The note quotes the wait that ran, not the one nobody waited.
+      assert.ok(result.success.note.includes("4 minutes"), result.success.note);
     }),
   );
 

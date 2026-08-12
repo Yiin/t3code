@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   PreviewAutomationUnavailableError,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -15,6 +16,7 @@ it.effect("reports the scoped credential context when preview capability is unav
     threadId: ThreadId.make("thread-1"),
     providerSessionId: "provider-session-1",
     providerInstanceId: ProviderInstanceId.make("codex"),
+    providerDriver: ProviderDriverKind.make("codex"),
     capabilities: new Set(),
     issuedAt: 1,
     expiresAt: 2,

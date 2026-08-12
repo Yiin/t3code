@@ -1,4 +1,4 @@
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -14,6 +14,8 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  /** The driver backing the instance. See `McpInvocationScope.providerDriver`. */
+  readonly providerDriver: ProviderDriverKind;
 }
 
 export interface McpIssuedCredential {
@@ -114,6 +116,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        providerDriver: ProviderDriverKind.make(request.providerDriver),
         // Granted unconditionally: the registry has no read-model or settings
         // access, so it cannot gate per thread. The `spawn_agent` handler
         // enforces policy and returns a typed refusal instead. The capability
