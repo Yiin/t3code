@@ -1525,7 +1525,7 @@ export function makeOpenCodeAdapter(
       }
 
       const text = input.input?.trim();
-      const fileParts = toOpenCodeFileParts({
+      const { parts: fileParts, unresolvedAttachmentIds } = toOpenCodeFileParts({
         attachments: input.attachments,
         resolveAttachmentPath: (attachment) =>
           resolveAttachmentPath({
@@ -1533,6 +1533,13 @@ export function makeOpenCodeAdapter(
             attachment,
           }),
       });
+      if (unresolvedAttachmentIds.length > 0) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "sendTurn",
+          detail: `Invalid attachment id '${unresolvedAttachmentIds[0]}'.`,
+        });
+      }
       if ((!text || text.length === 0) && fileParts.length === 0) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,

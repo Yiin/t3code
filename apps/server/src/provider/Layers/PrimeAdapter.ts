@@ -3,6 +3,7 @@ import * as NodePath from "node:path";
 
 import {
   attachmentCapabilityForDriver,
+  type ChatAttachment,
   EventId,
   type PrimeSettings,
   PRIME_AGENT_DRIVER_KIND,
@@ -669,41 +670,72 @@ export const makePrimeAdapter = Effect.fn("makePrimeAdapter")(function* (
       ),
     );
 
-  const resolveImages = Effect.fn("PrimeAdapter.resolveImages")(function* (
+  /**
+   * Splits a turn's attachments into what the Prime RPC can carry.
+   *
+   * An image rides as a `PrimeRpcImage`, unchanged. A file has no structured
+   * home: `PrimeRpcPromptInput` and `PrimeRpcMessageInput` carry `message` and
+   * `images` only, and the Prime RPC has no file or document member to add it
+   * to. A file must never ride as a `PrimeRpcImage` either, because Prime
+   * decodes that as image bytes. Prime's process runs with the user's
+   * permissions and can read an absolute path under the attachments
+   * directory, so a file rides as a path reference in the prompt text
+   * instead. Replace this fallback once the Prime RPC gains a file member.
+   */
+  const resolveAttachments = Effect.fn("PrimeAdapter.resolveAttachments")(function* (
     input: ProviderSendTurnInput,
   ) {
-    return yield* Effect.forEach(input.attachments ?? [], (attachment) =>
-      Effect.gen(function* () {
-        const path = resolveAttachmentPath({
-          attachmentsDir: serverConfig.attachmentsDir,
-          attachment,
+    const images: Array<PrimeRpcImage> = [];
+    const filePaths: Array<{ readonly attachment: ChatAttachment; readonly path: string }> = [];
+    for (const attachment of input.attachments ?? []) {
+      const path = resolveAttachmentPath({
+        attachmentsDir: serverConfig.attachmentsDir,
+        attachment,
+      });
+      if (!path) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "prompt",
+          detail: `Invalid attachment id '${attachment.id}'.`,
         });
-        if (!path) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "prompt",
-            detail: `Invalid attachment id '${attachment.id}'.`,
-          });
-        }
-        const bytes = yield* fileSystem.readFile(path).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "prompt",
-                detail: cause.message,
-                cause,
-              }),
-          ),
-        );
-        return {
-          type: "image",
-          data: Buffer.from(bytes).toString("base64"),
-          mimeType: attachment.mimeType,
-        } satisfies PrimeRpcImage;
-      }),
-    );
+      }
+      if (attachment.type !== "image") {
+        filePaths.push({ attachment, path });
+        continue;
+      }
+      const bytes = yield* fileSystem.readFile(path).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "prompt",
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
+      images.push({
+        type: "image",
+        data: Buffer.from(bytes).toString("base64"),
+        mimeType: attachment.mimeType,
+      });
+    }
+    return { images, filePaths } as const;
   });
+
+  const withAttachmentPaths = (
+    message: string,
+    filePaths: ReadonlyArray<{ readonly attachment: ChatAttachment; readonly path: string }>,
+  ) => {
+    if (filePaths.length === 0) return message;
+    const lines = filePaths.map(
+      ({ attachment, path }) => `- ${attachment.name} (${attachment.mimeType}): ${path}`,
+    );
+    const block = `The user attached ${
+      filePaths.length === 1 ? "this file" : "these files"
+    }. Read ${filePaths.length === 1 ? "it" : "them"} from disk:\n${lines.join("\n")}`;
+    return message.length > 0 ? `${message}\n\n${block}` : block;
+  };
 
   const applySelection = Effect.fn("PrimeAdapter.applySelection")(function* (
     ctx: PrimeSessionContext,
@@ -754,8 +786,8 @@ export const makePrimeAdapter = Effect.fn("makePrimeAdapter")(function* (
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
         yield* applySelection(ctx, input);
-        const message = input.input?.trim() ?? "";
-        const images = yield* resolveImages(input);
+        const { images, filePaths } = yield* resolveAttachments(input);
+        const message = withAttachmentPaths(input.input?.trim() ?? "", filePaths);
         if (!message && images.length === 0) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,

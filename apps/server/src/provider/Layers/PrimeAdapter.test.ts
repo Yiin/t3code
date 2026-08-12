@@ -107,6 +107,14 @@ const isCommand = (
 ): value is Record<string, unknown> & { readonly type: string } =>
   typeof value === "object" && value !== null && "type" in value && value.type === type;
 
+const promptCommands = (snapshot: { turns: ReadonlyArray<{ items: ReadonlyArray<unknown> }> }) =>
+  (snapshot.turns.at(-1)?.items ?? []).filter((item) =>
+    isCommand(item, "prompt"),
+  ) as ReadonlyArray<{
+    readonly message?: string;
+    readonly images?: ReadonlyArray<{ type: "image"; data: string; mimeType: string }>;
+  }>;
+
 it.layer(primeLayer)("PrimeAdapter", (it) => {
   it.effect("starts, resumes the owner, and forks for a different T3 thread", () =>
     Effect.gen(function* () {
@@ -373,6 +381,77 @@ it.layer(primeLayer)("PrimeAdapter", (it) => {
       assert.isFalse(yield* adapter.hasSession(threadId));
       yield* Fiber.interrupt(eventFiber);
       yield* Fiber.interrupt(isolatedEventFiber);
+    }),
+  );
+
+  it.effect("sends an image as image input and a file as a prompt path reference", () =>
+    Effect.gen(function* () {
+      const binaryPath = yield* makeWrapper();
+      const instanceId = ProviderInstanceId.make("prime-attachments");
+      const adapter = yield* makeAdapter(
+        binaryPath,
+        ids("prime-attachments", "generation-attachments"),
+        instanceId,
+      );
+      const threadId = ThreadId.make("prime-attachments");
+      yield* adapter.startSession({
+        threadId,
+        providerInstanceId: instanceId,
+        runtimeMode: "full-access",
+      });
+
+      const config = yield* ServerConfig;
+      const image = {
+        type: "image" as const,
+        id: "prime-attachments-11111111-1111-1111-1111-111111111111",
+        name: "pixel.png",
+        mimeType: "image/png",
+        sizeBytes: 3,
+      };
+      const file = {
+        type: "file" as const,
+        id: "prime-attachments-22222222-2222-2222-2222-222222222222",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 5,
+      };
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(config.attachmentsDir, attachmentRelativePath(image)),
+          Buffer.from([1, 2, 3]),
+        ),
+      );
+      const filePath = NodePath.join(config.attachmentsDir, attachmentRelativePath(file));
+      yield* Effect.promise(() => NodeFSP.writeFile(filePath, "hello", "utf8"));
+
+      yield* adapter.sendTurn({ threadId, input: "look", attachments: [image, file] });
+      yield* waitForSnapshot(adapter, threadId);
+      const mixed = promptCommands(yield* adapter.readThread(threadId)).at(-1);
+      assert.deepStrictEqual(mixed?.images, [
+        { type: "image", data: "AQID", mimeType: "image/png" },
+      ]);
+      assert.include(mixed?.message ?? "", "look");
+      assert.include(mixed?.message ?? "", filePath);
+      assert.include(mixed?.message ?? "", "notes.txt");
+      // The file must never travel as image bytes.
+      assert.isTrue((mixed?.images ?? []).every((image) => image.mimeType.startsWith("image/")));
+
+      yield* waitFor(() =>
+        adapter.listSessions().pipe(Effect.map((sessions) => sessions[0]?.status === "ready")),
+      );
+      yield* adapter.sendTurn({ threadId, attachments: [file] });
+      yield* waitFor(() =>
+        adapter.readThread(threadId).pipe(
+          Effect.map((snapshot) => promptCommands(snapshot).length >= 2),
+          Effect.orElseSucceed(() => false),
+        ),
+      );
+      const fileOnly = promptCommands(yield* adapter.readThread(threadId)).at(-1);
+      assert.include(fileOnly?.message ?? "", filePath);
+      assert.isUndefined(fileOnly?.images);
+
+      const emptyTurn = yield* adapter.sendTurn({ threadId }).pipe(Effect.flip);
+      assert.equal(emptyTurn._tag, "ProviderAdapterValidationError");
     }),
   );
 

@@ -314,15 +314,35 @@ export function openCodeQuestionId(
   return header.length > 0 ? `question-${index}-${header}` : `question-${index}`;
 }
 
+export interface OpenCodeFilePartsResult {
+  readonly parts: Array<FilePartInput>;
+  /** Attachments whose id does not resolve to a path under the store. */
+  readonly unresolvedAttachmentIds: Array<string>;
+}
+
+/**
+ * Encodes chat attachments as OpenCode file parts.
+ *
+ * OpenCode takes an image and a file through the same `file` part, so a
+ * non-image needs no special branch: mime and filename carry the type and the
+ * url points at the attachment on disk.
+ *
+ * An attachment id that does not resolve is reported rather than dropped. The
+ * id shape is validated, not the file, so a null path means the client sent a
+ * malformed id. Every other adapter fails that turn, and a silent drop here
+ * would turn a file-only turn into a confusing "turns require text input".
+ */
 export function toOpenCodeFileParts(input: {
   readonly attachments: ReadonlyArray<ChatAttachment> | undefined;
   readonly resolveAttachmentPath: (attachment: ChatAttachment) => string | null;
-}): Array<FilePartInput> {
+}): OpenCodeFilePartsResult {
   const parts: Array<FilePartInput> = [];
+  const unresolvedAttachmentIds: Array<string> = [];
 
   for (const attachment of input.attachments ?? []) {
     const attachmentPath = input.resolveAttachmentPath(attachment);
     if (!attachmentPath) {
+      unresolvedAttachmentIds.push(attachment.id);
       continue;
     }
 
@@ -334,7 +354,7 @@ export function toOpenCodeFileParts(input: {
     });
   }
 
-  return parts;
+  return { parts, unresolvedAttachmentIds };
 }
 
 export function buildOpenCodePermissionRules(runtimeMode: RuntimeMode): PermissionRuleset {

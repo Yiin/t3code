@@ -374,11 +374,17 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       });
     }
 
-    const fileParts = OpenCodeRuntime.toOpenCodeFileParts({
+    const { parts: fileParts, unresolvedAttachmentIds } = OpenCodeRuntime.toOpenCodeFileParts({
       attachments: input.attachments,
       resolveAttachmentPath: (attachment) =>
         resolveAttachmentPath({ attachmentsDir: serverConfig.attachmentsDir, attachment }),
     });
+    if (unresolvedAttachmentIds.length > 0) {
+      return yield* new TextGenerationError({
+        operation: input.operation,
+        detail: `Invalid attachment id '${unresolvedAttachmentIds[0]}'.`,
+      });
+    }
 
     const runAgainstServer = Effect.fn("runOpenCodeJson.runAgainstServer")(
       function* (server: Pick<OpenCodeRuntime.OpenCodeServerConnection, "url">) {

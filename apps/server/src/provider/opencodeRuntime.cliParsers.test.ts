@@ -2,7 +2,11 @@ import * as NodeAssert from "node:assert/strict";
 
 import { describe, it } from "vite-plus/test";
 
-import { parseModelsCliOutput, parseAgentListCliOutput } from "./opencodeRuntime.ts";
+import {
+  parseModelsCliOutput,
+  parseAgentListCliOutput,
+  toOpenCodeFileParts,
+} from "./opencodeRuntime.ts";
 
 describe("parseModelsCliOutput", () => {
   it("parses a single model from a single provider", () => {
@@ -225,5 +229,72 @@ describe("parseAgentListCliOutput", () => {
     const result = parseAgentListCliOutput(stdout);
     NodeAssert.equal(result[0]!.hidden, true);
     NodeAssert.equal(result[1]!.hidden, false);
+  });
+});
+
+describe("toOpenCodeFileParts", () => {
+  const imageAttachment = {
+    type: "image" as const,
+    id: "thread-11111111-1111-1111-1111-111111111111",
+    name: "pixel.png",
+    mimeType: "image/png",
+    sizeBytes: 3,
+  };
+  const logAttachment = {
+    type: "file" as const,
+    id: "thread-22222222-2222-2222-2222-222222222222",
+    name: "server.log",
+    mimeType: "text/plain",
+    sizeBytes: 12,
+  };
+
+  it("sends a non-image attachment as a file part with its mime, name and url", () => {
+    const result = toOpenCodeFileParts({
+      attachments: [logAttachment],
+      resolveAttachmentPath: (attachment) => `/state/attachments/${attachment.id}.log`,
+    });
+
+    NodeAssert.deepEqual(result.unresolvedAttachmentIds, []);
+    NodeAssert.deepEqual(result.parts, [
+      {
+        type: "file",
+        mime: "text/plain",
+        filename: "server.log",
+        url: `file:///state/attachments/${logAttachment.id}.log`,
+      },
+    ]);
+  });
+
+  it("uses the same file part for an image", () => {
+    const result = toOpenCodeFileParts({
+      attachments: [imageAttachment, logAttachment],
+      resolveAttachmentPath: (attachment) => `/state/attachments/${attachment.id}`,
+    });
+
+    NodeAssert.equal(result.parts.length, 2);
+    NodeAssert.equal(result.parts[0]!.mime, "image/png");
+    NodeAssert.equal(result.parts[1]!.mime, "text/plain");
+  });
+
+  it("reports an attachment whose id does not resolve instead of dropping it", () => {
+    const result = toOpenCodeFileParts({
+      attachments: [logAttachment, imageAttachment],
+      resolveAttachmentPath: (attachment) =>
+        attachment.type === "file" ? null : `/state/attachments/${attachment.id}.png`,
+    });
+
+    NodeAssert.deepEqual(result.unresolvedAttachmentIds, [logAttachment.id]);
+    NodeAssert.equal(result.parts.length, 1);
+    NodeAssert.equal(result.parts[0]!.filename, "pixel.png");
+  });
+
+  it("returns nothing for a turn without attachments", () => {
+    const result = toOpenCodeFileParts({
+      attachments: undefined,
+      resolveAttachmentPath: () => "/state/attachments/unused",
+    });
+
+    NodeAssert.deepEqual(result.parts, []);
+    NodeAssert.deepEqual(result.unresolvedAttachmentIds, []);
   });
 });
