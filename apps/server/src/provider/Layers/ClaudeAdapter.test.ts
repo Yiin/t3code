@@ -14,6 +14,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
+  type ChatAttachment,
   ClaudeSettings,
   EnvironmentId,
   ProviderDriverKind,
@@ -810,6 +811,146 @@ describe("ClaudeAdapterLive", () => {
           },
         },
       ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("encodes file attachments as documents or a path reference", () => {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-file-attachments-"));
+    const harness = makeHarness({
+      cwd: "/tmp/project-claude-file-attachments",
+      baseDir,
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() =>
+          NodeFS.rmSync(baseDir, {
+            recursive: true,
+            force: true,
+          }),
+        ),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+
+      const write = (attachment: ChatAttachment, bytes: Uint8Array) => {
+        const path = NodePath.join(attachmentsDir, attachmentRelativePath(attachment));
+        NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
+        NodeFS.writeFileSync(path, bytes);
+        return path;
+      };
+
+      const pdf = {
+        type: "file" as const,
+        id: "thread-claude-attachment-12345678-1234-1234-1234-1234567890a1",
+        name: "spec.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 4,
+      };
+      const notes = {
+        type: "file" as const,
+        id: "thread-claude-attachment-12345678-1234-1234-1234-1234567890a2",
+        name: "notes.md",
+        mimeType: "text/markdown",
+        sizeBytes: 8,
+      };
+      const archive = {
+        type: "file" as const,
+        id: "thread-claude-attachment-12345678-1234-1234-1234-1234567890a3",
+        name: "bundle.zip",
+        mimeType: "application/zip",
+        sizeBytes: 3,
+      };
+      write(pdf, Uint8Array.from([1, 2, 3, 4]));
+      write(notes, new TextEncoder().encode("# Notes"));
+      const archivePath = write(archive, Uint8Array.from([5, 6, 7]));
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Review these",
+        attachments: [pdf, notes, archive],
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      const promptMessage = yield* Effect.promise(() => readFirstPromptMessage(createInput));
+      assert.deepEqual(promptMessage?.message.content, [
+        { type: "text", text: "Review these" },
+        {
+          type: "document",
+          source: { type: "base64", media_type: "application/pdf", data: "AQIDBA==" },
+          title: "spec.pdf",
+        },
+        {
+          type: "document",
+          source: { type: "text", media_type: "text/plain", data: "# Notes" },
+          title: "notes.md",
+        },
+        {
+          type: "text",
+          text: `The user attached this file. Read it from disk:\n- bundle.zip (application/zip): ${archivePath}`,
+        },
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails a turn whose file attachment is missing from the store", () => {
+    const baseDir = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "claude-missing-attachment-"),
+    );
+    const harness = makeHarness({
+      cwd: "/tmp/project-claude-missing-attachment",
+      baseDir,
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() =>
+          NodeFS.rmSync(baseDir, {
+            recursive: true,
+            force: true,
+          }),
+        ),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const result = yield* adapter
+        .sendTurn({
+          threadId: session.threadId,
+          input: "Review this",
+          attachments: [
+            {
+              type: "file",
+              id: "thread-claude-attachment-12345678-1234-1234-1234-1234567890b1",
+              name: "gone.zip",
+              mimeType: "application/zip",
+              sizeBytes: 3,
+            },
+          ],
+        })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      assert.equal(
+        result._tag === "Failure" ? result.failure._tag : undefined,
+        "ProviderAdapterRequestError",
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -31,6 +31,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { formatAttachmentPathReferenceText } from "../attachmentEncoding.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
 import {
   ProviderAdapterProcessError,
@@ -728,12 +729,7 @@ export const makePrimeAdapter = Effect.fn("makePrimeAdapter")(function* (
     filePaths: ReadonlyArray<{ readonly attachment: ChatAttachment; readonly path: string }>,
   ) => {
     if (filePaths.length === 0) return message;
-    const lines = filePaths.map(
-      ({ attachment, path }) => `- ${attachment.name} (${attachment.mimeType}): ${path}`,
-    );
-    const block = `The user attached ${
-      filePaths.length === 1 ? "this file" : "these files"
-    }. Read ${filePaths.length === 1 ? "it" : "them"} from disk:\n${lines.join("\n")}`;
+    const block = formatAttachmentPathReferenceText(filePaths);
     return message.length > 0 ? `${message}\n\n${block}` : block;
   };
 

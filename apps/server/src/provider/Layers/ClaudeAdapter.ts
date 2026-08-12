@@ -73,6 +73,11 @@ import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveSpawnPolicy, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import {
+  formatAttachmentPathReferenceText,
+  isTextLikeAttachmentMimeType,
+  type AttachmentPathReference,
+} from "../attachmentEncoding.ts";
+import {
   readSubagentDefinitionCount,
   resolveSubagentSpawnMode,
   subagentSpawnSystemPromptAppend,
@@ -1062,6 +1067,37 @@ function buildClaudeImageContentBlock(input: {
   };
 }
 
+const CLAUDE_PDF_MIME_TYPE = "application/pdf";
+
+/**
+ * A PDF rides as a base64 document source; every other text-ish file rides as a
+ * plain-text one. `PlainTextSource` accepts `text/plain` only
+ * (@anthropic-ai/sdk/resources/messages/messages.d.ts), so the attachment's own
+ * mime type survives in the title rather than the media type.
+ */
+function buildClaudeDocumentContentBlock(input: {
+  readonly title: string;
+  readonly mimeType: string;
+  readonly bytes: Uint8Array;
+}): Record<string, unknown> {
+  return {
+    type: "document",
+    source:
+      input.mimeType === CLAUDE_PDF_MIME_TYPE
+        ? {
+            type: "base64",
+            media_type: CLAUDE_PDF_MIME_TYPE,
+            data: Buffer.from(input.bytes).toString("base64"),
+          }
+        : {
+            type: "text",
+            media_type: "text/plain",
+            data: new TextDecoder().decode(input.bytes),
+          },
+    title: input.title,
+  };
+}
+
 const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
   input: ProviderSendTurnInput,
   dependencies: {
@@ -1077,12 +1113,16 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     sdkContent.push({ type: "text", text });
   }
 
-  for (const attachment of input.attachments ?? []) {
-    if (attachment.type !== "image") {
-      continue;
-    }
+  // A file Claude has no document source for still reaches the model: the
+  // `t3code-vzb.33` probe confirmed Claude reads an absolute path under the
+  // attachments directory, so those files ride as one trailing text block.
+  const pathReferences: Array<AttachmentPathReference> = [];
 
-    if (!SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType)) {
+  for (const attachment of input.attachments ?? []) {
+    if (
+      attachment.type === "image" &&
+      !SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType)
+    ) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "turn/start",
@@ -1102,7 +1142,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
       });
     }
 
-    const bytes = yield* dependencies.fileSystem.readFile(attachmentPath).pipe(
+    const readBytes = dependencies.fileSystem.readFile(attachmentPath).pipe(
       Effect.mapError(
         (cause) =>
           new ProviderAdapterRequestError({
@@ -1114,12 +1154,47 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
       ),
     );
 
-    sdkContent.push(
-      buildClaudeImageContentBlock({
-        mimeType: attachment.mimeType,
-        bytes,
-      }),
-    );
+    if (attachment.type === "image") {
+      sdkContent.push(
+        buildClaudeImageContentBlock({
+          mimeType: attachment.mimeType,
+          bytes: yield* readBytes,
+        }),
+      );
+      continue;
+    }
+
+    if (
+      attachment.mimeType === CLAUDE_PDF_MIME_TYPE ||
+      isTextLikeAttachmentMimeType(attachment.mimeType)
+    ) {
+      sdkContent.push(
+        buildClaudeDocumentContentBlock({
+          title: attachment.name,
+          mimeType: attachment.mimeType,
+          bytes: yield* readBytes,
+        }),
+      );
+      continue;
+    }
+
+    // A path reference needs no bytes, only proof that the path resolves to
+    // something Claude can open.
+    const exists = yield* dependencies.fileSystem
+      .exists(attachmentPath)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (!exists) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/start",
+        detail: `Attachment file for '${attachment.id}' is missing.`,
+      });
+    }
+    pathReferences.push({ attachment, path: attachmentPath });
+  }
+
+  if (pathReferences.length > 0) {
+    sdkContent.push({ type: "text", text: formatAttachmentPathReferenceText(pathReferences) });
   }
 
   return buildUserMessage({ sdkContent });

@@ -57,12 +57,17 @@ import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
+  formatAttachmentPathReferenceText,
+  type AttachmentPathReference,
+} from "../attachmentEncoding.ts";
+import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
+  type CodexTurnAttachmentInput,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
@@ -1702,44 +1707,75 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       }),
     );
 
-  const resolveAttachment = Effect.fn("resolveAttachment")(function* (
+  /**
+   * Encodes a turn's attachments as Codex user input.
+   *
+   * An image keeps its data URL. A file has no member to ride in, so every file
+   * in the turn is named once in a trailing text block pointing at its absolute
+   * path; the `t3code-vzb.33` probe confirmed Codex reads those paths. Sending a
+   * file as an image would hand Codex bytes it decodes as an image and corrupt
+   * it. Replace this fallback once the app-server input union gains a file
+   * member.
+   */
+  const resolveAttachments = Effect.fn("resolveAttachments")(function* (
     input: ProviderSendTurnInput,
-    attachment: NonNullable<ProviderSendTurnInput["attachments"]>[number],
   ) {
-    const attachmentPath = resolveAttachmentPath({
-      attachmentsDir: serverConfig.attachmentsDir,
-      attachment,
-    });
-    if (!attachmentPath) {
-      return yield* new ProviderAdapterRequestError({
-        provider: PROVIDER,
-        method: "turn/start",
-        detail: `Invalid attachment id '${attachment.id}'.`,
+    const resolved: Array<CodexTurnAttachmentInput> = [];
+    const filePaths: Array<AttachmentPathReference> = [];
+    for (const attachment of input.attachments ?? []) {
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir: serverConfig.attachmentsDir,
+        attachment,
       });
-    }
-    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapterRequestError({
+      if (!attachmentPath) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: `Invalid attachment id '${attachment.id}'.`,
+        });
+      }
+
+      if (attachment.type !== "image") {
+        // A path reference needs no bytes, only proof that the file is there.
+        const exists = yield* fileSystem
+          .exists(attachmentPath)
+          .pipe(Effect.orElseSucceed(() => false));
+        if (!exists) {
+          return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "turn/start",
-            detail: `Failed to read attachment file: ${cause.message}.`,
-            cause,
-          }),
-      ),
-    );
-    return {
-      type: "image" as const,
-      url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
-    };
+            detail: `Attachment file for '${attachment.id}' is missing.`,
+          });
+        }
+        filePaths.push({ attachment, path: attachmentPath });
+        continue;
+      }
+
+      const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/start",
+              detail: `Failed to read attachment file: ${cause.message}.`,
+              cause,
+            }),
+        ),
+      );
+      resolved.push({
+        type: "image",
+        url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      });
+    }
+
+    if (filePaths.length > 0) {
+      resolved.push({ type: "text", text: formatAttachmentPathReferenceText(filePaths) });
+    }
+    return resolved;
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
-      (attachment) => resolveAttachment(input, attachment),
-      { concurrency: 1 },
-    );
+    const codexAttachments = yield* resolveAttachments(input);
 
     const session = yield* requireSession(input.threadId);
     const reasoningEffort =

@@ -192,6 +192,30 @@ describe("buildTurnStartParams", () => {
     });
   });
 
+  it.effect("forwards a file attachment as a text input after the prompt", () =>
+    Effect.gen(function* () {
+      const attachmentText =
+        "The user attached this file. Read it from disk:\n- notes.txt (text/plain): /state/attachments/notes.txt";
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Read it",
+        attachments: [{ type: "text", text: attachmentText }],
+      });
+
+      NodeAssert.deepStrictEqual(params.input, [
+        {
+          type: "text",
+          text: "Read it",
+        },
+        {
+          type: "text",
+          text: attachmentText,
+        },
+      ]);
+    }),
+  );
+
   it("reports the same fallback model and effort in settings and instructions", () => {
     const params = Effect.runSync(
       buildTurnStartParams({

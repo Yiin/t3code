@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
+  type ChatAttachment,
   CodexSettings,
   EnvironmentId,
   EventId,
@@ -35,7 +36,9 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as CodexErrors from "effect-codex-app-server/errors";
+import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
+import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -50,6 +53,9 @@ import {
 } from "./CodexSessionRuntime.ts";
 import { makeCodexAdapter } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const decodeCodexUserInput = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2TurnStartParams__UserInput,
+);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -1773,3 +1779,119 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
     }
   }),
 );
+
+const attachmentRuntimeFactory = makeRuntimeFactory();
+const attachmentLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        makeRuntime: attachmentRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "codex-attachments-" })),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+attachmentLayer("CodexAdapterLive attachments", (it) => {
+  const writeAttachment = (
+    attachmentsDir: string,
+    attachment: ChatAttachment,
+    bytes: Uint8Array,
+  ) => {
+    const path = NodePath.join(attachmentsDir, attachmentRelativePath(attachment));
+    NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
+    NodeFS.writeFileSync(path, bytes);
+    return path;
+  };
+
+  it.effect("sends an image as a data url and a file as its path", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+      const threadId = asThreadId("sess-attachments");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = attachmentRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+
+      const image: ChatAttachment = {
+        type: "image",
+        id: "sess-attachments-12345678-1234-1234-1234-1234567890a1",
+        name: "diagram.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const notes: ChatAttachment = {
+        type: "file",
+        id: "sess-attachments-12345678-1234-1234-1234-1234567890a2",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 5,
+      };
+      writeAttachment(attachmentsDir, image, Uint8Array.from([1, 2, 3, 4]));
+      const notesPath = writeAttachment(attachmentsDir, notes, new TextEncoder().encode("hello"));
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "look at these",
+        attachments: [image, notes],
+      });
+
+      const sent = runtime.sendTurnImpl.mock.calls[0]?.[0];
+      NodeAssert.deepStrictEqual(sent?.attachments, [
+        { type: "image", url: "data:image/png;base64,AQIDBA==" },
+        {
+          type: "text",
+          text: `The user attached this file. Read it from disk:\n- notes.txt (text/plain): ${notesPath}`,
+        },
+      ]);
+      yield* Effect.forEach(sent?.attachments ?? [], (attachment) =>
+        decodeCodexUserInput(attachment),
+      );
+    }),
+  );
+
+  it.effect("fails a turn whose file attachment is missing from the store", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-attachments-missing");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const result = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "look at this",
+          attachments: [
+            {
+              type: "file",
+              id: "sess-attachments-missing-12345678-1234-1234-1234-1234567890b1",
+              name: "gone.txt",
+              mimeType: "text/plain",
+              sizeBytes: 5,
+            },
+          ],
+        })
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(
+        result._tag === "Failure" ? result.failure._tag : undefined,
+        "ProviderAdapterRequestError",
+      );
+    }),
+  );
+});

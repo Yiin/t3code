@@ -136,12 +136,20 @@ export interface CodexSessionRuntimeOptions {
   readonly workerScope?: ProviderWorkerScopeBinding;
 }
 
+/**
+ * What a turn's attachments become in `V2TurnStartParams__UserInput`.
+ *
+ * The union has an image member but no file one, so a file rides as text
+ * naming its absolute path. `mention` looks closer but Codex classifies a
+ * non-workspace path as `Other` and sends the model nothing (`t3code-vzb.33`).
+ */
+export type CodexTurnAttachmentInput =
+  | { readonly type: "image"; readonly url: string }
+  | { readonly type: "text"; readonly text: string };
+
 export interface CodexSessionRuntimeSendTurnInput {
   readonly input?: string;
-  readonly attachments?: ReadonlyArray<{
-    readonly type: "image";
-    readonly url: string;
-  }>;
+  readonly attachments?: ReadonlyArray<CodexTurnAttachmentInput>;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
@@ -376,10 +384,7 @@ export function buildTurnStartParams(input: {
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
-  readonly attachments?: ReadonlyArray<{
-    readonly type: "image";
-    readonly url: string;
-  }>;
+  readonly attachments?: ReadonlyArray<CodexTurnAttachmentInput>;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;

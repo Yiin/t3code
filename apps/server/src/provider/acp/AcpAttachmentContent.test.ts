@@ -13,10 +13,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { type ChatAttachment, ProviderDriverKind } from "@t3tools/contracts";
 
 import { ProviderAdapterRequestError } from "../Errors.ts";
-import {
-  isTextLikeAttachmentMimeType,
-  toAcpAttachmentContentBlocks,
-} from "./AcpAttachmentContent.ts";
+import { toAcpAttachmentContentBlocks } from "./AcpAttachmentContent.ts";
 
 const PROVIDER = ProviderDriverKind.make("kimi");
 
@@ -53,14 +50,6 @@ const encode = (input: {
       materializeLinkTarget: input.materializeLinkTarget,
     });
   });
-
-it("classifies which mime types ride as embedded text", () => {
-  assert.isTrue(isTextLikeAttachmentMimeType("text/markdown"));
-  assert.isTrue(isTextLikeAttachmentMimeType("application/json"));
-  assert.isTrue(isTextLikeAttachmentMimeType("application/vnd.api+json"));
-  assert.isFalse(isTextLikeAttachmentMimeType("application/pdf"));
-  assert.isFalse(isTextLikeAttachmentMimeType("application/zip"));
-});
 
 it.layer(NodeServices.layer)("toAcpAttachmentContentBlocks", (it) => {
   it.effect("encodes an image as an ACP image block", () =>

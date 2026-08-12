@@ -8,45 +8,10 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import type { ChatAttachment, ProviderDriverKind } from "@t3tools/contracts";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { isTextLikeAttachmentMimeType } from "../attachmentEncoding.ts";
 import { ProviderAdapterRequestError } from "../Errors.ts";
 
 const PROMPT_METHOD = "session/prompt";
-
-const TEXT_LIKE_MIME_TYPES: ReadonlySet<string> = new Set([
-  "application/graphql",
-  "application/javascript",
-  "application/json",
-  "application/ld+json",
-  "application/sql",
-  "application/toml",
-  "application/typescript",
-  "application/x-javascript",
-  "application/x-ndjson",
-  "application/x-sh",
-  "application/x-shellscript",
-  "application/x-typescript",
-  "application/x-yaml",
-  "application/xml",
-  "application/yaml",
-]);
-
-const TEXT_LIKE_MIME_SUFFIXES: ReadonlyArray<string> = ["+json", "+xml", "+yaml"];
-
-/**
- * Whether an embedded resource for this mime type should carry `text` rather
- * than a base64 `blob`. ACP lets an agent read either, but text costs no
- * decode step on the agent side and keeps the prompt log readable.
- */
-export function isTextLikeAttachmentMimeType(mimeType: string): boolean {
-  const normalized = mimeType.trim().toLowerCase();
-  if (normalized.startsWith("text/")) {
-    return true;
-  }
-  if (TEXT_LIKE_MIME_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
-    return true;
-  }
-  return TEXT_LIKE_MIME_TYPES.has(normalized);
-}
 
 /**
  * Encodes chat attachments as ACP prompt content blocks.
