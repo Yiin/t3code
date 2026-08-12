@@ -5,7 +5,6 @@ import type {
   OrchestrationSubagentActivityCursor,
   OrchestrationThreadActivity,
   OrchestrationThreadSubagent,
-  OrchestrationThreadSubagentStatus,
   ScopedThreadRef,
   ServerProviderSkill,
   ThreadId,
@@ -42,24 +41,12 @@ import {
   findRosterEntry,
   formatSubagentRosterSummary,
   resolveSubagentInteraction,
+  SUBAGENT_STATUS_DOT_CLASS,
+  SUBAGENT_STATUS_LABEL,
   type SubagentRosterEntry,
 } from "./subagentRoster.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { WorkEntryRow } from "./WorkEntryRow";
-
-const STATUS_DOT_CLASS: Record<OrchestrationThreadSubagentStatus, string> = {
-  running: "bg-sky-500 dark:bg-sky-300/80 animate-status-pulse motion-reduce:animate-none",
-  completed: "bg-emerald-500 dark:bg-emerald-300/90",
-  failed: "bg-destructive",
-  stopped: "bg-muted-foreground/40",
-};
-
-const STATUS_LABEL: Record<OrchestrationThreadSubagentStatus, string> = {
-  running: "Running",
-  completed: "Done",
-  failed: "Failed",
-  stopped: "Stopped",
-};
 
 const INITIAL_BACKFILL_CURSORS = [undefined] as const;
 
@@ -111,7 +98,10 @@ function SubagentSwitcher({
                 onClick={() => onSelectSubagent(item.key)}
               >
                 <span
-                  className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[item.status])}
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    SUBAGENT_STATUS_DOT_CLASS[item.status],
+                  )}
                   aria-hidden
                 />
                 <span className="truncate">{name}</span>
@@ -442,17 +432,17 @@ export function SubagentInspectorPanel({
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 tabular-nums">
           <span className="inline-flex items-center gap-1.5">
             <span
-              className={cn("size-1.5 rounded-full", STATUS_DOT_CLASS[target.status])}
+              className={cn("size-1.5 rounded-full", SUBAGENT_STATUS_DOT_CLASS[target.status])}
               aria-hidden
             />
             {target.status === "running" ? (
               <>
-                <span>{STATUS_LABEL[target.status]}</span>
+                <span>{SUBAGENT_STATUS_LABEL[target.status]}</span>
                 <SubagentElapsed startedAt={target.startedAt} />
               </>
             ) : (
               <span>
-                {STATUS_LABEL[target.status]}
+                {SUBAGENT_STATUS_LABEL[target.status]}
                 {settledElapsed ? " in " + settledElapsed : ""}
               </span>
             )}

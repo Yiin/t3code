@@ -33,6 +33,22 @@ export interface SubagentRosterEntry {
   readModel: OrchestrationThreadSubagent | null;
 }
 
+/** Status dot colour, shared by the inspector switcher and the roster popover. */
+export const SUBAGENT_STATUS_DOT_CLASS: Record<OrchestrationThreadSubagentStatus, string> = {
+  running: "bg-sky-500 dark:bg-sky-300/80 animate-status-pulse motion-reduce:animate-none",
+  completed: "bg-emerald-500 dark:bg-emerald-300/90",
+  failed: "bg-destructive",
+  stopped: "bg-muted-foreground/40",
+};
+
+/** Human status word, shared by every subagent surface. */
+export const SUBAGENT_STATUS_LABEL: Record<OrchestrationThreadSubagentStatus, string> = {
+  running: "Running",
+  completed: "Done",
+  failed: "Failed",
+  stopped: "Stopped",
+};
+
 function entryFor(
   group: SubagentGroup | null,
   readModel: OrchestrationThreadSubagent | null,
@@ -122,6 +138,26 @@ export function findRosterEntry(
     roster.find((entry) => entry.subagentId === key) ??
     roster.find((entry) => entry.group?.entryId === key)
   );
+}
+
+/**
+ * Reading order for the roster popover: what is still working first.
+ *
+ * Running entries come oldest-first, because the one that has been going
+ * longest is the one a human wonders about. Settled entries follow
+ * newest-first, so the last thing to finish sits right under them. Both sorts
+ * are stable, so an entry with no `completedAt` keeps its incoming position.
+ */
+export function orderRosterForDisplay(
+  roster: ReadonlyArray<SubagentRosterEntry>,
+): SubagentRosterEntry[] {
+  const running = roster
+    .filter((entry) => entry.status === "running")
+    .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt));
+  const settled = roster
+    .filter((entry) => entry.status !== "running")
+    .toSorted((left, right) => (right.completedAt ?? "").localeCompare(left.completedAt ?? ""));
+  return [...running, ...settled];
 }
 
 export function countRunningSubagents(roster: ReadonlyArray<SubagentRosterEntry>): number {

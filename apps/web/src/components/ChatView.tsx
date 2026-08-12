@@ -228,11 +228,8 @@ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { resolveFirstRunningSubagentRowId } from "./chat/MessagesTimeline.logic";
-import {
-  buildSubagentRoster,
-  countRunningSubagents,
-  resolveFirstRunningRosterKey,
-} from "./chat/subagentRoster.logic";
+import { buildSubagentRoster, countRunningSubagents } from "./chat/subagentRoster.logic";
+import { SubagentRosterPopover } from "./chat/SubagentRosterPopover";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -2431,10 +2428,6 @@ function ChatViewContent(props: ChatViewProps) {
     () => resolveFirstRunningSubagentRowId(timelineEntries, subagentGroups),
     [subagentGroups, timelineEntries],
   );
-  const firstRunningSubagentKey = useMemo(
-    () => resolveFirstRunningRosterKey(subagentRoster),
-    [subagentRoster],
-  );
   const onOpenSubagentInspector = useCallback(
     (subagentKey: string) => {
       if (activeThreadRef) {
@@ -4120,21 +4113,19 @@ function ChatViewContent(props: ChatViewProps) {
             ? "1 subagent working"
             : `${runningSubagentCount} subagents working`,
         actions:
-          firstRunningSubagentKey || firstRunningSubagentRowId ? (
+          subagentRoster.length > 0 ? (
+            <SubagentRosterPopover
+              roster={subagentRoster}
+              onOpenSubagent={onOpenSubagentInspector}
+              triggerLabel="View subagents"
+            />
+          ) : firstRunningSubagentRowId ? (
+            // Roster empty but a timeline row resolved: scrolling to it is all
+            // that is left, because there is no entry the drawer could open.
             <Button
               size="xs"
               variant="outline"
-              onClick={() => {
-                if (firstRunningSubagentKey && activeThreadRef) {
-                  useRightPanelStore
-                    .getState()
-                    .openSubagent(activeThreadRef, firstRunningSubagentKey);
-                  return;
-                }
-                if (firstRunningSubagentRowId) {
-                  timelineScrollToRowRef.current?.(firstRunningSubagentRowId);
-                }
-              }}
+              onClick={() => timelineScrollToRowRef.current?.(firstRunningSubagentRowId)}
             >
               View
             </Button>
@@ -4193,15 +4184,15 @@ function ChatViewContent(props: ChatViewProps) {
     ];
   }, [
     activeThread?.id,
-    activeThreadRef,
     activeThreadId,
     branchRepairAction,
-    firstRunningSubagentKey,
     firstRunningSubagentRowId,
     handleSwitchCheckoutToThread,
     handleUpdateThreadToCheckout,
     localCheckoutBranchMismatch,
+    onOpenSubagentInspector,
     runningSubagentCount,
+    subagentRoster,
     systemComposerBannerItems,
   ]);
 

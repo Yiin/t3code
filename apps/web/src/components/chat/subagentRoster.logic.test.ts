@@ -7,9 +7,11 @@ import {
   countRunningSubagents,
   findRosterEntry,
   formatSubagentRosterSummary,
+  orderRosterForDisplay,
   resolveFirstRunningRosterKey,
   resolveSubagentInteraction,
   UNADDRESSABLE_SUBAGENT_REASON,
+  type SubagentRosterEntry,
 } from "./subagentRoster.logic";
 
 function group(overrides: Partial<SubagentGroup> = {}): SubagentGroup {
@@ -334,5 +336,65 @@ describe("resolveSubagentInteraction", () => {
     ]);
 
     expect(resolveSubagentInteraction(entry, nowMs).kind).toBe("settled");
+  });
+});
+
+describe("orderRosterForDisplay", () => {
+  function entry(
+    overrides: Partial<SubagentRosterEntry> & Pick<SubagentRosterEntry, "key">,
+  ): SubagentRosterEntry {
+    return {
+      subagentId: null,
+      name: "explore",
+      description: null,
+      status: "running",
+      startedAt: "2026-08-06T12:00:00.000Z",
+      completedAt: null,
+      lastProgressSummary: null,
+      lastToolName: null,
+      childThreadId: null,
+      group: null,
+      readModel: null,
+      ...overrides,
+    };
+  }
+
+  it("puts running entries before settled ones", () => {
+    const ordered = orderRosterForDisplay([
+      entry({ key: "done", status: "completed", completedAt: "2026-08-06T12:05:00.000Z" }),
+      entry({ key: "live" }),
+    ]);
+
+    expect(ordered.map((item) => item.key)).toEqual(["live", "done"]);
+  });
+
+  it("orders running entries oldest first", () => {
+    const ordered = orderRosterForDisplay([
+      entry({ key: "newer", startedAt: "2026-08-06T12:02:00.000Z" }),
+      entry({ key: "older", startedAt: "2026-08-06T12:00:00.000Z" }),
+      entry({ key: "middle", startedAt: "2026-08-06T12:01:00.000Z" }),
+    ]);
+
+    expect(ordered.map((item) => item.key)).toEqual(["older", "middle", "newer"]);
+  });
+
+  it("orders settled entries newest first", () => {
+    const ordered = orderRosterForDisplay([
+      entry({ key: "first", status: "completed", completedAt: "2026-08-06T12:01:00.000Z" }),
+      entry({ key: "last", status: "failed", completedAt: "2026-08-06T12:03:00.000Z" }),
+      entry({ key: "second", status: "stopped", completedAt: "2026-08-06T12:02:00.000Z" }),
+    ]);
+
+    expect(ordered.map((item) => item.key)).toEqual(["last", "second", "first"]);
+  });
+
+  it("keeps settled entries without a completedAt in their incoming order, after the dated ones", () => {
+    const ordered = orderRosterForDisplay([
+      entry({ key: "undated-a", status: "stopped" }),
+      entry({ key: "dated", status: "completed", completedAt: "2026-08-06T12:01:00.000Z" }),
+      entry({ key: "undated-b", status: "stopped" }),
+    ]);
+
+    expect(ordered.map((item) => item.key)).toEqual(["dated", "undated-a", "undated-b"]);
   });
 });
