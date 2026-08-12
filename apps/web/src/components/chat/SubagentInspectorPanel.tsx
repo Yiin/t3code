@@ -25,14 +25,16 @@ import { ScrollArea } from "../ui/scroll-area";
 import { capitalizeSubagentName, SubagentElapsed, SubagentUnavailableData } from "./SubagentCard";
 import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
 import {
-  buildSubagentSwitcherItems,
   decodeSubagentTranscriptRow,
-  formatSubagentSwitcherSummary,
   selectSubagentInspectorPlaceholder,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
-  type SubagentSwitcherItem,
 } from "./SubagentInspectorPanel.logic";
+import {
+  findRosterEntry,
+  formatSubagentRosterSummary,
+  type SubagentRosterEntry,
+} from "./subagentRoster.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { WorkEntryRow } from "./WorkEntryRow";
 
@@ -68,12 +70,12 @@ function SubagentSwitcher({
   onSelectSubagent,
 }: {
   activeSubagentKey: string;
-  items: ReadonlyArray<SubagentSwitcherItem>;
+  items: ReadonlyArray<SubagentRosterEntry>;
   onSelectSubagent: (subagentKey: string) => void;
 }) {
   if (items.length < 2) return null;
 
-  const summary = formatSubagentSwitcherSummary(items);
+  const summary = formatSubagentRosterSummary(items);
   return (
     <div className="border-b border-border/45 py-2">
       {summary ? (
@@ -207,8 +209,7 @@ function useSubagentTranscriptBackfill(input: {
 }
 
 export function SubagentInspectorPanel({
-  groups,
-  subagents,
+  roster,
   activeSubagentKey,
   threadRef,
   activities,
@@ -220,8 +221,7 @@ export function SubagentInspectorPanel({
   onInterrupt,
   onSelectSubagent,
 }: {
-  groups: readonly SubagentGroup[];
-  subagents: readonly OrchestrationThreadSubagent[];
+  roster: ReadonlyArray<SubagentRosterEntry>;
   activeSubagentKey: string;
   threadRef: ScopedThreadRef;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
@@ -240,11 +240,9 @@ export function SubagentInspectorPanel({
   const transcriptRef = useRef<HTMLDivElement>(null);
   const shouldFollowTailRef = useRef(true);
   const pendingPrependRef = useRef<{ pageCount: number; scrollHeight: number } | null>(null);
-  const group = groups.find(
-    (candidate) => (candidate.toolCallId ?? candidate.entryId) === activeSubagentKey,
-  );
-  const switcherItems = useMemo(() => buildSubagentSwitcherItems(groups), [groups]);
-  const readModel = subagents.find((subagent) => subagent.spawnedByItemId === activeSubagentKey);
+  const target = findRosterEntry(roster, activeSubagentKey);
+  const group = target?.group ?? null;
+  const readModel = target?.readModel ?? undefined;
   const backfill = useSubagentTranscriptBackfill({
     activities,
     fallbackEntries: group?.children ?? [],
@@ -261,10 +259,10 @@ export function SubagentInspectorPanel({
 
   useEffect(() => {
     const transcript = transcriptRef.current;
-    if (group?.status === "running" && transcript && shouldFollowTailRef.current) {
+    if (target?.status === "running" && transcript && shouldFollowTailRef.current) {
       transcript.scrollTop = transcript.scrollHeight;
     }
-  }, [backfill.liveTailLength, group?.status]);
+  }, [backfill.liveTailLength, target?.status]);
 
   useLayoutEffect(() => {
     const pending = pendingPrependRef.current;
@@ -284,12 +282,12 @@ export function SubagentInspectorPanel({
     if (shouldFollowTailRef.current) transcript.scrollTop = transcript.scrollHeight;
   }, [backfill.isPending, backfill.pageCount]);
 
-  if (!group) {
+  if (!target) {
     return (
       <div className="flex h-full w-full min-h-0 flex-1 flex-col">
         <SubagentSwitcher
           activeSubagentKey={activeSubagentKey}
-          items={switcherItems}
+          items={roster}
           onSelectSubagent={onSelectSubagent}
         />
         <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
@@ -299,9 +297,10 @@ export function SubagentInspectorPanel({
     );
   }
 
-  const completedAt = readModel?.completedAt ?? group.completedAt;
   const settledElapsed =
-    group.status === "running" ? null : formatElapsed(group.startedAt, completedAt ?? undefined);
+    target.status === "running"
+      ? null
+      : formatElapsed(target.startedAt, target.completedAt ?? undefined);
   const usage = summarizeSubagentUsage(readModel?.usage);
   const usageLabel =
     usage.inputTokens !== null || usage.outputTokens !== null
@@ -323,16 +322,23 @@ export function SubagentInspectorPanel({
     backfill.isComplete ? "" : " shown"
   }`;
   const liveProgress =
-    group.status === "running"
-      ? [readModel?.lastProgressSummary, readModel?.lastToolName].filter(
-          (value): value is string => value !== undefined,
+    target.status === "running"
+      ? [target.lastProgressSummary, target.lastToolName].filter(
+          (value): value is string => value !== null,
         )
       : [];
+  const prompt = group?.prompt ?? null;
+  // The per-subagent activity query keys off parent_tool_use_id / task_id and
+  // the spawn tool row carries neither, so the prompt is genuinely gone with
+  // the group. The settled read-model summary still stands in for the result.
+  const resultText =
+    group?.resultText ??
+    (target.status === "running" ? null : (target.lastProgressSummary ?? null));
   const placeholder = selectSubagentInspectorPlaceholder({
     entryCount: backfill.entries.length,
     isPending: backfill.isPending,
-    prompt: group.prompt,
-    resultText: group.resultText,
+    prompt,
+    resultText,
   });
 
   return (
@@ -345,13 +351,13 @@ export function SubagentInspectorPanel({
           <div className="flex min-w-0 items-baseline gap-2">
             <h2
               className="truncate text-sm font-medium text-foreground"
-              title={capitalizeSubagentName(group.name)}
+              title={capitalizeSubagentName(target.name)}
             >
-              {capitalizeSubagentName(group.name)}
+              {capitalizeSubagentName(target.name)}
             </h2>
-            {group.description ? (
-              <p className="truncate text-xs text-muted-foreground" title={group.description}>
-                {group.description}
+            {target.description ? (
+              <p className="truncate text-xs text-muted-foreground" title={target.description}>
+                {target.description}
               </p>
             ) : null}
           </div>
@@ -359,8 +365,8 @@ export function SubagentInspectorPanel({
       </header>
 
       <SubagentSwitcher
-        activeSubagentKey={activeSubagentKey}
-        items={switcherItems}
+        activeSubagentKey={target.key}
+        items={roster}
         onSelectSubagent={onSelectSubagent}
       />
 
@@ -368,17 +374,17 @@ export function SubagentInspectorPanel({
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 tabular-nums">
           <span className="inline-flex items-center gap-1.5">
             <span
-              className={cn("size-1.5 rounded-full", STATUS_DOT_CLASS[group.status])}
+              className={cn("size-1.5 rounded-full", STATUS_DOT_CLASS[target.status])}
               aria-hidden
             />
-            {group.status === "running" ? (
+            {target.status === "running" ? (
               <>
-                <span>{STATUS_LABEL[group.status]}</span>
-                <SubagentElapsed startedAt={group.startedAt} />
+                <span>{STATUS_LABEL[target.status]}</span>
+                <SubagentElapsed startedAt={target.startedAt} />
               </>
             ) : (
               <span>
-                {STATUS_LABEL[group.status]}
+                {STATUS_LABEL[target.status]}
                 {settledElapsed ? " in " + settledElapsed : ""}
               </span>
             )}
@@ -447,22 +453,22 @@ export function SubagentInspectorPanel({
                     skills={skills}
                     threadRef={threadRef}
                     workspaceRoot={workspaceRoot}
-                    turnSettled={group.status !== "running"}
+                    turnSettled={target.status !== "running"}
                   />
                 ))}
               </div>
             </section>
           ) : null}
 
-          {group.resultText !== null ? (
+          {resultText !== null ? (
             <section>
               <div className="flex items-center justify-between gap-2 px-0.5 pb-0.5">
                 <p className="font-medium text-[11px] text-muted-foreground/65">Result</p>
-                <MessageCopyButton text={group.resultText} size="icon-xs" variant="ghost" />
+                <MessageCopyButton text={resultText} size="icon-xs" variant="ghost" />
               </div>
               <div className="border-s border-border/45 ps-3 text-sm">
                 <ChatMarkdown
-                  text={group.resultText}
+                  text={resultText}
                   cwd={markdownCwd}
                   threadRef={threadRef}
                   skills={skills}
@@ -471,14 +477,14 @@ export function SubagentInspectorPanel({
             </section>
           ) : null}
 
-          {group.prompt !== null ? (
+          {prompt !== null ? (
             <details open={backfill.entries.length === 0}>
               <summary className="cursor-pointer select-none px-0.5 text-[11px] font-medium text-muted-foreground/65">
                 Spawn prompt
               </summary>
               <div className="mt-1 border-s border-border/45 ps-3 pt-0.5">
                 <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
-                  {group.prompt}
+                  {prompt}
                 </pre>
               </div>
             </details>

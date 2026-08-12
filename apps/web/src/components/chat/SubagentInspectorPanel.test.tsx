@@ -3,7 +3,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { WorkLogEntry } from "../../session-logic";
-import { SubagentInspectorPlaceholder, SubagentTranscriptEntryRow } from "./SubagentInspectorPanel";
+import {
+  SubagentInspectorPanel,
+  SubagentInspectorPlaceholder,
+  SubagentTranscriptEntryRow,
+} from "./SubagentInspectorPanel";
+import { buildSubagentRoster } from "./subagentRoster.logic";
 
 const commonProps = {
   markdownCwd: undefined,
@@ -72,5 +77,47 @@ describe("SubagentTranscriptEntryRow", () => {
 
     expect(markup).toContain("Generic fallback");
     expect(markup).not.toContain("Missing parent id");
+  });
+});
+
+describe("SubagentInspectorPanel", () => {
+  it("renders a read-model-only subagent instead of the unavailable message", () => {
+    const roster = buildSubagentRoster({
+      groups: [],
+      subagents: [
+        {
+          subagentId: "agent-1",
+          turnId: null,
+          agentType: "explore",
+          description: "Sweep the parser",
+          status: "running",
+          lastProgressSummary: "Reading files",
+          startedAt: "2026-08-06T11:55:00.000Z",
+          updatedAt: "2026-08-06T11:59:00.000Z",
+          completedAt: null,
+        },
+      ],
+    });
+
+    const markup = renderToStaticMarkup(
+      <SubagentInspectorPanel
+        activeSubagentKey="agent-1"
+        activities={[]}
+        markdownCwd={undefined}
+        onInterrupt={async () => undefined}
+        onSelectSubagent={() => {}}
+        onSteer={async () => null}
+        onStop={async () => null}
+        roster={roster}
+        skills={[]}
+        threadRef={commonProps.threadRef}
+        workspaceRoot={undefined}
+      />,
+    );
+
+    expect(markup).not.toContain("This subagent is no longer available.");
+    expect(markup).toContain("Explore");
+    expect(markup).toContain("Running");
+    expect(markup).not.toContain("Spawn prompt");
   });
 });

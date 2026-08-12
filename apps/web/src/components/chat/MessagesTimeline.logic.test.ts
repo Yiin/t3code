@@ -6,7 +6,6 @@ import {
   formatSubagentFleetSummary,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
-  resolveFirstRunningSubagentKey,
   resolveFirstRunningSubagentRowId,
 } from "./MessagesTimeline.logic";
 
@@ -1726,46 +1725,6 @@ describe("resolveFirstRunningSubagentRowId", () => {
     expect(
       resolveFirstRunningSubagentRowId([spawnEntry(1)] as never, [group(9, "running")] as never),
     ).toBeNull();
-  });
-});
-
-describe("resolveFirstRunningSubagentKey", () => {
-  const group = (
-    index: number,
-    status: "running" | "completed",
-    toolCallId: string | null = `toolu_${index}`,
-  ) => ({
-    entryId: `work-spawn-${index}`,
-    toolCallId,
-    status,
-  });
-
-  it("returns the first running subagent key", () => {
-    expect(
-      resolveFirstRunningSubagentKey([
-        group(1, "completed"),
-        group(2, "running"),
-        group(3, "running"),
-      ] as never),
-    ).toBe("toolu_2");
-  });
-
-  it("returns null when every subagent is completed", () => {
-    expect(
-      resolveFirstRunningSubagentKey([group(1, "completed"), group(2, "completed")] as never),
-    ).toBeNull();
-  });
-
-  it("prefers the tool call id", () => {
-    expect(resolveFirstRunningSubagentKey([group(1, "running", "tool-call-key")] as never)).toBe(
-      "tool-call-key",
-    );
-  });
-
-  it("falls back to the entry id", () => {
-    expect(resolveFirstRunningSubagentKey([group(1, "running", null)] as never)).toBe(
-      "work-spawn-1",
-    );
   });
 });
 

@@ -4,9 +4,7 @@ import { EventId, type OrchestrationThreadActivity } from "@t3tools/contracts";
 
 import type { WorkLogEntry } from "../../session-logic";
 import {
-  buildSubagentSwitcherItems,
   decodeSubagentTranscriptRow,
-  formatSubagentSwitcherSummary,
   selectSubagentInspectorPlaceholder,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
@@ -39,69 +37,6 @@ function activity(
     turnId: null,
   };
 }
-
-describe("buildSubagentSwitcherItems", () => {
-  it("preserves timeline order, prefers tool call ids, and carries status fields", () => {
-    const items = buildSubagentSwitcherItems([
-      {
-        entryId: "entry-1",
-        toolCallId: "tool-1",
-        name: "explore",
-        description: "Find the source",
-        status: "running",
-        startedAt: "2026-08-06T12:00:00.000Z",
-        completedAt: null,
-        children: [],
-        resultText: null,
-        prompt: null,
-      },
-      {
-        entryId: "entry-2",
-        toolCallId: null,
-        name: "review",
-        description: null,
-        status: "failed",
-        startedAt: "2026-08-06T12:01:00.000Z",
-        completedAt: "2026-08-06T12:02:00.000Z",
-        children: [],
-        resultText: null,
-        prompt: null,
-      },
-    ]);
-
-    expect(items).toEqual([
-      {
-        key: "tool-1",
-        name: "explore",
-        description: "Find the source",
-        status: "running",
-        startedAt: "2026-08-06T12:00:00.000Z",
-        completedAt: null,
-      },
-      {
-        key: "entry-2",
-        name: "review",
-        description: null,
-        status: "failed",
-        startedAt: "2026-08-06T12:01:00.000Z",
-        completedAt: "2026-08-06T12:02:00.000Z",
-      },
-    ]);
-  });
-});
-
-describe("formatSubagentSwitcherSummary", () => {
-  it("omits zero buckets", () => {
-    expect(
-      formatSubagentSwitcherSummary([
-        { status: "running" },
-        { status: "running" },
-        { status: "failed" },
-        { status: "stopped" },
-      ]),
-    ).toBe("2 running · 1 failed");
-  });
-});
 
 describe("selectSubagentTranscriptEntries", () => {
   it("accumulates prepended pages and merges the live tail without duplicate ids", () => {

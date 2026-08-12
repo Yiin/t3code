@@ -226,10 +226,12 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { resolveFirstRunningSubagentRowId } from "./chat/MessagesTimeline.logic";
 import {
-  resolveFirstRunningSubagentKey,
-  resolveFirstRunningSubagentRowId,
-} from "./chat/MessagesTimeline.logic";
+  buildSubagentRoster,
+  countRunningSubagents,
+  resolveFirstRunningRosterKey,
+} from "./chat/subagentRoster.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -2075,6 +2077,12 @@ function ChatViewContent(props: ChatViewProps) {
       }),
     [activeThreadSubagents, latestTurnSettled, workLogEntries],
   );
+  // One list for the banner and the drawer: groups die with the capped
+  // activity window, read-model rows do not, and the merge keeps both.
+  const subagentRoster = useMemo(
+    () => buildSubagentRoster({ groups: subagentGroups, subagents: activeThreadSubagents }),
+    [activeThreadSubagents, subagentGroups],
+  );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -2411,20 +2419,20 @@ function ChatViewContent(props: ChatViewProps) {
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
     [activeThread?.proposedPlans, timelineMessages, workLogEntries],
   );
-  // Composer presence banner: count from the thread's folded subagent read
-  // model (the same task.* fold the server uses for the sidebar shell count),
-  // jump target from the derived timeline rows.
+  // Composer presence banner: count and drawer target both come from the
+  // merged roster, so a "1 subagent working" banner always has something to
+  // open. The timeline row id stays a scroll-only fallback.
   const runningSubagentCount = useMemo(
-    () => activeThreadSubagents.filter((subagent) => subagent.status === "running").length,
-    [activeThreadSubagents],
+    () => countRunningSubagents(subagentRoster),
+    [subagentRoster],
   );
   const firstRunningSubagentRowId = useMemo(
     () => resolveFirstRunningSubagentRowId(timelineEntries, subagentGroups),
     [subagentGroups, timelineEntries],
   );
   const firstRunningSubagentKey = useMemo(
-    () => resolveFirstRunningSubagentKey(subagentGroups),
-    [subagentGroups],
+    () => resolveFirstRunningRosterKey(subagentRoster),
+    [subagentRoster],
   );
   const onOpenSubagentInspector = useCallback(
     (subagentKey: string) => {
@@ -5659,12 +5667,11 @@ function ChatViewContent(props: ChatViewProps) {
     ) : activeRightPanelSurface?.kind === "subagent" ? (
       <SubagentInspectorPanel
         activities={activeThread?.activities ?? []}
-        groups={subagentGroups}
+        roster={subagentRoster}
         onInterrupt={onInterrupt}
         onSelectSubagent={onOpenSubagentInspector}
         onSteer={onSteerSubagent}
         onStop={onStopSubagent}
-        subagents={activeThreadSubagents}
         activeSubagentKey={activeRightPanelSurface.activeSubagentKey}
         threadRef={activeThreadRef}
         markdownCwd={gitCwd ?? undefined}
