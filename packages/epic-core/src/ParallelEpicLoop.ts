@@ -33,6 +33,7 @@ import {
 } from "./Errors.ts";
 import {
   decideIterationBoundary,
+  EPIC_RUN_RESTART_RESUME_PROMPT,
   parseIntegrationFixTitle,
   parseMergeFixTitle,
   persistedFailureReason,
@@ -198,6 +199,14 @@ export interface PoolVcsShape {
    */
   readonly headCommit: (cwd: string, ref?: string) => Effect.Effect<string | null>;
   readonly worktreeFingerprint: (cwd: string) => Effect.Effect<string | null>;
+  /**
+   * A bounded, human-readable snapshot of what is uncommitted at `cwd`, for a
+   * resumed worker's prompt. `null` when git could tell us nothing at all.
+   *
+   * Unlike {@link PoolVcsShape.worktreeFingerprint} this is never compared,
+   * only shown, so it is truncated rather than kept verbatim.
+   */
+  readonly worktreeEvidence: (cwd: string) => Effect.Effect<string | null>;
   readonly commitsAhead: (input: {
     readonly cwd: string;
     readonly base: string;
@@ -819,6 +828,10 @@ export const runParallelEpicLoop = (
         })),
       );
       const initialWorktreeFingerprint = yield* ports.vcs.worktreeFingerprint(workspace.cwd);
+      // Only a resumed worker is shown its tree: a fresh iteration starts on a
+      // clean one and has nothing to be told about.
+      const resumeEvidence =
+        resumedWorker === null ? null : yield* ports.vcs.worktreeEvidence(workspace.cwd);
       const commentsBefore = issueEvidenceBefore.commentCount;
       const isResearchChild = yield* ports.backlog.issueIsResearch(
         input.cwd,
@@ -927,13 +940,24 @@ export const runParallelEpicLoop = (
             return null;
           }
           const dispatchedAt = yield* nowIso;
-          const prompt = assembleIterationPrompt({
-            basePrompt: current.prompt,
-            issueId,
-            epicContext,
-            orientationCard,
-            siblingRule: workspace.siblingRule,
-          });
+          // A resume continues the thread that already holds the epic context
+          // and the orientation card, so its turn repeats neither. It says the
+          // one thing the agent cannot know: the process died under it.
+          const prompt =
+            resumedWorker === null
+              ? assembleIterationPrompt({
+                  basePrompt: current.prompt,
+                  issueId,
+                  epicContext,
+                  orientationCard,
+                  siblingRule: workspace.siblingRule,
+                })
+              : EPIC_RUN_RESTART_RESUME_PROMPT({
+                  issueId,
+                  branch: workspace.branch,
+                  worktreePath: workspace.worktreePath,
+                  evidence: resumeEvidence,
+                });
           if (resumedWorker !== null) {
             // Continuity is proved before the run row moves, so a refusal
             // leaves no trace of a dispatch that never happened. The wait

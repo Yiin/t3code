@@ -315,6 +315,47 @@ export const EPIC_RUN_CONTINUATION_PROMPT = `Your background tasks finished. Fin
 
 export const EPIC_RUN_STALLED_PROGRESS_PROMPT = `Your turn ended while the work was unfinished. Complete the child and end the turn with the RALPH_MSG line, or RALPH_DONE if no work remains.`;
 
+/**
+ * The turn handed to a worker whose iteration is being continued after the
+ * server process died under it.
+ *
+ * It deliberately repeats neither the epic context nor the orientation card:
+ * this is a continuation of the SAME conversation, which still holds both in
+ * its first message. What the agent cannot know by itself is that time passed
+ * and its last command was cut off mid-flight, so that is all this says.
+ */
+export const EPIC_RUN_RESTART_RESUME_PROMPT = (input: {
+  readonly issueId: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  /** Bounded `git status` / `git diff --stat` output, or `null` when unreadable. */
+  readonly evidence: string | null;
+}): string => {
+  const where =
+    input.worktreePath === null
+      ? "You are in the run's main checkout"
+      : `Your worktree is \`${input.worktreePath}\``;
+  const branch =
+    input.branch === null
+      ? "you are on the run's base branch"
+      : `your branch is \`${input.branch}\``;
+  const evidence =
+    input.evidence === null
+      ? "The git probes for this worktree failed, so there is no snapshot below. Do not read that as a clean tree."
+      : `Where you left off, read at restart:\n\n${input.evidence}`;
+  return `The t3code server restarted while you were working. This is the same session, the same thread and the same worktree, so the conversation above is your own and the uncommitted changes here are your own work.
+
+You still own \`${input.issueId}\`. ${where}, and ${branch}.
+
+Your previous turn was cut off mid-command. Nothing you started is proven to have finished: not a build, not a test run, not a commit, not a push, not a \`bd\` write. Assume none of it landed until you check. Re-run whatever did not complete.
+
+${evidence}
+
+Run \`git status\` and \`git diff\` yourself before you change anything, so you are working from the tree as it is now.
+
+Then finish the child end-to-end per the instructions you were given, and end the turn with the RALPH_MSG line, or RALPH_DONE if no work remains.`;
+};
+
 /** How long the runner waits for a still-running subagent before grace ends. */
 export const DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS = 15 * 60 * 1_000;
 export const DEFAULT_MAX_GRACE_CONTINUATIONS = 10;

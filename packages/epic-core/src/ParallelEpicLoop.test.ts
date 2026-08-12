@@ -183,6 +183,8 @@ const fixture = (input: {
   readonly claimChildResult?: "claimed" | "already-claimed" | "closed" | "unknown";
   /** Fail `workspace.adopt`, as a worktree that is gone does. */
   readonly adoptFails?: boolean;
+  /** What the git probes report about a resumed worker's leftover tree. */
+  readonly worktreeEvidence?: string | null;
   /** Seed the persisted run's counters, e.g. the failure streaks. */
   readonly runSeed?: Partial<PersistedEpicRun>;
 }) => {
@@ -256,6 +258,7 @@ const fixture = (input: {
   const resumeCalls: Array<Parameters<ParallelEpicLoopPorts["dispatch"]["resumeIteration"]>[0]> =
     [];
   const acquireCalls: string[] = [];
+  const evidenceCwds: string[] = [];
   const adoptCalls: Array<Parameters<WorkspaceShape["adopt"]>[1]> = [];
   const claimChildCalls: string[] = [];
   const stopAbandonedCalls: string[] = [];
@@ -589,6 +592,11 @@ const fixture = (input: {
           : `head-${String(head)}`,
       ),
     worktreeFingerprint: () => Effect.succeed(""),
+    worktreeEvidence: (cwd) =>
+      Effect.sync(() => {
+        evidenceCwds.push(cwd);
+        return input.worktreeEvidence ?? null;
+      }),
     commitsAhead: () => Effect.succeed(0),
   };
 
@@ -643,6 +651,7 @@ const fixture = (input: {
     beginTurnCalls,
     resumeCalls,
     acquireCalls,
+    evidenceCwds,
     adoptCalls,
     claimChildCalls,
     stopAbandonedCalls,
@@ -1226,6 +1235,7 @@ it.live(
       const vcs: PoolVcsShape = {
         headCommit: (cwd) => Effect.succeed(`head-${String(headByCwd.get(cwd) ?? 0)}`),
         worktreeFingerprint: () => Effect.succeed(""),
+        worktreeEvidence: () => Effect.succeed(null),
         commitsAhead: () => Effect.succeed(0),
       };
 
@@ -1541,7 +1551,7 @@ it.live("continues an interrupted iteration on its own row, thread and worktree"
     assert.equal(test.resumeCalls[0]?.issueId, "epic.1");
     assert.deepEqual(test.createCalls, []);
     assert.deepEqual(test.beginTurnCalls, []);
-    assert.include(test.resumeCalls[0]?.prompt ?? "", "Cook exactly `epic.1` this iteration.");
+    assert.notInclude(test.resumeCalls[0]?.prompt ?? "", "Cook exactly `epic.1` this iteration.");
 
     // The row is reused, not appended to.
     assert.equal(test.iterations.length, 1);
@@ -1564,6 +1574,55 @@ it.live("continues an interrupted iteration on its own row, thread and worktree"
     const decisions = resumeDecisions(test.events);
     assert.equal(decisions.length, 1);
     assert.deepInclude(decisions[0], { decision: "resumed", iterationIndex: 3, origin: null });
+  }),
+);
+
+it.live("tells a resumed worker its turn was cut off, with its own worktree evidence", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      worktreeEvidence: "$ git status --porcelain=v1\n M src/half-done.ts",
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    // Evidence is read from the adopted worktree, not the run checkout.
+    assert.deepEqual(test.evidenceCwds, ["/wt/epic.1"]);
+
+    const prompt = test.resumeCalls[0]?.prompt ?? "";
+    assert.include(prompt, "The t3code server restarted while you were working.");
+    assert.include(prompt, "`epic.1`");
+    assert.include(prompt, "`epic/epic.1`");
+    assert.include(prompt, "`/wt/epic.1`");
+    assert.include(prompt, " M src/half-done.ts");
+    assert.include(prompt, "RALPH_MSG");
+    // The thread already holds both; repeating them would bury the one new fact.
+    assert.notInclude(prompt, "EPIC GOAL");
+    assert.notInclude(prompt, "ORIENTATION CARD");
+  }),
+);
+
+it.live("does not imply a clean tree when the evidence probes fail", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      worktreeEvidence: null,
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    assert.include(test.resumeCalls[0]?.prompt ?? "", "Do not read that as a clean tree.");
+  }),
+);
+
+it.live("never gathers worktree evidence for a fresh iteration", () =>
+  Effect.gen(function* () {
+    const test = fixture({ attempts: [{ commit: true, close: true, comment: true }] });
+    yield* test.run;
+
+    assert.deepEqual(test.evidenceCwds, []);
   }),
 );
 

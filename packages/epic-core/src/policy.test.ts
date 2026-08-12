@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   EPIC_RUN_CONTINUATION_PROMPT,
+  EPIC_RUN_RESTART_RESUME_PROMPT,
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
   backoffDelayMs,
   childBranch,
@@ -714,5 +715,55 @@ describe("integrationFixDescription (t3code-sha)", () => {
     expect(description).toContain("What the merge reported");
     expect(description).toContain("CONFLICT (content): Merge conflict in foo.ts");
     expect(description).toContain("already been repaired 2 time(s)");
+  });
+});
+
+describe("EPIC_RUN_RESTART_RESUME_PROMPT", () => {
+  const prompt = (evidence: string | null = "$ git status --porcelain=v1\n M src/a.ts") =>
+    EPIC_RUN_RESTART_RESUME_PROMPT({
+      issueId: "t3code-y5l.18",
+      branch: "epic/t3code-y5l.18",
+      worktreePath: "/wt/t3code-y5l.18",
+      evidence,
+    });
+
+  it("names the child, the branch and the worktree, and says the turn was cut off", () => {
+    const text = prompt();
+    expect(text).toContain("`t3code-y5l.18`");
+    expect(text).toContain("`epic/t3code-y5l.18`");
+    expect(text).toContain("`/wt/t3code-y5l.18`");
+    expect(text).toContain("The t3code server restarted while you were working.");
+    expect(text).toContain("cut off mid-command");
+    expect(text).toContain(" M src/a.ts");
+    expect(text).toContain("RALPH_MSG");
+    expect(text).toContain("RALPH_DONE");
+    expect(text).not.toContain("undefined");
+  });
+
+  it("carries neither the epic context nor the orientation card", () => {
+    // The resume continues a thread that already holds both, so repeating them
+    // would bury the one fact this turn exists to deliver.
+    const text = prompt();
+    expect(text).not.toContain("Epic context");
+    expect(text).not.toContain("Cook exactly");
+    expect(text).not.toContain("Agent orientation");
+  });
+
+  it("says the tree is unreadable rather than implying it is clean", () => {
+    const text = prompt(null);
+    expect(text).toContain("Do not read that as a clean tree.");
+    expect(text).not.toContain("Where you left off");
+  });
+
+  it("describes the main checkout when the run gave the worker no worktree", () => {
+    const text = EPIC_RUN_RESTART_RESUME_PROMPT({
+      issueId: "t3code-y5l.18",
+      branch: null,
+      worktreePath: null,
+      evidence: null,
+    });
+    expect(text).toContain("main checkout");
+    expect(text).toContain("base branch");
+    expect(text).not.toContain("null");
   });
 });
