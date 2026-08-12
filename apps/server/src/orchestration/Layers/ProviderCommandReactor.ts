@@ -4,6 +4,7 @@ import {
   EventId,
   type ModelSelection,
   type OrchestrationEvent,
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STOP_FAILED_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
   ProviderDriverKind,
@@ -11,6 +12,8 @@ import {
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
+  type ProviderSessionResumeOutcome,
+  type ProviderSessionResumeSettledActivityPayload,
   type RuntimeMode,
   SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND,
   SUBAGENT_STOP_ESCALATION_GRACE_MS,
@@ -73,7 +76,8 @@ type ProviderIntentEvent = Extract<
       | "thread.activity-appended"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.session-resume-requested";
   }
 >;
 
@@ -1607,6 +1611,165 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /**
+   * Continue the conversation a thread already had, or say why it cannot.
+   *
+   * Continuity is proved BEFORE any prompt is sent. The session is started on
+   * the existing thread, which picks up the cursor persisted for that thread
+   * (`ProviderService.startSession`), and only a `resumed` origin counts.
+   * Codex and OpenCode silently start a blank session on a stale cursor and
+   * Claude reports `ready` before the SDK validates the id, so the returned
+   * origin is the only trustworthy evidence. Anything else stops the session
+   * it just started and refuses — nothing was said to the agent, so nothing
+   * is lost.
+   *
+   * Every answer, refusal and fault alike, lands as one
+   * `provider.session.resume.settled` activity. The caller dispatched a
+   * command and cannot read this handler's failure any other way.
+   */
+  const processSessionResumeRequested = Effect.fn("processSessionResumeRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.session-resume-requested" }>,
+  ) {
+    const threadId = event.payload.threadId;
+    const createdAt = event.payload.createdAt;
+    const requestCommandId = event.commandId ?? CommandId.make(`event:${event.eventId}`);
+
+    const settle = (outcome: ProviderSessionResumeOutcome) =>
+      Effect.all({
+        commandId: serverCommandId("provider-session-resume-settled"),
+        eventId: serverEventId(),
+      }).pipe(
+        Effect.flatMap(({ commandId, eventId }) =>
+          orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId,
+            threadId,
+            activity: {
+              id: eventId,
+              tone: outcome._tag === "resumed" ? "info" : "error",
+              kind: PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+              summary:
+                outcome._tag === "resumed"
+                  ? "Provider session resumed"
+                  : "Provider session resume refused",
+              payload: {
+                threadId,
+                requestCommandId,
+                outcome,
+              } satisfies ProviderSessionResumeSettledActivityPayload,
+              turnId: null,
+              createdAt,
+            },
+            createdAt,
+          }),
+        ),
+        Effect.asVoid,
+      );
+
+    /** Stop through the command path, which also owns the projected session. */
+    const stopStartedSession = (reason: string) =>
+      serverCommandId("provider-session-resume-stop").pipe(
+        Effect.flatMap((commandId) =>
+          orchestrationEngine.dispatch({
+            type: "thread.session.stop",
+            commandId,
+            threadId,
+            reason,
+            createdAt,
+          }),
+        ),
+        Effect.asVoid,
+      );
+
+    yield* Effect.gen(function* () {
+      const thread = yield* resolveThread(threadId);
+      if (!thread) {
+        // The decider already refused a resume for a thread it could not
+        // find, so this only catches a thread deleted in between. The
+        // activity append needs the thread too, so the settle will fail and
+        // the caller falls back to its own bound.
+        return yield* settle({
+          _tag: "no-durable-state",
+          detail: `Thread '${threadId}' is not in the read model.`,
+        });
+      }
+
+      const instanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+      const resume = (yield* providerService.getCapabilities(instanceId)).sessionLifecycle.resume;
+      if (resume === "unsupported") {
+        // Refused before `startSession`: an adapter that cannot honour a
+        // cursor would start a blank session that looks like a resume.
+        return yield* settle({
+          _tag: "capability",
+          detail: `Provider instance '${instanceId}' cannot resume a past conversation.`,
+        });
+      }
+
+      const project = yield* resolveProject(thread.projectId);
+      const cwd = yield* resolveSessionCwdHealingStaleWorktree({ thread, project });
+      const session = yield* providerService.startSession(threadId, {
+        threadId,
+        providerInstanceId: instanceId,
+        ...(cwd ? { cwd } : {}),
+        modelSelection: { ...thread.modelSelection, instanceId },
+        runtimeMode: thread.runtimeMode,
+        ...(project ? { projectId: thread.projectId, workspaceRoot: project.workspaceRoot } : {}),
+      });
+
+      // Bind before judging the origin. The session is live either way, and
+      // an unprojected session cannot be stopped through the command path.
+      yield* setThreadSession({
+        threadId,
+        session: {
+          threadId,
+          status: mapProviderSessionStatusToOrchestrationStatus(session.status),
+          providerName: session.provider,
+          providerInstanceId: session.providerInstanceId ?? instanceId,
+          runtimeMode: thread.runtimeMode,
+          activeTurnId: null,
+          lastError: session.lastError ?? null,
+          updatedAt: session.updatedAt,
+        },
+        createdAt,
+      });
+
+      if (session.sessionOrigin !== "resumed") {
+        yield* stopStartedSession(
+          `Resume refused: provider session origin '${session.sessionOrigin ?? "unknown"}'.`,
+        );
+        // `started` means the adapter was handed no cursor at all, which is a
+        // missing durable state rather than a broken continuation.
+        return yield* settle(
+          session.sessionOrigin === "started"
+            ? {
+                _tag: "no-durable-state",
+                detail: `Thread '${threadId}' has no persisted resume cursor for instance '${instanceId}'.`,
+              }
+            : {
+                _tag: "not-continued",
+                origin: session.sessionOrigin ?? "unknown",
+                detail: `Provider started session origin '${session.sessionOrigin ?? "unknown"}' instead of continuing thread '${threadId}'.`,
+              },
+        );
+      }
+
+      yield* settle({ _tag: "resumed" });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : settle({ _tag: "failed", detail: formatFailureDetail(cause) }).pipe(
+              Effect.catchCause((settleCause) =>
+                Effect.logWarning("provider command reactor failed to record resume outcome", {
+                  threadId,
+                  cause: Cause.pretty(settleCause),
+                }),
+              ),
+            ),
+      ),
+    );
+  });
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (input: ProviderIntent) {
     const event = "event" in input ? input.event : input;
     yield* Effect.annotateCurrentSpan({
@@ -1652,6 +1815,9 @@ const make = Effect.gen(function* () {
         return;
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
+        return;
+      case "thread.session-resume-requested":
+        yield* processSessionResumeRequested(event);
         return;
     }
   });
@@ -1700,7 +1866,8 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        event.type === "thread.session-resume-requested"
       ) {
         return yield* worker.enqueue(event);
       }

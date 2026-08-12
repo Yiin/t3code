@@ -15,8 +15,12 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+  ProviderSessionResumeSettledActivityPayload,
+  ThreadId,
   type EpicRun as TransportEpicRun,
-  type ThreadId,
+  type ProviderSessionResumeOutcome,
+  type TurnId,
 } from "@t3tools/contracts";
 import {
   EpicRunnerDispatchError,
@@ -116,6 +120,17 @@ import { makeEpicRunMergeQueueStore } from "../EpicRunMergeQueueStore.ts";
 import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
 
 const GIT_HEAD_TIMEOUT_MS = 15_000;
+
+/**
+ * How long to wait for a resume request to settle before calling it an infra
+ * fault. The handler answers in one provider session start, so anything past
+ * this is the reactor not running, not a slow provider.
+ */
+const RESUME_SETTLE_TIMEOUT_MS = 120_000;
+
+const decodeResumeSettledActivity = Schema.decodeUnknownOption(
+  ProviderSessionResumeSettledActivityPayload,
+);
 const RECENT_ITERATIONS_LIMIT = 25;
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1862,6 +1877,47 @@ export const makeServerPoolDispatch = (deps: {
   });
 
   /**
+   * Wait for the `thread.session.resume` this call dispatched to settle.
+   *
+   * The resume answer travels as a durable activity rather than as the
+   * dispatch's own result: the handler runs in the reactor, long after
+   * `dispatch` returns. Polling the projection is the same trade
+   * `awaitTurnEnd` documents — a subscription cannot be proved live before
+   * the dispatch, while a projection read cannot miss a committed answer.
+   *
+   * Matching on `requestCommandId` is what keeps an earlier resume's outcome
+   * from answering this one on a thread that has been resumed before.
+   */
+  const awaitResumeOutcome = (input: {
+    readonly threadId: ThreadId;
+    readonly requestCommandId: CommandId;
+    readonly policy: PoolTimings;
+  }): Effect.Effect<ProviderSessionResumeOutcome> =>
+    Effect.gen(function* () {
+      while (true) {
+        const snapshot = yield* readThreadDetail(input.threadId);
+        for (const activity of snapshot?.thread.activities ?? []) {
+          if (activity.kind !== PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND) continue;
+          const payload = decodeResumeSettledActivity(activity.payload);
+          if (Option.isNone(payload)) continue;
+          if (payload.value.requestCommandId !== input.requestCommandId) continue;
+          return payload.value.outcome;
+        }
+        yield* Effect.sleep(Duration.millis(input.policy.pollIntervalMs));
+      }
+    }).pipe(
+      Effect.timeoutOption(Duration.millis(RESUME_SETTLE_TIMEOUT_MS)),
+      Effect.map(
+        Option.getOrElse(
+          (): ProviderSessionResumeOutcome => ({
+            _tag: "failed",
+            detail: `No resume outcome was recorded for thread '${input.threadId}' within ${String(RESUME_SETTLE_TIMEOUT_MS)}ms.`,
+          }),
+        ),
+      ),
+    );
+
+  /**
    * Wait for the thread to have no FRESH running subagents, bounded by
    * `subagentGraceTimeoutMs`. Polls the detail snapshot rather than the
    * shell's `activeSubagentCount` because staleness matters: that count
@@ -2101,6 +2157,133 @@ export const makeServerPoolDispatch = (deps: {
       return count !== null && count > 0;
     });
 
+  /**
+   * The handle every dispatched iteration is driven through.
+   *
+   * Shared by `beginTurn` and `resumeIteration` so a resumed iteration cannot
+   * settle, continue, release or read its final message by different rules
+   * than a fresh one. The only difference between the two callers is
+   * `priorTurnId`: a resume arrives with a turn already recorded on the
+   * thread, and the settle wait has to ignore it.
+   */
+  const makeIterationHandle = (input: {
+    readonly threadId: ThreadId;
+    readonly runId: string;
+    readonly iterationIndex: number;
+    readonly selection: Parameters<PoolDispatchShape["beginTurn"]>[0]["selection"];
+    readonly runtimeMode: Parameters<PoolDispatchShape["beginTurn"]>[0]["runtimeMode"];
+    readonly policy: PoolTimings;
+    readonly workspace: Parameters<PoolDispatchShape["beginTurn"]>[0]["workspace"];
+    readonly headBefore: string | null;
+    readonly branchBase: string | null;
+    readonly initialWorktreeFingerprint: string | null;
+    readonly priorTurnId: TurnId | null;
+  }): IterationHandle => {
+    const awaitSettled: Effect.Effect<IterationSettle, DispatchError> = Effect.gen(function* () {
+      yield* awaitTurnEnd(input.threadId, input.policy, input.priorTurnId);
+      yield* graceContinuationForSubagents({
+        runId: input.runId,
+        iterationIndex: input.iterationIndex,
+        threadId: input.threadId,
+        selection: input.selection,
+        runtimeMode: input.runtimeMode,
+        workspace: input.workspace,
+        headBefore: input.headBefore,
+        branchBase: input.branchBase,
+        initialWorktreeFingerprint: input.initialWorktreeFingerprint,
+        timings: input.policy,
+      });
+      const snapshot = yield* readThreadDetail(input.threadId);
+      const turnState = threadTurnState(snapshot?.thread);
+      return {
+        turnState: turnState === "running" || turnState === null ? "completed" : turnState,
+        timedOut: false,
+        providerError: snapshot?.thread.session?.lastError ?? null,
+      } satisfies IterationSettle;
+    });
+
+    const handle: IterationHandle = {
+      ref: input.threadId,
+      capabilities: serverDispatchCapabilities,
+      awaitSettled,
+      continueTurn: (prompt) =>
+        Effect.gen(function* () {
+          const continuationId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+          yield* dispatchCommand({
+            type: "thread.turn.start",
+            commandId: yield* commandId("turn-continue"),
+            threadId: input.threadId,
+            message: {
+              messageId: MessageId.make(`${input.threadId}-continue-${continuationId}`),
+              role: "user",
+              text: prompt,
+              attachments: [],
+            },
+            origin: "agent",
+            modelSelection: input.selection,
+            runtimeMode: input.runtimeMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            createdAt: yield* nowIso,
+          }).pipe(Effect.mapError(dispatchErrorFromRunner));
+        }),
+      interrupt: Effect.gen(function* () {
+        yield* dispatchBestEffort("epic.runner.interrupt-failed", {
+          type: "thread.turn.interrupt",
+          commandId: yield* commandId("turn-interrupt"),
+          threadId: input.threadId,
+          createdAt: yield* nowIso,
+        });
+      }),
+      release: Effect.gen(function* () {
+        yield* awaitSubagentDrain(input.threadId, input.policy);
+        const normalStop = {
+          type: "thread.session.stop",
+          commandId: yield* commandId("session-stop"),
+          threadId: input.threadId,
+          createdAt: yield* nowIso,
+          preserveRunningSubagents: true,
+        } as const;
+        yield* dispatchCommand(normalStop).pipe(
+          Effect.catch((error) => {
+            if (!isRunningSubagentLivenessRefusal(error.message)) {
+              return Effect.logWarning("epic.runner.session-stop-failed", { cause: error });
+            }
+            return Effect.gen(function* () {
+              yield* awaitSubagentDrain(input.threadId, input.policy);
+              yield* dispatchBestEffort("epic.runner.guarded-session-stop-retry-failed", {
+                ...normalStop,
+                commandId: yield* commandId("session-stop-retry"),
+              });
+            });
+          }),
+        );
+      }),
+      runningSubagents: Effect.gen(function* () {
+        const snapshot = yield* readThreadDetail(input.threadId);
+        const nowMs = Date.parse(yield* nowIso);
+        return {
+          mode: "native" as const,
+          running: countFreshRunningSubagents(snapshot?.thread.subagents ?? [], nowMs),
+        };
+      }),
+      finalMessage: readSettledFinalMessage(input.threadId, input.policy).pipe(
+        Effect.map((settled): FinalMessageRead => {
+          const thread = settled.snapshot?.thread;
+          const message = resolveFinalAssistantMessage(thread);
+          const turnState = threadTurnState(thread);
+          return {
+            text: message?.text ?? null,
+            streaming: message?.streaming ?? false,
+            waitExhausted: settled.messageWaitExhausted,
+            turnState: turnState === "running" ? null : turnState,
+            sessionLastError: thread?.session?.lastError ?? null,
+          };
+        }),
+      ),
+    };
+    return handle;
+  };
+
   return {
     capabilities: serverDispatchCapabilities,
     createIteration: (input) =>
@@ -2166,112 +2349,90 @@ export const makeServerPoolDispatch = (deps: {
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           createdAt: yield* nowIso,
         });
+        return makeIterationHandle({ ...input, priorTurnId: null });
+      }),
 
-        const awaitSettled: Effect.Effect<IterationSettle, DispatchError> = Effect.gen(
-          function* () {
-            yield* awaitTurnEnd(input.threadId, input.policy);
-            yield* graceContinuationForSubagents({
-              runId: input.runId,
-              iterationIndex: input.iterationIndex,
-              threadId: input.threadId,
-              selection: input.selection,
-              runtimeMode: input.runtimeMode,
-              workspace: input.workspace,
-              headBefore: input.headBefore,
-              branchBase: input.branchBase,
-              initialWorktreeFingerprint: input.initialWorktreeFingerprint,
-              timings: input.policy,
-            });
-            const snapshot = yield* readThreadDetail(input.threadId);
-            const turnState = threadTurnState(snapshot?.thread);
+    /**
+     * The server's ref IS the iteration's orchestration thread id, which
+     * outlives the process, so adopting the work is asking that thread to
+     * carry on. A failed dispatch is an infra fault — the command path is
+     * broken or the thread was deleted — while every provider-side "no" comes
+     * back through the resume outcome as an `unavailable` value.
+     */
+    resumeIteration: (input) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(input.ref);
+        // Pin the wait to the turn the dead process left behind. Without it
+        // `awaitTurnEnd` settles instantly on that turn's recorded state.
+        const priorTurnId = (yield* readThreadDetail(threadId))?.thread.latestTurn?.turnId ?? null;
+        const resumeCommandId = yield* commandId("session-resume");
+        yield* dispatchCommand({
+          type: "thread.session.resume",
+          commandId: resumeCommandId,
+          threadId,
+          createdAt: yield* nowIso,
+        });
+        const outcome = yield* awaitResumeOutcome({
+          threadId,
+          requestCommandId: resumeCommandId,
+          policy: input.policy,
+        });
+        yield* Effect.logInfo("epic.runner.resume-outcome", {
+          runId: input.runId,
+          iterationIndex: input.iterationIndex,
+          issueId: input.issueId,
+          threadId,
+          outcome: outcome._tag,
+        });
+        switch (outcome._tag) {
+          case "capability":
+          case "no-durable-state":
             return {
-              turnState: turnState === "running" || turnState === null ? "completed" : turnState,
-              timedOut: false,
-              providerError: snapshot?.thread.session?.lastError ?? null,
-            } satisfies IterationSettle;
-          },
-        );
-
-        const handle: IterationHandle = {
-          ref: input.threadId,
-          capabilities: serverDispatchCapabilities,
-          awaitSettled,
-          continueTurn: (prompt) =>
-            Effect.gen(function* () {
-              const continuationId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-              yield* dispatchCommand({
-                type: "thread.turn.start",
-                commandId: yield* commandId("turn-continue"),
-                threadId: input.threadId,
-                message: {
-                  messageId: MessageId.make(`${input.threadId}-continue-${continuationId}`),
-                  role: "user",
-                  text: prompt,
-                  attachments: [],
-                },
-                origin: "agent",
-                modelSelection: input.selection,
-                runtimeMode: input.runtimeMode,
-                interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-                createdAt: yield* nowIso,
-              }).pipe(Effect.mapError(dispatchErrorFromRunner));
-            }),
-          interrupt: Effect.gen(function* () {
-            yield* dispatchBestEffort("epic.runner.interrupt-failed", {
-              type: "thread.turn.interrupt",
-              commandId: yield* commandId("turn-interrupt"),
-              threadId: input.threadId,
-              createdAt: yield* nowIso,
-            });
-          }),
-          release: Effect.gen(function* () {
-            yield* awaitSubagentDrain(input.threadId, input.policy);
-            const normalStop = {
-              type: "thread.session.stop",
-              commandId: yield* commandId("session-stop"),
-              threadId: input.threadId,
-              createdAt: yield* nowIso,
-              preserveRunningSubagents: true,
+              _tag: "unavailable",
+              refusal: { _tag: outcome._tag, detail: outcome.detail },
             } as const;
-            yield* dispatchCommand(normalStop).pipe(
-              Effect.catch((error) => {
-                if (!isRunningSubagentLivenessRefusal(error.message)) {
-                  return Effect.logWarning("epic.runner.session-stop-failed", { cause: error });
-                }
-                return Effect.gen(function* () {
-                  yield* awaitSubagentDrain(input.threadId, input.policy);
-                  yield* dispatchBestEffort("epic.runner.guarded-session-stop-retry-failed", {
-                    ...normalStop,
-                    commandId: yield* commandId("session-stop-retry"),
-                  });
-                });
-              }),
-            );
-          }),
-          runningSubagents: Effect.gen(function* () {
-            const snapshot = yield* readThreadDetail(input.threadId);
-            const nowMs = Date.parse(yield* nowIso);
+          case "not-continued":
             return {
-              mode: "native" as const,
-              running: countFreshRunningSubagents(snapshot?.thread.subagents ?? [], nowMs),
-            };
-          }),
-          finalMessage: readSettledFinalMessage(input.threadId, input.policy).pipe(
-            Effect.map((settled): FinalMessageRead => {
-              const thread = settled.snapshot?.thread;
-              const message = resolveFinalAssistantMessage(thread);
-              const turnState = threadTurnState(thread);
-              return {
-                text: message?.text ?? null,
-                streaming: message?.streaming ?? false,
-                waitExhausted: settled.messageWaitExhausted,
-                turnState: turnState === "running" ? null : turnState,
-                sessionLastError: thread?.session?.lastError ?? null,
-              };
-            }),
-          ),
-        };
-        return handle;
+              _tag: "unavailable",
+              refusal: {
+                _tag: "not-continued",
+                origin: outcome.origin,
+                detail: outcome.detail,
+              },
+            } as const;
+          case "failed":
+            return yield* new EpicRunnerDispatchError({
+              commandType: "thread.session.resume",
+              detail: outcome.detail,
+            });
+          case "resumed":
+            break;
+        }
+
+        // Only now, with continuity proved, does the agent hear anything.
+        const promptId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+        yield* dispatchCommand({
+          type: "thread.turn.start",
+          commandId: yield* commandId("turn-resume"),
+          threadId,
+          message: {
+            // Never `${threadId}-prompt`: that id already names the message
+            // the interrupted iteration sent, and reusing it would replace it.
+            messageId: MessageId.make(`${threadId}-resume-${promptId}`),
+            role: "user",
+            text: input.prompt,
+            attachments: [],
+          },
+          origin: "agent",
+          modelSelection: input.selection,
+          runtimeMode: input.runtimeMode,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: yield* nowIso,
+        });
+        return {
+          _tag: "resumed",
+          handle: makeIterationHandle({ ...input, threadId, priorTurnId }),
+        } as const;
       }),
 
     stopAbandoned: (threadId) =>

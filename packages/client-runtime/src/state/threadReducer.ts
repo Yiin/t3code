@@ -595,6 +595,9 @@ export function applyThreadDetailEvent(
     case "thread.approval-response-requested":
     case "thread.user-input-response-requested":
     case "thread.checkpoint-revert-requested":
+    // A resume only asks. What it settles on arrives as `thread.session-set`
+    // and a `provider.session.resume.settled` activity.
+    case "thread.session-resume-requested":
       return { kind: "unchanged" };
   }
 

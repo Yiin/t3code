@@ -967,6 +967,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.session.resume": {
+      // The decider only proves the thread exists. Whether the provider can
+      // continue the conversation is a provider question, answered later by
+      // the reactor and recorded as a `provider.session.resume.settled`
+      // activity — the decider has no way to ask it here.
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.session-resume-requested",
+        payload: {
+          threadId: command.threadId,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.session.set": {
       const thread = yield* requireThread({
         readModel,

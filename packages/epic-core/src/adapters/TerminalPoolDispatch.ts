@@ -49,6 +49,21 @@ export const makeTerminalPoolDispatch = (deps: {
             }),
         ),
       ),
+  /**
+   * Always unavailable, matching the declared `lifecycle.resume:
+   * "unsupported"`. The terminal harness persists no artifact until the child
+   * process closes, so after a restart there is nothing to adopt — and
+   * spawning a fresh process here would produce an agent with no memory of
+   * the work, wearing the resumed iteration's row.
+   */
+  resumeIteration: (input) =>
+    Effect.succeed({
+      _tag: "unavailable",
+      refusal: {
+        _tag: "capability",
+        detail: `The terminal harness cannot resume iteration ${String(input.iterationIndex)} at ref '${input.ref}': it declares lifecycle.resume "unsupported".`,
+      },
+    }),
   stopAbandoned: () => Effect.void,
   stopForced: () => Effect.void,
 });

@@ -384,6 +384,7 @@ const fixture = (input: {
 
   const dispatch: ParallelEpicLoopPorts["dispatch"] = {
     capabilities: serverLikeCapabilities,
+    resumeIteration: () => Effect.die(new Error("resumeIteration is not exercised by this test")),
     createIteration: (create) =>
       Effect.sync(() => {
         createCalls.push(create);
@@ -1068,6 +1069,8 @@ it.live(
 
       const dispatch: ParallelEpicLoopPorts["dispatch"] = {
         capabilities: serverLikeCapabilities,
+        resumeIteration: () =>
+          Effect.die(new Error("resumeIteration is not exercised by this test")),
         createIteration: () => Effect.void,
         prepareIteration: () => Effect.void,
         beginTurn: (begin) =>

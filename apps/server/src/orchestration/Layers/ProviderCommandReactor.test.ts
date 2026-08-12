@@ -4,6 +4,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+  type ProviderSessionResumeSettledActivityPayload,
   UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   type ChatAttachment,
   ModelSelection,
@@ -163,6 +165,7 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
+    readonly sessionResume?: "cursor" | "unsupported";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly skillsRoot?: string;
     readonly providerSkills?: ReadonlyArray<{ readonly name: string; readonly enabled: boolean }>;
@@ -345,7 +348,7 @@ describe("ProviderCommandReactor", () => {
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
-          sessionLifecycle: { resume: "cursor" },
+          sessionLifecycle: { resume: input?.sessionResume ?? "cursor" },
           attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
         }),
       getInstanceInfo: (instanceId) => {
@@ -3285,5 +3288,112 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.status).toBe("stopped");
     expect(thread?.session?.lastError).toBe("session reaped: no live provider process");
+  });
+  describe("thread.session.resume", () => {
+    const RESUME_KIND = PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND;
+    const now = "2026-01-01T00:00:00.000Z";
+
+    const readResumeOutcome = async (harness: Awaited<ReturnType<typeof createHarness>>) => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      const activity = thread?.activities.find((entry) => entry.kind === RESUME_KIND);
+      return activity?.payload as ProviderSessionResumeSettledActivityPayload | undefined;
+    };
+
+    const requestResume = async (
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      commandId: string,
+    ) => {
+      await harness.dispatch({
+        type: "thread.session.resume",
+        commandId: CommandId.make(commandId),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      });
+      await waitFor(async () => (await readResumeOutcome(harness)) !== undefined);
+      return (await readResumeOutcome(harness))!;
+    };
+
+    it("refuses on capability without starting a session", async () => {
+      const harness = await createHarness({ sessionResume: "unsupported" });
+
+      const settled = await requestResume(harness, "cmd-resume-unsupported");
+
+      expect(settled.outcome).toEqual({
+        _tag: "capability",
+        detail: "Provider instance 'codex' cannot resume a past conversation.",
+      });
+      expect(settled.requestCommandId).toBe("cmd-resume-unsupported");
+      // The whole point of the capability read: an adapter that cannot honour
+      // a cursor never gets to start a session that looks like a resume.
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it("stops the session and refuses when the provider started fresh", async () => {
+      const harness = await createHarness({
+        startSessionEffect: (session) =>
+          Effect.succeed({ ...session, sessionOrigin: "started-fresh" as const }),
+      });
+
+      const settled = await requestResume(harness, "cmd-resume-started-fresh");
+
+      expect(settled.outcome).toMatchObject({
+        _tag: "not-continued",
+        origin: "started-fresh",
+      });
+      // No prompt was sent, so the lost conversation costs nothing more.
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(thread?.session?.status).toBe("stopped");
+    });
+
+    it("treats an absent origin exactly like a fresh start", async () => {
+      const harness = await createHarness();
+
+      const settled = await requestResume(harness, "cmd-resume-absent-origin");
+
+      // Absent is unknown, never resumed: an adapter that reports nothing
+      // must not be believed.
+      expect(settled.outcome).toMatchObject({ _tag: "not-continued", origin: "unknown" });
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    });
+
+    it("refuses with no durable state when the provider started a new conversation", async () => {
+      const harness = await createHarness({
+        startSessionEffect: (session) =>
+          Effect.succeed({ ...session, sessionOrigin: "started" as const }),
+      });
+
+      const settled = await requestResume(harness, "cmd-resume-started");
+
+      // `started` means the adapter was handed no cursor at all.
+      expect(settled.outcome).toMatchObject({ _tag: "no-durable-state" });
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    });
+
+    it("resumes and keeps the session bound when the conversation continued", async () => {
+      const harness = await createHarness({
+        startSessionEffect: (session) =>
+          Effect.succeed({ ...session, sessionOrigin: "resumed" as const }),
+      });
+
+      const settled = await requestResume(harness, "cmd-resume-ok");
+
+      expect(settled.outcome).toEqual({ _tag: "resumed" });
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(thread?.session?.status).toBe("ready");
+      expect(thread?.session?.providerInstanceId).toBe("codex");
+    });
   });
 });

@@ -668,6 +668,55 @@ export const SubagentStopFailedActivityPayload = Schema.Struct({
 export type SubagentStopFailedActivityPayload = typeof SubagentStopFailedActivityPayload.Type;
 
 /**
+ * The record a `thread.session.resume` leaves on its thread.
+ *
+ * The command path is asynchronous — the reactor starts the session long after
+ * `dispatch` returns — so the caller cannot read the answer from the dispatch
+ * itself. This activity IS the answer, and it is durable: the resume outcome
+ * survives the read that misses it by a poll.
+ */
+export const PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND = "provider.session.resume.settled";
+
+/**
+ * What a resume request settled on.
+ *
+ * `resumed` is the only arm that means the conversation continued. The three
+ * refusal arms are foreseeable answers, not faults: the provider cannot resume
+ * at all (`capability`), nothing durable is left to resume from
+ * (`no-durable-state`), or the provider started a session that is not a
+ * continuation (`not-continued`). `failed` is the fault arm — the resume broke
+ * on something that says nothing about whether resuming is possible.
+ *
+ * The union is open: a `forked` outcome is an added arm, never a changed one.
+ */
+export const ProviderSessionResumeOutcome = Schema.Union([
+  Schema.TaggedStruct("resumed", {}),
+  Schema.TaggedStruct("capability", { detail: TrimmedNonEmptyString }),
+  Schema.TaggedStruct("no-durable-state", { detail: TrimmedNonEmptyString }),
+  Schema.TaggedStruct("not-continued", {
+    // Never `resumed`: that origin is the `resumed` arm. Absent origin decodes
+    // as `unknown`, so an adapter that reports nothing can never read as a
+    // continuation.
+    origin: Schema.Literals(["started-fresh", "forked", "unknown"]),
+    detail: TrimmedNonEmptyString,
+  }),
+  Schema.TaggedStruct("failed", { detail: TrimmedNonEmptyString }),
+]);
+export type ProviderSessionResumeOutcome = typeof ProviderSessionResumeOutcome.Type;
+
+export const ProviderSessionResumeSettledActivityPayload = Schema.Struct({
+  threadId: ThreadId,
+  /**
+   * The `commandId` of the `thread.session.resume` this settles. A caller
+   * matches on it so an older resume's outcome cannot answer its request.
+   */
+  requestCommandId: CommandId,
+  outcome: ProviderSessionResumeOutcome,
+});
+export type ProviderSessionResumeSettledActivityPayload =
+  typeof ProviderSessionResumeSettledActivityPayload.Type;
+
+/**
  * Marks a subagent as thread-backed: it runs as the named child thread, so a
  * client can open that thread and talk to it directly.
  *
@@ -1404,6 +1453,25 @@ const ThreadSessionStopCommand = Schema.Struct({
   reason: OptionalThreadSessionStopReason,
 });
 
+/**
+ * Ask a thread's provider session to continue the conversation it already had.
+ *
+ * Server-only, so it sits in {@link InternalOrchestrationCommand}: a client
+ * cannot forge a resume, and the runner reaches the provider through the one
+ * command path that also owns the projected session (see
+ * `ProviderSessionReaper.ts`).
+ *
+ * The command's answer is not its dispatch. The handler starts the session and
+ * checks continuity asynchronously, then records a
+ * `provider.session.resume.settled` activity carrying this `commandId`.
+ */
+const ThreadSessionResumeCommand = Schema.Struct({
+  type: Schema.Literal("thread.session.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -1524,6 +1592,7 @@ const ThreadRevertCompleteCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadSessionResumeCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
@@ -1561,6 +1630,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.checkpoint-revert-requested",
   "thread.reverted",
   "thread.session-stop-requested",
+  "thread.session-resume-requested",
   "thread.session-set",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
@@ -1731,6 +1801,11 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
   reason: OptionalThreadSessionStopReason,
 });
 
+export const ThreadSessionResumeRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
@@ -1885,6 +1960,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-stop-requested"),
     payload: ThreadSessionStopRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.session-resume-requested"),
+    payload: ThreadSessionResumeRequestedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
