@@ -8,6 +8,8 @@ import {
   findRosterEntry,
   formatSubagentRosterSummary,
   resolveFirstRunningRosterKey,
+  resolveSubagentInteraction,
+  UNADDRESSABLE_SUBAGENT_REASON,
 } from "./subagentRoster.logic";
 
 function group(overrides: Partial<SubagentGroup> = {}): SubagentGroup {
@@ -238,5 +240,61 @@ describe("a running roster always has a View target", () => {
 
     expect(countRunningSubagents(roster)).toBe(2);
     expect(resolveFirstRunningRosterKey(roster)).toBe("toolu_2");
+  });
+});
+
+describe("resolveSubagentInteraction", () => {
+  const nowMs = Date.parse("2026-08-06T12:01:00.000Z");
+
+  function entryFor(subagents: OrchestrationThreadSubagent[]) {
+    const roster = buildSubagentRoster({
+      groups: [group({ toolCallId: "toolu_1" })],
+      subagents,
+    });
+    return roster[0]!;
+  }
+
+  it("cannot address a group with no read-model row", () => {
+    expect(resolveSubagentInteraction(entryFor([]), nowMs)).toEqual({
+      kind: "unaddressable",
+      reason: UNADDRESSABLE_SUBAGENT_REASON,
+    });
+  });
+
+  it("reports a terminal row as settled", () => {
+    const entry = entryFor([
+      subagent({
+        spawnedByItemId: "toolu_1",
+        status: "completed",
+        completedAt: "2026-08-06T12:00:45.000Z",
+      }),
+    ]);
+
+    expect(resolveSubagentInteraction(entry, nowMs)).toEqual({
+      kind: "settled",
+      subagentId: "agent-1",
+      reason: "This subagent is no longer running.",
+    });
+  });
+
+  it("reports a running row outside the freshness window as settled", () => {
+    const entry = entryFor([
+      subagent({ spawnedByItemId: "toolu_1", updatedAt: "2026-08-06T11:40:00.000Z" }),
+    ]);
+
+    expect(resolveSubagentInteraction(entry, nowMs)).toEqual({
+      kind: "settled",
+      subagentId: "agent-1",
+      reason: "This subagent has not reported recent activity.",
+    });
+  });
+
+  it("reports a fresh running row as parent-mediated", () => {
+    const entry = entryFor([subagent({ spawnedByItemId: "toolu_1" })]);
+
+    expect(resolveSubagentInteraction(entry, nowMs)).toEqual({
+      kind: "parent-mediated",
+      subagentId: "agent-1",
+    });
   });
 });

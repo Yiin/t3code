@@ -7,7 +7,7 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { SubagentInspectorFooter } from "./SubagentInspectorFooter";
+import { PARENT_MEDIATED_NOTICE, SubagentInspectorFooter } from "./SubagentInspectorFooter";
 
 const nowMs = Date.parse("2026-08-06T12:00:00.000Z");
 const threadId = ThreadId.make("thread-1");
@@ -71,6 +71,12 @@ describe("SubagentInspectorFooter", () => {
     const staleMarkup = render(subagent({ updatedAt: "2026-08-06T11:00:00.000Z" }));
     expect(staleMarkup).toContain("This subagent has not reported recent activity.");
     expect(staleMarkup.match(/disabled/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("names the parent hop before the first send, and only while the composer works", () => {
+    expect(render(subagent())).toContain(PARENT_MEDIATED_NOTICE);
+    // A settled subagent cannot be messaged at all, so the notice would lie.
+    expect(render(subagent({ status: "completed" }))).not.toContain(PARENT_MEDIATED_NOTICE);
   });
 
   it("renders steer delivery and failure transitions from activities", () => {

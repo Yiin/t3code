@@ -33,6 +33,7 @@ import {
 import {
   findRosterEntry,
   formatSubagentRosterSummary,
+  resolveSubagentInteraction,
   type SubagentRosterEntry,
 } from "./subagentRoster.logic";
 import { MessageCopyButton } from "./MessageCopyButton";
@@ -216,6 +217,7 @@ export function SubagentInspectorPanel({
   markdownCwd,
   workspaceRoot,
   skills,
+  nowMs = Date.now(),
   onSteer,
   onStop,
   onInterrupt,
@@ -226,6 +228,7 @@ export function SubagentInspectorPanel({
   threadRef: ScopedThreadRef;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
   markdownCwd: string | undefined;
+  nowMs?: number;
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   onSteer: (
@@ -297,10 +300,18 @@ export function SubagentInspectorPanel({
     );
   }
 
+  const interaction = resolveSubagentInteraction(target, nowMs);
   const settledElapsed =
     target.status === "running"
       ? null
       : formatElapsed(target.startedAt, target.completedAt ?? undefined);
+  // A group means the client saw the spawning tool call; a `spawnedByItemId`
+  // means the server recorded one. Without either, the row only ever arrived
+  // as provider-reported progress.
+  const spawnLabel =
+    target.group !== null || readModel?.spawnedByItemId !== undefined
+      ? "spawned by Task"
+      : "reported by the provider";
   const usage = summarizeSubagentUsage(readModel?.usage);
   const usageLabel =
     usage.inputTokens !== null || usage.outputTokens !== null
@@ -361,6 +372,17 @@ export function SubagentInspectorPanel({
               </p>
             ) : null}
           </div>
+          <p className="truncate text-[11px] text-muted-foreground">
+            {spawnLabel}
+            {target.status === "running" ? (
+              <>
+                {" · "}
+                <SubagentElapsed startedAt={target.startedAt} />
+              </>
+            ) : settledElapsed ? (
+              " · " + settledElapsed
+            ) : null}
+          </p>
         </div>
       </header>
 
@@ -494,9 +516,14 @@ export function SubagentInspectorPanel({
         </div>
       </div>
 
-      {readModel ? (
+      {interaction.kind === "unaddressable" ? (
+        <div className="mt-auto border-t border-border/70 p-3">
+          <p className="text-xs text-muted-foreground">{interaction.reason}</p>
+        </div>
+      ) : readModel ? (
         <SubagentInspectorFooter
           activities={activities}
+          nowMs={nowMs}
           onInterrupt={onInterrupt}
           onSteer={(text, commandId) => onSteer(readModel.subagentId, text, commandId)}
           onStop={(commandId) => onStop(readModel.subagentId, commandId)}

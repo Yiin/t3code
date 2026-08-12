@@ -1,5 +1,4 @@
 import {
-  isFreshRunningSubagent,
   SUBAGENT_STOP_ESCALATION_GRACE_MS,
   type CommandId,
   type OrchestrationThreadActivity,
@@ -13,6 +12,7 @@ import { selectSubagentSteerStates, type SubagentSteerState } from "../../sessio
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 import { newCommandId } from "~/lib/utils";
+import { subagentInteractionDisabledReason } from "./subagentRoster.logic";
 
 export interface SubagentCommandFailure {
   message: string;
@@ -21,16 +21,8 @@ export interface SubagentCommandFailure {
 
 type CommandResult = SubagentCommandFailure | null;
 
-export function subagentInteractionDisabledReason(
-  subagent: OrchestrationThreadSubagent,
-  nowMs: number,
-): string | null {
-  if (subagent.status !== "running") return "This subagent is no longer running.";
-  if (!isFreshRunningSubagent(subagent, nowMs)) {
-    return "This subagent has not reported recent activity.";
-  }
-  return null;
-}
+/** Said before the first send, so the parent hop is never a surprise. */
+export const PARENT_MEDIATED_NOTICE = "Messages reach the parent at the next turn boundary.";
 
 interface OptimisticSteer {
   steerId: CommandId;
@@ -190,6 +182,9 @@ export function SubagentInspectorFooter({
           </p>
         ) : null}
         {commandError ? <p className="text-xs text-destructive">{commandError}</p> : null}
+        {composerDisabledReason === null ? (
+          <p className="text-xs text-muted-foreground">{PARENT_MEDIATED_NOTICE}</p>
+        ) : null}
 
         <form
           className="flex items-end gap-2"

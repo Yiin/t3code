@@ -1,6 +1,7 @@
-import type {
-  OrchestrationThreadSubagent,
-  OrchestrationThreadSubagentStatus,
+import {
+  isFreshRunningSubagent,
+  type OrchestrationThreadSubagent,
+  type OrchestrationThreadSubagentStatus,
 } from "@t3tools/contracts";
 
 import type { SubagentGroup } from "../../session-logic";
@@ -128,6 +129,51 @@ export function resolveFirstRunningRosterKey(
   roster: ReadonlyArray<SubagentRosterEntry>,
 ): string | null {
   return roster.find((entry) => entry.status === "running")?.key ?? null;
+}
+
+/** Why the drawer cannot message or stop a subagent it does have a row for. */
+export function subagentInteractionDisabledReason(
+  subagent: Pick<OrchestrationThreadSubagent, "status" | "updatedAt">,
+  nowMs: number,
+): string | null {
+  if (subagent.status !== "running") return "This subagent is no longer running.";
+  if (!isFreshRunningSubagent(subagent, nowMs)) {
+    return "This subagent has not reported recent activity.";
+  }
+  return null;
+}
+
+/** Why a subagent with no read-model row can never be addressed. */
+export const UNADDRESSABLE_SUBAGENT_REASON =
+  "This provider does not report a subagent id, so T3 Code cannot message or stop this subagent.";
+
+/**
+ * What the drawer can do with one subagent.
+ *
+ * `parent-mediated` is today's only live arm: a steer is handed to the parent
+ * session, which passes it on at its next turn boundary. A thread-backed child
+ * gets its own arm here once the spawn phase lands a contract field for it —
+ * this is the one branch point, so the drawer stays a single component.
+ */
+export type SubagentInteraction =
+  | { kind: "parent-mediated"; subagentId: string }
+  | { kind: "settled"; subagentId: string; reason: string }
+  | { kind: "unaddressable"; reason: string };
+
+export function resolveSubagentInteraction(
+  entry: SubagentRosterEntry,
+  nowMs: number,
+): SubagentInteraction {
+  const readModel = entry.readModel;
+  // A group-only entry carries no subagent id, so no command can name it.
+  if (readModel === null) {
+    return { kind: "unaddressable", reason: UNADDRESSABLE_SUBAGENT_REASON };
+  }
+  const reason = subagentInteractionDisabledReason(readModel, nowMs);
+  if (reason !== null) {
+    return { kind: "settled", subagentId: readModel.subagentId, reason };
+  }
+  return { kind: "parent-mediated", subagentId: readModel.subagentId };
 }
 
 export function formatSubagentRosterSummary(

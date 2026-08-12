@@ -8,7 +8,12 @@ import {
   SubagentInspectorPlaceholder,
   SubagentTranscriptEntryRow,
 } from "./SubagentInspectorPanel";
-import { buildSubagentRoster } from "./subagentRoster.logic";
+import { PARENT_MEDIATED_NOTICE } from "./SubagentInspectorFooter";
+import {
+  buildSubagentRoster,
+  UNADDRESSABLE_SUBAGENT_REASON,
+  type SubagentRosterEntry,
+} from "./subagentRoster.logic";
 
 const commonProps = {
   markdownCwd: undefined,
@@ -20,6 +25,30 @@ const commonProps = {
   workspaceRoot: undefined,
   turnSettled: false,
 };
+
+const panelNowMs = Date.parse("2026-08-06T12:00:00.000Z");
+
+function renderPanel(input: {
+  roster: ReadonlyArray<SubagentRosterEntry>;
+  activeSubagentKey: string;
+}) {
+  return renderToStaticMarkup(
+    <SubagentInspectorPanel
+      activeSubagentKey={input.activeSubagentKey}
+      activities={[]}
+      markdownCwd={undefined}
+      nowMs={panelNowMs}
+      onInterrupt={async () => undefined}
+      onSelectSubagent={() => {}}
+      onSteer={async () => null}
+      onStop={async () => null}
+      roster={input.roster}
+      skills={[]}
+      threadRef={commonProps.threadRef}
+      workspaceRoot={undefined}
+    />,
+  );
+}
 
 function entry(
   kind: string,
@@ -119,5 +148,59 @@ describe("SubagentInspectorPanel", () => {
     expect(markup).toContain("Explore");
     expect(markup).toContain("Running");
     expect(markup).not.toContain("Spawn prompt");
+    expect(markup).toContain("reported by the provider");
+  });
+
+  it("states why a group-only subagent cannot be addressed, and offers no composer", () => {
+    const markup = renderPanel({
+      roster: buildSubagentRoster({
+        groups: [
+          {
+            entryId: "work-spawn-1",
+            toolCallId: "toolu_1",
+            name: "explore",
+            description: "Find the source",
+            status: "running",
+            startedAt: "2026-08-06T11:55:00.000Z",
+            completedAt: null,
+            children: [],
+            resultText: null,
+            prompt: null,
+          },
+        ],
+        subagents: [],
+      }),
+      activeSubagentKey: "toolu_1",
+    });
+
+    expect(markup).toContain(UNADDRESSABLE_SUBAGENT_REASON);
+    expect(markup).not.toContain('data-slot="textarea"');
+    expect(markup).not.toContain(PARENT_MEDIATED_NOTICE);
+    expect(markup).toContain("spawned by Task");
+  });
+
+  it("offers a composer and names the parent hop for a fresh running subagent", () => {
+    const markup = renderPanel({
+      roster: buildSubagentRoster({
+        groups: [],
+        subagents: [
+          {
+            subagentId: "agent-1",
+            turnId: null,
+            spawnedByItemId: "toolu_1",
+            agentType: "explore",
+            status: "running",
+            startedAt: "2026-08-06T11:55:00.000Z",
+            updatedAt: "2026-08-06T11:59:00.000Z",
+            completedAt: null,
+          },
+        ],
+      }),
+      activeSubagentKey: "toolu_1",
+    });
+
+    expect(markup).toContain('data-slot="textarea"');
+    expect(markup).toContain(PARENT_MEDIATED_NOTICE);
+    expect(markup).toContain("spawned by Task");
   });
 });
