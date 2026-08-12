@@ -229,8 +229,7 @@ export interface SubagentFleetAgent {
 }
 
 /**
- * Attention-first ordering for fleet dots, matching the mobile Live Activity
- * precedent (`phasePriority` in apps/mobile AgentActivity): failures first,
+ * Attention-first ordering for fleet dots: failures first,
  * then in-flight work, then finished. Subagents have no waiting states.
  */
 function subagentFleetDotPriority(status: OrchestrationThreadSubagentStatus): number {

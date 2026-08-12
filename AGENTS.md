@@ -8,20 +8,19 @@
   - Run targeted formatting, lint, and type checks for the affected scope when available.
 - Do not run repo-wide `vp check`, `vp run typecheck`, `vp run test`, or equivalent full-suite commands as a routine completion step. CI runs the full verification suite on pull requests and pushes to `main` or `mine`.
   - Exception: when a task hands you a specific gate command to run — an epic merge-fix child does, and the user may — run that command exactly as given. That is the request, and reporting a focused check in its place is a false pass.
-- After frontend feature development or any user-visible frontend behavior change, the primary agent must run one integrated verification pass for each affected client surface after integrating the work:
-  - Web: use the `test-t3-app` skill. Launch one isolated environment, authenticate through the printed pairing URL, and verify the affected flow in the controlled browser.
-  - Mobile: use the `test-t3-mobile` skill. Connect one representative iOS Simulator or Android Emulator available on the host to one isolated environment and verify the affected flow. On compatible macOS hosts, prefer iOS for cross-platform changes and stream it through serve-sim in the T3 Code in-app browser or another available agent browser; use Android when it is the affected or viable platform.
+- After frontend feature development or any user-visible frontend behavior change, the primary agent must run one integrated verification pass after integrating the work:
+  - Use the `test-t3-app` skill. Launch one isolated environment, authenticate through the printed pairing URL, and verify the affected flow in the controlled browser.
+  - The web app is the only client. Phones are served by the same React app, so check the affected flow at a phone viewport whenever the change touches layout, touch targets, or navigation.
   - Subagents must not independently launch dev servers or repeat integrated client verification unless their delegated task explicitly requires it.
   - Stop dev servers, watchers, and other long-running verification processes when the focused verification is complete.
 
 ## Package Roles
 
 - `apps/server`: Node.js WebSocket server. Owns provider drivers and sessions, serves the React web app, and runs orchestration such as EpicRunner.
-- `apps/web`: React/Vite UI. Owns session UX, conversation/event rendering, and client-side state. Connects to the server via WebSocket.
-- `apps/mobile`: Expo/React Native client. Shares provider/session contracts and runtime state with web where practical.
+- `apps/web`: React/Vite UI and the only client. Owns session UX, conversation/event rendering, and client-side state. Connects to the server via WebSocket. Phones are served by this app, so treat mobile web as a first-class target, not an afterthought.
 - `packages/contracts`: Shared effect/Schema schemas and TypeScript contracts for provider events, WebSocket protocol, and model/session types. Keep this package schema-only — no runtime logic.
 - `packages/shared`: Shared runtime utilities consumed by both server and client applications. Uses explicit subpath exports (e.g. `@t3tools/shared/git`) — no barrel index.
-- `packages/client-runtime`: Shared runtime package for sharing client code across web and mobile.
+- `packages/client-runtime`: Shared client runtime consumed by `apps/web`. It was built to share code with a native client that no longer exists, so its seams are wider than one consumer needs. Keep it — collapsing it into the web app is a separate decision.
 - Do not inspect or edit generated `dist` files when source exists.
 
 ## Reference Repos

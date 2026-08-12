@@ -7,7 +7,7 @@ EpicRunner adds this card to worker prompts. `AGENTS.md` wins on conflicts.
 Node is pinned by `mise.toml`. Use pnpm through `vp`.
 
 - Focused tests: `vp test run <test-files>`
-- Typecheck: `vp run --filter t3 typecheck`, `@t3tools/web`, or `@t3tools/mobile`
+- Typecheck: `vp run --filter t3 typecheck` or `vp run --filter @t3tools/web typecheck`
 - Touched files: `vp fmt --check <files>` and `vp lint <files>`
 
 Keep worker checks focused. Run a supplied gate command exactly.
@@ -24,7 +24,7 @@ three.
 ## Repo layout
 
 - `apps/server` owns providers, persistence, orchestration, and runner ports.
-- `apps/web` and `apps/mobile` own clients. `packages/contracts` has schemas only.
+- `apps/web` is the only client, and it serves phones too. `packages/contracts` has schemas only.
 - `packages/epic-core` owns shared runner logic.
 - `packages/shared` has explicit exports. `.repos` is read-only reference code.
 
@@ -81,8 +81,7 @@ before run completion. Provider fallback uses structured evidence only.
 - `EpicWorkerScopeRegistry` in `apps/server/src/provider/workerScope.ts` is
   in-memory, so a session resumed after a restart spawns outside its systemd scope.
 - The epic-run UI lives in `apps/web/src/routes/_chat.epics.$environmentId.$epicId.tsx`,
-  `apps/web/src/epicRun.logic.ts`, `apps/web/src/epicRunPreflightPresentation.ts`,
-  and `apps/mobile/src/features/epics/EpicsRouteScreens.tsx`.
+  `apps/web/src/epicRun.logic.ts`, and `apps/web/src/epicRunPreflightPresentation.ts`.
   `groupEpicRunIterationThreads` in `apps/web/src/components/Sidebar.logic.ts`
   folds a run's iteration threads by parsing the thread id.
 
