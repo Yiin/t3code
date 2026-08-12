@@ -12,7 +12,13 @@
  *
  * @module EpicRunner
  */
-import { type EpicRun as TransportEpicRun, EpicRunId } from "@t3tools/contracts";
+import {
+  CommandId,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
+  type EpicRun as TransportEpicRun,
+  EpicRunId,
+  MessageId,
+} from "@t3tools/contracts";
 import {
   EpicRunNotFoundError,
   type EpicRunnerError,
@@ -69,7 +75,7 @@ import * as Stream from "effect/Stream";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { EpicRunStore } from "../../persistence/Services/EpicRuns.ts";
+import { EpicRunStore, type EpicRun } from "../../persistence/Services/EpicRuns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
@@ -219,7 +225,86 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       agentAwarenessRelay,
       changes,
     });
-    const { enrichRun, enrichRuns, saveRun } = readModel;
+    const { enrichRun, enrichRuns } = readModel;
+
+    type PriorRun = Option.Option<EpicRun> | null;
+
+    const readPriorRun = (runId: EpicRunId): Effect.Effect<PriorRun> =>
+      store.getRun({ runId }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.origin-status-prior-read-failed", {
+            runId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+
+    const reportOriginThreadTransitions = (
+      previous: PriorRun,
+      run: EpicRun,
+    ): Effect.Effect<void> => {
+      if (previous === null || run.originThreadId === null) return Effect.void;
+      const originThreadId = run.originThreadId;
+
+      const transitions: Array<string> = [];
+      if (Option.isNone(previous) && run.status === "running") transitions.push("started");
+      if (Option.isSome(previous) && run.iterationsCompleted > previous.value.iterationsCompleted) {
+        transitions.push("iteration settled");
+      }
+      if (
+        (run.status === "done" || run.status === "failed" || run.status === "cancelled") &&
+        (Option.isNone(previous) || previous.value.status !== run.status)
+      ) {
+        transitions.push(run.status === "done" ? "completed" : run.status);
+      }
+      if (transitions.length === 0) return Effect.void;
+
+      return Effect.gen(function* () {
+        for (const transition of transitions) {
+          yield* Effect.gen(function* () {
+            const commandUuid = yield* crypto.randomUUIDv4;
+            const messageUuid = yield* crypto.randomUUIDv4;
+            const createdAt = yield* DateTimeNowIso;
+            yield* engine.dispatch({
+              type: "thread.turn.start",
+              commandId: CommandId.make(`server:epic-run-status:${commandUuid}`),
+              threadId: originThreadId,
+              message: {
+                messageId: MessageId.make(`epic-run-status:${run.runId}:${messageUuid}`),
+                role: "user",
+                text: `EpicRunner run ${run.runId} for ${run.epicId}: ${transition}. Iterations ${run.iterationsCompleted}/${run.maxIterations}.`,
+                attachments: [],
+              },
+              origin: "agent",
+              delivery: "turn-boundary",
+              runtimeMode: run.runtimeMode,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              createdAt,
+            });
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("epic.runner.origin-status-dispatch-failed", {
+                runId: run.runId,
+                epicId: run.epicId,
+                transition,
+                cause,
+              }),
+            ),
+          );
+        }
+      });
+    };
+
+    const saveRun = (run: EpicRun) =>
+      readPriorRun(run.runId).pipe(
+        Effect.flatMap((previous) =>
+          store.upsertRun(run).pipe(
+            Effect.mapError(storeError("upsertRun")),
+            Effect.tap(() => reportOriginThreadTransitions(previous, run)),
+            Effect.flatMap(() => readModel.publishRunChange(run)),
+          ),
+        ),
+      );
     const workspace = makeServerPoolWorkspace({
       store,
       processRunner,
@@ -230,8 +315,19 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       gitVcsDriver,
       projectionSnapshotQuery,
     });
+    const baseJournal = makeServerPoolJournal(store);
     const poolPorts: ParallelEpicLoopPorts = {
-      journal: makeServerPoolJournal(store),
+      journal: {
+        ...baseJournal,
+        saveRun: (run) =>
+          readPriorRun(run.runId).pipe(
+            Effect.flatMap((previous) =>
+              baseJournal
+                .saveRun(run)
+                .pipe(Effect.tap(() => reportOriginThreadTransitions(previous, run))),
+            ),
+          ),
+      },
       events: readModel.events,
       backlog,
       workspace,

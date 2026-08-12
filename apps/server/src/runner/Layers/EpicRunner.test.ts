@@ -307,6 +307,8 @@ function createHarness(input: {
   readonly childLabels?: Record<string, string>;
   /** Command types the stub engine refuses. The command is still recorded. */
   readonly refuseCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
+  /** Refuse only EpicRunner status turns sent to a run's origin thread. */
+  readonly refuseOriginStatusCommands?: boolean;
   /** Guarded normal-stop refusals that simulate a subagent starting after the advisory read. */
   readonly guardedStopRefusals?: number;
   /** Model a parallel branch HEAD that moves while the base checkout stays put. */
@@ -314,6 +316,8 @@ function createHarness(input: {
   /** Inject an allocation defect after this child's worktree is provisioned. */
   readonly failAllocationFor?: string;
   readonly failInitializeMergeState?: boolean;
+  /** Fail run enrichment after a run row has already been stored. */
+  readonly failListIterations?: boolean;
   readonly workerProvisionPath?: string;
   readonly integrationProvisionPath?: string;
   /** Per-cwd `git rev-list --count` responses; fallback is the scripted branch count. */
@@ -334,6 +338,11 @@ function createHarness(input: {
   if (input.failInitializeMergeState === true) {
     Object.assign(store.shape, {
       initializeMergeState: () => Effect.die(new Error("injected merge-state failure")),
+    });
+  }
+  if (input.failListIterations === true) {
+    Object.assign(store.shape, {
+      listIterations: () => Effect.die(new Error("injected list-iterations failure")),
     });
   }
   const repositoryRoot = input.workspaceRoot ?? "/tmp/epic-runner-repo";
@@ -483,13 +492,22 @@ function createHarness(input: {
         ) {
           stopsWithRunningSubagents.push(command.threadId);
         }
+        const targetsOriginThread =
+          command.type === "thread.turn.start" &&
+          [...store.runs.values()].some((run) => run.originThreadId === command.threadId);
         if (input.refuseCommandTypes?.includes(command.type) === true) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
             detail: "refused by test harness",
           });
         }
-        if (command.type === "thread.turn.start") {
+        if (input.refuseOriginStatusCommands === true && targetsOriginThread) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "refused origin status command by test harness",
+          });
+        }
+        if (command.type === "thread.turn.start" && !targetsOriginThread) {
           // Forked so `dispatch` returns before the turn resolves, the way the
           // real engine behaves.
           yield* Effect.forkDetach(simulateTurn(command.threadId));
@@ -2273,6 +2291,177 @@ describe("EpicRunner", () => {
         "thread-launcher",
       );
       assert.strictEqual(harness.store.runs.get(fromEpicsPage.runId)?.originThreadId, null);
+      assert.deepStrictEqual(
+        harness
+          .commandsOfType("thread.turn.start")
+          .filter((command) => command.message.text.startsWith("EpicRunner run "))
+          .map((command) => command.threadId),
+        ["thread-launcher"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("reports run lifecycle changes to the origin thread", () => {
+    const originThreadId = ThreadId.make("thread-epic-origin");
+    const completionHarness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+    });
+    const failedHarness = createHarness({
+      script: [{ text: "no commit", head: "head-0" }],
+      childStatuses: { "child-1": "open" },
+      options: { maxNoCommitStreak: 1 },
+    });
+    const cancelledRun: EpicRun = {
+      runId: EpicRunId.make("run-origin-cancelled"),
+      epicId: "epic-origin-cancelled",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 2,
+      iterationsCompleted: 1,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const cancellationHarness = createHarness({ script: [], seedRuns: [cancelledRun] });
+    const refusedHarness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      refuseOriginStatusCommands: true,
+    });
+
+    const statusTurns = (harness: ReturnType<typeof createHarness>) =>
+      harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === originThreadId);
+
+    const completionScenario = Effect.gen(function* () {
+      const completionRunner = yield* EpicRunner;
+      const completed = yield* completionRunner.launchRun({
+        epicId: "epic-origin-completed",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        originThreadId,
+      });
+      yield* waitFor(() => completionHarness.store.runs.get(completed.runId)?.status === "done");
+      yield* waitFor(() => statusTurns(completionHarness).length === 3);
+
+      const completedTurns = statusTurns(completionHarness);
+      assert.deepStrictEqual(
+        completedTurns.map((command) => command.message.text),
+        [
+          `EpicRunner run ${completed.runId} for epic-origin-completed: started. Iterations 0/50.`,
+          `EpicRunner run ${completed.runId} for epic-origin-completed: iteration settled. Iterations 1/50.`,
+          `EpicRunner run ${completed.runId} for epic-origin-completed: completed. Iterations 1/50.`,
+        ],
+      );
+      assert.isTrue(
+        completedTurns.every(
+          (command) => command.origin === "agent" && command.delivery === "turn-boundary",
+        ),
+      );
+      assert.isTrue(completedTurns.every((command) => command.modelSelection === undefined));
+      assert.strictEqual(
+        new Set(completedTurns.map((command) => command.commandId)).size,
+        completedTurns.length,
+      );
+      assert.strictEqual(
+        new Set(completedTurns.map((command) => command.message.messageId)).size,
+        completedTurns.length,
+      );
+    }).pipe(Effect.provide(completionHarness.layer));
+
+    const failureScenario = Effect.gen(function* () {
+      const failedRunner = yield* EpicRunner;
+      const failed = yield* failedRunner.launchRun({
+        epicId: "epic-origin-failed",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        originThreadId,
+      });
+      yield* waitFor(() => failedHarness.store.runs.get(failed.runId)?.status === "failed");
+      yield* waitFor(() => statusTurns(failedHarness).length === 3);
+      assert.deepStrictEqual(
+        statusTurns(failedHarness).map((command) => command.message.text),
+        [
+          `EpicRunner run ${failed.runId} for epic-origin-failed: started. Iterations 0/50.`,
+          `EpicRunner run ${failed.runId} for epic-origin-failed: iteration settled. Iterations 1/50.`,
+          `EpicRunner run ${failed.runId} for epic-origin-failed: failed. Iterations 1/50.`,
+        ],
+      );
+    }).pipe(Effect.provide(failedHarness.layer));
+
+    const cancellationScenario = Effect.gen(function* () {
+      const cancellationRunner = yield* EpicRunner;
+      yield* cancellationRunner.cancelRun({ runId: cancelledRun.runId });
+      assert.deepStrictEqual(
+        statusTurns(cancellationHarness).map((command) => command.message.text),
+        [
+          "EpicRunner run run-origin-cancelled for epic-origin-cancelled: cancelled. Iterations 1/10.",
+        ],
+      );
+    }).pipe(Effect.provide(cancellationHarness.layer));
+
+    const refusalScenario = Effect.gen(function* () {
+      const refusedRunner = yield* EpicRunner;
+      const refused = yield* refusedRunner.launchRun({
+        epicId: "epic-origin-refused",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        originThreadId,
+      });
+      yield* waitFor(() => refusedHarness.store.runs.get(refused.runId)?.status === "done");
+      yield* waitFor(() => statusTurns(refusedHarness).length === 3);
+      assert.strictEqual(statusTurns(refusedHarness).length, 3);
+    }).pipe(Effect.provide(refusedHarness.layer));
+
+    return Effect.gen(function* () {
+      yield* completionScenario;
+      yield* failureScenario;
+      yield* cancellationScenario;
+      yield* refusalScenario;
+    });
+  });
+
+  it.live("reports a stored status when later run fan-out fails", () => {
+    const originThreadId = ThreadId.make("thread-epic-origin-fan-out-failure");
+    const harness = createHarness({ script: [], failListIterations: true });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const exit = yield* Effect.exit(
+        runner.launchRun({
+          epicId: "epic-origin-fan-out-failure",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+          originThreadId,
+        }),
+      );
+
+      assert.isTrue(Exit.isFailure(exit));
+      const stored = [...harness.store.runs.values()][0]!;
+      assert.strictEqual(stored.status, "running");
+      assert.deepStrictEqual(
+        harness
+          .commandsOfType("thread.turn.start")
+          .filter((command) => command.threadId === originThreadId)
+          .map((command) => command.message.text),
+        [
+          `EpicRunner run ${stored.runId} for epic-origin-fan-out-failure: started. Iterations 0/50.`,
+        ],
+      );
     }).pipe(Effect.provide(harness.layer));
   });
 

@@ -339,9 +339,9 @@ const buildTransportRun = (
 /**
  * The run read model and the run-change fan-out the WS subscription consumes.
  *
- * `saveRun` is the lifecycle write path (upsert, then publish); the loop's
- * journal writes through {@link makeServerPoolJournal} and publishes through
- * the `events` port, so both paths land on the same PubSub in the same order.
+ * Lifecycle writes persist in `EpicRunner.ts`, then call `publishRunChange`.
+ * The loop's journal writes through {@link makeServerPoolJournal} and publishes
+ * through the `events` port, so both paths land on the same PubSub.
  */
 export const makeEpicRunReadModel = (deps: {
   readonly store: EpicRunStore["Service"];
@@ -433,12 +433,6 @@ export const makeEpicRunReadModel = (deps: {
       Effect.asVoid,
     );
 
-  const saveRun = (run: EpicRun) =>
-    store.upsertRun(run).pipe(
-      Effect.mapError(storeError("upsertRun")),
-      Effect.flatMap(() => publishRunChange(run)),
-    );
-
   const events: PoolRunEventsShape = {
     // Iteration changes reach the UI through the next run publish, exactly as
     // they did before the rewire; only run rows fan out to the PubSub.
@@ -446,7 +440,7 @@ export const makeEpicRunReadModel = (deps: {
       event.type === "run-state-changed" ? publishRunChange(event.run) : Effect.void,
   };
 
-  return { enrichRun, enrichRuns, saveRun, publishRunChange, events };
+  return { enrichRun, enrichRuns, publishRunChange, events };
 };
 
 const IssueEvidence = Schema.Struct({
