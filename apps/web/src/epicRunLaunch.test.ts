@@ -5,7 +5,11 @@ import {
   type EpicRunPreflightResult,
 } from "@t3tools/contracts";
 
-import { epicRunPreflightBlockersFromError, preflightAndLaunchEpicRun } from "./epicRunLaunch";
+import {
+  epicRunPreflightBlockersFromError,
+  epicRunPreflightModeForConfig,
+  preflightAndLaunchEpicRun,
+} from "./epicRunLaunch";
 
 const stubPreflightResult = (
   overrides?: Partial<EpicRunPreflightResult>,
@@ -16,6 +20,43 @@ const stubPreflightResult = (
   resolvedConfig: DEFAULT_EPIC_RUN_CONFIG,
   configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   ...overrides,
+});
+
+describe("epicRunPreflightModeForConfig", () => {
+  it("preflights a launch that sets no execution key as parallel", () => {
+    expect(epicRunPreflightModeForConfig(undefined)).toBe("parallel");
+    expect(epicRunPreflightModeForConfig({ vcs: { noPush: true } })).toBe("parallel");
+    expect(DEFAULT_EPIC_RUN_CONFIG.execution.sequential).toBe(false);
+  });
+
+  it("follows the execution flag the launch carries", () => {
+    expect(epicRunPreflightModeForConfig({ execution: { sequential: true } })).toBe("sequential");
+    expect(epicRunPreflightModeForConfig({ execution: { sequential: false } })).toBe("parallel");
+  });
+});
+
+/**
+ * Every web launch path has to derive its mode. A hardcoded literal here
+ * blocks parallel runs over untracked files the run would have tolerated,
+ * and the drift is invisible until an operator hits it.
+ */
+describe("web epic launch call sites", () => {
+  const callSites = import.meta.glob<string>(
+    [
+      "./routes/_chat.epics.$environmentId.$epicId.tsx",
+      "./components/EpicRunOptionsForm.tsx",
+      "./components/ChatView.tsx",
+    ],
+    { query: "?raw", import: "default", eager: true },
+  );
+
+  it("derive the preflight mode instead of hardcoding it", () => {
+    expect(Object.keys(callSites)).toHaveLength(3);
+    for (const [path, source] of Object.entries(callSites)) {
+      expect(source, path).toContain("epicRunPreflightModeForConfig(");
+      expect(source, path).not.toContain('mode: "sequential"');
+    }
+  });
 });
 
 describe("preflightAndLaunchEpicRun", () => {

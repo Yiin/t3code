@@ -13,7 +13,9 @@ import {
 import { LoaderIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { epicRunPreflightModeForConfig } from "../epicRunLaunch";
 import {
+  buildEpicRunConfigOverride,
   epicRunEffectiveValue,
   epicRunProvenanceChipLabel,
   formatEpicRunOptionValue,
@@ -231,6 +233,10 @@ export function EpicRunOptionsForm(props: {
     readonly provenance: EpicRunConfigProvenance;
   } | null>(null);
 
+  // A string, so the effect refetches when the operator flips the run between
+  // sequential and parallel, not on every other field they touch.
+  const preflightMode = epicRunPreflightModeForConfig(buildEpicRunConfigOverride(props.touched));
+
   useEffect(() => {
     let cancelled = false;
     void preflightRun({
@@ -238,7 +244,7 @@ export function EpicRunOptionsForm(props: {
       input: {
         workspaceRoot: props.workspaceRoot,
         epicId: props.epicId,
-        mode: "sequential" as const,
+        mode: preflightMode,
       },
     }).then((result) => {
       if (cancelled) return;
@@ -253,7 +259,7 @@ export function EpicRunOptionsForm(props: {
     return () => {
       cancelled = true;
     };
-  }, [preflightRun, props.environmentId, props.workspaceRoot, props.epicId]);
+  }, [preflightRun, props.environmentId, props.workspaceRoot, props.epicId, preflightMode]);
 
   if (resolved === null) {
     return (

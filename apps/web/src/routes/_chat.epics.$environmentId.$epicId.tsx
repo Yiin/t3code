@@ -80,7 +80,11 @@ import {
 import ChatMarkdown from "../components/ChatMarkdown";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useAtomCommand } from "../state/use-atom-command";
-import { epicRunPreflightBlockersFromError, preflightAndLaunchEpicRun } from "../epicRunLaunch";
+import {
+  epicRunPreflightBlockersFromError,
+  epicRunPreflightModeForConfig,
+  preflightAndLaunchEpicRun,
+} from "../epicRunLaunch";
 import { presentEpicRunPreflight } from "../epicRunPreflightPresentation";
 
 interface DetailSource {
@@ -426,7 +430,7 @@ function EpicRunSection(props: {
         input: {
           workspaceRoot: props.source.workspaceRoot,
           epicId: props.epicId,
-          mode: "sequential" as const,
+          mode: epicRunPreflightModeForConfig(config),
         },
       },
       launchInput: {

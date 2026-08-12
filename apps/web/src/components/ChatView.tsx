@@ -221,7 +221,11 @@ import {
 import { environmentShell } from "../state/shell";
 import { epicsEnvironment } from "../state/epics";
 import { launchPlannedEpic, plannedEpicIdentity, plannedEpicRoute } from "../plannedEpicFollowUp";
-import { epicRunPreflightBlockersFromError, preflightAndLaunchEpicRun } from "../epicRunLaunch";
+import {
+  epicRunPreflightBlockersFromError,
+  epicRunPreflightModeForConfig,
+  preflightAndLaunchEpicRun,
+} from "../epicRunLaunch";
 import { presentEpicRunPreflight } from "../epicRunPreflightPresentation";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
@@ -1894,7 +1898,9 @@ function ChatViewContent(props: ChatViewProps) {
                     input: {
                       workspaceRoot: plannedEpic.cwd,
                       epicId: plannedEpic.epicId,
-                      mode: "sequential" as const,
+                      // The banner launches with no config override, so the
+                      // run takes the resolved default.
+                      mode: epicRunPreflightModeForConfig(undefined),
                     },
                   },
                   launchInput: plannedEpic,

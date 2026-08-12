@@ -1,4 +1,9 @@
-import type { EpicRunPreflightResult } from "@t3tools/contracts";
+import { DEFAULT_EPIC_RUN_CONFIG } from "@t3tools/contracts";
+import type {
+  EpicRunConfigOverride,
+  EpicRunPreflightMode,
+  EpicRunPreflightResult,
+} from "@t3tools/contracts";
 
 type CommandResult<T> =
   | { readonly _tag: "Success"; readonly value: T }
@@ -15,6 +20,23 @@ export function epicRunPreflightBlockersFromError(error: unknown): readonly stri
     return null;
   }
   return error.blockers;
+}
+
+/**
+ * Picks the preflight mode the server will actually run this launch in.
+ *
+ * The two modes disagree about dirt: sequential treats every untracked file as
+ * a fatal blocker, parallel only warns. Preflighting as sequential for a run
+ * that launches parallel blocks the operator over dirt the run tolerates, so
+ * the mode has to come from the config the launch carries. Keys the override
+ * leaves alone fall back to the contract default, which is parallel.
+ */
+export function epicRunPreflightModeForConfig(
+  override: EpicRunConfigOverride | undefined,
+): EpicRunPreflightMode {
+  const sequential =
+    override?.execution?.sequential ?? DEFAULT_EPIC_RUN_CONFIG.execution.sequential;
+  return sequential ? "sequential" : "parallel";
 }
 
 export async function preflightAndLaunchEpicRun<P, L, R>(input: {
