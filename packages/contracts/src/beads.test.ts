@@ -73,6 +73,20 @@ describe("EpicRunPreflightInput", () => {
 
     expect(decodeInput(encoded)).toEqual(input);
   });
+
+  it("round-trips a resume intent and defaults an absent one to launch", () => {
+    const input = {
+      workspaceRoot: "/repo",
+      epicId: "t3code-y5l",
+      mode: "sequential" as const,
+      intent: "resume" as const,
+    };
+
+    expect(decodeInput(encodeInput(input))).toEqual(input);
+    expect(
+      decodeInput({ workspaceRoot: "/repo", epicId: "t3code-y5l", mode: "sequential" }).intent,
+    ).toBeUndefined();
+  });
 });
 
 describe("EpicRunPreflightResult", () => {
@@ -98,6 +112,7 @@ describe("EpicRunPreflightResult", () => {
           path: "/work/sibling",
           detail: "sibling repo '/work/sibling' is not on a branch",
         },
+        { _tag: "workspace_missing" as const, workspaceRoot: "/repo" },
       ],
       warnings: [
         { _tag: "stale_claims" as const, childIds: ["t3code-vst.1"] },
@@ -112,6 +127,7 @@ describe("EpicRunPreflightResult", () => {
           key: "parallel.workers",
           message: "Sequential execution limits parallel workers to 1.",
         },
+        { _tag: "dirty_tree_accepted" as const, paths: ["src/unfinished.ts"] },
       ],
       resolvedConfig: {
         ...DEFAULT_EPIC_RUN_CONFIG,

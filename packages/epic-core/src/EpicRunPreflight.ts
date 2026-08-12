@@ -1,14 +1,20 @@
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   EpicRunPreflightError,
   type EpicRunConfig,
   type EpicRunConfigOverride,
   type EpicRunConfigProvenance,
   type EpicRunPreflightBlocker,
   type EpicRunPreflightInput,
+  type EpicRunPreflightIntent,
+  type EpicRunPreflightMode,
   type EpicRunPreflightResult,
   type EpicRunPreflightWarning,
 } from "@t3tools/contracts";
@@ -57,7 +63,37 @@ export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker):
       return boundedBlockerText(
         `${blocker.branch} is checked out here, and the run lands by updating that ref. Switch to another branch before launching.`,
       );
+    case "workspace_missing":
+      return boundedBlockerText(`The workspace ${blocker.workspaceRoot} does not exist.`);
   }
+}
+
+/**
+ * How the checkout rules read for one (mode, intent) pair.
+ *
+ * Every intent-dependent decision belongs here rather than inline, so a later
+ * intent — `fork` — has one obvious place to answer for itself.
+ */
+interface EpicRunPreflightPolicy {
+  /**
+   * How dirt in the checkout the run commits into is reported.
+   *
+   * A resumed sequential run's own uncommitted work sits in the base checkout,
+   * so blocking on it would refuse the run permission to continue itself; it is
+   * recorded as a warning instead. Parallel workers only ever commit in their
+   * own worktrees and the base checkout is only fast-forwarded, so base dirt is
+   * never a resumed parallel run's own work and the launch rule stands.
+   */
+  readonly baseTreeDirt: "blocker" | "accepted";
+}
+
+function blockerPolicy(input: {
+  readonly mode: EpicRunPreflightMode;
+  readonly intent: EpicRunPreflightIntent;
+}): EpicRunPreflightPolicy {
+  return {
+    baseTreeDirt: input.mode === "sequential" && input.intent === "resume" ? "accepted" : "blocker",
+  };
 }
 
 export interface EpicRunPreflightShape {
@@ -174,6 +210,7 @@ export const layer = Layer.effect(
     const processRunner = yield* ProcessRunner;
     const lock = yield* EpicRunLock;
     const configSource = yield* EpicRunConfigSource;
+    const fileSystem = yield* FileSystem.FileSystem;
 
     const runBd = Effect.fn("EpicRunPreflight.runBd")(function* (
       cwd: string,
@@ -216,8 +253,25 @@ export const layer = Layer.effect(
       function* (input, suppliedConfigSnapshot) {
         const blockers: Array<EpicRunPreflightResult["blockers"][number]> = [];
         const warnings: Array<EpicRunPreflightWarning> = [];
+        const policy = blockerPolicy({ mode: input.mode, intent: input.intent ?? "launch" });
 
-        // Resolved before anything else, including the git status parse below:
+        // Probed before any subprocess: git, bd and the lock all take the
+        // workspace root as their cwd, and a cwd that is not there fails each
+        // of them with its own untyped spawn error. One probe turns that into
+        // a blocker naming the path.
+        const workspaceExists = yield* fileSystem.exists(input.workspaceRoot).pipe(Effect.exit);
+        if (Exit.isFailure(workspaceExists) || !workspaceExists.value) {
+          return {
+            ok: false,
+            blockers: [{ _tag: "workspace_missing", workspaceRoot: input.workspaceRoot }],
+            warnings,
+            resolvedConfig: suppliedConfigSnapshot?.config ?? DEFAULT_EPIC_RUN_CONFIG,
+            configProvenance:
+              suppliedConfigSnapshot?.provenance ?? DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+          };
+        }
+
+        // Resolved before the rest of the check, including the git status parse:
         // the parallel dirty-tree rule reads `vcs.runOwnedBaseBranch` off it
         // (t3code-5m4), and the lock branch and the final return both need it
         // too. The check mode is not a launch override — resolve with `null`
@@ -299,7 +353,11 @@ export const layer = Layer.effect(
           // checkout: any dirt — tracked or untracked — is fatal.
           const dirtyPaths = [...trackedDirtyPaths, ...untrackedPaths].toSorted();
           if (dirtyPaths.length > 0) {
-            blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+            if (policy.baseTreeDirt === "blocker") {
+              blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+            } else {
+              warnings.push({ _tag: "dirty_tree_accepted", paths: dirtyPaths });
+            }
           }
         } else {
           // Parallel workers commit in their own worktrees and the main
@@ -350,7 +408,11 @@ export const layer = Layer.effect(
             ...dirtyWorktrees,
           ].toSorted();
           if (dirtyPaths.length > 0) {
-            blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+            if (policy.baseTreeDirt === "blocker") {
+              blockers.push({ _tag: "dirty_tree", paths: dirtyPaths });
+            } else {
+              warnings.push({ _tag: "dirty_tree_accepted", paths: dirtyPaths });
+            }
           }
           // Dropping the blocker must not drop the signal: the run cooks
           // against committed code, so the operator should know their

@@ -18,11 +18,13 @@ describe("epic run preflight presentation", () => {
         pid: 42,
       }),
       epicRunPreflightBlockerText({ _tag: "epic_not_found", epicId: "epic-1" }),
+      epicRunPreflightBlockerText({ _tag: "workspace_missing", workspaceRoot: "/gone" }),
     ]).toEqual([
       "The worktree has changes: a.ts",
       "The repository has a detached HEAD.",
       "Another epic run owns this repository on host (PID 42, /tmp/run).",
       "Epic epic-1 was not found.",
+      "The workspace /gone does not exist.",
     ]);
   });
 
@@ -56,12 +58,14 @@ describe("epic run preflight presentation", () => {
         branch: "epic/t3code-5m4/base",
         commitsBehind: 3,
       }),
+      epicRunPreflightWarningText({ _tag: "dirty_tree_accepted", paths: ["a.ts"] }),
     ]).toEqual([
       "These children have stale claims: epic-1.1",
       "Epic epic-1 has no ready children.",
       "/repo/config.json has unknown keys: future.key",
       "parallel.workers: Pinned to 1.",
       "epic/t3code-5m4/base is 3 commit(s) behind the checked-out branch; a run reusing it starts fresh workers from old code.",
+      "The resumed run keeps its own uncommitted changes to: a.ts",
     ]);
   });
 });

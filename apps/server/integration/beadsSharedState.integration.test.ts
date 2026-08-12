@@ -214,6 +214,7 @@ const preflightLayer = EpicRunPreflightLive.pipe(
   Layer.provide(processLayer),
   Layer.provide(lockLayer),
   Layer.provide(EpicRunConfigSource.layer.pipe(Layer.provide(nodeLayer))),
+  Layer.provide(nodeLayer),
 );
 const testLayer = Layer.mergeAll(processLayer, lockLayer, broadcasterLayer, preflightLayer);
 

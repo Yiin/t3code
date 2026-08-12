@@ -26,6 +26,8 @@ export function epicRunPreflightBlockerText(blocker: EpicRunPreflightBlocker): s
       return blocker.detail;
     case "run_base_branch_checked_out":
       return `${blocker.branch} is checked out here, and the run lands by updating that ref. Switch to another branch before launching.`;
+    case "workspace_missing":
+      return `The workspace ${blocker.workspaceRoot} does not exist.`;
   }
 }
 
@@ -45,6 +47,8 @@ export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): s
       return `${warning.branch} is ${String(warning.commitsBehind)} commit(s) behind the checked-out branch; a run reusing it starts fresh workers from old code.`;
     case "tracked_changes_ignored":
       return `The run excludes your uncommitted changes to: ${warning.paths.join(", ")}`;
+    case "dirty_tree_accepted":
+      return `The resumed run keeps its own uncommitted changes to: ${warning.paths.join(", ")}`;
   }
 }
 

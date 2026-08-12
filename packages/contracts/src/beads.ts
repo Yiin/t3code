@@ -102,10 +102,23 @@ export type BeadsStatusResult = typeof BeadsStatusResult.Type;
 export const EpicRunPreflightMode = Schema.Literals(["parallel", "sequential"]);
 export type EpicRunPreflightMode = typeof EpicRunPreflightMode.Type;
 
+/**
+ * Whether this check clears a run that is about to start or one that is picking
+ * itself back up.
+ *
+ * This is a second axis, not a third mode. `mode` says WHERE work happens — the
+ * base checkout or per-worker worktrees — and a resume can be either, so a
+ * resumed run still needs the mode to know whose tree a dirty path belongs to.
+ */
+export const EpicRunPreflightIntent = Schema.Literals(["launch", "resume"]);
+export type EpicRunPreflightIntent = typeof EpicRunPreflightIntent.Type;
+
 export const EpicRunPreflightInput = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   epicId: TrimmedNonEmptyString,
   mode: EpicRunPreflightMode,
+  /** Absent means `launch`, so every existing caller decodes unchanged. */
+  intent: Schema.optional(EpicRunPreflightIntent),
   /**
    * The run being resumed, when this check is a resume rather than a launch.
    *
@@ -156,6 +169,16 @@ export const EpicRunPreflightBlocker = Schema.Union([
   Schema.TaggedStruct("run_base_branch_checked_out", {
     branch: TrimmedNonEmptyString,
   }),
+  /**
+   * The workspace root is not there at all.
+   *
+   * Without this, the first git call fails on a missing cwd and the run reports
+   * a one-string `git status: spawn ... ENOENT`, which reads as a git problem
+   * rather than a path the operator can fix.
+   */
+  Schema.TaggedStruct("workspace_missing", {
+    workspaceRoot: TrimmedNonEmptyString,
+  }),
 ]);
 export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
 
@@ -189,6 +212,14 @@ export const EpicRunPreflightWarning = Schema.Union([
    * against code the operator thought it had.
    */
   Schema.TaggedStruct("tracked_changes_ignored", {
+    paths: Schema.Array(TrimmedNonEmptyString),
+  }),
+  /**
+   * Dirt that no longer blocks, because the run is resuming into the checkout
+   * it was already working in. The paths are the run's own unfinished work, so
+   * refusing them would refuse the run permission to continue itself.
+   */
+  Schema.TaggedStruct("dirty_tree_accepted", {
     paths: Schema.Array(TrimmedNonEmptyString),
   }),
 ]);

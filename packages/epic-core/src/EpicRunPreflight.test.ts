@@ -8,6 +8,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "./processRunner.ts";
@@ -35,6 +36,8 @@ const run = (
     readonly configSnapshot?: EpicRunConfigSnapshot;
     readonly onConfigRead?: () => void;
     readonly mode?: "parallel" | "sequential";
+    readonly intent?: "launch" | "resume";
+    readonly workspaceExists?: boolean;
     readonly worktreeList?: string;
     readonly branchList?: string;
     readonly resumingRunId?: string;
@@ -130,6 +133,11 @@ const run = (
         acquire: () => Effect.die("unused"),
       }),
     ),
+    Layer.provide(
+      FileSystem.layerNoop({
+        exists: () => Effect.succeed(options?.workspaceExists ?? true),
+      }),
+    ),
   );
   return Effect.flatMap(EpicRunPreflight, (service) =>
     service.check(
@@ -137,6 +145,7 @@ const run = (
         workspaceRoot: "/repo",
         epicId: "epic-1",
         mode: options?.mode ?? "sequential",
+        ...(options?.intent === undefined ? {} : { intent: options.intent }),
         ...(options?.resumingRunId === undefined ? {} : { resumingRunId: options.resumingRunId }),
       },
       options?.configSnapshot,
@@ -345,6 +354,7 @@ describe("EpicRunPreflight", () => {
             }),
           ),
           Layer.provide(EpicRunConfigSourceLive.pipe(Layer.provide(NodeServices.layer))),
+          Layer.provide(NodeServices.layer),
         );
         const result = yield* Effect.flatMap(EpicRunPreflight, (service) =>
           service.check({ workspaceRoot: directory, epicId: "epic-1", mode: "sequential" }),
@@ -522,6 +532,7 @@ describe("EpicRunPreflight", () => {
               acquire: () => Effect.die("unused"),
             }),
           ),
+          Layer.provide(NodeServices.layer),
         );
         const result = yield* Effect.flatMap(EpicRunPreflight, (service) =>
           service.check({ workspaceRoot: directory, epicId: "epic-1", mode: "sequential" }),
@@ -1083,6 +1094,141 @@ describe("EpicRunPreflight", () => {
         expect(result.ok).toBe(true);
         expect(seen.some((entry) => entry.startsWith("realpath"))).toBe(false);
         expect(seen.some((entry) => entry === "git -C")).toBe(false);
+      }),
+    );
+  });
+
+  describe("resume intent", () => {
+    const dirtySequential =
+      "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n? untracked.ts\n";
+
+    it.effect("accepts a resumed sequential run's own dirty tree", () =>
+      Effect.gen(function* () {
+        const result = yield* run(dirtySequential, undefined, undefined, {
+          mode: "sequential",
+          intent: "resume",
+        });
+        expect(result.ok).toBe(true);
+        expect(result.blockers).toEqual([]);
+        expect(result.warnings).toContainEqual({
+          _tag: "dirty_tree_accepted",
+          paths: ["modified.ts", "untracked.ts"],
+        });
+      }),
+    );
+
+    it.effect("still blocks the same dirty tree on a launch", () =>
+      Effect.gen(function* () {
+        const result = yield* run(dirtySequential, undefined, undefined, { mode: "sequential" });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toEqual([
+          { _tag: "dirty_tree", paths: ["modified.ts", "untracked.ts"] },
+        ]);
+        expect(result.warnings.some((warning) => warning._tag === "dirty_tree_accepted")).toBe(
+          false,
+        );
+      }),
+    );
+
+    it.effect("still blocks tracked dirt in a resumed parallel run", () =>
+      Effect.gen(function* () {
+        // Parallel workers commit in their own worktrees, so base dirt is the
+        // operator's, never the resuming run's.
+        const result = yield* run(
+          "# branch.head main\n1 M. N... 100644 100644 100644 a a modified.ts\n",
+          undefined,
+          undefined,
+          { mode: "parallel", intent: "resume" },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({ _tag: "dirty_tree", paths: ["modified.ts"] });
+      }),
+    );
+
+    it.effect("still blocks detached HEAD on a resume", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head (detached)\n", undefined, undefined, {
+          intent: "resume",
+        });
+        expect(result.blockers).toContainEqual({ _tag: "detached_head" });
+      }),
+    );
+
+    it.effect("still blocks a missing epic on a resume", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          { show: "[]" },
+          { intent: "resume" },
+        );
+        expect(result.blockers).toContainEqual({ _tag: "epic_not_found", epicId: "epic-1" });
+      }),
+    );
+
+    it.effect("still reports a held lock on a resume", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          dirtySequential,
+          { workspaceRoot: "/repo", epicId: "epic-1" },
+          undefined,
+          { intent: "resume" },
+        );
+        expect(result.blockers).toEqual([
+          {
+            _tag: "run_in_progress",
+            owner: "terminal",
+            runDir: "/tmp/run",
+            host: "host",
+            pid: 42,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("still warns that nothing is ready on a resume", () =>
+      Effect.gen(function* () {
+        // The claimed child is in_progress, so an empty ready list is expected.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          { ready: "[]" },
+          { intent: "resume" },
+        );
+        expect(result.ok).toBe(true);
+        expect(result.warnings).toContainEqual({ _tag: "nothing_ready", epicId: "epic-1" });
+      }),
+    );
+  });
+
+  describe("workspace probe", () => {
+    it.effect("blocks a missing workspace root without running a command", () =>
+      Effect.gen(function* () {
+        const seen: Array<string> = [];
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          workspaceExists: false,
+          processOverride: (input) => {
+            seen.push(input.command);
+            return undefined;
+          },
+        });
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toEqual([{ _tag: "workspace_missing", workspaceRoot: "/repo" }]);
+        expect(result.warnings).toEqual([]);
+        expect(seen).toEqual([]);
+        expect(result.resolvedConfig).toEqual(DEFAULT_EPIC_RUN_CONFIG);
+        expect(result.configProvenance).toEqual(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
+      }),
+    );
+
+    it.effect("blocks a missing workspace root on a resume too", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          intent: "resume",
+          workspaceExists: false,
+        });
+        expect(result.blockers).toEqual([{ _tag: "workspace_missing", workspaceRoot: "/repo" }]);
       }),
     );
   });
