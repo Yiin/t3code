@@ -138,16 +138,25 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
       enabled: !isIosPersonalTeamBuild,
       extensionBundleIdentifier: `${iosBundleIdentifier}.sharing`,
       appGroupId: `group.${iosBundleIdentifier}`,
+      // Each count is PROVIDER_SEND_TURN_MAX_ATTACHMENTS; share-target.test.ts
+      // pins them together, because this file must stay free of workspace
+      // imports for the Expo config loader. The file key conforms to
+      // public.data, so it covers documents, archives and audio; movies need
+      // their own key. Oversized shares are refused by the model's byte cap.
       activationRule: {
         supportsText: true,
         supportsWebUrlWithMaxCount: 1,
         supportsImageWithMaxCount: 8,
+        supportsMovieWithMaxCount: 8,
+        supportsFileWithMaxCount: 8,
       },
     },
     android: {
       enabled: true,
-      singleShareMimeTypes: ["text/plain", "image/*"],
-      multipleShareMimeTypes: ["image/*"],
+      // `*/*` matches every concrete type, text/plain included, so it replaces
+      // the old pair rather than joining it.
+      singleShareMimeTypes: ["*/*"],
+      multipleShareMimeTypes: ["*/*"],
     },
   },
 ];
