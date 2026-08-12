@@ -455,10 +455,13 @@ export function applyThreadDetailEvent(
         checkpointRef: event.payload.checkpointRef,
         status: event.payload.status,
         files: event.payload.files,
-        // Subagent attribution is computed when the server reads a thread, and
-        // the event carries none, so a live checkpoint keeps whatever the last
-        // read gave it and a brand new one waits for the next thread read.
-        subagentContributions: existing?.subagentContributions ?? [],
+        // The capture path attributes what it can see, and the read-time answer
+        // in a thread snapshot only ever adds to it, so take the event's list
+        // when it names anyone and never regress a richer one to empty.
+        subagentContributions:
+          event.payload.subagentContributions.length > 0
+            ? event.payload.subagentContributions
+            : (existing?.subagentContributions ?? []),
         assistantMessageId: stableCheckpointAssistantMessageId(
           existing?.assistantMessageId,
           firstAssistantMessageId ?? event.payload.assistantMessageId,

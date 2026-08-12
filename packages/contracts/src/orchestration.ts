@@ -1466,6 +1466,10 @@ const ThreadTurnDiffCompleteCommand = Schema.Struct({
   checkpointRef: CheckpointRef,
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
+  // Attribution the capture path already knows, so a live client labels a
+  // child's files without waiting for the next thread read. Optional: the
+  // placeholder dispatch in ProviderRuntimeIngestion has nothing to attribute.
+  subagentContributions: Schema.optional(Schema.Array(ThreadTurnDiffSubagentContribution)),
   assistantMessageId: Schema.optional(MessageId),
   checkpointTurnCount: NonNegativeInt,
   createdAt: IsoDateTime,
@@ -1712,6 +1716,13 @@ export const ThreadTurnDiffCompletedPayload = Schema.Struct({
   checkpointRef: CheckpointRef,
   status: OrchestrationCheckpointStatus,
   files: Schema.Array(OrchestrationCheckpointFile),
+  // What the capture path could attribute at capture time. A child checkpoint
+  // that had not landed yet is missing here, never wrong, so the read-time
+  // answer in `getThreadDetailById` stays the authority and only ever adds to
+  // this. Defaulted so an event stored before this field decodes.
+  subagentContributions: Schema.Array(ThreadTurnDiffSubagentContribution).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   assistantMessageId: Schema.NullOr(MessageId),
   completedAt: IsoDateTime,
 });

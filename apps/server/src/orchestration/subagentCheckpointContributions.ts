@@ -1,4 +1,7 @@
 import { ThreadId, type ThreadTurnDiffSubagentContribution } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+
+import type { ProjectionSnapshotQueryShape } from "./Services/ProjectionSnapshotQuery.ts";
 
 /**
  * Read-time attribution of a subagent's files, shared by the turn diff and the
@@ -11,6 +14,48 @@ import { ThreadId, type ThreadTurnDiffSubagentContribution } from "@t3tools/cont
  * read time keeps it out of the capture path, where it would race the child's
  * own checkpoint landing.
  */
+
+/**
+ * Read the children that wrote inside one checkpoint window.
+ *
+ * The turn diff and the capture path both need this one answer, so they share
+ * one reader. The query is taken as an input, so the returned Effect needs no
+ * context. Attribution is decoration on top of a correct patch, so a failed
+ * lookup degrades to "no attribution" instead of failing the caller.
+ */
+export function readSubagentContributionWindow(input: {
+  readonly projectionSnapshotQuery: ProjectionSnapshotQueryShape;
+  readonly parentThreadId: ThreadId;
+  readonly afterCompletedAt: string | null;
+  readonly throughCompletedAt: string | null;
+}): Effect.Effect<ReadonlyArray<ThreadTurnDiffSubagentContribution>> {
+  if (input.throughCompletedAt === null) {
+    return Effect.succeed([]);
+  }
+  return input.projectionSnapshotQuery
+    .listSubagentTurnContributions({
+      parentThreadId: input.parentThreadId,
+      afterCompletedAt: input.afterCompletedAt,
+      throughCompletedAt: input.throughCompletedAt,
+    })
+    .pipe(
+      Effect.map((contributions) =>
+        contributions.map(
+          (contribution): ThreadTurnDiffSubagentContribution => ({
+            threadId: contribution.threadId,
+            title: contribution.title,
+            paths: contribution.paths,
+          }),
+        ),
+      ),
+      Effect.catch((error) =>
+        Effect.logWarning("failed to attribute subagent files", {
+          threadId: input.parentThreadId,
+          detail: error.message,
+        }).pipe(Effect.as([] as ReadonlyArray<ThreadTurnDiffSubagentContribution>)),
+      ),
+    );
+}
 
 /** One child checkpoint, as the projection stores it. */
 export interface SubagentCheckpointRow {

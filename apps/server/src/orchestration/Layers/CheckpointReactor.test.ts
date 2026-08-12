@@ -16,6 +16,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  type OrchestrationEvent,
   ProjectId,
   ThreadId,
   TurnId,
@@ -627,6 +628,88 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("names the subagent children that wrote inside the captured checkpoint", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await dispatch(harness.engine, {
+      type: "thread.create",
+      commandId: CommandId.make("cmd-child-thread-create"),
+      threadId: ThreadId.make("thread-child"),
+      projectId: asProjectId("project-1"),
+      title: "Reviewer",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: harness.cwd,
+      parentThreadId: ThreadId.make("thread-1"),
+      createdAt,
+    });
+    // The child settles inside the parent's turn, so its checkpoint lands
+    // before the parent's capture and falls inside the parent's window.
+    await dispatch(harness.engine, {
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-child-turn-diff"),
+      threadId: ThreadId.make("thread-child"),
+      turnId: asTurnId("turn-child-1"),
+      completedAt: "2026-01-01T00:00:02.000Z",
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-child"), 1),
+      status: "ready",
+      files: [{ path: "README.md", kind: "modified", additions: 1, deletions: 0 }],
+      assistantMessageId: MessageId.make("message-child-1"),
+      checkpointTurnCount: 1,
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    await setThreadSession(harness, {
+      status: "ready",
+      activeTurnId: null,
+      commandId: "cmd-session-set-subagent-attribution",
+    });
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-attribution"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+    });
+    await waitForGitRefExists(
+      harness.cwd,
+      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+    );
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-attribution"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:05.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      payload: { state: "completed" },
+    });
+
+    const events = await waitForEvent(
+      harness.engine,
+      (entry) =>
+        entry.type === "thread.turn-diff-completed" &&
+        (entry as OrchestrationEvent).aggregateId === "thread-1",
+    );
+    const captured = events.find(
+      (entry): entry is Extract<OrchestrationEvent, { type: "thread.turn-diff-completed" }> =>
+        entry.type === "thread.turn-diff-completed" && entry.aggregateId === "thread-1",
+    );
+    expect(captured?.payload.subagentContributions).toEqual([
+      { threadId: "thread-child", title: "Reviewer", paths: ["README.md"] },
+    ]);
   });
 
   it("anchors a synthetic placeholder replacement to the first assistant message", async () => {

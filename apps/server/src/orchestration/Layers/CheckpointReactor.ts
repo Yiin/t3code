@@ -32,6 +32,7 @@ import { CheckpointReactor, type CheckpointReactorShape } from "../Services/Chec
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
+import { readSubagentContributionWindow } from "../subagentCheckpointContributions.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository, resolveWorktreePath } from "../../git/Utils.ts";
@@ -268,6 +269,10 @@ const make = Effect.gen(function* () {
         readonly role: string;
         readonly turnId: TurnId | null;
       }>;
+      readonly checkpoints: ReadonlyArray<{
+        readonly checkpointTurnCount: number;
+        readonly completedAt: string;
+      }>;
     };
     readonly cwd: string;
     readonly turnCount: number;
@@ -338,6 +343,20 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    // Name the children that wrote inside this checkpoint's window, so a client
+    // watching live labels their files instead of waiting for the next thread
+    // read to attribute them. Same window as the turn diff: after the previous
+    // checkpoint, through this one.
+    const subagentContributions = yield* readSubagentContributionWindow({
+      projectionSnapshotQuery,
+      parentThreadId: input.threadId,
+      afterCompletedAt:
+        input.thread.checkpoints.find(
+          (checkpoint) => checkpoint.checkpointTurnCount === fromTurnCount,
+        )?.completedAt ?? null,
+      throughCompletedAt: input.createdAt,
+    });
+
     const firstAssistantMessageId = input.thread.messages.find(
       (entry) => entry.role === "assistant" && entry.turnId === input.turnId,
     )?.id;
@@ -358,6 +377,7 @@ const make = Effect.gen(function* () {
       checkpointRef: targetCheckpointRef,
       status: input.status,
       files,
+      subagentContributions,
       assistantMessageId,
       checkpointTurnCount: input.turnCount,
       createdAt: input.createdAt,

@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { readSubagentContributionWindow } from "../orchestration/subagentCheckpointContributions.ts";
 import {
   CheckpointDiffResultInvalidError,
   CheckpointRefUnavailableError,
@@ -87,41 +88,14 @@ export const make = Effect.gen(function* () {
    *
    * A thread-backed child edits the same worktree as its parent and always
    * settles before the parent's checkpoint is captured, so its files land in
-   * the parent's patch. Attribution is decoration on top of a correct patch, so
-   * a failed lookup degrades to "no attribution" instead of failing the diff.
+   * the parent's patch. Shared with the capture path, so the diff and the
+   * changed-files tree cannot disagree.
    */
-  const readSubagentContributions = Effect.fn("readSubagentContributions")(function* (input: {
+  const readSubagentContributions = (input: {
     readonly parentThreadId: ThreadId;
     readonly afterCompletedAt: string | null;
     readonly throughCompletedAt: string | null;
-  }) {
-    if (input.throughCompletedAt === null) {
-      return [] as ReadonlyArray<ThreadTurnDiffSubagentContribution>;
-    }
-    return yield* projectionSnapshotQuery
-      .listSubagentTurnContributions({
-        parentThreadId: input.parentThreadId,
-        afterCompletedAt: input.afterCompletedAt,
-        throughCompletedAt: input.throughCompletedAt,
-      })
-      .pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("failed to attribute subagent files in checkpoint diff", {
-            threadId: input.parentThreadId,
-            detail: error.message,
-          }).pipe(Effect.as([])),
-        ),
-        Effect.map((contributions) =>
-          contributions.map(
-            (contribution): ThreadTurnDiffSubagentContribution => ({
-              threadId: contribution.threadId,
-              title: contribution.title,
-              paths: contribution.paths,
-            }),
-          ),
-        ),
-      );
-  });
+  }) => readSubagentContributionWindow({ projectionSnapshotQuery, ...input });
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {

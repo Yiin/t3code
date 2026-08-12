@@ -104,6 +104,7 @@ describe("deriveOrchestrationBatchEffects", () => {
         checkpointRef: CheckpointRef.make("checkpoint-1"),
         status: "ready",
         files: [],
+        subagentContributions: [],
         assistantMessageId: MessageId.make("assistant-1"),
         completedAt: "2026-02-27T00:00:03.000Z",
       }),

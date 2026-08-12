@@ -671,6 +671,7 @@ export function projectEvent(
             checkpointRef: payload.checkpointRef,
             status: payload.status,
             files: payload.files,
+            subagentContributions: payload.subagentContributions,
             assistantMessageId: payload.assistantMessageId,
             completedAt: payload.completedAt,
           },

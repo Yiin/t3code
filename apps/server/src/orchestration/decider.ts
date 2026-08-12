@@ -1114,6 +1114,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           checkpointRef: command.checkpointRef,
           status: command.status,
           files: command.files,
+          subagentContributions: command.subagentContributions ?? [],
           assistantMessageId: command.assistantMessageId ?? null,
           completedAt: command.completedAt,
         },
