@@ -193,6 +193,7 @@ import {
   epicRunGroupRowLabel,
   epicRunIterationCountLabel,
   epicRunIterationRowLabel,
+  excludeSubagentChildThreads,
   getSidebarThreadIdsToPrewarm,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
@@ -1546,7 +1547,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     },
   });
   const openPrLink = useOpenPrLink();
-  const sidebarThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const projectThreadShells = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const sidebarThreads = useMemo(
+    () => excludeSubagentChildThreads(projectThreadShells),
+    [projectThreadShells],
+  );
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
@@ -3501,7 +3506,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
 export default function Sidebar() {
   const projects = useProjects();
-  const sidebarThreads = useThreadShells();
+  const threadShells = useThreadShells();
+  const sidebarThreads = useMemo(() => excludeSubagentChildThreads(threadShells), [threadShells]);
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);

@@ -49,6 +49,24 @@ export function filterHiddenEpicRunIterationThreads<T extends { readonly id: str
   });
 }
 
+/**
+ * Drops the child thread of a thread-backed subagent from a sidebar list.
+ *
+ * A spawned child is a real thread with its own session, so the shell list
+ * carries it like any other. It belongs to the drawer its parent opens, not
+ * beside the parent in the sidebar: one delegated task would otherwise read as
+ * two threads a human is expected to choose between.
+ *
+ * `parentThreadId` is set only by a subagent spawn (`thread.create` takes it
+ * nowhere else), so it is the whole test. Epic run iterations keep it null and
+ * are grouped separately by `groupEpicRunIterationThreads`.
+ */
+export function excludeSubagentChildThreads<T extends { readonly parentThreadId: string | null }>(
+  threads: readonly T[],
+): T[] {
+  return threads.filter((thread) => thread.parentThreadId === null);
+}
+
 export async function archiveSelectedThreadEntries<
   TEntry extends { readonly threadKey: string },
   TResult extends { readonly _tag: "Success" | "Failure" },

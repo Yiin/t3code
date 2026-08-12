@@ -9,6 +9,7 @@ import {
   epicRunIterationCountLabel,
   epicRunIterationLabel,
   epicRunIterationRowLabel,
+  excludeSubagentChildThreads,
   filterHiddenEpicRunIterationThreads,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
@@ -1158,6 +1159,28 @@ describe("settleSidebarThreadBatch", () => {
 
     expect(settle).not.toHaveBeenCalled();
     expect(outcome).toEqual({ primaryResult: null, skipped: true });
+  });
+});
+
+describe("excludeSubagentChildThreads", () => {
+  it("drops a thread-backed subagent's child thread and keeps its parent", () => {
+    const parent = { id: "parent-thread", parentThreadId: null };
+    const child = { id: "subagent-child-thread", parentThreadId: "parent-thread" };
+    const unrelated = { id: "other-thread", parentThreadId: null };
+
+    expect(excludeSubagentChildThreads([parent, child, unrelated])).toEqual([parent, unrelated]);
+  });
+
+  it("keeps an epic run iteration, which carries no parent thread", () => {
+    const iteration = {
+      id: epicRunIterationThreadId({
+        runId: "0c5a1f4e-9b7d-4a2c-8f31-6d0e2b7a4c19",
+        iterationIndex: 0,
+      }),
+      parentThreadId: null,
+    };
+
+    expect(excludeSubagentChildThreads([iteration])).toEqual([iteration]);
   });
 });
 

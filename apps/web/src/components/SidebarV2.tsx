@@ -88,6 +88,7 @@ import {
   epicRunGroupRowLabel,
   epicRunIterationCountLabel,
   epicRunIterationRowLabel,
+  excludeSubagentChildThreads,
   filterHiddenEpicRunIterationThreads,
   firstValidTimestampMs,
   groupEpicRunIterationThreads,
@@ -1065,7 +1066,8 @@ function latestTurnDiff(
 
 export default function SidebarV2() {
   const projects = useProjects();
-  const threads = useThreadShells();
+  const threadShells = useThreadShells();
+  const threads = useMemo(() => excludeSubagentChildThreads(threadShells), [threadShells]);
   const router = useRouter();
   const pathname = useLocation({ select: (location) => location.pathname });
   const { isMobile, setOpenMobile } = useSidebar();
