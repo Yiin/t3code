@@ -76,11 +76,28 @@ invalid config value. It does not silently select a different engine.
 Only one runner may own an epic. Epic-targeted `ralph`, `cook-epic`, and the T3
 Code server runner use the same run-lock file. If the lock is live, the second
 runner reports that the run is already in progress instead of claiming another
-child. `NodeEpicRunLock` in `packages/epic-core` is the shared implementation
-for the terminal core and the hosted runner; ralph keeps its own Bash holder on
-the same file format. The `NodeEpicRunLock` interop test covers the shared file
-format and exclusive-create behavior across the TypeScript and Bash
-implementations.
+child.
+[`NodeEpicRunLock.ts`](../packages/epic-core/src/adapters/NodeEpicRunLock.ts) is
+the shared implementation for the terminal core and the hosted runner;
+[`skills/ralph/run.sh`](../skills/ralph/run.sh) is the Bash twin and writes the
+same file format.
+[`NodeEpicRunLock.interop.test.ts`](../packages/epic-core/src/adapters/NodeEpicRunLock.interop.test.ts)
+pins that format. It asserts the exclusive-create behavior in both directions,
+and the exact payload key set: `bootId`, `heartbeatAt`, `host`, `owner`, `pgid`,
+`pid`, `runDir`, `startTicks`, `startedAt`.
+
+A graceful stop releases the lease and unlinks the lock file. A SIGKILL leaves
+the file behind. A leftover file does not wedge the epic.
+
+The holder heartbeats every 30 seconds, and it counts as live for 300 seconds
+after its last heartbeat. Two things reclaim the lock before that window runs
+out. A recorded boot id that is not the current boot id means the host rebooted,
+so nothing the file names can still be running. A holder that is provably dead on
+this host is also reclaimable: its PID is absent, or the PID now belongs to a
+process that started at a different time, and its recorded process group is gone
+too. `NodeEpicRunLock` applies the death check before the 300-second window, so a
+hard-killed server can resume its own run at once. `run.sh` waits out the window
+first. Neither one reclaims a lock recorded on another host.
 
 ## Integration gate and host load
 
@@ -124,10 +141,72 @@ failure. Read the load in the surrounding log lines before blaming the child.
   any session with an active turn
   ([`ProviderSessionReaper.ts:16-17`](../apps/server/src/provider/Layers/ProviderSessionReaper.ts#L16-L17),
   [`ProviderSessionReaper.ts:56-70`](../apps/server/src/provider/Layers/ProviderSessionReaper.ts#L56-L70)).
-- A server restart ends the old process and its provider subprocesses; no
-  provider session reattaches. T3 Code therefore saves server-owned epic runs
-  in SQLite and reconciles them at startup
-  ([`serverRuntimeStartup.ts:344-353`](../apps/server/src/serverRuntimeStartup.ts#L344-L353)).
+- A server restart ends the server process and every provider subprocess the
+  server owns directly. No provider session reattaches. T3 Code therefore saves
+  server-owned epic runs in SQLite and resumes them at startup
+  ([`serverRuntimeStartup.ts`](../apps/server/src/serverRuntimeStartup.ts) calls
+  `EpicRunner.start`).
+- A restart does not end epic worker agents. The runner puts each worker CLI in
+  its own `systemd-run --user --scope` unit under `cook-epic.slice`
+  ([`workerScope.ts`](../packages/epic-core/src/workerScope.ts),
+  [`provider/workerScope.ts`](../apps/server/src/provider/workerScope.ts)). That
+  slice sits outside the `t3code.service` cgroup, so the unit's
+  `KillMode=control-group` never signals the workers. Each unit is named
+  `cook-epic-<scopeId>-<worker>.scope`. Two of them outlived their server this
+  way on 2026-08-08. The boot resume stops the units carrying its own run
+  identity before it forks the loop again.
+- A graceful stop releases the run lock. The `EpicRunner` layer finalizer
+  releases every lease it holds as the layer tears down. A hard kill skips the
+  finalizer and leaves the lock file, which the boot resume then reclaims under
+  the rules in **Run lock**.
+
+## What a boot resume checks
+
+At startup the server walks its `epic_runs` rows. A row that is not `running`
+only has its leftover iteration rows abandoned. A `running` row is resumed. The
+server re-runs the launch preflight in resume mode, takes the run lock, abandons
+the run's own running iteration rows, reclaims a merge slot the dead process
+leaked, stops the worker scope units that carry its run identity, and forks the
+loop again. If the preflight or the lock fails, the run is marked `failed` and
+its last claimed child is released back to Beads.
+
+These still block a resume:
+
+- The epic is not in Beads.
+- The workspace directory is gone, or a git command in it fails.
+- The lock is held by a holder that is still live.
+- HEAD is detached.
+- The base checkout is dirty. Sequential mode counts every change, tracked or
+  untracked. Parallel mode counts tracked changes, unless the run owns its base
+  branch, and always counts a dirty registered nested worktree. Neither mode
+  counts anything under `.beads/`.
+- `.t3code/epic-run.json` does not parse, or its `gate.command` is invalid.
+- An integration branch or worktree from a **different** run is present.
+- A configured sibling repository does not validate.
+- The run-owned base branch is the branch checked out in the main checkout.
+  Landing fetches into that ref, and git refuses to fetch into a checked-out
+  branch.
+
+These do not block a resume:
+
+- The run's own integration branch and worktree. The resume passes its run id,
+  so its own leftovers read as where it left off, not as residue to reconcile.
+  This one is silent, not a warning.
+- Untracked files in the base checkout, in parallel mode. Reported as a warning
+  with the paths.
+- Tracked changes the run ignores because it owns its base branch. Reported as a
+  warning with the paths, so nobody assumes uncommitted work is in the run.
+- A child still claimed by a PID that no longer exists.
+- Unknown keys in `.t3code/epic-run.json`, and config violations other than
+  `gate.command`.
+- A run-owned base branch that is behind the current branch.
+- No child is ready.
+
+Parallel workers get one worktree each at
+`<baseDir>/worktrees/epic-<runId>/<issueId>`, and the merge queue gets
+`<baseDir>/worktrees/epic-<runId>/integration`. `baseDir` is the server base
+directory and defaults to `~/.t3`. Sequential mode uses no worktrees; it works in
+the real checkout.
 
 ## Switch between modes
 

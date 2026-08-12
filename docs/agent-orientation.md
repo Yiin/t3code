@@ -27,7 +27,15 @@ Keep worker checks focused. Run a supplied gate command exactly.
 - `apps/server/src/runner/Layers/EpicRunner.ts` owns lifecycle and restart recovery.
 - `EpicRunnerPoolPorts.ts` adapts server ports.
 - `apps/server/src/orchestration/ThreadSettleWatch.ts` watches owned turns and final messages.
+- `packages/epic-core/src/EpicRunPreflight.ts` gates both launch and resume.
+- `packages/epic-core/src/adapters/NodeEpicRunLock.ts` owns the run lock. It shares
+  its file format with `skills/ralph/run.sh`.
+- `packages/epic-core/src/workerScope.ts` puts workers in `cook-epic.slice`, so they
+  survive a service restart.
 - Restart recovery abandons old running iteration rows, then resumes each running run.
+  A resume re-runs preflight in resume mode, which forgives only that run's own
+  integration branch and worktree, and stops only that run's own leftover worker
+  scopes. A lost lease fails the run and releases its claimed child.
 - Client turn ingress does not block threads owned by an EpicRunner run.
 
 Never install dependencies or run `skills/install.sh` inside an epic worktree.
@@ -84,3 +92,7 @@ Deep merge cannot delete keys. Use `ATOMIC_SETTINGS_KEYS`; follow `providerInsta
 
 The service is `t3code.service`. Build before restart. Logs are in
 `~/.t3/userdata/logs/boot-service.log`.
+
+`systemctl --user restart t3code.service` does not stop live epic workers. They
+run in `cook-epic.slice`, outside the service cgroup. The next boot resume stops
+the scope units belonging to the runs it resumes.
