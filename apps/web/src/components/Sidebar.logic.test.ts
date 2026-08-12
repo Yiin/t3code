@@ -1069,6 +1069,30 @@ describe("groupEpicRunIterationThreads", () => {
     expect(nodes[1]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
   });
 
+  // The shape the live sidebar actually shows: several runs a shell script
+  // launched with no origin, plus one an in-thread skill launched from a chat
+  // that is older than every iteration it produced. Recency puts all four
+  // groups above the launcher; only the one with an origin may leave that slot.
+  // Reported as "epic runs render beside the thread that launched them" — the
+  // origin-less ones do, and must keep doing so.
+  it("moves only the origin-bearing run below an older launcher", () => {
+    const chainedRunId = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    const chained = (index: number) =>
+      thread(epicRunIterationThreadId({ runId: chainedRunId, iterationIndex: index }));
+    const nodes = groupEpicRunIterationThreads({
+      threads: [chained(1), chained(0), iterationThread(1), iterationThread(0), thread("launcher")],
+      runs: [
+        { ...run, runId: chainedRunId, threadRefs: [] },
+        { ...run, status: "done" as const, originThreadId: "launcher" },
+      ],
+      isThreadSettled: settledPredicate(new Set()),
+    });
+
+    expect(nodeIds(nodes)).toEqual([`group:${chainedRunId}`, "launcher", `group:${runId}`]);
+    expect(nodes[0]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: null });
+    expect(nodes[2]).toMatchObject({ kind: "epic-run", nestedUnderThreadId: "launcher" });
+  });
+
   // The v1 sidebar has no settled boundary and calls without the predicate:
   // nesting stays unconditional there.
   it("always nests when no settled predicate is given", () => {
