@@ -15,6 +15,7 @@ import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { AgentsToolkitHandlersLive } from "./toolkits/agents/handlers.ts";
 import { SpawnCancellationWatchLive } from "./toolkits/agents/SpawnRegistry.ts";
+import { SpawnReconciliationLive } from "./toolkits/agents/spawnReconciliation.ts";
 import { AgentsToolkit } from "./toolkits/agents/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
@@ -211,6 +212,9 @@ const AgentsToolkitRegistrationLive = Layer.mergeAll(
   // Ships with the toolkit, not with the provider reactor: a parent's
   // cancellation must not queue behind the provider work it is cancelling.
   SpawnCancellationWatchLive,
+  // One boot sweep over the rows a restart stranded. Nothing else clears them
+  // before the 15-minute freshness window does.
+  SpawnReconciliationLive,
 );
 
 export const PreviewToolkitRegistrationLive = Layer.mergeAll(

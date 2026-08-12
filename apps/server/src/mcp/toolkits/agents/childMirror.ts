@@ -201,6 +201,40 @@ const latestToolName = (thread: OrchestrationThread | undefined): string | undef
 };
 
 /**
+ * Write one `task.progress` row for a child.
+ *
+ * The activity id is fixed per thread pair (`task-progress:<parent>:<child>`,
+ * the same scheme ingestion uses), so every call coalesces onto one row instead
+ * of stacking. The *command* id must vary per call: `dispatch` deduplicates by
+ * command receipt, so a repeated one is silently dropped.
+ */
+export const appendChildProgress = (
+  target: ChildMirrorTarget,
+  input: {
+    readonly commandId: string;
+    readonly title: string | undefined;
+    readonly lastToolName?: string | undefined;
+  },
+): Effect.Effect<void, never, OrchestrationEngineService> =>
+  appendActivity({
+    parentThreadId: target.parentThreadId,
+    commandId: input.commandId,
+    activity: {
+      id: EventId.make(`task-progress:${target.parentThreadId}:${target.childThreadId}`),
+      tone: "info",
+      kind: "task.progress",
+      summary: input.title ?? "Subagent working",
+      payload: {
+        taskId: target.childThreadId,
+        subagentType: target.agentType,
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.lastToolName !== undefined ? { lastToolName: input.lastToolName } : {}),
+      },
+      turnId: target.parentTurnId,
+    },
+  });
+
+/**
  * Refresh the parent's row from the child, forever, until interrupted.
  *
  * Every tick reuses one coalescing activity id
@@ -232,24 +266,10 @@ export const mirrorChildProgress = (
           }).pipe(Effect.as(undefined)),
         ),
       );
-      const title = latestActivitySummary(child);
-      const toolName = latestToolName(child);
-      yield* appendActivity({
-        parentThreadId: target.parentThreadId,
+      yield* appendChildProgress(target, {
         commandId: `server:subagent-mirror-progress:${target.childThreadId}:${tick}`,
-        activity: {
-          id: EventId.make(`task-progress:${target.parentThreadId}:${target.childThreadId}`),
-          tone: "info",
-          kind: "task.progress",
-          summary: title ?? "Subagent working",
-          payload: {
-            taskId: target.childThreadId,
-            subagentType: target.agentType,
-            ...(title !== undefined ? { title } : {}),
-            ...(toolName !== undefined ? { lastToolName: toolName } : {}),
-          },
-          turnId: target.parentTurnId,
-        },
+        title: latestActivitySummary(child),
+        lastToolName: latestToolName(child),
       });
     }
   });

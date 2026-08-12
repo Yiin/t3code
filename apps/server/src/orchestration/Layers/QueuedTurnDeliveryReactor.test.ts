@@ -254,6 +254,7 @@ function withHarness(
     const snapshotQuery = {
       getThreadShellById: () => Effect.succeed(Option.fromUndefinedOr(state.shell)),
       getThreadDetailById: () => Effect.succeed(Option.fromUndefinedOr(state.thread)),
+      listRunningThreadBackedSubagents: () => Effect.succeed([]),
       listThreadIdsWithQueuedMessages: () => Effect.succeed(state.queuedThreadIds),
     } as unknown as ProjectionSnapshotQueryShape;
 

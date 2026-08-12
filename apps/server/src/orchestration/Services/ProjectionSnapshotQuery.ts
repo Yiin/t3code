@@ -21,6 +21,7 @@ import type {
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Option from "effect/Option";
@@ -53,6 +54,24 @@ export interface ProjectionThreadSubagentLiveness {
   readonly activeSubagentCount: number;
   /** `MAX(updated_at)` over the `running` rows, or null when there are none. */
   readonly newestRunningUpdatedAt: string | null;
+}
+
+/**
+ * One parent-side subagent row that is still `running` and names a child thread.
+ *
+ * Only the fields the parent's roster row is rewritten from: the boot
+ * reconciliation closes or annotates the row, it never re-reads the child's
+ * work.
+ */
+export interface ProjectionRunningThreadBackedSubagent {
+  /** The thread carrying the roster row, not the child. */
+  readonly parentThreadId: ThreadId;
+  readonly subagentId: string;
+  readonly childThreadId: ThreadId;
+  /** The parent turn the row belongs to, or null when none was projected. */
+  readonly turnId: TurnId | null;
+  readonly agentType: string | null;
+  readonly description: string | null;
 }
 
 export interface ProjectionFullThreadDiffContext {
@@ -261,6 +280,19 @@ export interface ProjectionSnapshotQueryShape {
   readonly listChildThreadIds: (
     parentThreadId: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionRepositoryError>;
+
+  /**
+   * List every parent-side subagent row still `running` and backed by a child
+   * thread, oldest first per parent.
+   *
+   * The boot reconciliation reads this once (`spawnReconciliation.ts`). A
+   * restart kills the in-process spawn registry but leaves these rows behind,
+   * so without the sweep each one claims a subagent that nothing is waiting on.
+   */
+  readonly listRunningThreadBackedSubagents: () => Effect.Effect<
+    ReadonlyArray<ProjectionRunningThreadBackedSubagent>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * List the active threads holding at least one message parked at a turn

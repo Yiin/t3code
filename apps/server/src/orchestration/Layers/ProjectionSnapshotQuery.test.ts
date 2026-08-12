@@ -2569,6 +2569,107 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("lists only running thread-backed subagent rows of live parents", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      yield* sql`DELETE FROM projection_thread_subagents`;
+      // thread-1 is the live parent seeded by the fixture; thread-gone is not,
+      // so its row must not come back even though it looks identical.
+      yield* sql`
+        INSERT INTO projection_thread_subagents (
+          subagent_id,
+          thread_id,
+          turn_id,
+          agent_type,
+          description,
+          status,
+          child_thread_id,
+          started_at,
+          updated_at
+        )
+        VALUES
+          (
+            'subagent-thread-late',
+            'thread-1',
+            'turn-1',
+            'Explore',
+            'Audit the migrations',
+            'running',
+            'subagent-thread-late',
+            '2026-08-05T00:00:20.000Z',
+            '2026-08-05T00:00:20.000Z'
+          ),
+          (
+            'subagent-thread-early',
+            'thread-1',
+            NULL,
+            NULL,
+            NULL,
+            'running',
+            'subagent-thread-early',
+            '2026-08-05T00:00:10.000Z',
+            '2026-08-05T00:00:10.000Z'
+          ),
+          (
+            'task-in-process',
+            'thread-1',
+            'turn-1',
+            'Explore',
+            NULL,
+            'running',
+            NULL,
+            '2026-08-05T00:00:11.000Z',
+            '2026-08-05T00:00:11.000Z'
+          ),
+          (
+            'subagent-thread-settled',
+            'thread-1',
+            'turn-1',
+            'Explore',
+            NULL,
+            'completed',
+            'subagent-thread-settled',
+            '2026-08-05T00:00:12.000Z',
+            '2026-08-05T00:00:12.000Z'
+          ),
+          (
+            'subagent-thread-orphan-parent',
+            'thread-gone',
+            'turn-1',
+            'Explore',
+            NULL,
+            'running',
+            'subagent-thread-orphan-parent',
+            '2026-08-05T00:00:13.000Z',
+            '2026-08-05T00:00:13.000Z'
+          )
+      `;
+
+      const orphans = yield* snapshotQuery.listRunningThreadBackedSubagents();
+      assert.deepEqual(orphans, [
+        {
+          parentThreadId: ThreadId.make("thread-1"),
+          subagentId: "subagent-thread-early",
+          childThreadId: ThreadId.make("subagent-thread-early"),
+          turnId: null,
+          agentType: null,
+          description: null,
+        },
+        {
+          parentThreadId: ThreadId.make("thread-1"),
+          subagentId: "subagent-thread-late",
+          childThreadId: ThreadId.make("subagent-thread-late"),
+          turnId: TurnId.make("turn-1"),
+          agentType: "Explore",
+          description: "Audit the migrations",
+        },
+      ]);
+    }),
+  );
+
   it.effect("counts pinned request rows as returned, not omitted", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
