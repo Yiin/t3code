@@ -26,7 +26,16 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
-import { grokPromptSettlementBelongsToContext, makeGrokAdapter } from "./GrokAdapter.ts";
+import {
+  readAcpProviderSessionsCreated,
+  readAcpTurnTargets,
+} from "../testUtils/acpSessionLifecycleProbes.ts";
+import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
+import {
+  GROK_ADAPTER_CAPABILITIES,
+  grokPromptSettlementBelongsToContext,
+  makeGrokAdapter,
+} from "./GrokAdapter.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -1337,4 +1346,41 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+
+  describeSessionLifecycleConformance(it, {
+    name: "Grok",
+    provider: ProviderDriverKind.make("grok"),
+    capabilities: GROK_ADAPTER_CAPABILITIES,
+    observes: { turnTargets: true },
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-lifecycle-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockGrokWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        return yield* body({
+          adapter,
+          // The mock agent always names its session `mock-session-1`, so this
+          // is the cursor a real Grok session would have persisted.
+          makeValidCursor: () => ({ schemaVersion: 1, sessionId: "mock-session-1" }),
+          makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "mock-session-1" }),
+          readProviderSessionsCreated: () => readAcpProviderSessionsCreated(requestLogPath),
+          readTurnTargets: () => readAcpTurnTargets(requestLogPath),
+          resumedProviderSessionId: "mock-session-1",
+          startSessionInput: {
+            cwd: process.cwd(),
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("grok"),
+              model: "grok-build",
+            },
+          },
+          // The mock agent loads any session id it is handed, so it cannot
+          // stage a cursor that names a conversation the agent has lost.
+        });
+      }),
+  });
 });

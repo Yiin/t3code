@@ -53,7 +53,8 @@ import {
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
-import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
+import { CODEX_ADAPTER_CAPABILITIES, makeCodexAdapter } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeCodexUserInput = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2TurnStartParams__UserInput,
@@ -2101,4 +2102,77 @@ attachmentLayer("CodexAdapterLive attachments", (it) => {
       );
     }),
   );
+});
+
+// `CodexAdapter` gates the opaque cursor with `isCodexResumeCursorSchema` before
+// it reaches the runtime, so a cursor the adapter reads arrives as
+// `options.resumeCursor` and one it rejects does not. The runtime turns the
+// first into `thread/resume` and the second into `thread/start`, which is why
+// "runtimes built without a cursor" is this adapter's provider-session count.
+function makeLifecycleRuntimeFactory() {
+  const startedAt = "2026-01-01T00:00:00.000Z";
+  let created = 0;
+
+  const factory = vi.fn((options: CodexSessionRuntimeOptions) => {
+    const runtime = new FakeCodexRuntime(options);
+    const resumedThreadId = options.resumeCursor?.threadId;
+    if (resumedThreadId === undefined) {
+      created += 1;
+    }
+    const providerThreadId = resumedThreadId ?? `codex-thread-${created}`;
+    runtime.startImpl.mockImplementation(() =>
+      Promise.resolve({
+        provider: ProviderDriverKind.make("codex"),
+        status: "ready" as const,
+        runtimeMode: options.runtimeMode,
+        threadId: options.threadId,
+        cwd: options.cwd,
+        resumeCursor: { threadId: providerThreadId },
+        createdAt: startedAt,
+        updatedAt: startedAt,
+      } satisfies ProviderSession),
+    );
+    return Effect.succeed(runtime);
+  });
+
+  return { factory, readProviderSessionsCreated: () => created };
+}
+
+const lifecycleConformanceRuntimeFactory = makeLifecycleRuntimeFactory();
+const lifecycleConformanceLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        makeRuntime: lifecycleConformanceRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+lifecycleConformanceLayer("CodexAdapterLive session lifecycle", (it) => {
+  describeSessionLifecycleConformance(it, {
+    name: "Codex",
+    provider: ProviderDriverKind.make("codex"),
+    capabilities: CODEX_ADAPTER_CAPABILITIES,
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        return yield* body({
+          adapter,
+          makeValidCursor: () => ({ threadId: "codex-thread-persisted" }),
+          makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "ses_persisted" }),
+          readProviderSessionsCreated: () =>
+            Effect.sync(lifecycleConformanceRuntimeFactory.readProviderSessionsCreated),
+          // The fake runtime never rejects a thread id, so it cannot stage a
+          // cursor naming a conversation Codex has lost.
+        });
+      }),
+  });
 });

@@ -28,7 +28,12 @@ import {
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
-import { makeCursorAdapter } from "./CursorAdapter.ts";
+import {
+  readAcpProviderSessionsCreated,
+  readAcpTurnTargets,
+} from "../testUtils/acpSessionLifecycleProbes.ts";
+import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
+import { CURSOR_ADAPTER_CAPABILITIES, makeCursorAdapter } from "./CursorAdapter.ts";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
@@ -1564,4 +1569,40 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       );
     }),
   );
+
+  describeSessionLifecycleConformance(it, {
+    name: "Cursor",
+    provider: ProviderDriverKind.make("cursor"),
+    capabilities: CURSOR_ADAPTER_CAPABILITIES,
+    observes: { turnTargets: true },
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const settings = yield* ServerSettingsService;
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-lifecycle-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+        );
+        yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+        return yield* body({
+          adapter,
+          // The mock agent always names its session `mock-session-1`, so this
+          // is the cursor a real Cursor session would have persisted.
+          makeValidCursor: () => ({ schemaVersion: 1, sessionId: "mock-session-1" }),
+          makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "mock-session-1" }),
+          readProviderSessionsCreated: () => readAcpProviderSessionsCreated(requestLogPath),
+          readTurnTargets: () => readAcpTurnTargets(requestLogPath),
+          resumedProviderSessionId: "mock-session-1",
+          startSessionInput: {
+            cwd: process.cwd(),
+            modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "default"),
+          },
+          // The mock agent loads any session id it is handed, so it cannot
+          // stage a cursor that names a conversation the agent has lost.
+        });
+      }),
+  });
 });

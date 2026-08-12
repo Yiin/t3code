@@ -24,6 +24,7 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import {
@@ -37,6 +38,7 @@ import {
   isSameOpenCodeDirectory,
   makeOpenCodeAdapter,
   mergeOpenCodeAssistantText,
+  OPENCODE_ADAPTER_CAPABILITIES,
 } from "./OpenCodeAdapter.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* OpenCodeAdapter`.
@@ -1518,4 +1520,42 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(closeCallsDuringRun, []);
     }),
   );
+
+  describeSessionLifecycleConformance(it, {
+    name: "OpenCode",
+    provider: ProviderDriverKind.make("opencode"),
+    capabilities: OPENCODE_ADAPTER_CAPABILITIES,
+    observes: { turnTargets: true, unknownCursor: true },
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        // The fake server answers `session.get` for every id except this one,
+        // which stands in for a session the OpenCode server has forgotten.
+        runtimeMock.state.missingSessionIds.add("ses_conformance_gone");
+        return yield* body({
+          adapter,
+          makeValidCursor: () => ({ schemaVersion: 1, sessionId: "ses_persisted" }),
+          makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "ses_persisted" }),
+          readProviderSessionsCreated: () =>
+            Effect.sync(() => runtimeMock.state.sessionCreateInputs.length),
+          readTurnTargets: () =>
+            Effect.sync(() =>
+              runtimeMock.state.promptCalls.map(
+                (call) => (call as { readonly sessionID: string }).sessionID,
+              ),
+            ),
+          sendTurnInput: {
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("opencode"),
+              "anthropic/sonnet",
+            ),
+          },
+          resumedProviderSessionId: "ses_persisted",
+          unknownCursor: {
+            make: () => ({ schemaVersion: 1, sessionId: "ses_conformance_gone" }),
+            expect: "fresh-session",
+          },
+        });
+      }),
+  });
 });

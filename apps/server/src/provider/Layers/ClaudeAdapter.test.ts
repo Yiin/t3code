@@ -43,7 +43,12 @@ import { DEFAULT_SPAWN_POLICY, type SpawnPolicy } from "../../mcp/toolkits/agent
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
+import {
+  CLAUDE_ADAPTER_CAPABILITIES,
+  makeClaudeAdapter,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -181,6 +186,10 @@ function makeHarness(config?: {
         readonly options: ClaudeQueryOptions;
       }
     | undefined;
+  const createInputs: Array<{
+    readonly prompt: AsyncIterable<SDKUserMessage>;
+    readonly options: ClaudeQueryOptions;
+  }> = [];
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
@@ -192,6 +201,7 @@ function makeHarness(config?: {
         : {}),
     createQuery: (input) => {
       createInput = input;
+      createInputs.push(input);
       return query;
     },
     ...(config?.nativeEventLogger
@@ -225,6 +235,12 @@ function makeHarness(config?: {
     ),
     query,
     getLastCreateQueryInput: () => createInput,
+    /**
+     * Queries opened without a `resume` id. That is a new Claude conversation;
+     * a query carrying `resume` continues one the SDK already has.
+     */
+    countProviderSessionsCreated: () =>
+      createInputs.filter((input) => input.options.resume === undefined).length,
   };
 }
 
@@ -5598,5 +5614,37 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+
+  describeSessionLifecycleConformance(it, {
+    name: "Claude",
+    provider: ProviderDriverKind.make("claudeAgent"),
+    capabilities: CLAUDE_ADAPTER_CAPABILITIES,
+    runScenario: (body) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        return yield* body({
+          adapter,
+          // Claude's cursor is exactly threadId / resume / turnCount, and the
+          // SDK only accepts a uuid as `resume`.
+          makeValidCursor: () => ({
+            threadId: "thread-claude-lifecycle",
+            resume: "550e8400-e29b-41d4-a716-446655440000",
+            turnCount: 3,
+          }),
+          // An OpenCode-shaped cursor: readable JSON, but nothing Claude can
+          // turn into a uuid, so it must degrade to a fresh conversation.
+          makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "ses_persisted" }),
+          readProviderSessionsCreated: () =>
+            Effect.sync(() => harness.countProviderSessionsCreated()),
+          // The fake SDK query accepts any resume id, so it cannot stage a
+          // cursor naming a conversation Claude has lost.
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
   });
 });

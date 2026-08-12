@@ -13,7 +13,12 @@ import * as Schema from "effect/Schema";
 import { KimiSettings, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
-import { makeKimiAdapter } from "./KimiAdapter.ts";
+import {
+  readAcpProviderSessionsCreated,
+  readAcpTurnTargets,
+} from "../testUtils/acpSessionLifecycleProbes.ts";
+import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
+import { KIMI_ADAPTER_CAPABILITIES, makeKimiAdapter } from "./KimiAdapter.ts";
 
 const decodeKimiSettings = Schema.decodeSync(KimiSettings);
 
@@ -242,4 +247,35 @@ it.layer(kimiAdapterTestLayer)("KimiAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+
+  describeSessionLifecycleConformance(it, {
+    name: "Kimi",
+    provider: ProviderDriverKind.make("kimi"),
+    capabilities: KIMI_ADAPTER_CAPABILITIES,
+    observes: { turnTargets: true },
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "kimi-acp-lifecycle-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockKimiWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        return yield* body({
+          adapter,
+          // The mock agent always names its session `mock-session-1`, so this
+          // is the cursor a real Kimi session would have persisted.
+          makeValidCursor: () => ({ schemaVersion: 1, sessionId: "mock-session-1" }),
+          makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "mock-session-1" }),
+          readProviderSessionsCreated: () => readAcpProviderSessionsCreated(requestLogPath),
+          readTurnTargets: () => readAcpTurnTargets(requestLogPath),
+          resumedProviderSessionId: "mock-session-1",
+          startSessionInput: { cwd: process.cwd() },
+          // The mock agent loads any session id it is handed, so it cannot
+          // stage a cursor that names a conversation the agent has lost.
+        });
+      }),
+  });
 });
