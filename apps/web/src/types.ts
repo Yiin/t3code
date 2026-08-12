@@ -36,7 +36,15 @@ export interface ChatImageAttachment extends ContractChatImageAttachment {
   readonly previewUrl?: string;
 }
 
-export type ChatAttachment = ChatImageAttachment | ContractChatFileAttachment;
+/**
+ * `previewUrl` on a file is the signed asset URL the timeline downloads from,
+ * resolved the same way an image's is.
+ */
+export interface ChatFileAttachment extends ContractChatFileAttachment {
+  readonly previewUrl?: string;
+}
+
+export type ChatAttachment = ChatImageAttachment | ChatFileAttachment;
 
 export interface ChatMessage extends Omit<OrchestrationMessage, "attachments"> {
   readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;

@@ -312,6 +312,49 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("passes a file attachment through unchanged", () => {
+      const attachments = [
+        {
+          type: "image" as const,
+          id: "img-1",
+          name: "screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 2_048,
+        },
+        {
+          type: "file" as const,
+          id: "file-1",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 4_096,
+        },
+      ];
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-attachments"),
+          role: "user",
+          text: "Read this",
+          attachments,
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T06:00:00.000Z",
+          updatedAt: "2026-04-01T06:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages[0]?.attachments).toEqual(attachments);
+      }
+    });
+
     it("appends text for streaming messages", () => {
       const threadWithMessage: OrchestrationThread = {
         ...baseThread,

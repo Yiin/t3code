@@ -1243,7 +1243,7 @@ function ChatViewContent(props: ChatViewProps) {
         : null,
   );
   const promptRef = useRef("");
-  const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
+  const composerAttachmentsRef = useRef<ComposerImageAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
   const composerElementContextsRef = useRef<ElementContextDraft[]>([]);
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
@@ -4618,7 +4618,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
     beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
 
-    const composerImagesSnapshot = [...composerImages];
+    const composerAttachmentsSnapshot = [...composerImages];
     const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
     const composerElementContextsSnapshot = [...composerElementContexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
@@ -4645,21 +4645,21 @@ function ChatViewContent(props: ChatViewProps) {
       text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
     });
     const turnAttachmentsPromise = Promise.all(
-      composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
-        name: image.name,
-        mimeType: image.mimeType,
-        sizeBytes: image.sizeBytes,
-        dataUrl: await readFileAsDataUrl(image.file),
+      composerAttachmentsSnapshot.map(async (attachment) => ({
+        type: attachment.type,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+        dataUrl: await readFileAsDataUrl(attachment.file),
       })),
     );
-    const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
-      id: image.id,
-      name: image.name,
-      mimeType: image.mimeType,
-      sizeBytes: image.sizeBytes,
-      previewUrl: image.previewUrl,
+    const optimisticAttachments = composerAttachmentsSnapshot.map((attachment) => ({
+      type: attachment.type,
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      previewUrl: attachment.previewUrl,
     }));
     // Sending always returns to the live edge. The new row becomes the
     // anchored end-space target so it lands near the top while the response
@@ -4707,8 +4707,8 @@ function ChatViewContent(props: ChatViewProps) {
     composerRef.current?.resetCursorState();
 
     let firstComposerImageName: string | null = null;
-    if (composerImagesSnapshot.length > 0) {
-      const firstComposerImage = composerImagesSnapshot[0];
+    if (composerAttachmentsSnapshot.length > 0) {
+      const firstComposerImage = composerAttachmentsSnapshot[0];
       if (firstComposerImage) {
         firstComposerImageName = firstComposerImage.name;
       }
@@ -4829,7 +4829,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (failure !== null) {
       if (
         promptRef.current.length === 0 &&
-        composerImagesRef.current.length === 0 &&
+        composerAttachmentsRef.current.length === 0 &&
         composerTerminalContextsRef.current.length === 0 &&
         composerElementContextsRef.current.length === 0 &&
         (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.previewAnnotations
@@ -4846,8 +4846,8 @@ function ChatViewContent(props: ChatViewProps) {
           return next.length === existing.length ? existing : next;
         });
         promptRef.current = promptForSend;
-        const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
-        composerImagesRef.current = retryComposerImages;
+        const retryComposerImages = composerAttachmentsSnapshot.map(cloneComposerImageForRetry);
+        composerAttachmentsRef.current = retryComposerImages;
         composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
         composerElementContextsRef.current = composerElementContextsSnapshot;
         setComposerDraftPrompt(composerDraftTarget, promptForSend);
@@ -5933,7 +5933,7 @@ function ChatViewContent(props: ChatViewProps) {
                         terminalOpen={Boolean(terminalUiState.terminalOpen)}
                         gitCwd={gitCwd}
                         promptRef={promptRef}
-                        composerImagesRef={composerImagesRef}
+                        composerAttachmentsRef={composerAttachmentsRef}
                         composerTerminalContextsRef={composerTerminalContextsRef}
                         composerElementContextsRef={composerElementContextsRef}
                         onSend={onSend}

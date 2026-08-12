@@ -33,7 +33,7 @@ import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model"
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
-import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type ChatImageAttachment } from "./types";
+import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type ChatAttachment } from "./types";
 import {
   type TerminalContextDraft,
   ensureInlineTerminalContextPlaceholders,
@@ -78,7 +78,12 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   });
 }
 
+// `type` carries the attachment class through a reload. Drafts written before
+// the composer took files have no `type`, so it decodes to "image".
 export const PersistedComposerImageAttachment = Schema.Struct({
+  type: Schema.Literals(["image", "file"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("image" as const)),
+  ),
   id: Schema.String,
   name: Schema.String,
   mimeType: Schema.String,
@@ -87,7 +92,7 @@ export const PersistedComposerImageAttachment = Schema.Struct({
 });
 export type PersistedComposerImageAttachment = typeof PersistedComposerImageAttachment.Type;
 
-export interface ComposerImageAttachment extends Omit<ChatImageAttachment, "previewUrl"> {
+export interface ComposerImageAttachment extends Omit<ChatAttachment, "previewUrl"> {
   previewUrl: string;
   file: File;
 }
@@ -1067,7 +1072,10 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
   ) {
     return null;
   }
+  // A draft written before the composer took files carries no `type`.
+  const type = candidate.type === "file" ? "file" : "image";
   return {
+    type,
     id,
     name,
     mimeType,
@@ -2099,7 +2107,7 @@ function hydrateImagesFromPersisted(
 
     return [
       {
-        type: "image" as const,
+        type: attachment.type,
         id: attachment.id,
         name: attachment.name,
         mimeType: attachment.mimeType,

@@ -331,6 +331,7 @@ describe("composerDraftStore syncPersistedAttachments", () => {
 
     useComposerDraftStore.getState().syncPersistedAttachments(threadRef, [
       {
+        type: "image",
         id: image.id,
         name: image.name,
         mimeType: image.mimeType,
@@ -342,6 +343,56 @@ describe("composerDraftStore syncPersistedAttachments", () => {
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.persistedAttachments).toEqual([]);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.nonPersistedImageIds).toEqual([image.id]);
+  });
+});
+
+describe("composerDraftStore attachment types", () => {
+  const threadId = ThreadId.make("thread-attachment-types");
+
+  it("round-trips a file attachment and defaults a legacy draft to image", () => {
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const mergedState = persistApi.getOptions().merge(
+      {
+        draftsByThreadId: {
+          [threadId]: {
+            prompt: "",
+            attachments: [
+              {
+                type: "file",
+                id: "att-file",
+                name: "notes.md",
+                mimeType: "text/markdown",
+                sizeBytes: 5,
+                dataUrl: "data:text/markdown,hello",
+              },
+              {
+                // A draft written before the composer took files.
+                id: "att-legacy",
+                name: "shot.png",
+                mimeType: "image/png",
+                sizeBytes: 5,
+                dataUrl: "data:image/png;base64,aGVsbG8=",
+              },
+            ],
+          },
+        },
+        draftThreadsByThreadId: {},
+        projectDraftThreadIdByProjectKey: {},
+      },
+      useComposerDraftStore.getInitialState(),
+    );
+
+    expect(mergedState.draftsByThreadKey[threadKeyFor(threadId)]?.images).toMatchObject([
+      { id: "att-file", type: "file", name: "notes.md" },
+      { id: "att-legacy", type: "image", name: "shot.png" },
+    ]);
   });
 });
 

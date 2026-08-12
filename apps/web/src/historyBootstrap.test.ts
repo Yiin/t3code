@@ -136,4 +136,41 @@ describe("buildBootstrapInput", () => {
     expect(result.text).toContain("Attached image");
     expect(result.text).toContain("screenshot.png");
   });
+
+  it("captures user file attachment context in transcript blocks", () => {
+    const result = buildBootstrapInput(
+      [
+        {
+          id: messageId("u-file"),
+          role: "user",
+          text: "",
+          attachments: [
+            {
+              type: "image",
+              id: "img-1",
+              name: "screenshot.png",
+              mimeType: "image/png",
+              sizeBytes: 2_048,
+            },
+            {
+              type: "file",
+              id: "file-1",
+              name: "report.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 4_096,
+            },
+          ],
+          createdAt: "2026-02-09T00:00:00.000Z",
+          turnId: null,
+          updatedAt: "2026-02-09T00:00:00.000Z",
+          streaming: false,
+        },
+      ],
+      "What does this error mean?",
+      1_500,
+    );
+
+    expect(result.text).toContain("Attached image: screenshot.png");
+    expect(result.text).toContain("Attached file: report.pdf");
+  });
 });

@@ -30,7 +30,11 @@ import {
   workLogEntryIsToolLike,
   type SubagentGroup,
 } from "../../session-logic";
-import { type ChatImageAttachment, type TurnDiffSummary } from "../../types";
+import {
+  type ChatFileAttachment,
+  type ChatImageAttachment,
+  type TurnDiffSummary,
+} from "../../types";
 import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 import {
   getRenderablePatch,
@@ -43,13 +47,16 @@ import {
   ChevronRightIcon,
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
+  DownloadIcon,
   FileDiffIcon,
+  FileIcon,
   MousePointerClickIcon,
   PaintbrushIcon,
   Undo2Icon,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
+import { attachmentExtensionLabel, formatAttachmentSize } from "./chatAttachments";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { capitalizeSubagentName, SubagentCard, SubagentUnavailableData } from "./SubagentCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
@@ -940,8 +947,12 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const userImages = (row.message.attachments ?? []).filter(
+  const userAttachments = row.message.attachments ?? [];
+  const userImages = userAttachments.filter(
     (attachment): attachment is ChatImageAttachment => attachment.type === "image",
+  );
+  const userFiles = userAttachments.filter(
+    (attachment): attachment is ChatFileAttachment => attachment.type === "file",
   );
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
@@ -998,6 +1009,13 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         )}
+        {userFiles.length > 0 && (
+          <div className="mb-2 flex max-w-[420px] flex-col gap-1.5">
+            {userFiles.map((file) => (
+              <UserMessageFileAttachmentRow key={file.id} attachment={file} />
+            ))}
+          </div>
+        )}
         {previewAnnotations.map((annotation, index) => (
           <UserMessagePreviewAnnotationCard
             key={annotation.id}
@@ -1040,6 +1058,56 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * A non-image attachment on a user message. The signed asset URL arrives on
+ * `previewUrl`, the same field an image reads, so a download is one hop and
+ * needs no second URL path. An optimistic row carries a local `blob:` URL that
+ * is revoked once the send completes, so only a server URL gets a link.
+ */
+function UserMessageFileAttachmentRow({ attachment }: { attachment: ChatFileAttachment }) {
+  const downloadUrl =
+    attachment.previewUrl && !attachment.previewUrl.startsWith("blob:")
+      ? attachment.previewUrl
+      : null;
+  const meta = [
+    attachmentExtensionLabel(attachment.name),
+    formatAttachmentSize(attachment.sizeBytes),
+  ]
+    .filter((part) => part.length > 0)
+    .join(" · ");
+
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-border/80 bg-background/70 px-2.5 py-2">
+      <FileIcon className="size-4 shrink-0 text-muted-foreground/70" />
+      <div className="flex min-w-0 flex-col text-left">
+        <span className="truncate text-xs" title={attachment.name}>
+          {attachment.name}
+        </span>
+        {meta.length > 0 && <span className="text-[10px] text-muted-foreground/70">{meta}</span>}
+      </div>
+      {downloadUrl && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <a
+                href={downloadUrl}
+                target="_blank"
+                rel="noreferrer"
+                download={attachment.name}
+                aria-label={`Download ${attachment.name}`}
+                className="ms-auto inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground/70 hover:bg-muted hover:text-foreground"
+              />
+            }
+          >
+            <DownloadIcon className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipPopup side="top">Download</TooltipPopup>
+        </Tooltip>
+      )}
     </div>
   );
 }
