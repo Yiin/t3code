@@ -31,6 +31,7 @@ import {
   parseMergeSlotHolder,
   shouldReclaimMergeSlot,
 } from "@t3tools/epic-core/policy";
+import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
@@ -112,6 +113,7 @@ const DateTimeNowIso = Effect.map(DateTime.now, DateTime.formatIso);
  */
 export interface EpicRunnerLiveOptions {
   readonly iterationTimeoutMs?: number;
+  readonly runStallTimeoutMs?: number;
   readonly pollIntervalMs?: number;
   readonly quietPeriodMs?: number;
   readonly retryBaseDelayMs?: number;
@@ -151,6 +153,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     );
     const policySeed: PoolPolicySeed = Object.freeze({
       iterationTimeoutMs: Math.max(1, options?.iterationTimeoutMs ?? DEFAULT_ITERATION_TIMEOUT_MS),
+      runStallTimeoutMs: Math.max(1, options?.runStallTimeoutMs ?? DEFAULT_RUN_STALL_TIMEOUT_MS),
       pollIntervalMs: Math.max(1, options?.pollIntervalMs ?? DEFAULT_POOL_POLL_INTERVAL_MS),
       quietPeriodMs: Math.max(1, options?.quietPeriodMs ?? DEFAULT_POOL_QUIET_PERIOD_MS),
       retryBaseDelayMs: seedRetryBaseDelayMs,

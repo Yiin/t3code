@@ -39,7 +39,17 @@ export interface DrainMergeQueueInput {
 
 export type DrainMergeQueueResult =
   | { readonly _tag: "idle"; readonly queueLength: 0 }
-  | { readonly _tag: "deferred"; readonly queueLength: number }
+  | {
+      readonly _tag: "deferred";
+      readonly queueLength: number;
+      /**
+       * Who holds the slot, or `null` when it is unreadable. A deferral is
+       * only legitimate while a live holder finishes its merge set, so the
+       * holder is what tells a stalled run apart from a patient one — without
+       * it, "deferred" says nothing an operator can act on.
+       */
+      readonly holder: string | null;
+    }
   | {
       readonly _tag: "drained";
       readonly merged: number;
@@ -359,7 +369,15 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
 
   // Terminal parity: `skills/cook-epic/run-legacy.sh:2912-2918`.
   const lease = yield* ports.slot.tryAcquire(input.holder);
-  if (Option.isNone(lease)) return { _tag: "deferred" as const, queueLength: beforeDrain.length };
+  if (Option.isNone(lease)) {
+    // Reading the holder must never turn a deferral into a failure: the slot
+    // being unreadable is exactly one of the states this reports on.
+    const holder = yield* ports.slot.holder.pipe(
+      Effect.map(Option.getOrNull),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    return { _tag: "deferred" as const, queueLength: beforeDrain.length, holder };
+  }
 
   return yield* Effect.gen(function* () {
     // Continuous integration of the operator's base branch (t3code-sha): once

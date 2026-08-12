@@ -51,6 +51,7 @@ import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { IterationWorkspace, PoolRunContext, WorkspaceShape } from "./ports/Workspace.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
 import { resolveEpicProviderFallback } from "./providerFallback.ts";
+import { RUN_STALL_WARN_INTERVAL_MS, evaluateRunStall, type RunWait } from "./runStall.ts";
 import {
   makeWorkerLivenessConfig,
   superviseWorker,
@@ -136,7 +137,11 @@ export type MergeDrainResult =
        */
       readonly blocked?: number;
     }
-  | { readonly _tag: "deferred" }
+  | {
+      readonly _tag: "deferred";
+      /** Who holds the merge slot, or `null` when it is unreadable. */
+      readonly holder: string | null;
+    }
   | { readonly _tag: "fatal"; readonly detail: string };
 
 /** Merge-queue writes and the queued-branch drain the scheduler runs. */
@@ -249,20 +254,6 @@ type LoopBoundary =
     };
 
 const LOOP_STOP: LoopBoundary = { _tag: "stop" };
-
-/**
- * How long the merge drain may keep deferring before the run gives up.
- *
- * A deferral means the merge slot is held by someone else. That is legitimate
- * while another holder finishes a merge set, so the bound is generous. It is
- * not legitimate indefinitely: an absent or stale slot defers every attempt,
- * and without a bound the loop spins on it for as long as the process lives
- * while still heartbeating its run lock.
- */
-const MERGE_DRAIN_DEFERRAL_LIMIT_MS = 600_000;
-
-/** How often a still-deferring drain says so, so the spin is visible early. */
-const MERGE_DRAIN_DEFERRAL_LOG_INTERVAL_MS = 30_000;
 
 interface ActiveIteration {
   charged: boolean;
@@ -1265,13 +1256,61 @@ export const runParallelEpicLoop = (
       initialMergeState?.entries.some(
         (entry) => entry.status === "queued" || entry.status === "draining",
       ) ?? false;
-    // A deferred drain used to retry forever, silently. Because the run lock
-    // keeps heartbeating and no worker is alive to look wrong, that presents
-    // as a healthy run for as long as it lasts — one such spin ran 8 hours
-    // before anyone noticed. Track the streak so it is visible, and give up
-    // rather than hang.
-    let deferredSince: number | null = null;
-    let deferredLoggedAt = 0;
+    // Run-level progress, and the one owner of "running but doing nothing"
+    // (`runStall.ts`). A deferred drain used to retry forever, silently: the
+    // run lock kept heartbeating, no worker was alive to look wrong, and one
+    // such spin ran 8 hours before anyone noticed. Only three things move a
+    // run — a provider turn dispatched, an iteration settled, a merge landed —
+    // so only those three reset this.
+    let lastProgressAt = yield* Clock.currentTimeMillis;
+    let lastStallWarnedAt = 0;
+    const noteProgress = Effect.gen(function* () {
+      lastProgressAt = yield* Clock.currentTimeMillis;
+      lastStallWarnedAt = 0;
+    });
+    /**
+     * Judge the current wait, and fail the run when it is provably stuck.
+     *
+     * Returns `true` when the run was moved to a terminal state and the loop
+     * must stop. A wait with live workers can only ever warn: one unit of epic
+     * work legitimately takes hours, and the worker timeout and
+     * `workerSupervision.ts` own that verdict.
+     */
+    const checkStall = (wait: RunWait) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const verdict = evaluateRunStall({
+          wait,
+          lastProgressAt,
+          now,
+          timeoutMs: policy.runStallTimeoutMs,
+        });
+        if (verdict._tag === "ok") return false;
+        if (now - lastStallWarnedAt >= RUN_STALL_WARN_INTERVAL_MS) {
+          lastStallWarnedAt = now;
+          yield* Effect.logWarning("epic.runner.no-progress", {
+            runId,
+            wait: wait._tag,
+            stalledForMs: verdict.stalledForMs,
+            detail: verdict._tag === "warn" ? verdict.detail : verdict.lastError,
+          });
+        }
+        if (verdict._tag === "warn") return false;
+        yield* withTransition(
+          Effect.gen(function* () {
+            const current = yield* requireRun(runId);
+            if (current.status === "running") {
+              yield* saveRun({
+                ...current,
+                status: "failed" as const,
+                lastError: verdict.lastError,
+                updatedAt: yield* nowIso,
+              });
+            }
+          }),
+        );
+        return true;
+      });
     let terminalWorkerError: EpicRunnerError | null = null;
     let pendingFallback: PendingProviderFallback | null = null;
     let syntheticSequence = 0;
@@ -1382,41 +1421,17 @@ export const runParallelEpicLoop = (
           return;
         }
         if (result._tag === "deferred") {
-          const now = yield* Clock.currentTimeMillis;
-          deferredSince ??= now;
-          const stalledFor = now - deferredSince;
-          if (stalledFor >= MERGE_DRAIN_DEFERRAL_LIMIT_MS) {
-            yield* withTransition(
-              Effect.gen(function* () {
-                const current = yield* requireRun(runId);
-                if (current.status === "running") {
-                  yield* saveRun({
-                    ...current,
-                    status: "failed" as const,
-                    lastError:
-                      `infra:merge-slot-unavailable: the merge drain could not acquire the ` +
-                      `merge slot for ${String(Math.round(stalledFor / 1000))}s, so no ` +
-                      `branch can land. Check \`bd merge-slot check\`; an absent or stale ` +
-                      `slot defers every attempt.`,
-                    updatedAt: yield* nowIso,
-                  });
-                }
-              }),
-            );
-            return;
-          }
-          if (now - deferredLoggedAt >= MERGE_DRAIN_DEFERRAL_LOG_INTERVAL_MS) {
-            deferredLoggedAt = now;
-            yield* Effect.logWarning("epic.runner.merge-drain-deferred", {
-              runId,
-              stalledForMs: stalledFor,
-            });
-          }
+          // Deferring to a live holder stays correct. Deferring past the stall
+          // window does not: an absent or stale slot defers every attempt, and
+          // without a bound the loop spins on it for as long as the process
+          // lives while still heartbeating its run lock.
+          if (yield* checkStall({ _tag: "merge-slot", holder: result.holder })) return;
           yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
           continue;
         }
-        deferredSince = null;
-        deferredLoggedAt = 0;
+        // A drain that took the slot moved the run, whether or not this pass
+        // had anything left to land.
+        yield* noteProgress;
         drainBeforeDispatch = false;
         lastDrainBlocked = result._tag === "drained" ? (result.blocked ?? 0) : 0;
         if (lastDrainBlocked > 0) {
@@ -1496,9 +1511,11 @@ export const runParallelEpicLoop = (
                     .filter((issueId, index, issueIds) => issueIds.indexOf(issueId) === index)
                     .filter((issueId) => !active.has(issueId))
                     .map((issueId) => [issueId, { _tag: "child", issueId }] as const);
-            for (const [key, selection] of selections.slice(0, slots)) {
+            const launched = selections.slice(0, slots);
+            for (const [key, selection] of launched) {
               yield* launch(run, selection, key);
             }
+            if (launched.length > 0) yield* noteProgress;
           }
         } else if (active.size === 0 && run.iterationsDispatched >= policy.maxIterations) {
           // Same deferred gap as above: max-iterations also writes `done`
@@ -1520,12 +1537,31 @@ export const runParallelEpicLoop = (
         }
       }
 
-      if (active.size === 0) continue;
+      if (active.size === 0) {
+        // Nothing is running and this pass dispatched nothing, so the next one
+        // reads the same state and does the same thing. Sleeping the poll
+        // interval keeps that from becoming a hot spin, and the watchdog gives
+        // it an end.
+        if (yield* checkStall({ _tag: "scheduler" })) return;
+        yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
+        continue;
+      }
 
-      const event = yield* Queue.take(events);
+      // Bounded so a worker that never settles cannot hold the loop here in
+      // silence. Workers are never failed from here — the timeout expires,
+      // `checkStall` warns, and the loop goes back to waiting.
+      const taken = yield* Queue.take(events).pipe(
+        Effect.timeoutOption(Duration.millis(policy.runStallTimeoutMs)),
+      );
+      if (Option.isNone(taken)) {
+        yield* checkStall({ _tag: "workers", issueIds: [...active.keys()] });
+        continue;
+      }
+      const event = taken.value;
       if (event._tag === "retune") continue;
       const settlement = event;
       active.delete(settlement.key);
+      yield* noteProgress;
       if (Exit.isFailure(settlement.exit)) {
         const cause = settlement.exit.cause;
         terminalWorkerError ??= Option.getOrElse(

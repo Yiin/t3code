@@ -15,6 +15,12 @@ export const DEFAULT_POOL_QUIET_PERIOD_MS = 1_000;
 
 export interface PoolPolicySeed {
   readonly iterationTimeoutMs: number;
+  /**
+   * How long the run may make no progress before it is declared stalled
+   * (`runStall.ts`). Layer-wide, not per-run: it bounds the scheduler, and a
+   * scheduler that cannot move is never a property of the epic being run.
+   */
+  readonly runStallTimeoutMs: number;
   readonly pollIntervalMs: number;
   readonly quietPeriodMs: number;
   readonly retryBaseDelayMs: number;
@@ -64,6 +70,7 @@ export const makePoolPolicy = (seed: PoolPolicySeed, run: PersistedEpicRun): Poo
         : configuredWorkerTimeout === null
           ? null
           : configuredWorkerTimeout * 1_000,
+    runStallTimeoutMs: seed.runStallTimeoutMs,
     pollIntervalMs: configured(
       "server.pollIntervalMs",
       run.config.server.pollIntervalMs,

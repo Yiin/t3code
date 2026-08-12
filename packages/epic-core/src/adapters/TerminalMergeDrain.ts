@@ -229,7 +229,9 @@ export const makeTerminalMergeDrain = (deps: {
     if (result._tag === "fatal" && "detail" in result) {
       return { _tag: "fatal", detail: result.detail } as const;
     }
-    if (result._tag === "deferred") return { _tag: "deferred" } as const;
+    if (result._tag === "deferred") {
+      return { _tag: "deferred", holder: result.holder } as const;
+    }
     if (result._tag === "drained") {
       return {
         _tag: "drained",

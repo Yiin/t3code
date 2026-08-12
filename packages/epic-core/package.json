@@ -47,6 +47,10 @@
       "types": "./src/ParallelEpicLoop.ts",
       "import": "./src/ParallelEpicLoop.ts"
     },
+    "./runStall": {
+      "types": "./src/runStall.ts",
+      "import": "./src/runStall.ts"
+    },
     "./runPolicy": {
       "types": "./src/runPolicy.ts",
       "import": "./src/runPolicy.ts"

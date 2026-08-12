@@ -219,7 +219,10 @@ const makeHarness = (
           calls.push(`slot-reclaim:${holder}`);
           return { reclaimed: false };
         }),
-      holder: Effect.succeed(Option.none()),
+      holder: Effect.sync(() => {
+        calls.push("slot-holder");
+        return options.slotHeld === true ? Option.some("cook-epic-run-0") : Option.none();
+      }),
     },
     store: {
       read: () => Effect.succeed(snapshot),
@@ -726,8 +729,14 @@ describe("MergeQueue", () => {
   it.effect("defers without draining when the merge slot is held", () =>
     Effect.gen(function* () {
       const harness = makeHarness({ slotHeld: true });
-      expect(yield* drain(harness.ports)).toEqual({ _tag: "deferred", queueLength: 1 });
-      expect(harness.calls).toEqual(["head:/repo", "slot-acquire:cook-epic-run-1"]);
+      // The holder rides along with the deferral: a run that defers past its
+      // stall window has to name who it deferred to.
+      expect(yield* drain(harness.ports)).toEqual({
+        _tag: "deferred",
+        queueLength: 1,
+        holder: "cook-epic-run-0",
+      });
+      expect(harness.calls).toEqual(["head:/repo", "slot-acquire:cook-epic-run-1", "slot-holder"]);
       expect(harness.snapshot().entries[0]?.status).toBe("queued");
     }),
   );
@@ -1240,10 +1249,15 @@ describe("MergeQueue", () => {
 
           const result = yield* drain(harness.ports);
 
-          expect(result).toEqual({ _tag: "deferred", queueLength: 0 });
+          expect(result).toEqual({
+            _tag: "deferred",
+            queueLength: 0,
+            holder: "cook-epic-run-0",
+          });
           expect(harness.calls).toEqual([
             `head:/repo:${ownedBranch}`,
             "slot-acquire:cook-epic-run-1",
+            "slot-holder",
           ]);
         }),
     );

@@ -108,6 +108,7 @@ const config = (override: Partial<EpicRunConfig> = {}): EpicRunConfig => ({
 
 const policy = (override: Partial<PoolPolicy> = {}): PoolPolicy => ({
   iterationTimeoutMs: null,
+  runStallTimeoutMs: 600_000,
   pollIntervalMs: 1,
   quietPeriodMs: 1,
   retryBaseDelayMs: 0,
@@ -148,6 +149,8 @@ const fixture = (input: {
   readonly releaseFails?: boolean;
   /** Make every merge drain defer, as an absent or stale merge slot does. */
   readonly drainDefersForever?: boolean;
+  /** Who a deferred drain reports as holding the merge slot. */
+  readonly drainHolder?: string;
   /** Supply the liveness evidence port; absent means supervision is off. */
   readonly workerEvidence?: WorkerEvidenceShape;
   /** Drive the supervision cadence off a fake clock. */
@@ -452,7 +455,7 @@ const fixture = (input: {
         drainCalls += 1;
         ordering.push("merge:drain");
         return input.drainDefersForever
-          ? ({ _tag: "deferred" } as const)
+          ? ({ _tag: "deferred", holder: input.drainHolder ?? null } as const)
           : ({ _tag: "drained" } as const);
       }),
     enqueueMerge: (merge) =>
@@ -634,20 +637,84 @@ it.live("fails the run as infra:merge-reconciliation when workspace release fail
   }),
 );
 
-it.effect("fails the run when the merge drain cannot acquire the slot", () =>
+it.effect("stalls the run, naming the holder, when the merge drain cannot take the slot", () =>
   Effect.gen(function* () {
     // Regression: a deferred drain used to retry forever with no log and no
     // bound, while the run lock kept heartbeating. The run reported "running"
     // and landed nothing for 8 hours.
-    const test = fixture({ sequential: false, drainDefersForever: true });
+    const test = fixture({
+      sequential: false,
+      drainDefersForever: true,
+      drainHolder: "epic-run:4f11d14b",
+    });
     const fiber = yield* test.run.pipe(Effect.forkChild);
     yield* TestClock.adjust(Duration.minutes(11));
     yield* Fiber.join(fiber);
 
     const run = test.runRecord();
     assert.equal(run.status, "failed");
-    assert.include(run.lastError ?? "", "infra:merge-slot-unavailable");
+    assert.include(run.lastError ?? "", "infra:stalled:merge-slot");
+    // The holder is the whole point: without it a deferral says nothing an
+    // operator can act on.
+    assert.include(run.lastError ?? "", "merge slot held by epic-run:4f11d14b");
     assert.equal(test.dispatchCount(), 0);
+  }),
+);
+
+it.effect("keeps deferring to a live holder inside the stall window", () =>
+  Effect.gen(function* () {
+    // Deferring is correct while another holder finishes its merge set. Only a
+    // deferral that outlasts the window is a stall.
+    const test = fixture({
+      sequential: false,
+      drainDefersForever: true,
+      policy: policy({ runStallTimeoutMs: 600_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(5));
+
+    assert.equal(test.runRecord().status, "running");
+    assert.isAbove(test.drainCalls(), 1);
+
+    yield* TestClock.adjust(Duration.minutes(6));
+    yield* Fiber.join(fiber);
+    assert.equal(test.runRecord().status, "failed");
+  }),
+);
+
+it.effect("stalls a scheduler that keeps reading an empty ready list", () =>
+  Effect.gen(function* () {
+    // A frontier that reports children and then hands back none dispatches
+    // nothing, forever, while the run still reads healthy.
+    const test = fixture({
+      frontier: () => ({ _tag: "children", issueIds: [] }),
+      policy: policy({ runStallTimeoutMs: 600_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(11));
+    yield* Fiber.join(fiber);
+
+    const run = test.runRecord();
+    assert.equal(run.status, "failed");
+    assert.include(run.lastError ?? "", "infra:stalled:scheduler");
+    assert.equal(test.dispatchCount(), 0);
+  }),
+);
+
+it.effect("never stalls a run on a worker that is still running", () =>
+  Effect.gen(function* () {
+    // One unit of epic work legitimately takes hours. The worker timeout and
+    // worker supervision own that verdict; the run-level watchdog must not.
+    const test = fixture({
+      attempts: [{ neverSettles: true }],
+      policy: policy({ runStallTimeoutMs: 60_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(30));
+
+    assert.equal(test.runRecord().status, "running");
+    assert.equal(test.dispatchCount(), 1);
+    yield* Fiber.interrupt(fiber);
   }),
 );
 

@@ -26,6 +26,7 @@ import {
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
   epicRunIterationPrompt,
 } from "@t3tools/epic-core/policy";
+import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import {
   runParallelEpicLoop,
   type ParallelEpicLoopPorts,
@@ -567,6 +568,7 @@ export const cookCommand = Command.make("cook", {
             // each matching value inside makePoolPolicy.
             const policySeed: PoolPolicySeed = {
               iterationTimeoutMs: DEFAULT_ITERATION_TIMEOUT_MS,
+              runStallTimeoutMs: DEFAULT_RUN_STALL_TIMEOUT_MS,
               pollIntervalMs: DEFAULT_POOL_POLL_INTERVAL_MS,
               quietPeriodMs: DEFAULT_POOL_QUIET_PERIOD_MS,
               retryBaseDelayMs: DEFAULT_RETRY_BASE_DELAY_MS,
