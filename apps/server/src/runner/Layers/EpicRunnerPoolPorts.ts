@@ -2228,10 +2228,18 @@ export const makeServerPoolDispatch = (deps: {
 
         continuationIndex = decision.nextContinuationCount;
         const createdAt = yield* nowIso;
-        // A human turn can start while subagents drain. Capture the turn that
-        // is active at dispatch time, so the continuation wait ignores it.
+        // A human turn can start after the grace snapshot while subagents
+        // drain. Do not dispatch a continuation into that newer turn.
+        const graceSnapshotTurnId = thread?.latestTurn?.turnId ?? null;
         const priorTurnId =
           (yield* readThreadDetail(input.threadId))?.thread.latestTurn?.turnId ?? null;
+        if (
+          priorTurnId !== null &&
+          priorTurnId !== graceSnapshotTurnId &&
+          priorTurnId !== settledTurn.turnId
+        ) {
+          return settledTurn;
+        }
         const continuationMessageId = MessageId.make(
           continuationIndex === 1
             ? `${input.threadId}-continue`
@@ -2252,6 +2260,9 @@ export const makeServerPoolDispatch = (deps: {
           // The runner wrote this prompt, not the human. The timeline labels
           // an agent-authored `role: "user"` row so the two never blur.
           origin: "agent",
+          // A human turn can still start between the re-check and dispatch.
+          // Park the continuation until that turn ends if this race is lost.
+          delivery: "turn-boundary",
           modelSelection: input.selection,
           runtimeMode: input.runtimeMode,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,

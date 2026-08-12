@@ -170,6 +170,8 @@ interface ScriptedIteration {
   readonly settleGate?: Deferred.Deferred<void>;
   /** Start an unrelated human turn before the runner classifies this turn. */
   readonly humanFollowupText?: string;
+  /** Delay the human follow-up until this many thread-detail reads complete. */
+  readonly humanFollowupAfterDetailReads?: number;
   /**
    * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
    * that report no assistant message before the scripted one appears —
@@ -188,6 +190,8 @@ interface ScriptedIteration {
    * Classification then has only the session status to go on.
    */
   readonly detailTurnPointerNull?: boolean;
+  /** Restore a transiently null latest-turn pointer after these detail reads. */
+  readonly restoreTurnPointerAfterDetailReads?: number;
   /**
    * Number of `getThreadDetailSnapshot` reads, for this iteration's thread,
    * that report one FRESH `running` subagent before it flips to `completed` —
@@ -389,6 +393,14 @@ function createHarness(input: {
   // Remaining detail reads, per thread, that report a fresh running subagent —
   // see `ScriptedIteration.subagentDrainReads`.
   const subagentDrainReads = new Map<string, number>();
+  const delayedHumanFollowups = new Map<
+    string,
+    { readonly text: string; readonly scriptIndex: number; remainingReads: number }
+  >();
+  const delayedTurnPointerRestorations = new Map<
+    string,
+    { readonly detail: OrchestrationThread; remainingReads: number }
+  >();
   const stopsWithRunningSubagents: ThreadId[] = [];
   let guardedStopRefusals = input.guardedStopRefusals ?? 0;
   let epicDescriptionReads = 0;
@@ -402,6 +414,29 @@ function createHarness(input: {
   harnessSequence += 1;
   const worktreesDir = `/tmp/t3-epic-runner-worktrees-${harnessSequence}`;
   let landedHead = baseHead;
+
+  const projectHumanFollowup = (args: {
+    readonly threadId: ThreadId;
+    readonly scriptIndex: number;
+    readonly text: string;
+    readonly settledDetail: OrchestrationThread;
+  }) => {
+    const humanTurnId = TurnId.make(`${args.threadId}-human-turn-${args.scriptIndex + 1}`);
+    activeTurnIds.set(args.threadId, humanTurnId);
+    const humanDetail = makeThreadDetail({
+      threadId: args.threadId,
+      turnId: humanTurnId,
+      turnState: "running",
+      text: args.text,
+      streaming: true,
+      sessionStatus: "running",
+    });
+    details.set(args.threadId, {
+      ...humanDetail,
+      messages: [...args.settledDetail.messages, ...humanDetail.messages],
+    });
+    shells.set(args.threadId, { latestTurn: "running", session: "running" });
+  };
 
   /**
    * Project one scripted iteration's outcome. The thread is seen `running`
@@ -469,22 +504,41 @@ function createHarness(input: {
         completedAt: NOW,
         assistantMessageId: settledDetail.latestTurn?.assistantMessageId ?? null,
       });
-      if (scripted.humanFollowupText === undefined) {
+      if (
+        scripted.humanFollowupText === undefined ||
+        scripted.humanFollowupAfterDetailReads !== undefined
+      ) {
         details.set(threadId, settledDetail);
+        if (scripted.humanFollowupText !== undefined) {
+          delayedHumanFollowups.set(threadId, {
+            text: scripted.humanFollowupText,
+            scriptIndex,
+            remainingReads: scripted.humanFollowupAfterDetailReads ?? 0,
+          });
+        }
       } else {
-        const humanTurnId = TurnId.make(`${threadId}-human-turn-${scriptIndex + 1}`);
-        activeTurnIds.set(threadId, humanTurnId);
-        const humanDetail = makeThreadDetail({
+        projectHumanFollowup({
           threadId,
-          turnId: humanTurnId,
-          turnState: "running",
+          scriptIndex,
           text: scripted.humanFollowupText,
-          streaming: true,
-          sessionStatus: "running",
+          settledDetail,
         });
-        details.set(threadId, {
-          ...humanDetail,
-          messages: [...settledDetail.messages, ...humanDetail.messages],
+      }
+      if (
+        scripted.detailTurnPointerNull === true &&
+        scripted.restoreTurnPointerAfterDetailReads !== undefined
+      ) {
+        delayedTurnPointerRestorations.set(threadId, {
+          detail: makeThreadDetail({
+            threadId,
+            turnId: scriptedTurnId,
+            turnState: scripted.turnState ?? "completed",
+            text: scripted.text,
+            streaming: scripted.streaming ?? false,
+            sessionStatus: scripted.sessionStatus ?? "ready",
+            sessionLastError: scripted.sessionLastError,
+          }),
+          remainingReads: scripted.restoreTurnPointerAfterDetailReads,
         });
       }
       if (scripted.messageSettleDelayReads !== undefined) {
@@ -495,7 +549,8 @@ function createHarness(input: {
       }
       shells.set(
         threadId,
-        scripted.humanFollowupText === undefined
+        scripted.humanFollowupText === undefined ||
+          scripted.humanFollowupAfterDetailReads !== undefined
           ? {
               latestTurn: scripted.turnState ?? "completed",
               session: scripted.sessionStatus ?? "ready",
@@ -671,6 +726,27 @@ function createHarness(input: {
           return Option.none();
         }
         let thread = detail;
+        const delayedTurnPointerRestoration = delayedTurnPointerRestorations.get(threadId);
+        if (delayedTurnPointerRestoration !== undefined) {
+          delayedTurnPointerRestoration.remainingReads -= 1;
+          if (delayedTurnPointerRestoration.remainingReads <= 0) {
+            delayedTurnPointerRestorations.delete(threadId);
+            details.set(threadId, delayedTurnPointerRestoration.detail);
+          }
+        }
+        const delayedHumanFollowup = delayedHumanFollowups.get(threadId);
+        if (delayedHumanFollowup !== undefined) {
+          delayedHumanFollowup.remainingReads -= 1;
+          if (delayedHumanFollowup.remainingReads <= 0) {
+            delayedHumanFollowups.delete(threadId);
+            projectHumanFollowup({
+              threadId,
+              scriptIndex: delayedHumanFollowup.scriptIndex,
+              text: delayedHumanFollowup.text,
+              settledDetail: detail,
+            });
+          }
+        }
         const remainingSubagentReads = subagentDrainReads.get(threadId);
         if (remainingSubagentReads !== undefined) {
           const running = remainingSubagentReads > 0;
@@ -3004,6 +3080,8 @@ describe("EpicRunner", () => {
       const continuation = turnStarts[1]!;
       assert.strictEqual(continuation.message.text, EPIC_RUN_CONTINUATION_PROMPT);
       assert.strictEqual(continuation.message.messageId, `${iterationThreadId}-continue`);
+      assert.strictEqual(continuation.origin, "agent");
+      assert.strictEqual(continuation.delivery, "turn-boundary");
 
       assert.strictEqual(
         harness
@@ -3025,6 +3103,66 @@ describe("EpicRunner", () => {
         logs.messages.find((message) => message[0] === "epic.runner.subagent-grace-cap"),
       );
     }).pipe(Effect.provide(Layer.merge(harness.layer, logs.layer)));
+  });
+
+  it.live("does not send a grace continuation into a newer human turn", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: "I am still implementing the child.",
+          head: "head-0",
+          worktreeFingerprint: " M apps/server/src/runner/Layers/EpicRunner.ts\n",
+          humanFollowupText: "Can you check one more thing?",
+          humanFollowupAfterDetailReads: 1,
+        },
+      ],
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      assert.strictEqual(turnStarts.length, 1);
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "child:no-commit-child-open");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("continues when a transiently null turn pointer restores", () => {
+    const harness = createHarness({
+      script: [
+        {
+          text: "I am still implementing the child.",
+          head: "head-0",
+          worktreeFingerprint: " M apps/server/src/runner/Layers/EpicRunner.ts\n",
+          detailTurnPointerNull: true,
+          restoreTurnPointerAfterDetailReads: 1,
+        },
+        {
+          text: 'Finished the child.\nRALPH_MSG: {"summary":"restored pointer","why":"grace continued"}',
+          head: "head-1",
+          worktreeFingerprint: "",
+        },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      options: { maxNoCommitStreak: 1 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const iterationThreadId = harness.commandsOfType("thread.create")[0]!.threadId;
+      const turnStarts = harness
+        .commandsOfType("thread.turn.start")
+        .filter((command) => command.threadId === iterationThreadId);
+      assert.strictEqual(turnStarts.length, 2);
+      assert.strictEqual(harness.store.iterations[0]?.summary, "restored pointer");
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.live("continues a protocol-silent no-commit turn when the worktree moved", () => {
