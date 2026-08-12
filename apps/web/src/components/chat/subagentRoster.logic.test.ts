@@ -10,6 +10,7 @@ import {
   orderRosterForDisplay,
   resolveFirstRunningRosterKey,
   resolveSubagentInteraction,
+  resolveSubagentSpawnLabel,
   UNADDRESSABLE_SUBAGENT_REASON,
   type SubagentRosterEntry,
 } from "./subagentRoster.logic";
@@ -336,6 +337,32 @@ describe("resolveSubagentInteraction", () => {
     ]);
 
     expect(resolveSubagentInteraction(entry, nowMs).kind).toBe("settled");
+  });
+});
+
+describe("resolveSubagentSpawnLabel", () => {
+  it("credits this thread for a thread-backed child, which has no other clue", () => {
+    const entry = buildSubagentRoster({
+      groups: [],
+      subagents: [subagent({ childThreadId: ThreadId.make("thread-child-1") })],
+    })[0]!;
+
+    expect(resolveSubagentSpawnLabel(entry)).toBe("spawned by this thread");
+  });
+
+  it("credits the Task tool when the client saw the spawning call", () => {
+    const entry = buildSubagentRoster({
+      groups: [group()],
+      subagents: [subagent({ spawnedByItemId: "toolu_1" })],
+    })[0]!;
+
+    expect(resolveSubagentSpawnLabel(entry)).toBe("spawned by Task");
+  });
+
+  it("credits the provider for a row that only ever arrived as progress", () => {
+    const entry = buildSubagentRoster({ groups: [], subagents: [subagent()] })[0]!;
+
+    expect(resolveSubagentSpawnLabel(entry)).toBe("reported by the provider");
   });
 });
 

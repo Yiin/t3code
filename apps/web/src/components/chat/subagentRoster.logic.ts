@@ -227,6 +227,24 @@ export function resolveSubagentInteraction(
   return { kind: "parent-mediated", subagentId: readModel.subagentId };
 }
 
+/**
+ * How the drawer header says where one subagent came from.
+ *
+ * A thread-backed child is checked first: `spawn_agent` reaches the server over
+ * MCP, which carries no tool_use id, and the client suppresses the spawn tool's
+ * group, so the row has neither of the other two clues even though this thread
+ * plainly spawned it. After that, a group means the client saw the spawning
+ * tool call and a `spawnedByItemId` means the server recorded one. Without any
+ * of the three, the row only ever arrived as provider-reported progress.
+ */
+export function resolveSubagentSpawnLabel(entry: SubagentRosterEntry): string {
+  if (entry.childThreadId !== null) return "spawned by this thread";
+  if (entry.group !== null || entry.readModel?.spawnedByItemId !== undefined) {
+    return "spawned by Task";
+  }
+  return "reported by the provider";
+}
+
 export function formatSubagentRosterSummary(
   roster: ReadonlyArray<Pick<SubagentRosterEntry, "status">>,
 ): string {

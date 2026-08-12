@@ -51,6 +51,7 @@ import {
   findRosterEntry,
   formatSubagentRosterSummary,
   resolveSubagentInteraction,
+  resolveSubagentSpawnLabel,
   SUBAGENT_STATUS_DOT_CLASS,
   SUBAGENT_STATUS_LABEL,
   type SubagentRosterEntry,
@@ -394,13 +395,7 @@ export function SubagentInspectorPanel({
     target.status === "running"
       ? null
       : formatElapsed(target.startedAt, target.completedAt ?? undefined);
-  // A group means the client saw the spawning tool call; a `spawnedByItemId`
-  // means the server recorded one. Without either, the row only ever arrived
-  // as provider-reported progress.
-  const spawnLabel =
-    target.group !== null || readModel?.spawnedByItemId !== undefined
-      ? "spawned by Task"
-      : "reported by the provider";
+  const spawnLabel = resolveSubagentSpawnLabel(target);
   const usage = summarizeSubagentUsage(readModel?.usage);
   const usageLabel =
     usage.inputTokens !== null || usage.outputTokens !== null

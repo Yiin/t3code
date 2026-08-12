@@ -296,6 +296,32 @@ describe("SubagentInspectorPanel", () => {
     expect(markup).toContain("Stop");
   });
 
+  it("credits this thread for a thread-backed child that carries no spawn item id", () => {
+    // The production shape: `spawn_agent` arrives over MCP, which carries no
+    // tool_use id, and the client suppresses the spawn tool's group.
+    const markup = renderPanel({
+      roster: buildSubagentRoster({
+        groups: [],
+        subagents: [
+          {
+            subagentId: "thread-child-2",
+            turnId: null,
+            childThreadId: ThreadId.make("thread-child-2"),
+            agentType: "explore",
+            status: "running",
+            startedAt: "2026-08-06T11:55:00.000Z",
+            updatedAt: "2026-08-06T11:59:00.000Z",
+            completedAt: null,
+          },
+        ],
+      }),
+      activeSubagentKey: "thread-child-2",
+    });
+
+    expect(markup).toContain("spawned by this thread");
+    expect(markup).not.toContain("reported by the provider");
+  });
+
   it("hides the composer for a settled subagent instead of disabling it", () => {
     const markup = renderPanel({
       roster: buildSubagentRoster({
