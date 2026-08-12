@@ -11,6 +11,7 @@ import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../..
 import {
   type MessageId,
   type OrchestrationLatestTurn,
+  type OrchestrationMessageOrigin,
   type OrchestrationThreadActivityTruncation,
   type OrchestrationThreadSubagentStatus,
   type TurnId,
@@ -274,6 +275,23 @@ export function computeMessageDurationStart(
   }
 
   return result;
+}
+
+/** What an agent-authored `role: "user"` row is called in the timeline. */
+export const AGENT_USER_MESSAGE_AUTHOR_LABEL = "Parent";
+
+/**
+ * Who wrote a `role: "user"` row, when it was not the human.
+ *
+ * Two authors share that role: the human, and an agent prompting a thread it
+ * drives (a parent messaging its child thread, the epic runner continuing an
+ * iteration). Only the second one needs saying — an unlabelled row is the
+ * human's, which is what every thread looked like before `origin` existed.
+ */
+export function resolveUserMessageAuthorLabel(
+  origin: OrchestrationMessageOrigin | undefined,
+): string | null {
+  return origin === "agent" ? AGENT_USER_MESSAGE_AUTHOR_LABEL : null;
 }
 
 export function normalizeCompactToolLabel(value: string): string {

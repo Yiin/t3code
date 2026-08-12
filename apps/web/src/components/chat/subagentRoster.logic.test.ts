@@ -1,4 +1,4 @@
-import type { OrchestrationThreadSubagent } from "@t3tools/contracts";
+import { ThreadId, type OrchestrationThreadSubagent } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SubagentGroup } from "../../session-logic";
@@ -296,5 +296,43 @@ describe("resolveSubagentInteraction", () => {
       kind: "parent-mediated",
       subagentId: "agent-1",
     });
+  });
+
+  it("reports a running child thread as thread-backed", () => {
+    const entry = entryFor([
+      subagent({ spawnedByItemId: "toolu_1", childThreadId: ThreadId.make("thread-child-1") }),
+    ]);
+
+    expect(entry.childThreadId).toBe("thread-child-1");
+    expect(resolveSubagentInteraction(entry, nowMs)).toEqual({
+      kind: "thread-backed",
+      subagentId: "agent-1",
+      childThreadId: "thread-child-1",
+    });
+  });
+
+  it("keeps a stale child thread addressable, because the child outlives the mirror", () => {
+    const entry = entryFor([
+      subagent({
+        spawnedByItemId: "toolu_1",
+        childThreadId: ThreadId.make("thread-child-1"),
+        updatedAt: "2026-08-06T11:40:00.000Z",
+      }),
+    ]);
+
+    expect(resolveSubagentInteraction(entry, nowMs).kind).toBe("thread-backed");
+  });
+
+  it("reports a terminal child thread as settled", () => {
+    const entry = entryFor([
+      subagent({
+        spawnedByItemId: "toolu_1",
+        childThreadId: ThreadId.make("thread-child-1"),
+        status: "completed",
+        completedAt: "2026-08-06T12:00:45.000Z",
+      }),
+    ]);
+
+    expect(resolveSubagentInteraction(entry, nowMs).kind).toBe("settled");
   });
 });

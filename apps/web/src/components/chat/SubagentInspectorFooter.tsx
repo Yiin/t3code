@@ -6,7 +6,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { SendIcon, SquareIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { selectSubagentSteerStates, type SubagentSteerState } from "../../session-logic";
 import { Button } from "~/components/ui/button";
@@ -24,6 +24,23 @@ type CommandResult = SubagentCommandFailure | null;
 /** Said before the first send, so the parent hop is never a surprise. */
 export const PARENT_MEDIATED_NOTICE = "Messages reach the parent at the next turn boundary.";
 
+/** Why the drawer looks indirect for a subagent the parent runs inside itself. */
+export const IN_PROCESS_SUBAGENT_NOTICE =
+  "This subagent runs inside the parent and has no inbox. Your message goes to the parent, which applies it when the subagent returns.";
+
+/**
+ * Which footer the drawer is showing, resolved by the caller.
+ *
+ * One component, three honest modes. `child-thread` takes the composer as a
+ * slot because only the panel can read the child thread's live state.
+ */
+export type SubagentFooterMode =
+  | { kind: "parent-relay" }
+  | { kind: "child-thread"; composer: ReactNode }
+  | { kind: "read-only"; reason: string };
+
+const DEFAULT_FOOTER_MODE: SubagentFooterMode = { kind: "parent-relay" };
+
 interface OptimisticSteer {
   steerId: CommandId;
   text: string;
@@ -34,6 +51,7 @@ export function SubagentInspectorFooter({
   threadId,
   subagent,
   activities,
+  mode = DEFAULT_FOOTER_MODE,
   nowMs = Date.now(),
   onSteer,
   onStop,
@@ -42,6 +60,7 @@ export function SubagentInspectorFooter({
   threadId: ThreadId;
   subagent: OrchestrationThreadSubagent;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
+  mode?: SubagentFooterMode;
   nowMs?: number;
   onSteer: (text: string, commandId: CommandId) => Promise<CommandResult>;
   onStop: (commandId: CommandId) => Promise<CommandResult>;
@@ -152,8 +171,12 @@ export function SubagentInspectorFooter({
   );
 
   return (
-    <div className="mt-auto border-t border-border/70" data-thread-id={threadId}>
-      {states.steers.length > 0 || pendingSteers.length > 0 ? (
+    <div
+      className="mt-auto border-t border-border/70"
+      data-subagent-footer-mode={mode.kind}
+      data-thread-id={threadId}
+    >
+      {mode.kind === "parent-relay" && (states.steers.length > 0 || pendingSteers.length > 0) ? (
         <div className="max-h-48 space-y-2 overflow-y-auto p-3">
           {states.steers.map(renderSteer)}
           {pendingSteers.map((steer) => (
@@ -182,43 +205,55 @@ export function SubagentInspectorFooter({
           </p>
         ) : null}
         {commandError ? <p className="text-xs text-destructive">{commandError}</p> : null}
-        {composerDisabledReason === null ? (
-          <p className="text-xs text-muted-foreground">{PARENT_MEDIATED_NOTICE}</p>
-        ) : null}
 
-        <form
-          className="flex items-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void send(draft);
-          }}
-        >
-          <Textarea
-            aria-label="Message subagent"
-            className="[&_[data-slot=textarea]]:max-h-28 [&_[data-slot=textarea]]:min-h-8"
-            disabled={composerDisabledReason !== null}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+        {mode.kind === "child-thread" ? (
+          mode.composer
+        ) : mode.kind === "read-only" ? (
+          // Hidden, never disabled: a greyed-out box invites a message this
+          // subagent can no longer take.
+          <p className="text-xs text-muted-foreground">{mode.reason}</p>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">{IN_PROCESS_SUBAGENT_NOTICE}</p>
+            {composerDisabledReason === null ? (
+              <p className="text-xs text-muted-foreground">{PARENT_MEDIATED_NOTICE}</p>
+            ) : null}
+
+            <form
+              className="flex items-end gap-2"
+              onSubmit={(event) => {
                 event.preventDefault();
                 void send(draft);
-              }
-            }}
-            placeholder="Message this subagent"
-            rows={1}
-            title={composerDisabledReason ?? undefined}
-            value={draft}
-          />
-          <Button
-            aria-label="Send to subagent"
-            disabled={composerDisabledReason !== null || draft.trim().length === 0}
-            size="icon"
-            title={composerDisabledReason ?? "Send to subagent"}
-            type="submit"
-          >
-            <SendIcon aria-hidden />
-          </Button>
-        </form>
+              }}
+            >
+              <Textarea
+                aria-label="Message subagent"
+                className="[&_[data-slot=textarea]]:max-h-28 [&_[data-slot=textarea]]:min-h-8"
+                disabled={composerDisabledReason !== null}
+                onChange={(event) => setDraft(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void send(draft);
+                  }
+                }}
+                placeholder="Message this subagent"
+                rows={1}
+                title={composerDisabledReason ?? undefined}
+                value={draft}
+              />
+              <Button
+                aria-label="Send to subagent"
+                disabled={composerDisabledReason !== null || draft.trim().length === 0}
+                size="icon"
+                title={composerDisabledReason ?? "Send to subagent"}
+                type="submit"
+              >
+                <SendIcon aria-hidden />
+              </Button>
+            </form>
+          </>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <Button

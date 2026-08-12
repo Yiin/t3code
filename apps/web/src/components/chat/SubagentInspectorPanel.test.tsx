@@ -8,7 +8,8 @@ import {
   SubagentInspectorPlaceholder,
   SubagentTranscriptEntryRow,
 } from "./SubagentInspectorPanel";
-import { PARENT_MEDIATED_NOTICE } from "./SubagentInspectorFooter";
+import { SUBAGENT_DRAWER_PLACEHOLDER } from "./SubagentDrawerComposer";
+import { IN_PROCESS_SUBAGENT_NOTICE, PARENT_MEDIATED_NOTICE } from "./SubagentInspectorFooter";
 import {
   buildSubagentRoster,
   UNADDRESSABLE_SUBAGENT_REASON,
@@ -40,6 +41,7 @@ function renderPanel(input: {
       nowMs={panelNowMs}
       onInterrupt={async () => undefined}
       onSelectSubagent={() => {}}
+      onSendToSubagentThread={async () => null}
       onSteer={async () => null}
       onStop={async () => null}
       roster={input.roster}
@@ -135,6 +137,7 @@ describe("SubagentInspectorPanel", () => {
         markdownCwd={undefined}
         onInterrupt={async () => undefined}
         onSelectSubagent={() => {}}
+        onSendToSubagentThread={async () => null}
         onSteer={async () => null}
         onStop={async () => null}
         roster={roster}
@@ -201,6 +204,63 @@ describe("SubagentInspectorPanel", () => {
 
     expect(markup).toContain('data-slot="textarea"');
     expect(markup).toContain(PARENT_MEDIATED_NOTICE);
+    expect(markup).toContain(IN_PROCESS_SUBAGENT_NOTICE);
     expect(markup).toContain("spawned by Task");
+  });
+
+  it("gives a thread-backed child its own composer and drops the parent hop", () => {
+    const markup = renderPanel({
+      roster: buildSubagentRoster({
+        groups: [],
+        subagents: [
+          {
+            subagentId: "thread-child-1",
+            turnId: null,
+            spawnedByItemId: "toolu_1",
+            childThreadId: ThreadId.make("thread-child-1"),
+            agentType: "explore",
+            status: "running",
+            startedAt: "2026-08-06T11:55:00.000Z",
+            updatedAt: "2026-08-06T11:59:00.000Z",
+            completedAt: null,
+          },
+        ],
+      }),
+      activeSubagentKey: "toolu_1",
+    });
+
+    expect(markup).toContain('data-subagent-footer-mode="child-thread"');
+    expect(markup).toContain(SUBAGENT_DRAWER_PLACEHOLDER);
+    // The child has an inbox of its own, so neither parent sentence applies.
+    expect(markup).not.toContain(PARENT_MEDIATED_NOTICE);
+    expect(markup).not.toContain(IN_PROCESS_SUBAGENT_NOTICE);
+    // The Stop button stays reachable in every mode.
+    expect(markup).toContain("Stop");
+  });
+
+  it("hides the composer for a settled subagent instead of disabling it", () => {
+    const markup = renderPanel({
+      roster: buildSubagentRoster({
+        groups: [],
+        subagents: [
+          {
+            subagentId: "agent-1",
+            turnId: null,
+            spawnedByItemId: "toolu_1",
+            agentType: "explore",
+            status: "completed",
+            startedAt: "2026-08-06T11:55:00.000Z",
+            updatedAt: "2026-08-06T11:59:00.000Z",
+            completedAt: "2026-08-06T11:59:00.000Z",
+          },
+        ],
+      }),
+      activeSubagentKey: "toolu_1",
+    });
+
+    expect(markup).toContain('data-subagent-footer-mode="read-only"');
+    expect(markup).toContain("This subagent is no longer running.");
+    expect(markup).not.toContain('data-slot="textarea"');
+    expect(markup).not.toContain(SUBAGENT_DRAWER_PLACEHOLDER);
   });
 });

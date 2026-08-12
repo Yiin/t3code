@@ -2045,6 +2045,9 @@ export const makeServerPoolDispatch = (deps: {
             text: decision.prompt,
             attachments: [],
           },
+          // The runner wrote this prompt, not the human. The timeline labels
+          // an agent-authored `role: "user"` row so the two never blur.
+          origin: "agent",
           modelSelection: input.selection,
           runtimeMode: input.runtimeMode,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -2129,6 +2132,7 @@ export const makeServerPoolDispatch = (deps: {
             text: input.prompt,
             attachments: [],
           },
+          origin: "agent",
           modelSelection: input.selection,
           runtimeMode: input.runtimeMode,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -2184,6 +2188,7 @@ export const makeServerPoolDispatch = (deps: {
                   text: prompt,
                   attachments: [],
                 },
+                origin: "agent",
                 modelSelection: input.selection,
                 runtimeMode: input.runtimeMode,
                 interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,

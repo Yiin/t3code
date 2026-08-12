@@ -14,6 +14,7 @@ import {
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
   type ThreadId,
+  type ThreadTurnStartDelivery,
   type TurnId,
   type KeybindingCommand,
   OrchestrationThreadActivity,
@@ -4912,6 +4913,37 @@ function ChatViewContent(props: ChatViewProps) {
     );
   };
 
+  // A thread-backed subagent owns a thread, so the drawer starts a turn on it
+  // directly. A busy child parks the turn start until its current turn ends.
+  const onSendToSubagentThread = async (
+    childThreadId: ThreadId,
+    text: string,
+    delivery: ThreadTurnStartDelivery,
+  ): Promise<SubagentCommandFailure | null> => {
+    const result = await startThreadTurn({
+      environmentId,
+      input: {
+        threadId: childThreadId,
+        message: {
+          messageId: newMessageId(),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        origin: "human",
+        delivery,
+        runtimeMode,
+        interactionMode,
+        createdAt: new Date().toISOString(),
+      },
+    });
+    if (result._tag === "Success" || isAtomCommandInterrupted(result)) return null;
+    return subagentCommandFailure(
+      squashAtomCommandFailure(result),
+      "Failed to send the message to the subagent.",
+    );
+  };
+
   const onStopSubagent = async (
     subagentId: string,
     commandId: CommandId,
@@ -5670,6 +5702,7 @@ function ChatViewContent(props: ChatViewProps) {
         roster={subagentRoster}
         onInterrupt={onInterrupt}
         onSelectSubagent={onOpenSubagentInspector}
+        onSendToSubagentThread={onSendToSubagentThread}
         onSteer={onSteerSubagent}
         onStop={onStopSubagent}
         activeSubagentKey={activeRightPanelSurface.activeSubagentKey}

@@ -7,7 +7,17 @@ import {
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveFirstRunningSubagentRowId,
+  resolveUserMessageAuthorLabel,
 } from "./MessagesTimeline.logic";
+
+describe("resolveUserMessageAuthorLabel", () => {
+  it("names the parent on an agent-authored user row and nobody on a human one", () => {
+    expect(resolveUserMessageAuthorLabel("agent")).toBe("Parent");
+    expect(resolveUserMessageAuthorLabel("human")).toBeNull();
+    // Every row written before `origin` existed is the human's.
+    expect(resolveUserMessageAuthorLabel(undefined)).toBeNull();
+  });
+});
 
 describe("computeMessageDurationStart", () => {
   it("returns message createdAt when there is no preceding user message", () => {

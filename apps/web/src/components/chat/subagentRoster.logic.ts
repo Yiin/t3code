@@ -2,6 +2,7 @@ import {
   isFreshRunningSubagent,
   type OrchestrationThreadSubagent,
   type OrchestrationThreadSubagentStatus,
+  type ThreadId,
 } from "@t3tools/contracts";
 
 import type { SubagentGroup } from "../../session-logic";
@@ -26,6 +27,8 @@ export interface SubagentRosterEntry {
   completedAt: string | null;
   lastProgressSummary: string | null;
   lastToolName: string | null;
+  /** The child thread a thread-backed subagent runs as; null for in-process ones. */
+  childThreadId: ThreadId | null;
   group: SubagentGroup | null;
   readModel: OrchestrationThreadSubagent | null;
 }
@@ -49,6 +52,7 @@ function entryFor(
     completedAt: readModel?.completedAt ?? group?.completedAt ?? null,
     lastProgressSummary: readModel?.lastProgressSummary ?? null,
     lastToolName: readModel?.lastToolName ?? null,
+    childThreadId: readModel?.childThreadId ?? null,
     group,
     readModel,
   };
@@ -150,12 +154,13 @@ export const UNADDRESSABLE_SUBAGENT_REASON =
 /**
  * What the drawer can do with one subagent.
  *
- * `parent-mediated` is today's only live arm: a steer is handed to the parent
- * session, which passes it on at its next turn boundary. A thread-backed child
- * gets its own arm here once the spawn phase lands a contract field for it —
- * this is the one branch point, so the drawer stays a single component.
+ * `parent-mediated` is the in-process arm: a steer is handed to the parent
+ * session, which passes it on at its next turn boundary. `thread-backed` is the
+ * child-thread arm: the message starts a turn on the child directly. This is
+ * the one branch point, so the drawer stays a single component.
  */
 export type SubagentInteraction =
+  | { kind: "thread-backed"; subagentId: string; childThreadId: ThreadId }
   | { kind: "parent-mediated"; subagentId: string }
   | { kind: "settled"; subagentId: string; reason: string }
   | { kind: "unaddressable"; reason: string };
@@ -168,6 +173,16 @@ export function resolveSubagentInteraction(
   // A group-only entry carries no subagent id, so no command can name it.
   if (readModel === null) {
     return { kind: "unaddressable", reason: UNADDRESSABLE_SUBAGENT_REASON };
+  }
+  // A thread-backed child skips the freshness check on purpose: the parent's
+  // mirror stops when `spawn_agent` times out, but the child keeps running and
+  // its own thread reports the live turn state the composer needs.
+  if (readModel.childThreadId !== undefined && readModel.status === "running") {
+    return {
+      kind: "thread-backed",
+      subagentId: readModel.subagentId,
+      childThreadId: readModel.childThreadId,
+    };
   }
   const reason = subagentInteractionDisabledReason(readModel, nowMs);
   if (reason !== null) {

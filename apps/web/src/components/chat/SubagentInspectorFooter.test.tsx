@@ -7,7 +7,11 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { PARENT_MEDIATED_NOTICE, SubagentInspectorFooter } from "./SubagentInspectorFooter";
+import {
+  IN_PROCESS_SUBAGENT_NOTICE,
+  PARENT_MEDIATED_NOTICE,
+  SubagentInspectorFooter,
+} from "./SubagentInspectorFooter";
 
 const nowMs = Date.parse("2026-08-06T12:00:00.000Z");
 const threadId = ThreadId.make("thread-1");
@@ -107,6 +111,53 @@ describe("SubagentInspectorFooter", () => {
     expect(markup).toContain("after the current subagent task returns");
     expect(markup).toContain("Parent session closed");
     expect(markup).toContain("Retry");
+  });
+
+  it("swaps in the child composer and drops every parent sentence", () => {
+    const markup = renderToStaticMarkup(
+      <SubagentInspectorFooter
+        activities={[
+          activity("event-1", "subagent.steer.requested", {
+            subagentId: "agent-1",
+            steerId: "steer-1",
+            text: "Check the parser",
+          }),
+        ]}
+        mode={{ kind: "child-thread", composer: <p>child composer</p> }}
+        nowMs={nowMs}
+        onInterrupt={async () => undefined}
+        onSteer={commandSuccess}
+        onStop={commandSuccess}
+        subagent={subagent()}
+        threadId={threadId}
+      />,
+    );
+
+    expect(markup).toContain("child composer");
+    expect(markup).not.toContain(PARENT_MEDIATED_NOTICE);
+    expect(markup).not.toContain(IN_PROCESS_SUBAGENT_NOTICE);
+    expect(markup).not.toContain("Queued for parent");
+    expect(markup).not.toContain('data-slot="textarea"');
+    expect(markup).toContain("Stop");
+  });
+
+  it("hides the input in read-only mode and states the reason", () => {
+    const markup = renderToStaticMarkup(
+      <SubagentInspectorFooter
+        activities={[]}
+        mode={{ kind: "read-only", reason: "This subagent is no longer running." }}
+        nowMs={nowMs}
+        onInterrupt={async () => undefined}
+        onSteer={commandSuccess}
+        onStop={commandSuccess}
+        subagent={subagent({ status: "completed" })}
+        threadId={threadId}
+      />,
+    );
+
+    expect(markup).toContain("This subagent is no longer running.");
+    expect(markup).not.toContain('data-slot="textarea"');
+    expect(markup).toContain("Stop");
   });
 
   it("renders stopping and escalation transitions from activities", () => {

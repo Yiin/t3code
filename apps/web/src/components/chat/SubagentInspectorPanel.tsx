@@ -8,6 +8,8 @@ import type {
   OrchestrationThreadSubagentStatus,
   ScopedThreadRef,
   ServerProviderSkill,
+  ThreadId,
+  ThreadTurnStartDelivery,
 } from "@t3tools/contracts";
 import { SUBAGENT_ACTIVITY_PAGE_LIMIT } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -19,11 +21,17 @@ import { formatElapsed, type SubagentGroup } from "../../session-logic";
 import { formatContextWindowTokens } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
+import { useThreadShell } from "~/state/entities";
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { capitalizeSubagentName, SubagentElapsed, SubagentUnavailableData } from "./SubagentCard";
-import { SubagentInspectorFooter, type SubagentCommandFailure } from "./SubagentInspectorFooter";
+import { SubagentDrawerComposer } from "./SubagentDrawerComposer";
+import {
+  SubagentInspectorFooter,
+  type SubagentCommandFailure,
+  type SubagentFooterMode,
+} from "./SubagentInspectorFooter";
 import {
   decodeSubagentTranscriptRow,
   selectSubagentInspectorPlaceholder,
@@ -222,6 +230,7 @@ export function SubagentInspectorPanel({
   onStop,
   onInterrupt,
   onSelectSubagent,
+  onSendToSubagentThread,
 }: {
   roster: ReadonlyArray<SubagentRosterEntry>;
   activeSubagentKey: string;
@@ -230,7 +239,7 @@ export function SubagentInspectorPanel({
   markdownCwd: string | undefined;
   nowMs?: number;
   workspaceRoot: string | undefined;
-  skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  skills: ReadonlyArray<ServerProviderSkill>;
   onSteer: (
     subagentId: string,
     text: string,
@@ -239,6 +248,11 @@ export function SubagentInspectorPanel({
   onStop: (subagentId: string, commandId: CommandId) => Promise<SubagentCommandFailure | null>;
   onInterrupt: () => Promise<void>;
   onSelectSubagent: (subagentKey: string) => void;
+  onSendToSubagentThread: (
+    childThreadId: ThreadId,
+    text: string,
+    delivery: ThreadTurnStartDelivery,
+  ) => Promise<SubagentCommandFailure | null>;
 }) {
   const transcriptRef = useRef<HTMLDivElement>(null);
   const shouldFollowTailRef = useRef(true);
@@ -252,6 +266,17 @@ export function SubagentInspectorPanel({
     subagent: readModel,
     threadRef,
   });
+  // The child's own thread is what says whether it is mid-turn. The parent's
+  // mirrored row cannot: it stops updating when `spawn_agent` gives up waiting.
+  const childThreadId = target?.childThreadId ?? null;
+  const childThreadRef = useMemo(
+    () =>
+      childThreadId === null
+        ? null
+        : { environmentId: threadRef.environmentId, threadId: childThreadId },
+    [childThreadId, threadRef.environmentId],
+  );
+  const childShell = useThreadShell(childThreadRef);
 
   useEffect(() => {
     shouldFollowTailRef.current = true;
@@ -301,6 +326,27 @@ export function SubagentInspectorPanel({
   }
 
   const interaction = resolveSubagentInteraction(target, nowMs);
+  const footerMode: SubagentFooterMode =
+    interaction.kind === "thread-backed"
+      ? {
+          kind: "child-thread",
+          composer: (
+            <SubagentDrawerComposer
+              childLatestTurn={childShell?.latestTurn ?? null}
+              childThreadRef={{
+                environmentId: threadRef.environmentId,
+                threadId: interaction.childThreadId,
+              }}
+              onSend={(text, delivery) =>
+                onSendToSubagentThread(interaction.childThreadId, text, delivery)
+              }
+              skills={skills}
+            />
+          ),
+        }
+      : interaction.kind === "settled"
+        ? { kind: "read-only", reason: interaction.reason }
+        : { kind: "parent-relay" };
   const settledElapsed =
     target.status === "running"
       ? null
@@ -523,6 +569,7 @@ export function SubagentInspectorPanel({
       ) : readModel ? (
         <SubagentInspectorFooter
           activities={activities}
+          mode={footerMode}
           nowMs={nowMs}
           onInterrupt={onInterrupt}
           onSteer={(text, commandId) => onSteer(readModel.subagentId, text, commandId)}
