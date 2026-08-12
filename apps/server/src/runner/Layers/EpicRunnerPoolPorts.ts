@@ -2620,6 +2620,10 @@ export const makeServerPoolDispatch = (deps: {
  * Flip every iteration still recorded as `running` to `abandoned`, stopping
  * its thread first. Shared by cancellation, restart reconciliation, and the
  * loop-failure backstop.
+ *
+ * The optional `onlyIterationIndexes` narrows that to a chosen subset. The boot
+ * path needs it: it withholds the rows it is about to resume, and abandoning
+ * one of those would stop the very session the resume is going to continue.
  */
 export const makeAbandonRunningIterations = (deps: {
   readonly store: EpicRunStore["Service"];
@@ -2650,6 +2654,7 @@ export const makeAbandonRunningIterations = (deps: {
     summary: string,
     failureReason: string,
     commandPrefix: string,
+    onlyIterationIndexes?: ReadonlySet<number>,
   ) {
     const run = yield* store.getRun({ runId }).pipe(
       Effect.mapError(storeError("getRun")),
@@ -2664,6 +2669,12 @@ export const makeAbandonRunningIterations = (deps: {
       .listRunningIterations({ runId })
       .pipe(Effect.mapError(storeError("listRunningIterations")));
     for (const iteration of iterations) {
+      if (
+        onlyIterationIndexes !== undefined &&
+        !onlyIterationIndexes.has(iteration.iterationIndex)
+      ) {
+        continue;
+      }
       const abandonedAt = yield* nowIso;
       if (iteration.issueId !== null) {
         yield* dispatchBestEffort(`epic.runner.${commandPrefix}-interrupt-failed`, {

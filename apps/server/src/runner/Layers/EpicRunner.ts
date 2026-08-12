@@ -52,6 +52,7 @@ import {
   runParallelEpicLoop,
   type ParallelEpicLoopPorts,
   type PoolSchedulerEvent,
+  type ResumedWorker,
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import {
   DEFAULT_POOL_POLL_INTERVAL_MS,
@@ -77,7 +78,11 @@ import * as Stream from "effect/Stream";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { EpicRunStore, type EpicRun } from "../../persistence/Services/EpicRuns.ts";
+import {
+  EpicRunStore,
+  type EpicRun,
+  type EpicRunIteration,
+} from "../../persistence/Services/EpicRuns.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
@@ -106,6 +111,24 @@ const DEFAULT_PROVIDER_DEGRADATION_TTL_MS = 60 * 60 * 1000;
 /** How long a resume waits for a dying loop to release the run's own lock. */
 const LOOP_EXIT_WAIT_MS = 5_000;
 /**
+ * How many times one iteration row may be picked back up after a restart.
+ *
+ * A row that keeps being interrupted is more likely a crash loop than bad
+ * luck, and each resume spends the whole iteration budget again on a thread
+ * whose transcript is already long. One retry, then the child is dispatched
+ * fresh — which is exactly what the pre-resume runner always did.
+ */
+const MAX_RESUMES_PER_ITERATION = 1;
+/**
+ * Persisted failure reasons that mean "a restart ended this row". Counted per
+ * child when a row predates the `resume_count` column and cannot say for
+ * itself how often it was already resumed.
+ */
+const RESTART_FAILURE_REASONS: ReadonlySet<string> = new Set([
+  "server-restart",
+  "server-restart-unresumable",
+]);
+/**
  * Server runs have no on-disk run directory; this fixed discriminator keeps
  * server scope identities disjoint from terminal runs of the same checkout.
  */
@@ -121,6 +144,12 @@ interface EpicRunLoopOptions {
    * collision. A fresh launch never sets this.
    */
   readonly reclaimOwnScopes?: boolean;
+  /**
+   * Iterations a previous process left `running` that this loop should
+   * continue instead of dispatching fresh. Only the boot path fills this; the
+   * loop adopts each one before its first scheduler tick.
+   */
+  readonly resumedWorkers?: ReadonlyArray<ResumedWorker>;
 }
 
 /**
@@ -435,6 +464,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             signals,
             readOrientation,
             cleanupOwnedExternally: () => cancelCleanupOwned.has(runId),
+            resumedWorkers: options?.resumedWorkers,
           },
           poolPorts,
         ).pipe(Effect.ensuring(workerScopeRegistry.releaseRun(runId)));
@@ -718,6 +748,96 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       ),
     );
 
+    /**
+     * Split a restarted run's in-flight rows into the work this process can
+     * continue and the work it has to abandon.
+     *
+     * Everything decided here is something only the boot path knows: whether a
+     * row names a child at all, whether its worktree survived (preflight
+     * already probed that, so this reads its answer rather than shelling out
+     * again), and how much of the row's resume budget is left. Everything
+     * else — an unsupported harness, a harness that refuses, a child that
+     * closed while the server was down — is the loop's own resume branch to
+     * decide, and it abandons those rows itself.
+     */
+    const classifyInterruptedIterations = (input: {
+      readonly runId: EpicRunId;
+      readonly inFlight: ReadonlyArray<EpicRunIteration>;
+      readonly missingWorktreePaths: ReadonlySet<string>;
+      readonly sequential: boolean;
+    }) =>
+      Effect.gen(function* () {
+        const { runId, inFlight, missingWorktreePaths, sequential } = input;
+        // A row written before migration 056 cannot say how often it was
+        // resumed, so count the restarts its child already survived. A read
+        // that fails leaves the budget unknown, and an unknown budget is spent.
+        const spentByChild = inFlight.some((iteration) => iteration.resumeCount === undefined)
+          ? yield* store.listIterations({ runId }).pipe(
+              Effect.map((rows) => {
+                const counts = new Map<string, number>();
+                for (const row of rows) {
+                  if (row.issueId === null || row.failureReason === null) continue;
+                  if (!RESTART_FAILURE_REASONS.has(row.failureReason)) continue;
+                  counts.set(row.issueId, (counts.get(row.issueId) ?? 0) + 1);
+                }
+                return counts;
+              }),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("epic.runner.resume-budget-read-failed", { runId, cause }).pipe(
+                  Effect.as(null),
+                ),
+              ),
+            )
+          : new Map<string, number>();
+
+        const resumedWorkers: Array<ResumedWorker> = [];
+        const abandonedIterationIndexes = new Set<number>();
+        const refusals: Array<{ readonly iterationIndex: number; readonly reason: string }> = [];
+        const refuse = (iteration: EpicRunIteration, reason: string) => {
+          abandonedIterationIndexes.add(iteration.iterationIndex);
+          refusals.push({ iterationIndex: iteration.iterationIndex, reason });
+        };
+
+        for (const iteration of inFlight) {
+          const issueId = iteration.issueId;
+          // A synthetic row (an unrecognised `bd ready`) names no child, so
+          // there is no work to pick back up.
+          if (issueId === null) {
+            refuse(iteration, "no-child");
+            continue;
+          }
+          const worktreePath = iteration.worktreePath ?? null;
+          // A parallel worker commits in its own worktree. Without one there
+          // is nothing to adopt, and provisioning a fresh one would strand
+          // whatever the dead worker had already committed.
+          if (worktreePath === null && !sequential) {
+            refuse(iteration, "no-worktree");
+            continue;
+          }
+          if (worktreePath !== null && missingWorktreePaths.has(worktreePath)) {
+            refuse(iteration, "worktree-missing");
+            continue;
+          }
+          const spent =
+            iteration.resumeCount ??
+            (spentByChild === null ? null : (spentByChild.get(issueId) ?? 0));
+          if (spent === null || spent >= MAX_RESUMES_PER_ITERATION) {
+            refuse(iteration, "resume-budget-spent");
+            continue;
+          }
+          resumedWorkers.push({
+            issueId,
+            iterationIndex: iteration.iterationIndex,
+            threadId: iteration.threadId,
+            branch: iteration.branch ?? null,
+            worktreePath,
+            startedAt: iteration.startedAt,
+            resumeCount: spent,
+          });
+        }
+        return { resumedWorkers, abandonedIterationIndexes, refusals } as const;
+      });
+
     const start: EpicRunnerShape["start"] = () =>
       Effect.gen(function* () {
         const runs = yield* store.listRuns({}).pipe(Effect.mapError(storeError("listRuns")));
@@ -752,22 +872,24 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 .filter((path): path is string => path !== null),
             ),
           ];
-          const acquireError = yield* launch
+          const configSnapshot = launch.persistedConfigSnapshot(run);
+          const acquired = yield* launch
             .acquireLease(
               run.runId,
               { cwd: run.cwd, epicId: run.epicId },
-              launch.persistedConfigSnapshot(run),
+              configSnapshot,
               // This is a resume: the run's own integration branch and
               // worktrees are where it left off, not leftovers to reconcile.
               { worktreePaths: resumeWorktreePaths },
             )
             .pipe(
               Effect.match({
-                onFailure: (error) => error,
-                onSuccess: () => null,
+                onFailure: (error) => ({ _tag: "blocked" as const, error }),
+                onSuccess: (lease) => ({ _tag: "leased" as const, lease }),
               }),
             );
-          if (acquireError !== null) {
+          if (acquired._tag === "blocked") {
+            const acquireError = acquired.error;
             const error =
               acquireError._tag === "EpicRunLeaseHeld" ? acquireError.mappedError : acquireError;
             // `paused`, not `failed`: the blocker is almost always something an
@@ -807,11 +929,35 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             continue;
           }
           yield* Effect.gen(function* () {
+            const { resumedWorkers, abandonedIterationIndexes, refusals } =
+              yield* classifyInterruptedIterations({
+                runId: run.runId,
+                inFlight,
+                missingWorktreePaths: new Set(acquired.lease.missingResumeWorktreePaths),
+                sequential: configSnapshot.config.execution.sequential,
+              });
+            yield* Effect.logInfo("epic.runner.restart-resume", {
+              runId: run.runId,
+              epicId: run.epicId,
+              resumed: resumedWorkers.length,
+              abandoned: abandonedIterationIndexes.size,
+              workers: resumedWorkers.map((worker) => ({
+                iterationIndex: worker.iterationIndex,
+                threadId: worker.threadId,
+                issueId: worker.issueId,
+                resumeCount: worker.resumeCount,
+              })),
+              refusals,
+            });
+            // Only the rows nothing will continue. Abandoning a resumable row
+            // would stop the very session the resume is about to pick up, and
+            // un-claim the child out from under it.
             yield* abandonRunningIterations(
               run.runId,
               "abandoned by server restart",
               "server-restart",
               "restart",
+              abandonedIterationIndexes,
             );
             // Before the loop, not inside it: the first drain is what a leaked
             // slot silently blocks.
@@ -820,7 +966,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             // the service cgroup, so a `systemctl --user restart` leaves their
             // scope units loaded. They hold this run's own identity, and a
             // fresh probe would call that a fatal collision.
-            yield* forkLoop(run.runId, { reclaimOwnScopes: true });
+            yield* forkLoop(run.runId, { reclaimOwnScopes: true, resumedWorkers });
           }).pipe(releaseLeaseOnFailure(run.runId));
         }
 

@@ -68,6 +68,23 @@ export interface EpicRunLeaseResume {
   readonly worktreePaths: ReadonlyArray<string>;
 }
 
+/**
+ * What a granted lease tells its caller about the resume it was asked for.
+ *
+ * Preflight already probed every path in {@link EpicRunLeaseResume.worktreePaths}
+ * against `git worktree list` and the filesystem, so reporting the misses here
+ * costs nothing and spares the boot path a second probe. A launch always reads
+ * an empty array.
+ */
+export interface EpicRunLeaseAcquired {
+  /**
+   * The resume worktrees git no longer lists, or that are gone from disk. The
+   * boot path cannot continue the agents that were working in them, so it
+   * abandons those rows and lets the loop dispatch their children fresh.
+   */
+  readonly missingResumeWorktreePaths: ReadonlyArray<string>;
+}
+
 export interface EpicRunLeaseHeld {
   readonly _tag: "EpicRunLeaseHeld";
   readonly mappedError: EpicRunPreflightBlockedError;
@@ -242,6 +259,11 @@ export const makeEpicRunnerLaunch = (deps: {
         }),
       );
     leases.set(runId, lease);
+    return {
+      missingResumeWorktreePaths: result.warnings.flatMap((warning) =>
+        warning._tag === "resume_worktree_missing" ? [...warning.paths] : [],
+      ),
+    } satisfies EpicRunLeaseAcquired;
   });
 
   const readConfigSnapshot = Effect.fn("EpicRunner.readConfigSnapshot")(function* (

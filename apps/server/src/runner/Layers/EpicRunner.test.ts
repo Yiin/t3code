@@ -6,8 +6,10 @@ import {
   EpicRunConfig as EpicRunConfigSchema,
   EpicRunId,
   EpicRunPreflightError,
+  EventId,
   MessageId,
   ProjectId,
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -19,6 +21,7 @@ import {
   type ProjectionThreadTurnStatus,
   type EpicRunPreflightInput,
   type EpicRunPreflightResult,
+  type ProviderSessionResumeOutcome,
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
@@ -333,6 +336,14 @@ function createHarness(input: {
   readonly revListCommitCounts?: Readonly<Record<string, number>>;
   /** Per-cwd `git rev-parse` head responses; fallback is the harness head. */
   readonly repositoryHeads?: Readonly<Record<string, string>>;
+  /** Paths `git worktree list --porcelain` reports; absent means none. */
+  readonly registeredWorktrees?: ReadonlyArray<string>;
+  /**
+   * What a `thread.session.resume` settles on, per thread. Threads not listed
+   * settle `resumed`, which is what a live provider session does after a
+   * restart that left its cursor intact.
+   */
+  readonly resumeOutcomes?: Readonly<Record<string, ProviderSessionResumeOutcome>>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   if (input.failAllocationFor !== undefined) {
@@ -594,6 +605,41 @@ function createHarness(input: {
         ) {
           stopsWithRunningSubagents.push(command.threadId);
         }
+        // The real reactor answers a resume long after `dispatch` returns, by
+        // appending a durable activity to the thread. Mirror that: the runner
+        // polls the detail snapshot for it, so it has to be findable there.
+        if (command.type === "thread.session.resume") {
+          const base =
+            details.get(command.threadId) ??
+            makeThreadDetail({
+              threadId: command.threadId,
+              turnId: TurnId.make(`${command.threadId}-turn-interrupted`),
+              turnState: "completed",
+              text: null,
+              streaming: false,
+              latestTurnPointerNull: true,
+              sessionStatus: "stopped",
+            });
+          details.set(command.threadId, {
+            ...base,
+            activities: [
+              ...base.activities,
+              {
+                id: EventId.make(`${command.threadId}-resume-settled-${String(sequence)}`),
+                tone: "info" as const,
+                kind: PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+                summary: "resume settled",
+                payload: {
+                  threadId: command.threadId,
+                  requestCommandId: command.commandId,
+                  outcome: input.resumeOutcomes?.[command.threadId] ?? { _tag: "resumed" as const },
+                },
+                turnId: null,
+                createdAt: NOW,
+              },
+            ],
+          });
+        }
         const targetsOriginThread =
           command.type === "thread.turn.start" &&
           [...store.runs.values()].some((run) => run.originThreadId === command.threadId);
@@ -804,6 +850,24 @@ function createHarness(input: {
             stdout: "",
             stderr: "",
             code: (ref.includes("cook-epic-integration-") ? 1 : 0) as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
+        // `worktree list` is how a resume proves the worktree it means to
+        // adopt is still attached to the run's checkout.
+        if (
+          request.command === "git" &&
+          request.args.includes("worktree") &&
+          request.args.includes("list")
+        ) {
+          return {
+            stdout: (input.registeredWorktrees ?? [])
+              .map((worktreePath) => `worktree ${worktreePath}\n`)
+              .join(""),
+            stderr: "",
+            code: 0 as never,
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1041,13 +1105,32 @@ function createHarness(input: {
           const callIndex = preflightModes.length;
           preflightModes.push(preflightInput.mode);
           preflightInputs.push(preflightInput);
-          return input.preflightError === undefined
-            ? Effect.succeed(
-                input.preflightResults?.[Math.min(callIndex, input.preflightResults.length - 1)] ??
-                  input.preflightResult ??
-                  stubPreflightResult(),
-              )
-            : Effect.fail(input.preflightError);
+          if (input.preflightError !== undefined) return Effect.fail(input.preflightError);
+          const configured =
+            input.preflightResults?.[Math.min(callIndex, input.preflightResults.length - 1)] ??
+            input.preflightResult;
+          if (configured !== undefined) return Effect.succeed(configured);
+          // The real preflight probes each resume worktree against `git
+          // worktree list` and the filesystem. Derive the same warning from
+          // the same source the process stub answers `worktree list` from, so
+          // a test cannot describe a worktree as present here and absent there.
+          const missingResumeWorktrees = (preflightInput.resume?.worktreePaths ?? []).filter(
+            (worktreePath) => !(input.registeredWorktrees ?? []).includes(worktreePath),
+          );
+          return Effect.succeed(
+            stubPreflightResult(
+              missingResumeWorktrees.length === 0
+                ? undefined
+                : {
+                    warnings: [
+                      {
+                        _tag: "resume_worktree_missing",
+                        paths: [...missingResumeWorktrees].toSorted(),
+                      },
+                    ],
+                  },
+            ),
+          );
         },
       }),
     ),
@@ -5512,6 +5595,317 @@ describe("EpicRunner", () => {
       );
     }).pipe(Effect.provide(harness.layer));
   });
+
+  // ─── Restart resume ──────────────────────────────────────────────────────
+  //
+  // Workers live in `cook-epic.slice`, so a `systemctl --user restart` kills
+  // the server and leaves their threads, sessions and worktrees intact. The
+  // boot path picks each one back up instead of throwing its work away.
+
+  const interruptedRun = (input: {
+    readonly runId: EpicRunId;
+    readonly cwd: string;
+    readonly workers: number;
+    readonly overrides?: Partial<EpicRun>;
+  }): EpicRun => ({
+    runId: input.runId,
+    epicId: "epic-1",
+    projectId,
+    cwd: input.cwd,
+    prompt: "do one unit of work",
+    orientationFile: null,
+    modelSelection,
+    runtimeMode: "full-access",
+    config: {
+      ...DEFAULT_EPIC_RUN_CONFIG,
+      parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: input.workers },
+    },
+    configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+    originThreadId: null,
+    status: "running",
+    maxIterations: 10,
+    workers: input.workers,
+    iterationsDispatched: input.workers,
+    iterationsCompleted: 0,
+    currentThreadId: null,
+    currentTurnStartedAt: null,
+    consecutiveFailures: 0,
+    noCommitStreak: 0,
+    infraStreak: 0,
+    lastError: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...input.overrides,
+  });
+
+  const interruptedRow = (input: {
+    readonly runId: EpicRunId;
+    readonly iterationIndex: number;
+    readonly worktreePath: string | null;
+    readonly resumeCount?: number;
+  }): EpicRunIteration => ({
+    runId: input.runId,
+    iterationIndex: input.iterationIndex,
+    threadId: ThreadId.make(`epic-run-${input.runId}-${input.iterationIndex}`),
+    issueId: `child-${input.iterationIndex}`,
+    workerId: `epic-run-${input.runId}-${input.iterationIndex}`,
+    branch: `epic/child-${input.iterationIndex}`,
+    worktreePath: input.worktreePath,
+    turnStatus: "running",
+    summary: null,
+    why: null,
+    failureReason: null,
+    ...(input.resumeCount === undefined ? {} : { resumeCount: input.resumeCount }),
+    startedAt: NOW,
+    finishedAt: null,
+  });
+
+  /** `bd update <id> --status open --assignee ""` — the un-claim a resume must not send. */
+  const unclaimRequests = (
+    harness: ReturnType<typeof createHarness>,
+    issueId: string,
+  ): ReadonlyArray<ProcessRunner.ProcessRunInput> =>
+    harness.processRequests.filter(
+      (request) =>
+        request.command === "bd" &&
+        request.args[0] === "update" &&
+        request.args[1] === issueId &&
+        request.args.includes("--status") &&
+        request.args[request.args.indexOf("--status") + 1] === "open",
+    );
+
+  const firstIndexOf = (
+    harness: ReturnType<typeof createHarness>,
+    type: OrchestrationCommand["type"],
+    threadId: ThreadId,
+  ) =>
+    harness.commands.findIndex(
+      (command) => command.type === type && "threadId" in command && command.threadId === threadId,
+    );
+
+  it.live("continues every interrupted worker on its own thread after a restart", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      const runId = EpicRunId.make("run-restart-resume");
+      const worktreePaths = [0, 1].map((index) => path.join(root, `child-${index}`));
+      yield* Effect.forEach(worktreePaths, (worktreePath) =>
+        fileSystem.makeDirectory(worktreePath, { recursive: true }),
+      );
+      const harness = createHarness({
+        workspaceRoot: root,
+        // Stalled, so both resumed turns are still in flight while this
+        // asserts. The end of an iteration stops its own session, and that
+        // stop would be indistinguishable from a reconciliation teardown.
+        script: [
+          { text: null, head: "head-0", stall: true },
+          { text: null, head: "head-0", stall: true },
+        ],
+        readyOutput: "[]",
+        registeredWorktrees: worktreePaths,
+        seedRuns: [interruptedRun({ runId, cwd: root, workers: 2 })],
+        seedIterations: worktreePaths.map((worktreePath, iterationIndex) =>
+          interruptedRow({ runId, iterationIndex, worktreePath, resumeCount: 0 }),
+        ),
+        childStatuses: { "child-0": "in_progress", "child-1": "in_progress" },
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.commandsOfType("thread.turn.start").length === 2);
+        yield* settle;
+
+        // The lease was taken as a resume, in the mode the run persisted.
+        assert.strictEqual(harness.preflightModes[0], "parallel");
+        assert.strictEqual(harness.preflightInputs[0]?.intent, "resume");
+        // Nothing fresh was started and nothing in flight was torn down.
+        assert.lengthOf(harness.commandsOfType("thread.create"), 0);
+        assert.lengthOf(harness.commandsOfType("thread.turn.interrupt"), 0);
+        assert.lengthOf(harness.commandsOfType("thread.session.stop"), 0);
+        assert.deepStrictEqual(
+          harness
+            .commandsOfType("thread.session.resume")
+            .map((command) => command.threadId)
+            .toSorted(),
+          [`epic-run-${runId}-0`, `epic-run-${runId}-1`],
+        );
+        for (const iterationIndex of [0, 1]) {
+          const threadId = ThreadId.make(`epic-run-${runId}-${iterationIndex}`);
+          const turn = harness
+            .commandsOfType("thread.turn.start")
+            .find((command) => command.threadId === threadId);
+          assert.isTrue(turn?.message.messageId.startsWith(`${threadId}-resume-`));
+          // Never the id the interrupted iteration's own prompt already used.
+          assert.notStrictEqual(turn?.message.messageId, `${threadId}-prompt`);
+          // The claim survived: nothing sent it back to the ready pool.
+          assert.lengthOf(unclaimRequests(harness, `child-${iterationIndex}`), 0);
+          assert.strictEqual(harness.childStatus(`child-${iterationIndex}`), "in_progress");
+        }
+        // One iteration across two process lifetimes: the same two rows, at
+        // the same indexes, each charged one resume.
+        assert.deepStrictEqual(
+          harness.store.iterations.map((row) => [
+            row.iterationIndex,
+            row.turnStatus,
+            row.resumeCount,
+          ]),
+          [
+            [0, "running", 1],
+            [1, "running", 1],
+          ],
+        );
+        // A resume spends no dispatch budget: the iterations were charged
+        // before the restart.
+        assert.strictEqual(harness.store.runs.get(runId)?.iterationsDispatched, 2);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("abandons the row whose worktree is gone and resumes its sibling", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      const runId = EpicRunId.make("run-restart-resume-mixed");
+      const livePath = path.join(root, "child-0");
+      const goneWorktreePath = path.join(root, "child-1");
+      yield* fileSystem.makeDirectory(livePath, { recursive: true });
+      const harness = createHarness({
+        workspaceRoot: root,
+        script: [{ text: null, head: "head-0", stall: true }],
+        readyOutput: "[]",
+        // Only the survivor is still attached to the checkout.
+        registeredWorktrees: [livePath],
+        seedRuns: [interruptedRun({ runId, cwd: root, workers: 2 })],
+        seedIterations: [
+          interruptedRow({ runId, iterationIndex: 0, worktreePath: livePath, resumeCount: 0 }),
+          interruptedRow({
+            runId,
+            iterationIndex: 1,
+            worktreePath: goneWorktreePath,
+            resumeCount: 0,
+          }),
+        ],
+        childStatuses: { "child-0": "in_progress", "child-1": "in_progress" },
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.commandsOfType("thread.turn.start").length === 1);
+        yield* settle;
+
+        const survivor = ThreadId.make(`epic-run-${runId}-0`);
+        const orphan = ThreadId.make(`epic-run-${runId}-1`);
+        assert.deepStrictEqual(
+          harness.commandsOfType("thread.session.resume").map((command) => command.threadId),
+          [survivor],
+        );
+        // The orphan takes exactly the path every restart used to take.
+        assert.isAtLeast(firstIndexOf(harness, "thread.turn.interrupt", orphan), 0);
+        assert.isAtLeast(firstIndexOf(harness, "thread.session.stop", orphan), 0);
+        assert.lengthOf(unclaimRequests(harness, "child-1"), 1);
+        assert.strictEqual(harness.childStatus("child-1"), "open");
+        // The survivor is untouched by that reconciliation.
+        assert.strictEqual(firstIndexOf(harness, "thread.turn.interrupt", survivor), -1);
+        assert.strictEqual(firstIndexOf(harness, "thread.session.stop", survivor), -1);
+        assert.lengthOf(unclaimRequests(harness, "child-0"), 0);
+        assert.deepStrictEqual(
+          harness.store.iterations.map((row) => [row.iterationIndex, row.turnStatus]),
+          [
+            [0, "running"],
+            [1, "abandoned"],
+          ],
+        );
+        assert.strictEqual(harness.store.iterations[1]?.failureReason, "server-restart");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live("abandons an interrupted row that has already spent its resume budget", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      const runId = EpicRunId.make("run-restart-resume-budget");
+      const worktreePath = path.join(root, "child-0");
+      yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
+      const harness = createHarness({
+        workspaceRoot: root,
+        script: [],
+        readyOutput: "[]",
+        registeredWorktrees: [worktreePath],
+        seedRuns: [interruptedRun({ runId, cwd: root, workers: 1 })],
+        // A row this process already resumed once. Resuming it again would
+        // spend a second full iteration on a thread that keeps dying.
+        seedIterations: [
+          interruptedRow({ runId, iterationIndex: 0, worktreePath, resumeCount: 1 }),
+        ],
+        childStatuses: { "child-0": "in_progress" },
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+
+        assert.lengthOf(harness.commandsOfType("thread.session.resume"), 0);
+        assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+        assert.strictEqual(harness.store.iterations[0]?.failureReason, "server-restart");
+        // Unchanged, because nothing reopened the row.
+        assert.strictEqual(harness.store.iterations[0]?.resumeCount, 1);
+        assert.strictEqual(harness.childStatus("child-0"), "open");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  // The boot path must not route through `resumeRun`, which zeroes all three
+  // budgets. A run in the no-commit gutter would otherwise restart its way out
+  // of it, forever.
+  it.live("keeps the failure budgets a restarted run had already spent", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* makeTempWorkspace;
+      const runId = EpicRunId.make("run-restart-resume-streaks");
+      const worktreePath = path.join(root, "child-0");
+      yield* fileSystem.makeDirectory(worktreePath, { recursive: true });
+      const harness = createHarness({
+        workspaceRoot: root,
+        // Stalled, so the run is still mid-iteration when the budgets are read.
+        script: [{ text: null, head: "head-0", stall: true }],
+        readyOutput: "[]",
+        registeredWorktrees: [worktreePath],
+        seedRuns: [
+          interruptedRun({
+            runId,
+            cwd: root,
+            workers: 1,
+            overrides: { consecutiveFailures: 2, noCommitStreak: 1, infraStreak: 1 },
+          }),
+        ],
+        seedIterations: [
+          interruptedRow({ runId, iterationIndex: 0, worktreePath, resumeCount: 0 }),
+        ],
+        childStatuses: { "child-0": "in_progress" },
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.commandsOfType("thread.turn.start").length === 1);
+        yield* settle;
+
+        const run = harness.store.runs.get(runId)!;
+        assert.strictEqual(run.status, "running");
+        assert.strictEqual(run.consecutiveFailures, 2);
+        assert.strictEqual(run.noCommitStreak, 1);
+        assert.strictEqual(run.infraStreak, 1);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   it.live("stops at the dispatch cap after repeated restart abandonment", () => {
     const runId = EpicRunId.make("run-restart-cap");
