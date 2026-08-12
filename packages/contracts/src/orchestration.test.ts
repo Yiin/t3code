@@ -1038,6 +1038,64 @@ it("ignores a replayed child-thread link and an undecodable payload", () => {
   );
 });
 
+it("keeps a background Bash task out of the subagent read model", () => {
+  const bashStarted = subagentActivity({
+    id: "evt-bash-task-started",
+    kind: "task.started",
+    payload: {
+      taskId: "bredvmy3q",
+      taskType: "local_bash",
+      detail: "Sleep 120 seconds then echo, in background",
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  const bashCompleted = subagentActivity({
+    id: "evt-bash-task-completed",
+    kind: "task.completed",
+    payload: {
+      taskId: "bredvmy3q",
+      taskType: "local_bash",
+      status: "completed",
+      summary: "finished",
+    },
+    createdAt: "2026-01-01T00:00:12.000Z",
+  });
+
+  // The whole lifecycle, in order, leaves no row behind.
+  assert.deepStrictEqual(
+    applySubagentActivity(applySubagentActivity([], bashStarted), bashCompleted),
+    [],
+  );
+  // The completion alone must not create one either: the read model is
+  // rebuilt from an activity window that can start after task.started.
+  assert.deepStrictEqual(applySubagentActivity([], bashCompleted), []);
+
+  // A real subagent running alongside it still folds, and it is the only row.
+  const subagents = applySubagentActivity(
+    applySubagentActivity(applySubagentActivity([], bashStarted), subagentStarted),
+    bashCompleted,
+  );
+  assert.strictEqual(subagents.length, 1);
+  assert.strictEqual(subagents[0]?.subagentId, "a027ffbeca4f867d2");
+});
+
+it("folds a task.started that names no task type", () => {
+  // Only Claude sets a task kind; every other provider reports subagents
+  // without one, so an absent kind must stay a subagent.
+  const started = applySubagentActivity(
+    [],
+    subagentActivity({
+      id: "evt-untyped-task-started",
+      kind: "task.started",
+      payload: { taskId: "prime-task-1", detail: "Inspect parser", subagentType: "explorer" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }),
+  );
+
+  assert.strictEqual(started.length, 1);
+  assert.strictEqual(started[0]?.agentType, "explorer");
+});
+
 it.effect("round-trips subagent steer activity payloads", () =>
   Effect.gen(function* () {
     const requested = {

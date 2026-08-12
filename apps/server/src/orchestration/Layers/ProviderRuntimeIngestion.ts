@@ -88,6 +88,7 @@ interface PendingToolUpdate {
 interface RememberedTaskMetadata {
   readonly description?: string | undefined;
   readonly subagentType?: string | undefined;
+  readonly taskType?: string | undefined;
 }
 
 // Task metadata that arrives on task.started/task.progress but not on the
@@ -96,6 +97,11 @@ interface RememberedTaskMetadata {
 export interface TaskActivityMetadata {
   readonly title?: string | undefined;
   readonly subagentType?: string | undefined;
+  // The task kind from task.started. `applySubagentActivity` reads it off the
+  // completion payload to keep a non-agent task (a backgrounded Bash command)
+  // out of the subagent read model when its completion is the first activity
+  // the fold sees.
+  readonly taskType?: string | undefined;
 }
 
 // Fallback when the in-memory metadata cache no longer has the task name or
@@ -111,6 +117,7 @@ function findTaskMetadataInActivities(
   }
   let title: string | undefined;
   let subagentType: string | undefined;
+  let taskType: string | undefined;
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index];
     if (!activity || (activity.kind !== "task.started" && activity.kind !== "task.progress")) {
@@ -123,6 +130,7 @@ function findTaskMetadataInActivities(
             title?: unknown;
             detail?: unknown;
             subagentType?: unknown;
+            taskType?: unknown;
           })
         : undefined;
     if (payload?.taskId !== taskId) {
@@ -142,13 +150,17 @@ function findTaskMetadataInActivities(
     if (subagentType === undefined && typeof payload.subagentType === "string") {
       subagentType = payload.subagentType;
     }
-    if (title !== undefined && subagentType !== undefined) {
+    if (taskType === undefined && typeof payload.taskType === "string") {
+      taskType = payload.taskType;
+    }
+    if (title !== undefined && subagentType !== undefined && taskType !== undefined) {
       break;
     }
   }
   return {
     ...(title !== undefined ? { title } : {}),
     ...(subagentType !== undefined ? { subagentType } : {}),
+    ...(taskType !== undefined ? { taskType } : {}),
   };
 }
 
@@ -714,6 +726,9 @@ export function runtimeEventToActivities(
             status: event.payload.status,
             ...(taskContext?.title ? { title: truncateDetail(taskContext.title, 120) } : {}),
             ...(taskContext?.subagentType ? { subagentType: taskContext.subagentType } : {}),
+            // Carried forward from task.started so `applySubagentActivity` can
+            // tell a settled subagent from a settled background Bash command.
+            ...(taskContext?.taskType ? { taskType: taskContext.taskType } : {}),
             // summary + detail mirror task.progress: clients label the row from
             // summary and keep detail for the preview/expanded body.
             ...(event.payload.summary
@@ -994,6 +1009,9 @@ const make = Effect.gen(function* () {
             : {}),
           ...((metadata.subagentType ?? current?.subagentType)
             ? { subagentType: metadata.subagentType ?? current?.subagentType }
+            : {}),
+          ...((metadata.taskType ?? current?.taskType)
+            ? { taskType: metadata.taskType ?? current?.taskType }
             : {}),
         });
       }),
@@ -2439,10 +2457,13 @@ const make = Effect.gen(function* () {
       if (event.type === "task.started" || event.type === "task.progress") {
         const description = event.payload.description?.trim();
         const subagentType = event.payload.subagentType;
-        if (description || subagentType) {
+        // Only task.started carries the task kind; task.progress has none.
+        const taskType = event.type === "task.started" ? event.payload.taskType : undefined;
+        if (description || subagentType || taskType) {
           yield* rememberTaskMetadata(thread.id, event.payload.taskId, {
             ...(description ? { description } : {}),
             ...(subagentType ? { subagentType } : {}),
+            ...(taskType ? { taskType } : {}),
           });
         }
         if (event.payload.toolUseId && subagentType) {
@@ -2463,10 +2484,11 @@ const make = Effect.gen(function* () {
         const remembered = yield* lookupTaskMetadata(thread.id, event.payload.taskId);
         let title = remembered?.description;
         let subagentType = remembered?.subagentType;
+        let taskType = remembered?.taskType;
         // Fall back to persisted activities only when the title is gone: the
-        // cache remembers both fields together, so a present title with an
-        // absent subagentType means the wire never carried one and the
-        // persisted payloads will not have it either.
+        // cache remembers all three fields together, so a present title with an
+        // absent subagentType or taskType means the wire never carried one and
+        // the persisted payloads will not have it either.
         if (!title) {
           const threadDetail = yield* getLoadedThreadDetail();
           const persisted = findTaskMetadataInActivities(
@@ -2475,10 +2497,12 @@ const make = Effect.gen(function* () {
           );
           title = persisted.title;
           subagentType = subagentType ?? persisted.subagentType;
+          taskType = taskType ?? persisted.taskType;
         }
         taskContext = {
           ...(title ? { title } : {}),
           ...(subagentType ? { subagentType } : {}),
+          ...(taskType ? { taskType } : {}),
         };
       }
 

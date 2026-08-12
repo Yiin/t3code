@@ -487,7 +487,11 @@ export function mapPrimeRpcEvent(
           payload: {
             taskId: RuntimeTaskId.make(event.taskId),
             ...(event.description ? { description: event.description } : {}),
-            ...(event.agentType ? { taskType: event.agentType } : {}),
+            // `subagentType`, not `taskType`: taskType names the kind of task
+            // (Claude's "local_agent" / "local_bash"), and the subagent read
+            // model only accepts agent kinds. Prime reports the agent's own
+            // type here, which is what `subagentType` means.
+            ...(event.agentType ? { subagentType: event.agentType } : {}),
           },
         }),
       );

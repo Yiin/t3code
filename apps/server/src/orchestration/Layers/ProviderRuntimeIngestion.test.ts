@@ -3664,6 +3664,79 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe("# Plan title");
   });
 
+  it("keeps a background Bash task out of the subagent read model", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // One prompt that launches a Task subagent while a Bash command runs in
+    // the background: the SDK reports both over task.started, and only the
+    // subagent belongs in the roster.
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-bash-task-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-mixed-tasks"),
+      payload: {
+        taskId: "bredvmy3q",
+        description: "Sleep 120 seconds then echo, in background",
+        taskType: "local_bash",
+      },
+    });
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-agent-task-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-mixed-tasks"),
+      payload: {
+        taskId: "add5dd01c5351a641",
+        description: "Run sleep command",
+        taskType: "local_agent",
+        subagentType: "general-purpose",
+      },
+    });
+
+    // The wire completion carries no task kind; ingestion copies it forward
+    // from task.started so the fold can still reject the Bash task.
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-bash-task-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-mixed-tasks"),
+      payload: {
+        taskId: "bredvmy3q",
+        status: "completed",
+        summary: "finished",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-bash-task-completed",
+      ),
+    );
+
+    expect(thread.subagents.map((subagent) => subagent.subagentId)).toEqual(["add5dd01c5351a641"]);
+    expect(thread.subagents[0]?.agentType).toBe("general-purpose");
+
+    // The work log still carries the Bash task; only the roster rejects it.
+    const completed = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-bash-task-completed",
+    );
+    const completedPayload =
+      completed?.payload && typeof completed.payload === "object"
+        ? (completed.payload as Record<string, unknown>)
+        : undefined;
+    expect(completedPayload?.taskType).toBe("local_bash");
+    expect(completedPayload?.title).toBe("Sleep 120 seconds then echo, in background");
+  });
+
   it("titles task activities with the task description, including on completion", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

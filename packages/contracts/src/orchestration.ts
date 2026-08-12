@@ -586,12 +586,38 @@ export type SubagentTaskProgressActivityPayload = typeof SubagentTaskProgressAct
 export const SubagentTaskCompletedActivityPayload = Schema.Struct({
   taskId: TrimmedNonEmptyString,
   status: Schema.Literals(["completed", "failed", "stopped"]),
+  /**
+   * Copied forward from the task's `task.started` by ingestion: the wire
+   * completion event carries no task kind, and the fold below needs it to keep
+   * a non-agent task out of the read model when its completion is the first
+   * activity that reaches the fold.
+   */
+  taskType: Schema.optional(TrimmedNonEmptyString),
   title: Schema.optional(TrimmedNonEmptyString),
   summary: Schema.optional(TrimmedNonEmptyString),
   detail: Schema.optional(TrimmedNonEmptyString),
   usage: Schema.optional(Schema.Unknown),
 });
 export type SubagentTaskCompletedActivityPayload = typeof SubagentTaskCompletedActivityPayload.Type;
+
+/**
+ * Task kinds that mean "a subagent is running".
+ *
+ * Providers report other background work over the same `task.*` events: the
+ * Claude SDK sends `task_started` with `task_type: "local_bash"` for every
+ * backgrounded Bash command, and `task_type: "local_workflow"` for a workflow
+ * script. Folding those into the subagent read model listed shell jobs in the
+ * roster as untyped "Subagent" rows and made the composer banner count
+ * disagree with the popover.
+ *
+ * Allowlist, not denylist, so a task kind the SDK adds later stays out until
+ * someone names it here. A task with no kind at all still counts: only Claude
+ * sets one, and every other provider reports subagents without it.
+ */
+export const SUBAGENT_TASK_TYPES: ReadonlyArray<string> = ["local_agent"];
+
+export const isSubagentTaskType = (taskType: string | undefined): boolean =>
+  taskType === undefined || SUBAGENT_TASK_TYPES.includes(taskType);
 
 export const SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND = "subagent.steer.requested";
 export const SUBAGENT_STEER_DELIVERED_ACTIVITY_KIND = "subagent.steer.delivered";
@@ -713,7 +739,8 @@ const replaceSubagentAt = (
  * reducer all call this one function so their views cannot drift (precedent:
  * the build/parse pair in `epicRuns.ts`).
  *
- * Total and replay-safe: non-`task.*` kinds and undecodable payloads return
+ * Total and replay-safe: non-`task.*` kinds, non-subagent task kinds (see
+ * `SUBAGENT_TASK_TYPES`) and undecodable payloads return
  * the input array unchanged (same reference), applying the same activity
  * twice is a no-op the second time, and a `task.progress` arriving after the
  * row settled (reconnect replay) is ignored rather than reviving the row.
@@ -727,6 +754,7 @@ export const applySubagentActivity = (
       const decoded = decodeSubagentTaskStartedPayload(activity.payload);
       if (Option.isNone(decoded)) return subagents;
       const payload = decoded.value;
+      if (!isSubagentTaskType(payload.taskType)) return subagents;
       const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
       const existing = index === -1 ? undefined : subagents[index];
       if (existing === undefined) {
@@ -807,6 +835,10 @@ export const applySubagentActivity = (
       const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
       const existing = index === -1 ? undefined : subagents[index];
       if (existing === undefined) {
+        // A backgrounded Bash command settles with its own `task.completed`,
+        // and its `task.started` never opened a row. Creating one here would
+        // put the finished shell job in the roster after the fact.
+        if (!isSubagentTaskType(payload.taskType)) return subagents;
         return [
           ...subagents,
           {
