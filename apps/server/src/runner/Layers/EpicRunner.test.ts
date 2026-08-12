@@ -998,8 +998,32 @@ function createHarness(input: {
     Layer.provide(NodeServices.layer),
   );
 
+  /**
+   * Run one process lifetime against this harness.
+   *
+   * Everything the harness records — `store`, `heldLocks`, `dispatched`,
+   * `shells`, `details`, `turnsStarted`, `preflightModes`, `processRequests` —
+   * lives in this closure, not in the layer, so building `layer` a second time
+   * gives a second runner that sees the first runner's persisted state.
+   * `makeEpicRunner` scopes every loop to the layer and releases every held
+   * lease in a layer finalizer, so closing one `runLifecycle` scope is exactly
+   * what process death looks like to the lock and to the loops. Two calls in
+   * sequence are a restart.
+   *
+   * Two things to know before scripting one:
+   *
+   * - `simulateTurn` is forked with `Effect.forkDetach`, so a turn that is not
+   *   stalled keeps mutating `head` and `shells` after phase one's scope
+   *   closes. A restart script MUST give the interrupted iteration
+   *   `stall: true`, or phase one's turn settles into phase two's world.
+   * - `turnsStarted` keeps advancing across phases. Phase two consumes
+   *   `script[1]`, not `script[0]`.
+   */
+  const runLifecycle = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provide(effect, layer);
+
   return {
     layer,
+    runLifecycle,
     store,
     turnsStarted: () => turnsStarted,
     activeTurns: () => activeTurns,
@@ -4395,6 +4419,197 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.store.iterations[0]?.failureReason, "cancelled");
     }).pipe(Effect.provide(harness.layer));
   });
+
+  // The restart recipe itself, proven before anything is built on it: one
+  // process starts a run and dies mid-iteration, a second process provides the
+  // same harness layer and picks that run up from what the first one persisted.
+  // Every other restart test seeds the "after" state by hand; this one earns it.
+  it.live("carries a run across two runner lifecycles", () => {
+    const harness = createHarness({
+      // Phase one's iteration has to stall — a settling turn keeps mutating
+      // harness state after phase one's scope closes. See `runLifecycle`.
+      script: [
+        { text: null, head: "head-0", stall: true },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      // The provider subprocess died with the first process, so its claimed
+      // child is still `in_progress` when the second process boots.
+      childStatuses: { "child-1": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* harness.runLifecycle(
+        Effect.gen(function* () {
+          const started = yield* startRun(2);
+          yield* waitFor(
+            () => harness.turnsStarted() === 1 && harness.store.iterations.length === 1,
+          );
+          return started;
+        }),
+      );
+
+      // What process death leaves behind: no lease, no loop, a run still
+      // recorded as running, and an iteration row still recorded as running.
+      assert.strictEqual(harness.activeLockCount(), 0);
+      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "running");
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "running");
+      assert.strictEqual(harness.store.iterations[0]?.issueId, "child-1");
+
+      yield* harness.runLifecycle(
+        Effect.gen(function* () {
+          const runner = yield* EpicRunner;
+          yield* runner.start();
+          yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        }),
+      );
+
+      // The second process reconciled the first process's row and dispatched
+      // its own iteration, consuming `script[1]`.
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "server-restart");
+      assert.strictEqual(harness.childStatus("child-1"), "open");
+      assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
+      assert.strictEqual(harness.turnsStarted(), 2);
+    });
+  });
+
+  // The dangling row this epic exists to fix. A blocked boot preflight fails
+  // the run and releases its child, but never reconciles the iteration row, so
+  // the row stays `running` with nothing running behind it.
+  it.live("fails a running run at boot when preflight reports dirty_tree", () => {
+    const runId = "run-boot-dirty-tree";
+    const staleRun: EpicRun = {
+      runId: EpicRunId.make(runId),
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "running",
+      maxIterations: 2,
+      workers: 1,
+      iterationsDispatched: 1,
+      iterationsCompleted: 0,
+      currentThreadId: ThreadId.make(`epic-run-${runId}-0`),
+      currentTurnStartedAt: NOW,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      seedRuns: [staleRun],
+      seedIterations: [
+        {
+          runId: staleRun.runId,
+          iterationIndex: 0,
+          threadId: ThreadId.make(`epic-run-${runId}-0`),
+          issueId: "child-0",
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: null,
+        },
+      ],
+      preflightResult: stubPreflightResult({
+        ok: false,
+        blockers: [{ _tag: "dirty_tree", paths: ["src/a.ts"] }],
+      }),
+      childStatuses: { "child-0": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+
+      const failed = harness.store.runs.get(runId)!;
+      // The persisted error is the formatted blocker, not its tag: a run that
+      // parks here has to tell a human which paths to clean.
+      assert.strictEqual(
+        failed.lastError,
+        `Epic epic-1 cannot start: ${formatEpicRunPreflightBlocker({
+          _tag: "dirty_tree",
+          paths: ["src/a.ts"],
+        })}`,
+      );
+      assert.include(failed.lastError ?? "", "src/a.ts");
+      // The stranded child comes back, because the failed run's loop never
+      // forks and so its finalizer never releases the claim.
+      assert.strictEqual(harness.childStatus("child-0"), "open");
+      const releaseRequest = harness.processRequests.find(
+        (request) =>
+          request.command === "bd" && request.args[0] === "update" && request.args[1] === "child-0",
+      )!;
+      assert.deepStrictEqual(releaseRequest.args, [
+        "update",
+        "child-0",
+        "--status",
+        "open",
+        "--assignee",
+        "",
+      ]);
+      // The row nobody reconciled. `abandonRunningIterations` runs only after
+      // the lease is acquired, and this boot never gets that far.
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "running");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, null);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  // Today the boot preflight asks for whichever mode the run persisted, so it
+  // asks "is the tree this run works in dirty" with no way to say "this is a
+  // resume, not a fresh launch". Pinned here because a later child changes it.
+  for (const [label, configSnapshot, expectedMode] of [
+    ["parallel", defaultConfigSnapshot, "parallel"],
+    ["sequential", persistedSequentialConfigSnapshot, "sequential"],
+  ] as const) {
+    it.live(`asks the boot preflight for the ${label} mode a ${label} run persisted`, () => {
+      const runId = `run-boot-preflight-${label}`;
+      const staleRun: EpicRun = {
+        runId: EpicRunId.make(runId),
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        orientationFile: null,
+        modelSelection,
+        runtimeMode: "full-access",
+        ...configSnapshot,
+        originThreadId: null,
+        status: "running",
+        maxIterations: 1,
+        workers: 1,
+        iterationsDispatched: 1,
+        iterationsCompleted: 1,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        noCommitStreak: 0,
+        infraStreak: 0,
+        lastError: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      const harness = createHarness({ script: [], seedRuns: [staleRun], readyOutput: "[]" });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.preflightModes.length > 0);
+
+        assert.strictEqual(harness.preflightModes[0], expectedMode);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
 
   it.live("marks an iteration left running by a restart as abandoned and resumes", () => {
     const runId = "run-restart";

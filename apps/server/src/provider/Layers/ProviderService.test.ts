@@ -1546,6 +1546,77 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  // A restart leaves a binding in exactly this shape: written by a process
+  // that is gone, then stopped by the reaper's boot pass, which preserves the
+  // resume cursor. Nothing in this process ever started that session, so the
+  // next turn has to recover it rather than open a blank one — that recovery
+  // is what lets an interrupted epic iteration continue its own agent session.
+  //
+  // The neighbouring recovery tests all call `startSession` first, so the
+  // adapter still knows the thread. This one never does; the persisted binding
+  // is the only evidence the session ever existed.
+  //
+  // The strategy is asserted through the adapter, not through analytics:
+  // `provider.session.recovered` is PostHog-only and no-op in these tests, but
+  // `adopt-existing` calls no `startSession` at all, so one `startSession` call
+  // carrying the persisted cursor can only be the resume path.
+  it.effect("resumes a binding that boot reconciliation stopped", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-boot-reconciled");
+      const resumeCursor = { opaque: "resume-after-boot" };
+
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        adapterKey: "codex-boot-reconciled-adapter",
+        runtimeMode: "full-access",
+        status: "stopped",
+        resumeCursor,
+        runtimePayload: {
+          cwd: "/tmp/project-boot-reconciled",
+          model: "gpt-5.4",
+          activeTurnId: null,
+          // `BOOT_RECONCILE_STOP_REASON` in `ProviderSessionReaper.ts`.
+          lastError: "session interrupted: server restarted while the session was running",
+          t3EnvironmentContext: {
+            projectId: ProjectId.make("project-boot-reconciled"),
+            workspaceRoot: "/tmp/project-boot-reconciled",
+          },
+        },
+      });
+
+      routing.codex.startSession.mockClear();
+      routing.codex.sendTurn.mockClear();
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "first turn after the restart",
+        attachments: [],
+      });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      const resumedStartInput = routing.codex.startSession.mock.calls[0]?.[0];
+      assert.equal(typeof resumedStartInput === "object" && resumedStartInput !== null, true);
+      if (resumedStartInput && typeof resumedStartInput === "object") {
+        const startPayload = resumedStartInput as {
+          provider?: string;
+          cwd?: string;
+          resumeCursor?: unknown;
+          threadId?: string;
+        };
+        // The same conversation: original cursor, original thread, original cwd.
+        assert.equal(startPayload.provider, "codex");
+        assert.equal(startPayload.threadId, threadId);
+        assert.deepEqual(startPayload.resumeCursor, resumeCursor);
+        assert.equal(startPayload.cwd, "/tmp/project-boot-reconciled");
+      }
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
   it.effect("routes explicit claudeAgent provider session starts to the claude adapter", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

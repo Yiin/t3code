@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "./config.ts";
@@ -228,6 +229,48 @@ it.effect("enqueueCommand fails queued work when readiness fails", () =>
 
       const error = yield* Effect.flip(Fiber.join(queuedCommandFiber));
       assert.equal(error.message, "Server runtime startup failed before command readiness.");
+    }),
+  ),
+);
+
+// The boot order is load-bearing for restart recovery, and nothing pinned it.
+// The reaper stops every binding whose process died with the last server, and
+// EpicRunner has to read that settled state — plus the resume cursors the stop
+// preserves — before it reconciles a run. Reordering these would destroy state
+// the runner is about to use, so the order is asserted rather than reviewed.
+it.effect("starts the boot reactors in reconciliation-safe order", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const started: Array<string> = [];
+      const reactorScope = yield* Scope.make("sequential");
+
+      yield* ServerRuntimeStartup.startBootReactors({
+        orchestrationReactor: {
+          start: () =>
+            Effect.sync(() => {
+              started.push("orchestrationReactor");
+            }),
+        },
+        providerSessionReaper: {
+          start: () =>
+            Effect.sync(() => {
+              started.push("providerSessionReaper");
+            }),
+        },
+        epicRunner: {
+          start: () =>
+            Effect.sync(() => {
+              started.push("epicRunner");
+            }),
+        } as never,
+        reactorScope,
+      });
+
+      assert.deepStrictEqual(started, [
+        "orchestrationReactor",
+        "providerSessionReaper",
+        "epicRunner",
+      ]);
     }),
   ),
 );

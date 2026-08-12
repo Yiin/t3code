@@ -290,6 +290,36 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.withSpan(`server.startup.${phase}`),
   );
 
+/**
+ * Start the three reactors that reconcile what a restart left behind, in the
+ * one order that works.
+ *
+ * The reaper's synchronous boot pass stops every binding whose process died
+ * with the last server, and EpicRunner must observe their honest state, so the
+ * reaper goes first. The stop does not destroy the resume cursor — the binding
+ * keeps it — which is what lets an interrupted epic iteration continue its own
+ * agent session instead of starting a blank one. Reordering these three would
+ * quietly destroy state the runner is about to use.
+ *
+ * Extracted so the order is assertable. "starts the boot reactors in
+ * reconciliation-safe order" in `serverRuntimeStartup.test.ts` guards it.
+ *
+ * The first two own scoped fibers and take `reactorScope`. EpicRunner owns its
+ * own layer-scoped fibers, so it needs no scope here — it only reconciles run
+ * state and relaunches the loops the old process was interrupted with.
+ */
+export const startBootReactors = (input: {
+  readonly orchestrationReactor: OrchestrationReactor.OrchestrationReactorShape;
+  readonly providerSessionReaper: ProviderSessionReaper.ProviderSessionReaperShape;
+  readonly epicRunner: EpicRunner.EpicRunnerShape;
+  readonly reactorScope: Scope.Scope;
+}) =>
+  Effect.gen(function* () {
+    yield* input.orchestrationReactor.start().pipe(Scope.provide(input.reactorScope));
+    yield* input.providerSessionReaper.start().pipe(Scope.provide(input.reactorScope));
+    yield* input.epicRunner.start();
+  });
+
 export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const keybindings = yield* Keybindings.Keybindings;
@@ -344,16 +374,7 @@ export const make = Effect.gen(function* () {
     yield* Effect.logDebug("startup phase: starting orchestration reactors");
     yield* runStartupPhase(
       "reactors.start",
-      Effect.gen(function* () {
-        yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
-        // Keep this order: the reaper's synchronous boot pass dispatches
-        // session-stop requests, and EpicRunner must observe their honest state.
-        yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
-        // Owns its own fibers (layer-scoped), so unlike the reactors above it
-        // needs no scope here — it only reconciles run state left by a restart
-        // and relaunches the loops that were interrupted with the old process.
-        yield* epicRunner.start();
-      }),
+      startBootReactors({ orchestrationReactor, providerSessionReaper, epicRunner, reactorScope }),
     );
 
     const welcomeBase = yield* resolveWelcomeBase;
