@@ -86,6 +86,31 @@ export class ProviderAdapterProcessError extends Schema.TaggedErrorClass<Provide
 }
 
 /**
+ * ProviderAdapterResumeError - A resume cursor named a conversation the
+ * provider no longer has.
+ *
+ * Distinct from `ProviderAdapterProcessError` on purpose: the caller of a
+ * resume can fall back to a fresh session, which is the wrong answer for a
+ * runtime that crashed for any other reason. `resumeSessionId` is the
+ * provider-native id that was refused, so a log line names the lost
+ * conversation rather than only the thread that asked for it.
+ */
+export class ProviderAdapterResumeError extends Schema.TaggedErrorClass<ProviderAdapterResumeError>()(
+  "ProviderAdapterResumeError",
+  {
+    provider: Schema.String,
+    threadId: Schema.String,
+    resumeSessionId: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Provider adapter cannot resume (${this.provider}) session ${this.resumeSessionId} for thread ${this.threadId}: ${this.detail}`;
+  }
+}
+
+/**
  * ProviderValidationError - Invalid provider API input.
  */
 export class ProviderValidationError extends Schema.TaggedErrorClass<ProviderValidationError>()(
@@ -192,7 +217,8 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
-  | ProviderAdapterProcessError;
+  | ProviderAdapterProcessError
+  | ProviderAdapterResumeError;
 
 export type ProviderServiceError =
   | ProviderValidationError

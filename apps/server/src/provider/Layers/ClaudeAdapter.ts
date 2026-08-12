@@ -6,6 +6,8 @@
  *
  * @module ClaudeAdapterLive
  */
+import * as NodeOS from "node:os";
+
 import {
   type CanUseTool,
   query,
@@ -99,6 +101,7 @@ import {
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -151,6 +154,9 @@ type PromptQueueItem =
  * ever knew the last ASSISTANT uuid, so it persisted a checkpoint that could
  * never be replayed. The key is gone from the cursor, and a legacy value on
  * an older persisted cursor is discarded rather than carried forward.
+ *
+ * A later `fork` capability has to source its own USER uuid from the session
+ * transcript. There is no checkpoint left in this cursor to read one from.
  */
 interface ClaudeResumeState {
   readonly threadId?: ThreadId;
@@ -733,6 +739,18 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
       ? { turnCount: turnCountValue }
       : {}),
   };
+}
+
+/**
+ * The directory name Claude Code gives one workspace under `projects/`.
+ *
+ * The CLI slugifies the working directory: every character outside
+ * `[A-Za-z0-9]` becomes `-`. Measured against a live `~/.claude/projects`
+ * on 2026-08-12. It is an SDK internal with no published contract, which is
+ * why the only caller (`ensureResumeTranscriptExists`) is fail-open.
+ */
+function claudeTranscriptProjectSlug(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
@@ -3758,6 +3776,61 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return Effect.succeed(context);
   };
 
+  /**
+   * Refuse a resume whose transcript is provably gone, before any query runs.
+   *
+   * `startSession` reports `ready` as soon as `createQuery` returns a runtime.
+   * The SDK only rejects a dead `resume` id once its subprocess reads that id,
+   * which happens on the stream fiber long after the caller holds its session:
+   * a resume against a lost conversation therefore looked healthy and died
+   * asynchronously. Every other adapter answers synchronously, and an epic-run
+   * resume that trusts the `ready` prompts into a dying session.
+   *
+   * So the adapter looks for the transcript itself. The layout is an SDK
+   * internal, so the check is fail-open everywhere it cannot be sure: no
+   * explicit `cwd` (the SDK would inherit the server's own working directory,
+   * which this adapter never chose), a project directory that is not there, or
+   * a filesystem that will not answer all mean "cannot tell" and the resume
+   * proceeds exactly as before. Only "the project directory is there and this
+   * session's file is not" counts as proof, and that is the case a restart
+   * resume actually hits.
+   */
+  const ensureResumeTranscriptExists = Effect.fn("ensureResumeTranscriptExists")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly resumeSessionId: string;
+    readonly cwd: string | undefined;
+  }) {
+    if (input.cwd === undefined) {
+      return;
+    }
+    const configDir = claudeEnvironment.CLAUDE_CONFIG_DIR ?? path.join(NodeOS.homedir(), ".claude");
+    const projectDir = path.join(configDir, "projects", claudeTranscriptProjectSlug(input.cwd));
+    const projectDirExists = yield* fileSystem
+      .exists(projectDir)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (!projectDirExists) {
+      return;
+    }
+    const transcriptPath = path.join(projectDir, `${input.resumeSessionId}.jsonl`);
+    const transcriptExists = yield* fileSystem
+      .exists(transcriptPath)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (transcriptExists) {
+      return;
+    }
+    yield* Effect.logWarning("claude.session.resume.transcript-missing", {
+      threadId: input.threadId,
+      resumeSessionId: input.resumeSessionId,
+      transcriptPath,
+    });
+    return yield* new ProviderAdapterResumeError({
+      provider: PROVIDER,
+      threadId: input.threadId,
+      resumeSessionId: input.resumeSessionId,
+      detail: `Claude has no transcript for this session under ${projectDir}.`,
+    });
+  });
+
   const startSession: ClaudeAdapterShape["startSession"] = Effect.fn("startSession")(
     function* (input) {
       if (input.provider !== undefined && input.provider !== PROVIDER) {
@@ -3793,6 +3866,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const resumeState = readClaudeResumeState(input.resumeCursor);
       const threadId = input.threadId;
       const existingResumeSessionId = resumeState?.resume;
+      if (existingResumeSessionId !== undefined) {
+        yield* ensureResumeTranscriptExists({
+          threadId,
+          resumeSessionId: existingResumeSessionId,
+          cwd: input.cwd,
+        });
+      }
       const newSessionId = existingResumeSessionId === undefined ? yield* randomUUIDv4 : undefined;
       const sessionId = existingResumeSessionId ?? newSessionId;
 
@@ -4290,6 +4370,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         providerInstanceId: boundInstanceId,
         status: "ready",
         runtimeMode: input.runtimeMode,
+        // Claude has no fallback path: a cursor it could read is the session
+        // it continues, and a cursor it could not read leaves it starting a
+        // conversation of its own. So it never reports `started-fresh`.
+        sessionOrigin: existingResumeSessionId !== undefined ? "resumed" : "started",
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(modelSelection?.model ? { model: modelSelection.model } : {}),
         ...(threadId ? { threadId } : {}),

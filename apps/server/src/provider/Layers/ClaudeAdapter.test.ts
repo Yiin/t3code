@@ -41,7 +41,11 @@ import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { DEFAULT_SPAWN_POLICY, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderAdapterResumeError,
+  ProviderAdapterValidationError,
+} from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
 import {
@@ -241,6 +245,36 @@ function makeHarness(config?: {
      */
     countProviderSessionsCreated: () =>
       createInputs.filter((input) => input.options.resume === undefined).length,
+  };
+}
+
+const isResumeError = Schema.is(ProviderAdapterResumeError);
+
+/** A session id Claude Code has a transcript for in the staged config dir. */
+const STAGED_SESSION_ID = "550e8400-e29b-41d4-a716-446655440000";
+/** A well-formed session id no staged config dir has a transcript for. */
+const LOST_SESSION_ID = "7f1f0d2c-8e4a-4c3b-9a10-2b6c5d4e3f21";
+
+/**
+ * A CLAUDE_CONFIG_DIR laid out the way Claude Code lays one out: a
+ * `projects/<slugified cwd>/` directory holding one `<sessionId>.jsonl` per
+ * conversation. The adapter reads this layout to tell a resumable session from
+ * a lost one, so a test that wants either answer has to build the real thing.
+ */
+function stageClaudeConfigDir(input: {
+  readonly cwd: string;
+  readonly sessionIds: ReadonlyArray<string>;
+}): { readonly configDir: string; readonly projectDir: string; readonly cleanup: () => void } {
+  const configDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-config-"));
+  const projectDir = NodePath.join(configDir, "projects", input.cwd.replace(/[^A-Za-z0-9]/g, "-"));
+  NodeFS.mkdirSync(projectDir, { recursive: true });
+  for (const sessionId of input.sessionIds) {
+    NodeFS.writeFileSync(NodePath.join(projectDir, `${sessionId}.jsonl`), "");
+  }
+  return {
+    configDir,
+    projectDir,
+    cleanup: () => NodeFS.rmSync(configDir, { recursive: true, force: true }),
   };
 }
 
@@ -4591,6 +4625,132 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("reports sessionOrigin resumed for a session started from a cursor", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: "resume-thread-1",
+          resume: STAGED_SESSION_ID,
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(session.sessionOrigin, "resumed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reports sessionOrigin started for a session with no cursor", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(session.sessionOrigin, "started");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails a resume whose Claude transcript is gone instead of starting one", () => {
+    const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-resume-cwd-"));
+    const staged = stageClaudeConfigDir({ cwd, sessionIds: [STAGED_SESSION_ID] });
+    const harness = makeHarness({ claudeConfig: { homePath: staged.configDir } });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          staged.cleanup();
+          NodeFS.rmSync(cwd, { recursive: true, force: true });
+        }),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+
+      const result = yield* adapter
+        .startSession({
+          threadId: RESUME_THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          cwd,
+          resumeCursor: {
+            threadId: RESUME_THREAD_ID,
+            resume: LOST_SESSION_ID,
+            turnCount: 3,
+          },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") {
+        return;
+      }
+      // A resume-specific tag, not the generic process error: the caller has
+      // to be able to tell "this conversation is gone" from "Claude crashed".
+      assert.equal(result.failure._tag, "ProviderAdapterResumeError");
+      assert.equal(
+        isResumeError(result.failure) ? result.failure.resumeSessionId : undefined,
+        LOST_SESSION_ID,
+      );
+      // The refusal has to land before the runtime exists, otherwise the
+      // caller is back to a healthy-looking session that dies asynchronously.
+      assert.equal(harness.getLastCreateQueryInput(), undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("resumes anyway when it cannot see Claude's transcripts for the cwd", () => {
+    const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-resume-cwd-"));
+    // A config dir laid out for a different workspace: nothing here says this
+    // cwd's conversation is gone, only that this adapter cannot see it. The
+    // transcript layout is an SDK internal, so uncertainty must not refuse.
+    const staged = stageClaudeConfigDir({ cwd: "/tmp/some-other-workspace", sessionIds: [] });
+    const harness = makeHarness({ claudeConfig: { homePath: staged.configDir } });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          staged.cleanup();
+          NodeFS.rmSync(cwd, { recursive: true, force: true });
+        }),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd,
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: LOST_SESSION_ID,
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(session.sessionOrigin, "resumed");
+      assert.equal(harness.getLastCreateQueryInput()?.options.resume, LOST_SESSION_ID);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("keeps an assistant uuid out of the resume cursor a turn writes", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -5621,16 +5781,28 @@ describe("ClaudeAdapterLive", () => {
     provider: ProviderDriverKind.make("claudeAgent"),
     capabilities: CLAUDE_ADAPTER_CAPABILITIES,
     runScenario: (body) => {
-      const harness = makeHarness();
+      // The fake SDK query accepts any resume id, so a lost conversation can
+      // only be staged on disk: the adapter decides whether a cursor is still
+      // resumable by looking for the transcript Claude Code would have kept.
+      const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-lifecycle-cwd-"));
+      const staged = stageClaudeConfigDir({ cwd, sessionIds: [STAGED_SESSION_ID] });
+      const harness = makeHarness({ claudeConfig: { homePath: staged.configDir } });
       return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            staged.cleanup();
+            NodeFS.rmSync(cwd, { recursive: true, force: true });
+          }),
+        );
         const adapter = yield* ClaudeAdapter;
         return yield* body({
           adapter,
+          startSessionInput: { cwd },
           // Claude's cursor is exactly threadId / resume / turnCount, and the
           // SDK only accepts a uuid as `resume`.
           makeValidCursor: () => ({
             threadId: "thread-claude-lifecycle",
-            resume: "550e8400-e29b-41d4-a716-446655440000",
+            resume: STAGED_SESSION_ID,
             turnCount: 3,
           }),
           // An OpenCode-shaped cursor: readable JSON, but nothing Claude can
@@ -5638,13 +5810,20 @@ describe("ClaudeAdapterLive", () => {
           makeForeignCursor: () => ({ schemaVersion: 99, sessionId: "ses_persisted" }),
           readProviderSessionsCreated: () =>
             Effect.sync(() => harness.countProviderSessionsCreated()),
-          // The fake SDK query accepts any resume id, so it cannot stage a
-          // cursor naming a conversation Claude has lost.
+          unknownCursor: {
+            make: () => ({
+              threadId: "thread-claude-lifecycle",
+              resume: LOST_SESSION_ID,
+              turnCount: 3,
+            }),
+            expect: "typed-error",
+          },
         });
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
       );
     },
+    observes: { unknownCursor: true },
   });
 });
