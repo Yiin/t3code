@@ -298,6 +298,14 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Matches the event store's default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
 const SHELL_RESUME_MAX_GAP = 1_000;
 
+// Same bound for a resuming thread-detail subscription. A thread replay reads
+// and decodes every event in the gap and only then filters to this thread, so
+// an unbounded gap costs the whole event store per subscriber. The allowance is
+// higher than the shell's because the per-event cost here is a decode rather
+// than a refetch, and one busy turn can append a few thousand events; at the
+// measured ~3.4 KB average payload this caps a single resume read near 17 MB.
+const THREAD_RESUME_MAX_GAP = 5_000;
+
 const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.dispatchCommand, AuthOrchestrationOperateScope],
   [ORCHESTRATION_WS_METHODS.getTurnDiff, AuthOrchestrationReadScope],
@@ -1421,14 +1429,70 @@ const makeWsRpcLayer = (
               // catch-up followed by the buffered/ongoing live events. Overlapping
               // events are deduped by sequence on the client.
               //
+              const synchronizedThenLive =
+                input.requestCompletionMarker === true
+                  ? Stream.concat(
+                      Stream.fromEffect(
+                        Queue.offer(liveBuffer, { kind: "synchronized" as const }),
+                      ).pipe(Stream.drain),
+                      bufferedLiveStream,
+                    )
+                  : bufferedLiveStream;
+
+              const loadSnapshotStream = Effect.gen(function* () {
+                const snapshot = yield* projectionSnapshotQuery
+                  .getThreadDetailSnapshot(input.threadId)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new OrchestrationGetSnapshotError({
+                          message: `Failed to load thread ${input.threadId}`,
+                          cause,
+                        }),
+                    ),
+                  );
+
+                if (Option.isNone(snapshot)) {
+                  return yield* new OrchestrationGetSnapshotError({
+                    message: `Thread ${input.threadId} was not found`,
+                    cause: input.threadId,
+                  });
+                }
+
+                return Stream.concat(
+                  Stream.make({
+                    kind: "snapshot" as const,
+                    snapshot: snapshot.value,
+                  }),
+                  synchronizedThenLive,
+                );
+              });
+
               // Read the full range after the cursor (not the store's default
-              // page-bounded limit): the range is normally tiny (a fresh HTTP
-              // snapshot sequence) and the per-thread filter runs after reading,
+              // page-bounded limit): the per-thread filter runs after reading,
               // so a global cap could otherwise omit this thread's events.
               if (input.afterSequence !== undefined) {
                 const afterSequence = input.afterSequence;
+                const headSequence = yield* orchestrationEngine.latestSequence;
+                const replayGap = headSequence - afterSequence;
+                // Gap too large: the replay reads and decodes every event in the
+                // range before the per-thread filter drops the ones this thread
+                // never emitted, so a stale cursor costs the whole event store to
+                // deliver a handful of frames. Measured on a 357k-event store: one
+                // resume from sequence 0 churned ~3 GB through the heap to send 557
+                // events, and that churn is what drove the 2026-08-09 heap OOMs
+                // (t3code-9x8.1). A cursor ahead of this engine's authoritative
+                // state is also invalid, so reset it with a snapshot. The gap
+                // allowance is larger than the shell's because a thread replay
+                // costs a decode per event while a shell replay costs a refetch.
+                if (replayGap < 0 || replayGap > THREAD_RESUME_MAX_GAP) {
+                  return yield* loadSnapshotStream;
+                }
                 const catchUpStream = orchestrationEngine
-                  .readEvents(afterSequence, Number.MAX_SAFE_INTEGER)
+                  // Replay only through the head captured above, so the read
+                  // cannot chase a moving event-store head while the live
+                  // subscription is already buffering the newer events.
+                  .readEvents(afterSequence, replayGap)
                   .pipe(
                     Stream.filter(isThisThreadDetailEvent),
                     Stream.map((event) => ({ kind: "event" as const, event })),
@@ -1440,53 +1504,10 @@ const makeWsRpcLayer = (
                         }),
                     ),
                   );
-                const afterCatchUp =
-                  input.requestCompletionMarker === true
-                    ? Stream.concat(
-                        Stream.fromEffect(
-                          Queue.offer(liveBuffer, { kind: "synchronized" as const }),
-                        ).pipe(Stream.drain),
-                        bufferedLiveStream,
-                      )
-                    : bufferedLiveStream;
-                return Stream.concat(catchUpStream, afterCatchUp);
+                return Stream.concat(catchUpStream, synchronizedThenLive);
               }
 
-              const snapshot = yield* projectionSnapshotQuery
-                .getThreadDetailSnapshot(input.threadId)
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationGetSnapshotError({
-                        message: `Failed to load thread ${input.threadId}`,
-                        cause,
-                      }),
-                  ),
-                );
-
-              if (Option.isNone(snapshot)) {
-                return yield* new OrchestrationGetSnapshotError({
-                  message: `Thread ${input.threadId} was not found`,
-                  cause: input.threadId,
-                });
-              }
-
-              const afterSnapshot =
-                input.requestCompletionMarker === true
-                  ? Stream.concat(
-                      Stream.fromEffect(
-                        Queue.offer(liveBuffer, { kind: "synchronized" as const }),
-                      ).pipe(Stream.drain),
-                      bufferedLiveStream,
-                    )
-                  : bufferedLiveStream;
-              return Stream.concat(
-                Stream.make({
-                  kind: "snapshot" as const,
-                  snapshot: snapshot.value,
-                }),
-                afterSnapshot,
-              );
+              return yield* loadSnapshotStream;
             }),
             { "rpc.aggregate": "orchestration" },
           ),
