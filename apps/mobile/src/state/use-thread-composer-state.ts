@@ -15,11 +15,15 @@ import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
 import {
+  composerAttachmentSources,
   convertPastedImagesToAttachments,
   pasteComposerClipboard,
-  pickComposerImages,
-} from "../lib/composerImages";
-import type { DraftComposerImageAttachment } from "../lib/composerImages";
+  pickComposerDocuments,
+  pickComposerPhotos,
+} from "../lib/composerAttachments";
+import type { DraftComposerAttachment } from "../lib/composerAttachments";
+import { providerDisplayLabel } from "../lib/modelOptions";
+import { useEnvironmentServerConfig } from "./entities";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildThreadFeed } from "../lib/threadActivity";
 import { appAtomRegistry } from "../state/atom-registry";
@@ -45,7 +49,7 @@ export function appendReviewCommentToDraft(input: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly text: string;
-  readonly attachments?: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly attachments?: ReadonlyArray<DraftComposerAttachment>;
 }): void {
   const threadKey = scopedThreadKey(input.environmentId, input.threadId);
   const existing = appAtomRegistry.get(composerDraftsAtom)[threadKey]?.text ?? "";
@@ -77,6 +81,7 @@ export function useThreadComposerState() {
   const selectedThreadDetail = useSelectedThreadDetail();
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
+  const serverConfig = useEnvironmentServerConfig(selectedThreadShell?.environmentId ?? null);
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -183,22 +188,53 @@ export function useThreadComposerState() {
     [selectedThreadShell],
   );
 
-  const onPickDraftImages = useCallback(async () => {
+  const onPickDraftPhotos = useCallback(async () => {
     if (!selectedThreadShell) {
       return;
     }
 
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
-    const result = await pickComposerImages({
+    const result = await pickComposerPhotos({
       existingCount: composerDrafts[threadKey]?.attachments.length ?? 0,
     });
-    if (result.images.length > 0) {
-      appendComposerDraftAttachments(threadKey, result.images);
+    if (result.attachments.length > 0) {
+      appendComposerDraftAttachments(threadKey, result.attachments);
     }
     if (result.error) {
       setPendingConnectionError(result.error);
     }
   }, [composerDrafts, selectedThreadShell]);
+
+  // Which pickers the composer offers depends on the driver that will run the
+  // turn, read from the same capability table the web composer uses.
+  const attachmentProvider = useMemo(() => {
+    const instanceId =
+      selectedThread?.session?.providerInstanceId ?? selectedThread?.modelSelection.instanceId;
+    return serverConfig?.providers.find((provider) => provider.instanceId === instanceId) ?? null;
+  }, [selectedThread, serverConfig]);
+  const attachmentSources = useMemo(
+    () => composerAttachmentSources({ driver: attachmentProvider?.driver ?? null }),
+    [attachmentProvider],
+  );
+
+  const onPickDraftDocuments = useCallback(async () => {
+    if (!selectedThreadShell) {
+      return;
+    }
+
+    const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
+    const result = await pickComposerDocuments({
+      existingCount: composerDrafts[threadKey]?.attachments.length ?? 0,
+      driver: attachmentProvider?.driver ?? null,
+      providerLabel: attachmentProvider ? providerDisplayLabel(attachmentProvider) : undefined,
+    });
+    if (result.attachments.length > 0) {
+      appendComposerDraftAttachments(threadKey, result.attachments);
+    }
+    if (result.error) {
+      setPendingConnectionError(result.error);
+    }
+  }, [attachmentProvider, composerDrafts, selectedThreadShell]);
 
   const onPasteIntoDraft = useCallback(async () => {
     if (!selectedThreadShell) {
@@ -209,8 +245,8 @@ export function useThreadComposerState() {
     const result = await pasteComposerClipboard({
       existingCount: composerDrafts[threadKey]?.attachments.length ?? 0,
     });
-    if (result.images.length > 0) {
-      appendComposerDraftAttachments(threadKey, result.images);
+    if (result.attachments.length > 0) {
+      appendComposerDraftAttachments(threadKey, result.attachments);
     }
     if (result.text) {
       appendComposerDraftText(threadKey, result.text);
@@ -299,8 +335,10 @@ export function useThreadComposerState() {
     runtimeMode,
     interactionMode,
     activeThreadBusy,
+    attachmentSources,
     onChangeDraftMessage,
-    onPickDraftImages,
+    onPickDraftPhotos,
+    onPickDraftDocuments,
     onPasteIntoDraft,
     onNativePasteImages,
     onRemoveDraftImage,

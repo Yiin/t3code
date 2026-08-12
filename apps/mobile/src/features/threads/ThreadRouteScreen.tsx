@@ -788,7 +788,9 @@ function ThreadRouteContent(
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}
           onChangeDraftMessage={composer.onChangeDraftMessage}
-          onPickDraftImages={composer.onPickDraftImages}
+          attachmentSources={composer.attachmentSources}
+          onPickDraftPhotos={composer.onPickDraftPhotos}
+          onPickDraftDocuments={composer.onPickDraftDocuments}
           onNativePasteImages={composer.onNativePasteImages}
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}

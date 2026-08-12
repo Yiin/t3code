@@ -28,7 +28,7 @@ export type ProviderGroup = {
   readonly models: ReadonlyArray<ModelOption>;
 };
 
-function providerDisplayLabel(provider: {
+export function providerDisplayLabel(provider: {
   readonly displayName?: string | undefined;
   readonly driver: ProviderDriverKind;
   readonly instanceId: string;

@@ -24,10 +24,14 @@ import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 import { ControlPill, ControlPillMenu } from "../../components/ControlPill";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import { ComposerSurface } from "./ThreadComposer";
+import { ATTACHMENT_SOURCE_MENU_ACTIONS, ComposerSurface } from "./ThreadComposer";
 
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
-import { convertPastedImagesToAttachments, pickComposerImages } from "../../lib/composerImages";
+import {
+  convertPastedImagesToAttachments,
+  pickComposerDocuments,
+  pickComposerPhotos,
+} from "../../lib/composerAttachments";
 import {
   applyProviderOptionMenuEvent,
   buildProviderOptionMenuActions,
@@ -46,7 +50,10 @@ import { useProjects } from "../../state/entities";
 import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage, removeThreadOutboxMessage } from "../../state/thread-outbox";
-import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import {
+  setPendingConnectionError,
+  useRemoteConnectionStatus,
+} from "../../state/use-remote-environment-registry";
 import { branchBadgeLabel, useNewTaskFlow } from "./new-task-flow-provider";
 import { useCreateProjectThread } from "./use-project-actions";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
@@ -774,13 +781,33 @@ export function NewTaskDraftScreen(props: {
     }
   }
 
-  async function handlePickImages(): Promise<void> {
+  async function handlePickPhotos(): Promise<void> {
     if (isIncomingShareTransferPending) {
       return;
     }
-    const result = await pickComposerImages({ existingCount: flow.attachments.length });
-    if (result.images.length > 0) {
-      flow.appendAttachments(result.images);
+    const result = await pickComposerPhotos({ existingCount: flow.attachments.length });
+    if (result.attachments.length > 0) {
+      flow.appendAttachments(result.attachments);
+    }
+    if (result.error) {
+      setPendingConnectionError(result.error);
+    }
+  }
+
+  async function handlePickDocuments(): Promise<void> {
+    if (isIncomingShareTransferPending) {
+      return;
+    }
+    const result = await pickComposerDocuments({
+      existingCount: flow.attachments.length,
+      driver: flow.attachmentDriver,
+      providerLabel: flow.attachmentProviderLabel ?? undefined,
+    });
+    if (result.attachments.length > 0) {
+      flow.appendAttachments(result.attachments);
+    }
+    if (result.error) {
+      setPendingConnectionError(result.error);
     }
   }
 
@@ -991,12 +1018,31 @@ export function NewTaskDraftScreen(props: {
 
   const toolbarPills = (
     <>
-      <ComposerToolbarButton
-        icon="plus"
-        onPress={() => void handlePickImages()}
-        showChevron={false}
-        disabled={isIncomingShareTransferPending}
-      />
+      {flow.attachmentSources.documents ? (
+        <ControlPillMenu
+          actions={ATTACHMENT_SOURCE_MENU_ACTIONS}
+          onPressAction={({ nativeEvent }) =>
+            void (nativeEvent.event === "attachment:files"
+              ? handlePickDocuments()
+              : handlePickPhotos())
+          }
+        >
+          <ComposerToolbarButton
+            accessibilityLabel="Add attachment"
+            icon="plus"
+            showChevron={false}
+            disabled={isIncomingShareTransferPending}
+          />
+        </ControlPillMenu>
+      ) : (
+        <ComposerToolbarButton
+          accessibilityLabel="Add attachment"
+          icon="plus"
+          onPress={() => void handlePickPhotos()}
+          showChevron={false}
+          disabled={isIncomingShareTransferPending}
+        />
+      )}
       <ControlPillMenu
         actions={modelMenuActions}
         onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}

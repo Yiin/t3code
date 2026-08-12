@@ -13,8 +13,8 @@ import * as Schema from "effect/Schema";
 import { useEffect } from "react";
 import { Atom } from "effect/unstable/reactivity";
 
-import { DraftComposerImageAttachmentSchema } from "../lib/composer-image-schema";
-import type { DraftComposerImageAttachment } from "../lib/composerImages";
+import { DraftComposerAttachmentSchema } from "../lib/composer-attachment-schema";
+import type { DraftComposerAttachment } from "../lib/composerAttachments";
 import { SerializedAsyncQueue } from "../lib/serialized-async-queue";
 import { appAtomRegistry } from "./atom-registry";
 
@@ -39,7 +39,7 @@ export class ComposerDraftPersistenceError extends Schema.TaggedErrorClass<Compo
 
 export interface ComposerDraft {
   readonly text: string;
-  readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly importedShareIds?: ReadonlyArray<string>;
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
@@ -49,7 +49,7 @@ export interface ComposerDraft {
 
 export interface ComposerDraftContent {
   readonly text: string;
-  readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly sourceShareId?: string;
 }
 
@@ -74,7 +74,7 @@ const ComposerDraftWorkspaceSelectionSchema = Schema.Struct({
 
 const ComposerDraftSchema = Schema.Struct({
   text: Schema.String,
-  attachments: Schema.Array(DraftComposerImageAttachmentSchema),
+  attachments: Schema.Array(DraftComposerAttachmentSchema),
   importedShareIds: Schema.optional(Schema.Array(Schema.String)),
   modelSelection: Schema.optional(ModelSelectionSchema),
   runtimeMode: Schema.optional(RuntimeModeSchema),
@@ -291,7 +291,7 @@ export function appendComposerDraftText(draftKey: string, value: string): void {
 
 export function appendComposerDraftAttachments(
   draftKey: string,
-  attachments: ReadonlyArray<DraftComposerImageAttachment>,
+  attachments: ReadonlyArray<DraftComposerAttachment>,
 ): void {
   if (attachments.length === 0) {
     return;
@@ -310,7 +310,7 @@ export function appendComposerDraftAttachments(
 
 export function replaceComposerDraftAttachments(
   draftKey: string,
-  attachments: ReadonlyArray<DraftComposerImageAttachment>,
+  attachments: ReadonlyArray<DraftComposerAttachment>,
 ): void {
   updateComposerDrafts((current) => {
     const draft = {

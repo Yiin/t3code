@@ -19,8 +19,11 @@ import { SymbolView } from "../../components/AppSymbol";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 import { ControlPill } from "../../components/ControlPill";
 import { cn } from "../../lib/cn";
-import type { DraftComposerImageAttachment } from "../../lib/composerImages";
-import { convertPastedImagesToAttachments, pickComposerImages } from "../../lib/composerImages";
+import type { DraftComposerAttachment } from "../../lib/composerAttachments";
+import {
+  convertPastedImagesToAttachments,
+  pickComposerPhotos,
+} from "../../lib/composerAttachments";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useNativePaste } from "../../lib/useNativePaste";
 import { setPendingConnectionError } from "../../state/use-remote-environment-registry";
@@ -61,7 +64,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
   const [highlightedLinesById, setHighlightedLinesById] = useState<
     Record<string, ReadonlyArray<ReviewHighlightedToken>>
   >({});
-  const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>([]);
+  const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>([]);
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
 
   const selectedLines = useMemo(
@@ -137,9 +140,9 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
   }, [selectedLines, selectedTheme, target]);
 
   async function handlePickImages(): Promise<void> {
-    const result = await pickComposerImages({ existingCount: attachments.length });
-    if (result.images.length > 0) {
-      setAttachments((current) => [...current, ...result.images]);
+    const result = await pickComposerPhotos({ existingCount: attachments.length });
+    if (result.attachments.length > 0) {
+      setAttachments((current) => [...current, ...result.attachments]);
     }
     if (result.error) {
       setPendingConnectionError(result.error);

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   EnvironmentId,
   ModelSelection,
+  ProviderDriverKind,
   ProviderInteractionMode,
   ProviderOptionSelection,
   RuntimeMode,
@@ -20,9 +21,13 @@ import { pipe } from "effect/Function";
 
 import { useEnvironmentServerConfig, useProjects, useThreadShells } from "../../state/entities";
 import type { TurnCommandMetadata } from "../../lib/commandMetadata";
-import type { DraftComposerImageAttachment } from "../../lib/composerImages";
+import {
+  composerAttachmentSources,
+  type ComposerAttachmentSources,
+  type DraftComposerAttachment,
+} from "../../lib/composerAttachments";
 import type { ModelOption, ProviderGroup } from "../../lib/modelOptions";
-import { buildModelOptions, groupByProvider } from "../../lib/modelOptions";
+import { buildModelOptions, groupByProvider, providerDisplayLabel } from "../../lib/modelOptions";
 import { groupProjectsByRepository } from "../../lib/repositoryGroups";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -119,7 +124,7 @@ type NewTaskFlowContextValue = {
   readonly draftKey: string | null;
   readonly editingPendingTask: QueuedThreadMessage | null;
   readonly prompt: string;
-  readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly submitting: boolean;
   readonly branchQuery: string;
   readonly branchesLoading: boolean;
@@ -136,6 +141,9 @@ type NewTaskFlowContextValue = {
   readonly selectedModel: ModelSelection | null;
   readonly selectedModelOption: ModelOption | null;
   readonly selectedProviderSkills: ReadonlyArray<ServerProviderSkill>;
+  readonly attachmentSources: ComposerAttachmentSources;
+  readonly attachmentDriver: ProviderDriverKind | null;
+  readonly attachmentProviderLabel: string | null;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
   readonly filteredBranches: ReadonlyArray<VcsRef>;
   readonly reset: () => void;
@@ -150,8 +158,8 @@ type NewTaskFlowContextValue = {
   readonly cancelEditingPendingTask: () => void;
   readonly buildPendingTaskMessage: (metadata: TurnCommandMetadata) => QueuedThreadMessage | null;
   readonly setPrompt: (value: string) => void;
-  readonly replaceAttachments: (attachments: ReadonlyArray<DraftComposerImageAttachment>) => void;
-  readonly appendAttachments: (attachments: ReadonlyArray<DraftComposerImageAttachment>) => void;
+  readonly replaceAttachments: (attachments: ReadonlyArray<DraftComposerAttachment>) => void;
+  readonly appendAttachments: (attachments: ReadonlyArray<DraftComposerAttachment>) => void;
   readonly removeAttachment: (imageId: string) => void;
   readonly clearAttachments: () => void;
   readonly setSubmitting: (value: boolean) => void;
@@ -398,6 +406,17 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       )?.skills ?? [],
     [selectedEnvironmentServerConfig, selectedModel?.instanceId],
   );
+  const attachmentProvider = useMemo(
+    () =>
+      selectedEnvironmentServerConfig?.providers.find(
+        (provider) => provider.instanceId === selectedModel?.instanceId,
+      ) ?? null,
+    [selectedEnvironmentServerConfig, selectedModel?.instanceId],
+  );
+  const attachmentSources = useMemo(
+    () => composerAttachmentSources({ driver: attachmentProvider?.driver ?? null }),
+    [attachmentProvider],
+  );
   const setSelectedModelKey = useCallback(
     (key: string | null) => {
       if (!key || !selectedProjectDraftKey) {
@@ -442,7 +461,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     [selectedProjectDraftKey],
   );
   const replaceAttachments = useCallback(
-    (nextAttachments: ReadonlyArray<DraftComposerImageAttachment>) => {
+    (nextAttachments: ReadonlyArray<DraftComposerAttachment>) => {
       if (!selectedProjectDraftKey) {
         return;
       }
@@ -451,7 +470,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     [selectedProjectDraftKey],
   );
   const appendAttachments = useCallback(
-    (nextAttachments: ReadonlyArray<DraftComposerImageAttachment>) => {
+    (nextAttachments: ReadonlyArray<DraftComposerAttachment>) => {
       if (!selectedProjectDraftKey) {
         return;
       }
@@ -846,6 +865,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedModel,
       selectedModelOption,
       selectedProviderSkills,
+      attachmentSources,
+      attachmentDriver: attachmentProvider?.driver ?? null,
+      attachmentProviderLabel: attachmentProvider ? providerDisplayLabel(attachmentProvider) : null,
       providerGroups,
       filteredBranches,
       reset,
@@ -901,6 +923,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedModelOption,
       selectedProjectDraftKey,
       selectedProviderSkills,
+      attachmentProvider,
+      attachmentSources,
       setSelectedModelOptions,
       selectedProject,
       selectedProjectKey,

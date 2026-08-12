@@ -5,8 +5,8 @@ import {
 import * as Schema from "effect/Schema";
 import type { ResolvedSharePayload, SharePayload } from "expo-sharing";
 
-import { DraftComposerImageAttachmentSchema } from "../../lib/composer-image-schema";
-import type { DraftComposerImageAttachment } from "../../lib/composerImages";
+import { DraftComposerAttachmentSchema } from "../../lib/composer-attachment-schema";
+import type { DraftComposerAttachment } from "../../lib/composerAttachments";
 import { estimateBase64ByteSize } from "../../lib/base64";
 
 export interface IncomingShareDraft {
@@ -15,7 +15,7 @@ export interface IncomingShareDraft {
   readonly createdAt: string;
   readonly destination?: IncomingShareDestination;
   readonly text: string;
-  readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly warnings: ReadonlyArray<string>;
 }
 
@@ -35,7 +35,7 @@ export const IncomingShareDraftSchema = Schema.Struct({
   createdAt: Schema.String,
   destination: Schema.optional(IncomingShareDestinationSchema),
   text: Schema.String,
-  attachments: Schema.Array(DraftComposerImageAttachmentSchema),
+  attachments: Schema.Array(DraftComposerAttachmentSchema),
   warnings: Schema.Array(Schema.String),
 });
 
@@ -129,7 +129,7 @@ export async function buildIncomingShareDraft(input: {
   readonly id: string;
   readonly createdAt: string;
 }): Promise<IncomingShareDraft> {
-  const attachments: DraftComposerImageAttachment[] = [];
+  const attachments: DraftComposerAttachment[] = [];
   const warnings: string[] = [];
   const consumedResolvedPayloadIndexes = new Set<number>();
   let warnedAttachmentLimit = false;

@@ -34,6 +34,7 @@ import Animated, {
   FadeOutDown,
   LinearTransition,
 } from "react-native-reanimated";
+import { SymbolView } from "../../components/AppSymbol";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
@@ -53,7 +54,10 @@ import {
 } from "../../components/ComposerToolbarTrigger";
 import { ControlPill, ControlPillMenu } from "../../components/ControlPill";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import type { DraftComposerImageAttachment } from "../../lib/composerImages";
+import type {
+  ComposerAttachmentSources,
+  DraftComposerAttachment,
+} from "../../lib/composerAttachments";
 import { buildModelOptions, groupByProvider } from "../../lib/modelOptions";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import type { RemoteClientConnectionState } from "../../lib/connection";
@@ -84,9 +88,18 @@ export const COMPOSER_COLLAPSED_CHROME = 60;
  */
 export const COMPOSER_EXPANDED_CHROME = 174;
 
+/**
+ * Attachment source menu shown when the driver can take files as well as
+ * photos. Exported so the new-task draft screen offers the same two sources.
+ */
+export const ATTACHMENT_SOURCE_MENU_ACTIONS = [
+  { id: "attachment:photos", title: "Photos", image: "camera" },
+  { id: "attachment:files", title: "Files", image: "doc.text" },
+];
+
 export interface ThreadComposerProps {
   readonly draftMessage: string;
-  readonly draftAttachments: ReadonlyArray<DraftComposerImageAttachment>;
+  readonly draftAttachments: ReadonlyArray<DraftComposerAttachment>;
   readonly placeholder: string;
   readonly contentMaxWidth?: number;
   readonly bottomInset?: number;
@@ -107,7 +120,9 @@ export interface ThreadComposerProps {
   readonly projectCwd: string | null;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
-  readonly onPickDraftImages: () => Promise<void>;
+  readonly attachmentSources: ComposerAttachmentSources;
+  readonly onPickDraftPhotos: () => Promise<void>;
+  readonly onPickDraftDocuments: () => Promise<void>;
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
@@ -788,15 +803,33 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           </View>
           {!isExpanded && props.draftAttachments.length > 0 ? (
             <View className="flex-row gap-1 pl-1">
-              {props.draftAttachments.slice(0, 3).map((image) => (
-                <Pressable key={image.id} onPress={() => onPressImage(image.previewUri)}>
-                  <Image
-                    source={{ uri: image.previewUri }}
-                    className="size-[30px] rounded-lg bg-subtle"
-                    resizeMode="cover"
-                  />
-                </Pressable>
-              ))}
+              {props.draftAttachments.slice(0, 3).map((attachment) =>
+                attachment.type === "image" ? (
+                  <Pressable
+                    key={attachment.id}
+                    onPress={() => onPressImage(attachment.previewUri)}
+                  >
+                    <Image
+                      source={{ uri: attachment.previewUri }}
+                      className="size-[30px] rounded-lg bg-subtle"
+                      resizeMode="cover"
+                    />
+                  </Pressable>
+                ) : (
+                  <View
+                    key={attachment.id}
+                    accessibilityLabel={attachment.name}
+                    className="size-[30px] items-center justify-center rounded-lg bg-subtle"
+                  >
+                    <SymbolView
+                      name="doc"
+                      size={14}
+                      tintColor={foregroundColor}
+                      type="monochrome"
+                    />
+                  </View>
+                ),
+              )}
               {props.draftAttachments.length > 3 ? (
                 <View className="size-[30px] items-center justify-center rounded-lg bg-subtle-strong">
                   <Text className="text-foreground-muted text-2xs font-t3-bold">
@@ -830,12 +863,29 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 fadeOpaque={toolbarFadeOpaque}
                 fadeTransparent={toolbarFadeTransparent}
               >
-                <ComposerToolbarButton
-                  accessibilityLabel="Add attachment"
-                  icon="plus"
-                  onPress={() => void props.onPickDraftImages()}
-                  showChevron={false}
-                />
+                {props.attachmentSources.documents ? (
+                  <ControlPillMenu
+                    actions={ATTACHMENT_SOURCE_MENU_ACTIONS}
+                    onPressAction={({ nativeEvent }) =>
+                      void (nativeEvent.event === "attachment:files"
+                        ? props.onPickDraftDocuments()
+                        : props.onPickDraftPhotos())
+                    }
+                  >
+                    <ComposerToolbarButton
+                      accessibilityLabel="Add attachment"
+                      icon="plus"
+                      showChevron={false}
+                    />
+                  </ControlPillMenu>
+                ) : (
+                  <ComposerToolbarButton
+                    accessibilityLabel="Add attachment"
+                    icon="plus"
+                    onPress={() => void props.onPickDraftPhotos()}
+                    showChevron={false}
+                  />
+                )}
                 <ControlPillMenu
                   actions={modelMenuActions}
                   onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}
