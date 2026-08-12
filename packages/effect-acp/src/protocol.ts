@@ -24,6 +24,12 @@ export interface AcpProtocolLogEvent {
   readonly payload: unknown;
 }
 
+export interface AcpOutgoingQueuedEvent {
+  readonly method: string | undefined;
+  readonly requestId: string | undefined;
+  readonly payload: string | Uint8Array;
+}
+
 export type AcpIncomingNotification =
   | {
       readonly _tag: "SessionUpdate";
@@ -48,6 +54,7 @@ export interface AcpPatchedProtocolOptions {
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocolLogEvent) => Effect.Effect<void, never>;
+  readonly onOutgoingQueued?: (event: AcpOutgoingQueuedEvent) => Effect.Effect<void, never>;
   readonly onNotification?: (
     notification: AcpIncomingNotification,
   ) => Effect.Effect<void, AcpError.AcpError, never>;
@@ -142,6 +149,13 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       });
 
       yield* Queue.offer(outgoing, encoded).pipe(Effect.asVoid);
+      yield* (
+        options.onOutgoingQueued?.({
+          method,
+          requestId,
+          payload: encoded,
+        }) ?? Effect.void
+      );
     }
   });
 
@@ -543,6 +557,9 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     );
     yield* logProtocol({ direction: "outgoing", stage: "raw", payload: encoded });
     yield* Queue.offer(outgoing, encoded).pipe(Effect.asVoid);
+    yield* (
+      options.onOutgoingQueued?.({ method, requestId: undefined, payload: encoded }) ?? Effect.void
+    );
   });
 
   const sendRequest = Effect.fn("sendRequest")(function* (method: string, payload: unknown) {

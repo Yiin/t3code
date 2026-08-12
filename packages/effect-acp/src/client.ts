@@ -26,6 +26,9 @@ export interface AcpClientOptions {
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocol.AcpProtocolLogEvent) => Effect.Effect<void, never>;
+  readonly onOutgoingQueued?: (
+    event: AcpProtocol.AcpOutgoingQueuedEvent,
+  ) => Effect.Effect<void, never>;
 }
 
 type AcpClientRaw = {
@@ -403,6 +406,7 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
+    ...(options.onOutgoingQueued ? { onOutgoingQueued: options.onOutgoingQueued } : {}),
     onNotification: dispatchNotification,
     onExtRequest: dispatchExtRequest,
   });

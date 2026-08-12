@@ -215,6 +215,26 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("reports outgoing frames after transport enqueue", () =>
+    Effect.gen(function* () {
+      const { stdio } = yield* makeInMemoryStdio();
+      const queued = yield* Deferred.make<AcpProtocol.AcpOutgoingQueuedEvent>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        onOutgoingQueued: (event) => Deferred.succeed(queued, event).pipe(Effect.asVoid),
+      });
+
+      yield* transport.notify("session/cancel", { sessionId: "session-1" });
+
+      assert.deepEqual(yield* Deferred.await(queued), {
+        method: "session/cancel",
+        requestId: undefined,
+        payload: '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session-1"}}\n',
+      });
+    }),
+  );
+
   it.effect("logs decode failures without copying the cause or wire payload", () =>
     Effect.gen(function* () {
       const secret = "acp-wire-secret-sentinel";
