@@ -521,6 +521,7 @@ function createHarness(input: {
     listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
+    listSubagentTurnContributions: () => Effect.succeed([]),
     getThreadShellById: (threadId) =>
       Effect.sync(() => {
         const shell = shells.get(threadId);

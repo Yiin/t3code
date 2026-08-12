@@ -216,6 +216,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
+    listSubagentTurnContributions: () => Effect.succeed([]),
     getThreadShellById: (threadId) =>
       Effect.sync(() => {
         const state = shells.get(threadId);

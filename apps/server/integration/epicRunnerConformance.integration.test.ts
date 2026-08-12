@@ -607,6 +607,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
+    listSubagentTurnContributions: () => Effect.succeed([]),
     getThreadShellById: (threadId) =>
       Effect.sync(() => {
         const shell = shells.get(threadId);

@@ -14,6 +14,7 @@ import {
   type OrchestrationGetTurnDiffInput,
   type OrchestrationGetTurnDiffResult as OrchestrationGetTurnDiffResultType,
   type ThreadId,
+  type ThreadTurnDiffSubagentContribution,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -66,18 +67,61 @@ function buildTurnDiffResult(
     readonly toTurnCount: number;
   },
   diff: string,
+  subagentContributions: ReadonlyArray<ThreadTurnDiffSubagentContribution> = [],
 ): OrchestrationGetTurnDiffResultType {
   return {
     threadId: input.threadId,
     fromTurnCount: input.fromTurnCount,
     toTurnCount: input.toTurnCount,
     diff,
+    subagentContributions,
   };
 }
 
 export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
+
+  /**
+   * Name the subagent children that wrote inside this diff's window.
+   *
+   * A thread-backed child edits the same worktree as its parent and always
+   * settles before the parent's checkpoint is captured, so its files land in
+   * the parent's patch. Attribution is decoration on top of a correct patch, so
+   * a failed lookup degrades to "no attribution" instead of failing the diff.
+   */
+  const readSubagentContributions = Effect.fn("readSubagentContributions")(function* (input: {
+    readonly parentThreadId: ThreadId;
+    readonly afterCompletedAt: string | null;
+    readonly throughCompletedAt: string | null;
+  }) {
+    if (input.throughCompletedAt === null) {
+      return [] as ReadonlyArray<ThreadTurnDiffSubagentContribution>;
+    }
+    return yield* projectionSnapshotQuery
+      .listSubagentTurnContributions({
+        parentThreadId: input.parentThreadId,
+        afterCompletedAt: input.afterCompletedAt,
+        throughCompletedAt: input.throughCompletedAt,
+      })
+      .pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to attribute subagent files in checkpoint diff", {
+            threadId: input.parentThreadId,
+            detail: error.message,
+          }).pipe(Effect.as([])),
+        ),
+        Effect.map((contributions) =>
+          contributions.map(
+            (contribution): ThreadTurnDiffSubagentContribution => ({
+              threadId: contribution.threadId,
+              title: contribution.title,
+              paths: contribution.paths,
+            }),
+          ),
+        ),
+      );
+  });
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -91,12 +135,7 @@ export const make = Effect.gen(function* () {
       });
 
       if (input.fromTurnCount === input.toTurnCount) {
-        const emptyDiff: OrchestrationGetTurnDiffResultType = {
-          threadId: input.threadId,
-          fromTurnCount: input.fromTurnCount,
-          toTurnCount: input.toTurnCount,
-          diff: "",
-        };
+        const emptyDiff: OrchestrationGetTurnDiffResultType = buildTurnDiffResult(input, "");
         if (!isTurnDiffResult(emptyDiff)) {
           return yield* new CheckpointDiffResultInvalidError({
             operation,
@@ -137,12 +176,13 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      const fromCheckpoint = threadContext.value.checkpoints.find(
+        (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
+      );
       const fromCheckpointRef =
         input.fromTurnCount === 0
           ? checkpointRefForThreadTurn(input.threadId, 0)
-          : threadContext.value.checkpoints.find(
-              (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
-            )?.checkpointRef;
+          : fromCheckpoint?.checkpointRef;
       if (!fromCheckpointRef) {
         return yield* new CheckpointRefUnavailableError({
           operation,
@@ -152,9 +192,10 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const toCheckpointRef = threadContext.value.checkpoints.find(
+      const toCheckpoint = threadContext.value.checkpoints.find(
         (checkpoint) => checkpoint.checkpointTurnCount === input.toTurnCount,
-      )?.checkpointRef;
+      );
+      const toCheckpointRef = toCheckpoint?.checkpointRef;
       if (!toCheckpointRef) {
         return yield* new CheckpointRefUnavailableError({
           operation,
@@ -174,7 +215,13 @@ export const make = Effect.gen(function* () {
         })
         .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
 
-      const turnDiff = buildTurnDiffResult(input, diff);
+      const subagentContributions = yield* readSubagentContributions({
+        parentThreadId: input.threadId,
+        afterCompletedAt: fromCheckpoint?.completedAt ?? null,
+        throughCompletedAt: toCheckpoint?.completedAt ?? null,
+      });
+
+      const turnDiff = buildTurnDiffResult(input, diff, subagentContributions);
       if (!isTurnDiffResult(turnDiff)) {
         return yield* new CheckpointDiffResultInvalidError({
           operation,
@@ -264,6 +311,12 @@ export const make = Effect.gen(function* () {
       })
       .pipe(Effect.withSpan("checkpoint.fullThread.diffCheckpoints"));
 
+    const subagentContributions = yield* readSubagentContributions({
+      parentThreadId: input.threadId,
+      afterCompletedAt: null,
+      throughCompletedAt: threadContext.value.toCompletedAt,
+    });
+
     const turnDiff = buildTurnDiffResult(
       {
         threadId: input.threadId,
@@ -271,6 +324,7 @@ export const make = Effect.gen(function* () {
         toTurnCount: input.toTurnCount,
       },
       diff,
+      subagentContributions,
     );
     if (!isTurnDiffResult(turnDiff)) {
       return yield* new CheckpointDiffResultInvalidError({

@@ -62,6 +62,28 @@ export interface ProjectionFullThreadDiffContext {
   readonly worktreePath: string | null;
   readonly latestCheckpointTurnCount: number;
   readonly toCheckpointRef: CheckpointRef | null;
+  /** Completion time of the `to` checkpoint, for the subagent window. */
+  readonly toCompletedAt: string | null;
+}
+
+/**
+ * The paths one subagent child thread checkpointed inside a parent turn window.
+ */
+export interface ProjectionSubagentTurnContribution {
+  readonly threadId: ThreadId;
+  readonly title: string;
+  readonly paths: ReadonlyArray<string>;
+}
+
+export interface ProjectionSubagentTurnContributionWindow {
+  readonly parentThreadId: ThreadId;
+  /**
+   * Exclusive lower bound on a child checkpoint's completion time, or null for
+   * the parent's first turn, which has no earlier checkpoint.
+   */
+  readonly afterCompletedAt: string | null;
+  /** Inclusive upper bound: the parent checkpoint that closes the window. */
+  readonly throughCompletedAt: string;
 }
 
 /**
@@ -172,6 +194,18 @@ export interface ProjectionSnapshotQueryShape {
     threadId: ThreadId,
     toTurnCount: number,
   ) => Effect.Effect<Option.Option<ProjectionFullThreadDiffContext>, ProjectionRepositoryError>;
+
+  /**
+   * List which files each subagent child of a parent thread checkpointed inside
+   * one of the parent's turn windows.
+   *
+   * The window is bounded by checkpoint completion times because a child thread
+   * carries its own checkpoint numbering, so the parent's turn counts say
+   * nothing about which of the child's turns fall inside the parent's turn.
+   */
+  readonly listSubagentTurnContributions: (
+    window: ProjectionSubagentTurnContributionWindow,
+  ) => Effect.Effect<ReadonlyArray<ProjectionSubagentTurnContribution>, ProjectionRepositoryError>;
 
   /**
    * Read a single active thread shell row by id.

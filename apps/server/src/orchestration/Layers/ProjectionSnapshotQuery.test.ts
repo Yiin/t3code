@@ -1883,6 +1883,204 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("lists only the subagent files checkpointed inside the parent turn window", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_turns`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-subagent',
+          'Subagent Project',
+          '/tmp/subagent-workspace',
+          NULL,
+          '[]',
+          '2026-05-01T00:00:00.000Z',
+          '2026-05-01T00:00:00.000Z',
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at,
+          parent_thread_id
+        )
+        VALUES
+          (
+            'thread-parent',
+            'project-subagent',
+            'Parent Thread',
+            NULL,
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            '2026-05-01T00:00:01.000Z',
+            '2026-05-01T00:00:01.000Z',
+            NULL,
+            NULL,
+            NULL
+          ),
+          (
+            'thread-child',
+            'project-subagent',
+            'Reviewer',
+            NULL,
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            '2026-05-01T00:00:02.000Z',
+            '2026-05-01T00:00:02.000Z',
+            NULL,
+            NULL,
+            'thread-parent'
+          ),
+          (
+            'thread-stranger',
+            'project-subagent',
+            'Unrelated Thread',
+            NULL,
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            '2026-05-01T00:00:02.000Z',
+            '2026-05-01T00:00:02.000Z',
+            NULL,
+            NULL,
+            NULL
+          )
+      `;
+
+      // Two child checkpoints inside the window, one before it, plus an
+      // unrelated thread's checkpoint inside it.
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          source_proposed_plan_thread_id,
+          source_proposed_plan_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES
+          (
+            'thread-child',
+            'child-turn-1',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:05.000Z',
+            '2026-05-01T00:00:05.000Z',
+            '2026-05-01T00:00:05.000Z',
+            1,
+            'checkpoint-child-1',
+            'ready',
+            '[{"path":"src/early.ts","kind":"modified","additions":1,"deletions":0}]'
+          ),
+          (
+            'thread-child',
+            'child-turn-2',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:20.000Z',
+            '2026-05-01T00:00:20.000Z',
+            '2026-05-01T00:00:20.000Z',
+            2,
+            'checkpoint-child-2',
+            'ready',
+            '[{"path":"src/beta.ts","kind":"modified","additions":2,"deletions":1}]'
+          ),
+          (
+            'thread-child',
+            'child-turn-3',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:25.000Z',
+            '2026-05-01T00:00:25.000Z',
+            '2026-05-01T00:00:25.000Z',
+            3,
+            'checkpoint-child-3',
+            'ready',
+            '[{"path":"src/alpha.ts","kind":"modified","additions":3,"deletions":0},{"path":"src/beta.ts","kind":"modified","additions":1,"deletions":0}]'
+          ),
+          (
+            'thread-stranger',
+            'stranger-turn-1',
+            NULL, NULL, NULL, NULL,
+            'completed',
+            '2026-05-01T00:00:22.000Z',
+            '2026-05-01T00:00:22.000Z',
+            '2026-05-01T00:00:22.000Z',
+            1,
+            'checkpoint-stranger-1',
+            'ready',
+            '[{"path":"src/stranger.ts","kind":"modified","additions":1,"deletions":0}]'
+          )
+      `;
+
+      const contributions = yield* snapshotQuery.listSubagentTurnContributions({
+        parentThreadId: ThreadId.make("thread-parent"),
+        afterCompletedAt: "2026-05-01T00:00:10.000Z",
+        throughCompletedAt: "2026-05-01T00:00:30.000Z",
+      });
+
+      assert.deepEqual(contributions, [
+        {
+          threadId: ThreadId.make("thread-child"),
+          title: "Reviewer",
+          paths: ["src/alpha.ts", "src/beta.ts"],
+        },
+      ]);
+
+      const openWindow = yield* snapshotQuery.listSubagentTurnContributions({
+        parentThreadId: ThreadId.make("thread-parent"),
+        afterCompletedAt: null,
+        throughCompletedAt: "2026-05-01T00:00:30.000Z",
+      });
+
+      assert.deepEqual(openWindow[0]?.paths, ["src/alpha.ts", "src/beta.ts", "src/early.ts"]);
+    }),
+  );
+
   it.effect("keeps thread detail activity ordering consistent with shell snapshot ordering", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

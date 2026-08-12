@@ -1876,10 +1876,30 @@ export const TurnCountRange = Schema.Struct({
   ),
 );
 
+/**
+ * One thread-backed subagent's file-level share of a parent turn's diff.
+ *
+ * `spawn_agent` blocks inside the parent's turn and the parent's checkpoint is
+ * captured at `turn.completed`, so the parent's turn diff always contains every
+ * file its children wrote. The tree is a correct worktree snapshot; only the
+ * attribution is wrong. These rows name the child that wrote each path so the
+ * diff view can label it instead of claiming it for the parent.
+ */
+export const ThreadTurnDiffSubagentContribution = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  paths: Schema.Array(TrimmedNonEmptyString),
+});
+export type ThreadTurnDiffSubagentContribution = typeof ThreadTurnDiffSubagentContribution.Type;
+
 export const ThreadTurnDiff = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
     diff: Schema.String,
+    // Defaulted so a newer client keeps decoding an older server's response.
+    subagentContributions: Schema.Array(ThreadTurnDiffSubagentContribution).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+    ),
   }),
   { unsafePreserveChecks: true },
 );

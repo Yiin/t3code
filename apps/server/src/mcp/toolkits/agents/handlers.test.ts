@@ -262,6 +262,7 @@ const run = (
         getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
         getThreadCheckpointContext: () => Effect.die("unused"),
         getFullThreadDiffContext: () => Effect.die("unused"),
+        listSubagentTurnContributions: () => Effect.succeed([]),
         getThreadShellById: (threadId) => {
           const found = shells.get(threadId) ?? spawnedChildShell(threadId);
           return Effect.succeed(found === undefined ? Option.none() : Option.some(found));

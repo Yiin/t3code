@@ -204,6 +204,7 @@ describe("OrchestrationEngine", () => {
           listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+          listSubagentTurnContributions: () => Effect.succeed([]),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadSessionById: () => Effect.succeed(Option.none()),
           getThreadSubagentLiveness: () =>

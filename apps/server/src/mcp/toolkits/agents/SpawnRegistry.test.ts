@@ -221,6 +221,7 @@ const startSpawn = (options: RunOptions = {}) =>
       getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
       getThreadCheckpointContext: () => Effect.die("unused"),
       getFullThreadDiffContext: () => Effect.die("unused"),
+      listSubagentTurnContributions: () => Effect.succeed([]),
       getThreadShellById: (threadId) =>
         Effect.succeed(
           Option.some(isChild(threadId) ? runningChildShell(threadId, turnState) : parentShell),

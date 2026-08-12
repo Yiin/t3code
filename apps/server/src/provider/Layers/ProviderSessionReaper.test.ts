@@ -314,6 +314,7 @@ describe("ProviderSessionReaper", () => {
           listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
           getThreadCheckpointContext: () => Effect.die("unused"),
           getFullThreadDiffContext: () => Effect.die("unused"),
+          listSubagentTurnContributions: () => Effect.succeed([]),
           getThreadShellById: (threadId) =>
             Effect.succeed(
               input.readModel.threads.find((thread) => thread.id === threadId)

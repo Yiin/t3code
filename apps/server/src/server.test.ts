@@ -794,6 +794,7 @@ const buildAppUnderTest = (options?: {
               fromTurnCount: 0,
               toTurnCount: 0,
               diff: "",
+              subagentContributions: [],
             }),
           getFullThreadDiff: () =>
             Effect.succeed({
@@ -801,6 +802,7 @@ const buildAppUnderTest = (options?: {
               fromTurnCount: 0,
               toTurnCount: 0,
               diff: "",
+              subagentContributions: [],
             }),
           ...options?.layers?.checkpointDiffQuery,
         }),
@@ -5835,6 +5837,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 fromTurnCount: 0,
                 toTurnCount: 1,
                 diff: "turn-diff",
+                subagentContributions: [],
               }),
             getFullThreadDiff: () =>
               Effect.succeed({
@@ -5842,6 +5845,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 fromTurnCount: 0,
                 toTurnCount: 1,
                 diff: "full-diff",
+                subagentContributions: [],
               }),
           },
         },

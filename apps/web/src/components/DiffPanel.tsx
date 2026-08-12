@@ -32,6 +32,11 @@ import {
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../lib/diffRendering";
+import {
+  buildSubagentDiffAttribution,
+  readSubagentDiffLabels,
+} from "../lib/subagentDiffAttribution";
+import { SubagentDiffBadge } from "./diffs/SubagentDiffBadge";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useProject, useThread } from "../state/entities";
 import { resolveThreadRouteRef } from "../threadRoutes";
@@ -433,6 +438,15 @@ export default function DiffPanel({
       }),
     );
   }, [renderablePatch]);
+  // Only a turn diff can contain a subagent's work. A git-scope diff is not a
+  // turn, so it carries no attribution.
+  const subagentAttribution = useMemo(
+    () =>
+      buildSubagentDiffAttribution(
+        selectedTurn ? activeCheckpointDiff.data?.subagentContributions : undefined,
+      ),
+    [activeCheckpointDiff.data?.subagentContributions, selectedTurn],
+  );
   const codeViewFiles = useMemo(
     () =>
       renderableFiles.map((fileDiff) => {
@@ -819,35 +833,41 @@ export default function DiffPanel({
                   composerDraftTarget={composerDraftTarget}
                   renderHeaderPrefix={(fileDiff, fileKey, collapsed) => {
                     const filePath = resolveFileDiffPath(fileDiff);
+                    const subagentLabels = readSubagentDiffLabels(subagentAttribution, filePath);
                     return (
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <button
-                              type="button"
-                              className={cn(
-                                "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
-                                getDiffCollapseIconClassName(fileDiff),
-                              )}
-                              aria-label={collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`}
-                              aria-expanded={!collapsed}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                toggleDiffFileCollapsed(fileKey);
-                              }}
-                            />
-                          }
-                        >
-                          {collapsed ? (
-                            <ChevronRightIcon className="size-4" />
-                          ) : (
-                            <ChevronDownIcon className="size-4" />
-                          )}
-                        </TooltipTrigger>
-                        <TooltipPopup side="top">
-                          {collapsed ? "Expand diff" : "Collapse diff"}
-                        </TooltipPopup>
-                      </Tooltip>
+                      <>
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                className={cn(
+                                  "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
+                                  getDiffCollapseIconClassName(fileDiff),
+                                )}
+                                aria-label={
+                                  collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`
+                                }
+                                aria-expanded={!collapsed}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleDiffFileCollapsed(fileKey);
+                                }}
+                              />
+                            }
+                          >
+                            {collapsed ? (
+                              <ChevronRightIcon className="size-4" />
+                            ) : (
+                              <ChevronDownIcon className="size-4" />
+                            )}
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">
+                            {collapsed ? "Expand diff" : "Collapse diff"}
+                          </TooltipPopup>
+                        </Tooltip>
+                        <SubagentDiffBadge filePath={filePath} labels={subagentLabels} />
+                      </>
                     );
                   }}
                   options={{

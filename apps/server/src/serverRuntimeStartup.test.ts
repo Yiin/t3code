@@ -258,6 +258,7 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
           listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+          listSubagentTurnContributions: () => Effect.succeed([]),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadSessionById: () => Effect.succeed(Option.none()),
           getThreadSubagentLiveness: () =>
@@ -328,6 +329,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
         getThreadCheckpointContext: () => Effect.succeed(Option.none()),
         getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+        listSubagentTurnContributions: () => Effect.succeed([]),
         getThreadShellById: () => Effect.die("unused"),
         getThreadSessionById: () => Effect.die("unused"),
         getThreadSubagentLiveness: () =>
@@ -379,6 +381,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
         getThreadCheckpointContext: () => Effect.succeed(Option.none()),
         getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+        listSubagentTurnContributions: () => Effect.succeed([]),
         getThreadShellById: () => Effect.die("unused"),
         getThreadSessionById: () => Effect.die("unused"),
         getThreadSubagentLiveness: () =>
@@ -436,6 +439,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
         getThreadCheckpointContext: () => Effect.succeed(Option.none()),
         getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+        listSubagentTurnContributions: () => Effect.succeed([]),
         getThreadShellById: () => Effect.die("unused"),
         getThreadSessionById: () => Effect.die("unused"),
         getThreadSubagentLiveness: () =>

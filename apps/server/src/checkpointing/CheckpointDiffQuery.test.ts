@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import { describe, expect } from "vite-plus/test";
 
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { checkpointRefForThreadTurn } from "./Utils.ts";
 import * as CheckpointDiffQuery from "./CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
@@ -36,6 +37,73 @@ function makeThreadCheckpointContext(input: {
       },
     ],
   };
+}
+
+const TURN_1_COMPLETED_AT = "2026-01-01T00:01:00.000Z";
+const TURN_2_COMPLETED_AT = "2026-01-01T00:02:00.000Z";
+
+/**
+ * A parent thread with two checkpoints, so a turn-1-to-turn-2 diff has a real
+ * subagent window on both ends.
+ */
+function makeSubagentAttributionLayer(input: {
+  readonly threadId: ThreadId;
+  readonly listSubagentTurnContributions: ProjectionSnapshotQuery.ProjectionSnapshotQueryShape["listSubagentTurnContributions"];
+}) {
+  const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
+    isGitRepository: () => Effect.succeed(true),
+    captureCheckpoint: () => Effect.void,
+    hasCheckpointRef: () => Effect.succeed(true),
+    restoreCheckpoint: () => Effect.succeed(true),
+    diffCheckpoints: () => Effect.succeed("diff patch"),
+    deleteCheckpointRefs: () => Effect.void,
+  };
+
+  const threadCheckpointContext: ProjectionSnapshotQuery.ProjectionThreadCheckpointContext = {
+    threadId: input.threadId,
+    projectId: ProjectId.make("project-parent"),
+    workspaceRoot: "/tmp/workspace",
+    worktreePath: null,
+    checkpoints: [1, 2].map((turnCount) => ({
+      turnId: TurnId.make(`turn-${String(turnCount)}`),
+      checkpointTurnCount: turnCount,
+      checkpointRef: checkpointRefForThreadTurn(input.threadId, turnCount),
+      status: "ready" as const,
+      files: [],
+      assistantMessageId: null,
+      completedAt: turnCount === 1 ? TURN_1_COMPLETED_AT : TURN_2_COMPLETED_AT,
+    })),
+  };
+
+  return CheckpointDiffQuery.layer.pipe(
+    Layer.provideMerge(Layer.succeed(CheckpointStore.CheckpointStore, checkpointStore)),
+    Layer.provideMerge(
+      Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        getCommandReadModel: () => Effect.die("unused"),
+        getSnapshot: () => Effect.die("unused"),
+        getShellSnapshot: () => Effect.die("unused"),
+        getArchivedShellSnapshot: () => Effect.die("unused"),
+        getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+        getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
+        getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+        getProjectShellById: () => Effect.succeed(Option.none()),
+        getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+        listChildThreadIds: () => Effect.succeed([]),
+        listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
+        getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
+        getFullThreadDiffContext: () => Effect.die("unused"),
+        listSubagentTurnContributions: input.listSubagentTurnContributions,
+        getThreadShellById: () => Effect.succeed(Option.none()),
+        getThreadSessionById: () => Effect.succeed(Option.none()),
+        getThreadSubagentLiveness: () =>
+          Effect.succeed({ activeSubagentCount: 0, newestRunningUpdatedAt: null }),
+        getSubagentActivities: () =>
+          Effect.succeed({ activities: [], hasMore: false, nextBefore: null }),
+        getThreadDetailById: () => Effect.succeed(Option.none()),
+        getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+      }),
+    ),
+  );
 }
 
 describe("CheckpointDiffQuery.layer", () => {
@@ -105,8 +173,10 @@ describe("CheckpointDiffQuery.layer", () => {
                   worktreePath: "/tmp/worktree",
                   latestCheckpointTurnCount: 4,
                   toCheckpointRef,
+                  toCompletedAt: "2026-01-01T00:00:00.000Z",
                 });
               }),
+            listSubagentTurnContributions: () => Effect.succeed([]),
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadSessionById: () => Effect.succeed(Option.none()),
             getThreadSubagentLiveness: () =>
@@ -143,6 +213,7 @@ describe("CheckpointDiffQuery.layer", () => {
         fromTurnCount: 0,
         toTurnCount: 4,
         diff: "full thread diff patch",
+        subagentContributions: [],
       });
     }),
   );
@@ -207,6 +278,7 @@ describe("CheckpointDiffQuery.layer", () => {
             listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
+            listSubagentTurnContributions: () => Effect.succeed([]),
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadSessionById: () => Effect.succeed(Option.none()),
             getThreadSubagentLiveness: () =>
@@ -243,6 +315,7 @@ describe("CheckpointDiffQuery.layer", () => {
         fromTurnCount: 0,
         toTurnCount: 1,
         diff: "diff patch",
+        subagentContributions: [],
       });
     }),
   );
@@ -297,6 +370,7 @@ describe("CheckpointDiffQuery.layer", () => {
             listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
+            listSubagentTurnContributions: () => Effect.succeed([]),
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadSessionById: () => Effect.succeed(Option.none()),
             getThreadSubagentLiveness: () =>
@@ -372,6 +446,7 @@ describe("CheckpointDiffQuery.layer", () => {
             listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
+            listSubagentTurnContributions: () => Effect.succeed([]),
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadSessionById: () => Effect.succeed(Option.none()),
             getThreadSubagentLiveness: () =>
@@ -432,6 +507,7 @@ describe("CheckpointDiffQuery.layer", () => {
             listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.none()),
             getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+            listSubagentTurnContributions: () => Effect.succeed([]),
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadSessionById: () => Effect.succeed(Option.none()),
             getThreadSubagentLiveness: () =>
@@ -461,6 +537,67 @@ describe("CheckpointDiffQuery.layer", () => {
       expect(error.message).toBe(
         "Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread 'thread-missing' not found.",
       );
+    }),
+  );
+
+  it.effect("attributes a subagent's files to the child that wrote them", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-parent");
+      const childThreadId = ThreadId.make("subagent:thread-parent-reviewer");
+      const windows: Array<ProjectionSnapshotQuery.ProjectionSubagentTurnContributionWindow> = [];
+
+      const result = yield* Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+        return yield* query.getTurnDiff({ threadId, fromTurnCount: 1, toTurnCount: 2 });
+      }).pipe(
+        Effect.provide(
+          makeSubagentAttributionLayer({
+            threadId,
+            listSubagentTurnContributions: (window) =>
+              Effect.sync(() => {
+                windows.push(window);
+                return [{ threadId: childThreadId, title: "Reviewer", paths: ["src/child.ts"] }];
+              }),
+          }),
+        ),
+      );
+
+      expect(windows).toEqual([
+        {
+          parentThreadId: threadId,
+          afterCompletedAt: TURN_1_COMPLETED_AT,
+          throughCompletedAt: TURN_2_COMPLETED_AT,
+        },
+      ]);
+      expect(result.subagentContributions).toEqual([
+        { threadId: childThreadId, title: "Reviewer", paths: ["src/child.ts"] },
+      ]);
+    }),
+  );
+
+  it.effect("still returns the patch when the subagent lookup fails", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-parent");
+
+      const result = yield* Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+        return yield* query.getTurnDiff({ threadId, fromTurnCount: 1, toTurnCount: 2 });
+      }).pipe(
+        Effect.provide(
+          makeSubagentAttributionLayer({
+            threadId,
+            listSubagentTurnContributions: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "ProjectionSnapshotQuery.listSubagentTurnContributions:query",
+                }),
+              ),
+          }),
+        ),
+      );
+
+      expect(result.diff).toBe("diff patch");
+      expect(result.subagentContributions).toEqual([]);
     }),
   );
 });

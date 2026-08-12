@@ -179,6 +179,17 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   latestCheckpointTurnCount: Schema.NullOr(NonNegativeInt),
   toCheckpointRef: Schema.NullOr(CheckpointRef),
+  toCompletedAt: Schema.NullOr(Schema.String),
+});
+const SubagentTurnContributionLookupInput = Schema.Struct({
+  parentThreadId: ThreadId,
+  afterCompletedAt: Schema.String,
+  throughCompletedAt: Schema.String,
+});
+const ProjectionSubagentTurnContributionRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
 });
 const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.projects,
@@ -1446,13 +1457,45 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             WHERE turns.thread_id = threads.thread_id
               AND turns.checkpoint_turn_count = ${checkpointTurnCount}
             LIMIT 1
-          ) AS "toCheckpointRef"
+          ) AS "toCheckpointRef",
+          (
+            SELECT turns.completed_at
+            FROM projection_turns AS turns
+            WHERE turns.thread_id = threads.thread_id
+              AND turns.checkpoint_turn_count = ${checkpointTurnCount}
+            LIMIT 1
+          ) AS "toCompletedAt"
         FROM projection_threads AS threads
         INNER JOIN projection_projects AS projects
           ON projects.project_id = threads.project_id
         WHERE threads.thread_id = ${threadId}
           AND threads.deleted_at IS NULL
         LIMIT 1
+      `,
+  });
+
+  // Rides `idx_projection_threads_parent_thread`. `afterCompletedAt` is the
+  // empty string for an open lower bound: every stored timestamp is an ISO
+  // string, and every ISO string sorts after "".
+  const listSubagentTurnContributionRows = SqlSchema.findAll({
+    Request: SubagentTurnContributionLookupInput,
+    Result: ProjectionSubagentTurnContributionRowSchema,
+    execute: ({ parentThreadId, afterCompletedAt, throughCompletedAt }) =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId",
+          threads.title AS "title",
+          turns.checkpoint_files_json AS "files"
+        FROM projection_turns AS turns
+        INNER JOIN projection_threads AS threads
+          ON threads.thread_id = turns.thread_id
+        WHERE threads.parent_thread_id = ${parentThreadId}
+          AND threads.deleted_at IS NULL
+          AND turns.checkpoint_turn_count IS NOT NULL
+          AND turns.completed_at IS NOT NULL
+          AND turns.completed_at > ${afterCompletedAt}
+          AND turns.completed_at <= ${throughCompletedAt}
+        ORDER BY threads.thread_id ASC, turns.checkpoint_turn_count ASC
       `,
   });
 
@@ -2436,8 +2479,46 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         worktreePath: row.value.worktreePath,
         latestCheckpointTurnCount: row.value.latestCheckpointTurnCount ?? 0,
         toCheckpointRef: row.value.toCheckpointRef,
+        toCompletedAt: row.value.toCompletedAt,
       });
     });
+
+  const listSubagentTurnContributions: ProjectionSnapshotQueryShape["listSubagentTurnContributions"] =
+    (window) =>
+      listSubagentTurnContributionRows({
+        parentThreadId: window.parentThreadId,
+        afterCompletedAt: window.afterCompletedAt ?? "",
+        throughCompletedAt: window.throughCompletedAt,
+      }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listSubagentTurnContributions:query",
+            "ProjectionSnapshotQuery.listSubagentTurnContributions:decodeRow",
+          ),
+        ),
+        Effect.map((rows) => {
+          // One child can checkpoint several turns inside one parent turn, so
+          // fold its rows into a single contribution with de-duplicated paths.
+          const byThreadId = new Map<string, { title: string; paths: Set<string> }>();
+          for (const row of rows) {
+            const existing = byThreadId.get(row.threadId);
+            const entry = existing ?? { title: row.title, paths: new Set<string>() };
+            for (const file of row.files) {
+              entry.paths.add(file.path);
+            }
+            if (!existing) {
+              byThreadId.set(row.threadId, entry);
+            }
+          }
+          return Array.from(byThreadId.entries())
+            .filter(([, entry]) => entry.paths.size > 0)
+            .map(([threadId, entry]) => ({
+              threadId: ThreadId.make(threadId),
+              title: entry.title,
+              paths: Array.from(entry.paths).toSorted((left, right) => left.localeCompare(right)),
+            }));
+        }),
+      );
 
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
     Effect.gen(function* () {
@@ -2819,6 +2900,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     listThreadIdsWithQueuedMessages,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
+    listSubagentTurnContributions,
     getThreadShellById,
     getThreadSessionById,
     getThreadSubagentLiveness,
