@@ -164,11 +164,23 @@ failure. Read the load in the surrounding log lines before blaming the child.
 
 At startup the server walks its `epic_runs` rows. A row that is not `running`
 only has its leftover iteration rows abandoned. A `running` row is resumed. The
-server re-runs the launch preflight in resume mode, takes the run lock, abandons
+server re-runs the preflight with a resume intent, takes the run lock, abandons
 the run's own running iteration rows, reclaims a merge slot the dead process
 leaked, stops the worker scope units that carry its run identity, and forks the
-loop again. If the preflight or the lock fails, the run is marked `failed` and
-its last claimed child is released back to Beads.
+loop again.
+
+The resume names what the run already owns: its run id and the
+`worktree_path` of every row still marked `running`. Preflight forgives exactly
+those and nothing else. What it forgave, and which named worktree it could not
+find, is logged at boot as `epic.runner.resume-preflight-warnings` with the run
+id.
+
+If the preflight or the lock fails, the run parks as `paused`, with the blocker
+text in `last_error` and its thread pointers cleared. Every row still marked
+`running` is reconciled to `abandoned` / `server-restart`, and every child the
+run claimed is released back to Beads. Nothing drives those threads: without a
+lock the runner has no right to, and the session reaper already stopped their
+sessions. An operator clears the blocker and calls resume on the run.
 
 These still block a resume:
 
@@ -176,10 +188,10 @@ These still block a resume:
 - The workspace directory is gone, or a git command in it fails.
 - The lock is held by a holder that is still live.
 - HEAD is detached.
-- The base checkout is dirty. Sequential mode counts every change, tracked or
-  untracked. Parallel mode counts tracked changes, unless the run owns its base
-  branch, and always counts a dirty registered nested worktree. Neither mode
-  counts anything under `.beads/`.
+- The base checkout is dirty, in parallel mode. It counts tracked changes,
+  unless the run owns its base branch, and always counts a dirty registered
+  nested worktree that the resume does not own. It counts nothing under
+  `.beads/`.
 - `.t3code/epic-run.json` does not parse, or its `gate.command` is invalid.
 - An integration branch or worktree from a **different** run is present.
 - A configured sibling repository does not validate.
@@ -192,6 +204,13 @@ These do not block a resume:
 - The run's own integration branch and worktree. The resume passes its run id,
   so its own leftovers read as where it left off, not as residue to reconcile.
   This one is silent, not a warning.
+- The run's own per-worker worktrees, named by the resume. A dirty one is the
+  interrupted agent's unfinished work, which is the point of the resume.
+- A dirty base checkout in sequential mode. That work is the run's own, so it is
+  accepted and reported as a `dirty_tree_accepted` warning with the paths. A
+  parallel run still blocks: a dirty base tree there is the operator's.
+- A named worktree git no longer lists, or that is gone from disk. Reported as a
+  `resume_worktree_missing` warning with the paths.
 - Untracked files in the base checkout, in parallel mode. Reported as a warning
   with the paths.
 - Tracked changes the run ignores because it owns its base branch. Reported as a
@@ -207,6 +226,33 @@ Parallel workers get one worktree each at
 `<baseDir>/worktrees/epic-<runId>/integration`. `baseDir` is the server base
 directory and defaults to `~/.t3`. Sequential mode uses no worktrees; it works in
 the real checkout.
+
+## Recover a run that failed at boot
+
+Servers before this change wrote `failed` on a blocked boot and left the
+in-flight rows at `running`. `failed` is a dead end: resume only accepts
+`paused`. Fix such a run by hand.
+
+Stop the server first. Then, against `~/.t3/userdata/state.sqlite`:
+
+```sql
+UPDATE epic_runs
+SET status = 'paused',
+    current_thread_id = NULL,
+    current_turn_started_at = NULL
+WHERE run_id = '<run-id>' AND status = 'failed';
+
+UPDATE epic_run_iterations
+SET turn_status = 'abandoned',
+    summary = 'abandoned by server restart',
+    failure_reason = 'server-restart',
+    finished_at = '<iso-timestamp>'
+WHERE run_id = '<run-id>' AND turn_status = 'running';
+```
+
+Clear the blocker in `last_error`, start the server, and resume the run. Check
+the run's children in Beads too: a claim the old process never released still
+reads `in_progress`.
 
 ## Switch between modes
 

@@ -17,6 +17,7 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
+  type EpicRunPreflightInput,
   type EpicRunPreflightResult,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -406,6 +407,7 @@ function createHarness(input: {
   let epicDescriptionReads = 0;
   const configReadRoots: string[] = [];
   const preflightModes: Array<"parallel" | "sequential"> = [];
+  const preflightInputs: Array<EpicRunPreflightInput> = [];
   const provisionInputs: ProvisionWorktreeInput[] = [];
   const integrationProvisionInputs: ProvisionWorktreeInput[] = [];
   const releasedWorktrees: string[] = [];
@@ -1038,6 +1040,7 @@ function createHarness(input: {
         check: (preflightInput) => {
           const callIndex = preflightModes.length;
           preflightModes.push(preflightInput.mode);
+          preflightInputs.push(preflightInput);
           return input.preflightError === undefined
             ? Effect.succeed(
                 input.preflightResults?.[Math.min(callIndex, input.preflightResults.length - 1)] ??
@@ -1196,6 +1199,7 @@ function createHarness(input: {
     epicDescriptionReads: () => epicDescriptionReads,
     configReadRoots,
     preflightModes,
+    preflightInputs,
     provisionInputs,
     integrationProvisionInputs,
     releasedWorktrees,
@@ -2312,6 +2316,9 @@ describe("EpicRunner", () => {
       assert.strictEqual(stored.configProvenance["limits.maxAttemptsPerChild"], "file");
       assert.strictEqual(stored.configProvenance["execution.sequential"], "override");
       assert.deepStrictEqual(harness.preflightModes, ["parallel"]);
+      // A launch forgives nothing: it owns no leftovers yet.
+      assert.isUndefined(harness.preflightInputs[0]?.intent);
+      assert.isUndefined(harness.preflightInputs[0]?.resume);
       assert.deepStrictEqual(harness.configReadRoots, ["/tmp/epic-runner-repo"]);
     }).pipe(Effect.provide(harness.layer));
   });
@@ -4928,10 +4935,10 @@ describe("EpicRunner", () => {
     });
   });
 
-  // The dangling row this epic exists to fix. A blocked boot preflight fails
-  // the run and releases its child, but never reconciles the iteration row, so
-  // the row stays `running` with nothing running behind it.
-  it.live("fails a running run at boot when preflight reports dirty_tree", () => {
+  // A blocked boot preflight used to fail the run and leave its rows dangling
+  // at `running` with nothing running behind them. It now parks the run where
+  // an operator can resume it and reconciles every in-flight row itself.
+  it.live("parks a running run as paused at boot when preflight reports dirty_tree", () => {
     const runId = "run-boot-dirty-tree";
     const staleRun: EpicRun = {
       runId: EpicRunId.make(runId),
@@ -4967,6 +4974,20 @@ describe("EpicRunner", () => {
           iterationIndex: 0,
           threadId: ThreadId.make(`epic-run-${runId}-0`),
           issueId: "child-0",
+          worktreePath: `/tmp/worktrees/${runId}-0`,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: null,
+        },
+        {
+          runId: staleRun.runId,
+          iterationIndex: 1,
+          threadId: ThreadId.make(`epic-run-${runId}-1`),
+          issueId: "child-1",
+          worktreePath: `/tmp/worktrees/${runId}-1`,
           turnStatus: "running",
           summary: null,
           why: null,
@@ -4979,50 +5000,172 @@ describe("EpicRunner", () => {
         ok: false,
         blockers: [{ _tag: "dirty_tree", paths: ["src/a.ts"] }],
       }),
+      childStatuses: { "child-0": "in_progress", "child-1": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "paused");
+
+      const parked = harness.store.runs.get(runId)!;
+      // The persisted error is the formatted blocker, not its tag: a run that
+      // parks here has to tell a human which paths to clean.
+      assert.strictEqual(
+        parked.lastError,
+        `Epic epic-1 cannot start: ${formatEpicRunPreflightBlocker({
+          _tag: "dirty_tree",
+          paths: ["src/a.ts"],
+        })}`,
+      );
+      assert.include(parked.lastError ?? "", "src/a.ts");
+      // Nothing drives this run's thread any more, so nothing may point at it.
+      assert.strictEqual(parked.currentThreadId, null);
+      assert.strictEqual(parked.currentTurnStartedAt, null);
+      // Both stranded children come back, because the parked run's loop never
+      // forks and so its finalizer never releases the claims.
+      for (const issueId of ["child-0", "child-1"]) {
+        yield* waitFor(() => harness.childStatus(issueId) === "open");
+        const releaseRequest = harness.processRequests.find(
+          (request) =>
+            request.command === "bd" && request.args[0] === "update" && request.args[1] === issueId,
+        )!;
+        assert.deepStrictEqual(releaseRequest.args, [
+          "update",
+          issueId,
+          "--status",
+          "open",
+          "--assignee",
+          "",
+        ]);
+      }
+      // Every in-flight row is reconciled here, without a lease and without
+      // driving a single thread.
+      for (const index of [0, 1]) {
+        assert.strictEqual(harness.store.iterations[index]?.turnStatus, "abandoned");
+        assert.strictEqual(harness.store.iterations[index]?.summary, "abandoned by server restart");
+        assert.strictEqual(harness.store.iterations[index]?.failureReason, "server-restart");
+        assert.strictEqual(harness.store.iterations[index]?.why, null);
+        assert.isNotNull(harness.store.iterations[index]?.finishedAt);
+      }
+      assert.strictEqual(harness.commandsOfType("thread.turn.interrupt").length, 0);
+      assert.strictEqual(harness.commandsOfType("thread.session.stop").length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("hands the boot preflight this run's own runId and in-flight worktrees", () => {
+    const runId = "run-boot-resume-intent";
+    const staleRun: EpicRun = {
+      runId: EpicRunId.make(runId),
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "running",
+      maxIterations: 1,
+      workers: 1,
+      iterationsDispatched: 1,
+      iterationsCompleted: 1,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      seedRuns: [staleRun],
+      readyOutput: "[]",
+      seedIterations: [
+        {
+          runId: staleRun.runId,
+          iterationIndex: 0,
+          threadId: ThreadId.make(`epic-run-${runId}-0`),
+          issueId: "child-0",
+          worktreePath: `/tmp/worktrees/${runId}-0`,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: null,
+        },
+        // A finished row's worktree is already released, so it must not be
+        // named as something the resume still owns.
+        {
+          runId: staleRun.runId,
+          iterationIndex: 1,
+          threadId: ThreadId.make(`epic-run-${runId}-1`),
+          issueId: "child-1",
+          worktreePath: `/tmp/worktrees/${runId}-1`,
+          turnStatus: "completed",
+          summary: "done",
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: NOW,
+        },
+      ],
       childStatuses: { "child-0": "in_progress" },
     });
 
     return Effect.gen(function* () {
       const runner = yield* EpicRunner;
       yield* runner.start();
-      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+      yield* waitFor(() => harness.preflightInputs.length > 0);
 
-      const failed = harness.store.runs.get(runId)!;
-      // The persisted error is the formatted blocker, not its tag: a run that
-      // parks here has to tell a human which paths to clean.
-      assert.strictEqual(
-        failed.lastError,
-        `Epic epic-1 cannot start: ${formatEpicRunPreflightBlocker({
-          _tag: "dirty_tree",
-          paths: ["src/a.ts"],
-        })}`,
-      );
-      assert.include(failed.lastError ?? "", "src/a.ts");
-      // The stranded child comes back, because the failed run's loop never
-      // forks and so its finalizer never releases the claim.
-      assert.strictEqual(harness.childStatus("child-0"), "open");
-      const releaseRequest = harness.processRequests.find(
-        (request) =>
-          request.command === "bd" && request.args[0] === "update" && request.args[1] === "child-0",
-      )!;
-      assert.deepStrictEqual(releaseRequest.args, [
-        "update",
-        "child-0",
-        "--status",
-        "open",
-        "--assignee",
-        "",
-      ]);
-      // The row nobody reconciled. `abandonRunningIterations` runs only after
-      // the lease is acquired, and this boot never gets that far.
-      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "running");
-      assert.strictEqual(harness.store.iterations[0]?.failureReason, null);
+      const bootInput = harness.preflightInputs[0]!;
+      assert.strictEqual(bootInput.intent, "resume");
+      assert.deepStrictEqual(bootInput.resume, {
+        runId,
+        worktreePaths: [`/tmp/worktrees/${runId}-0`],
+      });
     }).pipe(Effect.provide(harness.layer));
   });
 
-  // Today the boot preflight asks for whichever mode the run persisted, so it
-  // asks "is the tree this run works in dirty" with no way to say "this is a
-  // resume, not a fresh launch". Pinned here because a later child changes it.
+  it.live("asks a start and an operator resume for no resume forgiveness", () => {
+    // `startRun`, `launchRun` and `resumeRun` all run in a workspace an
+    // operator owns. Only the boot path may forgive a run's own leftovers.
+    const harness = createHarness({
+      script: [
+        { text: "work", head: "head-1" },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      options: { quietPeriodMs: 150 },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.iterations.length === 1);
+      yield* runner.pauseRun({ runId: run.runId });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "paused");
+      yield* waitFor(
+        () =>
+          harness.store.iterations[0]?.turnStatus === "completed" &&
+          harness.activeLockCount() === 0,
+      );
+      yield* runner.resumeRun({ runId: run.runId });
+      yield* waitFor(() => harness.preflightInputs.length === 2);
+
+      for (const preflightInput of harness.preflightInputs) {
+        assert.isUndefined(preflightInput.intent);
+        assert.isUndefined(preflightInput.resume);
+      }
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  // The boot preflight asks for whichever mode the run persisted. `mode` says
+  // WHOSE tree a dirty path belongs to, and a resume can be either mode, so the
+  // resume intent never replaces it.
   for (const [label, configSnapshot, expectedMode] of [
     ["parallel", defaultConfigSnapshot, "parallel"],
     ["sequential", persistedSequentialConfigSnapshot, "sequential"],
@@ -5629,7 +5772,7 @@ describe("EpicRunner", () => {
     return Effect.gen(function* () {
       const runner = yield* EpicRunner;
       yield* runner.start();
-      yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "paused");
       yield* waitFor(() => harness.childStatus("child-0") === "open");
 
       const releaseRequest = harness.processRequests.find(

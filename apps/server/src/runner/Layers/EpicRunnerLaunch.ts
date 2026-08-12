@@ -57,6 +57,17 @@ export const isValidOrientationFile = (value: string): boolean =>
 const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
   provenance[key] !== undefined && provenance[key] !== "default";
 
+/**
+ * What a resumed run already owns, handed to `acquireLease` by the boot path.
+ *
+ * Its presence is the resume discriminator: absent means launch, and every
+ * launch caller keeps today's exact behaviour by passing nothing.
+ */
+export interface EpicRunLeaseResume {
+  /** Absolute per-worker worktree paths, read from `epic_run_iterations`. */
+  readonly worktreePaths: ReadonlyArray<string>;
+}
+
 export interface EpicRunLeaseHeld {
   readonly _tag: "EpicRunLeaseHeld";
   readonly mappedError: EpicRunPreflightBlockedError;
@@ -152,7 +163,10 @@ export const makeEpicRunnerLaunch = (deps: {
     runId: EpicRunId,
     input: Pick<StartEpicRunInput, "cwd" | "epicId">,
     configSnapshot: EpicRunConfigSnapshot,
-    resuming?: boolean,
+    // The artifacts this run already owns, when the caller is picking the run
+    // back up rather than launching it. The run id is not repeated here: it is
+    // this call's first argument, and two sources for it could disagree.
+    resume?: EpicRunLeaseResume,
   ) {
     const result = yield* preflight
       .check(
@@ -160,11 +174,15 @@ export const makeEpicRunnerLaunch = (deps: {
           workspaceRoot: input.cwd,
           epicId: input.epicId,
           mode: configSnapshot.config.execution.sequential ? "sequential" : "parallel",
-          // Resuming this run forgives this run's own integration leftovers.
-          // A fresh launch passes no run id, so nothing is forgiven there.
-          // The per-worker worktree paths stay empty until the boot path
-          // sources them from `epic_run_iterations` (t3code-y5l.15).
-          ...(resuming === true ? { resume: { runId, worktreePaths: [] } } : {}),
+          // Resuming this run forgives this run's own integration leftovers and
+          // its own in-flight worktrees. A fresh launch passes neither, so
+          // nothing is forgiven there.
+          ...(resume === undefined
+            ? {}
+            : {
+                intent: "resume" as const,
+                resume: { runId, worktreePaths: resume.worktreePaths },
+              }),
         },
         configSnapshot,
       )
@@ -177,6 +195,17 @@ export const makeEpicRunnerLaunch = (deps: {
             }),
         ),
       );
+    if (resume !== undefined && result.warnings.length > 0) {
+      // What the resume adopted, and what it could not find, belongs in the
+      // boot log: `dirty_tree_accepted` says the run's own unfinished work was
+      // forgiven, `resume_worktree_missing` says a child has to be dispatched
+      // fresh instead of continued.
+      yield* Effect.logInfo("epic.runner.resume-preflight-warnings", {
+        runId,
+        epicId: input.epicId,
+        warnings: result.warnings,
+      });
+    }
     if (!result.ok) {
       const mapped = new EpicRunPreflightBlockedError({
         epicId: input.epicId,

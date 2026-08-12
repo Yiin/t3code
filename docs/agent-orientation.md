@@ -34,8 +34,9 @@ Keep worker checks focused. Run a supplied gate command exactly.
   survive a service restart.
 - Restart recovery abandons old running iteration rows, then resumes each running run.
   A resume re-runs preflight in resume mode, which forgives only that run's own
-  integration branch and worktree, and stops only that run's own leftover worker
-  scopes. A lost lease fails the run and releases its claimed child.
+  integration branch and worktrees, and stops only that run's own leftover worker
+  scopes. A lost lease pauses the run, abandons its in-flight rows, and releases
+  its claimed children.
 - Client turn ingress does not block threads owned by an EpicRunner run.
 
 Never install dependencies or run `skills/install.sh` inside an epic worktree.

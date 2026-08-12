@@ -739,14 +739,27 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             );
             continue;
           }
+          // The rows still marked `running` are this run's interrupted work.
+          // Their worktrees are the ones preflight has to forgive, so read them
+          // before the check rather than after it.
+          const inFlight = yield* store
+            .listRunningIterations({ runId: run.runId })
+            .pipe(Effect.mapError(storeError("listRunningIterations")));
+          const resumeWorktreePaths = [
+            ...new Set(
+              inFlight
+                .map((iteration) => iteration.worktreePath ?? null)
+                .filter((path): path is string => path !== null),
+            ),
+          ];
           const acquireError = yield* launch
             .acquireLease(
               run.runId,
               { cwd: run.cwd, epicId: run.epicId },
               launch.persistedConfigSnapshot(run),
               // This is a resume: the run's own integration branch and
-              // worktree are where it left off, not leftovers to reconcile.
-              true,
+              // worktrees are where it left off, not leftovers to reconcile.
+              { worktreePaths: resumeWorktreePaths },
             )
             .pipe(
               Effect.match({
@@ -757,12 +770,36 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           if (acquireError !== null) {
             const error =
               acquireError._tag === "EpicRunLeaseHeld" ? acquireError.mappedError : acquireError;
+            // `paused`, not `failed`: the blocker is almost always something an
+            // operator can clear, and `resumeRun` only accepts `paused`, so
+            // `failed` here would be a dead end. The thread pointers go with
+            // it, or the awareness relay and the web sidebar keep pointing at a
+            // thread nothing is driving.
             yield* saveRun({
               ...run,
-              status: "failed",
+              status: "paused",
               lastError: error.message,
+              currentThreadId: null,
+              currentTurnStartedAt: null,
               updatedAt: yield* DateTimeNowIso,
             });
+            // Reconcile the in-flight rows durably, but drive no thread: without
+            // a lease this runner has no right to interrupt or stop them, and
+            // the session reaper already stopped their sessions at startup.
+            // That is why this cannot reuse `abandonRunningIterations`.
+            for (const iteration of inFlight) {
+              yield* store
+                .updateIteration({
+                  runId: run.runId,
+                  iterationIndex: iteration.iterationIndex,
+                  turnStatus: "abandoned",
+                  summary: "abandoned by server restart",
+                  why: null,
+                  failureReason: "server-restart",
+                  finishedAt: yield* DateTimeNowIso,
+                })
+                .pipe(Effect.mapError(storeError("updateIteration")));
+            }
             // This run's loop never gets a chance to fork, so its finalizer
             // never runs either — release its last claimed child here, or a
             // lost lease strands it exactly like the failure path this fixes.
