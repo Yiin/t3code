@@ -30,10 +30,17 @@ import {
   type PoolSchedulerEvent,
   type PoolVcsShape,
   type ReadyFrontierSelection,
+  type ResumedWorker,
 } from "./ParallelEpicLoop.ts";
 import { parseMergeFixTitle } from "./policy.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
-import type { AgentDispatchCapabilities, IterationHandle } from "./ports/AgentDispatch.ts";
+import type {
+  AgentDispatchCapabilities,
+  IterationHandle,
+  IterationResume,
+  IterationResumeMode,
+  IterationResumeRefusal,
+} from "./ports/AgentDispatch.ts";
 import type { BacklogIssue } from "./ports/Backlog.ts";
 import type { RunEvent } from "./ports/RunEvents.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
@@ -166,6 +173,18 @@ const fixture = (input: {
   readonly workerEvidence?: WorkerEvidenceShape;
   /** Drive the supervision cadence off a fake clock. */
   readonly supervisionClock?: SupervisionClock;
+  /** Iterations a previous process left running, adopted at loop start. */
+  readonly resumedWorkers?: ReadonlyArray<ResumedWorker>;
+  /** What the harness declares it can do about a dead handle. */
+  readonly resumeCapability?: IterationResumeMode;
+  /** What `resumeIteration` answers, one entry per call, in order. */
+  readonly resumeRefusals?: ReadonlyArray<IterationResumeRefusal | null>;
+  /** What `claimChild` answers for a resumed child. */
+  readonly claimChildResult?: "claimed" | "already-claimed" | "closed" | "unknown";
+  /** Fail `workspace.adopt`, as a worktree that is gone does. */
+  readonly adoptFails?: boolean;
+  /** Seed the persisted run's counters, e.g. the failure streaks. */
+  readonly runSeed?: Partial<PersistedEpicRun>;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -207,8 +226,26 @@ const fixture = (input: {
     lastError: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
+    ...input.runSeed,
   };
-  const iterations: PersistedEpicRunIteration[] = [];
+  const resumedWorkers = input.resumedWorkers ?? [];
+  const iterations: PersistedEpicRunIteration[] = resumedWorkers.map((worker) => ({
+    runId: RUN_ID,
+    iterationIndex: worker.iterationIndex,
+    threadId: worker.threadId,
+    issueId: worker.issueId,
+    turnStatus: "running" as const,
+    summary: null,
+    why: null,
+    failureReason: null,
+    resumeCount: worker.resumeCount,
+    startedAt: worker.startedAt,
+    finishedAt: null,
+  }));
+  nextIterationIndex = resumedWorkers.reduce(
+    (next, worker) => Math.max(next, worker.iterationIndex + 1),
+    0,
+  );
   const events: RunEvent[] = [];
   const ordering: string[] = [];
   const attempts = input.attempts ?? [];
@@ -216,6 +253,11 @@ const fixture = (input: {
   const createCalls: Array<Parameters<ParallelEpicLoopPorts["dispatch"]["createIteration"]>[0]> =
     [];
   const beginTurnCalls: Array<Parameters<ParallelEpicLoopPorts["dispatch"]["beginTurn"]>[0]> = [];
+  const resumeCalls: Array<Parameters<ParallelEpicLoopPorts["dispatch"]["resumeIteration"]>[0]> =
+    [];
+  const acquireCalls: string[] = [];
+  const adoptCalls: Array<Parameters<WorkspaceShape["adopt"]>[1]> = [];
+  const claimChildCalls: string[] = [];
   const stopAbandonedCalls: string[] = [];
   const stopForcedCalls: string[] = [];
   const releasedClaims: string[] = [];
@@ -338,6 +380,14 @@ const fixture = (input: {
         }
         return false;
       }),
+    claimChild: (_cwd, issueId) =>
+      Effect.sync(() => {
+        claimChildCalls.push(issueId);
+        const result = input.claimChildResult ?? "claimed";
+        if (result === "claimed") child = { ...child, status: "in_progress" };
+        if (result === "closed") child = { ...child, status: "closed" };
+        return result;
+      }),
   };
 
   const workspace: WorkspaceShape = {
@@ -349,8 +399,28 @@ const fixture = (input: {
             // is the path an unavailable merge slot defers on.
             { entries: input.drainDefersForever ? [{ status: "queued" as const }] : [] },
       ),
+    adopt: (_runCtx, adoptInput) =>
+      Effect.suspend(() => {
+        adoptCalls.push(adoptInput);
+        if (input.adoptFails === true) {
+          return Effect.fail(
+            new EpicRunnerDispatchError({
+              commandType: "git.worktree-adopt",
+              detail: `Worktree ${adoptInput.worktreePath ?? "-"} is gone`,
+            }),
+          );
+        }
+        return Effect.succeed<IterationWorkspace>({
+          cwd: adoptInput.worktreePath ?? "/repo",
+          branch: adoptInput.branch,
+          worktreePath: adoptInput.worktreePath,
+          siblingWorktrees,
+          siblingRule: input.siblingRule ?? null,
+        });
+      }),
     acquire: (_runCtx, acquireInput) =>
       Effect.sync((): IterationWorkspace => {
+        acquireCalls.push(acquireInput.issueId);
         if (acquireInput.sequential) {
           return {
             cwd: "/repo",
@@ -382,9 +452,72 @@ const fixture = (input: {
       }),
   };
 
+  const capabilities: AgentDispatchCapabilities =
+    input.resumeCapability === undefined
+      ? serverLikeCapabilities
+      : { ...serverLikeCapabilities, lifecycle: { resume: input.resumeCapability } };
+
+  const makeHandle = (ref: string, attempt: Attempt): IterationHandle => ({
+    ref,
+    capabilities,
+    awaitSettled:
+      attempt.neverSettles === true
+        ? Effect.never
+        : Effect.sync(() => {
+            if (attempt.commit === true) head += 1;
+            if (attempt.siblingCommit === true) {
+              for (const path of siblingHeads.keys()) {
+                siblingHeads.set(path, (siblingHeads.get(path) ?? 0) + 1);
+              }
+            }
+            if (attempt.claim === true) child = { ...child, status: "in_progress" };
+            if (attempt.close === true) child = { ...child, status: "closed" };
+            if (attempt.comment === true) {
+              child = { ...child, commentCount: child.commentCount + 1 };
+            }
+            return {
+              turnState:
+                attempt.providerError === undefined ? ("completed" as const) : ("error" as const),
+              timedOut: false,
+              providerError: attempt.providerError ?? null,
+            };
+          }),
+    continueTurn: () => Effect.void,
+    interrupt: Effect.sync(() => {
+      interrupts += 1;
+      ordering.push("handle:interrupt");
+    }),
+    release: Effect.sync(() => {
+      releases += 1;
+      ordering.push("handle:release");
+    }),
+    runningSubagents: Effect.succeed({ mode: "native", running: 0 }),
+    finalMessage: Effect.succeed(
+      attempt.providerError !== undefined
+        ? { text: null, streaming: false, waitExhausted: true }
+        : {
+            text:
+              attempt.blocked === true
+                ? "RALPH_BLOCKED"
+                : 'RALPH_MSG: {"summary":"did work","why":"needed"}',
+            streaming: false,
+            waitExhausted: false,
+          },
+    ),
+  });
+
+  let resumeCount = 0;
   const dispatch: ParallelEpicLoopPorts["dispatch"] = {
-    capabilities: serverLikeCapabilities,
-    resumeIteration: () => Effect.die(new Error("resumeIteration is not exercised by this test")),
+    capabilities,
+    resumeIteration: (resume) =>
+      Effect.sync((): IterationResume => {
+        resumeCalls.push(resume);
+        ordering.push("dispatch:resumeIteration");
+        const refusal = (input.resumeRefusals ?? [])[resumeCount++] ?? null;
+        return refusal === null
+          ? { _tag: "resumed", handle: makeHandle(resume.ref, attempts[dispatchCount++] ?? {}) }
+          : { _tag: "unavailable", refusal };
+      }),
     createIteration: (create) =>
       Effect.sync(() => {
         createCalls.push(create);
@@ -409,57 +542,7 @@ const fixture = (input: {
           }),
         );
       }
-      const handle: IterationHandle = {
-        ref: begin.threadId,
-        capabilities: serverLikeCapabilities,
-        awaitSettled:
-          attempt.neverSettles === true
-            ? Effect.never
-            : Effect.sync(() => {
-                if (attempt.commit === true) head += 1;
-                if (attempt.siblingCommit === true) {
-                  for (const path of siblingHeads.keys()) {
-                    siblingHeads.set(path, (siblingHeads.get(path) ?? 0) + 1);
-                  }
-                }
-                if (attempt.claim === true) child = { ...child, status: "in_progress" };
-                if (attempt.close === true) child = { ...child, status: "closed" };
-                if (attempt.comment === true) {
-                  child = { ...child, commentCount: child.commentCount + 1 };
-                }
-                return {
-                  turnState:
-                    attempt.providerError === undefined
-                      ? ("completed" as const)
-                      : ("error" as const),
-                  timedOut: false,
-                  providerError: attempt.providerError ?? null,
-                };
-              }),
-        continueTurn: () => Effect.void,
-        interrupt: Effect.sync(() => {
-          interrupts += 1;
-          ordering.push("handle:interrupt");
-        }),
-        release: Effect.sync(() => {
-          releases += 1;
-          ordering.push("handle:release");
-        }),
-        runningSubagents: Effect.succeed({ mode: "native", running: 0 }),
-        finalMessage: Effect.succeed(
-          attempt.providerError !== undefined
-            ? { text: null, streaming: false, waitExhausted: true }
-            : {
-                text:
-                  attempt.blocked === true
-                    ? "RALPH_BLOCKED"
-                    : 'RALPH_MSG: {"summary":"did work","why":"needed"}',
-                streaming: false,
-                waitExhausted: false,
-              },
-        ),
-      };
-      return Effect.succeed(handle);
+      return Effect.succeed(makeHandle(begin.threadId, attempt));
     },
     stopAbandoned: (threadId) =>
       Effect.sync(() => {
@@ -543,6 +626,7 @@ const fixture = (input: {
         signals,
         readOrientation: () => Effect.succeed("ORIENTATION CARD"),
         cleanupOwnedExternally: () => false,
+        resumedWorkers,
       },
       ports,
     );
@@ -557,6 +641,10 @@ const fixture = (input: {
     ordering,
     createCalls,
     beginTurnCalls,
+    resumeCalls,
+    acquireCalls,
+    adoptCalls,
+    claimChildCalls,
     stopAbandonedCalls,
     stopForcedCalls,
     releasedClaims,
@@ -1044,10 +1132,12 @@ it.live(
         issueIsResearch: () => Effect.succeed(false),
         epicDescription: () => Effect.succeed("EPIC GOAL"),
         releaseClaimedChild: () => Effect.succeed(false),
+        claimChild: () => Effect.succeed("claimed"),
       };
 
       const workspace: WorkspaceShape = {
         ensureIntegration: () => Effect.succeed({ entries: [] }),
+        adopt: () => Effect.die(new Error("adopt is not exercised by this test")),
         acquire: (_run, acquireInput) =>
           Effect.sync((): IterationWorkspace => {
             const isFix = acquireInput.issueId === fixChildId;
@@ -1399,5 +1489,282 @@ it.live("charges no per-child attempt when the claim was never standing", () =>
     assert.equal(test.runRecord().status, "failed");
     assert.equal(test.dispatchCount(), 3);
     assert.equal(test.events.filter((event) => event.type === "child-claim-released").length, 0);
+  }),
+);
+
+/**
+ * Restart recovery: an iteration a previous process left `running` is either
+ * continued on its own thread, or abandoned through ONE fallback that hands
+ * the child back to the ordinary dispatch tick.
+ */
+
+const resumedWorker = (override: Partial<ResumedWorker> = {}): ResumedWorker => ({
+  issueId: "epic.1",
+  iterationIndex: 3,
+  threadId: ThreadId.make(epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 3 })),
+  branch: "epic/epic.1",
+  worktreePath: "/wt/epic.1",
+  startedAt: "2026-01-01T00:00:00Z",
+  resumeCount: 0,
+  ...override,
+});
+
+const resumeDecisions = (events: ReadonlyArray<RunEvent>) =>
+  events.filter((event) => event.type === "iteration-resume-decision");
+
+it.live("continues an interrupted iteration on its own row, thread and worktree", () =>
+  Effect.gen(function* () {
+    const worker = resumedWorker();
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [worker],
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    // The already-provisioned worktree is adopted, never re-acquired.
+    assert.deepEqual(test.adoptCalls, [
+      {
+        issueId: "epic.1",
+        branch: "epic/epic.1",
+        worktreePath: "/wt/epic.1",
+        sequential: false,
+      },
+    ]);
+    assert.deepEqual(test.acquireCalls, []);
+
+    // One resume, on the row and thread the dead process left behind, and no
+    // new thread for it.
+    assert.equal(test.resumeCalls.length, 1);
+    assert.equal(test.resumeCalls[0]?.ref, worker.threadId);
+    assert.equal(test.resumeCalls[0]?.iterationIndex, 3);
+    assert.equal(test.resumeCalls[0]?.issueId, "epic.1");
+    assert.deepEqual(test.createCalls, []);
+    assert.deepEqual(test.beginTurnCalls, []);
+    assert.include(test.resumeCalls[0]?.prompt ?? "", "Cook exactly `epic.1` this iteration.");
+
+    // The row is reused, not appended to.
+    assert.equal(test.iterations.length, 1);
+    assert.equal(test.iterations[0]?.iterationIndex, 3);
+    assert.equal(test.iterations[0]?.threadId, worker.threadId);
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
+    assert.equal(test.iterations[0]?.startedAt, "2026-01-01T00:00:00Z");
+    assert.isAbove(test.ordering.indexOf("dispatch:resumeIteration"), -1);
+    assert.isBelow(
+      test.ordering.indexOf("journal:resumed"),
+      test.ordering.indexOf("dispatch:resumeIteration"),
+    );
+
+    // The run pays for the iteration once, at its first dispatch.
+    const run = test.runRecord();
+    assert.equal(run.iterationsDispatched, 0);
+    assert.equal(run.iterationsCompleted, 1);
+    assert.equal(run.status, "done");
+
+    const decisions = resumeDecisions(test.events);
+    assert.equal(decisions.length, 1);
+    assert.deepInclude(decisions[0], { decision: "resumed", iterationIndex: 3, origin: null });
+  }),
+);
+
+it.live("never asks a harness that declares resume unsupported", () =>
+  Effect.gen(function* () {
+    const worker = resumedWorker();
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [worker],
+      resumeCapability: "unsupported",
+      claimChildResult: "already-claimed",
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    assert.deepEqual(test.resumeCalls, []);
+    // The refusal is decided from the capability alone, before the claim read.
+    assert.deepEqual(test.claimChildCalls, []);
+
+    // The interrupted row is abandoned and its dead session stopped.
+    assert.equal(test.iterations[0]?.iterationIndex, 3);
+    assert.equal(test.iterations[0]?.turnStatus, "abandoned");
+    assert.equal(test.iterations[0]?.failureReason, "server-restart");
+    assert.deepEqual(test.stopForcedCalls, [worker.threadId]);
+    assert.include(test.releasedClaims, "epic.1");
+
+    const decisions = resumeDecisions(test.events);
+    assert.equal(decisions.length, 1);
+    assert.deepInclude(decisions[0], { decision: "capability", origin: null, iterationIndex: 3 });
+
+    // The child is redispatched fresh through the ordinary tick.
+    assert.deepEqual(test.acquireCalls, ["epic.1"]);
+    assert.equal(test.beginTurnCalls.length, 1);
+    assert.equal(test.iterations[1]?.iterationIndex, 4);
+    assert.equal(test.iterations[1]?.turnStatus, "completed");
+    assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("takes the same fallback when the harness refuses to continue the session", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      claimChildResult: "already-claimed",
+      resumeRefusals: [
+        {
+          _tag: "not-continued",
+          origin: "started-fresh",
+          detail: "the session started blank",
+        },
+      ],
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.resumeCalls.length, 1);
+    assert.equal(test.iterations[0]?.turnStatus, "abandoned");
+    assert.equal(test.iterations[0]?.failureReason, "server-restart");
+    assert.include(test.releasedClaims, "epic.1");
+
+    const decisions = resumeDecisions(test.events);
+    assert.equal(decisions.length, 1);
+    assert.deepInclude(decisions[0], { decision: "not-continued", origin: "started-fresh" });
+
+    // Identical recovery to the unsupported case: one fresh dispatch.
+    assert.deepEqual(test.acquireCalls, ["epic.1"]);
+    assert.equal(test.iterations[1]?.turnStatus, "completed");
+    assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("falls back the same way when the interrupted worktree is gone", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      adoptFails: true,
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    assert.deepEqual(test.resumeCalls, []);
+    assert.equal(test.iterations[0]?.turnStatus, "abandoned");
+    assert.deepInclude(resumeDecisions(test.events)[0], { decision: "workspace-missing" });
+    assert.deepEqual(test.acquireCalls, ["epic.1"]);
+    assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("never resumes a child that closed while the run was down", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      claimChildResult: "closed",
+    });
+    yield* test.run;
+
+    assert.deepEqual(test.claimChildCalls, ["epic.1"]);
+    assert.deepEqual(test.resumeCalls, []);
+    assert.deepEqual(test.beginTurnCalls, []);
+    assert.equal(test.iterations[0]?.turnStatus, "abandoned");
+    assert.equal(test.iterations[0]?.failureReason, "server-restart");
+    assert.deepInclude(resumeDecisions(test.events)[0], { decision: "child-closed" });
+    assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("decides two interrupted rows of one run independently", () =>
+  Effect.gen(function* () {
+    const first = resumedWorker({ iterationIndex: 3 });
+    const second = resumedWorker({
+      issueId: "epic.2",
+      iterationIndex: 4,
+      threadId: ThreadId.make(epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 4 })),
+      branch: "epic/epic.2",
+      worktreePath: "/wt/epic.2",
+    });
+    const test = fixture({
+      sequential: false,
+      runSeed: { workers: 2 },
+      resumedWorkers: [first, second],
+      claimChildResult: "already-claimed",
+      // First adopts, second is refused. The order matches the launch order.
+      resumeRefusals: [null, { _tag: "no-durable-state", detail: "no cursor persisted" }],
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.resumeCalls.length, 2);
+    const rows = new Map(test.iterations.map((row) => [row.iterationIndex, row]));
+    assert.equal(rows.get(3)?.turnStatus, "completed");
+    assert.equal(rows.get(4)?.turnStatus, "abandoned");
+    assert.equal(rows.get(4)?.failureReason, "server-restart");
+
+    const decisions = resumeDecisions(test.events);
+    assert.equal(decisions.length, 2);
+    assert.deepEqual(
+      decisions.map((event) => [event.iterationIndex, event.decision]),
+      [
+        [3, "resumed"],
+        [4, "no-durable-state"],
+      ],
+    );
+  }),
+);
+
+it.effect("lets two resumed workers fill a two-worker pool from tick zero", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      runSeed: { workers: 2 },
+      resumedWorkers: [
+        resumedWorker({ iterationIndex: 3 }),
+        resumedWorker({
+          issueId: "epic.2",
+          iterationIndex: 4,
+          threadId: ThreadId.make(epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 4 })),
+          worktreePath: "/wt/epic.2",
+        }),
+      ],
+      claimChildResult: "already-claimed",
+      attempts: [{ neverSettles: true }, { neverSettles: true }],
+      policy: policy({ runStallTimeoutMs: 60_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(30));
+
+    // Both slots are held by workers this run already charged for, so nothing
+    // fresh is dispatched and `iterationsDispatched` never moves.
+    assert.equal(test.resumeCalls.length, 2);
+    assert.deepEqual(test.beginTurnCalls, []);
+    assert.deepEqual(test.acquireCalls, []);
+    assert.equal(test.runRecord().iterationsDispatched, 0);
+    assert.equal(test.runRecord().status, "running");
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
+it.effect("carries a run's failure streaks into a resumed iteration", () =>
+  Effect.gen(function* () {
+    // `resumeRun` zeroes these three counters. A restart must not, or a gutted
+    // run would restart its way out of the gutter.
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      claimChildResult: "already-claimed",
+      runSeed: { consecutiveFailures: 2, noCommitStreak: 1, infraStreak: 1 },
+      attempts: [{ neverSettles: true }],
+      policy: policy({ runStallTimeoutMs: 60_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(30));
+
+    const run = test.runRecord();
+    assert.equal(test.resumeCalls.length, 1);
+    assert.equal(run.consecutiveFailures, 2);
+    assert.equal(run.noCommitStreak, 1);
+    assert.equal(run.infraStreak, 1);
+    assert.equal(run.status, "running");
+    yield* Fiber.interrupt(fiber);
   }),
 );

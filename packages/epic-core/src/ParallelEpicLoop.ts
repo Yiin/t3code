@@ -42,7 +42,13 @@ import {
   iterationFailureClass,
   type EpicIterationOutcome,
 } from "./ralphProtocol.ts";
-import type { DispatchError, FinalMessageRead, IterationSettle } from "./ports/AgentDispatch.ts";
+import type {
+  DispatchError,
+  FinalMessageRead,
+  IterationHandle,
+  IterationResumeRefusal,
+  IterationSettle,
+} from "./ports/AgentDispatch.ts";
 import type { PoolDispatchShape } from "./ports/PoolDispatch.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEvent } from "./ports/RunEvents.ts";
@@ -123,6 +129,21 @@ export interface PoolBacklogShape {
    * the claim-recovery event exactly once per exhausted child.
    */
   readonly releaseClaimedChild: (cwd: string, issueId: string) => Effect.Effect<boolean>;
+  /**
+   * Take the standing claim on a child the loop is about to resume.
+   *
+   * A restart cannot assume the claim survived: the run's own finalizer, or a
+   * `bd` sweep, may have reopened the child while the process was down. Only
+   * an `open` child is claimed; `closed` is the one answer that must stop the
+   * resume, because the work is finished and continuing the session would
+   * redo it. `unknown` is an unreadable bead and is never treated as closed.
+   *
+   * Never fails; the adapter logs.
+   */
+  readonly claimChild: (
+    cwd: string,
+    issueId: string,
+  ) => Effect.Effect<"claimed" | "already-claimed" | "closed" | "unknown">;
 }
 
 export type MergeDrainResult =
@@ -193,12 +214,63 @@ export interface PoolRunEventsShape {
   readonly publish: (event: RunEvent) => Effect.Effect<void, EpicRunnerError>;
 }
 
+/**
+ * One iteration a previous process left `running`, as the caller hands it back.
+ *
+ * The caller sources these from its own durable store — the loop's journal
+ * port carries no `branch` or `worktreePath`, and both are needed to find the
+ * worktree the dead worker was committing into. See
+ * {@link ParallelEpicLoopInput.resumedWorkers}.
+ */
+export interface ResumedWorker {
+  readonly issueId: string;
+  readonly iterationIndex: number;
+  readonly threadId: ThreadId;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  /** When the FIRST dispatch of this row started, not when the resume did. */
+  readonly startedAt: string;
+  /** How many times this row was already reopened. `0` on the first resume. */
+  readonly resumeCount: number;
+}
+
 type ReadyChildSelection =
   | { readonly _tag: "child"; readonly issueId: string }
+  /** Continue an interrupted iteration instead of starting a new one. */
+  | { readonly _tag: "resume"; readonly worker: ResumedWorker }
   | { readonly _tag: "unrecognised"; readonly candidateIds: ReadonlyArray<string> };
+
+/**
+ * Why the loop gave up on continuing an interrupted iteration: the harness's
+ * own refusal, plus the two the loop decides for itself.
+ */
+type ResumeRefusalDecision =
+  | IterationResumeRefusal
+  | { readonly _tag: "workspace-missing"; readonly detail: string }
+  | { readonly _tag: "child-closed"; readonly detail: string };
+
+/** `resumeIteration`'s three answers, flattened so each narrows on its own. */
+type ResumeAttempt =
+  | { readonly _tag: "handle"; readonly handle: IterationHandle }
+  | { readonly _tag: "refused"; readonly refusal: IterationResumeRefusal }
+  | { readonly _tag: "failed"; readonly error: EpicRunnerDispatchError };
+
+/** The persisted failure reason for an iteration a restart could not continue. */
+const RESUME_ABANDONED_REASON = "server-restart";
 
 type RunIterationResult =
   | { readonly _tag: "dispatch-skipped"; readonly providerTurnDispatched: false }
+  /**
+   * A resume the loop refused. The row is already `abandoned` and the claim is
+   * already released, so the boundary writes nothing: no iteration completed,
+   * no streak moved, and the next scheduler tick re-selects the child fresh.
+   */
+  | {
+      readonly _tag: "resume-abandoned";
+      readonly providerTurnDispatched: false;
+      readonly issueId: string;
+      readonly iterationIndex: number;
+    }
   | {
       readonly _tag: "classified";
       readonly outcome: EpicIterationOutcome;
@@ -309,6 +381,20 @@ export interface ParallelEpicLoopInput {
   ) => Effect.Effect<string | null>;
   /** When true (cancel owns cleanup), the finalizer skips its own cleanup. */
   readonly cleanupOwnedExternally: () => boolean;
+  /**
+   * Iterations a previous process left `running`, adopted before the first
+   * scheduler tick.
+   *
+   * Absent or empty keeps today's behaviour exactly: nothing is adopted and
+   * no resume port is touched. Each entry occupies a pool slot from tick zero
+   * and is charged already, so a two-worker run that adopts two workers
+   * dispatches nothing new until one settles.
+   *
+   * The caller decides what belongs here. It reads its own store for the
+   * run's `running` rows, which is the only place `branch` and `worktreePath`
+   * live; the loop never goes looking for interrupted work by itself.
+   */
+  readonly resumedWorkers?: ReadonlyArray<ResumedWorker> | undefined;
 }
 
 export interface ParallelEpicLoopPorts {
@@ -472,6 +558,76 @@ export const runParallelEpicLoop = (
       return count !== null && count > 0;
     });
 
+  /**
+   * The ONE recovery branch for an interrupted iteration the loop will not
+   * continue — an unsupported harness, a harness refusal, a worktree that is
+   * gone, a child that closed while the run was down.
+   *
+   * Every path ends the same way: the operator gets the decision as a durable
+   * event, the row goes `abandoned` exactly as restart reconciliation used to
+   * write it, the dead session is stopped, and the claim is reopened so the
+   * next scheduler tick re-selects the child and dispatches it fresh. Two
+   * recovery branches would be two things to keep in step; there is one.
+   */
+  const abandonResume = (abandoned: {
+    readonly worker: ResumedWorker;
+    readonly refusal: ResumeRefusalDecision;
+  }): Effect.Effect<RunIterationResult, EpicRunnerError> =>
+    Effect.gen(function* () {
+      const { worker, refusal } = abandoned;
+      const summary = `resume refused (${refusal._tag}): ${refusal.detail}`;
+      yield* ports.events.publish({
+        type: "iteration-resume-decision",
+        runId,
+        iterationIndex: worker.iterationIndex,
+        issueId: worker.issueId,
+        decision: refusal._tag,
+        origin: refusal._tag === "not-continued" ? refusal.origin : null,
+        detail: refusal.detail,
+      });
+      const finishedAt = yield* nowIso;
+      yield* ports.journal
+        .updateIteration({
+          runId,
+          iterationIndex: worker.iterationIndex,
+          turnStatus: "abandoned",
+          summary,
+          why: null,
+          failureReason: RESUME_ABANDONED_REASON,
+          finishedAt,
+        })
+        .pipe(Effect.mapError(journalError("updateIteration")));
+      yield* publishIteration({
+        runId,
+        iterationIndex: worker.iterationIndex,
+        threadId: worker.threadId,
+        issueId: worker.issueId,
+        turnStatus: "abandoned",
+        summary,
+        why: null,
+        failureReason: RESUME_ABANDONED_REASON,
+        startedAt: worker.startedAt,
+        finishedAt,
+      });
+      // Nobody will ever hold this session again, so it must not sit open
+      // while the same child is redispatched onto a fresh worktree.
+      yield* ports.dispatch.stopForced(worker.threadId).pipe(Effect.ignore);
+      yield* ports.backlog.releaseClaimedChild(input.cwd, worker.issueId);
+      yield* Effect.logWarning("epic.runner.resume-abandoned", {
+        runId,
+        iterationIndex: worker.iterationIndex,
+        issueId: worker.issueId,
+        decision: refusal._tag,
+        detail: refusal.detail,
+      });
+      return {
+        _tag: "resume-abandoned",
+        providerTurnDispatched: false,
+        issueId: worker.issueId,
+        iterationIndex: worker.iterationIndex,
+      } as const;
+    });
+
   const runIteration = (args: {
     readonly runCtx: PoolRunContext;
     readonly run: import("./ports/RunJournal.ts").PersistedEpicRun;
@@ -569,7 +725,8 @@ export const runParallelEpicLoop = (
         } as const;
       }
 
-      const issueId = selection.issueId;
+      const resumedWorker = selection._tag === "resume" ? selection.worker : null;
+      const issueId = selection._tag === "resume" ? selection.worker.issueId : selection.issueId;
       const issueEvidenceBefore = yield* ports.backlog.issueEvidence(input.cwd, issueId);
       // Flag this worker to the pool loop before it can possibly touch the
       // base branch (t3code-sha): the workspace acquire just below is what
@@ -578,12 +735,79 @@ export const runParallelEpicLoop = (
       if (parseIntegrationFixTitle(issueEvidenceBefore.title ?? "") !== null) {
         args.onIntegrationFixDetected();
       }
-      const workspace = yield* ports.workspace.acquire(args.runCtx, {
-        issueId,
-        issueTitle: issueEvidenceBefore.title?.trim() || issueId,
-        sequential: run.config.execution.sequential,
-      });
+
+      // A resume rebuilds the record of a worktree that already exists; it
+      // never provisions. `acquire` would refuse the leftover worktree, and
+      // provisioning a second one would strand the commits in the first.
+      //
+      // This runs BEFORE the capability check on purpose. The shared fallback
+      // has to release the leftover worktree — otherwise the fresh dispatch
+      // that follows it refuses to provision over what is still on disk — and
+      // the release finalizer needs this record to do it. `resumeIteration`
+      // is still never called on a harness that declared `unsupported`.
+      let workspace: IterationWorkspace;
+      if (resumedWorker === null) {
+        workspace = yield* ports.workspace.acquire(args.runCtx, {
+          issueId,
+          issueTitle: issueEvidenceBefore.title?.trim() || issueId,
+          sequential: run.config.execution.sequential,
+        });
+      } else {
+        const adopted = yield* ports.workspace
+          .adopt(args.runCtx, {
+            issueId,
+            branch: resumedWorker.branch,
+            worktreePath: resumedWorker.worktreePath,
+            sequential: run.config.execution.sequential,
+          })
+          .pipe(
+            Effect.map((adoptedWorkspace) => ({
+              _tag: "adopted" as const,
+              workspace: adoptedWorkspace,
+            })),
+            Effect.catch((error) =>
+              Effect.succeed({ _tag: "refused" as const, detail: error.message }),
+            ),
+          );
+        if (adopted._tag === "refused") {
+          return yield* abandonResume({
+            worker: resumedWorker,
+            refusal: { _tag: "workspace-missing", detail: adopted.detail },
+          });
+        }
+        workspace = adopted.workspace;
+      }
       releaseContext = { workspace };
+
+      if (resumedWorker !== null) {
+        // The typed capability, read before anything is asked of the harness.
+        // A harness that persists no artifact until the child closes has
+        // nothing to adopt, and saying so is the honest answer — starting a
+        // blank session that looks resumed is not.
+        if (ports.dispatch.capabilities.lifecycle.resume === "unsupported") {
+          return yield* abandonResume({
+            worker: resumedWorker,
+            refusal: {
+              _tag: "capability",
+              detail: "this harness cannot adopt an iteration whose handle died",
+            },
+          });
+        }
+        // The claim may not have survived the restart: the run's own finalizer
+        // reopens every child it stranded. Re-take it, and stop here when the
+        // child is already closed — that work is done, and continuing the
+        // session would only redo it.
+        const claim = yield* ports.backlog.claimChild(input.cwd, issueId);
+        if (claim === "closed") {
+          return yield* abandonResume({
+            worker: resumedWorker,
+            refusal: {
+              _tag: "child-closed",
+              detail: `${issueId} closed while the run was down`,
+            },
+          });
+        }
+      }
       const branchBase = workspace.branch === null ? null : yield* ports.vcs.headCommit(input.cwd);
       const epicContext = yield* ports.backlog.epicDescription(input.cwd, input.epicId);
       const orientationCard = yield* input.readOrientation(input.cwd, run.orientationFile);
@@ -606,6 +830,23 @@ export const runParallelEpicLoop = (
         Effect.gen(function* () {
           const current = yield* requireRun(runId);
           if (current.status !== "running") return null;
+          if (resumedWorker !== null) {
+            // Reuse the row. `allocateIteration` derives `thread_id` from the
+            // index in SQL, so a second row at N+1 carrying thread N's id
+            // breaks the `epicRunIterationThreadId` round-trip — and a resume
+            // is one iteration across two process lifetimes, not two.
+            yield* ports.journal
+              .markIterationResumed({
+                runId,
+                iterationIndex: resumedWorker.iterationIndex,
+                resumedAt: startedAt,
+              })
+              .pipe(Effect.mapError(journalError("markIterationResumed")));
+            return {
+              iterationIndex: resumedWorker.iterationIndex,
+              threadId: resumedWorker.threadId,
+            } as const;
+          }
           const iterationIndex = yield* ports.journal
             .allocateIteration({
               runId,
@@ -636,6 +877,9 @@ export const runParallelEpicLoop = (
         return { _tag: "dispatch-skipped", providerTurnDispatched: false } as const;
       }
       const { iterationIndex, threadId } = allocated;
+      // A resumed row keeps the stamp its first dispatch wrote; only the
+      // journal's `lastResumedAt` records when this process picked it up.
+      const iterationStartedAt = resumedWorker?.startedAt ?? startedAt;
 
       yield* publishIteration({
         runId,
@@ -646,11 +890,12 @@ export const runParallelEpicLoop = (
         summary: null,
         why: null,
         failureReason: null,
-        startedAt,
+        startedAt: iterationStartedAt,
         finishedAt: null,
       });
 
-      if (workspace.branch !== null && workspace.worktreePath !== null) {
+      // The setup script already ran in this worktree before the restart.
+      if (resumedWorker === null && workspace.branch !== null && workspace.worktreePath !== null) {
         yield* ports.dispatch.prepareIteration({
           threadId,
           projectId: run.projectId,
@@ -682,6 +927,59 @@ export const runParallelEpicLoop = (
             return null;
           }
           const dispatchedAt = yield* nowIso;
+          const prompt = assembleIterationPrompt({
+            basePrompt: current.prompt,
+            issueId,
+            epicContext,
+            orientationCard,
+            siblingRule: workspace.siblingRule,
+          });
+          if (resumedWorker !== null) {
+            // Continuity is proved before the run row moves, so a refusal
+            // leaves no trace of a dispatch that never happened. The wait
+            // stays inside the transition for the same reason `beginTurn`
+            // does: a durable pause must not be followed by a provider turn.
+            const attempt: ResumeAttempt = yield* ports.dispatch
+              .resumeIteration({
+                ref: resumedWorker.threadId,
+                runId,
+                iterationIndex,
+                issueId,
+                prompt,
+                selection: current.modelSelection,
+                runtimeMode: current.runtimeMode,
+                policy,
+                workspace,
+                headBefore,
+                branchBase,
+                initialWorktreeFingerprint,
+              })
+              .pipe(
+                Effect.match({
+                  onFailure: (error): ResumeAttempt => ({ _tag: "failed", error }),
+                  onSuccess: (outcome): ResumeAttempt =>
+                    outcome._tag === "resumed"
+                      ? { _tag: "handle", handle: outcome.handle }
+                      : { _tag: "refused", refusal: outcome.refusal },
+                }),
+              );
+            if (attempt._tag === "refused") {
+              return { _tag: "refused", worker: resumedWorker, refusal: attempt.refusal } as const;
+            }
+            const resumedRun = {
+              ...current,
+              currentThreadId: threadId,
+              currentTurnStartedAt: dispatchedAt,
+              // No `iterationsDispatched` charge: this run already paid for
+              // this iteration, and charging twice shrinks the frontier.
+              updatedAt: dispatchedAt,
+            };
+            yield* saveRun(resumedRun);
+            args.onDispatched(threadId);
+            return attempt._tag === "handle"
+              ? ({ _tag: "started", run: resumedRun, handle: attempt.handle, error: null } as const)
+              : ({ _tag: "started", run: resumedRun, handle: null, error: attempt.error } as const);
+          }
           const next = {
             ...current,
             currentThreadId: threadId,
@@ -694,13 +992,7 @@ export const runParallelEpicLoop = (
           const started = yield* ports.dispatch
             .beginTurn({
               threadId,
-              prompt: assembleIterationPrompt({
-                basePrompt: next.prompt,
-                issueId,
-                epicContext,
-                orientationCard,
-                siblingRule: workspace.siblingRule,
-              }),
+              prompt,
               selection: next.modelSelection,
               runtimeMode: next.runtimeMode,
               policy,
@@ -717,12 +1009,32 @@ export const runParallelEpicLoop = (
                 onSuccess: (handle) => ({ handle, error: null }),
               }),
             );
-          return { run: next, ...started } as const;
+          return { _tag: "started", run: next, ...started } as const;
         }),
       );
       if (dispatched === null) {
         yield* ports.dispatch.stopAbandoned(threadId);
         return { _tag: "dispatch-skipped", providerTurnDispatched: false } as const;
+      }
+      if (dispatched._tag === "refused") {
+        return yield* abandonResume({
+          worker: dispatched.worker,
+          refusal: dispatched.refusal,
+        });
+      }
+      if (resumedWorker !== null) {
+        // Every resume decision is on the record, not just the ones that lost
+        // work: "the session was continued" is the only evidence that a
+        // restart cost nothing.
+        yield* ports.events.publish({
+          type: "iteration-resume-decision",
+          runId,
+          iterationIndex,
+          issueId,
+          decision: "resumed",
+          origin: null,
+          detail: `continued at ${resumedWorker.threadId}`,
+        });
       }
 
       const settleIteration: Effect.Effect<
@@ -975,7 +1287,7 @@ export const runParallelEpicLoop = (
         summary: outcome.report?.summary ?? outcome.detail,
         why: outcome.report?.why ?? null,
         failureReason,
-        startedAt,
+        startedAt: iterationStartedAt,
         finishedAt,
       });
 
@@ -1050,6 +1362,17 @@ export const runParallelEpicLoop = (
       Effect.gen(function* () {
         if (args.iterationResult._tag === "dispatch-skipped") {
           return LOOP_STOP;
+        }
+        // An abandoned resume completed nothing, so it moves no counter: not
+        // `iterationsCompleted`, not a streak, not a child attempt. The child
+        // is open again and the next tick dispatches it fresh, which is the
+        // attempt that will be judged.
+        if (args.iterationResult._tag === "resume-abandoned") {
+          return {
+            _tag: "continue",
+            delayMs: 0,
+            providerFallbackApplied: args.providerFallbackApplied,
+          } satisfies LoopBoundary;
         }
         // Failure budgets belong to the run. Every completed worker applies
         // its boundary under this semaphore, so simultaneous settlements
@@ -1349,14 +1672,23 @@ export const runParallelEpicLoop = (
         // no-commit iteration earned its keep. Short-circuit `&&` skips the
         // `yield*` entirely, so the flag-off path issues exactly the calls it
         // issued before t3code-sha, in the same order.
+        const selectedIssueId =
+          selection._tag === "child"
+            ? selection.issueId
+            : selection._tag === "resume"
+              ? selection.worker.issueId
+              : null;
         const isIntegrationFix =
           run.config.vcs.runOwnedBaseBranch &&
-          selection._tag === "child" &&
+          selectedIssueId !== null &&
           parseIntegrationFixTitle(
-            (yield* ports.backlog.issueEvidence(input.cwd, selection.issueId)).title ?? "",
+            (yield* ports.backlog.issueEvidence(input.cwd, selectedIssueId)).title ?? "",
           ) !== null;
         const activeIteration: ActiveIteration = {
-          charged: false,
+          // A resumed worker is charged from tick zero: its
+          // `iterationsDispatched` was paid before the restart, so leaving it
+          // uncharged would let the frontier reserve a slot it already holds.
+          charged: selection._tag === "resume",
           modelSelection: run.modelSelection,
           isIntegrationFix,
         };
@@ -1384,6 +1716,21 @@ export const runParallelEpicLoop = (
           Effect.forkChild,
         );
       });
+
+    // Adopt what a previous process left running, before the scheduler gets a
+    // chance to dispatch anything fresh. Each adopted worker holds its pool
+    // slot from here on, so the first tick already sees the right occupancy.
+    for (const worker of input.resumedWorkers ?? []) {
+      if (active.has(worker.issueId)) continue;
+      yield* Effect.logInfo("epic.runner.resume-adopting", {
+        runId,
+        iterationIndex: worker.iterationIndex,
+        issueId: worker.issueId,
+        threadId: worker.threadId,
+        resumeCount: worker.resumeCount,
+      });
+      yield* launch(initialRun, { _tag: "resume", worker }, worker.issueId);
+    }
 
     while (true) {
       const run = yield* requireRun(runId);

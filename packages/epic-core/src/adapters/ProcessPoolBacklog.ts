@@ -274,6 +274,40 @@ export const makeProcessPoolBacklog = (
       ),
     );
 
+  /**
+   * Take the standing claim on a child a resume is about to continue.
+   *
+   * The claim may or may not have survived the process that made it: the run's
+   * own finalizer reopens every child it stranded, so the bead can read `open`
+   * again even though the worktree and the agent session are both still there.
+   * Only `open` is claimed. `in_progress` is already ours (or a legitimate
+   * handoff) and needs no write, and `closed` is the one answer that must stop
+   * the resume.
+   *
+   * An unreadable bead is `unknown`, never `closed`: dropping a live agent
+   * session because `bd` hiccuped costs more than continuing one turn too many.
+   */
+  const claimChild: PoolBacklogShape["claimChild"] = (cwd, issueId) =>
+    issueEvidence(cwd, issueId).pipe(
+      Effect.flatMap((evidence) => {
+        if (evidence.status === "closed") return Effect.succeed("closed" as const);
+        if (evidence.status === "in_progress") return Effect.succeed("already-claimed" as const);
+        if (evidence.status !== "open") return Effect.succeed("unknown" as const);
+        return processRunner
+          .run({ command: "bd", args: ["update", issueId, "--status", "in_progress"], cwd })
+          .pipe(
+            Effect.map((claimed) =>
+              claimed.code === 0 ? ("claimed" as const) : ("unknown" as const),
+            ),
+          );
+      }),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("epic.runner.claim-child-failed", { cwd, issueId, cause }).pipe(
+          Effect.as("unknown" as const),
+        ),
+      ),
+    );
+
   return {
     readyFrontier,
     countOpenChildren,
@@ -281,5 +315,6 @@ export const makeProcessPoolBacklog = (
     issueIsResearch,
     epicDescription,
     releaseClaimedChild,
+    claimChild,
   };
 };

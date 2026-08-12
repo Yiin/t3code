@@ -1321,6 +1321,117 @@ export const makeServerPoolWorkspace = (deps: {
         );
       }),
 
+    /**
+     * Rebuild the workspace record of an iteration that is already
+     * provisioned. Same sibling derivation as `acquire`; the main path and
+     * branch come from the caller, because a merge-fix child works a parked
+     * branch whose name `epic/<issueId>` would not reproduce.
+     *
+     * A worktree missing from disk or from `git worktree list` is a refusal,
+     * not a run failure: the caller starts that child fresh instead.
+     */
+    adopt: (runCtx, input) =>
+      Effect.gen(function* () {
+        const run = yield* requireRun(runCtx.runId);
+        if (input.sequential) {
+          const siblings = yield* runSiblings(run);
+          return {
+            cwd: input.worktreePath ?? run.cwd,
+            branch: null,
+            worktreePath: input.worktreePath,
+            siblingWorktrees: siblings.map((sibling) => ({
+              worktreePath: sibling.canonicalPath,
+              sourcePath: sibling.canonicalPath,
+              baseBranch: sibling.baseBranch,
+            })),
+            siblingRule: siblings.length === 0 ? null : siblingRuleSequential({ siblings }),
+          };
+        }
+        const worktreePath = input.worktreePath;
+        if (worktreePath === null) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.worktree-adopt",
+            detail: `Parallel iteration for ${input.issueId} recorded no worktree to adopt`,
+          });
+        }
+        const onDisk = yield* fileSystem.exists(worktreePath).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("epic.runner.worktree-adopt-probe-failed", {
+              runId: runCtx.runId,
+              worktreePath,
+              cause,
+            }).pipe(Effect.as(false)),
+          ),
+        );
+        if (!onDisk) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.worktree-adopt",
+            detail: `Worktree ${worktreePath} is gone`,
+          });
+        }
+        const registered = yield* processRunner
+          .run({
+            command: "git",
+            args: ["-C", run.cwd, "worktree", "list", "--porcelain"],
+            cwd: run.cwd,
+            timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new EpicRunnerDispatchError({
+                  commandType: "git.worktree-adopt",
+                  detail: `Could not list the worktrees of ${run.cwd}`,
+                  cause,
+                }),
+            ),
+          );
+        if (
+          registered.code !== 0 ||
+          !registered.stdout.split(/\r?\n/).includes(`worktree ${worktreePath}`)
+        ) {
+          return yield* new EpicRunnerDispatchError({
+            commandType: "git.worktree-adopt",
+            detail: `Worktree ${worktreePath} is not registered with ${run.cwd}`,
+          });
+        }
+        const siblings = yield* runSiblings(run);
+        if (siblings.length === 0) {
+          return {
+            cwd: worktreePath,
+            branch: input.branch,
+            worktreePath,
+            siblingWorktrees: [],
+            siblingRule: null,
+          };
+        }
+        // A layout mirrors the siblings' real relative positions around the
+        // main worktree, so both the layout root and the repo basename are
+        // readable off the path `acquire` built.
+        const layout = path.dirname(worktreePath);
+        const repoBasename = path.basename(worktreePath);
+        return {
+          cwd: worktreePath,
+          branch: input.branch,
+          worktreePath,
+          siblingWorktrees: siblings.map((sibling) => ({
+            worktreePath: mirrorPath(layout, repoBasename, sibling.relativePath),
+            sourcePath: sibling.canonicalPath,
+            baseBranch: sibling.baseBranch,
+          })),
+          siblingRule:
+            input.branch === null
+              ? null
+              : siblingRuleLayout({
+                  layoutRoot: layoutRoot(runCtx.runId),
+                  layout,
+                  repoBasename,
+                  branch: input.branch,
+                  siblings,
+                }),
+        };
+      }),
+
     release: (runCtx, workspace) => {
       if (workspace.worktreePath === null) return Effect.void;
       const worktreePath = workspace.worktreePath;

@@ -60,6 +60,32 @@ export interface WorkspaceShape {
     },
   ) => Effect.Effect<IterationWorkspace, EpicRunnerError>;
   /**
+   * Rebuild the workspace record of an iteration that is ALREADY provisioned,
+   * without provisioning anything.
+   *
+   * A restart loses the in-memory {@link IterationWorkspace} but not the
+   * worktree on disk, so a resumed iteration needs its record back — the same
+   * `siblingWorktrees` and `siblingRule` derivation `acquire` does, with the
+   * main path and branch supplied by the caller rather than derived.
+   *
+   * Read `branch` and `worktreePath` from the caller and never re-derive them
+   * from `issueId`: a merge-fix child works a parked branch, so the derived
+   * name and the real one disagree.
+   *
+   * Fails when the worktree is not on disk, or not registered with git. That
+   * is a refusal the caller turns into "start this child fresh", not a run
+   * failure.
+   */
+  readonly adopt: (
+    run: PoolRunContext,
+    input: {
+      readonly issueId: string;
+      readonly branch: string | null;
+      readonly worktreePath: string | null;
+      readonly sequential: boolean;
+    },
+  ) => Effect.Effect<IterationWorkspace, EpicRunnerError>;
+  /**
    * Release an iteration workspace. The single-repo path never fails (the
    * adapter logs); a layout cleanup failure propagates and the loop fails the
    * run as `infra:merge-reconciliation`.

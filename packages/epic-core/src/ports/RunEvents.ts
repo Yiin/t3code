@@ -60,6 +60,35 @@ export const RunEvent = Schema.Union([
     stage: WorkerLivenessStage,
     detail: Schema.String,
   }),
+  /**
+   * What the loop decided about one iteration a restart interrupted.
+   *
+   * Published once per interrupted iteration, whichever way the decision went.
+   * Anything but `resumed` is a data-loss event — the agent's own session is
+   * dropped and the child starts over from a clean worktree — so an operator
+   * needs the refusal in the record, not only in a log line.
+   *
+   * `capability`, `no-durable-state` and `not-continued` are the harness's own
+   * `IterationResumeRefusal` tags. `workspace-missing` and `child-closed` are
+   * the loop's: the worktree is gone, or the bead closed while the run was
+   * down. `origin` is set only by `not-continued`.
+   */
+  Schema.Struct({
+    type: Schema.Literal("iteration-resume-decision"),
+    runId: EpicRunId,
+    iterationIndex: NonNegativeInt,
+    issueId: Schema.String,
+    decision: Schema.Literals([
+      "resumed",
+      "capability",
+      "no-durable-state",
+      "not-continued",
+      "workspace-missing",
+      "child-closed",
+    ]),
+    origin: Schema.NullOr(Schema.Literals(["started-fresh", "forked", "unknown"])),
+    detail: Schema.String,
+  }),
   Schema.Struct({
     type: Schema.Literal("child-claim-released"),
     runId: EpicRunId,

@@ -357,6 +357,12 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
 
       let dispatchFailed = false;
       let outcome: EpicIterationOutcome;
+      // No resume path here, on purpose. This loop dispatches through the
+      // older single-step `AgentDispatchShape.startIteration`, which has no
+      // durable ref to adopt and no two-phase transition to slot a resume
+      // into. Restart recovery for an interrupted iteration lives in
+      // `ParallelEpicLoop.ts` (`resumedWorkers`), which is the only loop the
+      // server runs; this one is CLI and conformance only.
       const started = yield* Effect.result(
         ports.dispatch.startIteration({
           runId: input.runId,

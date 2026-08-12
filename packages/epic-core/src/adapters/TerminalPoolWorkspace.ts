@@ -677,6 +677,108 @@ export const makeTerminalPoolWorkspace = (deps: {
       );
     });
 
+  /**
+   * Rebuild the record of a worktree a previous process already provisioned.
+   *
+   * The terminal dispatch declares `lifecycle.resume: "unsupported"`, so the
+   * pool loop refuses every terminal resume before it ever asks for a turn.
+   * This still has to be right: the loop adopts the workspace first so the
+   * refusal path can RELEASE the leftover worktree, and the fresh dispatch
+   * that follows would otherwise refuse to provision over it.
+   */
+  const adopt: WorkspaceShape["adopt"] = (runCtx, input) =>
+    Effect.gen(function* () {
+      const run = yield* requireRun(runCtx.runId);
+      if (input.sequential) {
+        const siblings = yield* runSiblings(
+          run.runId,
+          run.cwd,
+          run.config.parallel.siblings,
+          !run.config.vcs.noPush,
+          false,
+        );
+        return {
+          cwd: run.cwd,
+          branch: null,
+          worktreePath: null,
+          siblingWorktrees: siblings.map((sibling) => ({
+            worktreePath: sibling.canonicalPath,
+            sourcePath: sibling.canonicalPath,
+            baseBranch: sibling.baseBranch,
+          })),
+          siblingRule: siblings.length === 0 ? null : siblingRuleSequential({ siblings }),
+        } satisfies IterationWorkspace;
+      }
+      const worktreePath = input.worktreePath;
+      if (worktreePath === null) {
+        return yield* new EpicRunnerDispatchError({
+          commandType: "git.worktree-adopt",
+          detail: `Parallel iteration for ${input.issueId} recorded no worktree to adopt`,
+        });
+      }
+      if (!(yield* Effect.promise(() => pathExists(worktreePath)))) {
+        return yield* new EpicRunnerDispatchError({
+          commandType: "git.worktree-adopt",
+          detail: `Worktree ${worktreePath} is gone`,
+        });
+      }
+      const registered = yield* git({
+        operation: "git.worktree-adopt",
+        cwd: run.cwd,
+        args: ["worktree", "list", "--porcelain"],
+      });
+      if (
+        registered.code !== 0 ||
+        !registered.stdout.split(/\r?\n/).includes(`worktree ${worktreePath}`)
+      ) {
+        return yield* new EpicRunnerDispatchError({
+          commandType: "git.worktree-adopt",
+          detail: `Worktree ${worktreePath} is not registered with ${run.cwd}`,
+        });
+      }
+      const siblings = yield* runSiblings(
+        run.runId,
+        run.cwd,
+        run.config.parallel.siblings,
+        !run.config.vcs.noPush,
+        true,
+      );
+      if (siblings.length === 0) {
+        return {
+          cwd: worktreePath,
+          branch: input.branch,
+          worktreePath,
+          siblingWorktrees: [],
+          siblingRule: null,
+        } satisfies IterationWorkspace;
+      }
+      // Layout mode mirrors the siblings' real relative positions around the
+      // main worktree, so the layout and the repo basename are both readable
+      // off the path acquire built.
+      const layout = NodePath.dirname(worktreePath);
+      const repoBasename = NodePath.basename(worktreePath);
+      return {
+        cwd: worktreePath,
+        branch: input.branch,
+        worktreePath,
+        siblingWorktrees: siblings.map((sibling) => ({
+          worktreePath: mirrorPath(layout, repoBasename, sibling.relativePath),
+          sourcePath: sibling.canonicalPath,
+          baseBranch: sibling.baseBranch,
+        })),
+        siblingRule:
+          input.branch === null
+            ? null
+            : siblingRuleLayout({
+                layoutRoot: layoutRoot(),
+                layout,
+                repoBasename,
+                branch: input.branch,
+                siblings,
+              }),
+      } satisfies IterationWorkspace;
+    });
+
   const release: WorkspaceShape["release"] = (runCtx, workspace) => {
     if (workspace.worktreePath === null) return Effect.void;
     const worktreePath = workspace.worktreePath;
@@ -794,5 +896,5 @@ export const makeTerminalPoolWorkspace = (deps: {
       ),
     );
 
-  return { ensureIntegration, acquire, release, releaseIntegration };
+  return { ensureIntegration, acquire, adopt, release, releaseIntegration };
 };
