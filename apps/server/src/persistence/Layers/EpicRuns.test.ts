@@ -502,7 +502,7 @@ describe("EpicRunStore", () => {
       assert.deepStrictEqual(afterFirst[0], {
         runId,
         iterationIndex: 0,
-        threadId: `epic-run-${runId}-0`,
+        threadId: ThreadId.make(`epic-run-${runId}-0`),
         issueId: "issue-resume",
         workerId: `epic-run-${runId}-0`,
         branch: "epic/issue-resume",

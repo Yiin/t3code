@@ -105,6 +105,16 @@ const SERVER_WORKER_SCOPE_RUN_DIRECTORY = "t3code-server";
 
 const DateTimeNowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+/** Per-fork loop options. Only the boot re-adoption path sets any of them. */
+interface EpicRunLoopOptions {
+  /**
+   * The boot path is re-adopting a run whose workers outlived the server, so
+   * its own leftover systemd scopes are orphans to stop, not a fatal identity
+   * collision. A fresh launch never sets this.
+   */
+  readonly reclaimOwnScopes?: boolean;
+}
+
 /**
  * The loop-policy fields are internal default seeds. A persisted non-default
  * run config replaces each matching seed when the loop freezes its policy
@@ -284,19 +294,27 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     );
 
     /** The loop: one call into the shared core, wired to the server ports. */
-    const runLoop = (runId: EpicRunId): Effect.Effect<void, EpicRunnerError> =>
+    const runLoop = (
+      runId: EpicRunId,
+      options?: EpicRunLoopOptions,
+    ): Effect.Effect<void, EpicRunnerError> =>
       Effect.gen(function* () {
         const initialRun = yield* requireRun(runId);
         // One systemd scope identity per run, mirroring the terminal
         // coordinator. A collision is fatal — a crashed run's workers may
         // still hold the identity; every other degradation logs a warning and
-        // spawns unwrapped (see workerScope.ts in epic-core).
-        const scopePreparation = yield* prepareWorkerScope({
-          repositoryPath: initialRun.cwd,
-          runDirectory: SERVER_WORKER_SCOPE_RUN_DIRECTORY,
-          epicId: initialRun.epicId,
-          runId,
-        }).pipe(
+        // spawns unwrapped (see workerScope.ts in epic-core). The exception is
+        // a run re-adopting itself at boot: the leftover scopes are its own
+        // orphans, so it stops them and carries on.
+        const scopePreparation = yield* prepareWorkerScope(
+          {
+            repositoryPath: initialRun.cwd,
+            runDirectory: SERVER_WORKER_SCOPE_RUN_DIRECTORY,
+            epicId: initialRun.epicId,
+            runId,
+          },
+          { reclaimOwnScopes: options?.reclaimOwnScopes === true },
+        ).pipe(
           Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
           Effect.mapError(
             (collision) => new EpicRunStateError({ runId, detail: collision.detail }),
@@ -367,8 +385,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
-    const supervisedLoop = (runId: EpicRunId): Effect.Effect<void> =>
-      runLoop(runId).pipe(
+    const supervisedLoop = (runId: EpicRunId, options?: EpicRunLoopOptions): Effect.Effect<void> =>
+      runLoop(runId, options).pipe(
         Effect.catch((error: EpicRunnerError) =>
           Effect.logError("epic.runner.loop-failed", { runId, detail: error.message }).pipe(
             Effect.flatMap(() =>
@@ -422,9 +440,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
-    const forkLoop = (runId: EpicRunId) =>
+    const forkLoop = (runId: EpicRunId, options?: EpicRunLoopOptions) =>
       Effect.sync(() => liveLoops.add(runId)).pipe(
-        Effect.andThen(FiberMap.run(loops, runId, supervisedLoop(runId))),
+        Effect.andThen(FiberMap.run(loops, runId, supervisedLoop(runId, options))),
         Effect.asVoid,
       );
 
@@ -659,7 +677,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             // Before the loop, not inside it: the first drain is what a leaked
             // slot silently blocks.
             yield* reclaimLeakedMergeSlot(run);
-            yield* forkLoop(run.runId);
+            // Boot only: this run's workers live in `cook-epic.slice`, outside
+            // the service cgroup, so a `systemctl --user restart` leaves their
+            // scope units loaded. They hold this run's own identity, and a
+            // fresh probe would call that a fatal collision.
+            yield* forkLoop(run.runId, { reclaimOwnScopes: true });
           }).pipe(releaseLeaseOnFailure(run.runId));
         }
 

@@ -20,7 +20,8 @@
  * spawn proceeds unwrapped. The one fatal case is an identity collision — a
  * pre-existing scope matching this run's identity means a crashed run's
  * workers (or a live identity clash) must be reconciled, mirroring
- * run-legacy.sh:777-781.
+ * run-legacy.sh:777-781. A run re-adopting itself at boot owns those units by
+ * construction and opts into stopping them with `reclaimOwnScopes`.
  */
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
@@ -83,7 +84,121 @@ export interface WorkerScopePreparation {
   readonly active: boolean;
 }
 
+export interface WorkerScopePrepareOptions {
+  /**
+   * Boot re-adoption only. The scope id already hashes this run's own runId, so
+   * a pre-existing unit under it is this run's own orphan: the server restarted
+   * out from under workers living in `cook-epic.slice`, which is outside the
+   * service cgroup and so survives the restart. Stop those units and continue
+   * instead of failing. Off by default, because for a fresh launch the same
+   * units mean an unreconciled identity clash.
+   */
+  readonly reclaimOwnScopes?: boolean;
+}
+
 const INACTIVE = (scopeId: string): WorkerScopePreparation => ({ scopeId, active: false });
+
+interface ListedScopeUnit {
+  readonly unit: string;
+  /** The ACTIVE and SUB columns, e.g. `active running`. */
+  readonly state: string;
+}
+
+/** Unit names are the first field of each `list-units --plain --no-legend` line. */
+const parseListedUnits = (stdout: string): ReadonlyArray<ListedScopeUnit> =>
+  stdout
+    .split("\n")
+    .map((line) => line.trim())
+    // A failed unit can still carry a leading status bullet.
+    .map((line) => line.replace(/^[●*]\s+/, ""))
+    .filter((line) => line !== "")
+    .map((line) => {
+      const fields = line.split(/\s+/);
+      return { unit: fields[0] ?? "", state: fields.slice(2, 4).join(" ") };
+    })
+    .filter((entry) => entry.unit !== "");
+
+const listScopeUnits = (runner: ProcessRunner["Service"], scopeId: string) =>
+  runner
+    .run({
+      command: "systemctl",
+      args: [
+        "--user",
+        "list-units",
+        "--all",
+        "--plain",
+        "--no-legend",
+        "--no-pager",
+        `cook-epic-${scopeId}-*.scope`,
+      ],
+      timeout: COMMAND_TIMEOUT,
+    })
+    .pipe(Effect.orElseSucceed(() => null));
+
+/**
+ * Stop this run's leftover scope units, then prove they are gone.
+ *
+ * `systemctl stop` on the scope is the whole mechanism: it is the
+ * ownership-correct disposal, it leaves the worker's worktree and its
+ * uncommitted work untouched, and the surviving agent process is unusable
+ * anyway (its stdio pipe died with the old server). The re-probe is the only
+ * proof of success — a stop that reports failure may just mean the unit was
+ * already gone, while a probe that cannot run proves nothing at all.
+ */
+const reclaimScopeUnits = Effect.fn("workerScope.reclaim")(function* (
+  runner: ProcessRunner["Service"],
+  scopeId: string,
+  units: ReadonlyArray<ListedScopeUnit>,
+) {
+  for (const entry of units) {
+    const stopped = yield* runner
+      .run({
+        command: "systemctl",
+        args: ["--user", "stop", entry.unit],
+        timeout: COMMAND_TIMEOUT,
+      })
+      .pipe(Effect.orElseSucceed(() => null));
+    yield* Effect.logInfo("epic.worker-scope.reclaim-unit", {
+      scopeId,
+      unit: entry.unit,
+      previousState: entry.state,
+      detail:
+        stopped === null
+          ? "systemctl stop could not be executed"
+          : stopped.code === 0
+            ? "stopped"
+            : stopped.stderr.trim(),
+    });
+    // A stopped scope can linger in `failed`; clearing it is best effort.
+    yield* runner
+      .run({
+        command: "systemctl",
+        args: ["--user", "reset-failed", entry.unit],
+        timeout: COMMAND_TIMEOUT,
+      })
+      .pipe(Effect.orElseSucceed(() => null));
+  }
+
+  const remaining = yield* listScopeUnits(runner, scopeId);
+  if (remaining === null || remaining.code !== 0) {
+    return yield* new WorkerScopeCollisionError({
+      scopeId,
+      detail:
+        `could not confirm the reclaim of run identity ${scopeId}: ` +
+        `${units.map((entry) => entry.unit).join(", ")}`,
+    });
+  }
+  if (remaining.stdout.trim() !== "") {
+    return yield* new WorkerScopeCollisionError({
+      scopeId,
+      detail:
+        `worker or inspector scopes refused to stop for run identity ${scopeId}: ` +
+        `${parseListedUnits(remaining.stdout)
+          .map((entry) => entry.unit)
+          .join(", ")}`,
+    });
+  }
+});
 
 /**
  * Probe the systemd user manager, refuse identity collisions, and set the
@@ -92,6 +207,7 @@ const INACTIVE = (scopeId: string): WorkerScopePreparation => ({ scopeId, active
  */
 export const prepareWorkerScope = Effect.fn("workerScope.prepare")(function* (
   identity: WorkerScopeIdentity,
+  options?: WorkerScopePrepareOptions,
 ) {
   const scopeId = deriveWorkerScopeId(identity);
   const platform = yield* HostProcessPlatform;
@@ -123,28 +239,17 @@ export const prepareWorkerScope = Effect.fn("workerScope.prepare")(function* (
     return INACTIVE(scopeId);
   }
 
-  const existing = yield* runner
-    .run({
-      command: "systemctl",
-      args: [
-        "--user",
-        "list-units",
-        "--all",
-        "--plain",
-        "--no-legend",
-        "--no-pager",
-        `cook-epic-${scopeId}-*.scope`,
-      ],
-      timeout: COMMAND_TIMEOUT,
-    })
-    .pipe(Effect.orElseSucceed(() => null));
+  const existing = yield* listScopeUnits(runner, scopeId);
   if (existing !== null && existing.code === 0 && existing.stdout.trim() !== "") {
-    return yield* new WorkerScopeCollisionError({
-      scopeId,
-      detail:
-        `pre-existing worker or inspector scope uses run identity ${scopeId}: ` +
-        `${existing.stdout.trim().split("\n")[0] ?? ""}`,
-    });
+    if (options?.reclaimOwnScopes !== true) {
+      return yield* new WorkerScopeCollisionError({
+        scopeId,
+        detail:
+          `pre-existing worker or inspector scope uses run identity ${scopeId}: ` +
+          `${existing.stdout.trim().split("\n")[0] ?? ""}`,
+      });
+    }
+    yield* reclaimScopeUnits(runner, scopeId, parseListedUnits(existing.stdout));
   }
 
   // Only the delegated controllers are set (t3code-06s.20 verdict): the io

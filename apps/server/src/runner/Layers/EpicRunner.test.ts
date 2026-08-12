@@ -86,6 +86,8 @@ const modelSelection = {
   model: "gpt-5-codex",
 } as const;
 const NOW = "2026-01-01T00:00:00.000Z";
+/** The leftover worker scope `workerScopeCollision` plants. */
+const PLANTED_WORKER_SCOPE_UNIT = "cook-epic-deadbeef-iteration-0.scope";
 const defaultConfigSnapshot = {
   config: DEFAULT_EPIC_RUN_CONFIG,
   configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
@@ -362,6 +364,7 @@ function createHarness(input: {
   const readyChildren = new Set(input.readyChildren ?? []);
   let sequence = 0;
   const processRequests: ProcessRunner.ProcessRunInput[] = [];
+  let plantedScopeUnitStopped = false;
   const heldLocks = new Set<string>();
   // Remaining `getThreadDetailSnapshot` reads, per thread, that must report no
   // assistant message before the real one is revealed — see
@@ -801,10 +804,19 @@ function createHarness(input: {
         // collide unless the test plants one, and slice limits are accepted.
         if (request.command === "systemd-run" || request.command === "systemctl") {
           const listsUnits = request.command === "systemctl" && request.args.includes("list-units");
+          // A planted unit answers every probe until it is stopped, which is
+          // what a real reclaim does to it.
+          if (
+            request.command === "systemctl" &&
+            request.args[1] === "stop" &&
+            request.args[2] === PLANTED_WORKER_SCOPE_UNIT
+          ) {
+            plantedScopeUnitStopped = true;
+          }
           return {
             stdout:
-              listsUnits && input.workerScopeCollision === true
-                ? "cook-epic-deadbeef-iteration-0.scope loaded active running\n"
+              listsUnits && input.workerScopeCollision === true && !plantedScopeUnitStopped
+                ? `${PLANTED_WORKER_SCOPE_UNIT} loaded active running\n`
                 : "",
             stderr: "",
             code: 0 as never,
@@ -1373,6 +1385,14 @@ describe("EpicRunner", () => {
         const failed = harness.store.runs.get(run.runId);
         assert.include(failed?.lastError ?? "", "run identity");
         assert.equal(harness.commandsOfType("thread.turn.start").length, 0);
+        // A fresh launch never owns a pre-existing scope, so it must not stop
+        // one.
+        assert.equal(
+          harness.processRequests.filter(
+            (request) => request.command === "systemctl" && request.args[1] === "stop",
+          ).length,
+          0,
+        );
       }).pipe(Effect.provide(harness.layer));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -4701,6 +4721,59 @@ describe("EpicRunner", () => {
       const completed = harness.store.runs.get(runId)!;
       assert.strictEqual(completed.iterationsDispatched, 2);
       assert.strictEqual(completed.iterationsCompleted, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  // Workers run in `cook-epic.slice`, outside the service cgroup, so a
+  // `systemctl --user restart t3code.service` leaves their scope units loaded.
+  // They carry this run's own identity, so re-adopting the run means stopping
+  // them, not treating them as a fatal collision.
+  it.live("reclaims its own leftover worker scopes when it re-adopts a run at boot", () => {
+    const runId = "run-restart-scope";
+    const staleRun: EpicRun = {
+      runId: runId as EpicRun["runId"],
+      epicId: "epic-1",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId: null,
+      status: "running",
+      maxIterations: 2,
+      workers: 1,
+      iterationsDispatched: 1,
+      iterationsCompleted: 0,
+      currentThreadId: ThreadId.make(`epic-run-${runId}-0`),
+      currentTurnStartedAt: NOW,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      seedRuns: [staleRun],
+      workerScopeCollision: true,
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+
+      const stops = harness.processRequests.filter(
+        (request) => request.command === "systemctl" && request.args[1] === "stop",
+      );
+      assert.deepStrictEqual(
+        stops.map((request) => request.args[2]),
+        [PLANTED_WORKER_SCOPE_UNIT],
+      );
+      assert.strictEqual(harness.store.runs.get(runId)?.lastError, null);
     }).pipe(Effect.provide(harness.layer));
   });
 

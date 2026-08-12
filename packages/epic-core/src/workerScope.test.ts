@@ -52,8 +52,12 @@ const fakeRunner = (
   captured,
 });
 
-const prepare = (platform: NodeJS.Platform, runner: ProcessRunner.ProcessRunner["Service"]) =>
-  prepareWorkerScope(identity).pipe(
+const prepare = (
+  platform: NodeJS.Platform,
+  runner: ProcessRunner.ProcessRunner["Service"],
+  options?: { readonly reclaimOwnScopes?: boolean },
+) =>
+  prepareWorkerScope(identity, options).pipe(
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(HostProcessPlatform, platform),
   );
@@ -145,10 +149,10 @@ describe("workerScope", () => {
     }),
   );
 
-  it.effect("refuses a colliding pre-existing scope", () =>
+  it.effect("refuses a colliding pre-existing scope and stops nothing", () =>
     Effect.gen(function* () {
       const scopeId = deriveWorkerScopeId(identity);
-      const { runner } = fakeRunner((input) =>
+      const { runner, captured } = fakeRunner((input) =>
         input.command === "systemctl" && input.args[1] === "list-units"
           ? output(`cook-epic-${scopeId}-iteration-0.scope loaded active running\n`)
           : output(""),
@@ -156,6 +160,102 @@ describe("workerScope", () => {
       const error = yield* Effect.flip(prepare("linux", runner));
       expect(error).toBeInstanceOf(WorkerScopeCollisionError);
       expect(error.scopeId).toBe(scopeId);
+      expect(captured.filter((input) => input.args[1] === "stop")).toHaveLength(0);
+    }),
+  );
+
+  it.effect("stops its own leftover scopes when the boot path asks for a reclaim", () =>
+    Effect.gen(function* () {
+      const scopeId = deriveWorkerScopeId(identity);
+      let listed = 0;
+      const { runner, captured } = fakeRunner((input) => {
+        if (input.command === "systemctl" && input.args[1] === "list-units") {
+          listed += 1;
+          // The first probe finds the orphans a restart left behind; after the
+          // stops they are gone.
+          return listed === 1
+            ? output(
+                `cook-epic-${scopeId}-iteration-4.scope loaded active running Worker\n` +
+                  `cook-epic-${scopeId}-iteration-5.scope loaded active running Worker\n`,
+              )
+            : output("");
+        }
+        return output("");
+      });
+
+      const preparation = yield* prepare("linux", runner, { reclaimOwnScopes: true });
+      expect(preparation.active).toBe(true);
+      expect(preparation.scopeId).toBe(scopeId);
+      expect(
+        captured
+          .filter((input) => input.command === "systemctl" && input.args[1] === "stop")
+          .map((input) => input.args[2]),
+      ).toEqual([
+        `cook-epic-${scopeId}-iteration-4.scope`,
+        `cook-epic-${scopeId}-iteration-5.scope`,
+      ]);
+      expect(
+        captured.filter(
+          (input) => input.command === "systemctl" && input.args[1] === "reset-failed",
+        ).length,
+      ).toBe(2);
+      expect(listed).toBe(2);
+    }),
+  );
+
+  it.effect("still fails when a leftover scope refuses to stop", () =>
+    Effect.gen(function* () {
+      const scopeId = deriveWorkerScopeId(identity);
+      let listed = 0;
+      const { runner } = fakeRunner((input) => {
+        if (input.command === "systemctl" && input.args[1] === "list-units") {
+          listed += 1;
+          return listed === 1
+            ? output(
+                `cook-epic-${scopeId}-iteration-4.scope loaded active running Worker\n` +
+                  `cook-epic-${scopeId}-iteration-5.scope loaded active running Worker\n`,
+              )
+            : output(
+                `cook-epic-${scopeId}-iteration-4.scope loaded active running Worker\n` +
+                  `cook-epic-${scopeId}-iteration-5.scope loaded active running Worker\n`,
+              );
+        }
+        return output("");
+      });
+
+      const error = yield* Effect.flip(prepare("linux", runner, { reclaimOwnScopes: true }));
+      expect(error).toBeInstanceOf(WorkerScopeCollisionError);
+      expect(error.detail).toContain(`cook-epic-${scopeId}-iteration-4.scope`);
+      expect(error.detail).toContain(`cook-epic-${scopeId}-iteration-5.scope`);
+    }),
+  );
+
+  it.effect("fails the reclaim when the confirming probe cannot be executed", () =>
+    Effect.gen(function* () {
+      const scopeId = deriveWorkerScopeId(identity);
+      let listed = 0;
+      const { runner } = fakeRunner((input) => {
+        if (input.command === "systemctl" && input.args[1] === "list-units") {
+          listed += 1;
+          return listed === 1
+            ? output(`cook-epic-${scopeId}-iteration-4.scope loaded active running Worker\n`)
+            : null;
+        }
+        return output("");
+      });
+
+      const error = yield* Effect.flip(prepare("linux", runner, { reclaimOwnScopes: true }));
+      expect(error).toBeInstanceOf(WorkerScopeCollisionError);
+      expect(error.detail).toContain("could not confirm");
+    }),
+  );
+
+  it.effect("does not probe on non-Linux hosts even when a reclaim is requested", () =>
+    Effect.gen(function* () {
+      const { runner, captured } = fakeRunner(() => output(""));
+      const preparation = yield* prepare("darwin", runner, { reclaimOwnScopes: true });
+      expect(preparation.active).toBe(false);
+      expect(captured).toHaveLength(0);
     }),
   );
 
