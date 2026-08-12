@@ -2,7 +2,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunId,
+  EventId,
   ProjectId,
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   ProviderInstanceId,
   ThreadId,
   TurnId,
@@ -24,7 +29,11 @@ import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
-import { EpicRunStore } from "../src/persistence/Services/EpicRuns.ts";
+import {
+  EpicRunStore,
+  type EpicRun,
+  type EpicRunIteration,
+} from "../src/persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../src/config.ts";
@@ -105,9 +114,15 @@ case "$cmd" in
     printf '[{"id":"child-1","status":"%s","parent":"epic-1"}]\\n' "$status" ;;
   label)
     [ "$#" -eq 2 ] && [ "$1" = list ] && [ "$2" = child-1 ] || { echo "unsupported bd argv: label $*" >&2; exit 64; } ;;
+  merge-slot)
+    [ "$#" -eq 2 ] && [ "$1" = check ] && [ "$2" = --json ] || { echo "unsupported bd argv: merge-slot $*" >&2; exit 64; }
+    printf '{"available":true,"holder":null}\\n' ;;
   update)
-    [ "$#" -eq 5 ] && [ "$1" = child-1 ] && [ "$2" = --status ] && [ "$3" = open ] && [ "$4" = --assignee ] && [ -z "$5" ] || { echo "unsupported bd argv: update $*" >&2; exit 64; }
-    printf open > "$state/status" ;;
+    if [ "$#" -eq 5 ] && [ "$1" = child-1 ] && [ "$2" = --status ] && [ "$3" = open ] && [ "$4" = --assignee ] && [ -z "$5" ]; then
+      printf open > "$state/status"
+    elif [ "$#" -eq 3 ] && [ "$1" = child-1 ] && [ "$2" = --status ] && [ "$3" = in_progress ]; then
+      printf in_progress > "$state/status"
+    else echo "unsupported bd argv: update $*" >&2; exit 64; fi ;;
   *) echo "unsupported bd argv: $cmd $*" >&2; exit 64 ;;
 esac
 `;
@@ -143,6 +158,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
   const store = makeMemoryStore();
   const details = new Map<string, OrchestrationThread>();
   const shells = new Map<string, "running" | "completed">();
+  const commands: OrchestrationCommand[] = [];
   let sequence = 0;
 
   const settleTurn = (threadId: ThreadId) =>
@@ -184,6 +200,42 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
       command: OrchestrationCommand,
     ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
       Effect.gen(function* () {
+        commands.push(command);
+        // The real reactor answers a resume long after `dispatch` returns, by
+        // appending a durable activity to the thread. Mirror that: the runner
+        // polls the detail snapshot for it, so it has to be findable there.
+        if (command.type === "thread.session.resume") {
+          const base =
+            details.get(command.threadId) ??
+            makeThreadDetail({
+              threadId: command.threadId,
+              turnId: TurnId.make(`${command.threadId}-turn-interrupted`),
+              turnState: "completed",
+              text: null,
+              streaming: false,
+              latestTurnPointerNull: true,
+              sessionStatus: "stopped",
+            });
+          details.set(command.threadId, {
+            ...base,
+            activities: [
+              ...base.activities,
+              {
+                id: EventId.make(`${command.threadId}-resume-settled`),
+                tone: "info",
+                kind: PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+                summary: "resume settled",
+                payload: {
+                  threadId: command.threadId,
+                  requestCommandId: command.commandId,
+                  outcome: { _tag: "resumed" as const },
+                },
+                turnId: null,
+                createdAt: NOW,
+              },
+            ],
+          });
+        }
         if (command.type === "thread.turn.start")
           yield* Effect.forkDetach(settleTurn(command.threadId));
         sequence += 1;
@@ -325,7 +377,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     ),
     Layer.provide(NodeServices.layer),
   );
-  return { store, layer };
+  return { store, layer, commands };
 };
 
 const withPath = <A, E, R>(fixture: Fixture, effect: Effect.Effect<A, E, R>) => {
@@ -365,6 +417,22 @@ const preflightBdInvocations = [
   "list --parent epic-1 --json",
 ] as const;
 
+/**
+ * A resumed iteration's own reads. It differs from a fresh one twice: the
+ * claim is re-taken (`--status in_progress`) because the interrupted run's
+ * finalizer may have reopened the child, and no `bd ready` precedes it — the
+ * boot path hands the worker in, so the frontier is never consulted for it.
+ */
+const resumedIterationBdInvocations = [
+  "show child-1 --json",
+  "show child-1 --json",
+  "update child-1 --status in_progress",
+  "show epic-1 --json",
+  "label list child-1",
+  "show epic-1 --json",
+  "show child-1 --json",
+] as const;
+
 const iterationBdInvocations = [
   "ready --parent epic-1 --json",
   "show child-1 --json",
@@ -372,6 +440,59 @@ const iterationBdInvocations = [
   "label list child-1",
   "show child-1 --json",
 ] as const;
+
+/** The run a `systemctl --user restart` interrupted, read back at boot. */
+const RESUMED_RUN_ID = EpicRunId.make("run-integration-restart");
+const RESUMED_THREAD_ID = ThreadId.make(`epic-run-${RESUMED_RUN_ID}-0`);
+
+const interruptedRun = (cwd: string): EpicRun => ({
+  runId: RESUMED_RUN_ID,
+  epicId: "epic-1",
+  projectId,
+  cwd,
+  prompt: "cook one child",
+  orientationFile: null,
+  modelSelection,
+  runtimeMode: "full-access",
+  config: {
+    ...DEFAULT_EPIC_RUN_CONFIG,
+    execution: { sequential: true },
+    parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: 1 },
+  },
+  configProvenance: { ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE, "execution.sequential": "file" },
+  originThreadId: null,
+  status: "running",
+  maxIterations: 2,
+  workers: 1,
+  iterationsDispatched: 1,
+  iterationsCompleted: 0,
+  currentThreadId: RESUMED_THREAD_ID,
+  currentTurnStartedAt: NOW,
+  consecutiveFailures: 0,
+  noCommitStreak: 0,
+  infraStreak: 0,
+  lastError: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+});
+
+/** The write-ahead row the dead worker left behind: still `running`, no verdict. */
+const interruptedRow = (): EpicRunIteration => ({
+  runId: RESUMED_RUN_ID,
+  iterationIndex: 0,
+  threadId: RESUMED_THREAD_ID,
+  issueId: "child-1",
+  workerId: RESUMED_THREAD_ID,
+  branch: null,
+  worktreePath: null,
+  turnStatus: "running",
+  summary: null,
+  why: null,
+  failureReason: null,
+  resumeCount: 0,
+  startedAt: NOW,
+  finishedAt: null,
+});
 
 describe("EpicRunner real process boundaries", () => {
   it.live("completes one full happy iteration", () =>
@@ -426,6 +547,84 @@ describe("EpicRunner real process boundaries", () => {
         assert.isTrue(exit._tag === "Failure");
         assert.equal(harness.store.runs.size, 0);
         assert.deepEqual(readBdInvocations(fixture), preflightBdInvocations);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+  );
+
+  // The launch path above proves real dirt blocks. This proves the boot path
+  // resumes THROUGH it: same repo, same preflight, same lock, but the dirt is
+  // the run's own dead worker's, so a resume continues rather than parks.
+  it.live("resumes a running run at boot through a real dirty tree", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture;
+        // What the killed worker left uncommitted in the checkout it owned.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(NodePath.join(fixture.cwd, "scratch.txt"), "half-done\n"),
+        );
+        const harness = makeHarness(fixture, "commit");
+        harness.store.runs.set(RESUMED_RUN_ID, interruptedRun(fixture.cwd));
+        harness.store.iterations.push(interruptedRow());
+        const observedStatuses = new Set<string>();
+        yield* withPath(
+          fixture,
+          Effect.gen(function* () {
+            const runner = yield* EpicRunner;
+            yield* runner.start();
+            yield* waitFor(
+              () => {
+                const status = harness.store.runs.get(RESUMED_RUN_ID)?.status;
+                if (status !== undefined) observedStatuses.add(status);
+                return status;
+              },
+              (status) => status === "done",
+            );
+            yield* waitFor(
+              () => NodeFS.existsSync(NodePath.join(fixture.cwd, ".beads/run-lock.epic-1.json")),
+              (exists) => !exists,
+            );
+          }).pipe(Effect.provide(harness.layer)),
+        );
+
+        const run = harness.store.runs.get(RESUMED_RUN_ID)!;
+        assert.isFalse(observedStatuses.has("failed"));
+        assert.isFalse(observedStatuses.has("paused"));
+        assert.isNull(run.lastError);
+        // The resumed agent committed, so the real HEAD moved.
+        assert.notEqual(git(fixture.cwd, ["rev-parse", "HEAD"]), fixture.initialHead);
+        // One row across two process lifetimes, reused rather than appended to.
+        assert.lengthOf(harness.store.iterations, 1);
+        assert.equal(harness.store.iterations[0]?.turnStatus, "completed");
+        assert.equal(harness.store.iterations[0]?.resumeCount, 1);
+        assert.equal(run.iterationsDispatched, 1);
+        // The thread the dead worker owned is the one that carried on.
+        assert.deepEqual(
+          harness.commands
+            .filter((command) => command.type === "thread.session.resume")
+            .map((command) => command.threadId),
+          [RESUMED_THREAD_ID],
+        );
+        assert.lengthOf(
+          harness.commands.filter((command) => command.type === "thread.create"),
+          0,
+        );
+        const invocations = readBdInvocations(fixture);
+        // The precise signal that the resume kept its claim: it re-took the
+        // child and never handed it back to the pool.
+        assert.include(invocations, "update child-1 --status in_progress");
+        assert.deepEqual(
+          invocations.filter((line) => line.startsWith("update child-1 --status open")),
+          [],
+        );
+        assert.deepEqual(invocations, [
+          ...preflightBdInvocations,
+          // Boot only: a slot the dead run leaked would defer every drain.
+          "merge-slot check --json",
+          ...resumedIterationBdInvocations,
+          "ready --parent epic-1 --json",
+          "list --parent epic-1 --all --flat --json",
+          "show child-1 --json",
+        ]);
       }).pipe(Effect.provide(NodeServices.layer)),
     ),
   );
