@@ -12,6 +12,7 @@ import { Alert, AppState, Platform } from "react-native";
 
 import {
   buildIncomingShareDraft,
+  carriesShareAttachment,
   type IncomingShareDestination,
   type IncomingShareDraft,
 } from "./incoming-share-model";
@@ -48,7 +49,7 @@ function receiveSharingEnabled(): boolean {
   return Constants.expoConfig?.extra?.iosPersonalTeamBuild !== true;
 }
 
-async function resolvedPayloadsForImages(): Promise<ReadonlyArray<ResolvedSharePayload>> {
+async function resolvedAttachmentPayloads(): Promise<ReadonlyArray<ResolvedSharePayload>> {
   try {
     return await getResolvedSharedPayloadsAsync();
   } catch (error) {
@@ -93,21 +94,21 @@ async function removeOwnedFile(uri: string): Promise<void> {
   }
 }
 
-async function removeReplayedImagePayloadFiles(
+async function removeReplayedAttachmentPayloadFiles(
   payloads: ReadonlyArray<SharePayload>,
 ): Promise<void> {
   const uris = new Set<string>();
   for (const payload of payloads) {
-    if (payload.shareType === "image") {
+    if (carriesShareAttachment(payload)) {
       uris.add(payload.value);
     }
   }
   if (uris.size === 0) {
     return;
   }
-  const resolvedPayloads = await resolvedPayloadsForImages();
+  const resolvedPayloads = await resolvedAttachmentPayloads();
   for (const payload of resolvedPayloads) {
-    if (payload.shareType === "image" && payload.contentUri) {
+    if (carriesShareAttachment(payload) && payload.contentUri) {
       uris.add(payload.contentUri);
     }
   }
@@ -125,8 +126,8 @@ const incomingShareInbox = new IncomingShareInbox({
   clearPayloads: clearSharedPayloads,
   buildDraft: async ({ payloads, id, createdAt }) => {
     const cleanupUris = new Set<string>();
-    const resolvedPayloads = payloads.some((payload) => payload.shareType === "image")
-      ? await resolvedPayloadsForImages()
+    const resolvedPayloads = payloads.some(carriesShareAttachment)
+      ? await resolvedAttachmentPayloads()
       : [];
     const draft = await buildIncomingShareDraft({
       payloads,
@@ -147,7 +148,7 @@ const incomingShareInbox = new IncomingShareInbox({
       },
     };
   },
-  cleanupReplayedPayloads: removeReplayedImagePayloadFiles,
+  cleanupReplayedPayloads: removeReplayedAttachmentPayloadFiles,
   idForPayloads: incomingShareIdForPayloads,
   now: () => new Date().toISOString(),
   onClearError: (error) => {

@@ -1,11 +1,18 @@
 import { describe, expect, it, vi } from "@effect/vitest";
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  ProviderDriverKind,
 } from "@t3tools/contracts";
 import type { ResolvedSharePayload, SharePayload } from "expo-sharing";
 
-import { buildIncomingShareDraft, hasIncomingShareContent } from "./incoming-share-model";
+import type { DraftComposerAttachment } from "../../lib/composerAttachmentRules";
+import {
+  buildIncomingShareDraft,
+  hasIncomingShareContent,
+  screenShareAttachmentsForDriver,
+} from "./incoming-share-model";
 
 describe("incoming native shares", () => {
   it("converts shared text, URLs, and images into a durable composer draft", async () => {
@@ -115,7 +122,7 @@ describe("incoming native shares", () => {
 
     expect(result.attachments).toHaveLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
     expect(result.warnings).toEqual([
-      `Only the first ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} shared images were attached.`,
+      `Only the first ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} shared files were attached.`,
     ]);
     expect(readBase64).toHaveBeenCalledTimes(PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
     expect(removeOwnedFile).toHaveBeenCalledTimes(payloads.length);
@@ -191,6 +198,161 @@ describe("incoming native shares", () => {
     });
 
     expect(result.attachments).toHaveLength(1);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("converts a shared document into a file attachment with no preview", async () => {
+    const document: SharePayload = {
+      shareType: "file",
+      value: "content://shared/report",
+      mimeType: "application/pdf",
+    };
+
+    const result = await buildIncomingShareDraft({
+      id: "share-file",
+      createdAt: "2026-08-12T08:00:00.000Z",
+      payloads: [{ shareType: "text", value: "Summarize this" }, document],
+      resolvedPayloads: [
+        {
+          ...document,
+          contentUri: "file:///cache/report.pdf",
+          contentType: "file",
+          contentMimeType: "application/pdf",
+          contentSize: 3,
+          originalName: "Q3 report.pdf",
+        },
+      ],
+      fileReader: {
+        readBase64: async () => "YWJj",
+        removeOwnedFile: async () => undefined,
+      },
+    });
+
+    expect(result.text).toBe("Summarize this");
+    expect(result.attachments).toEqual([
+      {
+        id: "share-file:file:1",
+        type: "file",
+        name: "Q3 report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 3,
+        dataUrl: "data:application/pdf;base64,YWJj",
+      },
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("types an untyped shared file from its name and names an untyped one from its type", async () => {
+    const named: SharePayload = { shareType: "file", value: "file:///shared/notes.md" };
+    const unnamed: SharePayload = {
+      shareType: "video",
+      value: "content://shared",
+      mimeType: "video/mp4",
+    };
+
+    const result = await buildIncomingShareDraft({
+      id: "share-types",
+      createdAt: "2026-08-12T08:00:00.000Z",
+      payloads: [named, unnamed],
+      resolvedPayloads: [],
+      fileReader: {
+        readBase64: async () => "YWJj",
+        removeOwnedFile: async () => undefined,
+      },
+    });
+
+    expect(
+      result.attachments.map((attachment) => ({
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        type: attachment.type,
+      })),
+    ).toEqual([
+      { name: "notes.md", mimeType: "text/markdown", type: "file" },
+      { name: "shared-file-2.mp4", mimeType: "video/mp4", type: "file" },
+    ]);
+  });
+
+  it("holds a shared file to the file byte limit", async () => {
+    const document: SharePayload = {
+      shareType: "file",
+      value: "file:///shared/huge.zip",
+      mimeType: "application/zip",
+    };
+    const readBase64 = vi.fn(async () => "unused");
+
+    const result = await buildIncomingShareDraft({
+      id: "share-huge-file",
+      createdAt: "2026-08-12T08:00:00.000Z",
+      payloads: [document],
+      resolvedPayloads: [
+        {
+          ...document,
+          contentUri: document.value,
+          contentType: "file",
+          contentMimeType: "application/zip",
+          contentSize: PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES + 1,
+          originalName: "huge.zip",
+        },
+      ],
+      fileReader: { readBase64, removeOwnedFile: async () => undefined },
+    });
+
+    expect(result.attachments).toEqual([]);
+    expect(result.warnings).toEqual(["'huge.zip' exceeds the 10 MB attachment limit."]);
+    expect(readBase64).not.toHaveBeenCalled();
+  });
+});
+
+describe("screening shared attachments for the destination driver", () => {
+  const image: DraftComposerAttachment = {
+    id: "a",
+    type: "image",
+    name: "shot.png",
+    mimeType: "image/png",
+    sizeBytes: 3,
+    dataUrl: "data:image/png;base64,YWJj",
+    previewUri: "data:image/png;base64,YWJj",
+  };
+  const file: DraftComposerAttachment = {
+    id: "b",
+    type: "file",
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    sizeBytes: 3,
+    dataUrl: "data:application/pdf;base64,YWJj",
+  };
+
+  it("keeps every attachment for a driver that takes files", () => {
+    const result = screenShareAttachmentsForDriver({
+      attachments: [image, file],
+      driver: ProviderDriverKind.make("claudeAgent"),
+    });
+
+    expect(result.attachments).toEqual([image, file]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("drops files for a driver that cannot take them and names the provider", () => {
+    const result = screenShareAttachmentsForDriver({
+      attachments: [image, file, { ...file, id: "c" }],
+      driver: ProviderDriverKind.make("someForkDriver"),
+      providerLabel: "Fork Agent",
+    });
+
+    expect(result.attachments).toEqual([image]);
+    expect(result.warnings).toEqual([
+      "Fork Agent cannot take file attachments, so 2 shared files were skipped.",
+    ]);
+  });
+
+  it("keeps everything while the destination driver is still unresolved", () => {
+    const result = screenShareAttachmentsForDriver({
+      attachments: [image, file],
+      driver: null,
+    });
+
+    expect(result.attachments).toEqual([image, file]);
     expect(result.warnings).toEqual([]);
   });
 });

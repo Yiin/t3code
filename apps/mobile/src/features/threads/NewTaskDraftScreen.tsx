@@ -57,6 +57,7 @@ import {
 import { branchBadgeLabel, useNewTaskFlow } from "./new-task-flow-provider";
 import { useCreateProjectThread } from "./use-project-actions";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
+import { screenShareAttachmentsForDriver } from "../sharing/incoming-share-model";
 import { nextInitialPromptInstall } from "../epics/epics.logic";
 
 function formatWorkspaceLabel(input: {
@@ -334,6 +335,8 @@ export function NewTaskDraftScreen(props: {
     const shareId = props.incomingShareId;
     const draftKey = flow.draftKey;
     const destinationProject = selectedProject;
+    const attachmentDriver = flow.attachmentDriver;
+    const attachmentProviderLabel = flow.attachmentProviderLabel;
     const initialEnvironmentId = props.initialProjectRef?.environmentId;
     const initialProjectId = props.initialProjectRef?.projectId;
     const selectedProjectMatchesRoute =
@@ -396,9 +399,14 @@ export function NewTaskDraftScreen(props: {
         return;
       }
       needsDraftRestore = true;
+      const screened = screenShareAttachmentsForDriver({
+        attachments: incomingShare.attachments,
+        driver: attachmentDriver,
+        providerLabel: attachmentProviderLabel ?? undefined,
+      });
       const { skippedAttachmentCount } = await mergeComposerDraftContent(draftKey, {
         text: incomingShare.text,
-        attachments: incomingShare.attachments,
+        attachments: screened.attachments,
         sourceShareId: shareId,
       });
       if (
@@ -415,10 +423,10 @@ export function NewTaskDraftScreen(props: {
       if (!shareImportMountedRef.current || activeShareImportTokenRef.current !== importToken) {
         return;
       }
-      const warnings = [...incomingShare.warnings];
+      const warnings = [...incomingShare.warnings, ...screened.warnings];
       if (skippedAttachmentCount > 0) {
         warnings.push(
-          `${skippedAttachmentCount} shared image${skippedAttachmentCount === 1 ? " was" : "s were"} skipped because this draft reached the attachment limit.`,
+          `${skippedAttachmentCount} shared file${skippedAttachmentCount === 1 ? " was" : "s were"} skipped because this draft reached the attachment limit.`,
         );
       }
       if (warnings.length > 0) {
@@ -515,6 +523,8 @@ export function NewTaskDraftScreen(props: {
   }, [
     consumeShare,
     cancelledIncomingShareId,
+    flow.attachmentDriver,
+    flow.attachmentProviderLabel,
     flow.draftKey,
     hasImportedIncomingShare,
     incomingShare,
