@@ -272,6 +272,9 @@ export const spawnAgent = Effect.fn("AgentsToolkit.spawnAgent")(function* (
       text: input.prompt,
       attachments: [],
     },
+    // The parent wrote this prompt, not a human. The child's drawer reads the
+    // origin to label the row "Parent" (`resolveUserMessageAuthorLabel`).
+    origin: "agent",
     modelSelection,
     runtimeMode: parentShell.runtimeMode,
     interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,

@@ -1,9 +1,11 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, EventId, MessageId, ThreadId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { WorkLogEntry } from "../../session-logic";
+import { buildChildThreadTranscript } from "./childThreadTranscript.logic";
 import {
+  ChildThreadTranscriptSection,
   SubagentInspectorPanel,
   SubagentInspectorPlaceholder,
   SubagentTranscriptEntryRow,
@@ -108,6 +110,62 @@ describe("SubagentTranscriptEntryRow", () => {
 
     expect(markup).toContain("Generic fallback");
     expect(markup).not.toContain("Missing parent id");
+  });
+});
+
+describe("ChildThreadTranscriptSection", () => {
+  const transcript = buildChildThreadTranscript({
+    messages: [
+      {
+        id: MessageId.make("msg-prompt"),
+        role: "user",
+        text: "Audit the settings migrations",
+        origin: "agent",
+        turnId: null,
+        streaming: false,
+        createdAt: "2026-08-12T10:00:00.000Z",
+        updatedAt: "2026-08-12T10:00:00.000Z",
+      },
+      {
+        id: MessageId.make("msg-answer"),
+        role: "assistant",
+        text: "Found **three** migrations.",
+        turnId: null,
+        streaming: false,
+        createdAt: "2026-08-12T10:00:30.000Z",
+        updatedAt: "2026-08-12T10:00:30.000Z",
+      },
+    ],
+    activities: [
+      {
+        id: EventId.make("tool-1"),
+        createdAt: "2026-08-12T10:00:10.000Z",
+        kind: "tool.completed",
+        payload: { toolName: "Bash", detail: "rg migrations" },
+        sequence: 1,
+        summary: "Searched the repo",
+        tone: "tool",
+        turnId: null,
+      },
+    ],
+  });
+
+  it("shows the child's own turns and tool calls, and names the parent's prompt", () => {
+    const markup = renderToStaticMarkup(
+      <ChildThreadTranscriptSection {...commonProps} rows={transcript.rows} />,
+    );
+
+    expect(markup).toContain("3 transcript entries");
+    expect(markup).toContain(">Parent</p>");
+    expect(markup).toContain("Audit the settings migrations");
+    expect(markup).toContain("Searched the repo");
+    expect(markup).toContain("<strong>three</strong>");
+  });
+
+  it("renders nothing when the child thread has produced no rows", () => {
+    expect(renderToStaticMarkup(<ChildThreadTranscriptSection {...commonProps} rows={[]} />)).toBe(
+      "",
+    );
   });
 });
 

@@ -369,6 +369,8 @@ describe("spawn_agent handler", () => {
       assert.strictEqual(turn.threadId, result.success.childThreadId);
       assert.strictEqual(turn.message.messageId, `${result.success.childThreadId}-prompt`);
       assert.strictEqual(turn.message.text, spawnInput.prompt);
+      // The parent authored the prompt, so the child's drawer labels it "Parent".
+      assert.strictEqual(turn.origin, "agent");
     }),
   );
 

@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { selectLiveSubagentTail } from "@t3tools/client-runtime/state/subagent-activity";
 import type {
   CommandId,
+  OrchestrationMessage,
   OrchestrationSubagentActivityCursor,
   OrchestrationThreadActivity,
   OrchestrationThreadSubagent,
@@ -21,6 +22,7 @@ import { formatContextWindowTokens } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useThreadShell } from "~/state/entities";
+import { useEnvironmentThread } from "~/state/threads";
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
@@ -37,6 +39,11 @@ import {
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
 } from "./SubagentInspectorPanel.logic";
+import {
+  buildChildThreadTranscript,
+  type ChildThreadTranscriptRow,
+} from "./childThreadTranscript.logic";
+import { resolveUserMessageAuthorLabel } from "./MessagesTimeline.logic";
 import {
   findRosterEntry,
   formatSubagentRosterSummary,
@@ -267,6 +274,28 @@ export function SubagentInspectorPanel({
     [childThreadId, threadRef.environmentId],
   );
   const childShell = useThreadShell(childThreadRef);
+  // The child's own thread is also the only place its transcript exists: the
+  // parent's mirrored row carries lifecycle, never the child's turns.
+  const childThreadState = useEnvironmentThread(
+    childThreadId === null ? null : threadRef.environmentId,
+    childThreadId,
+  );
+  const childThread = Option.getOrNull(childThreadState.data);
+  const childTranscript = useMemo(
+    () =>
+      buildChildThreadTranscript({
+        messages: childThread?.messages ?? [],
+        activities: childThread?.activities ?? [],
+      }),
+    [childThread],
+  );
+  // Until the child's own thread answers, the parent's mirrored lifecycle row
+  // is all there is, and it is better than a blank drawer. The same fallback
+  // covers a settled child whose thread has since been pruned.
+  const showChildTranscript = childTranscript.rows.length > 0;
+  const transcriptLength = showChildTranscript
+    ? childTranscript.rows.length
+    : backfill.liveTailLength;
 
   useEffect(() => {
     shouldFollowTailRef.current = true;
@@ -280,7 +309,7 @@ export function SubagentInspectorPanel({
     if (target?.status === "running" && transcript && shouldFollowTailRef.current) {
       transcript.scrollTop = transcript.scrollHeight;
     }
-  }, [backfill.liveTailLength, target?.status]);
+  }, [transcriptLength, target?.status]);
 
   useLayoutEffect(() => {
     const pending = pendingPrependRef.current;
@@ -360,13 +389,18 @@ export function SubagentInspectorPanel({
           .filter((value): value is string => value !== null)
           .join(" · ")
       : null;
-  const toolCount = backfill.entries.filter(
-    (child) =>
-      child.sourceActivityKind !== "subagent.text" &&
-      child.sourceActivityKind !== "subagent.thinking",
-  ).length;
+  const toolCount = showChildTranscript
+    ? childTranscript.toolCount
+    : backfill.entries.filter(
+        (child) =>
+          child.sourceActivityKind !== "subagent.text" &&
+          child.sourceActivityKind !== "subagent.thinking",
+      ).length;
+  const transcriptComplete = showChildTranscript
+    ? (childThread?.activitiesTruncated ?? null) === null
+    : backfill.isComplete;
   const toolCountLabel = `${toolCount === 1 ? "1 tool call" : toolCount + " tool calls"}${
-    backfill.isComplete ? "" : " shown"
+    transcriptComplete ? "" : " shown"
   }`;
   const liveProgress =
     target.status === "running"
@@ -374,19 +408,26 @@ export function SubagentInspectorPanel({
           (value): value is string => value !== null,
         )
       : [];
-  const prompt = group?.prompt ?? null;
+  // A thread-backed child keeps both of these in its own transcript: the spawn
+  // prompt is its first message and the result is its last assistant turn.
+  // Repeating them under the transcript would say everything twice.
+  const prompt = showChildTranscript ? null : (group?.prompt ?? null);
   // The per-subagent activity query keys off parent_tool_use_id / task_id and
   // the spawn tool row carries neither, so the prompt is genuinely gone with
   // the group. The settled read-model summary still stands in for the result.
-  const resultText =
-    group?.resultText ??
-    (target.status === "running" ? null : (target.lastProgressSummary ?? null));
-  const placeholder = selectSubagentInspectorPlaceholder({
-    entryCount: backfill.entries.length,
-    isPending: backfill.isPending,
-    prompt,
-    resultText,
-  });
+  const resultText = showChildTranscript
+    ? null
+    : (group?.resultText ??
+      (target.status === "running" ? null : (target.lastProgressSummary ?? null)));
+  const placeholder = showChildTranscript
+    ? null
+    : selectSubagentInspectorPlaceholder({
+        entryCount: backfill.entries.length,
+        // A child thread still catching up is as pending as a backfill page.
+        isPending: backfill.isPending || childThreadState.status === "synchronizing",
+        prompt,
+        resultText,
+      });
 
   return (
     <div className="flex h-full w-full min-h-0 flex-1 flex-col">
@@ -473,7 +514,7 @@ export function SubagentInspectorPanel({
         }}
       >
         <div className="space-y-3">
-          {backfill.showLoadEarlier ? (
+          {backfill.showLoadEarlier && !showChildTranscript ? (
             <div className="sticky top-0 z-10 flex justify-center bg-background/90 pb-2 backdrop-blur-sm">
               <Button
                 size="xs"
@@ -495,7 +536,16 @@ export function SubagentInspectorPanel({
             </div>
           ) : null}
 
-          {backfill.entries.length > 0 ? (
+          {showChildTranscript ? (
+            <ChildThreadTranscriptSection
+              rows={childTranscript.rows}
+              markdownCwd={markdownCwd}
+              skills={skills}
+              threadRef={threadRef}
+              workspaceRoot={workspaceRoot}
+              turnSettled={target.status !== "running"}
+            />
+          ) : backfill.entries.length > 0 ? (
             <section>
               <p className="px-0.5 pb-0.5 font-medium text-[11px] text-muted-foreground/65">
                 {backfill.entries.length === 1
@@ -568,6 +618,101 @@ export function SubagentInspectorPanel({
           threadId={threadRef.threadId}
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The child thread's own transcript: what it was asked, what it did, what it
+ * said back. Exported so the rows are testable without the panel's live
+ * subscriptions.
+ */
+export function ChildThreadTranscriptSection({
+  rows,
+  markdownCwd,
+  skills,
+  threadRef,
+  workspaceRoot,
+  turnSettled,
+}: {
+  rows: ReadonlyArray<ChildThreadTranscriptRow>;
+  markdownCwd: string | undefined;
+  skills: ReadonlyArray<ServerProviderSkill>;
+  threadRef: ScopedThreadRef;
+  workspaceRoot: string | undefined;
+  turnSettled: boolean;
+}) {
+  if (rows.length === 0) return null;
+
+  return (
+    <section>
+      <p className="px-0.5 pb-0.5 font-medium text-[11px] text-muted-foreground/65">
+        {rows.length === 1 ? "1 transcript entry" : rows.length + " transcript entries"}
+      </p>
+      <div className="space-y-1">
+        {rows.map((row) =>
+          row.kind === "message" ? (
+            <ChildThreadMessageRow
+              key={row.id}
+              message={row.message}
+              markdownCwd={markdownCwd}
+              skills={skills}
+              threadRef={threadRef}
+            />
+          ) : (
+            <SubagentTranscriptEntryRow
+              key={row.id}
+              workEntry={row.entry}
+              markdownCwd={markdownCwd}
+              skills={skills}
+              threadRef={threadRef}
+              workspaceRoot={workspaceRoot}
+              turnSettled={turnSettled}
+            />
+          ),
+        )}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * One message of the child thread.
+ *
+ * A `role: "user"` row here is usually the parent's: the spawn prompt, or a
+ * later message the parent sent. `resolveUserMessageAuthorLabel` names it, and
+ * leaves a human's own drawer message unlabelled, exactly as the main timeline
+ * does.
+ */
+function ChildThreadMessageRow({
+  message,
+  markdownCwd,
+  skills,
+  threadRef,
+}: {
+  message: OrchestrationMessage;
+  markdownCwd: string | undefined;
+  skills: ReadonlyArray<ServerProviderSkill>;
+  threadRef: ScopedThreadRef;
+}) {
+  if (message.text.trim().length === 0) return null;
+
+  if (message.role === "assistant") {
+    return (
+      <div className="py-1 text-sm text-foreground">
+        <ChatMarkdown text={message.text} cwd={markdownCwd} threadRef={threadRef} skills={skills} />
+      </div>
+    );
+  }
+
+  const authorLabel =
+    message.role === "user" ? resolveUserMessageAuthorLabel(message.origin) : "System";
+  return (
+    <div className="rounded-md bg-muted/40 px-2 py-1.5 text-sm">
+      {authorLabel !== null ? (
+        <p className="pb-0.5 font-medium text-[11px] text-muted-foreground/65">{authorLabel}</p>
+      ) : null}
+      <ChatMarkdown text={message.text} cwd={markdownCwd} threadRef={threadRef} skills={skills} />
     </div>
   );
 }
