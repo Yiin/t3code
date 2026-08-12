@@ -345,6 +345,7 @@ describe("ProviderCommandReactor", () => {
       listSessions: () => Effect.succeed(runtimeSessions),
       hasLiveSession: (threadId) =>
         Effect.succeed(runtimeSessions.some((session) => session.threadId === threadId)),
+      describeSessionResume: () => unsupported(),
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",

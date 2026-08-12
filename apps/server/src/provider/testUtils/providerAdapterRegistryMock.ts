@@ -33,12 +33,24 @@ export type KindAdapterMap = Partial<
 >;
 
 /**
+ * Per-instance routing details a fixture wants to differ from the defaults.
+ * Keyed by driver kind, the same key the adapter map uses.
+ */
+export interface AdapterRegistryInstanceOverrides {
+  readonly enabled?: boolean;
+  readonly continuationKey?: string;
+}
+
+/**
  * Build a `ProviderAdapterRegistryShape` from a kind-keyed adapter map.
  * Every adapter present in the map is addressable via both the legacy
  * `getByProvider(kind)` path and the new `getByInstance(id)` path (where
  * `id = defaultInstanceIdForDriver(kind)`).
  */
-export const makeAdapterRegistryMock = (adapters: KindAdapterMap): ProviderAdapterRegistryShape => {
+export const makeAdapterRegistryMock = (
+  adapters: KindAdapterMap,
+  instanceOverrides?: Partial<Record<ProviderDriverKind, AdapterRegistryInstanceOverrides>>,
+): ProviderAdapterRegistryShape => {
   const byInstanceId = new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>();
   for (const [kind, adapter] of Object.entries(adapters)) {
     if (!adapter) continue;
@@ -68,14 +80,17 @@ export const makeAdapterRegistryMock = (adapters: KindAdapterMap): ProviderAdapt
           }),
         );
       }
+      const driverKind = ProviderDriverKind.make(adapter.provider);
+      const overrides = instanceOverrides?.[driverKind];
       return Effect.succeed({
         instanceId,
-        driverKind: ProviderDriverKind.make(adapter.provider),
+        driverKind,
         displayName: undefined,
-        enabled: true,
+        enabled: overrides?.enabled ?? true,
         continuationIdentity: {
-          driverKind: ProviderDriverKind.make(adapter.provider),
-          continuationKey: `${adapter.provider}:instance:${instanceId}`,
+          driverKind,
+          continuationKey:
+            overrides?.continuationKey ?? `${adapter.provider}:instance:${instanceId}`,
         },
       });
     },

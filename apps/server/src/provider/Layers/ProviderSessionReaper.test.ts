@@ -254,6 +254,7 @@ describe("ProviderSessionReaper", () => {
       stopSession,
       listSessions: () => Effect.succeed([]),
       hasLiveSession,
+      describeSessionResume: () => unsupported(),
       getCapabilities: () =>
         Effect.succeed({
           sessionModelSwitch: "in-session",
@@ -651,6 +652,7 @@ describe("ProviderSessionReaper", () => {
           stopSession,
           listSessions: () => Effect.succeed([]),
           hasLiveSession: () => Effect.succeed(false),
+          describeSessionResume: () => unsupportedCall(),
           getCapabilities: () =>
             Effect.succeed({
               sessionModelSwitch: "in-session",

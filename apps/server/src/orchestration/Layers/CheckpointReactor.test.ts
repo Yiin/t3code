@@ -132,6 +132,7 @@ function createProviderServiceHarness(
     listSessions,
     hasLiveSession: (threadId) =>
       Effect.succeed(hasSession && threadId === ThreadId.make("thread-1")),
+    describeSessionResume: () => unsupported(),
     getCapabilities: () =>
       Effect.succeed({
         sessionModelSwitch: "in-session",

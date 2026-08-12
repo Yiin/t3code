@@ -29,6 +29,7 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderSessionResumeVerdict,
   type T3SessionEnvironment,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
@@ -56,6 +57,7 @@ import {
 } from "../../observability/Metrics.ts";
 import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type { ProviderContinuationIdentity } from "../ProviderDriver.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -183,6 +185,7 @@ function toRuntimePayloadFromSession(
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
     readonly t3EnvironmentContext?: T3EnvironmentContext;
+    readonly continuationIdentity?: PersistedContinuationIdentity;
   },
 ): Record<string, unknown> {
   return {
@@ -201,6 +204,9 @@ function toRuntimePayloadFromSession(
       : {}),
     ...(extra?.t3EnvironmentContext !== undefined
       ? { t3EnvironmentContext: extra.t3EnvironmentContext }
+      : {}),
+    ...(extra?.continuationIdentity !== undefined
+      ? { continuationIdentity: extra.continuationIdentity }
       : {}),
   };
 }
@@ -266,6 +272,47 @@ function readPersistedT3EnvironmentContext(
     projectId: ProjectId.make(projectId),
     workspaceRoot,
   };
+}
+
+/**
+ * Which provider continuation domain a persisted resume cursor belongs to.
+ *
+ * `driverKind` is a plain string here on purpose: it is read back off disk and
+ * a row written by an older build can carry anything.
+ */
+interface PersistedContinuationIdentity {
+  readonly driverKind: string;
+  readonly continuationKey: string;
+}
+
+/**
+ * Read the continuation identity a past write left on the binding.
+ *
+ * Returns `undefined` for a legacy row that predates the field and for any
+ * malformed payload. `undefined` means UNKNOWN, never "mismatch": a consumer
+ * must not block a resume on it, because every binding written before this
+ * field existed reads that way.
+ */
+function readPersistedContinuationIdentity(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): PersistedContinuationIdentity | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const raw =
+    "continuationIdentity" in runtimePayload ? runtimePayload.continuationIdentity : undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const driverKind = "driverKind" in raw ? raw.driverKind : undefined;
+  const continuationKey = "continuationKey" in raw ? raw.continuationKey : undefined;
+  if (typeof driverKind !== "string" || driverKind.trim().length === 0) {
+    return undefined;
+  }
+  if (typeof continuationKey !== "string" || continuationKey.trim().length === 0) {
+    return undefined;
+  }
+  return { driverKind, continuationKey };
 }
 
 function readPersistedModelSelection(
@@ -529,6 +576,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
       readonly t3EnvironmentContext?: T3EnvironmentContext;
+      readonly continuationIdentity?: PersistedContinuationIdentity;
     },
   ) =>
     Effect.gen(function* () {
@@ -1240,6 +1288,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          // Record which continuation domain the cursor we are about to persist
+          // belongs to. If the instance is reconfigured later, a reader can tell
+          // the cursor is dead instead of handing it to a stranger.
+          continuationIdentity: instanceInfo.continuationIdentity,
           // Persist the project context so a post-restart recovery can rebuild
           // the T3_* injection for this thread.
           ...(parsed.projectId !== undefined && parsed.workspaceRoot !== undefined
@@ -1312,6 +1364,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
       const turn = yield* routed.adapter.sendTurn(input);
+      // A turn refreshes the resume cursor, so it has to refresh the identity
+      // stamped on it too. Never fail a started turn over this: an instance the
+      // registry just routed through can only go missing in a race, and the
+      // merged payload then keeps whatever the last write left.
+      const turnContinuationIdentity = yield* registry.getInstanceInfo(routed.instanceId).pipe(
+        Effect.map((info): ProviderContinuationIdentity | undefined => info.continuationIdentity),
+        Effect.orElseSucceed(() => undefined),
+      );
       yield* directory.upsert({
         threadId: input.threadId,
         provider: routed.adapter.provider,
@@ -1320,6 +1380,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
         runtimePayload: {
           ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          ...(turnContinuationIdentity !== undefined
+            ? { continuationIdentity: turnContinuationIdentity }
+            : {}),
           activeTurnId: turn.turnId,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,
@@ -1607,6 +1670,105 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  /**
+   * Read-only resume verdict. Touches nothing: no adapter start, no MCP
+   * session, no directory write. The checks run in the order that makes the
+   * most specific cause win, so "this provider cannot resume" is never
+   * reported as "no cursor is persisted".
+   *
+   * Advisory and racy — see the shape's TSDoc.
+   */
+  const describeSessionResume: ProviderServiceMethod<"describeSessionResume"> = Effect.fn(
+    "describeSessionResume",
+  )(function* (threadId) {
+    const annotate = (verdict: ProviderSessionResumeVerdict) =>
+      Effect.annotateCurrentSpan({
+        "provider.operation": "describe-session-resume",
+        "provider.thread_id": threadId,
+        "provider.resume.resumable": verdict.resumable,
+        "provider.resume.reason": verdict.reason,
+      }).pipe(Effect.as(verdict));
+
+    const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+    if (!binding) {
+      return yield* annotate({ threadId, resumable: "no", reason: "no-binding" });
+    }
+
+    const base = {
+      threadId,
+      provider: binding.provider,
+      ...(binding.providerInstanceId !== undefined
+        ? { providerInstanceId: binding.providerInstanceId }
+        : {}),
+    } as const;
+
+    // A binding with no instance id cannot be routed at all, which is the same
+    // dead end as an instance that is no longer configured.
+    if (binding.providerInstanceId === undefined) {
+      return yield* annotate({ ...base, resumable: "no", reason: "instance-not-configured" });
+    }
+    const instanceId = binding.providerInstanceId;
+
+    const adapterOption = yield* registry.getByInstance(instanceId).pipe(Effect.option);
+    if (Option.isNone(adapterOption)) {
+      return yield* annotate({ ...base, resumable: "no", reason: "instance-not-configured" });
+    }
+    const adapter = adapterOption.value;
+
+    const instanceInfoOption = yield* registry.getInstanceInfo(instanceId).pipe(Effect.option);
+    if (Option.isNone(instanceInfoOption)) {
+      return yield* annotate({ ...base, resumable: "no", reason: "instance-not-configured" });
+    }
+    const instanceInfo = instanceInfoOption.value;
+    if (!instanceInfo.enabled) {
+      return yield* annotate({ ...base, resumable: "no", reason: "instance-disabled" });
+    }
+
+    const persistedCwd = readPersistedCwd(binding.runtimePayload);
+    const withPersistedState = {
+      ...base,
+      ...(persistedCwd !== undefined ? { cwd: persistedCwd } : {}),
+      lastSeenAt: binding.lastSeenAt,
+    } as const;
+
+    if (yield* adapter.hasSession(threadId)) {
+      return yield* annotate({
+        ...withPersistedState,
+        resumable: "live",
+        reason: "live-session",
+      });
+    }
+
+    if (adapter.capabilities.sessionLifecycle.resume === "unsupported") {
+      return yield* annotate({ ...base, resumable: "no", reason: "resume-unsupported" });
+    }
+
+    if (binding.resumeCursor === null || binding.resumeCursor === undefined) {
+      return yield* annotate({ ...base, resumable: "no", reason: "no-cursor" });
+    }
+
+    // An absent persisted identity is unknown, not a mismatch: every binding
+    // written before the field existed reads that way. Only a recorded key that
+    // disagrees with the instance's current one kills the cursor.
+    const persistedIdentity = readPersistedContinuationIdentity(binding.runtimePayload);
+    if (
+      persistedIdentity !== undefined &&
+      persistedIdentity.continuationKey !== instanceInfo.continuationIdentity.continuationKey
+    ) {
+      return yield* annotate({
+        ...base,
+        resumable: "no",
+        reason: "continuation-identity-changed",
+      });
+    }
+
+    return yield* annotate({
+      ...withPersistedState,
+      resumable: "cursor",
+      reason: "persisted-cursor",
+    });
+  });
+
   const getCapabilities: ProviderServiceMethod<"getCapabilities"> = (instanceId) =>
     registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
 
@@ -1734,6 +1896,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     stopSession,
     listSessions,
     hasLiveSession,
+    describeSessionResume,
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,

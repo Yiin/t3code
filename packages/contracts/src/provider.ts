@@ -108,6 +108,54 @@ export const ProviderWorkerScopeBinding = Schema.Struct({
 });
 export type ProviderWorkerScopeBinding = typeof ProviderWorkerScopeBinding.Type;
 
+/**
+ * How much of a past conversation a thread can still get back.
+ *
+ * - `live`: the adapter still holds the session, so nothing has to be resumed.
+ * - `cursor`: no live session, but a persisted cursor looks usable.
+ * - `no`: nothing to resume from.
+ */
+export const ProviderSessionResumability = Schema.Literals(["live", "cursor", "no"]);
+export type ProviderSessionResumability = typeof ProviderSessionResumability.Type;
+
+/**
+ * Why the verdict came out the way it did. One arm per check, so a caller can
+ * tell "this provider cannot resume" from "nothing was persisted".
+ */
+export const ProviderSessionResumeReason = Schema.Literals([
+  "live-session",
+  "persisted-cursor",
+  "no-binding",
+  "no-cursor",
+  "instance-not-configured",
+  "instance-disabled",
+  "resume-unsupported",
+  "continuation-identity-changed",
+]);
+export type ProviderSessionResumeReason = typeof ProviderSessionResumeReason.Type;
+
+/**
+ * A read-only answer to "can this thread's session be picked up again?".
+ *
+ * Advisory and racy: the session it describes can die between the ask and the
+ * act, so a caller must still handle a failed start.
+ */
+export const ProviderSessionResumeVerdict = Schema.Struct({
+  threadId: ThreadId,
+  resumable: ProviderSessionResumability,
+  reason: ProviderSessionResumeReason,
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  provider: Schema.optional(ProviderDriverKind),
+  /**
+   * The cwd persisted with the binding, verbatim. The caller owns any
+   * comparison against it: for a parallel epic run it is a per-iteration
+   * worktree path, not the repo root.
+   */
+  cwd: Schema.optional(TrimmedNonEmptyString),
+  lastSeenAt: Schema.optional(IsoDateTime),
+});
+export type ProviderSessionResumeVerdict = typeof ProviderSessionResumeVerdict.Type;
+
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),

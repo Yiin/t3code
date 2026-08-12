@@ -19,6 +19,7 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionResumeVerdict,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ThreadId,
@@ -90,6 +91,22 @@ export interface ProviderServiceShape {
    * Check whether the adapter still holds a session without recovering it.
    */
   readonly hasLiveSession: (threadId: ThreadId) => Effect.Effect<boolean, ProviderServiceError>;
+
+  /**
+   * Answer whether this thread's provider session could be picked up again,
+   * without starting anything.
+   *
+   * Reads the persisted binding, the configured instance and the adapter's
+   * declared capability, and returns a typed verdict. It writes nothing, starts
+   * no session and prepares no MCP session.
+   *
+   * The verdict is advisory and racy. A live session can die, an instance can
+   * be reconfigured, and a cursor can go stale between the ask and the act, so
+   * a caller must still handle a failed start.
+   */
+  readonly describeSessionResume: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderSessionResumeVerdict, ProviderServiceError>;
 
   /**
    * Read capabilities for the adapter bound to a configured provider instance.

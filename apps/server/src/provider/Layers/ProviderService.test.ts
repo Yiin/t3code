@@ -1696,10 +1696,15 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(persisted.value.status, "error");
         assert.deepEqual(persisted.value.resumeCursor, updatedResumeCursor);
         // The `startSession` above wrote `sessionOrigin: null` — the fake
-        // adapter reports no origin — and the payload merge keeps it.
+        // adapter reports no origin — and the continuation identity, and the
+        // payload merge keeps both.
         assert.deepEqual(persisted.value.runtimePayload, {
           ...runtimePayload,
           sessionOrigin: null,
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: `${CODEX_DRIVER}:instance:${codexInstanceId}`,
+          },
         });
       }
     }),
@@ -1754,10 +1759,15 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(persisted.value.runtimeMode, "auto-accept-edits");
         assert.equal(persisted.value.status, "stopped");
         assert.deepEqual(persisted.value.resumeCursor, initialResumeCursor);
-        // Same as above: the start persisted a null origin before this upsert.
+        // Same as above: the start persisted a null origin and the continuation
+        // identity before this upsert.
         assert.deepEqual(persisted.value.runtimePayload, {
           ...runtimePayload,
           sessionOrigin: null,
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: `${CODEX_DRIVER}:instance:${codexInstanceId}`,
+          },
         });
       }
     }),
@@ -3437,5 +3447,385 @@ it.effect("fails with the missing path when no fallback directory exists", () =>
       String((error as { readonly message?: string }).message).includes(VANISHED_CWD),
       true,
     );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+/**
+ * Single-adapter stack for the continuation-identity and resume-verdict
+ * suites. The registry overrides let a test say "this instance was
+ * reconfigured" or "this instance is switched off" without rebuilding the
+ * fixture by hand.
+ */
+function makeContinuationIdentityStack(options?: {
+  readonly sessionResume?: ProviderSessionResumeMode;
+  readonly enabled?: boolean;
+  readonly continuationKey?: string;
+}) {
+  const codex = makeFakeCodexAdapter(
+    CODEX_DRIVER,
+    options?.sessionResume !== undefined ? { sessionResume: options.sessionResume } : undefined,
+  );
+  const registry = makeAdapterRegistryMock(
+    { [CODEX_DRIVER]: codex.adapter },
+    {
+      [CODEX_DRIVER]: {
+        ...(options?.enabled !== undefined ? { enabled: options.enabled } : {}),
+        ...(options?.continuationKey !== undefined
+          ? { continuationKey: options.continuationKey }
+          : {}),
+      },
+    },
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = Layer.mergeAll(
+    makeProviderServiceLiveForTest().pipe(
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+    ),
+    directoryLayer,
+    runtimeRepositoryLayer,
+  );
+  return { codex, providerLayer };
+}
+
+/** The default key `makeAdapterRegistryMock` reports for the codex instance. */
+const CODEX_CONTINUATION_KEY = `${CODEX_DRIVER}:instance:${codexInstanceId}`;
+
+const readContinuationIdentity = (runtimePayload: unknown): unknown =>
+  typeof runtimePayload === "object" && runtimePayload !== null
+    ? (runtimePayload as Record<string, unknown>).continuationIdentity
+    : undefined;
+
+const persistedRuntimePayload = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+    const binding = yield* directory.getBinding(threadId);
+    assert.equal(Option.isSome(binding), true);
+    return Option.isSome(binding) ? binding.value.runtimePayload : undefined;
+  });
+
+/** Writes a binding straight to the directory, bypassing every session path. */
+const seedBinding = (input: {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId?: ProviderInstanceId;
+  readonly resumeCursor?: unknown | null;
+  readonly runtimePayload?: Record<string, unknown>;
+}) =>
+  Effect.gen(function* () {
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+    yield* directory.upsert({
+      threadId: input.threadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: input.providerInstanceId ?? codexInstanceId,
+      runtimeMode: "full-access",
+      status: "stopped",
+      resumeCursor: input.resumeCursor ?? null,
+      runtimePayload: input.runtimePayload ?? {},
+    });
+  });
+
+it.effect("persists the instance continuation identity when a session starts", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-start");
+
+    const runtimePayload = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+      const info = yield* provider.getInstanceInfo(codexInstanceId);
+      assert.equal(info.continuationIdentity.continuationKey, CODEX_CONTINUATION_KEY);
+      return yield* persistedRuntimePayload(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.deepEqual(readContinuationIdentity(runtimePayload), {
+      driverKind: CODEX_DRIVER,
+      continuationKey: CODEX_CONTINUATION_KEY,
+    });
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("refreshes the continuation identity on every turn", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-turn");
+
+    const runtimePayload = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+      // Rot the persisted identity behind the service's back, so the assertion
+      // below can only pass if `sendTurn` wrote it again.
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "stale" },
+        runtimePayload: {
+          continuationIdentity: { driverKind: CODEX_DRIVER, continuationKey: "codex:home:/gone" },
+        },
+      });
+      yield* provider.sendTurn({ threadId, input: "keep going", attachments: [] });
+      return yield* persistedRuntimePayload(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.deepEqual(readContinuationIdentity(runtimePayload), {
+      driverKind: CODEX_DRIVER,
+      continuationKey: CODEX_CONTINUATION_KEY,
+    });
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("keeps the continuation identity across a session stop", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-stop");
+
+    const runtimePayload = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      return yield* persistedRuntimePayload(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.deepEqual(readContinuationIdentity(runtimePayload), {
+      driverKind: CODEX_DRIVER,
+      continuationKey: CODEX_CONTINUATION_KEY,
+    });
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reads a legacy binding that carries no continuation identity", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-legacy");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "legacy" },
+        runtimePayload: { cwd: "/tmp/project-legacy" },
+      });
+      const payload = yield* persistedRuntimePayload(threadId);
+      assert.equal(readContinuationIdentity(payload), undefined);
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    // Absent means unknown, never mismatch: every row written before the field
+    // existed reads this way.
+    assert.equal(verdict.resumable, "cursor");
+    assert.equal(verdict.reason, "persisted-cursor");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("ignores a malformed persisted continuation identity", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-malformed");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "malformed" },
+        runtimePayload: { continuationIdentity: { driverKind: "", continuationKey: 7 } },
+      });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "cursor");
+    assert.equal(verdict.reason, "persisted-cursor");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume reports no binding", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-verdict-no-binding");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.threadId, threadId);
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "no-binding");
+    assert.equal(verdict.providerInstanceId, undefined);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume reports an unconfigured instance", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-verdict-unconfigured");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex_retired"),
+        resumeCursor: { opaque: "orphan" },
+      });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "instance-not-configured");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume reports a disabled instance", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ enabled: false });
+    const threadId = asThreadId("thread-verdict-disabled");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({ threadId, resumeCursor: { opaque: "disabled" } });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "instance-disabled");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume reports a live adapter session", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-verdict-live");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-verdict-live",
+        runtimeMode: "full-access",
+      });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "live");
+    assert.equal(verdict.reason, "live-session");
+    assert.equal(verdict.provider, CODEX_DRIVER);
+    assert.equal(verdict.providerInstanceId, codexInstanceId);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume reports an adapter that cannot resume", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ sessionResume: "unsupported" });
+    const threadId = asThreadId("thread-verdict-unsupported");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({ threadId, resumeCursor: { opaque: "unusable" } });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    // The cursor is right there, so this can only come from the capability.
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "resume-unsupported");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume reports a binding with no cursor", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-verdict-no-cursor");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({ threadId, resumeCursor: null });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "no-cursor");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume refuses a cursor from another continuation domain", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/new-home" });
+    const threadId = asThreadId("thread-verdict-identity-changed");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "from-the-old-home" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: "codex:home:/old-home",
+          },
+        },
+      });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "continuation-identity-changed");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume accepts a persisted cursor and starts nothing", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-verdict-cursor");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-verdict-cursor",
+        runtimeMode: "full-access",
+      });
+      // Kill the in-memory session the way a server restart does, leaving the
+      // persisted binding behind.
+      yield* stack.codex.stopAll();
+      stack.codex.startSession.mockClear();
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "cursor");
+    assert.equal(verdict.reason, "persisted-cursor");
+    assert.equal(verdict.cwd, "/tmp/project-verdict-cursor");
+    assert.equal(typeof verdict.lastSeenAt, "string");
+    // Read-only: asking must never wake a provider up.
+    assert.equal(stack.codex.startSession.mock.calls.length, 0);
+    assert.equal(stack.codex.sendTurn.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
