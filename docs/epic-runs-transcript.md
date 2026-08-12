@@ -47,17 +47,19 @@ The contract also accepts the shared `run-state-changed` and `iteration-state-ch
 
 ## Server iteration fields without a terminal field
 
-| Server field     | Terminal source                                                   | Verdict                                                              |
-| ---------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `iterationIndex` | Mailbox sequence and dispatch order.                              | The terminal adapter synthesizes the stable zero-based index.        |
-| `threadId`       | No stable terminal value.                                         | The adapter stores it in ignored transcript metadata when available. |
-| `workerId`       | Worker lifecycle events.                                          | The terminal adapter copies the worker identity when available.      |
-| `issueId`        | Mailbox `child`.                                                  | The terminal adapter renames it. Run-level records use null.         |
-| `branch`         | Worker checkout events.                                           | The terminal adapter copies the per-child branch when available.     |
-| `worktreePath`   | Worker checkout events.                                           | The terminal adapter copies the per-child path when available.       |
-| `turnStatus`     | Dispatch, completion, retry, blocked, and interruption events.    | The adapter synthesizes the four-state value.                        |
-| `summary`        | Worker result text or the terminal event reason.                  | The adapter includes only stable worker-reported text.               |
-| `why`            | The structured worker report.                                     | The terminal adapter copies it when the harness supplies it.         |
-| `failureReason`  | Retry, blocked, rate-limit, timeout, and provider classification. | The shared core owns the closed classified value.                    |
-| `startedAt`      | Mailbox timestamp.                                                | The adapter moves it to ignored transcript metadata.                 |
-| `finishedAt`     | Mailbox timestamp.                                                | The adapter moves it to ignored transcript metadata.                 |
+| Server field     | Terminal source                                                   | Verdict                                                                                                             |
+| ---------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `iterationIndex` | Mailbox sequence and dispatch order.                              | The terminal adapter synthesizes the stable zero-based index.                                                       |
+| `threadId`       | No stable terminal value.                                         | The adapter stores it in ignored transcript metadata when available.                                                |
+| `workerId`       | Worker lifecycle events.                                          | The terminal adapter copies the worker identity when available.                                                     |
+| `issueId`        | Mailbox `child`.                                                  | The terminal adapter renames it. Run-level records use null.                                                        |
+| `branch`         | Worker checkout events.                                           | The terminal adapter copies the per-child branch when available.                                                    |
+| `worktreePath`   | Worker checkout events.                                           | The terminal adapter copies the per-child path when available.                                                      |
+| `turnStatus`     | Dispatch, completion, retry, blocked, and interruption events.    | The adapter synthesizes the four-state value.                                                                       |
+| `summary`        | Worker result text or the terminal event reason.                  | The adapter includes only stable worker-reported text.                                                              |
+| `why`            | The structured worker report.                                     | The terminal adapter copies it when the harness supplies it.                                                        |
+| `failureReason`  | Retry, blocked, rate-limit, timeout, and provider classification. | The shared core owns the closed classified value.                                                                   |
+| `resumeCount`    | No terminal source.                                               | The terminal harness persists nothing until a child closes, so it declares resume unsupported and always reports 0. |
+| `lastResumedAt`  | No terminal source.                                               | Null for the same reason as `resumeCount`.                                                                          |
+| `startedAt`      | Mailbox timestamp.                                                | The adapter moves it to ignored transcript metadata.                                                                |
+| `finishedAt`     | Mailbox timestamp.                                                | The adapter moves it to ignored transcript metadata.                                                                |

@@ -188,6 +188,26 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
           finishedAt: input.finishedAt,
         };
       }),
+    reopenIteration: (input) =>
+      Effect.sync(() => {
+        const index = iterations.findIndex(
+          (iteration) =>
+            iteration.runId === input.runId && iteration.iterationIndex === input.iterationIndex,
+        );
+        if (index === -1) return;
+        const current = iterations[index]!;
+        iterationWrites.push({ method: "update", turnStatus: "running" });
+        iterations[index] = {
+          ...current,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          finishedAt: null,
+          resumeCount: (current.resumeCount ?? 0) + 1,
+          lastResumedAt: input.resumedAt,
+        };
+      }),
     listIterations: ({ runId }) =>
       Effect.sync(() => {
         iterationReadCounts.perRun += 1;

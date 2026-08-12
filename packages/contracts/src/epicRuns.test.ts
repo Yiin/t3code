@@ -122,13 +122,33 @@ describe("EpicRun contracts", () => {
           startedAt: "2026-07-28T00:00:00.000Z",
           finishedAt: "2026-07-28T00:01:00.000Z",
         },
+        {
+          iterationIndex: 2,
+          threadId: "thread-2",
+          issueId: "t3code-vst.2",
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          resumeCount: 1,
+          lastResumedAt: "2026-07-28T00:05:00.000Z",
+          startedAt: "2026-07-28T00:02:00.000Z",
+          finishedAt: null,
+        },
       ],
     });
     expect(run.workers).toBe(1);
     const event = { version: 1 as const, type: "run-state-changed" as const, run };
 
-    // The iteration above predates `failureReason`; old rows decode to null.
+    // The first iteration above predates `failureReason` and the resume
+    // columns; old rows decode to null / 0 rather than failing.
     expect(run.recentIterations[0]?.failureReason).toBeNull();
+    expect(run.recentIterations[0]?.resumeCount).toBe(0);
+    expect(run.recentIterations[0]?.lastResumedAt).toBeNull();
+    // A resumed iteration keeps its own index, thread and start time. It is
+    // the same row, continued, not a second row.
+    expect(run.recentIterations[1]?.resumeCount).toBe(1);
+    expect(run.recentIterations[1]?.lastResumedAt).toBe("2026-07-28T00:05:00.000Z");
+    expect(run.recentIterations[1]?.startedAt).toBe("2026-07-28T00:02:00.000Z");
     expect(run.config.limits.maxIterations).toBe(50);
     expect(run.configProvenance).toEqual(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
     expect(decodeEpicRun(encodeEpicRun(run))).toEqual(run);

@@ -888,6 +888,38 @@ describe("groupEpicRunIterationThreads", () => {
     });
   });
 
+  // A restart-resume reopens the interrupted iteration's own row, so the run
+  // still reports ONE thread ref for it and the server still opens no second
+  // thread. One iteration therefore stays one node, however many times it
+  // resumed. If anyone ever swaps the reopen for an appended row, the run
+  // gains a ref at index 1 for the same child and this fails, instead of the
+  // sidebar quietly listing the same work twice.
+  it("shows one iteration node for a run whose only iteration was resumed", () => {
+    const resumedRun = {
+      ...run,
+      threadRefs: [
+        {
+          threadId: epicRunIterationThreadId({ runId, iterationIndex: 0 }),
+          issueId: "t3code-ypi.1",
+          iterationIndex: 0,
+        },
+      ],
+    };
+
+    const nodes = groupEpicRunIterationThreads({
+      threads: [iterationThread(0)],
+      runs: [resumedRun],
+    });
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toMatchObject({
+      kind: "epic-run",
+      runId,
+      iterations: [{ iterationIndex: 0, issueId: "t3code-ypi.1" }],
+    });
+    expect(sidebarNodeThreads(nodes[0]!)).toHaveLength(1);
+  });
+
   it("ignores thread ids that only look like iteration ids", () => {
     const nodes = groupEpicRunIterationThreads({
       threads: [thread("epic-runner-notes"), thread(`epic-run-${runId}-final`)],

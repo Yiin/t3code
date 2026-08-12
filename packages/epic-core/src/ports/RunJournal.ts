@@ -4,6 +4,10 @@
  * The loop must append a `running` iteration before it dispatches the agent.
  * It updates that record only after the turn ends. A crash between these writes
  * must therefore leave visible work that restart recovery can abandon safely.
+ *
+ * `markIterationResumed` is the same discipline in reverse: it flips an
+ * existing record back to `running` before a resume dispatch, so recovery of
+ * the recovery still sees in-flight work.
  */
 import {
   EpicRun as ContractEpicRun,
@@ -50,6 +54,14 @@ export const PersistedEpicRunIteration = Schema.Struct({
   failureReason: Schema.NullOr(Schema.String),
   headBefore: Schema.optional(Schema.NullOr(Schema.String)),
   headAfter: Schema.optional(Schema.NullOr(Schema.String)),
+  /**
+   * How many times `markIterationResumed` reopened this record. Absent on
+   * every record written before the column existed; treat absent as `0`. A
+   * resume reuses the record, so `iterationIndex`, `threadId` and `startedAt`
+   * keep the values the first dispatch wrote.
+   */
+  resumeCount: Schema.optionalKey(NonNegativeInt),
+  lastResumedAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -67,6 +79,13 @@ export const UpdatePersistedEpicRunIteration = Schema.Struct({
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type UpdatePersistedEpicRunIteration = typeof UpdatePersistedEpicRunIteration.Type;
+
+export const MarkPersistedEpicRunIterationResumed = Schema.Struct({
+  runId: EpicRunId,
+  iterationIndex: NonNegativeInt,
+  resumedAt: IsoDateTime,
+});
+export type MarkPersistedEpicRunIterationResumed = typeof MarkPersistedEpicRunIterationResumed.Type;
 
 export class RunJournalError extends Schema.TaggedErrorClass<RunJournalError>()("RunJournalError", {
   operation: Schema.String,
@@ -99,6 +118,19 @@ export interface RunJournalShape {
    */
   readonly updateIteration: (
     input: UpdatePersistedEpicRunIteration,
+  ) => Effect.Effect<void, RunJournalError>;
+  /**
+   * Reopen an existing iteration so its own agent session can be continued.
+   *
+   * The record goes back to `running`, its terminal fields clear, the resume
+   * counter bumps and the stamp lands. `threadId` and `startedAt` stay fixed,
+   * because a resume is the same iteration across two process lifetimes, not
+   * a new one. Call this BEFORE the resume dispatch so a crash during the
+   * resume still leaves visible in-flight work. A missing index is a no-op,
+   * matching `updateIteration`.
+   */
+  readonly markIterationResumed: (
+    input: MarkPersistedEpicRunIterationResumed,
   ) => Effect.Effect<void, RunJournalError>;
   /** Return iterations in ascending index order. */
   readonly listIterations: (

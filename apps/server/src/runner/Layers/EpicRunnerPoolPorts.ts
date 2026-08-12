@@ -304,6 +304,8 @@ const buildTransportRun = (
     workerId: iteration.workerId ?? null,
     branch: iteration.branch ?? null,
     worktreePath: iteration.worktreePath ?? null,
+    resumeCount: iteration.resumeCount ?? 0,
+    lastResumedAt: iteration.lastResumedAt ?? null,
   })),
   threadRefs: recentIterations.flatMap((iteration) =>
     iteration.issueId === null
@@ -465,6 +467,8 @@ export const makeServerPoolJournal = (store: EpicRunStore["Service"]): PoolRunJo
     const { headBefore: _headBefore, headAfter: _headAfter, ...row } = input;
     return store.updateIteration(row).pipe(Effect.mapError(journalError("updateIteration")));
   },
+  markIterationResumed: (input) =>
+    store.reopenIteration(input).pipe(Effect.mapError(journalError("markIterationResumed"))),
   listIterations: (runId) =>
     store.listIterations({ runId }).pipe(
       Effect.map((rows): ReadonlyArray<PersistedEpicRunIteration> => rows),

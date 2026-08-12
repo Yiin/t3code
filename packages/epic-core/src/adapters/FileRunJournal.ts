@@ -244,6 +244,30 @@ export const make = (options: FileRunJournalOptions) =>
         yield* writeRunAtomically(filePath, yield* encodeIterationJson(updated));
       }).pipe(Effect.mapError(journalError("updateIteration")));
 
+    const markIterationResumed: RunJournalShape["markIterationResumed"] = (input) =>
+      Effect.gen(function* () {
+        const filePath = iterationPath(input.iterationIndex);
+        if (!(yield* fileSystem.exists(filePath))) return;
+        const current = yield* readIteration(filePath);
+        if (current.runId !== input.runId) {
+          return yield* new RunJournalError({
+            operation: "markIterationResumed",
+            detail: `Iteration ${input.iterationIndex} belongs to ${current.runId}, not ${input.runId}`,
+          });
+        }
+        const resumed: PersistedEpicRunIteration = {
+          ...current,
+          turnStatus: "running",
+          summary: null,
+          why: null,
+          failureReason: null,
+          finishedAt: null,
+          resumeCount: (current.resumeCount ?? 0) + 1,
+          lastResumedAt: input.resumedAt,
+        };
+        yield* writeRunAtomically(filePath, yield* encodeIterationJson(resumed));
+      }).pipe(Effect.mapError(journalError("markIterationResumed")));
+
     const listIterations: RunJournalShape["listIterations"] = (runId) =>
       Effect.gen(function* () {
         if (!(yield* fileSystem.exists(options.runDirectory))) return [];
@@ -278,6 +302,7 @@ export const make = (options: FileRunJournalOptions) =>
       getRun,
       appendIteration,
       updateIteration,
+      markIterationResumed,
       listIterations,
       getLatestIteration,
     });
@@ -369,6 +394,7 @@ export const makePool = (options: FileRunJournalOptions) =>
       getRun: base.getRun,
       appendIteration: base.appendIteration,
       updateIteration: base.updateIteration,
+      markIterationResumed: base.markIterationResumed,
       listIterations: base.listIterations,
       getLatestIteration: base.getLatestIteration,
       allocateIteration,

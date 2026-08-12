@@ -464,6 +464,92 @@ describe("EpicRunStore", () => {
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 
+  // A restart-resume continues the same provider session on the same thread,
+  // so it must reuse this row. If anyone ever swaps the reopen for an appended
+  // row, the identity assertions below fail instead of the thread id silently
+  // drifting away from the iteration index.
+  it.effect("reopens an iteration in place, counting the resume", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-resume");
+      yield* store.upsertRun(makeRun({ runId }));
+
+      const iterationIndex = yield* store.allocateIteration({
+        runId,
+        issueId: "issue-resume",
+        branch: "epic/issue-resume",
+        worktreePath: "/tmp/worktrees/issue-resume",
+        startedAt: "2026-08-12T00:00:00.000Z",
+      });
+      yield* store.updateIteration({
+        runId,
+        iterationIndex,
+        turnStatus: "abandoned",
+        summary: "abandoned by the restart",
+        why: "the process died",
+        failureReason: "server-restart",
+        finishedAt: "2026-08-12T00:10:00.000Z",
+      });
+
+      yield* store.reopenIteration({
+        runId,
+        iterationIndex,
+        resumedAt: "2026-08-12T00:11:00.000Z",
+      });
+
+      const afterFirst = yield* store.listIterations({ runId });
+      assert.strictEqual(afterFirst.length, 1);
+      assert.deepStrictEqual(afterFirst[0], {
+        runId,
+        iterationIndex: 0,
+        threadId: `epic-run-${runId}-0`,
+        issueId: "issue-resume",
+        workerId: `epic-run-${runId}-0`,
+        branch: "epic/issue-resume",
+        worktreePath: "/tmp/worktrees/issue-resume",
+        turnStatus: "running",
+        summary: null,
+        why: null,
+        failureReason: null,
+        resumeCount: 1,
+        lastResumedAt: "2026-08-12T00:11:00.000Z",
+        startedAt: "2026-08-12T00:00:00.000Z",
+        finishedAt: null,
+      });
+
+      // A second resume keeps counting, and a terminal update leaves both
+      // resume columns exactly where the reopen put them.
+      yield* store.reopenIteration({
+        runId,
+        iterationIndex,
+        resumedAt: "2026-08-12T00:20:00.000Z",
+      });
+      yield* store.updateIteration({
+        runId,
+        iterationIndex,
+        turnStatus: "completed",
+        summary: "finished after the restart",
+        why: null,
+        failureReason: null,
+        finishedAt: "2026-08-12T00:30:00.000Z",
+      });
+
+      const settled = (yield* store.listIterations({ runId }))[0];
+      assert.strictEqual(settled?.resumeCount, 2);
+      assert.strictEqual(settled?.lastResumedAt, "2026-08-12T00:20:00.000Z");
+      assert.strictEqual(settled?.turnStatus, "completed");
+      assert.strictEqual(settled?.startedAt, "2026-08-12T00:00:00.000Z");
+
+      // A key that matches no row is a silent no-op, exactly like updateIteration.
+      yield* store.reopenIteration({
+        runId,
+        iterationIndex: 7,
+        resumedAt: "2026-08-12T00:40:00.000Z",
+      });
+      assert.strictEqual((yield* store.listIterations({ runId })).length, 1);
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
   it.effect("atomically allocates distinct indices and lists running rows", () =>
     Effect.gen(function* () {
       const store = yield* EpicRunStore;

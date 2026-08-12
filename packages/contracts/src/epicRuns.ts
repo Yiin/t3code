@@ -77,6 +77,20 @@ export const EpicRunIterationReport = Schema.Struct({
   failureReason: Schema.NullOr(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /**
+   * How many times this iteration's own provider session was continued after
+   * an interruption; `0` on a row that never resumed, and on rows written
+   * before the column existed.
+   *
+   * A resume deliberately reuses the interrupted row rather than appending a
+   * new one, so `iterationIndex`, `threadId`, `startedAt`, `issueId`, `branch`
+   * and `worktreePath` all keep the values the first dispatch wrote. A
+   * non-zero count is the only signal that the row covers more than one
+   * process lifetime.
+   */
+  resumeCount: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  /** When the most recent resume was stamped; `null` while `resumeCount` is 0. */
+  lastResumedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });

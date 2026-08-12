@@ -242,6 +242,24 @@ const fixture = (input: {
         if (index >= 0) iterations[index] = { ...iterations[index]!, ...update };
         ordering.push(`journal:${update.turnStatus}`);
       }),
+    markIterationResumed: (input) =>
+      Effect.sync(() => {
+        const index = iterations.findIndex((item) => item.iterationIndex === input.iterationIndex);
+        if (index >= 0) {
+          const current = iterations[index]!;
+          iterations[index] = {
+            ...current,
+            turnStatus: "running",
+            summary: null,
+            why: null,
+            failureReason: null,
+            finishedAt: null,
+            resumeCount: (current.resumeCount ?? 0) + 1,
+            lastResumedAt: input.resumedAt,
+          };
+        }
+        ordering.push("journal:resumed");
+      }),
     listIterations: () => Effect.succeed(iterations),
     getLatestIteration: () => {
       const latest = iterations.at(-1);
@@ -968,6 +986,7 @@ it.live(
             );
             if (index >= 0) iterations[index] = { ...iterations[index]!, ...update };
           }),
+        markIterationResumed: () => Effect.void,
         listIterations: () => Effect.succeed(iterations),
         getLatestIteration: () => Effect.succeed(Option.none()),
         allocateIteration: (allocation) =>

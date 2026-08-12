@@ -126,6 +126,63 @@ describe("FileRunJournal", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("reopens an iteration in place and counts the resume", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const runDirectory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "epic-file-journal-resume-test-",
+        });
+        const journal = yield* make({ runDirectory });
+
+        yield* journal.createRun(run);
+        yield* journal.appendIteration(runningIteration);
+        yield* journal.updateIteration({
+          runId: run.runId,
+          iterationIndex: 0,
+          turnStatus: "abandoned",
+          summary: "abandoned by the restart",
+          why: "the process died",
+          failureReason: "server-restart",
+          finishedAt: "2026-08-07T10:02:00.000Z",
+        });
+
+        yield* journal.markIterationResumed({
+          runId: run.runId,
+          iterationIndex: 0,
+          resumedAt: "2026-08-07T10:03:00.000Z",
+        });
+
+        // The same record, continued: index, thread and start time all hold.
+        assert.deepEqual(yield* journal.listIterations(run.runId), [
+          { ...runningIteration, resumeCount: 1, lastResumedAt: "2026-08-07T10:03:00.000Z" },
+        ]);
+
+        // A settle after the resume leaves both resume fields alone.
+        yield* journal.updateIteration({
+          runId: run.runId,
+          iterationIndex: 0,
+          turnStatus: "completed",
+          summary: "finished after the restart",
+          why: null,
+          failureReason: null,
+          finishedAt: "2026-08-07T10:04:00.000Z",
+        });
+        const settled = Option.getOrThrow(yield* journal.getLatestIteration(run.runId));
+        assert.equal(settled.resumeCount, 1);
+        assert.equal(settled.lastResumedAt, "2026-08-07T10:03:00.000Z");
+
+        // A missing index is a no-op, matching updateIteration.
+        yield* journal.markIterationResumed({
+          runId: run.runId,
+          iterationIndex: 7,
+          resumedAt: "2026-08-07T10:05:00.000Z",
+        });
+        assert.equal((yield* journal.listIterations(run.runId)).length, 1);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("creates a run exclusively when writers race", () =>
     Effect.scoped(
       Effect.gen(function* () {

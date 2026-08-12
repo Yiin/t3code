@@ -44,6 +44,7 @@ import {
   ListEpicRunsInput,
   ListRecentEpicRunIterationsInput,
   ParkEpicRunMergeInput,
+  ReopenEpicRunIterationInput,
   RestoreEpicRunMergeTailInput,
   UpdateEpicRunIterationInput,
   UpsertEpicRunLandingEffectsInput,
@@ -264,6 +265,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           summary,
           why,
           failure_reason,
+          resume_count,
+          last_resumed_at,
           started_at,
           finished_at
         )
@@ -279,6 +282,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.summary},
           ${row.why},
           ${row.failureReason},
+          ${row.resumeCount ?? 0},
+          ${row.lastResumedAt ?? null},
           ${row.startedAt},
           ${row.finishedAt}
         )
@@ -293,8 +298,8 @@ const makeEpicRunStore = Effect.gen(function* () {
       sql`
         INSERT INTO epic_run_iterations (
           run_id, iteration_index, thread_id, issue_id, worker_id, branch,
-          worktree_path, turn_status, summary, why, failure_reason, started_at,
-          finished_at
+          worktree_path, turn_status, summary, why, failure_reason,
+          resume_count, last_resumed_at, started_at, finished_at
         )
         SELECT
           ${row.runId},
@@ -307,6 +312,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           'running',
           NULL,
           NULL,
+          NULL,
+          0,
           NULL,
           ${row.startedAt},
           NULL
@@ -332,6 +339,30 @@ const makeEpicRunStore = Effect.gen(function* () {
       `,
   });
 
+  /**
+   * The reopen half of the write-ahead discipline: one UPDATE puts the row
+   * back to `running`, clears the terminal fields a previous settle wrote, and
+   * counts the resume. `started_at` stays put — the iteration really did start
+   * then.
+   */
+  const reopenEpicRunIterationRow = SqlSchema.void({
+    Request: ReopenEpicRunIterationInput,
+    execute: (input) =>
+      sql`
+        UPDATE epic_run_iterations
+        SET
+          turn_status = 'running',
+          summary = NULL,
+          why = NULL,
+          failure_reason = NULL,
+          finished_at = NULL,
+          resume_count = resume_count + 1,
+          last_resumed_at = ${input.resumedAt}
+        WHERE run_id = ${input.runId}
+          AND iteration_index = ${input.iterationIndex}
+      `,
+  });
+
   const iterationColumns = sql.literal(`
     run_id AS "runId",
     iteration_index AS "iterationIndex",
@@ -344,6 +375,8 @@ const makeEpicRunStore = Effect.gen(function* () {
     summary,
     why,
     failure_reason AS "failureReason",
+    resume_count AS "resumeCount",
+    last_resumed_at AS "lastResumedAt",
     started_at AS "startedAt",
     finished_at AS "finishedAt"
   `);
@@ -740,6 +773,17 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const reopenIteration: EpicRunStoreShape["reopenIteration"] = (input) =>
+    reopenEpicRunIterationRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.reopenIteration:query",
+          "EpicRunStore.reopenIteration:encodeRequest",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
   const listIterations: EpicRunStoreShape["listIterations"] = (input) =>
     listEpicRunIterationRows(input).pipe(
       Effect.mapError(
@@ -1061,6 +1105,7 @@ const makeEpicRunStore = Effect.gen(function* () {
     appendIteration,
     allocateIteration,
     updateIteration,
+    reopenIteration,
     listIterations,
     listRunningIterations,
     listRecentIterationsForRuns,

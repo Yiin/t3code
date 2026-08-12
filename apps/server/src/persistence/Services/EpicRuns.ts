@@ -12,6 +12,11 @@
  * BEFORE orchestration begins, and the terminal state is persisted after the
  * turn resolves. A crash in between therefore leaves visible in-flight work.
  *
+ * `reopenIteration` is the reopen half of that discipline. The row already
+ * exists, so flipping it back to `running` BEFORE the resume dispatch keeps
+ * the same write-ahead guarantee an append gives a fresh iteration: a crash
+ * during the resume still leaves visible in-flight work.
+ *
  * ## Why the iteration readers exist
  *
  * On restart the runner lists every `running` iteration and marks each one
@@ -80,6 +85,13 @@ export const EpicRunIteration = Schema.Struct({
    * (`EpicRunIterationReport.failureReason`).
    */
   failureReason: Schema.NullOr(Schema.String),
+  /**
+   * How many times this row was reopened by `reopenIteration`. Absent on rows
+   * read through a pre-056 shape; treat absent as `0`. Vocabulary lives on the
+   * transport schema (`EpicRunIterationReport.resumeCount`).
+   */
+  resumeCount: Schema.optionalKey(NonNegativeInt),
+  lastResumedAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -126,6 +138,13 @@ export const UpdateEpicRunIterationInput = Schema.Struct({
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type UpdateEpicRunIterationInput = typeof UpdateEpicRunIterationInput.Type;
+
+export const ReopenEpicRunIterationInput = Schema.Struct({
+  runId: EpicRunId,
+  iterationIndex: NonNegativeInt,
+  resumedAt: IsoDateTime,
+});
+export type ReopenEpicRunIterationInput = typeof ReopenEpicRunIterationInput.Type;
 
 export const EpicProviderDegradation = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
@@ -341,6 +360,24 @@ export interface EpicRunStoreShape {
    */
   readonly updateIteration: (
     input: UpdateEpicRunIterationInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+
+  /**
+   * Reopen an existing iteration so its own provider session can continue.
+   *
+   * One UPDATE keyed on `(runId, iterationIndex)`: the row goes back to
+   * `running`, its terminal fields (`summary`, `why`, `failureReason`,
+   * `finishedAt`) clear, `resumeCount` bumps by one and `lastResumedAt` gets
+   * the stamp. Clearing the terminal fields keeps the row honest, because
+   * `failureReason` is documented as `null` on any non-failed status.
+   *
+   * `startedAt` is deliberately untouched: the iteration really did start
+   * then, and the whole point of the reuse is that `threadId`, `issueId`,
+   * `branch` and `worktreePath` still describe the same work. A key that
+   * matches no row is a silent no-op, exactly like `updateIteration`.
+   */
+  readonly reopenIteration: (
+    input: ReopenEpicRunIterationInput,
   ) => Effect.Effect<void, EpicRunStoreError>;
 
   /**

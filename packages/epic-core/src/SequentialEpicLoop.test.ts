@@ -220,6 +220,9 @@ const fixture = (input: {
           if (index >= 0) iterations[index] = { ...iterations[index]!, ...update };
           ordering.push(`journal:${update.turnStatus}`);
         }),
+      // The sequential loop never resumes an iteration; the port exists so
+      // both journals share one shape.
+      markIterationResumed: () => Effect.void,
       listIterations: () => Effect.succeed(iterations),
       getLatestIteration: () => {
         const latest = iterations.at(-1);
