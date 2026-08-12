@@ -401,6 +401,33 @@ describe("isRecoverableThreadResumeError", () => {
       false,
     );
   });
+
+  it("matches an invalid-params rejection whatever it says", () => {
+    NodeAssert.equal(
+      isRecoverableThreadResumeError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32602,
+          errorMessage: "unrecognised identifier",
+        }),
+      ),
+      true,
+    );
+  });
+
+  it("ignores errors that are not app-server request rejections", () => {
+    // A spawn or transport failure says nothing about the thread. Falling back
+    // to a fresh start on one would hide a broken app server.
+    NodeAssert.equal(
+      isRecoverableThreadResumeError(
+        new CodexErrors.CodexAppServerSpawnError({
+          command: "codex app-server",
+          cause: new Error("thread not found"),
+        }),
+      ),
+      false,
+    );
+    NodeAssert.equal(isRecoverableThreadResumeError(new Error("no such thread")), false);
+  });
 });
 
 describe("openCodexThread", () => {
@@ -436,11 +463,68 @@ describe("openCodexThread", () => {
         resumeThreadId: "stale-thread",
       });
 
-      NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.equal(opened.response.thread.id, "fresh-thread");
+      // The caller asked to continue a conversation and got an empty one; the
+      // origin is the only thing that says so.
+      NodeAssert.equal(opened.origin, "started-fresh");
       NodeAssert.deepStrictEqual(
         calls.map((call) => call.method),
         ["thread/resume", "thread/start"],
       );
+    }),
+  );
+
+  it.effect("reports a successful resume as resumed", () =>
+    Effect.gen(function* () {
+      const calls: Array<"thread/start" | "thread/resume"> = [];
+      const resumed = makeThreadOpenResponse("live-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          request: <M extends "thread/start" | "thread/resume">(
+            method: M,
+            _payload: CodexRpc.ClientRequestParamsByMethod[M],
+          ) => {
+            calls.push(method);
+            return Effect.succeed(resumed as CodexRpc.ClientRequestResponsesByMethod[M]);
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "live-thread",
+      });
+
+      NodeAssert.equal(opened.origin, "resumed");
+      NodeAssert.deepStrictEqual(calls, ["thread/resume"]);
+    }),
+  );
+
+  it.effect("reports a cursorless open as started", () =>
+    Effect.gen(function* () {
+      const calls: Array<"thread/start" | "thread/resume"> = [];
+      const started = makeThreadOpenResponse("fresh-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          request: <M extends "thread/start" | "thread/resume">(
+            method: M,
+            _payload: CodexRpc.ClientRequestParamsByMethod[M],
+          ) => {
+            calls.push(method);
+            return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+      });
+
+      NodeAssert.equal(opened.origin, "started");
+      NodeAssert.deepStrictEqual(calls, ["thread/start"]);
     }),
   );
 
@@ -484,6 +568,7 @@ describe("openCodexThread", () => {
 it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
   const makeHarness = Effect.fn("makeCodexSessionRuntimeTestHarness")(function* (
     scenario = "steer-success",
+    resumeCursor?: { readonly threadId: string },
   ) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -507,16 +592,18 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
       binaryPath: wrapperPath,
       cwd: tempDir,
       runtimeMode: "full-access",
+      ...(resumeCursor ? { resumeCursor } : {}),
       environment: {
         ...process.env,
         T3_CODEX_RUNTIME_REQUEST_LOG_PATH: requestLogPath,
         T3_CODEX_RUNTIME_SCENARIO: scenario,
       },
     });
-    yield* runtime.start();
+    const started = yield* runtime.start();
 
     return {
       runtime,
+      started,
       readRequests: fileSystem.readFileString(requestLogPath).pipe(
         Effect.map((content) =>
           content
@@ -708,6 +795,53 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
         ["turn/start", "turn/steer"],
       );
       yield* runtime.close;
+    }),
+  );
+
+  it.effect("reports a started session when no resume cursor was supplied", () =>
+    Effect.gen(function* () {
+      const { runtime, started } = yield* makeHarness();
+
+      NodeAssert.equal(started.sessionOrigin, "started");
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("reports a resumed session when the app server accepts the cursor", () =>
+    Effect.gen(function* () {
+      const { runtime, started } = yield* makeHarness("resume-success", {
+        threadId: "provider-thread-1",
+      });
+
+      NodeAssert.equal(started.sessionOrigin, "resumed");
+      NodeAssert.deepStrictEqual(started.resumeCursor, { threadId: "resumed-thread-1" });
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("reports started-fresh when a lost thread falls back to a fresh start", () =>
+    Effect.gen(function* () {
+      const { runtime, started } = yield* makeHarness("resume-missing-thread", {
+        threadId: "lost-thread",
+      });
+
+      // The session works, and it says plainly that it is not the conversation
+      // the cursor named.
+      NodeAssert.equal(started.status, "ready");
+      NodeAssert.equal(started.sessionOrigin, "started-fresh");
+      NodeAssert.deepStrictEqual(started.resumeCursor, { threadId: "provider-thread-1" });
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("fails the start when a resume is rejected for an unrelated reason", () =>
+    Effect.gen(function* () {
+      const error = yield* makeHarness("resume-transport-failure", {
+        threadId: "provider-thread-1",
+      }).pipe(Effect.flip);
+
+      NodeAssert.ok(isCodexAppServerRequestError(error));
+      NodeAssert.equal(error.errorMessage, "timed out waiting for server");
     }),
   );
 });

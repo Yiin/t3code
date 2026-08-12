@@ -1351,7 +1351,7 @@ export function makeOpenCodeAdapter(
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: reusable, created: false };
+                  return { openCodeSession: reusable, created: false, origin: "resumed" } as const;
                 }
 
                 // The session lives under a different cwd (e.g. the thread
@@ -1378,7 +1378,9 @@ export function makeOpenCodeAdapter(
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: forked, created: true };
+                  // The history came across, but the id the caller handed us is
+                  // not the id it gets back, so this is a fork, not a resume.
+                  return { openCodeSession: forked, created: true, origin: "forked" } as const;
                 }
 
                 if (resumeSessionId) {
@@ -1397,7 +1399,14 @@ export function makeOpenCodeAdapter(
                     detail: "OpenCode session.create returned no session payload.",
                   });
                 }
-                return { openCodeSession: createdSession.data, created: true };
+                return {
+                  openCodeSession: createdSession.data,
+                  created: true,
+                  // A cursor was supplied and the session behind it is gone, so
+                  // this empty session is a fallback, not what the caller asked
+                  // for. Without a cursor it is simply a new session.
+                  origin: resumeSessionId ? "started-fresh" : "started",
+                } as const;
               });
 
               return {
@@ -1406,6 +1415,7 @@ export function makeOpenCodeAdapter(
                 client,
                 openCodeSession: resolved.openCodeSession,
                 created: resolved.created,
+                origin: resolved.origin,
               };
             }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
           );
@@ -1450,6 +1460,9 @@ export function makeOpenCodeAdapter(
             schemaVersion: OPENCODE_RESUME_VERSION,
             sessionId: started.openCodeSession.id,
           },
+          // Which of the four resolution branches produced this session, so a
+          // caller can tell a continued conversation from a silent fresh start.
+          sessionOrigin: started.origin,
           createdAt,
           updatedAt: createdAt,
         };

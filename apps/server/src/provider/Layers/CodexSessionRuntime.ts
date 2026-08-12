@@ -10,6 +10,7 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  type ProviderSessionOrigin,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   type ProviderWorkerScopeBinding,
@@ -62,6 +63,9 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "unknown thread",
   "does not exist",
 ];
+// JSON-RPC "Invalid params". See `isRecoverableThreadResumeError`.
+const RECOVERABLE_THREAD_RESUME_ERROR_CODES = new Set([-32602]);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 function isUnsupportedTurnSteerError(error: CodexSessionRuntimeError): boolean {
   if (error._tag !== "CodexAppServerRequestError") {
@@ -451,8 +455,29 @@ function classifyCodexStderrLine(rawLine: string): { readonly message: string } 
   return { message: line };
 }
 
+/**
+ * Decides whether a failed `thread/resume` means "that thread is gone" — the
+ * one condition the fresh-start fallback is allowed to hide.
+ *
+ * Only a request-level rejection from the app server can say that. A transport,
+ * spawn or protocol-parse failure says nothing about the thread, and starting
+ * fresh on one would mask a real fault as an empty conversation.
+ */
 export function isRecoverableThreadResumeError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (!isCodexAppServerRequestError(error)) {
+    return false;
+  }
+  // Preferred signal: the JSON-RPC code. `thread/resume` is built here, so the
+  // only member of its params the server can reject as unknown is the thread id
+  // we handed it. Invalid-params on this method is a missing thread.
+  if (RECOVERABLE_THREAD_RESUME_ERROR_CODES.has(error.code)) {
+    return true;
+  }
+  // Documented fallback: today's app-server builds report a missing thread as a
+  // generic internal error, and only the message text separates it from a real
+  // failure. The sniff is brittle by nature — a wording change breaks it — and
+  // stays only until the app server carries a stable code for this case.
+  const message = error.errorMessage.toLowerCase();
   if (!message.includes("thread")) {
     return false;
   }
@@ -464,6 +489,20 @@ type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
 
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
+
+/**
+ * Which branch `openCodexThread` took. Codex never forks, so `forked` is not
+ * reachable here; the `Extract` keeps this tied to the contract's vocabulary.
+ */
+export type CodexThreadOpenOrigin = Extract<
+  ProviderSessionOrigin,
+  "started" | "resumed" | "started-fresh"
+>;
+
+export interface CodexThreadOpenResult {
+  readonly response: CodexThreadOpenResponse;
+  readonly origin: CodexThreadOpenOrigin;
+}
 
 interface CodexThreadOpenClient {
   readonly request: <M extends CodexThreadOpenMethod>(
@@ -480,7 +519,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
-}): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
+}): Effect.Effect<CodexThreadOpenResult, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
     cwd: input.cwd,
@@ -490,7 +529,9 @@ export const openCodexThread = (input: {
   });
 
   if (resumeThreadId === undefined) {
-    return input.client.request("thread/start", startParams);
+    return input.client
+      .request("thread/start", startParams)
+      .pipe(Effect.map((response) => ({ response, origin: "started" }) as const));
   }
 
   return input.client
@@ -499,6 +540,7 @@ export const openCodexThread = (input: {
       ...startParams,
     })
     .pipe(
+      Effect.map((response) => ({ response, origin: "resumed" }) as const),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
         Effect.logWarning("codex app-server thread resume fell back to fresh start", {
           threadId: input.threadId,
@@ -506,7 +548,12 @@ export const openCodexThread = (input: {
           resumeThreadId,
           recoverable: true,
           cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+        }).pipe(
+          Effect.andThen(input.client.request("thread/start", startParams)),
+          // The caller asked to continue a conversation and got an empty one.
+          // `started-fresh` is what makes that visible instead of silent.
+          Effect.map((response) => ({ response, origin: "started-fresh" }) as const),
+        ),
       ),
     );
 };
@@ -1313,13 +1360,17 @@ export const makeCodexSessionRuntime = (
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
       });
 
-      const providerThreadId = opened.thread.id;
+      const providerThreadId = opened.response.thread.id;
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
-        cwd: opened.cwd,
-        model: opened.model,
+        cwd: opened.response.cwd,
+        model: opened.response.model,
         resumeCursor: { threadId: providerThreadId },
+        // Says whether this session continued the conversation the cursor
+        // named. `started-fresh` is the recoverable-resume fallback owning up
+        // to handing back an empty thread.
+        sessionOrigin: opened.origin,
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);

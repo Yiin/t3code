@@ -5,8 +5,34 @@ import * as NodeFS from "node:fs";
 const requestLogPath = process.env.T3_CODEX_RUNTIME_REQUEST_LOG_PATH;
 const scenario = process.env.T3_CODEX_RUNTIME_SCENARIO ?? "steer-success";
 const providerThreadId = "provider-thread-1";
+const resumedThreadId = "resumed-thread-1";
 const startedTurnId = "started-turn-1";
 let turnStartCount = 0;
+
+function makeThreadOpenResult(threadId: string) {
+  return {
+    cwd: process.cwd(),
+    model: "gpt-5.3-codex",
+    modelProvider: "openai",
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+    sandbox: { type: "dangerFullAccess" },
+    thread: {
+      cliVersion: "0.0.0-test",
+      createdAt: 1,
+      cwd: process.cwd(),
+      ephemeral: false,
+      id: threadId,
+      modelProvider: "openai",
+      preview: "",
+      sessionId: "session-1",
+      source: "cli",
+      turns: [],
+      status: { type: "idle" },
+      updatedAt: 1,
+    },
+  };
+}
 
 function writeMessage(message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -160,29 +186,22 @@ function handleRequest(message: Record<string, unknown>): void {
         platformOs: "linux",
       });
       return;
+    // `thread/start` and `thread/resume` stay out of the request log: several
+    // tests assert the whole logged method list and expect it to start at the
+    // first turn.
     case "thread/start":
-      respond(id, {
-        cwd: process.cwd(),
-        model: "gpt-5.3-codex",
-        modelProvider: "openai",
-        approvalPolicy: "never",
-        approvalsReviewer: "user",
-        sandbox: { type: "dangerFullAccess" },
-        thread: {
-          cliVersion: "0.0.0-test",
-          createdAt: 1,
-          cwd: process.cwd(),
-          ephemeral: false,
-          id: providerThreadId,
-          modelProvider: "openai",
-          preview: "",
-          sessionId: "session-1",
-          source: "cli",
-          turns: [],
-          status: { type: "idle" },
-          updatedAt: 1,
-        },
-      });
+      respond(id, makeThreadOpenResult(providerThreadId));
+      return;
+    case "thread/resume":
+      if (scenario === "resume-missing-thread") {
+        respondError(id, -32603, "no such thread");
+        return;
+      }
+      if (scenario === "resume-transport-failure") {
+        respondError(id, -32603, "timed out waiting for server");
+        return;
+      }
+      respond(id, makeThreadOpenResult(resumedThreadId));
       return;
     case "turn/start": {
       logRequest(method, message.params);

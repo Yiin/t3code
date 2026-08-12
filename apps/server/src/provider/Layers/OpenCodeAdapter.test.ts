@@ -322,6 +322,8 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         schemaVersion: 1,
         sessionId: "http://127.0.0.1:9999/session",
       });
+      // Nothing was asked to continue, so this is a plain new session.
+      NodeAssert.equal(session.sessionOrigin, "started");
 
       yield* adapter.stopSession(threadId);
     }),
@@ -347,6 +349,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         schemaVersion: 1,
         sessionId: "ses_persisted",
       });
+      NodeAssert.equal(session.sessionOrigin, "resumed");
       // Resume re-asserts the permission ruleset for the current runtimeMode.
       NodeAssert.equal(runtimeMock.state.sessionUpdateCalls.length, 1);
       NodeAssert.equal(runtimeMock.state.sessionUpdateCalls[0]?.sessionID, "ses_persisted");
@@ -412,6 +415,8 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         schemaVersion: 1,
         sessionId: "http://127.0.0.1:9999/session",
       });
+      // The fallback stays, but it now says the conversation was lost.
+      NodeAssert.equal(session.sessionOrigin, "started-fresh");
 
       yield* adapter.stopSession(threadId);
     }),
@@ -522,6 +527,8 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           schemaVersion: 1,
           sessionId: "ses_otherdir_fork",
         });
+        // History carried over, but under a new id: a fork, not a resume.
+        NodeAssert.equal(session.sessionOrigin, "forked");
 
         yield* adapter.stopSession(threadId);
       }),
@@ -549,6 +556,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         schemaVersion: 1,
         sessionId: "ses_samedir",
       });
+      NodeAssert.equal(session.sessionOrigin, "resumed");
 
       yield* adapter.stopSession(threadId);
     }),
