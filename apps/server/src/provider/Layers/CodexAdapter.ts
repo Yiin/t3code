@@ -61,6 +61,8 @@ import {
   type AttachmentPathReference,
 } from "../attachmentEncoding.ts";
 import {
+  CODEX_SUBAGENT_TURN_COMPLETED_METHOD,
+  CODEX_SUBAGENT_TURN_STARTED_METHOD,
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
@@ -244,7 +246,9 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
     return "file_change";
   if (type.includes("mcp")) return "mcp_tool_call";
   if (type.includes("dynamic tool")) return "dynamic_tool_call";
-  if (type.includes("collab")) return "collab_agent_tool_call";
+  // codex-cli 0.147 reports a collab spawn as `subAgentActivity` instead of
+  // through `collabAgentToolCall.receiverThreadIds`; both are subagent rows.
+  if (type.includes("sub agent") || type.includes("collab")) return "collab_agent_tool_call";
   if (type.includes("web search")) return "web_search";
   if (type.includes("image")) return "image_view";
   if (type.includes("review entered")) return "review_entered";
@@ -503,7 +507,11 @@ function mapItemLifecycle(
           : "completed"
         : undefined;
   const data =
-    item.type === "collabAgentToolCall" ? normalizeCollabAgentActivityData(item) : event.payload;
+    item.type === "collabAgentToolCall"
+      ? normalizeCollabAgentActivityData(item)
+      : item.type === "subAgentActivity"
+        ? normalizeSubAgentActivityData(item)
+        : event.payload;
 
   return {
     ...runtimeEventBase(event, canonicalThreadId),
@@ -520,6 +528,116 @@ function mapItemLifecycle(
 
 type CollabAgentToolCallItem = Extract<CodexLifecycleItem, { type: "collabAgentToolCall" }>;
 type CollabAgentState = CollabAgentToolCallItem["agentsStates"][string];
+type SubAgentActivityItem = Extract<CodexLifecycleItem, { type: "subAgentActivity" }>;
+
+// A `subAgentActivity` kind maps onto the collab tool vocabulary the web
+// subagent projection already groups by: only a spawn opens a group, the
+// other two are later operations on an open one.
+const SUB_AGENT_ACTIVITY_COLLAB_TOOL: Record<SubAgentActivityItem["kind"], string> = {
+  started: "spawnAgent",
+  interacted: "sendInput",
+  interrupted: "closeAgent",
+};
+
+function subAgentActivityType(item: SubAgentActivityItem): string {
+  const segments = item.agentPath
+    .split("/")
+    .map((segment) => trimText(segment))
+    .filter((segment): segment is string => segment !== undefined);
+  return segments[segments.length - 1] ?? "Subagent";
+}
+
+/**
+ * codex-cli 0.147 emits `subAgentActivity` (agentThreadId + agentPath) for a
+ * `collaboration.spawn_agent` call, and the matching `collabAgentToolCall` is
+ * a `wait` with empty `receiverThreadIds`. Normalize it onto the same collab
+ * shape `deriveSubagentGroups` reads, so the spawn renders as a subagent row
+ * rather than an unknown item that gets dropped.
+ */
+function normalizeSubAgentActivityData(item: SubAgentActivityItem) {
+  return {
+    toolCallId: item.id,
+    toolName: "Task",
+    collabTool: SUB_AGENT_ACTIVITY_COLLAB_TOOL[item.kind],
+    subAgentActivityKind: item.kind,
+    agentPath: item.agentPath,
+    receiverThreadIds: [item.agentThreadId],
+    agentsStates: {},
+    input: {
+      description: item.agentPath,
+      subagent_type: subAgentActivityType(item),
+    },
+  };
+}
+
+// The child thread id is the task id, matching `mapCollabAgentTaskEvents`.
+// Called from `item/started` only: Codex repeats the same snapshot on
+// `item/completed`, where a second task event would duplicate the row.
+function mapSubAgentActivityTaskEvents(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  item: SubAgentActivityItem,
+): ReadonlyArray<ProviderRuntimeEvent> {
+  const base = runtimeEventBase(event, canonicalThreadId);
+  const taskId = RuntimeTaskId.make(item.agentThreadId);
+  const subagentType = subAgentActivityType(item);
+  if (item.kind === "started") {
+    return [
+      {
+        ...base,
+        type: "task.started",
+        payload: {
+          taskId,
+          toolUseId: item.id,
+          subagentType,
+          description: item.agentPath,
+        },
+      },
+    ];
+  }
+  if (item.kind === "interrupted") {
+    return [
+      {
+        ...base,
+        type: "task.completed",
+        payload: {
+          taskId,
+          status: "stopped",
+          toolUseId: item.id,
+        },
+      },
+    ];
+  }
+  return [
+    {
+      ...base,
+      type: "task.progress",
+      payload: {
+        taskId,
+        description: "Subagent received input",
+        toolUseId: item.id,
+        subagentType,
+      },
+    },
+  ];
+}
+
+// A collab child never reaches a terminal collab state in 0.147; its own
+// `turn/completed` is the only completion signal, and the session runtime
+// renames it so it cannot be read as the parent's turn ending.
+function subAgentTaskStatusFromTurn(
+  status: EffectCodexSchema.V2TurnCompletedNotification["turn"]["status"],
+): "completed" | "failed" | "stopped" {
+  switch (toTurnStatus(status)) {
+    case "failed":
+      return "failed";
+    case "cancelled":
+    case "interrupted":
+      return "stopped";
+    default:
+      return "completed";
+  }
+}
 
 const PROMPT_EXCERPT_MAX_LENGTH = 200;
 
@@ -966,6 +1084,42 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === CODEX_SUBAGENT_TURN_STARTED_METHOD) {
+    const payload = readPayload(EffectCodexSchema.V2TurnStartedNotification, event.payload);
+    if (!payload) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "task.progress",
+        payload: {
+          taskId: RuntimeTaskId.make(payload.threadId),
+          description: "Subagent turn started",
+        },
+      },
+    ];
+  }
+
+  if (event.method === CODEX_SUBAGENT_TURN_COMPLETED_METHOD) {
+    const payload = readPayload(EffectCodexSchema.V2TurnCompletedNotification, event.payload);
+    if (!payload) {
+      return [];
+    }
+    const errorMessage = trimText(payload.turn.error?.message);
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "task.completed",
+        payload: {
+          taskId: RuntimeTaskId.make(payload.threadId),
+          status: subAgentTaskStatusFromTurn(payload.turn.status),
+          ...(errorMessage ? { summary: errorMessage } : {}),
+        },
+      },
+    ];
+  }
+
   if (event.method === "turn/aborted") {
     return [
       {
@@ -1025,9 +1179,13 @@ function mapToRuntimeEvents(
       event.payload,
     )?.item;
     const taskEvents =
-      startedItem && startedItem.type === "collabAgentToolCall"
-        ? mapCollabAgentTaskEvents(event, canonicalThreadId, "item.started", startedItem)
-        : [];
+      startedItem === undefined
+        ? []
+        : startedItem.type === "collabAgentToolCall"
+          ? mapCollabAgentTaskEvents(event, canonicalThreadId, "item.started", startedItem)
+          : startedItem.type === "subAgentActivity"
+            ? mapSubAgentActivityTaskEvents(event, canonicalThreadId, startedItem)
+            : [];
     return [started, ...taskEvents];
   }
 
@@ -1057,6 +1215,9 @@ function mapToRuntimeEvents(
     if (!completed) {
       return [];
     }
+    // `subAgentActivity` is absent here on purpose: its task lifecycle is
+    // mapped once from `item/started`, and completed once from the child
+    // thread's own renamed `turn/completed`.
     const taskEvents =
       item.type === "collabAgentToolCall"
         ? mapCollabAgentTaskEvents(event, canonicalThreadId, "item.completed", item)

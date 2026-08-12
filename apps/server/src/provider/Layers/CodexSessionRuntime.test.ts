@@ -549,7 +549,7 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
       const { runtime } = yield* makeHarness("sub-agent-activity");
       const eventsFiber = yield* runtime.events.pipe(
         Stream.filter((event) => event.kind === "notification"),
-        Stream.take(6),
+        Stream.take(10),
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -557,16 +557,31 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
       yield* runtime.sendTurn({ input: "start" });
       const events = Array.from(yield* Fiber.join(eventsFiber));
 
+      // A child's own turn lifecycle is renamed, never dropped and never
+      // emitted as `turn/started`/`turn/completed`: the adapter turns it into
+      // the subagent's task lifecycle, and it stays on the root turn.
       NodeAssert.deepStrictEqual(
         events.map((event) => [event.method, event.turnId]),
         [
           ["turn/started", TurnId.make("started-turn-1")],
           ["item/started", TurnId.make("started-turn-1")],
+          ["subagent/turn/started", TurnId.make("started-turn-1")],
           ["item/started", TurnId.make("started-turn-1")],
+          ["subagent/turn/started", TurnId.make("started-turn-1")],
           ["turn/diff/updated", TurnId.make("started-turn-1")],
           ["turn/diff/updated", TurnId.make("started-turn-1")],
           ["turn/diff/updated", TurnId.make("started-turn-1")],
+          ["subagent/turn/completed", TurnId.make("started-turn-1")],
+          ["subagent/turn/completed", TurnId.make("started-turn-1")],
         ],
+      );
+      NodeAssert.deepStrictEqual(
+        events.flatMap((event) =>
+          event.method === "subagent/turn/completed"
+            ? [(event.payload as { threadId?: string } | undefined)?.threadId]
+            : [],
+        ),
+        ["child-thread-1", "nested-thread-1"],
       );
       NodeAssert.equal((yield* runtime.getSession).activeTurnId, TurnId.make("started-turn-1"));
       yield* runtime.close;

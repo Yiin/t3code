@@ -46,6 +46,8 @@ import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CODEX_SUBAGENT_TURN_COMPLETED_METHOD,
+  CODEX_SUBAGENT_TURN_STARTED_METHOD,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
@@ -1623,6 +1625,211 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.equal(event?.type, "item.completed");
       if (event?.type === "item.completed") {
         NodeAssert.equal(event.payload.status, "failed");
+      }
+    }),
+  );
+
+  it.effect(
+    "extracts a subAgentActivity spawn plus the child's own turn end into task events",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        // 1 item.started row, 1 task.started row, then 1 task.progress and
+        // 1 task.completed from the child thread's renamed turn lifecycle.
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 4).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-activity-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("child-activity-1"),
+          payload: {
+            startedAtMs: 1_777_999_999_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "subAgentActivity",
+              id: "child-activity-1",
+              kind: "started",
+              agentPath: "root/reviewer",
+              agentThreadId: "child-thread-1",
+            },
+          },
+        } satisfies ProviderEvent);
+
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-turn-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: CODEX_SUBAGENT_TURN_STARTED_METHOD,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "child-thread-1",
+            turn: { id: "child-turn-1", items: [], status: "inProgress" },
+          },
+        } satisfies ProviderEvent);
+
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-turn-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          method: CODEX_SUBAGENT_TURN_COMPLETED_METHOD,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "child-thread-1",
+            turn: { id: "child-turn-1", items: [], status: "completed" },
+          },
+        } satisfies ProviderEvent);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+        NodeAssert.deepStrictEqual(
+          runtimeEvents.map((event) => event.type),
+          ["item.started", "task.started", "task.progress", "task.completed"],
+        );
+
+        const item = runtimeEvents[0];
+        NodeAssert.equal(item?.type, "item.started");
+        if (item?.type === "item.started") {
+          NodeAssert.equal(item.payload.itemType, "collab_agent_tool_call");
+          NodeAssert.equal(item.payload.title, "Subagent task");
+          NodeAssert.deepEqual(item.payload.data, {
+            toolCallId: "child-activity-1",
+            toolName: "Task",
+            collabTool: "spawnAgent",
+            subAgentActivityKind: "started",
+            agentPath: "root/reviewer",
+            receiverThreadIds: ["child-thread-1"],
+            agentsStates: {},
+            input: {
+              description: "root/reviewer",
+              subagent_type: "reviewer",
+            },
+          });
+        }
+
+        const started = runtimeEvents[1];
+        NodeAssert.equal(started?.type, "task.started");
+        if (started?.type === "task.started") {
+          NodeAssert.equal(started.payload.taskId, "child-thread-1");
+          NodeAssert.equal(started.payload.toolUseId, "child-activity-1");
+          NodeAssert.equal(started.payload.subagentType, "reviewer");
+          NodeAssert.equal(started.payload.description, "root/reviewer");
+        }
+
+        // The renamed child turn lifecycle never becomes parent turn
+        // lifecycle: it only moves the subagent's task row.
+        const progress = runtimeEvents[2];
+        NodeAssert.equal(progress?.type, "task.progress");
+        if (progress?.type === "task.progress") {
+          NodeAssert.equal(progress.payload.taskId, "child-thread-1");
+          NodeAssert.equal(progress.turnId, asTurnId("turn-1"));
+        }
+
+        const completed = runtimeEvents[3];
+        NodeAssert.equal(completed?.type, "task.completed");
+        if (completed?.type === "task.completed") {
+          NodeAssert.equal(completed.payload.taskId, "child-thread-1");
+          NodeAssert.equal(completed.payload.status, "completed");
+        }
+      }),
+  );
+
+  it.effect("completes a subagent task as failed when the child's turn fails", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 1).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-turn-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: CODEX_SUBAGENT_TURN_COMPLETED_METHOD,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "child-thread-2",
+          turn: {
+            id: "child-turn-2",
+            items: [],
+            status: "failed",
+            error: { message: "child ran out of context" },
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const [event] = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      NodeAssert.equal(event?.type, "task.completed");
+      if (event?.type === "task.completed") {
+        NodeAssert.equal(event.payload.taskId, "child-thread-2");
+        NodeAssert.equal(event.payload.status, "failed");
+        NodeAssert.equal(event.payload.summary, "child ran out of context");
+      }
+    }),
+  );
+
+  it.effect("maps an interrupted subAgentActivity to a stopped task", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-activity-interrupted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("child-activity-2"),
+        payload: {
+          startedAtMs: 1_777_999_999_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "subAgentActivity",
+            id: "child-activity-2",
+            kind: "interrupted",
+            agentPath: "root/reviewer",
+            agentThreadId: "child-thread-3",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      NodeAssert.deepStrictEqual(
+        runtimeEvents.map((event) => event.type),
+        ["item.started", "task.completed"],
+      );
+      const completed = runtimeEvents[1];
+      if (completed?.type === "task.completed") {
+        NodeAssert.equal(completed.payload.taskId, "child-thread-3");
+        NodeAssert.equal(completed.payload.status, "stopped");
+      }
+      const item = runtimeEvents[0];
+      if (item?.type === "item.started") {
+        // A non-spawn operation must not open a second subagent group.
+        NodeAssert.equal(
+          (item.payload.data as { collabTool?: string } | undefined)?.collabTool,
+          "closeAgent",
+        );
       }
     }),
   );

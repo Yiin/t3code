@@ -2262,6 +2262,81 @@ describe("deriveSubagentGroups", () => {
     });
     expect(stillRunning[0]?.status).toBe("stopped");
   });
+
+  it("groups a Codex subAgentActivity spawn and joins it to its task row", () => {
+    // codex-cli 0.147 reports a spawn as `subAgentActivity`; the adapter
+    // normalizes it onto the collab shape, keyed by the child thread id.
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "tool-updated:thread-1:child-activity-1",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        sequence: 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Subagent task",
+          data: {
+            toolCallId: "child-activity-1",
+            toolName: "Task",
+            collabTool: "spawnAgent",
+            subAgentActivityKind: "started",
+            agentPath: "root/reviewer",
+            receiverThreadIds: ["child-thread-1"],
+            agentsStates: {},
+            input: { description: "root/reviewer", subagent_type: "reviewer" },
+          },
+        },
+      }),
+      makeActivity({
+        id: "interrupted-activity",
+        createdAt: "2026-02-23T00:00:06.000Z",
+        kind: "tool.updated",
+        summary: "Subagent task",
+        sequence: 6,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          title: "Subagent task",
+          data: {
+            toolCallId: "child-activity-2",
+            toolName: "Task",
+            collabTool: "closeAgent",
+            subAgentActivityKind: "interrupted",
+            agentPath: "root/reviewer",
+            receiverThreadIds: ["child-thread-1"],
+            agentsStates: {},
+            input: { description: "root/reviewer", subagent_type: "reviewer" },
+          },
+        },
+      }),
+    ];
+    const readModelRow: OrchestrationThreadSubagent = {
+      subagentId: "child-thread-1",
+      turnId: null,
+      agentType: "reviewer",
+      description: "root/reviewer",
+      status: "completed",
+      spawnedByItemId: "child-activity-1",
+      startedAt: "2026-02-23T00:00:05.000Z",
+      updatedAt: "2026-02-23T00:00:08.000Z",
+      completedAt: "2026-02-23T00:00:08.000Z",
+    };
+
+    const entries = deriveWorkLogEntries(activities);
+    const groups = deriveSubagentGroups(entries, {
+      turnSettled: false,
+      subagents: [readModelRow],
+    });
+
+    // Only the spawn opens a group; `closeAgent` is a later operation on it.
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.toolCallId).toBe("child-activity-1");
+    expect(groups[0]?.name).toBe("reviewer");
+    expect(groups[0]?.status).toBe("completed");
+    expect(groups[0]?.completedAt).toBe("2026-02-23T00:00:08.000Z");
+  });
 });
 
 describe("extractSubagentResultText", () => {

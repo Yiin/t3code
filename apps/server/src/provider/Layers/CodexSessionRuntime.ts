@@ -646,6 +646,29 @@ function rememberCollabReceiverTurns(
   }
 }
 
+/**
+ * Synthetic methods for a collab child thread's own turn lifecycle. The real
+ * `turn/started` / `turn/completed` notifications for a child arrive on the
+ * parent's connection, so emitting them unchanged would start and end the
+ * PARENT's turn. They are renamed instead: `CodexAdapter` maps them to
+ * `task.progress` / `task.completed` for the subagent read model, and nothing
+ * mistakes them for parent turn lifecycle.
+ */
+export const CODEX_SUBAGENT_TURN_STARTED_METHOD = "subagent/turn/started";
+export const CODEX_SUBAGENT_TURN_COMPLETED_METHOD = "subagent/turn/completed";
+
+function subagentTurnLifecycleMethod(
+  method: CodexRpc.ServerNotificationMethod,
+): string | undefined {
+  if (method === "turn/started") {
+    return CODEX_SUBAGENT_TURN_STARTED_METHOD;
+  }
+  if (method === "turn/completed") {
+    return CODEX_SUBAGENT_TURN_COMPLETED_METHOD;
+  }
+  return undefined;
+}
+
 function shouldSuppressChildConversationNotification(
   method: CodexRpc.ServerNotificationMethod,
 ): boolean {
@@ -889,6 +912,16 @@ export const makeCodexSessionRuntime = (
         );
         if (childParentTurnId && shouldSuppressChildConversationNotification(notification.method)) {
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
+          const subagentMethod = subagentTurnLifecycleMethod(notification.method);
+          if (subagentMethod) {
+            yield* emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: subagentMethod,
+              turnId: childParentTurnId,
+              ...(payload !== undefined ? { payload } : {}),
+            });
+          }
           return;
         }
 
