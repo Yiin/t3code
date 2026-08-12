@@ -136,7 +136,7 @@ import type { ReviewCommentContext } from "../../reviewCommentContext";
 import {
   attachmentExtensionLabel,
   formatAttachmentSize,
-  screenComposerAttachment,
+  screenComposerAttachments,
 } from "./chatAttachments";
 
 const runtimeModeConfig: Record<
@@ -1852,36 +1852,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
-    const nextAttachments: ComposerImageAttachment[] = [];
-    let attachedCount = composerAttachmentsRef.current.length;
-    let error: string | null = null;
-    for (const file of files) {
-      const screening = screenComposerAttachment({
-        file,
-        driver: selectedProvider,
-        providerLabel: selectedProviderLabel,
-        attachedCount,
-      });
-      if (screening.outcome === "stop") {
-        error = screening.message;
-        break;
-      }
-      if (screening.outcome === "reject") {
-        error = screening.message;
-        continue;
-      }
-      const previewUrl = URL.createObjectURL(file);
-      nextAttachments.push({
-        type: screening.kind,
-        id: randomUUID(),
-        name: file.name || (screening.kind === "image" ? "image" : "file"),
-        mimeType: file.type || "application/octet-stream",
-        sizeBytes: file.size,
-        previewUrl,
-        file,
-      });
-      attachedCount += 1;
-    }
+    const { accepted, error } = screenComposerAttachments(files, {
+      driver: selectedProvider,
+      providerLabel: selectedProviderLabel,
+      attachedCount: composerAttachmentsRef.current.length,
+    });
+    const nextAttachments: ComposerImageAttachment[] = accepted.map(({ file, kind }) => ({
+      type: kind,
+      id: randomUUID(),
+      name: file.name || (kind === "image" ? "image" : "file"),
+      mimeType: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+      previewUrl: URL.createObjectURL(file),
+      file,
+    }));
     if (nextAttachments.length === 1 && nextAttachments[0]) {
       addComposerAttachment(nextAttachments[0]);
     } else if (nextAttachments.length > 1) {

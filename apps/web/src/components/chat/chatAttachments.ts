@@ -66,13 +66,21 @@ export const attachmentExtensionLabel = (name: string): string => {
   return /^[a-z0-9]{1,8}$/i.test(extension) ? extension.toUpperCase() : "";
 };
 
-export interface ScreenComposerAttachmentInput {
-  readonly file: ComposerAttachmentCandidate;
-  readonly driver: ProviderDriverKind;
+export interface ScreenComposerAttachmentContext {
+  /**
+   * The driver that will run the turn, or `null` when the surface cannot name
+   * one. A `null` driver skips the capability gate: refusing a file because we
+   * do not know who reads it is worse than letting the driver's encoder decide.
+   */
+  readonly driver: ProviderDriverKind | null;
   /** Display name of the provider instance that will run the turn. */
   readonly providerLabel: string;
   /** Attachments already staged on this draft. */
   readonly attachedCount: number;
+}
+
+export interface ScreenComposerAttachmentInput extends ScreenComposerAttachmentContext {
+  readonly file: ComposerAttachmentCandidate;
 }
 
 export const screenComposerAttachment = ({
@@ -88,8 +96,9 @@ export const screenComposerAttachment = ({
     };
   }
   const kind = composerAttachmentKind(file.type);
-  const capability = attachmentCapabilityForDriver(driver);
-  const support = kind === "image" ? capability.images : capability.files;
+  const capability = driver === null ? null : attachmentCapabilityForDriver(driver);
+  const support =
+    capability === null ? null : kind === "image" ? capability.images : capability.files;
   if (support === "unsupported") {
     return {
       outcome: "reject",
@@ -108,4 +117,46 @@ export const screenComposerAttachment = ({
     };
   }
   return { outcome: "accept", kind };
+};
+
+export interface ScreenedComposerAttachment<TFile> {
+  readonly file: TFile;
+  readonly kind: ComposerAttachmentKind;
+}
+
+export interface ScreenComposerAttachmentsResult<TFile> {
+  readonly accepted: ReadonlyArray<ScreenedComposerAttachment<TFile>>;
+  /**
+   * The last refusal, or `null` when every file was taken. One message, because
+   * one line of composer error space is what a surface has.
+   */
+  readonly error: string | null;
+}
+
+/**
+ * Screen a whole drop or file pick. A full draft stops the run; a single
+ * refused file is skipped and the rest keep going, so one bad file never costs
+ * the others.
+ */
+export const screenComposerAttachments = <TFile extends ComposerAttachmentCandidate>(
+  files: ReadonlyArray<TFile>,
+  context: ScreenComposerAttachmentContext,
+): ScreenComposerAttachmentsResult<TFile> => {
+  const accepted: Array<ScreenedComposerAttachment<TFile>> = [];
+  let attachedCount = context.attachedCount;
+  let error: string | null = null;
+  for (const file of files) {
+    const screening = screenComposerAttachment({ ...context, attachedCount, file });
+    if (screening.outcome === "stop") {
+      error = screening.message;
+      break;
+    }
+    if (screening.outcome === "reject") {
+      error = screening.message;
+      continue;
+    }
+    accepted.push({ file, kind: screening.kind });
+    attachedCount += 1;
+  }
+  return { accepted, error };
 };

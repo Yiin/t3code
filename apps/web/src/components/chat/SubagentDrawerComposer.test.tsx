@@ -1,12 +1,15 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   resolveSubagentDrawerDelivery,
+  resolveSubagentDrawerMessageText,
+  subagentDrawerAttachmentMeta,
   subagentDrawerNotice,
   subagentDrawerSentLabel,
   SubagentDrawerComposer,
+  SUBAGENT_DRAWER_ATTACHMENT_ONLY_PROMPT,
   SUBAGENT_DRAWER_BUSY_NOTICE,
   SUBAGENT_DRAWER_IDLE_NOTICE,
   SUBAGENT_DRAWER_PLACEHOLDER,
@@ -27,7 +30,9 @@ function render(latestTurn: { state: "running" | "completed" } | null) {
     <SubagentDrawerComposer
       childLatestTurn={latestTurn}
       childThreadRef={childThreadRef}
+      driver={ProviderDriverKind.make("claudeAgent")}
       onSend={async () => null}
+      providerLabel="Claude"
       skills={[]}
     />,
   );
@@ -56,6 +61,23 @@ describe("subagentDrawerSentLabel", () => {
   });
 });
 
+describe("resolveSubagentDrawerMessageText", () => {
+  it("sends a file with no words as a prompt, and refuses an empty message", () => {
+    expect(resolveSubagentDrawerMessageText("  look at this  ", 0)).toBe("look at this");
+    expect(resolveSubagentDrawerMessageText("  look at this  ", 1)).toBe("look at this");
+    expect(resolveSubagentDrawerMessageText("   ", 1)).toBe(SUBAGENT_DRAWER_ATTACHMENT_ONLY_PROMPT);
+    expect(resolveSubagentDrawerMessageText("   ", 0)).toBeNull();
+    expect(resolveSubagentDrawerMessageText("", 0)).toBeNull();
+  });
+});
+
+describe("subagentDrawerAttachmentMeta", () => {
+  it("labels a chip with its extension and size, and skips what it lacks", () => {
+    expect(subagentDrawerAttachmentMeta("rows.csv", 2048)).toBe("CSV · 2 KB");
+    expect(subagentDrawerAttachmentMeta("dump", 512)).toBe("512 B");
+  });
+});
+
 describe("SubagentDrawerComposer", () => {
   it("stays enabled while the child is busy and says when the message lands", () => {
     const busyMarkup = render({ state: "running" });
@@ -73,5 +95,14 @@ describe("SubagentDrawerComposer", () => {
     expect(idleMarkup).toContain(escaped(SUBAGENT_DRAWER_IDLE_NOTICE));
     expect(idleMarkup).not.toContain(escaped(SUBAGENT_DRAWER_BUSY_NOTICE));
     expect(subagentDrawerNotice("immediate")).toBe(SUBAGENT_DRAWER_IDLE_NOTICE);
+  });
+
+  it("offers an attach control that takes any file type", () => {
+    const markup = render(null);
+
+    expect(markup).toContain('type="file"');
+    expect(markup).toContain('aria-label="Attach files"');
+    // An `accept` list would be the images-only rule coming back in.
+    expect(markup).not.toContain("accept=");
   });
 });

@@ -7,9 +7,11 @@ import type {
   OrchestrationThreadActivity,
   OrchestrationThreadSubagent,
   ScopedThreadRef,
+  ServerProvider,
   ServerProviderSkill,
   ThreadId,
   ThreadTurnStartDelivery,
+  UploadChatAttachment,
 } from "@t3tools/contracts";
 import { SUBAGENT_ACTIVITY_PAGE_LIMIT } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -35,6 +37,7 @@ import {
 } from "./SubagentInspectorFooter";
 import {
   decodeSubagentTranscriptRow,
+  resolveChildThreadAttachmentProvider,
   selectSubagentInspectorPlaceholder,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
@@ -56,6 +59,7 @@ import { MessageCopyButton } from "./MessageCopyButton";
 import { WorkEntryRow } from "./WorkEntryRow";
 
 const INITIAL_BACKFILL_CURSORS = [undefined] as const;
+const EMPTY_PROVIDER_STATUSES: ReadonlyArray<ServerProvider> = [];
 
 export function SubagentInspectorPlaceholder({ state }: { state: "loading" | "unavailable" }) {
   return state === "loading" ? (
@@ -222,6 +226,7 @@ export function SubagentInspectorPanel({
   markdownCwd,
   workspaceRoot,
   skills,
+  providerStatuses = EMPTY_PROVIDER_STATUSES,
   nowMs = Date.now(),
   onSteer,
   onStop,
@@ -237,6 +242,8 @@ export function SubagentInspectorPanel({
   nowMs?: number;
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<ServerProviderSkill>;
+  /** Names the driver behind a child thread, so the drawer can screen a file. */
+  providerStatuses?: ReadonlyArray<ServerProvider>;
   onSteer: (
     subagentId: string,
     text: string,
@@ -249,6 +256,7 @@ export function SubagentInspectorPanel({
     childThreadId: ThreadId,
     text: string,
     delivery: ThreadTurnStartDelivery,
+    attachments: ReadonlyArray<UploadChatAttachment>,
   ) => Promise<SubagentCommandFailure | null>;
 }) {
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -274,6 +282,20 @@ export function SubagentInspectorPanel({
     [childThreadId, threadRef.environmentId],
   );
   const childShell = useThreadShell(childThreadRef);
+  // A file the drawer sends rides the CHILD's turn, so the child's own provider
+  // is the one that decides whether it can carry it.
+  const childAttachmentProvider = useMemo(
+    () =>
+      resolveChildThreadAttachmentProvider(
+        providerStatuses,
+        childShell?.session?.providerInstanceId ?? childShell?.modelSelection.instanceId,
+      ),
+    [
+      childShell?.modelSelection.instanceId,
+      childShell?.session?.providerInstanceId,
+      providerStatuses,
+    ],
+  );
   // The child's own thread is also the only place its transcript exists: the
   // parent's mirrored row carries lifecycle, never the child's turns.
   const childThreadState = useEnvironmentThread(
@@ -356,9 +378,11 @@ export function SubagentInspectorPanel({
                 environmentId: threadRef.environmentId,
                 threadId: interaction.childThreadId,
               }}
-              onSend={(text, delivery) =>
-                onSendToSubagentThread(interaction.childThreadId, text, delivery)
+              driver={childAttachmentProvider.driver}
+              onSend={(text, delivery, attachments) =>
+                onSendToSubagentThread(interaction.childThreadId, text, delivery, attachments)
               }
+              providerLabel={childAttachmentProvider.label}
               skills={skills}
             />
           ),

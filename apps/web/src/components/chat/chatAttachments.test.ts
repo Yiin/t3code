@@ -6,6 +6,7 @@ import {
   composerAttachmentKind,
   formatAttachmentSize,
   screenComposerAttachment,
+  screenComposerAttachments,
 } from "./chatAttachments";
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
@@ -118,5 +119,69 @@ describe("attachmentExtensionLabel", () => {
     expect(attachmentExtensionLabel("Makefile")).toBe("");
     expect(attachmentExtensionLabel(".gitignore")).toBe("");
     expect(attachmentExtensionLabel("report.")).toBe("");
+  });
+});
+
+describe("screenComposerAttachment with an unnamed driver", () => {
+  it("takes a file, because refusing it on a guess is worse", () => {
+    // An unknown driver refuses files; a null driver means we do not know one
+    // yet, and the driver's own encoder gets the last word instead.
+    expect(
+      screen({ name: "rows.csv", type: "text/csv", size: 2_048 }, { driver: UNKNOWN }),
+    ).toEqual({
+      outcome: "reject",
+      message: "Claude Code cannot take file attachments, so 'rows.csv' was not attached.",
+    });
+    expect(
+      screenComposerAttachment({
+        file: { name: "rows.csv", type: "text/csv", size: 2_048 },
+        driver: null,
+        providerLabel: "This subagent's provider",
+        attachedCount: 0,
+      }),
+    ).toEqual({ outcome: "accept", kind: "file" });
+  });
+
+  it("still enforces the size and count limits", () => {
+    const result = screenComposerAttachment({
+      file: { name: "huge.bin", type: "application/octet-stream", size: 1_024 * 1_024 * 1_024 },
+      driver: null,
+      providerLabel: "This subagent's provider",
+      attachedCount: 0,
+    });
+    expect(result.outcome).toBe("reject");
+  });
+});
+
+describe("screenComposerAttachments", () => {
+  it("keeps the good files when one is refused", () => {
+    const result = screenComposerAttachments(
+      [
+        { name: "rows.csv", type: "text/csv", size: 2_048 },
+        { name: "huge.bin", type: "application/octet-stream", size: 1_024 * 1_024 * 1_024 },
+        { name: "shot.png", type: "image/png", size: 1_024 },
+      ],
+      { driver: CLAUDE, providerLabel: "Claude Code", attachedCount: 0 },
+    );
+    expect(result.accepted.map(({ file, kind }) => [file.name, kind])).toEqual([
+      ["rows.csv", "file"],
+      ["shot.png", "image"],
+    ]);
+    expect(result.error).toContain("huge.bin");
+  });
+
+  it("stops at the per-message cap and counts what is already staged", () => {
+    const files = Array.from({ length: 4 }, (_unused, index) => ({
+      name: `note-${index}.txt`,
+      type: "text/plain",
+      size: 16,
+    }));
+    const result = screenComposerAttachments(files, {
+      driver: CODEX,
+      providerLabel: "Codex",
+      attachedCount: 6,
+    });
+    expect(result.accepted).toHaveLength(2);
+    expect(result.error).toBe("You can attach up to 8 files per message.");
   });
 });

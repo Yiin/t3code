@@ -3,10 +3,14 @@ import {
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
   type OrchestrationThreadActivity,
+  type ProviderDriverKind,
+  type ProviderInstanceId,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { mergeSubagentActivities } from "@t3tools/client-runtime/state/subagent-activity";
 import * as Option from "effect/Option";
 
+import { getProviderDisplayName } from "../../providerModels";
 import { deriveWorkLogEntries, type WorkLogEntry } from "../../session-logic";
 
 export function selectSubagentTranscriptEntries(input: {
@@ -95,4 +99,24 @@ export function summarizeSubagentUsage(usage: unknown): SubagentUsageSummary {
     inputTokens === null && outputTokens === null ? null : (inputTokens ?? 0) + (outputTokens ?? 0);
 
   return { inputTokens, outputTokens, totalTokens };
+}
+
+/**
+ * Which driver will carry an attachment the drawer sends to a child thread.
+ *
+ * The child's own session names the instance; the provider snapshot list turns
+ * that into a driver kind. A child whose session has not reported an instance
+ * yet resolves to `null`, and a null driver skips the capability gate rather
+ * than refusing a file on a guess.
+ */
+export function resolveChildThreadAttachmentProvider(
+  providers: ReadonlyArray<ServerProvider>,
+  instanceId: ProviderInstanceId | undefined,
+): { readonly driver: ProviderDriverKind | null; readonly label: string } {
+  const match =
+    instanceId === undefined
+      ? undefined
+      : providers.find((provider) => provider.instanceId === instanceId);
+  if (match === undefined) return { driver: null, label: "This subagent's provider" };
+  return { driver: match.driver, label: getProviderDisplayName(providers, match.driver) };
 }

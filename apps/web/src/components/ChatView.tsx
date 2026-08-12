@@ -16,6 +16,7 @@ import {
   type ThreadId,
   type ThreadTurnStartDelivery,
   type TurnId,
+  type UploadChatAttachment,
   type KeybindingCommand,
   OrchestrationThreadActivity,
   ProviderInteractionMode,
@@ -4910,6 +4911,7 @@ function ChatViewContent(props: ChatViewProps) {
     childThreadId: ThreadId,
     text: string,
     delivery: ThreadTurnStartDelivery,
+    attachments: ReadonlyArray<UploadChatAttachment>,
   ): Promise<SubagentCommandFailure | null> => {
     const result = await startThreadTurn({
       environmentId,
@@ -4919,7 +4921,7 @@ function ChatViewContent(props: ChatViewProps) {
           messageId: newMessageId(),
           role: "user",
           text,
-          attachments: [],
+          attachments,
         },
         origin: "human",
         delivery,
@@ -5701,6 +5703,7 @@ function ChatViewContent(props: ChatViewProps) {
         markdownCwd={gitCwd ?? undefined}
         workspaceRoot={activeWorkspaceRoot}
         skills={timelineSkills}
+        providerStatuses={providerStatuses}
       />
     ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
       activeProject &&

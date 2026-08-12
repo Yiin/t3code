@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { EventId, type OrchestrationThreadActivity } from "@t3tools/contracts";
+import {
+  EventId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type OrchestrationThreadActivity,
+  type ServerProvider,
+} from "@t3tools/contracts";
 
 import type { WorkLogEntry } from "../../session-logic";
 import {
   decodeSubagentTranscriptRow,
+  resolveChildThreadAttachmentProvider,
   selectSubagentInspectorPlaceholder,
   selectSubagentTranscriptEntries,
   summarizeSubagentUsage,
@@ -181,5 +188,35 @@ describe("summarizeSubagentUsage", () => {
       outputTokens: null,
       totalTokens: 30,
     });
+  });
+});
+
+describe("resolveChildThreadAttachmentProvider", () => {
+  const providers = [
+    {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude Code",
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { state: "authenticated" },
+      checkedAt: "2026-08-12T00:00:00.000Z",
+      models: [],
+    },
+  ] as unknown as ReadonlyArray<ServerProvider>;
+
+  it("names the child's own driver", () => {
+    expect(
+      resolveChildThreadAttachmentProvider(providers, ProviderInstanceId.make("claudeAgent")),
+    ).toEqual({ driver: ProviderDriverKind.make("claudeAgent"), label: "Claude Code" });
+  });
+
+  it("reports no driver when the child has not named an instance yet", () => {
+    expect(resolveChildThreadAttachmentProvider(providers, undefined).driver).toBeNull();
+    expect(
+      resolveChildThreadAttachmentProvider(providers, ProviderInstanceId.make("codex")).driver,
+    ).toBeNull();
   });
 });
