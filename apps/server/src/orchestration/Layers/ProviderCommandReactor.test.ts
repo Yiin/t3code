@@ -625,6 +625,13 @@ describe("ProviderCommandReactor", () => {
 
     await harness.adjustClock(Duration.millis(SUBAGENT_STOP_ESCALATION_GRACE_MS));
     await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    // An in-process subagent has no thread of its own, so the escalation still
+    // lands on the parent's turn. Pinned here because the thread-backed path
+    // must never do this.
+    expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: ThreadId.make("thread-1"),
+    });
+    expect(harness.stopSession).not.toHaveBeenCalled();
     const thread = (await harness.readModel()).threads.find(
       (entry) => entry.id === ThreadId.make("thread-1"),
     );
@@ -735,6 +742,157 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
     expect(harness.sendTurn).toHaveBeenCalledTimes(1);
     expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
+  });
+
+  const PARENT_THREAD_ID = ThreadId.make("thread-1");
+  const CHILD_THREAD_ID = ThreadId.make("thread-child-1");
+
+  /**
+   * A parent whose `subagent-1` is thread-backed: it runs as `thread-child-1`,
+   * which has its own provider session and its own turn.
+   */
+  async function prepareThreadBackedStopHarness(input?: { readonly childTurnRunning?: boolean }) {
+    const harness = await createHarness({ useTestClock: true });
+    const nowMillis = Date.parse("2026-01-01T00:00:00.000Z");
+    await harness.setClock(nowMillis);
+    const now = DateTime.formatIso(DateTime.makeUnsafe(nowMillis));
+
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-child"),
+      threadId: CHILD_THREAD_ID,
+      projectId: asProjectId("project-1"),
+      title: "Child",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: now,
+    });
+
+    for (const [threadId, turnId] of [
+      [PARENT_THREAD_ID, asTurnId("turn-1")],
+      [CHILD_THREAD_ID, asTurnId("turn-child-1")],
+    ] as const) {
+      harness.runtimeSessions.push({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "ready",
+        runtimeMode: "approval-required",
+        model: "gpt-5-codex",
+        threadId,
+        resumeCursor: { opaque: `resume-${threadId}` },
+        createdAt: now,
+        updatedAt: now,
+      });
+      const childIsIdle = threadId === CHILD_THREAD_ID && input?.childTurnRunning === false;
+      await harness.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(`cmd-session-set-${threadId}`),
+        threadId,
+        session: {
+          threadId,
+          status: childIsIdle ? "ready" : "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: childIsIdle ? null : turnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+    }
+
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-child-subagent-started"),
+      threadId: PARENT_THREAD_ID,
+      activity: {
+        id: EventId.make("activity-child-subagent-started"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Inspect parser task started",
+        payload: { taskId: "subagent-1", taskType: "subagent", detail: "Inspect parser" },
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      },
+      createdAt: now,
+    });
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-child-thread-linked"),
+      threadId: PARENT_THREAD_ID,
+      activity: {
+        id: EventId.make("activity-child-thread-linked"),
+        tone: "info",
+        kind: "subagent.child-thread.linked",
+        summary: "Subagent runs as a child thread",
+        payload: { subagentId: "subagent-1", childThreadId: CHILD_THREAD_ID },
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      },
+      createdAt: now,
+    });
+
+    return { harness, now };
+  }
+
+  it("stops a thread-backed subagent by interrupting the child, never the parent", async () => {
+    const { harness, now } = await prepareThreadBackedStopHarness();
+
+    await harness.dispatch({
+      type: "thread.subagent.stop",
+      commandId: CommandId.make("stop-child-1"),
+      threadId: PARENT_THREAD_ID,
+      subagentId: "subagent-1",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({ threadId: CHILD_THREAD_ID });
+    // The parent stays untouched: no stop instruction in its session, and no
+    // interrupt of the turn that is waiting on this child's result.
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    await harness.adjustClock(Duration.millis(SUBAGENT_STOP_ESCALATION_GRACE_MS));
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    expect(harness.stopSession.mock.calls[0]?.[0]).toMatchObject({ threadId: CHILD_THREAD_ID });
+    expect(harness.interruptTurn).toHaveBeenCalledTimes(1);
+
+    const parent = (await harness.readModel()).threads.find(
+      (entry) => entry.id === PARENT_THREAD_ID,
+    );
+    expect(
+      parent?.activities.find((activity) => activity.kind === "subagent.stop.escalated"),
+    ).toMatchObject({
+      tone: "info",
+      payload: { subagentId: "subagent-1", stopId: "stop-child-1" },
+      turnId: asTurnId("turn-1"),
+    });
+  });
+
+  it("does not stop a thread-backed child whose turn ended inside the grace", async () => {
+    const { harness, now } = await prepareThreadBackedStopHarness({ childTurnRunning: false });
+
+    await harness.dispatch({
+      type: "thread.subagent.stop",
+      commandId: CommandId.make("stop-child-idle"),
+      threadId: PARENT_THREAD_ID,
+      subagentId: "subagent-1",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    await harness.adjustClock(Duration.millis(SUBAGENT_STOP_ESCALATION_GRACE_MS));
+    await harness.drain();
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    const parent = (await harness.readModel()).threads.find(
+      (entry) => entry.id === PARENT_THREAD_ID,
+    );
+    expect(parent?.activities.some((activity) => activity.kind === "subagent.stop.escalated")).toBe(
+      false,
+    );
   });
 
   it("queues a subagent follow-up on the live parent session and appends delivery", async () => {

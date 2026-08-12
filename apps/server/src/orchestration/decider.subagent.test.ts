@@ -27,6 +27,7 @@ function makeReadModel(input?: {
   readonly subagentStatus?: OrchestrationThread["subagents"][number]["status"];
   readonly subagentUpdatedAt?: string;
   readonly includeSubagent?: boolean;
+  readonly subagentChildThreadId?: ThreadId;
 }): OrchestrationReadModel {
   const now = input?.subagentUpdatedAt ?? "2026-01-01T00:00:00.000Z";
   return {
@@ -74,6 +75,9 @@ function makeReadModel(input?: {
                   startedAt: now,
                   updatedAt: now,
                   completedAt: input?.subagentStatus === "completed" ? now : null,
+                  ...(input?.subagentChildThreadId !== undefined
+                    ? { childThreadId: input.subagentChildThreadId }
+                    : {}),
                 },
               ],
         activities: [],
@@ -228,6 +232,44 @@ it.layer(NodeServices.layer)("subagent stop decider", (it) => {
       const error = yield* decideOrchestrationCommand({
         command: stopCommand("2099-01-01T00:00:00.000Z"),
         readModel: makeReadModel({ subagentUpdatedAt: staleAt }),
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
+  it.effect("accepts a stale thread-backed child, whose mirror stops before it does", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const staleAt = DateTime.formatIso(
+        DateTime.subtractDuration(now, Duration.millis(RUNNING_SUBAGENT_FRESHNESS_MS + 1)),
+      );
+      const result = yield* decideOrchestrationCommand({
+        command: stopCommand(DateTime.formatIso(now)),
+        readModel: makeReadModel({
+          subagentUpdatedAt: staleAt,
+          subagentChildThreadId: ThreadId.make("thread-child-1"),
+        }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe("thread.activity-appended");
+      if (events[0]?.type === "thread.activity-appended") {
+        expect(events[0].payload.activity.kind).toBe(SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND);
+      }
+    }),
+  );
+
+  it.effect("still rejects a settled thread-backed child", () =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const error = yield* decideOrchestrationCommand({
+        command: stopCommand(now),
+        readModel: makeReadModel({
+          subagentStatus: "completed",
+          subagentUpdatedAt: now,
+          subagentChildThreadId: ThreadId.make("thread-child-1"),
+        }),
       }).pipe(Effect.flip);
       expect(error._tag).toBe("OrchestrationCommandInvariantError");
     }),

@@ -452,6 +452,30 @@ describe("SpawnRegistry", () => {
     ),
   );
 
+  it.effect("ends the parent's wait on the child's turn interrupt alone", () =>
+    scenario(
+      Effect.gen(function* () {
+        const spawn = yield* startSpawn();
+
+        // This is the first thing a drawer stop of a thread-backed child does,
+        // 30 s before any session stop. It has to release the parent by itself:
+        // the parent is blocked inside `spawn_agent`, and nothing else tells it.
+        yield* Queue.offer(
+          spawn.events,
+          cancellationEvent("thread.turn-interrupt-requested", spawn.childThreadId),
+        );
+
+        const result = yield* Fiber.join(spawn.fiber);
+        assert.strictEqual(result._tag, "Success");
+        if (result._tag !== "Success" || !result.success.spawned) return;
+        assert.strictEqual(result.success.status, "interrupted");
+        assert.strictEqual(result.success.finalMessage, CHILD_TEXT);
+        assert.match(result.success.note, /was stopped from its own thread/);
+        assert.strictEqual(liveChildCount(PARENT_THREAD_ID), 0);
+      }),
+    ),
+  );
+
   it.effect("detaches instead of killing the child when the spawn call is aborted", () =>
     scenario(
       withCapturedLogs((messages) =>

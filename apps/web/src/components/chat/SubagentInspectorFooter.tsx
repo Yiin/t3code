@@ -81,7 +81,13 @@ export function SubagentInspectorFooter({
   );
   const pendingSteers = optimisticSteers.filter((steer) => !activitySteerIds.has(steer.steerId));
   const latestStop = states.stops.at(-1);
-  const interactionDisabledReason = subagentInteractionDisabledReason(subagent, nowMs);
+  const isChildThread = mode.kind === "child-thread";
+  // A thread-backed child is judged by its own thread, never by how recently
+  // the parent's mirror was refreshed: the mirror stops when `spawn_agent`
+  // times out, and the child that outlives it is the one worth stopping.
+  const interactionDisabledReason = isChildThread
+    ? null
+    : subagentInteractionDisabledReason(subagent, nowMs);
   const composerDisabledReason = steeringUnsupported
     ? "This server does not support subagent steering."
     : interactionDisabledReason;
@@ -196,12 +202,18 @@ export function SubagentInspectorFooter({
 
       <div className="space-y-2 p-3">
         {latestStop?.status === "escalated" ? (
-          <p className="text-xs text-destructive">Escalated: turn interrupted.</p>
+          <p className="text-xs text-destructive">
+            {isChildThread
+              ? "Escalated: this subagent's session stopped."
+              : "Escalated: turn interrupted."}
+          </p>
         ) : latestStop?.status === "failed" ? (
           <p className="text-xs text-destructive">{latestStop.detail}</p>
         ) : isStopping ? (
           <p className="text-xs text-muted-foreground">
-            Stopping… interrupts turn in {SUBAGENT_STOP_ESCALATION_GRACE_MS / 1_000}s.
+            {isChildThread
+              ? `Stopping… ends this subagent's own session in ${SUBAGENT_STOP_ESCALATION_GRACE_MS / 1_000}s. Your turn keeps running.`
+              : `Stopping… interrupts turn in ${SUBAGENT_STOP_ESCALATION_GRACE_MS / 1_000}s.`}
           </p>
         ) : null}
         {commandError ? <p className="text-xs text-destructive">{commandError}</p> : null}
@@ -266,7 +278,12 @@ export function SubagentInspectorFooter({
             <SquareIcon aria-hidden />
             {isStopping ? "Stopping…" : "Stop"}
           </Button>
-          {isStopping && latestStop?.status !== "escalated" ? (
+          {/*
+            Only the parent-relay path offers this. The button interrupts the
+            PARENT's turn, which for a thread-backed child would kill the turn
+            waiting on its result — the opposite of stopping the child.
+          */}
+          {!isChildThread && isStopping && latestStop?.status !== "escalated" ? (
             <Button onClick={() => void onInterrupt()} size="sm" variant="ghost">
               Interrupt turn now
             </Button>

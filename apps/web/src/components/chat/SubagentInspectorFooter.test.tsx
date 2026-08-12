@@ -179,4 +179,59 @@ describe("SubagentInspectorFooter", () => {
     expect(escalatedMarkup).toContain("Escalated: turn interrupted.");
     expect(escalatedMarkup).not.toContain("Interrupt turn now");
   });
+
+  it("scopes stop copy to the child and never offers to interrupt the parent turn", () => {
+    const renderChildThread = (activities: OrchestrationThreadActivity[]) =>
+      renderToStaticMarkup(
+        <SubagentInspectorFooter
+          activities={activities}
+          mode={{ kind: "child-thread", composer: <p>child composer</p> }}
+          nowMs={nowMs}
+          onInterrupt={async () => undefined}
+          onSteer={commandSuccess}
+          onStop={commandSuccess}
+          subagent={subagent()}
+          threadId={threadId}
+        />,
+      );
+
+    const stoppingMarkup = renderChildThread([
+      activity("event-1", "subagent.stop.requested", { subagentId: "agent-1", stopId: "stop-1" }),
+    ]);
+    expect(stoppingMarkup).toContain(
+      "Stopping… ends this subagent&#x27;s own session in 30s. Your turn keeps running.",
+    );
+    expect(stoppingMarkup).not.toContain("interrupts turn");
+    // Locked decision 2: no human interrupt path for a thread-backed child.
+    // That button interrupts the parent, which is the one turn that must live.
+    expect(stoppingMarkup).not.toContain("Interrupt turn now");
+
+    const escalatedMarkup = renderChildThread([
+      activity("event-1", "subagent.stop.escalated", { subagentId: "agent-1", stopId: "stop-1" }),
+    ]);
+    expect(escalatedMarkup).toContain("Escalated: this subagent&#x27;s session stopped.");
+    expect(escalatedMarkup).not.toContain("turn interrupted");
+  });
+
+  it("keeps Stop live for a thread-backed child whose parent mirror went stale", () => {
+    // `spawn_agent` timed out, so the parent stopped refreshing the row. The
+    // child is still running, and stopping it is exactly what is wanted.
+    const markup = renderToStaticMarkup(
+      <SubagentInspectorFooter
+        activities={[]}
+        mode={{ kind: "child-thread", composer: <p>child composer</p> }}
+        nowMs={nowMs}
+        onInterrupt={async () => undefined}
+        onSteer={commandSuccess}
+        onStop={commandSuccess}
+        subagent={subagent({ updatedAt: "2026-08-06T11:00:00.000Z" })}
+        threadId={threadId}
+      />,
+    );
+
+    expect(markup).not.toContain("This subagent has not reported recent activity.");
+    expect(markup).toContain('title="Stop subagent"');
+    // The class list mentions `disabled:` variants, so match the attribute.
+    expect(markup).not.toContain('disabled=""');
+  });
 });

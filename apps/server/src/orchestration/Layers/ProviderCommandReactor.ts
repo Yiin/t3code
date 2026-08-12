@@ -1294,6 +1294,96 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /**
+   * Stop a thread-backed child by acting on the CHILD, never on the parent.
+   *
+   * The parent is blocked inside `spawn_agent` waiting for this child, so
+   * interrupting the parent's turn would destroy the very result the human is
+   * trying to salvage. Two steps against the child instead: interrupt its turn,
+   * then after the same grace the in-process path uses, stop its session if it
+   * is still mid-turn.
+   *
+   * The interrupt is also the release signal for the parent's blocked tool call:
+   * `SpawnRegistry.watchSpawnCancellations` sees `thread.turn-interrupt-requested`
+   * on the child and ends that one wait with whatever the child had said.
+   * Nothing else has to tell the parent.
+   */
+  const processThreadBackedSubagentStop = Effect.fn("processThreadBackedSubagentStop")(
+    function* (input: {
+      readonly parentThreadId: ThreadId;
+      readonly childThreadId: ThreadId;
+      readonly stop: SubagentStopRequestedActivityPayload;
+      readonly turnId: TurnId | null;
+      readonly createdAt: string;
+      /** The caller's own failure append, so both stop arms report alike. */
+      readonly appendFailed: (detail: string) => ReturnType<typeof appendSubagentStopActivity>;
+    }) {
+      const interrupted = yield* orchestrationEngine
+        .dispatch({
+          type: "thread.turn.interrupt",
+          commandId: yield* serverCommandId("subagent-stop-child-interrupt"),
+          threadId: input.childThreadId,
+          createdAt: input.createdAt,
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.catchCause((cause) =>
+            input.appendFailed(formatFailureDetail(cause)).pipe(Effect.as(false)),
+          ),
+        );
+      if (!interrupted) {
+        return;
+      }
+
+      yield* Effect.gen(function* () {
+        yield* Effect.sleep(SUBAGENT_STOP_ESCALATION_GRACE_MS);
+        // The child's own shell is the truth here. The parent's mirrored row
+        // stops being refreshed once `spawn_agent` gives up waiting, so a stale
+        // row would read as settled while the child is still working.
+        const shell = yield* projectionSnapshotQuery
+          .getThreadShellById(input.childThreadId)
+          .pipe(Effect.map(Option.getOrUndefined));
+        if (!shell || shell.latestTurn === null || shell.latestTurn.state !== "running") {
+          return;
+        }
+        const createdAt = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
+        yield* appendSubagentStopActivity({
+          threadId: input.parentThreadId,
+          kind: SUBAGENT_STOP_ESCALATED_ACTIVITY_KIND,
+          tone: "info",
+          summary: "Subagent stop escalated to a session stop",
+          payload: {
+            subagentId: input.stop.subagentId,
+            stopId: input.stop.stopId,
+          },
+          turnId: input.turnId,
+          createdAt,
+        });
+        yield* orchestrationEngine.dispatch({
+          // No `preserveRunningSubagents`: a human asked for this child to stop,
+          // and that guard exists to protect a live subagent tree from routine
+          // cleanup, not from an explicit stop.
+          type: "thread.session.stop",
+          commandId: yield* serverCommandId("subagent-stop-child-session-stop"),
+          threadId: input.childThreadId,
+          createdAt,
+          reason: "subagent stopped from the drawer",
+        });
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("subagent.stop.child-escalation-failed", {
+                parentThreadId: input.parentThreadId,
+                childThreadId: input.childThreadId,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+        Effect.forkScoped,
+      );
+    },
+  );
+
   const processSubagentStopRequested = Effect.fn("processSubagentStopRequested")(function* (
     event: SubagentRequestedEvent,
     stop: SubagentStopRequestedActivityPayload,
@@ -1322,13 +1412,26 @@ const make = Effect.gen(function* () {
         createdAt: event.occurredAt,
       });
 
+    const subagent = thread.subagents.find((row) => row.subagentId === stop.subagentId);
+    // Which stop this is depends on where the subagent lives, and only the read
+    // model knows. A thread-backed child owns a thread and a session of its
+    // own, so the stop goes there; the parent is left alone.
+    if (subagent?.childThreadId !== undefined) {
+      return yield* processThreadBackedSubagentStop({
+        parentThreadId: event.payload.threadId,
+        childThreadId: subagent.childThreadId,
+        stop,
+        turnId,
+        createdAt: event.occurredAt,
+        appendFailed,
+      });
+    }
+
     if (!thread.session || thread.session.status === "stopped") {
       return yield* appendFailed("No active provider session is bound to this thread.");
     }
 
-    const description =
-      thread.subagents.find((subagent) => subagent.subagentId === stop.subagentId)?.description ??
-      "unknown task";
+    const description = subagent?.description ?? "unknown task";
     const messageText = `[Stop request for subagent ${stop.subagentId} (${description})]\nThe user asked to stop this subagent now. End that work, collect what it completed, and report it. If it is still running in 30 seconds the whole turn will be interrupted.`;
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,

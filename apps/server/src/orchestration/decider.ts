@@ -813,7 +813,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       const subagent = thread.subagents.find((row) => row.subagentId === command.subagentId);
       const occurredAt = yield* nowIso;
-      if (!subagent || !isFreshRunningSubagent(subagent, Date.parse(occurredAt))) {
+      // Freshness judges the parent's mirrored row, and that row stops being
+      // refreshed once `spawn_agent` gives up waiting — while the child thread
+      // keeps running. That is exactly when a human wants to stop it, so a
+      // running thread-backed child is stoppable however quiet its mirror is.
+      const isThreadBacked = subagent?.childThreadId !== undefined && subagent.status === "running";
+      if (
+        !subagent ||
+        (!isThreadBacked && !isFreshRunningSubagent(subagent, Date.parse(occurredAt)))
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `subagent ${command.subagentId} is not running or is stale`,
