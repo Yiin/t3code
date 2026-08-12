@@ -9,8 +9,9 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 
 export interface HeadlessServeAccessInfo {
   readonly connectionString: string;
-  readonly token: string;
-  readonly pairingUrl: string;
+  /** Absent when open access is enabled, because no pairing is needed. */
+  readonly token?: string;
+  readonly pairingUrl?: string;
 }
 
 type NetworkInterfacesMap = ReturnType<typeof NodeOS.networkInterfaces>;
@@ -123,10 +124,14 @@ export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): 
   [
     "T3 Code server is ready.",
     `Connection string: ${accessInfo.connectionString}`,
-    `Token: ${accessInfo.token}`,
-    `Pairing URL: ${accessInfo.pairingUrl}`,
-    "",
-    renderTerminalQrCode(accessInfo.pairingUrl),
+    ...(accessInfo.token !== undefined && accessInfo.pairingUrl !== undefined
+      ? [
+          `Token: ${accessInfo.token}`,
+          `Pairing URL: ${accessInfo.pairingUrl}`,
+          "",
+          renderTerminalQrCode(accessInfo.pairingUrl),
+        ]
+      : ["Open access is enabled. No pairing is required."]),
     "",
   ].join("\n");
 
@@ -138,6 +143,10 @@ export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessI
     serverConfig.host,
     resolveListeningPort(httpServer.address, serverConfig.port),
   );
+  if (serverConfig.openAccess) {
+    return { connectionString } satisfies HeadlessServeAccessInfo;
+  }
+
   const issued = yield* serverAuth.issueStartupPairingCredential();
 
   return {

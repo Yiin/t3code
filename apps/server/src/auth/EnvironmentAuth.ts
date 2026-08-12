@@ -33,10 +33,13 @@ import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
+import { ServerConfig } from "../config.ts";
 import { layerConfig as SqlitePersistenceLayer } from "../persistence/Layers/Sqlite.ts";
 
 export const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
+export const OPEN_ACCESS_SUBJECT = "open-access";
+const OPEN_ACCESS_SESSION_TTL = Duration.days(365);
 
 export interface IssuedPairingLink {
   readonly id: string;
@@ -560,6 +563,42 @@ export const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
   const descriptor = yield* policy.getDescriptor();
+  const { openAccess } = yield* ServerConfig;
+
+  /**
+   * With open access enabled every request resolves to this one persisted
+   * session. It is persisted rather than synthetic so that WebSocket tickets,
+   * session listing and revocation keep working unchanged. The previous
+   * open-access session is revoked first so restarts do not accumulate rows.
+   */
+  const openAccessSession = openAccess
+    ? yield* Effect.gen(function* () {
+        yield* Effect.logWarning(
+          "Open access is enabled. Every request is authenticated as an administrative session.",
+        );
+        const active = yield* sessions
+          .listActive()
+          .pipe(Effect.orElseSucceed((): ReadonlyArray<AuthClientSession> => []));
+        yield* Effect.forEach(
+          active.filter((session) => session.subject === OPEN_ACCESS_SUBJECT),
+          (session) => sessions.revoke(session.sessionId).pipe(Effect.ignore),
+        );
+        const issued = yield* sessions.issue({
+          ttl: OPEN_ACCESS_SESSION_TTL,
+          subject: OPEN_ACCESS_SUBJECT,
+          method: "browser-session-cookie",
+          scopes: AuthAdministrativeScopes,
+          client: { label: "Open access", deviceType: "unknown" },
+        });
+        return {
+          sessionId: issued.sessionId,
+          subject: OPEN_ACCESS_SUBJECT,
+          method: issued.method,
+          scopes: issued.scopes,
+          expiresAt: issued.expiresAt,
+        } satisfies AuthenticatedSession;
+      })
+    : undefined;
 
   const authenticateToken = (
     token: string,
@@ -591,6 +630,9 @@ export const make = Effect.gen(function* () {
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
+    if (openAccessSession) {
+      return Effect.succeed(openAccessSession);
+    }
     const cookieToken = request.cookies[sessions.cookieName];
     const bearerToken = parseBearerToken(request);
     const dpopToken = parseDpopToken(request);

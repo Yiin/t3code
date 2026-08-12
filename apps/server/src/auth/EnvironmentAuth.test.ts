@@ -252,4 +252,35 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         ),
       ),
   );
+
+  it.effect(
+    "authenticates credential-less requests against a persisted session when open access is enabled",
+    () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const request = makeCookieRequest("");
+
+        const verified = yield* serverAuth.authenticateHttpRequest(request);
+        const sessionState = yield* serverAuth.getSessionState(request);
+        const ticket = yield* serverAuth.issueWebSocketTicket(verified);
+        const repeated = yield* serverAuth.authenticateHttpRequest(request);
+
+        expect(verified.subject).toBe(EnvironmentAuth.OPEN_ACCESS_SUBJECT);
+        expect(verified.scopes).toEqual([...AuthAdministrativeScopes]);
+        expect(sessionState.authenticated).toBe(true);
+        // The session is persisted, so WebSocket tickets resolve back to it.
+        expect(ticket.ticket).toBeTruthy();
+        // Every request resolves to the same session rather than issuing new ones.
+        expect(repeated.sessionId).toBe(verified.sessionId);
+      }).pipe(Effect.provide(makeEnvironmentAuthLayer({ openAccess: true }))),
+  );
+
+  it.effect("still requires a credential when open access is disabled", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessionState = yield* serverAuth.getSessionState(makeCookieRequest(""));
+
+      expect(sessionState.authenticated).toBe(false);
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
+  );
 });

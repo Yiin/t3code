@@ -79,6 +79,11 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    /**
+     * Skip pairing and treat every request as an authenticated administrative
+     * session. Only safe when the listener is reachable from a trusted network.
+     */
+    readonly openAccess: boolean;
   }
 >()("t3/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */
@@ -182,6 +187,7 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
+    openAccess: false,
     port: 0,
     host: undefined,
     desktopBootstrapToken: undefined,
