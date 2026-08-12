@@ -3,6 +3,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import type * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
@@ -205,6 +206,7 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
     const activeSessionIdRef = yield* Ref.make<string | undefined>(undefined);
     const pendingRef = yield* Ref.make<ReadonlyArray<PendingXAiPromptCompletion>>([]);
     const completedPromptIdsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+    const promptSerializationSemaphore = yield* Semaphore.make(1);
     let nextPromptFallbackId = 0;
     const allocatePromptFallbackId = Effect.sync(() => {
       nextPromptFallbackId += 1;
@@ -228,11 +230,14 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
         runtime
           .start()
           .pipe(Effect.tap((started) => Ref.set(activeSessionIdRef, started.sessionId))),
-      prompt: (payload) =>
+      prompt: <E = never, R = never>(
+        payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+        hooks?: AcpSessionRuntime.AcpPromptHooks<E, R>,
+      ) =>
         Effect.gen(function* () {
           const sessionId = yield* Ref.get(activeSessionIdRef);
           if (sessionId === undefined) {
-            return yield* runtime.prompt(payload);
+            return yield* runtime.prompt(payload, hooks);
           }
 
           const promptId = yield* allocatePromptFallbackId;
@@ -241,25 +246,32 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
             sessionId,
             promptId,
           );
-          const requestPayload = {
-            ...payload,
-            _meta: {
-              ...payload._meta,
-              promptId: fallback.promptId,
-              requestId: fallback.promptId,
-            },
-          } satisfies Omit<EffectAcpSchema.PromptRequest, "sessionId">;
-
-          return yield* Effect.raceFirst(
-            runtime.prompt(requestPayload),
-            Deferred.await(fallback.deferred),
-          ).pipe(
-            Effect.tap((response) =>
-              rememberCompletedXAiPromptId(completedPromptIdsRef, response, fallback.promptId),
-            ),
+          return yield* Effect.gen(function* () {
+            const requestPayload = {
+              ...payload,
+              _meta: {
+                ...payload._meta,
+                promptId: fallback.promptId,
+                requestId: fallback.promptId,
+              },
+            } satisfies Omit<EffectAcpSchema.PromptRequest, "sessionId">;
+            const response = yield* Effect.raceFirst(
+              runtime.prompt(
+                requestPayload,
+                hooks?.onStarted ? { onStarted: hooks.onStarted } : undefined,
+              ),
+              Deferred.await(fallback.deferred),
+            );
+            yield* Effect.uninterruptible(
+              rememberCompletedXAiPromptId(completedPromptIdsRef, response, fallback.promptId).pipe(
+                Effect.andThen(hooks?.onCompleted?.(response) ?? Effect.void),
+              ),
+            );
+            return response;
+          }).pipe(
             Effect.ensuring(unregisterXAiPromptCompletionFallback(pendingRef, fallback.deferred)),
           );
-        }),
+        }).pipe(promptSerializationSemaphore.withPermit),
       cancel: Ref.get(activeSessionIdRef).pipe(
         Effect.flatMap((sessionId) =>
           sessionId === undefined

@@ -123,6 +123,13 @@ export interface AcpSessionRuntimeStartResult {
   readonly modelConfigId: string | undefined;
 }
 
+export interface AcpPromptHooks<E = never, R = never> {
+  /** Runs after this prompt acquires the one-turn permit. */
+  readonly onStarted?: Effect.Effect<void, E, R>;
+  /** Runs before the permit is released, after all prompt events settle. */
+  readonly onCompleted?: (result: EffectAcpSchema.PromptResponse) => Effect.Effect<void, E, R>;
+}
+
 export class AcpSessionRuntime extends Context.Service<
   AcpSessionRuntime,
   {
@@ -218,9 +225,10 @@ export class AcpSessionRuntime extends Context.Service<
      * Sends a prompt turn to the active session.
      * @see https://agentclientprotocol.com/protocol/schema#session/prompt
      */
-    readonly prompt: (
+    readonly prompt: <E = never, R = never>(
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
-    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+      hooks?: AcpPromptHooks<E, R>,
+    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError | E, R>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
      * The in-flight `prompt` caller is released immediately with
@@ -308,6 +316,7 @@ export const make = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
+    yield* Scope.addFinalizer(runtimeScope, Queue.shutdown(eventQueue));
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallState>());
     const assistantItemRuntimeId = yield* crypto.randomUUIDv4.pipe(
@@ -766,15 +775,19 @@ export const make = (
       getEvents: () => Stream.fromQueue(eventQueue),
       drainEvents: Effect.gen(function* () {
         const acknowledge = yield* Deferred.make<void>();
-        yield* Queue.offer(eventQueue, {
+        const offered = yield* Queue.offer(eventQueue, {
           _tag: "EventStreamBarrier",
           acknowledge,
         });
-        yield* Deferred.await(acknowledge);
+        if (!offered) return;
+        yield* Effect.raceFirst(
+          Deferred.await(acknowledge),
+          Queue.await(eventQueue).pipe(Effect.exit, Effect.asVoid),
+        );
       }),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
-      prompt: (payload) =>
+      prompt: (payload, hooks) =>
         promptSerializationSemaphore.withPermit(
           Effect.gen(function* () {
             const started = yield* getStartedState;
@@ -799,6 +812,11 @@ export const make = (
               queue: eventQueue,
               assistantSegmentRef,
             });
+            const cancelSignal = yield* Deferred.make<void>();
+            yield* Ref.set(activeCancelSignalRef, Option.some(cancelSignal));
+            yield* (hooks?.onStarted ?? Effect.void).pipe(
+              Effect.onError(() => Ref.set(activeCancelSignalRef, Option.none())),
+            );
             const requestPayload = {
               sessionId: started.sessionId,
               ...payload,
@@ -806,16 +824,24 @@ export const make = (
             const cancelledResponse = {
               stopReason: "cancelled",
             } satisfies EffectAcpSchema.PromptResponse;
-            const cancelSignal = yield* Deferred.make<void>();
+            if (yield* Deferred.isDone(cancelSignal)) {
+              yield* Ref.set(activeCancelSignalRef, Option.none());
+              yield* hooks?.onCompleted?.(cancelledResponse) ?? Effect.void;
+              return cancelledResponse;
+            }
             const promptRpcFiber = yield* runLoggedRequest(
               "session/prompt",
               requestPayload,
               acp.agent.prompt(requestPayload),
             ).pipe(Effect.forkIn(runtimeScope));
-            yield* Ref.set(activeCancelSignalRef, Option.some(cancelSignal));
             return yield* Effect.raceFirst(
               Fiber.join(promptRpcFiber),
               Deferred.await(cancelSignal).pipe(
+                Effect.tap(() =>
+                  acp.agent
+                    .cancel({ sessionId: started.sessionId })
+                    .pipe(Effect.ignore, Effect.forkIn(runtimeScope)),
+                ),
                 Effect.andThen(Ref.set(lingeringPromptFiberRef, Option.some(promptRpcFiber))),
                 Effect.as(cancelledResponse),
               ),
@@ -840,6 +866,7 @@ export const make = (
                   assistantSegmentRef,
                 }),
               ),
+              Effect.tap((result) => hooks?.onCompleted?.(result) ?? Effect.void),
             );
           }),
         ),

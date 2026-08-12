@@ -2,8 +2,10 @@ import { describe, expect, it } from "vite-plus/test";
 import * as EffectAcpErrors from "effect-acp/errors";
 import { ProviderDriverKind } from "@t3tools/contracts";
 
+import { ProviderAdapterRequestError } from "../Errors.ts";
 import {
   acpPermissionOutcome,
+  mapAcpOrAdapterError,
   mapAcpSessionStartError,
   mapAcpToAdapterError,
 } from "./AcpAdapterSupport.ts";
@@ -28,6 +30,23 @@ describe("AcpAdapterSupport", () => {
 
     expect(error._tag).toBe("ProviderAdapterRequestError");
     expect(error.message).toContain("Invalid params");
+  });
+
+  it("keeps adapter errors raised by prompt lifecycle hooks", () => {
+    const original = new ProviderAdapterRequestError({
+      provider: "grok",
+      method: "session/set_model",
+      detail: "Model selection failed.",
+    });
+
+    const error = mapAcpOrAdapterError(
+      ProviderDriverKind.make("grok"),
+      "thread-1" as never,
+      "session/prompt",
+      original,
+    );
+
+    expect(error).toBe(original);
   });
 
   it("maps a refused resume to a provider adapter resume error", () => {

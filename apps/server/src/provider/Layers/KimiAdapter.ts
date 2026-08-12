@@ -51,6 +51,7 @@ import {
 } from "../Errors.ts";
 import {
   acpPermissionOutcome,
+  mapAcpOrAdapterError,
   mapAcpSessionStartError,
   mapAcpToAdapterError,
 } from "../acp/AcpAdapterSupport.ts";
@@ -151,10 +152,6 @@ interface KimiSessionContext {
   readonly subagentTracker: KimiSubagentTaskTracker;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
-  /** Number of sendTurn prompts currently in flight or being prepared.
-   * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
-  promptsInFlight: number;
   /** Prompt content blocks this agent advertised at `initialize`; decides how
    * a non-image attachment is encoded. */
   readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
@@ -706,7 +703,6 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             subagentTracker: makeKimiSubagentTaskTracker(),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
-            promptsInFlight: 0,
             promptCapabilities: started.initializeResult.agentCapabilities?.promptCapabilities,
             stopped: false,
           };
@@ -863,124 +859,127 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
     const sendTurn: KimiAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        // A sendTurn while a prompt is in flight is a steer: the agent folds
-        // the new prompt into the ongoing work, so the active turn id is
-        // reused instead of opening a new turn.
-        const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
-        const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
-        // Count this prompt immediately so a superseded in-flight prompt
-        // resolving from here on does not settle the turn; the matching
-        // decrement is the `ensuring` below.
-        ctx.promptsInFlight += 1;
-
-        return yield* Effect.gen(function* () {
-          const turnModelSelection =
-            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-          const model = turnModelSelection?.model ?? ctx.session.model;
-          const resolvedModel = resolveKimiAcpBaseModelId(model);
-          yield* applyRequestedSessionConfiguration({
-            runtime: ctx.acp,
-            runtimeMode: ctx.session.runtimeMode,
-            interactionMode: input.interactionMode,
-            model,
-            mapError: ({ cause, method }) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
-          });
-          ctx.activeTurnId = turnId;
-          if (steeringTurnId === undefined) {
-            ctx.lastPlanFingerprint = undefined;
-          }
-          ctx.session = {
-            ...ctx.session,
-            activeTurnId: turnId,
-            updatedAt: yield* nowIso,
-          };
-
-          if (steeringTurnId === undefined) {
-            yield* offerRuntimeEvent({
-              type: "turn.started",
-              ...(yield* makeEventStamp()),
-              provider: PROVIDER,
-              threadId: input.threadId,
-              turnId,
-              payload: { model: resolvedModel },
-            });
-          }
-
-          const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
-          if (input.input?.trim()) {
-            promptParts.push({ type: "text", text: input.input.trim() });
-          }
-          promptParts.push(
-            ...(yield* toAcpAttachmentContentBlocks({
-              provider: PROVIDER,
-              attachments: input.attachments,
-              attachmentsDir: serverConfig.attachmentsDir,
-              promptCapabilities: ctx.promptCapabilities,
-              fileSystem,
-            })),
-          );
-
-          if (promptParts.length === 0) {
-            return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
-              operation: "sendTurn",
-              issue: "Turn requires non-empty text or attachments.",
-            });
-          }
-
-          const result = yield* ctx.acp
-            .prompt({
-              prompt: promptParts,
-            })
-            .pipe(
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-              ),
-            );
-
-          const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
-          if (turnRecord) {
-            turnRecord.items.push({ prompt: promptParts, result });
-          } else {
-            ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
-          }
-          ctx.session = {
-            ...ctx.session,
-            activeTurnId: turnId,
-            updatedAt: yield* nowIso,
-            model: resolvedModel,
-          };
-
-          // Only the last remaining prompt settles the turn — a steer-
-          // superseded prompt resolving (usually cancelled) while another is
-          // in flight or pending must leave the merged turn running.
-          if (ctx.promptsInFlight === 1) {
-            yield* offerRuntimeEvent({
-              type: "turn.completed",
-              ...(yield* makeEventStamp()),
-              provider: PROVIDER,
-              threadId: input.threadId,
-              turnId,
-              payload: {
-                state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                stopReason: result.stopReason ?? null,
-              },
-            });
-          }
-
-          return {
-            threadId: input.threadId,
-            turnId,
-            resumeCursor: ctx.session.resumeCursor,
-          };
-        }).pipe(
-          Effect.ensuring(
-            Effect.sync(() => {
-              ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
-            }),
-          ),
+        const turnId = TurnId.make(yield* randomUUIDv4);
+        const turnModelSelection =
+          input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+        const model = turnModelSelection?.model ?? ctx.session.model;
+        const resolvedModel = resolveKimiAcpBaseModelId(model);
+        const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
+        if (input.input?.trim()) {
+          promptParts.push({ type: "text", text: input.input.trim() });
+        }
+        promptParts.push(
+          ...(yield* toAcpAttachmentContentBlocks({
+            provider: PROVIDER,
+            attachments: input.attachments,
+            attachmentsDir: serverConfig.attachmentsDir,
+            promptCapabilities: ctx.promptCapabilities,
+            fileSystem,
+          })),
         );
+
+        if (promptParts.length === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Turn requires non-empty text or attachments.",
+          });
+        }
+
+        let turnStarted = false;
+        return yield* ctx.acp
+          .prompt(
+            {
+              prompt: promptParts,
+            },
+            {
+              onStarted: Effect.gen(function* () {
+                yield* ctx.acp.drainEvents;
+                if (sessions.get(input.threadId) !== ctx || ctx.stopped) {
+                  return yield* new ProviderAdapterSessionNotFoundError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                  });
+                }
+                yield* applyRequestedSessionConfiguration({
+                  runtime: ctx.acp,
+                  runtimeMode: ctx.session.runtimeMode,
+                  interactionMode: input.interactionMode,
+                  model,
+                  mapError: ({ cause, method }) =>
+                    mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
+                });
+                ctx.activeTurnId = turnId;
+                turnStarted = true;
+                ctx.lastPlanFingerprint = undefined;
+                ctx.session = {
+                  ...ctx.session,
+                  activeTurnId: turnId,
+                  updatedAt: yield* nowIso,
+                };
+                yield* offerRuntimeEvent({
+                  type: "turn.started",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId,
+                  payload: { model: resolvedModel },
+                });
+              }),
+              onCompleted: (result) =>
+                Effect.gen(function* () {
+                  if (sessions.get(input.threadId) !== ctx || ctx.stopped) return;
+                  yield* ctx.acp.drainEvents;
+                  if (sessions.get(input.threadId) !== ctx || ctx.stopped) return;
+                  ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
+                  const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
+                  ctx.activeTurnId = undefined;
+                  ctx.session = {
+                    ...readySession,
+                    updatedAt: yield* nowIso,
+                    model: resolvedModel,
+                  };
+                  yield* offerRuntimeEvent({
+                    type: "turn.completed",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId,
+                    payload: {
+                      state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+                      stopReason: result.stopReason ?? null,
+                    },
+                  });
+                }),
+            },
+          )
+          .pipe(
+            Effect.mapError((error) =>
+              mapAcpOrAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+            ),
+            Effect.tapError((error) =>
+              !turnStarted || sessions.get(input.threadId) !== ctx || ctx.stopped
+                ? Effect.void
+                : Effect.gen(function* () {
+                    const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
+                    ctx.activeTurnId = undefined;
+                    ctx.session = { ...readySession, updatedAt: yield* nowIso };
+                    yield* offerRuntimeEvent({
+                      type: "turn.completed",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId,
+                      payload: { state: "failed", errorMessage: error.message },
+                    });
+                  }),
+            ),
+            Effect.as({
+              threadId: input.threadId,
+              turnId,
+              resumeCursor: ctx.session.resumeCursor,
+            }),
+          );
       });
 
     const interruptTurn: KimiAdapterShape["interruptTurn"] = (threadId) =>

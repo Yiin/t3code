@@ -8,24 +8,21 @@
  * `sendTurn` parks until the running prompt settles and then reaches the agent
  * as a plain new `session/prompt`. The agent never sees the text mid-turn.
  *
- * Each adapter nonetheless reports that second message as a steer: it reuses
- * the running turn id and suppresses the second `turn.started`, so the UI shows
- * one turn that supposedly absorbed both messages. That is a lie about what the
- * agent saw. The honest report is two turns.
+ * Each adapter reports the serialized prompts as separate turns. A queued
+ * message does not emit `turn.started` until its prompt can run.
  *
  * The spec registers two rows per adapter:
  *
  * - **delivery** (`it.effect`) — the wire fact, true before and after the fix:
  *   the mid-turn message reaches the agent as its own `session/prompt`, and
  *   only after the first prompt settles.
- * - **honest turn boundaries** (`it.effect.fails`) — the contract, pinned red.
+ * - **honest turn boundaries** (`it.effect`) — the contract.
  *   It asserts two distinct turn ids and one `turn.started`/`turn.completed`
  *   pair per message. Today every adapter merges, so the row fails; `.fails`
  *   records that expected failure and keeps the suite green.
  *
- * `t3code-6f3.12` makes the merge honest. When it lands, drop `.fails` from the
- * second row (the row goes green) and delete each adapter's own "steers a
- * running turn" test, which pins the behaviour this spec rejects.
+ * Each message gets its own turn because each message reaches the agent through
+ * its own serialized `session/prompt` request.
  *
  * @module acpMidTurnDeliveryConformance
  */
@@ -159,8 +156,12 @@ const SECOND_MESSAGE = "actually run 15";
 interface MidTurnObservation {
   readonly firstTurnId: string;
   readonly secondTurnId: string;
+  readonly firstReportedSteer: boolean;
+  readonly secondReportedSteer: boolean;
+  readonly turnStartedIdsWhileFirstInFlight: ReadonlyArray<string>;
   readonly turnStartedIds: ReadonlyArray<string>;
   readonly turnCompletedIds: ReadonlyArray<string>;
+  readonly turnBoundaryEvents: ReadonlyArray<string>;
   /** `session/prompt` arrivals while the first prompt was still unanswered. */
   readonly promptsSeenWhileFirstInFlight: number;
   /** Prompt texts the agent received, in arrival order. */
@@ -198,6 +199,9 @@ const observeMidTurnDelivery = (
       Stream.runForEach((event) => Ref.update(events, (seen) => [...seen, event])),
       Effect.forkChild,
     );
+    for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
+      yield* Effect.yieldNow;
+    }
 
     return yield* Effect.gen(function* () {
       yield* adapter.startSession({
@@ -231,6 +235,22 @@ const observeMidTurnDelivery = (
         );
       });
 
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const runtimeEvents = yield* Ref.get(events);
+          if (runtimeEvents.some((event) => event.type === "turn.started")) {
+            return;
+          }
+          yield* Effect.sleep("10 millis");
+        }
+        const runtimeEvents = yield* Ref.get(events);
+        return yield* Effect.die(
+          new Error(
+            `${input.name}: the adapter never emitted the first turn.started; saw ${runtimeEvents.map((event) => event.type).join(", ") || "no events"}.`,
+          ),
+        );
+      });
+
       const secondFiber = yield* adapter
         .sendTurn({
           threadId,
@@ -244,6 +264,7 @@ const observeMidTurnDelivery = (
       // A quarter of the delay leaves plenty of margin on a loaded host.
       yield* Effect.sleep(`${Math.max(50, Math.floor(input.promptDelayMillis / 4))} millis`);
       const midFlightRequests = yield* harness.readAgentRequests();
+      const midFlightRuntimeEvents = yield* Ref.get(events);
 
       const firstTurn = yield* Fiber.join(firstFiber);
       const secondTurn = yield* Fiber.join(secondFiber);
@@ -259,12 +280,20 @@ const observeMidTurnDelivery = (
       return {
         firstTurnId: String(firstTurn.turnId),
         secondTurnId: String(secondTurn.turnId),
+        firstReportedSteer: firstTurn.steeredIntoActiveTurn === true,
+        secondReportedSteer: secondTurn.steeredIntoActiveTurn === true,
+        turnStartedIdsWhileFirstInFlight: midFlightRuntimeEvents
+          .filter((event) => event.type === "turn.started")
+          .map((event) => String(event.turnId)),
         turnStartedIds: runtimeEvents
           .filter((event) => event.type === "turn.started")
           .map((event) => String(event.turnId)),
         turnCompletedIds: runtimeEvents
           .filter((event) => event.type === "turn.completed")
           .map((event) => String(event.turnId)),
+        turnBoundaryEvents: runtimeEvents
+          .filter((event) => event.type === "turn.started" || event.type === "turn.completed")
+          .map((event) => `${event.type}:${String(event.turnId)}`),
         promptsSeenWhileFirstInFlight: promptRequests(midFlightRequests).length,
         promptTexts: promptRequests(settledRequests).map(promptText),
       } satisfies MidTurnObservation;
@@ -309,10 +338,8 @@ export const describeAcpMidTurnDeliveryConformance = <R>(
     ),
   );
 
-  // Pinned red: every ACP adapter merges the second message into the running
-  // turn today. `t3code-6f3.12` makes this row honest; drop `.fails` then.
-  it.effect.fails(
-    row("each message gets its own turn [pinned red until t3code-6f3.12]"),
+  it.effect(
+    row("each message gets its own turn"),
     () =>
       input.runScenario((harness) =>
         Effect.gen(function* () {
@@ -323,6 +350,19 @@ export const describeAcpMidTurnDeliveryConformance = <R>(
             observed.firstTurnId,
             "the agent never saw the second message mid-turn, so reusing the running turn id reports a steer that did not happen",
           );
+          assert.isFalse(
+            observed.firstReportedSteer,
+            "the first serialized prompt must not report a steer",
+          );
+          assert.isFalse(
+            observed.secondReportedSteer,
+            "a queued ACP prompt must not report a steer",
+          );
+          assert.deepStrictEqual(
+            observed.turnStartedIdsWhileFirstInFlight,
+            [observed.firstTurnId],
+            "the queued prompt must not emit turn.started before the running prompt settles",
+          );
           assert.deepStrictEqual(
             observed.turnStartedIds,
             [observed.firstTurnId, observed.secondTurnId],
@@ -332,6 +372,16 @@ export const describeAcpMidTurnDeliveryConformance = <R>(
             observed.turnCompletedIds,
             [observed.firstTurnId, observed.secondTurnId],
             "each turn must complete on its own prompt; folding both into one turn.completed leaves the first turn open in the UI",
+          );
+          assert.deepStrictEqual(
+            observed.turnBoundaryEvents,
+            [
+              `turn.started:${observed.firstTurnId}`,
+              `turn.completed:${observed.firstTurnId}`,
+              `turn.started:${observed.secondTurnId}`,
+              `turn.completed:${observed.secondTurnId}`,
+            ],
+            "the queued turn must start only after the running turn completes",
           );
         }),
       ),

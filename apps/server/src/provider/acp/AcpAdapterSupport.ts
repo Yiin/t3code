@@ -45,6 +45,25 @@ export function mapAcpToAdapterError(
   });
 }
 
+export function mapAcpOrAdapterError(
+  provider: ProviderDriverKind,
+  threadId: ThreadId,
+  method: string,
+  error: EffectAcpErrors.AcpError | ProviderAdapterError,
+): ProviderAdapterError {
+  switch (error._tag) {
+    case "ProviderAdapterValidationError":
+    case "ProviderAdapterSessionNotFoundError":
+    case "ProviderAdapterSessionClosedError":
+    case "ProviderAdapterRequestError":
+    case "ProviderAdapterProcessError":
+    case "ProviderAdapterResumeError":
+      return error;
+    default:
+      return mapAcpToAdapterError(provider, threadId, method, error);
+  }
+}
+
 /**
  * Map a failure from `AcpSessionRuntime.start()`. A start that carried a
  * resume cursor and died on the resume itself becomes a
