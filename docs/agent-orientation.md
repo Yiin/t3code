@@ -12,6 +12,15 @@ Node is pinned by `mise.toml`. Use pnpm through `vp`.
 
 Keep worker checks focused. Run a supplied gate command exactly.
 
+Three drivers run the epic-run conformance scenarios: the server driver, plus
+`coreDriver.test.ts` and `terminalDriver.test.ts` in
+`packages/epic-run-conformance/src`. The terminal leg is skipped unless
+`T3CODE_CONFORMANCE_TERMINAL` is set. Editing one scenario means running all
+three.
+
+`apps/server/vite.config.ts` sets `fileParallelism: false` and raises both
+`hookTimeout` and `testTimeout` to 120 s. Server tests are load sensitive.
+
 ## Repo layout
 
 - `apps/server` owns providers, persistence, orchestration, and runner ports.
@@ -25,18 +34,24 @@ Keep worker checks focused. Run a supplied gate command exactly.
 - `workerSupervision.ts` drives the pure `workerLiveness.ts` machine.
 - `MergeQueue.ts` owns trial merges and gates.
 - `apps/server/src/runner/Layers/EpicRunner.ts` owns lifecycle and restart recovery.
+- `EpicRunnerLaunch.ts` owns preflight, the lease, and run creation.
+  `EpicRunnerLifecycle.ts` owns pause, resume, cancel, and the worker cap.
 - `EpicRunnerPoolPorts.ts` adapts server ports.
 - `apps/server/src/orchestration/ThreadSettleWatch.ts` watches owned turns and final messages.
-- `packages/epic-core/src/EpicRunPreflight.ts` gates both launch and resume.
+- `packages/epic-core/src/EpicRunPreflight.ts` gates both launch and resume. Its
+  `blockerPolicy` branches on `mode` and `intent`; it moved out of `apps/server/src/beads`.
 - `packages/epic-core/src/adapters/NodeEpicRunLock.ts` owns the run lock. It shares
   its file format with `skills/ralph/run.sh`.
 - `packages/epic-core/src/workerScope.ts` puts workers in `cook-epic.slice`, so they
   survive a service restart.
-- Restart recovery abandons old running iteration rows, then resumes each running run.
-  A resume re-runs preflight in resume mode, which forgives only that run's own
-  integration branch and worktrees, and stops only that run's own leftover worker
-  scopes. A lost lease pauses the run, abandons its in-flight rows, and releases
-  its claimed children.
+- Restart recovery continues each interrupted iteration in its own row. A row
+  resumes when it names a child, its worktree survived, and its `resume_count` is
+  under the cap; the rest are abandoned by index. A resume re-runs preflight in
+  resume mode, which forgives only that run's own integration branch and
+  worktrees, and stops only that run's own leftover worker scopes. A lost lease
+  pauses the run, abandons its in-flight rows, and releases its claimed children.
+  A refused resume hands the worktree and the claim to a fresh pinned iteration
+  and scores an `infra:resume-*` reason.
 - Client turn ingress does not block threads owned by an EpicRunner run.
 
 Never install dependencies or run `skills/install.sh` inside an epic worktree.
@@ -44,6 +59,32 @@ Its linked `node_modules` can damage the source checkout.
 
 Do not infer file conflicts from issue prose. Beads must confirm no open child
 before run completion. Provider fallback uses structured evidence only.
+
+## Durable state and boot order
+
+- The live database is `~/.t3/userdata/state.sqlite`. Read-only `sqlite3` selects
+  against `epic_runs`, `epic_run_iterations`, `epic_run_merge_state`,
+  `epic_run_merge_entries`, and `provider_session_runtime` are the fastest way to
+  check a real run.
+- Migrations are statically imported into `migrationEntries` in
+  `apps/server/src/persistence/Migrations.ts` and run at boot. Tests step the
+  schema with `runMigrations({ toMigrationInclusive: N })`.
+- `startBootReactors` in `apps/server/src/serverRuntimeStartup.ts` runs the
+  orchestration reactors, then the reaper's synchronous boot pass, then
+  `EpicRunner.start()`. That order is load bearing.
+
+## Epic run gotchas
+
+- The run PubSub fans out only from `publishRunChange` in
+  `EpicRunnerPoolPorts.ts`, so a journal-only iteration write stays invisible to
+  clients until the next run-row save.
+- `EpicWorkerScopeRegistry` in `apps/server/src/provider/workerScope.ts` is
+  in-memory, so a session resumed after a restart spawns outside its systemd scope.
+- The epic-run UI lives in `apps/web/src/routes/_chat.epics.$environmentId.$epicId.tsx`,
+  `apps/web/src/epicRun.logic.ts`, `apps/web/src/epicRunPreflightPresentation.ts`,
+  and `apps/mobile/src/features/epics/EpicsRouteScreens.tsx`.
+  `groupEpicRunIterationThreads` in `apps/web/src/components/Sidebar.logic.ts`
+  folds a run's iteration threads by parsing the thread id.
 
 ## Message delivery
 
@@ -73,8 +114,7 @@ They never report a fake steer.
 `T3_ACP_PROMPT_DELAY_MS`, `T3_ACP_REQUEST_LOG_PATH`, and
 `T3_ACP_REJECT_OVERLAPPING_PROMPTS`. Live CLI probes use
 `T3_KIMI_ACP_PROBE`, `T3_GROK_ACP_PROBE`, or `T3_CURSOR_ACP_PROBE`.
-`apps/server/vite.config.ts` sets `fileParallelism: false`. All three adapter
-tests use the ACP mid-turn conformance suite.
+All three adapter tests use the ACP mid-turn conformance suite.
 
 The Claude capability probe is in `apps/server/src/provider/Layers/ClaudeProvider.ts`.
 `apps/server/src/provider/Drivers/ClaudeDriver.ts` caches it for five minutes.
@@ -85,13 +125,35 @@ Treat new SDK controls as optional. Check, catch, time out, and handle no result
 An instance's `homePath` becomes `CLAUDE_CONFIG_DIR`. A session only resumes
 inside the config directory that created it.
 
+## Provider session lifecycle
+
+- `apps/server/src/provider/Services/ProviderAdapter.ts` declares
+  `sessionLifecycle.resume`. All seven adapters declare `"cursor"`.
+- `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` starts and
+  restarts sessions.
+- `apps/server/src/provider/Layers/ProviderService.ts` falls back to the
+  persisted resume cursor, but inherits it only when the provider instance id
+  matches. `describeSessionResume` reports the verdict without starting anything.
+- `apps/server/src/provider/Services/ProviderSessionDirectory.ts` and
+  `apps/server/src/persistence/ProviderSessionRuntime.ts` hold the persisted
+  binding and the cursor. The payload merges, so an absent key keeps the old value.
+- `apps/server/src/provider/Layers/ProviderSessionReaper.ts` reconciles dead
+  bindings at boot, before the runner. Its stop keeps the cursor.
+- `apps/server/src/provider/ProviderDriver.ts` defines
+  `ProviderContinuationIdentity`, now persisted with the binding.
+- The `provider.session.recovered` analytics event goes to PostHog only. It
+  writes nothing under `~/.t3/userdata/logs`. Use `epic.runner.restart-resume`
+  and `epic.runner.resume-outcome` in `boot-service.log` instead.
+
 ## Settings
 
 Deep merge cannot delete keys. Use `ATOMIC_SETTINGS_KEYS`; follow `providerInstances`.
 
 ## Local service
 
-The service is `t3code.service`. Build before restart. Logs are in
+The service is `t3code.service`. Build before restart. Check with
+`stat -c %y apps/server/dist/bin.mjs` against `git log -1 --format=%cI`; the
+deployed binary has been hours behind HEAD twice. Logs are in
 `~/.t3/userdata/logs/boot-service.log`.
 
 `systemctl --user restart t3code.service` does not stop live epic workers. They

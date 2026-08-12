@@ -23,6 +23,12 @@ Ralph's run artifacts are listed in
 The server derives `state.sqlite` in
 [`apps/server/src/config.ts:101-106`](../apps/server/src/config.ts#L101-L106).
 
+A resumed iteration reuses its existing `epic_run_iterations` row: same index,
+same thread id, same branch, same worktree, same bead claim. It records the fact
+in `resume_count` and `last_resumed_at`, and it charges no new dispatch. A
+parallel run can have several iterations in flight at once, so one restart
+resumes N of them, each decided on its own.
+
 ## Ownership rules
 
 T3 Code reads Beads through `BeadsStatusBroadcaster`. A terminal `bd update`,
@@ -141,11 +147,14 @@ failure. Read the load in the surrounding log lines before blaming the child.
   any session with an active turn
   ([`ProviderSessionReaper.ts:16-17`](../apps/server/src/provider/Layers/ProviderSessionReaper.ts#L16-L17),
   [`ProviderSessionReaper.ts:56-70`](../apps/server/src/provider/Layers/ProviderSessionReaper.ts#L56-L70)).
-- A server restart ends the server process and every provider subprocess the
-  server owns directly. No provider session reattaches. T3 Code therefore saves
-  server-owned epic runs in SQLite and resumes them at startup
+- A server restart ends the server process. The persisted provider binding keeps
+  the resume cursor, the working directory, the model selection, and the project
+  context, so the runner continues the interrupted child's own session instead of
+  starting a fresh iteration
   ([`serverRuntimeStartup.ts`](../apps/server/src/serverRuntimeStartup.ts) calls
-  `EpicRunner.start`).
+  `EpicRunner.start`). An adapter that declares no resume capability still cannot
+  reattach; that iteration is scored with an `infra:resume-*` reason and its work
+  is handed to a fresh iteration.
 - A restart does not end epic worker agents. The runner puts each worker CLI in
   its own `systemd-run --user --scope` unit under `cook-epic.slice`
   ([`workerScope.ts`](../packages/epic-core/src/workerScope.ts),
@@ -164,10 +173,30 @@ failure. Read the load in the surrounding log lines before blaming the child.
 
 At startup the server walks its `epic_runs` rows. A row that is not `running`
 only has its leftover iteration rows abandoned. A `running` row is resumed. The
-server re-runs the preflight with a resume intent, takes the run lock, abandons
-the run's own running iteration rows, reclaims a merge slot the dead process
-leaked, stops the worker scope units that carry its run identity, and forks the
-loop again.
+server re-runs the preflight with a resume intent, takes the run lock, sorts its
+in-flight iteration rows into resumable and abandoned, reclaims a merge slot the
+dead process leaked, stops the worker scope units that carry its run identity,
+and forks the loop again with the resumable rows.
+
+A row resumes when it names a child, its worktree still exists (or is null, in
+sequential mode), and its `resume_count` is under the cap of one per row. A row
+written before the resume columns existed falls back to counting the restarts
+its child already survived. Everything else is abandoned, by index, so
+abandoning one row never stops a session another row is about to continue. The
+counts, the resumed workers, and the per-row refusal reason are logged once as
+`epic.runner.restart-resume`.
+
+A resumed worker gets a turn that says the process died mid-command, with
+`git status --porcelain=v1` and `git diff --stat` from its worktree as evidence.
+It does not repeat the epic context; the thread it continues still holds it. The
+run's failure streaks carry across the restart, so a run cannot restart its way
+out of the gutter.
+
+When the session cannot be resumed, the worktree and the claim are handed to a
+fresh iteration in the same worktree rather than thrown away, and the old row is
+scored `infra:resume-unsupported`, `infra:resume-blocked`, or
+`infra:resume-failed`. Only a missing worktree or a child that is already closed
+releases the claim.
 
 The resume names what the run already owns: its run id and the
 `worktree_path` of every row still marked `running`. Preflight forgives exactly
@@ -220,6 +249,10 @@ These do not block a resume:
   `gate.command`.
 - A run-owned base branch that is behind the current branch.
 - No child is ready.
+
+To prove all of this on a real machine, follow
+[`docs/operations/epic-run-restart-resume.md`](operations/epic-run-restart-resume.md).
+It holds a detached verification script and the risk register.
 
 Parallel workers get one worktree each at
 `<baseDir>/worktrees/epic-<runId>/<issueId>`, and the merge queue gets
