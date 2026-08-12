@@ -10,7 +10,7 @@ on:
 jobs:
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -43,7 +43,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -64,7 +64,7 @@ jobs:
 
   epic_runs:
     name: Epic Runs
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 25
     steps:
       - name: Checkout
@@ -97,7 +97,7 @@ jobs:
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
-    runs-on: blacksmith-12vcpu-macos-26
+    runs-on: ${{ vars.CI_RUNNER_MACOS || 'blacksmith-12vcpu-macos-26' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -118,7 +118,7 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     steps:
       - name: Checkout
