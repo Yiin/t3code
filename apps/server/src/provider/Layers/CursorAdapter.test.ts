@@ -30,6 +30,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import {
   readAcpProviderSessionsCreated,
+  readAcpSessionSetupMethods,
   readAcpTurnTargets,
 } from "../testUtils/acpSessionLifecycleProbes.ts";
 import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
@@ -1567,6 +1568,82 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         ),
         "the mirror must leave nothing behind in the workspace",
       );
+    }),
+  );
+
+  it.effect("loads the session a cursor names and reports sessionOrigin resumed", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-origin-resumed");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-origin-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const fresh = yield* adapter.startSession({
+        threadId: ThreadId.make("cursor-origin-fresh"),
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+      assert.equal(fresh.sessionOrigin, "started");
+      yield* adapter.stopSession(ThreadId.make("cursor-origin-fresh"));
+
+      const resumed = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+        resumeCursor: { schemaVersion: 1, sessionId: "mock-session-1" },
+      });
+
+      assert.equal(resumed.sessionOrigin, "resumed");
+      assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), [
+        "session/new",
+        "session/load",
+      ]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("refuses a resume when the agent does not advertise loadSession", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-origin-no-load-session");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-no-load-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          T3_ACP_OMIT_LOAD_SESSION_CAPABILITY: "1",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("cursor"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+          resumeCursor: { schemaVersion: 1, sessionId: "mock-session-1" },
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterResumeError");
+      assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), []);
     }),
   );
 

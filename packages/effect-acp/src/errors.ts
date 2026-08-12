@@ -182,6 +182,28 @@ export class AcpInputStreamEndedError extends Schema.TaggedErrorClass<AcpInputSt
   }
 }
 
+/**
+ * The client asked for something the agent did not advertise in its
+ * `initialize` response. The request is never sent: an agent that omits a
+ * capability answers the matching method with an opaque RPC error, so the
+ * refusal is more useful named than round-tripped.
+ */
+export class AcpUnsupportedCapabilityError extends Schema.TaggedErrorClass<AcpUnsupportedCapabilityError>()(
+  "AcpUnsupportedCapabilityError",
+  {
+    /** Capability key on `InitializeResponse.agentCapabilities`. */
+    capability: Schema.String,
+    /** The method the client would have called. */
+    method: Schema.optionalKey(Schema.String),
+    detail: Schema.optional(Schema.String),
+  },
+) {
+  override get message() {
+    const method = this.method ? ` required by ${this.method}` : "";
+    return `ACP agent does not advertise the '${this.capability}' capability${method}.`;
+  }
+}
+
 export class AcpRequestError extends Schema.TaggedErrorClass<AcpRequestError>()("AcpRequestError", {
   code: AcpSchema.ErrorCode,
   errorMessage: Schema.String,
@@ -370,6 +392,7 @@ export const AcpError = Schema.Union([
   AcpProtocolParseError,
   AcpTransportError,
   AcpInputStreamEndedError,
+  AcpUnsupportedCapabilityError,
 ]);
 
 export type AcpError = typeof AcpError.Type;

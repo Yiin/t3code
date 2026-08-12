@@ -42,7 +42,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { mapAcpSessionStartError, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import { toAcpAttachmentContentBlocks } from "../acp/AcpAttachmentContent.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
@@ -755,7 +755,13 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             return yield* acp.start();
           }).pipe(
             Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              mapAcpSessionStartError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                method: "session/start",
+                resumeSessionId,
+                error,
+              }),
             ),
           );
 
@@ -783,6 +789,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               schemaVersion: GROK_RESUME_VERSION,
               sessionId: started.sessionId,
             },
+            // ACP has no silent fallback: `session/load` either continued the
+            // conversation the cursor named or the start failed outright, so
+            // this adapter never reports `started-fresh`.
+            sessionOrigin: started.sessionSetupMethod === "session/load" ? "resumed" : "started",
             createdAt: now,
             updatedAt: now,
           };

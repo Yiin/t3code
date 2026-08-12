@@ -49,7 +49,11 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  acpPermissionOutcome,
+  mapAcpSessionStartError,
+  mapAcpToAdapterError,
+} from "../acp/AcpAdapterSupport.ts";
 import { toAcpAttachmentContentBlocks } from "../acp/AcpAttachmentContent.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
@@ -650,7 +654,13 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             return yield* acp.start();
           }).pipe(
             Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              mapAcpSessionStartError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                method: "session/start",
+                resumeSessionId,
+                error,
+              }),
             ),
           );
 
@@ -676,6 +686,10 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               schemaVersion: KIMI_RESUME_VERSION,
               sessionId: started.sessionId,
             },
+            // ACP has no silent fallback: `session/load` either continued the
+            // conversation the cursor named or the start failed outright, so
+            // this adapter never reports `started-fresh`.
+            sessionOrigin: started.sessionSetupMethod === "session/load" ? "resumed" : "started",
             createdAt: now,
             updatedAt: now,
           };

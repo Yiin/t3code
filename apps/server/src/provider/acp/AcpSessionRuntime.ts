@@ -109,6 +109,17 @@ export interface AcpSessionRuntimeStartResult {
     | EffectAcpSchema.LoadSessionResponse
     | EffectAcpSchema.NewSessionResponse
     | EffectAcpSchema.ResumeSessionResponse;
+  /**
+   * Which request set the session up. `session/load` continued the
+   * conversation the cursor named; `session/new` started an empty one.
+   */
+  readonly sessionSetupMethod: "session/load" | "session/new";
+  /**
+   * `agentCapabilities.loadSession` as this agent advertised it. An adapter
+   * that declares `sessionLifecycle.resume: "cursor"` statically can read this
+   * to downgrade the claim for the agent build it actually spawned.
+   */
+  readonly loadSessionSupported: boolean;
   readonly modelConfigId: string | undefined;
 }
 
@@ -571,6 +582,18 @@ export const make = (
         acp.agent.initialize(initializePayload),
       );
 
+      const loadSessionSupported = initializeResult.agentCapabilities?.loadSession === true;
+      if (options.resumeSessionId && !loadSessionSupported) {
+        // `initialize` is where the agent says whether it can load a session at
+        // all, so refuse here rather than authenticate and then send a
+        // `session/load` this build answers with an opaque RPC error.
+        return yield* new EffectAcpErrors.AcpUnsupportedCapabilityError({
+          capability: "loadSession",
+          method: "session/load",
+          detail: `Cannot resume session ${options.resumeSessionId}: this agent did not advertise agentCapabilities.loadSession.`,
+        });
+      }
+
       const authenticatePayload = {
         methodId: options.authMethodId,
       } satisfies EffectAcpSchema.AuthenticateRequest;
@@ -582,11 +605,13 @@ export const make = (
       );
 
       let sessionId: string;
+      let sessionSetupMethod: "session/load" | "session/new";
       let sessionSetupResult:
         | EffectAcpSchema.LoadSessionResponse
         | EffectAcpSchema.NewSessionResponse
         | EffectAcpSchema.ResumeSessionResponse;
       if (options.resumeSessionId) {
+        sessionSetupMethod = "session/load";
         const loadPayload = {
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
@@ -661,6 +686,7 @@ export const make = (
           return loaded;
         }).pipe(Effect.ensuring(Ref.set(sessionLoadGateRef, Option.none())));
       } else {
+        sessionSetupMethod = "session/new";
         const createPayload = {
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
@@ -681,6 +707,8 @@ export const make = (
         sessionId,
         initializeResult,
         sessionSetupResult,
+        sessionSetupMethod,
+        loadSessionSupported,
         modelConfigId: extractModelConfigId(sessionSetupResult),
       } satisfies AcpStartedState;
       return nextState;

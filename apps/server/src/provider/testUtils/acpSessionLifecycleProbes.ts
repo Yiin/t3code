@@ -42,6 +42,24 @@ export const readAcpProviderSessionsCreated = (requestLogPath: string): Effect.E
   );
 
 /**
+ * The session-setup requests the mock agent has received, oldest first. Tells
+ * a resume that continued a conversation (`session/load`) apart from one that
+ * quietly started a new one (`session/new`).
+ */
+export const readAcpSessionSetupMethods = (
+  requestLogPath: string,
+): Effect.Effect<ReadonlyArray<string>> =>
+  readRequests(requestLogPath).pipe(
+    Effect.map((requests) =>
+      requests
+        .map((entry) => entry.method)
+        .filter(
+          (method): method is string => method === "session/new" || method === "session/load",
+        ),
+    ),
+  );
+
+/**
  * The provider-native session ids that received a `session/prompt`, oldest
  * first. Waits for the first prompt to land, because `sendTurn` resolves once
  * the turn is accepted rather than once the mock has logged it.

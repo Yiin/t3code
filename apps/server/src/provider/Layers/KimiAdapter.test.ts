@@ -15,6 +15,7 @@ import { KimiSettings, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import { ServerConfig } from "../../config.ts";
 import {
   readAcpProviderSessionsCreated,
+  readAcpSessionSetupMethods,
   readAcpTurnTargets,
 } from "../testUtils/acpSessionLifecycleProbes.ts";
 import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
@@ -245,6 +246,106 @@ it.layer(kimiAdapterTestLayer)("KimiAdapterLive", (it) => {
       assert.equal(error._tag, "ProviderAdapterRequestError");
 
       yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  const makeLoggedAdapter = (extraEnv?: Record<string, string>) =>
+    Effect.gen(function* () {
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "kimi-acp-origin-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockKimiWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath, ...extraEnv }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      return { adapter, requestLogPath };
+    });
+
+  it.effect("reports sessionOrigin started for a session with no cursor", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("kimi-origin-fresh");
+      const { adapter, requestLogPath } = yield* makeLoggedAdapter();
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kimi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(session.sessionOrigin, "started");
+      assert.deepStrictEqual(session.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+      assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), ["session/new"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("loads the session a cursor names and reports sessionOrigin resumed", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("kimi-origin-resumed");
+      const { adapter, requestLogPath } = yield* makeLoggedAdapter();
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kimi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, sessionId: "mock-session-1" },
+      });
+
+      assert.equal(session.sessionOrigin, "resumed");
+      assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), ["session/load"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("ignores a wrong-schemaVersion cursor and reports sessionOrigin started", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("kimi-origin-foreign-cursor");
+      const { adapter, requestLogPath } = yield* makeLoggedAdapter();
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kimi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 99, sessionId: "mock-session-1" },
+      });
+
+      assert.equal(session.sessionOrigin, "started");
+      assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), ["session/new"]);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("refuses a resume when the agent does not advertise loadSession", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("kimi-origin-no-load-session");
+      const { adapter, requestLogPath } = yield* makeLoggedAdapter({
+        T3_ACP_OMIT_LOAD_SESSION_CAPABILITY: "1",
+      });
+
+      const error = yield* Effect.flip(
+        adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("kimi"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "mock-session-1" },
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterResumeError");
+      // The refusal must not fall back to a fresh session behind the caller's
+      // back: a resumed epic worker would lose the turn it was continuing.
+      assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), []);
     }),
   );
 

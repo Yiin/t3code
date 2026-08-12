@@ -8,11 +8,13 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterResumeError,
   ProviderAdapterSessionClosedError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 const isAcpProcessExitedError = Schema.is(EffectAcpErrors.AcpProcessExitedError);
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
+const isAcpUnsupportedCapabilityError = Schema.is(EffectAcpErrors.AcpUnsupportedCapabilityError);
 
 export function mapAcpToAdapterError(
   provider: ProviderDriverKind,
@@ -41,6 +43,32 @@ export function mapAcpToAdapterError(
     detail: error.message,
     cause: error,
   });
+}
+
+/**
+ * Map a failure from `AcpSessionRuntime.start()`. A start that carried a
+ * resume cursor and died on the resume itself becomes a
+ * `ProviderAdapterResumeError`, so a caller can tell "this conversation is
+ * gone" apart from "this agent is broken" and fall back deliberately.
+ */
+export function mapAcpSessionStartError(input: {
+  readonly provider: ProviderDriverKind;
+  readonly threadId: ThreadId;
+  readonly method: string;
+  readonly resumeSessionId: string | undefined;
+  readonly error: EffectAcpErrors.AcpError;
+}): ProviderAdapterError {
+  const { error, provider, resumeSessionId, threadId } = input;
+  if (resumeSessionId !== undefined && isAcpUnsupportedCapabilityError(error)) {
+    return new ProviderAdapterResumeError({
+      provider,
+      threadId,
+      resumeSessionId,
+      detail: error.detail ?? error.message,
+      cause: error,
+    });
+  }
+  return mapAcpToAdapterError(provider, threadId, input.method, error);
 }
 
 export function acpPermissionOutcome(decision: ProviderApprovalDecision): string {
