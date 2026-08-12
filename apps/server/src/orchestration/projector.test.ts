@@ -3,6 +3,7 @@ import {
   EventId,
   ProjectId,
   ProviderDriverKind,
+  PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
   THREAD_DETAIL_ACTIVITY_LIMIT,
   ThreadId,
   type OrchestrationEvent,
@@ -41,6 +42,90 @@ function makeEvent(input: {
 }
 
 describe("orchestration projector", () => {
+  effectIt.effect("attributes only a valid steered user message marker", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const threadId = "thread-steer-attribution";
+      const create = makeEvent({
+        sequence: 1,
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: createdAt,
+        commandId: "cmd-create-steer-attribution",
+        payload: {
+          threadId,
+          projectId: "project-1",
+          title: "Steer attribution",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const message = (sequence: number, messageId: string, role: "user" | "assistant") =>
+        makeEvent({
+          sequence,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: createdAt,
+          commandId: `cmd-message-${sequence}`,
+          payload: {
+            threadId,
+            messageId,
+            role,
+            text: messageId,
+            turnId: null,
+            streaming: false,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+      const marker = (sequence: number, messageId: unknown) =>
+        makeEvent({
+          sequence,
+          type: "thread.activity-appended",
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: createdAt,
+          commandId: `cmd-marker-${sequence}`,
+          payload: {
+            threadId,
+            activity: {
+              id: `activity-${sequence}`,
+              tone: "info",
+              kind: PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
+              summary: "Steered message attributed to active turn",
+              payload: { messageId },
+              turnId: `turn-${sequence}`,
+              createdAt,
+            },
+          },
+        });
+
+      const events = [
+        create,
+        message(2, "message-user", "user"),
+        message(3, "message-assistant", "assistant"),
+        marker(4, "message-user"),
+        marker(5, "message-assistant"),
+        marker(6, 42),
+      ];
+      let state = createEmptyReadModel(createdAt);
+      for (const event of events) {
+        state = yield* projectEvent(state, event);
+      }
+
+      const thread = state.threads[0];
+      expect(thread?.messages.find((entry) => entry.id === "message-user")?.turnId).toBe("turn-4");
+      expect(thread?.messages.find((entry) => entry.id === "message-assistant")?.turnId).toBeNull();
+      expect(thread?.activities).toHaveLength(3);
+    }),
+  );
+
   it("applies thread.created events", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const model = createEmptyReadModel(now);

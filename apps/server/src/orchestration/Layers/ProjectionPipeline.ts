@@ -2,9 +2,11 @@ import {
   ApprovalRequestId,
   applySubagentActivity,
   type ChatAttachment,
+  decodeProviderTurnSteerAttributedActivityPayload,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
   type OrchestrationThreadSubagent,
+  PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
   SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND,
   subagentCloseStatusForSessionStatus,
   ThreadId,
@@ -931,6 +933,33 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             isStreaming: event.payload.streaming,
             createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.activity-appended": {
+          if (event.payload.activity.kind !== PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND) {
+            return;
+          }
+          const attributedPayload = decodeProviderTurnSteerAttributedActivityPayload(
+            event.payload.activity.payload,
+          );
+          if (Option.isNone(attributedPayload)) {
+            return;
+          }
+          const existingMessage = yield* projectionThreadMessageRepository.getByMessageId({
+            messageId: attributedPayload.value.messageId,
+          });
+          if (
+            Option.isNone(existingMessage) ||
+            existingMessage.value.threadId !== event.payload.threadId ||
+            existingMessage.value.role !== "user"
+          ) {
+            return;
+          }
+          yield* projectionThreadMessageRepository.upsert({
+            ...existingMessage.value,
+            turnId: event.payload.activity.turnId,
           });
           return;
         }

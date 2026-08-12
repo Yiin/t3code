@@ -412,6 +412,18 @@ export const OrchestrationThreadActivity = Schema.Struct({
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
+export const PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND = "provider.turn.steer.attributed";
+
+export const ProviderTurnSteerAttributedActivityPayload = Schema.Struct({
+  messageId: MessageId,
+});
+export type ProviderTurnSteerAttributedActivityPayload =
+  typeof ProviderTurnSteerAttributedActivityPayload.Type;
+
+export const decodeProviderTurnSteerAttributedActivityPayload = Schema.decodeUnknownOption(
+  ProviderTurnSteerAttributedActivityPayload,
+);
+
 /**
  * Present when the server returned only part of a thread's activity history.
  *

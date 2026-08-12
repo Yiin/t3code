@@ -2,14 +2,17 @@ import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3to
 import {
   applySubagentActivity,
   closeRunningSubagentsForSession,
+  decodeProviderTurnSteerAttributedActivityPayload,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
   THREAD_ACTIVITY_OPEN_REQUEST_KINDS,
   THREAD_DETAIL_ACTIVITY_LIMIT,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
@@ -807,11 +810,25 @@ export function projectEvent(
           // so `thread.subagents` survives the activity cap above: a `task.*`
           // activity can fall out of the window while its folded row stays.
           const subagents = applySubagentActivity(thread.subagents, payload.activity);
+          const attributedPayload =
+            payload.activity.kind === PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND
+              ? decodeProviderTurnSteerAttributedActivityPayload(payload.activity.payload)
+              : Option.none();
+          const messages = Option.match(attributedPayload, {
+            onNone: () => thread.messages,
+            onSome: ({ messageId }) =>
+              thread.messages.map((message) =>
+                message.id === messageId && message.role === "user"
+                  ? { ...message, turnId: payload.activity.turnId }
+                  : message,
+              ),
+          });
 
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
+              ...(messages !== thread.messages ? { messages } : {}),
               ...(subagents !== thread.subagents ? { subagents } : {}),
               updatedAt: event.occurredAt,
             }),

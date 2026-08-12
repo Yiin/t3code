@@ -1415,6 +1415,12 @@ describe("ProviderCommandReactor", () => {
           command.type === "thread.session.set" && command.commandId !== "cmd-seed-active-steer",
       ),
     );
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.messages.find((message) => message.id === "message-active-steer")?.turnId === turnId
+      );
+    });
     const adoptedSessionSet = dispatchSpy.mock.calls
       .map(([command]) => command)
       .find((command) => command.type === "thread.session.set");
@@ -1424,6 +1430,76 @@ describe("ProviderCommandReactor", () => {
       session,
       createdAt: sessionUpdatedAt,
     });
+  });
+
+  it("attributes a steered message when the current session does not match", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const currentTurnId = asTurnId("turn-current-before-steer");
+    const steeredTurnId = asTurnId("turn-returned-steer");
+    const sessionUpdatedAt = "2026-01-01T00:00:01.000Z";
+    const harness = await createHarness({
+      sendTurnEffect: () =>
+        Effect.succeed({
+          threadId,
+          turnId: steeredTurnId,
+          steeredIntoActiveTurn: true,
+        }),
+    });
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: currentTurnId,
+      cwd: "/tmp/provider-project",
+      createdAt: sessionUpdatedAt,
+      updatedAt: sessionUpdatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-seed-mismatched-steer"),
+      threadId,
+      session: {
+        threadId,
+        status: "running",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "approval-required",
+        activeTurnId: currentTurnId,
+        lastError: null,
+        updatedAt: sessionUpdatedAt,
+      },
+      createdAt: sessionUpdatedAt,
+    });
+    const dispatchSpy = vi.spyOn(harness.engine, "dispatch");
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-mismatched-steer"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-mismatched-steer"),
+        role: "user",
+        text: "attribute this genuine steer",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.messages.find((message) => message.id === "message-mismatched-steer")?.turnId ===
+        steeredTurnId
+      );
+    });
+    await harness.drain();
+    expect(
+      dispatchSpy.mock.calls.filter(([command]) => command.type === "thread.session.set"),
+    ).toHaveLength(0);
   });
 
   it("does not dispatch a session update for a fresh turn result", async () => {

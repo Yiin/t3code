@@ -7,6 +7,7 @@ import {
   PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STOP_FAILED_ACTIVITY_KIND,
   PROVIDER_SUBAGENT_STEER_FAILED_ACTIVITY_KIND,
+  PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -1165,6 +1166,22 @@ const make = Effect.gen(function* () {
           return Effect.void;
         }
         return Effect.gen(function* () {
+          const activityId = yield* serverEventId();
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* serverCommandId("provider-turn-steer-attributed"),
+            threadId: event.payload.threadId,
+            activity: {
+              id: activityId,
+              tone: "info",
+              kind: PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
+              summary: "Steered message attributed to active turn",
+              payload: { messageId: event.payload.messageId },
+              turnId: result.turnId,
+              createdAt: event.payload.createdAt,
+            },
+            createdAt: event.payload.createdAt,
+          });
           const latestThread = yield* resolveThread(event.payload.threadId);
           const latestSession = latestThread?.session;
           const providerSession = (yield* providerService.listSessions()).find(
@@ -1188,7 +1205,7 @@ const make = Effect.gen(function* () {
           });
         }).pipe(
           Effect.catchCause((cause) =>
-            Effect.logWarning("provider command reactor failed to adopt steered turn", {
+            Effect.logWarning("provider command reactor failed to process steered turn result", {
               eventType: event.type,
               threadId: event.payload.threadId,
               turnId: result.turnId,
