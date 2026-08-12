@@ -52,6 +52,10 @@ import {
 } from "../Errors.ts";
 import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import { toAcpAttachmentContentBlocks } from "../acp/AcpAttachmentContent.ts";
+import {
+  makeWorkspaceAttachmentMirror,
+  type WorkspaceAttachmentMirror,
+} from "../acp/AcpWorkspaceAttachmentMirror.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -155,6 +159,9 @@ interface CursorSessionContext {
   /** Prompt content blocks this agent advertised at `initialize`; decides how
    * a non-image attachment is encoded. */
   readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
+  /** Copies a linked attachment into the workspace, which is the only place
+   * Cursor reads a resource from. */
+  readonly attachmentMirror: WorkspaceAttachmentMirror;
   stopped: boolean;
 }
 
@@ -484,6 +491,7 @@ export function makeCursorAdapter(
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
+        yield* ctx.attachmentMirror.releaseSession;
         sessions.delete(ctx.threadId);
         yield* offerRuntimeEvent({
           type: "session.exited",
@@ -851,6 +859,16 @@ export function makeCursorAdapter(
             updatedAt: now,
           };
 
+          const attachmentMirror = makeWorkspaceAttachmentMirror({
+            fileSystem,
+            path,
+            workspaceRoot: cwd,
+            sessionKey: input.threadId,
+          });
+          // A crash skips the shutdown sweep, so clear this thread's leftovers
+          // before the session can add more.
+          yield* attachmentMirror.releaseSession;
+
           ctx = {
             threadId: input.threadId,
             session,
@@ -864,6 +882,7 @@ export function makeCursorAdapter(
             activeTurnId: undefined,
             promptsInFlight: 0,
             promptCapabilities: started.initializeResult.agentCapabilities?.promptCapabilities,
+            attachmentMirror,
             stopped: false,
           };
 
@@ -1004,6 +1023,11 @@ export function makeCursorAdapter(
         // resolving from here on does not settle the turn; the matching
         // decrement is the `ensuring` below.
         ctx.promptsInFlight += 1;
+        // One mirror directory per prompt, not per turn: a steer folds into
+        // the same turn id, and its own attachments must outlive neither it
+        // nor the prompt they arrived with.
+        const hasAttachments = (input.attachments?.length ?? 0) > 0;
+        const attachmentPromptKey = yield* randomUUIDv4;
 
         return yield* Effect.gen(function* () {
           const turnModelSelection =
@@ -1056,6 +1080,20 @@ export function makeCursorAdapter(
               attachmentsDir: serverConfig.attachmentsDir,
               promptCapabilities: ctx.promptCapabilities,
               fileSystem,
+              materializeLinkTarget: (linkInput) =>
+                ctx.attachmentMirror
+                  .materialize({ promptKey: attachmentPromptKey, ...linkInput })
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapterRequestError({
+                          provider: PROVIDER,
+                          method: "session/prompt",
+                          detail: `Failed to copy attachment '${linkInput.attachment.id}' into the workspace: ${cause.message}`,
+                          cause,
+                        }),
+                    ),
+                  ),
             })),
           );
 
@@ -1117,6 +1155,11 @@ export function makeCursorAdapter(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
             }),
+          ),
+          // The prompt has settled, so the workspace copies have served their
+          // purpose. `ensuring` also covers an interrupt or a failed prompt.
+          Effect.ensuring(
+            hasAttachments ? ctx.attachmentMirror.releasePrompt(attachmentPromptKey) : Effect.void,
           ),
         );
       });

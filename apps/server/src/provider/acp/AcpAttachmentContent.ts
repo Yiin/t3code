@@ -60,7 +60,9 @@ export function isTextLikeAttachmentMimeType(mimeType: string): boolean {
  *   base64 `blob`.
  * - Without `embeddedContext` a file becomes a `resource_link`, which every
  *   ACP agent must support. Attachments live outside the workspace, so an
- *   agent that refuses external paths sees the name and URI only.
+ *   agent that refuses external paths sees the name and URI only. An adapter
+ *   whose agent does that supplies `materializeLinkTarget` to point the link
+ *   at a copy the agent will actually read.
  */
 export const toAcpAttachmentContentBlocks = (input: {
   readonly provider: ProviderDriverKind;
@@ -68,6 +70,17 @@ export const toAcpAttachmentContentBlocks = (input: {
   readonly attachmentsDir: string;
   readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
   readonly fileSystem: FileSystem.FileSystem;
+  /**
+   * Relocates a linked file and returns the path to link instead. Only the
+   * `resource_link` branch calls it; an embedded resource already carries the
+   * bytes.
+   */
+  readonly materializeLinkTarget?:
+    | ((linkInput: {
+        readonly attachment: ChatAttachment;
+        readonly sourcePath: string;
+      }) => Effect.Effect<string, ProviderAdapterRequestError>)
+    | undefined;
 }): Effect.Effect<ReadonlyArray<EffectAcpSchema.ContentBlock>, ProviderAdapterRequestError> =>
   Effect.gen(function* () {
     const attachments = input.attachments ?? [];
@@ -114,8 +127,6 @@ export const toAcpAttachmentContentBlocks = (input: {
         continue;
       }
 
-      const uri = NodeURL.pathToFileURL(attachmentPath).href;
-
       if (!supportsEmbeddedContext) {
         const exists = yield* fileSystem
           .exists(attachmentPath)
@@ -127,16 +138,20 @@ export const toAcpAttachmentContentBlocks = (input: {
             detail: `Attachment file for '${attachment.id}' is missing.`,
           });
         }
+        const linkPath = input.materializeLinkTarget
+          ? yield* input.materializeLinkTarget({ attachment, sourcePath: attachmentPath })
+          : attachmentPath;
         blocks.push({
           type: "resource_link",
           name: attachment.name,
-          uri,
+          uri: NodeURL.pathToFileURL(linkPath).href,
           mimeType: attachment.mimeType,
           size: attachment.sizeBytes,
         });
         continue;
       }
 
+      const uri = NodeURL.pathToFileURL(attachmentPath).href;
       const bytes = yield* readBytes;
       blocks.push({
         type: "resource",

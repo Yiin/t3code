@@ -1430,7 +1430,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     },
   );
 
-  it.effect("sends an image inline and a file as an ACP resource link", () =>
+  it.effect("sends an image inline and links a file copied inside the workspace for the turn", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
       const serverSettings = yield* ServerSettingsService;
@@ -1440,11 +1440,18 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       const tempDir = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-attachment-")),
       );
+      // Cursor drops the content of a resource outside the project root, so
+      // the session needs a real workspace to copy the attachment into.
+      const workspaceDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-workspace-")),
+      );
       const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
       const argvLogPath = NodePath.join(tempDir, "argv.txt");
       yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      // The delay holds the prompt open, so the copy can be observed while
+      // the agent still has it.
       const wrapperPath = yield* Effect.promise(() =>
-        makeProbeWrapper(requestLogPath, argvLogPath),
+        makeProbeWrapper(requestLogPath, argvLogPath, { T3_ACP_PROMPT_DELAY_MS: "3000" }),
       );
       yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
 
@@ -1463,31 +1470,33 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       yield* adapter.startSession({
         threadId,
         provider: ProviderDriverKind.make("cursor"),
-        cwd: process.cwd(),
+        cwd: workspaceDir,
         runtimeMode: "full-access",
         modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
       });
 
-      yield* adapter.sendTurn({
-        threadId,
-        input: "look at both attachments",
-        attachments: [
-          {
-            type: "image",
-            id: "cursor-image-1",
-            name: "shot.png",
-            mimeType: "image/png",
-            sizeBytes: imageBytes.byteLength,
-          },
-          {
-            type: "file",
-            id: "cursor-file-1",
-            name: "notes.txt",
-            mimeType: "text/plain",
-            sizeBytes: fileText.length,
-          },
-        ],
-      });
+      const turnFiber = yield* Effect.forkChild(
+        adapter.sendTurn({
+          threadId,
+          input: "look at both attachments",
+          attachments: [
+            {
+              type: "image",
+              id: "cursor-image-1",
+              name: "shot.png",
+              mimeType: "image/png",
+              sizeBytes: imageBytes.byteLength,
+            },
+            {
+              type: "file",
+              id: "cursor-file-1",
+              name: "notes.txt",
+              mimeType: "text/plain",
+              sizeBytes: fileText.length,
+            },
+          ],
+        }),
+      );
 
       const requests = yield* waitForJsonLogMatch(
         requestLogPath,
@@ -1498,23 +1507,61 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
       )?.prompt;
 
-      assert.deepEqual(promptBlocks, [
+      const linkBlock = promptBlocks?.[2] as Record<string, unknown> | undefined;
+      const linkedUri = typeof linkBlock?.uri === "string" ? linkBlock.uri : "file:///missing";
+      const linkedPath = NodeURL.fileURLToPath(linkedUri);
+      const mirrorRoot = NodePath.join(workspaceDir, ".t3code", "attachments");
+
+      assert.deepEqual(promptBlocks?.slice(0, 2), [
         { type: "text", text: "look at both attachments" },
         {
           type: "image",
           data: Buffer.from(imageBytes).toString("base64"),
           mimeType: "image/png",
         },
-        {
-          type: "resource_link",
-          name: "notes.txt",
-          uri: NodeURL.pathToFileURL(filePath).href,
-          mimeType: "text/plain",
-          size: fileText.length,
-        },
       ]);
+      assert.deepEqual(linkBlock, {
+        type: "resource_link",
+        name: "notes.txt",
+        uri: NodeURL.pathToFileURL(linkedPath).href,
+        mimeType: "text/plain",
+        size: fileText.length,
+      });
+      assert.isTrue(linkedPath.startsWith(`${mirrorRoot}${NodePath.sep}`));
+      assert.equal(NodePath.basename(linkedPath), "notes.txt");
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(linkedPath, "utf8")),
+        fileText,
+        "the copy must be readable while the agent holds the prompt",
+      );
+      assert.equal(
+        yield* Effect.promise(() => NodeFSP.readFile(`${mirrorRoot}/.gitignore`, "utf8")),
+        "*\n",
+      );
+
+      yield* Fiber.join(turnFiber);
+
+      assert.isFalse(
+        yield* Effect.promise(() =>
+          NodeFSP.access(linkedPath).then(
+            () => true,
+            () => false,
+          ),
+        ),
+        "the copy must be gone once the prompt settles",
+      );
 
       yield* adapter.stopSession(threadId);
+
+      assert.isFalse(
+        yield* Effect.promise(() =>
+          NodeFSP.access(NodePath.join(workspaceDir, ".t3code")).then(
+            () => true,
+            () => false,
+          ),
+        ),
+        "the mirror must leave nothing behind in the workspace",
+      );
     }),
   );
 });

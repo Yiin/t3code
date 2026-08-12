@@ -12,6 +12,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { type ChatAttachment, ProviderDriverKind } from "@t3tools/contracts";
 
+import { ProviderAdapterRequestError } from "../Errors.ts";
 import {
   isTextLikeAttachmentMimeType,
   toAcpAttachmentContentBlocks,
@@ -36,6 +37,10 @@ const encode = (input: {
   readonly attachmentsDir: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
+  readonly materializeLinkTarget?: (linkInput: {
+    readonly attachment: ChatAttachment;
+    readonly sourcePath: string;
+  }) => Effect.Effect<string, ProviderAdapterRequestError>;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -45,6 +50,7 @@ const encode = (input: {
       attachmentsDir: input.attachmentsDir,
       promptCapabilities: input.promptCapabilities,
       fileSystem,
+      materializeLinkTarget: input.materializeLinkTarget,
     });
   });
 
@@ -257,6 +263,107 @@ it.layer(NodeServices.layer)("toAcpAttachmentContentBlocks", (it) => {
 
       assert.equal(error._tag, "ProviderAdapterRequestError");
       assert.include(error.detail, "is missing");
+    }),
+  );
+
+  it.effect("links the materialized copy when the adapter supplies one", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = yield* makeAttachmentsDir;
+      const text = "materialized";
+      yield* writeAttachment(attachmentsDir, "notes-5.txt", new TextEncoder().encode(text));
+      const workspaceCopy = NodePath.join(attachmentsDir, "workspace-copy.txt");
+      const seen: Array<string> = [];
+
+      const blocks = yield* encode({
+        attachmentsDir,
+        attachments: [
+          {
+            type: "file",
+            id: "notes-5",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: text.length,
+          },
+        ],
+        promptCapabilities: NO_EMBEDDED_CONTEXT,
+        materializeLinkTarget: ({ sourcePath }) => {
+          seen.push(sourcePath);
+          return Effect.succeed(workspaceCopy);
+        },
+      });
+
+      assert.deepEqual(seen, [NodePath.join(attachmentsDir, "notes-5.txt")]);
+      assert.deepEqual(blocks, [
+        {
+          type: "resource_link",
+          name: "notes.txt",
+          uri: NodeURL.pathToFileURL(workspaceCopy).href,
+          mimeType: "text/plain",
+          size: text.length,
+        },
+      ]);
+    }),
+  );
+
+  it.effect("never materializes a copy for an embedded resource", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = yield* makeAttachmentsDir;
+      yield* writeAttachment(attachmentsDir, "notes-6.txt", new TextEncoder().encode("embedded"));
+      let calls = 0;
+
+      yield* encode({
+        attachmentsDir,
+        attachments: [
+          {
+            type: "file",
+            id: "notes-6",
+            name: "notes.txt",
+            mimeType: "text/plain",
+            sizeBytes: 8,
+          },
+        ],
+        promptCapabilities: EMBEDDED_CONTEXT,
+        materializeLinkTarget: ({ sourcePath }) => {
+          calls += 1;
+          return Effect.succeed(sourcePath);
+        },
+      });
+
+      assert.equal(calls, 0);
+    }),
+  );
+
+  it.effect("fails the prompt when materializing the copy fails", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = yield* makeAttachmentsDir;
+      yield* writeAttachment(attachmentsDir, "notes-7.txt", new TextEncoder().encode("nope"));
+
+      const error = yield* Effect.flip(
+        encode({
+          attachmentsDir,
+          attachments: [
+            {
+              type: "file",
+              id: "notes-7",
+              name: "notes.txt",
+              mimeType: "text/plain",
+              sizeBytes: 4,
+            },
+          ],
+          promptCapabilities: NO_EMBEDDED_CONTEXT,
+          materializeLinkTarget: () =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: "workspace is read-only",
+              }),
+            ),
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      assert.include(error.detail, "workspace is read-only");
     }),
   );
 
