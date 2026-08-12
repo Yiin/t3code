@@ -26,11 +26,43 @@ import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
+/**
+ * How an adapter can pick up a conversation it already started.
+ *
+ * `"cursor"` means `startSession` accepts the `resumeCursor` the adapter itself
+ * handed back and continues that conversation. `"unsupported"` means the
+ * adapter cannot continue a past conversation at all, so a caller holding a
+ * cursor must not try. The union is open: a later mode such as `"replay"`, for
+ * an adapter that rebuilds the conversation from transcript rather than from a
+ * provider-side id, is a new literal here and not a new field.
+ */
+export type ProviderSessionResumeMode = "cursor" | "unsupported";
+
+/**
+ * Per-operation session-lifecycle capabilities.
+ *
+ * One key per lifecycle operation, so a later operation is an added key rather
+ * than a change to an existing type. `fork` is deliberately absent: no adapter
+ * implements it today, and declaring it before one does would make every
+ * adapter answer a question it cannot answer honestly.
+ */
+export interface ProviderSessionLifecycleCapabilities {
+  /**
+   * Declares what the adapter can do with a persisted resume cursor.
+   */
+  readonly resume: ProviderSessionResumeMode;
+}
+
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+
+  /**
+   * Declares which session-lifecycle operations the adapter supports.
+   */
+  readonly sessionLifecycle: ProviderSessionLifecycleCapabilities;
 
   /**
    * Declares what the driver can do with an image or file attachment. Must

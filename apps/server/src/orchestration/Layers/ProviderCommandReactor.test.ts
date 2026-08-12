@@ -345,6 +345,7 @@ describe("ProviderCommandReactor", () => {
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
+          sessionLifecycle: { resume: "cursor" },
           attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
         }),
       getInstanceInfo: (instanceId) => {

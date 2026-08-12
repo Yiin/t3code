@@ -32,6 +32,7 @@ const fakeCodexAdapter: CodexAdapter.CodexAdapterShape = {
   provider: CODEX_DRIVER,
   capabilities: {
     sessionModelSwitch: "in-session",
+    sessionLifecycle: { resume: "cursor" },
     attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   },
   startSession: vi.fn(),
@@ -52,6 +53,7 @@ const fakeClaudeAdapter: ClaudeAdapter.ClaudeAdapterShape = {
   provider: CLAUDE_AGENT_DRIVER,
   capabilities: {
     sessionModelSwitch: "in-session",
+    sessionLifecycle: { resume: "cursor" },
     attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   },
   startSession: vi.fn(),
@@ -72,6 +74,7 @@ const fakeOpenCodeAdapter: OpenCodeAdapter.OpenCodeAdapterShape = {
   provider: OPENCODE_DRIVER,
   capabilities: {
     sessionModelSwitch: "in-session",
+    sessionLifecycle: { resume: "cursor" },
     attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   },
   startSession: vi.fn(),
@@ -92,6 +95,7 @@ const fakeCursorAdapter: CursorAdapter.CursorAdapterShape = {
   provider: CURSOR_DRIVER,
   capabilities: {
     sessionModelSwitch: "in-session",
+    sessionLifecycle: { resume: "cursor" },
     attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   },
   startSession: vi.fn(),

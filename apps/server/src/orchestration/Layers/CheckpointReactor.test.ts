@@ -135,6 +135,7 @@ function createProviderServiceHarness(
     getCapabilities: () =>
       Effect.succeed({
         sessionModelSwitch: "in-session",
+        sessionLifecycle: { resume: "cursor" },
         attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
       }),
     getInstanceInfo: (instanceId) =>

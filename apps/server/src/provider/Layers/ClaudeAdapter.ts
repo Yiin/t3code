@@ -118,6 +118,7 @@ const PROVIDER = ProviderDriverKind.make("claudeAgent");
  */
 export const CLAUDE_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;

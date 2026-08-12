@@ -97,6 +97,7 @@ const PROVIDER = ProviderDriverKind.make("cursor");
  */
 export const CURSOR_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 const CURSOR_RESUME_VERSION = 1 as const;

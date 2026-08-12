@@ -257,6 +257,7 @@ describe("ProviderSessionReaper", () => {
       getCapabilities: () =>
         Effect.succeed({
           sessionModelSwitch: "in-session",
+          sessionLifecycle: { resume: "cursor" },
           attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
         }),
       getInstanceInfo: (instanceId) => {
@@ -653,6 +654,7 @@ describe("ProviderSessionReaper", () => {
           getCapabilities: () =>
             Effect.succeed({
               sessionModelSwitch: "in-session",
+              sessionLifecycle: { resume: "cursor" },
               attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
             }),
           getInstanceInfo: (instanceId) => {

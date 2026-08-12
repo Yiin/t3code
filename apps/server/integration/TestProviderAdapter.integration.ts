@@ -510,6 +510,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       provider,
       capabilities: {
         sessionModelSwitch: "in-session",
+        sessionLifecycle: { resume: "cursor" },
         attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
       },
       startSession,

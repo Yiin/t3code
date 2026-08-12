@@ -53,7 +53,10 @@ import {
   ProviderValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderSessionResumeMode,
+} from "../Services/ProviderAdapter.ts";
 import { decideSessionReap } from "../sessionReapPolicy.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -127,7 +130,10 @@ type LegacyProviderRuntimeEvent = {
   readonly [key: string]: unknown;
 };
 
-function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
+function makeFakeCodexAdapter(
+  provider: ProviderDriverKind = CODEX_DRIVER,
+  capabilityOverrides?: { readonly sessionResume?: ProviderSessionResumeMode },
+) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -247,6 +253,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      sessionLifecycle: { resume: capabilityOverrides?.sessionResume ?? "cursor" },
       attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
     },
     startSession,
@@ -969,6 +976,85 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     assert.instanceOf(failure, ProviderValidationError);
     assert.include(failure.issue, "Provider instance 'codex_personal' is disabled");
     assert.equal(codex.startSession.mock.calls.length, 0);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+/**
+ * Builds a single-adapter provider stack whose adapter declares `resume` as the
+ * given mode, so a test can pin what callers read and what recovery does.
+ */
+function makeResumeCapabilityStack(resume: ProviderSessionResumeMode) {
+  const codex = makeFakeCodexAdapter(CODEX_DRIVER, { sessionResume: resume });
+  const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = makeProviderServiceLiveForTest().pipe(
+    Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+    Layer.provide(directoryLayer),
+    Layer.provide(defaultServerSettingsLayer),
+    Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+  return { codex, providerLayer };
+}
+
+it.effect("getCapabilities surfaces the adapter's declared session resume mode", () =>
+  Effect.gen(function* () {
+    const resumable = makeResumeCapabilityStack("cursor");
+    const resumableCapabilities = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.getCapabilities(codexInstanceId);
+    }).pipe(Effect.provide(resumable.providerLayer));
+    assert.equal(resumableCapabilities.sessionLifecycle.resume, "cursor");
+
+    const unresumable = makeResumeCapabilityStack("unsupported");
+    const unresumableCapabilities = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.getCapabilities(codexInstanceId);
+    }).pipe(Effect.provide(unresumable.providerLayer));
+    assert.equal(unresumableCapabilities.sessionLifecycle.resume, "unsupported");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("refuses to recover a thread whose adapter cannot resume a session", () =>
+  Effect.gen(function* () {
+    const stack = makeResumeCapabilityStack("unsupported");
+    const threadId = asThreadId("thread-resume-unsupported");
+
+    const failure = yield* Effect.flip(
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        // The session starts and persists a cursor, so the refusal below can
+        // only come from the capability and not from a missing cursor.
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/project-resume-unsupported",
+          runtimeMode: "full-access",
+        });
+        yield* stack.codex.stopAll();
+        stack.codex.startSession.mockClear();
+
+        return yield* provider.sendTurn({
+          threadId,
+          input: "resume",
+          attachments: [],
+        });
+      }).pipe(Effect.provide(stack.providerLayer)),
+    );
+
+    assert.instanceOf(failure, ProviderValidationError);
+    assert.include(failure.issue, "does not support resuming a session");
+    assert.equal(stack.codex.startSession.mock.calls.length, 0);
+    assert.equal(stack.codex.sendTurn.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

@@ -88,6 +88,7 @@ const PROVIDER = ProviderDriverKind.make("codex");
  */
 export const CODEX_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 

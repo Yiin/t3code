@@ -82,6 +82,7 @@ const PROVIDER = ProviderDriverKind.make("grok");
  */
 export const GROK_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 const GROK_RESUME_VERSION = 1 as const;

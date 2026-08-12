@@ -896,6 +896,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
       }
 
+      // Adopting a session the adapter still holds is not a resume, so it stays
+      // available to every provider. Everything past this point restarts the
+      // conversation from a persisted cursor, which an adapter has to declare
+      // it can honour. Answer "this provider cannot resume" before "no state is
+      // persisted", so a caller that sees the cursor complaint knows the cursor
+      // is the only thing missing.
+      if (adapter.capabilities.sessionLifecycle.resume === "unsupported") {
+        return yield* toValidationError(
+          input.operation,
+          `Cannot recover thread '${input.binding.threadId}' because provider '${input.binding.provider}' does not support resuming a session.`,
+        );
+      }
+
       if (!hasResumeCursor) {
         return yield* toValidationError(
           input.operation,

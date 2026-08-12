@@ -89,6 +89,7 @@ const PROVIDER = ProviderDriverKind.make("kimi");
  */
 export const KIMI_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 const KIMI_RESUME_VERSION = 1 as const;

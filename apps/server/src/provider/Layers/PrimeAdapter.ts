@@ -67,6 +67,7 @@ const PROVIDER = PRIME_AGENT_DRIVER_KIND;
  */
 export const PRIME_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 const CURSOR_VERSION = 1;

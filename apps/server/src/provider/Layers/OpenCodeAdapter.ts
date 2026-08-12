@@ -66,6 +66,7 @@ const PROVIDER = ProviderDriverKind.make("opencode");
  */
 export const OPENCODE_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
   sessionModelSwitch: "in-session",
+  sessionLifecycle: { resume: "cursor" },
   attachments: attachmentCapabilityForDriver(PROVIDER),
 };
 
