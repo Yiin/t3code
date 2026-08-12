@@ -83,6 +83,13 @@ export const EpicRunIteration = Schema.Struct({
    * Machine-readable reason for a `failed`/`abandoned` status, `null`
    * otherwise. Vocabulary lives on the transport schema
    * (`EpicRunIterationReport.failureReason`).
+   *
+   * Mirrored here because this column is what the runner writes: classified
+   * failures carry their failure class ("infra:" or "child:"), the resume
+   * family is `EPIC_RUN_FAILURE_RESUME_UNSUPPORTED` / `_BLOCKED` / `_FAILED`
+   * from `@t3tools/contracts`, and "cancelled" and "server-restart" stay
+   * unprefixed. "server-restart" means only that the row was reconciled at
+   * boot; it is never a resume outcome.
    */
   failureReason: Schema.NullOr(Schema.String),
   /**

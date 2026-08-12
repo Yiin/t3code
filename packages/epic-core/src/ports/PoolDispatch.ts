@@ -118,14 +118,25 @@ export interface PoolDispatchShape {
    *    a blank session that looks resumed is unrecoverable: the agent answers
    *    with no memory of the work it was doing.
    * 2. Every foreseeable "cannot resume" is a returned
-   *    `{ _tag: "unavailable" }`, NEVER a failure. `EpicRunnerDispatchError`
-   *    is reserved for infra faults — a broken store, an unreachable engine.
-   *    The caller treats unavailable as "start this child fresh instead" and a
+   *    `{ _tag: "unavailable" }`, NEVER a failure — including the adapter
+   *    erroring on a resume it had accepted, which is the `failed` refusal.
+   *    `EpicRunnerDispatchError` is reserved for infra faults after continuity
+   *    is proved: a refused prompt, a broken store, an unreachable engine. The
+   *    caller treats unavailable as "start this child fresh instead" and a
    *    failure as "something is wrong with the machine".
    */
   readonly resumeIteration: (
     input: ResumableIteration,
   ) => Effect.Effect<IterationResume, EpicRunnerDispatchError>;
+  /**
+   * Best-effort turn interrupt on a ref this process holds no handle for.
+   *
+   * The restart path needs it: a thread whose iteration died with the previous
+   * process still projects a running turn, and stopping the session alone
+   * leaves that turn open forever. A handle-owning caller uses
+   * {@link IterationHandle.interrupt} instead.
+   */
+  readonly interruptForced: (threadId: ThreadId) => Effect.Effect<void>;
   /** Best-effort session stop for a created-but-never-dispatched thread. */
   readonly stopAbandoned: (threadId: ThreadId) => Effect.Effect<void>;
   /**

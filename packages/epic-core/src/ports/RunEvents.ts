@@ -83,6 +83,7 @@ export const RunEvent = Schema.Union([
       "capability",
       "no-durable-state",
       "not-continued",
+      "failed",
       "workspace-missing",
       "child-closed",
     ]),

@@ -2554,10 +2554,14 @@ export const makeServerPoolDispatch = (deps: {
               },
             } as const;
           case "failed":
-            return yield* new EpicRunnerDispatchError({
-              commandType: "thread.session.resume",
-              detail: outcome.detail,
-            });
+            // Not an `EpicRunnerDispatchError`: the reactor answers `failed`
+            // when the adapter errored on the resume it had accepted, and the
+            // agent still heard nothing. That is a refusal the caller recovers
+            // from, not a broken machine.
+            return {
+              _tag: "unavailable",
+              refusal: { _tag: "failed", detail: outcome.detail },
+            } as const;
           case "resumed":
             break;
         }
@@ -2590,6 +2594,23 @@ export const makeServerPoolDispatch = (deps: {
           _tag: "resumed",
           handle: makeIterationHandle({ ...input, threadId, priorTurnId, messageId }),
         } as const;
+      }),
+
+    interruptForced: (threadId) =>
+      Effect.gen(function* () {
+        const createdAt = yield* nowIso;
+        yield* dispatchBestEffort("epic.runner.forced-interrupt-failed", {
+          type: "thread.turn.interrupt",
+          commandId: yield* commandId("forced-interrupt"),
+          threadId,
+          // Only this process's own owned turn can be named. A thread
+          // interrupted after a restart has none recorded here, and the
+          // engine then interrupts whatever turn it finds running.
+          ...(ownedIterationTurnIds.has(threadId)
+            ? { turnId: ownedIterationTurnIds.get(threadId) }
+            : {}),
+          createdAt,
+        });
       }),
 
     stopAbandoned: (threadId) =>

@@ -10,6 +10,9 @@
  * configuration.
  */
 import {
+  EPIC_RUN_FAILURE_RESUME_BLOCKED,
+  EPIC_RUN_FAILURE_RESUME_FAILED,
+  EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
   EpicRunId,
   type ModelSelection,
   type ProviderDriverKind,
@@ -33,6 +36,7 @@ import {
 } from "./Errors.ts";
 import {
   decideIterationBoundary,
+  EPIC_RUN_RESTART_HANDOFF_PROMPT,
   EPIC_RUN_RESTART_RESUME_PROMPT,
   parseIntegrationFixTitle,
   parseMergeFixTitle,
@@ -247,6 +251,23 @@ type ReadyChildSelection =
   | { readonly _tag: "child"; readonly issueId: string }
   /** Continue an interrupted iteration instead of starting a new one. */
   | { readonly _tag: "resume"; readonly worker: ResumedWorker }
+  /**
+   * Start a NEW iteration for a child the loop already holds the claim and the
+   * worktree for — the recovery from a resume that could not be continued.
+   *
+   * It exists because `bd ready` cannot name this child: a still-claimed child
+   * is absent from the frontier, so an unpinned dispatch would pick a
+   * different one and walk away from a tree full of half-finished work. The
+   * workspace travels on the selection rather than being re-adopted, because
+   * the refused resume adopted it moments ago and hands it straight over.
+   *
+   * Internal to the loop. The scheduler never produces one.
+   */
+  | {
+      readonly _tag: "pinned";
+      readonly issueId: string;
+      readonly workspace: IterationWorkspace;
+    }
   | { readonly _tag: "unrecognised"; readonly candidateIds: ReadonlyArray<string> };
 
 /**
@@ -258,21 +279,56 @@ type ResumeRefusalDecision =
   | { readonly _tag: "workspace-missing"; readonly detail: string }
   | { readonly _tag: "child-closed"; readonly detail: string };
 
+/** What `abandonResume` decided to do with the child it gave up resuming. */
+type ResumeRefusalOutcome =
+  /** Claim reopened, worktree dropped; the iteration is over. */
+  | { readonly _tag: "released"; readonly result: RunIterationResult }
+  /** Claim and worktree kept; run this selection next, in the same fiber. */
+  | { readonly _tag: "handoff"; readonly selection: ReadyChildSelection };
+
 /** `resumeIteration`'s three answers, flattened so each narrows on its own. */
 type ResumeAttempt =
   | { readonly _tag: "handle"; readonly handle: IterationHandle }
   | { readonly _tag: "refused"; readonly refusal: IterationResumeRefusal }
   | { readonly _tag: "failed"; readonly error: EpicRunnerDispatchError };
 
-/** The persisted failure reason for an iteration a restart could not continue. */
+/** The persisted failure reason for a row a restart reconciled and nothing more. */
 const RESUME_ABANDONED_REASON = "server-restart";
+
+/**
+ * The typed failure reason for a refusal that leaves real work behind, or
+ * `null` for one that leaves none.
+ *
+ * `null` means the ordinary release path: `workspace-missing` has no tree to
+ * hand over, and `child-closed` has no work left to do. Everything else names
+ * a live worktree holding a dead agent's uncommitted changes, so the row gets
+ * a reason from the resume family and the child gets a new thread in that same
+ * tree.
+ */
+const resumeHandoffReason = (refusal: ResumeRefusalDecision): string | null => {
+  switch (refusal._tag) {
+    case "capability":
+      return EPIC_RUN_FAILURE_RESUME_UNSUPPORTED;
+    case "no-durable-state":
+    case "not-continued":
+      return EPIC_RUN_FAILURE_RESUME_BLOCKED;
+    case "failed":
+      return EPIC_RUN_FAILURE_RESUME_FAILED;
+    case "workspace-missing":
+    case "child-closed":
+      return null;
+  }
+};
 
 type RunIterationResult =
   | { readonly _tag: "dispatch-skipped"; readonly providerTurnDispatched: false }
   /**
-   * A resume the loop refused. The row is already `abandoned` and the claim is
-   * already released, so the boundary writes nothing: no iteration completed,
-   * no streak moved, and the next scheduler tick re-selects the child fresh.
+   * A resume the loop refused with nothing left to hand over — a worktree that
+   * is gone, or a child that closed. The row is already `abandoned` and the
+   * claim is already released, so the boundary writes nothing: no iteration
+   * completed, no streak moved, and the next scheduler tick re-selects the
+   * child fresh. A refusal that DID leave work behind never reaches here; it
+   * runs on as a pinned iteration and is classified like any other.
    */
   | {
       readonly _tag: "resume-abandoned";
@@ -572,18 +628,31 @@ export const runParallelEpicLoop = (
    * continue — an unsupported harness, a harness refusal, a worktree that is
    * gone, a child that closed while the run was down.
    *
-   * Every path ends the same way: the operator gets the decision as a durable
-   * event, the row goes `abandoned` exactly as restart reconciliation used to
-   * write it, the dead session is stopped, and the claim is reopened so the
-   * next scheduler tick re-selects the child and dispatches it fresh. Two
-   * recovery branches would be two things to keep in step; there is one.
+   * Every path starts the same way: the operator gets the decision as a
+   * durable event, the row goes `abandoned`, and the dead thread is
+   * interrupted and stopped so nothing keeps running under a row nobody owns.
+   *
+   * How it ends depends on what the refusal left behind, and that is the whole
+   * of the difference — see {@link resumeHandoffReason}. A refusal with a live
+   * worktree hands that tree and the standing claim to a NEW iteration, which
+   * is the only way the dead agent's uncommitted work survives. A refusal with
+   * nothing to hand over reopens the claim, drops the worktree, and lets the
+   * next scheduler tick re-select the child fresh.
    */
   const abandonResume = (abandoned: {
     readonly worker: ResumedWorker;
     readonly refusal: ResumeRefusalDecision;
-  }): Effect.Effect<RunIterationResult, EpicRunnerError> =>
+    /** The adopted worktree, when the refusal happened after it was adopted. */
+    readonly workspace: IterationWorkspace | null;
+  }): Effect.Effect<ResumeRefusalOutcome, EpicRunnerError> =>
     Effect.gen(function* () {
       const { worker, refusal } = abandoned;
+      const handoffReason = resumeHandoffReason(refusal);
+      const handoff =
+        handoffReason === null || abandoned.workspace === null
+          ? null
+          : { reason: handoffReason, workspace: abandoned.workspace };
+      const failureReason = handoff?.reason ?? RESUME_ABANDONED_REASON;
       const summary = `resume refused (${refusal._tag}): ${refusal.detail}`;
       yield* ports.events.publish({
         type: "iteration-resume-decision",
@@ -602,7 +671,7 @@ export const runParallelEpicLoop = (
           turnStatus: "abandoned",
           summary,
           why: null,
-          failureReason: RESUME_ABANDONED_REASON,
+          failureReason,
           finishedAt,
         })
         .pipe(Effect.mapError(journalError("updateIteration")));
@@ -614,13 +683,35 @@ export const runParallelEpicLoop = (
         turnStatus: "abandoned",
         summary,
         why: null,
-        failureReason: RESUME_ABANDONED_REASON,
+        failureReason,
         startedAt: worker.startedAt,
         finishedAt,
       });
-      // Nobody will ever hold this session again, so it must not sit open
-      // while the same child is redispatched onto a fresh worktree.
+      // Nobody will ever hold this session again. The interrupt closes the
+      // turn the dead process left projected as running — a stop alone leaves
+      // it open forever — and the stop keeps the session from sitting there
+      // while the same child is worked by someone else.
+      yield* ports.dispatch.interruptForced(worker.threadId).pipe(Effect.ignore);
       yield* ports.dispatch.stopForced(worker.threadId).pipe(Effect.ignore);
+      if (handoff !== null) {
+        yield* Effect.logWarning("epic.runner.resume-handed-over", {
+          runId,
+          iterationIndex: worker.iterationIndex,
+          issueId: worker.issueId,
+          decision: refusal._tag,
+          failureReason: handoff.reason,
+          worktreePath: handoff.workspace.worktreePath,
+          detail: refusal.detail,
+        });
+        return {
+          _tag: "handoff",
+          selection: {
+            _tag: "pinned",
+            issueId: worker.issueId,
+            workspace: handoff.workspace,
+          },
+        } as const;
+      }
       yield* ports.backlog.releaseClaimedChild(input.cwd, worker.issueId);
       yield* Effect.logWarning("epic.runner.resume-abandoned", {
         runId,
@@ -630,10 +721,13 @@ export const runParallelEpicLoop = (
         detail: refusal.detail,
       });
       return {
-        _tag: "resume-abandoned",
-        providerTurnDispatched: false,
-        issueId: worker.issueId,
-        iterationIndex: worker.iterationIndex,
+        _tag: "released",
+        result: {
+          _tag: "resume-abandoned",
+          providerTurnDispatched: false,
+          issueId: worker.issueId,
+          iterationIndex: worker.iterationIndex,
+        },
       } as const;
     });
 
@@ -657,6 +751,29 @@ export const runParallelEpicLoop = (
   }): Effect.Effect<RunIterationResult, EpicRunnerError> => {
     let releaseContext: { readonly workspace: IterationWorkspace } | null = null;
     let releaseError: EpicRunnerError | null = null;
+    /**
+     * Give up on continuing this iteration, and run whatever comes next in
+     * this same fiber so the child never loses its pool slot.
+     *
+     * A handoff re-enters `runIteration` with the pinned selection. The
+     * worktree goes with it, so this invocation drops its release duty first:
+     * releasing it here would delete the very tree the new iteration is being
+     * given.
+     */
+    const refuseResume = (
+      worker: ResumedWorker,
+      refusal: ResumeRefusalDecision,
+    ): Effect.Effect<RunIterationResult, EpicRunnerError> =>
+      Effect.gen(function* () {
+        const decision = yield* abandonResume({
+          worker,
+          refusal,
+          workspace: releaseContext?.workspace ?? null,
+        });
+        if (decision._tag === "released") return decision.result;
+        releaseContext = null;
+        return yield* runIteration({ ...args, selection: decision.selection });
+      });
     return Effect.gen(function* () {
       const run = args.run;
       const selection = args.selection;
@@ -735,6 +852,10 @@ export const runParallelEpicLoop = (
       }
 
       const resumedWorker = selection._tag === "resume" ? selection.worker : null;
+      // A pinned iteration is a fresh iteration in every respect but two: the
+      // child comes from the refused resume rather than the frontier, and the
+      // worktree is already open.
+      const pinned = selection._tag === "pinned" ? selection : null;
       const issueId = selection._tag === "resume" ? selection.worker.issueId : selection.issueId;
       const issueEvidenceBefore = yield* ports.backlog.issueEvidence(input.cwd, issueId);
       // Flag this worker to the pool loop before it can possibly touch the
@@ -749,13 +870,17 @@ export const runParallelEpicLoop = (
       // never provisions. `acquire` would refuse the leftover worktree, and
       // provisioning a second one would strand the commits in the first.
       //
-      // This runs BEFORE the capability check on purpose. The shared fallback
-      // has to release the leftover worktree — otherwise the fresh dispatch
-      // that follows it refuses to provision over what is still on disk — and
-      // the release finalizer needs this record to do it. `resumeIteration`
-      // is still never called on a harness that declared `unsupported`.
+      // This runs BEFORE every refusal on purpose. Both endings need the
+      // record: a handoff passes it to the pinned iteration, and a release
+      // needs it to clear the leftover worktree off disk. `resumeIteration` is
+      // still never called on a harness that declared `unsupported`.
       let workspace: IterationWorkspace;
-      if (resumedWorker === null) {
+      if (pinned !== null) {
+        // Already adopted by the resume this iteration replaces, and handed
+        // straight over. Re-adopting would only re-prove what was true a
+        // moment ago, and `acquire` would refuse the open worktree outright.
+        workspace = pinned.workspace;
+      } else if (resumedWorker === null) {
         workspace = yield* ports.workspace.acquire(args.runCtx, {
           issueId,
           issueTitle: issueEvidenceBefore.title?.trim() || issueId,
@@ -779,9 +904,9 @@ export const runParallelEpicLoop = (
             ),
           );
         if (adopted._tag === "refused") {
-          return yield* abandonResume({
-            worker: resumedWorker,
-            refusal: { _tag: "workspace-missing", detail: adopted.detail },
+          return yield* refuseResume(resumedWorker, {
+            _tag: "workspace-missing",
+            detail: adopted.detail,
           });
         }
         workspace = adopted.workspace;
@@ -789,31 +914,30 @@ export const runParallelEpicLoop = (
       releaseContext = { workspace };
 
       if (resumedWorker !== null) {
+        // The claim may not have survived the restart: the run's own finalizer
+        // reopens every child it stranded. Re-take it FIRST, before any
+        // refusal is decided, because every refusal but this one now hands the
+        // child to a new iteration in the same worktree — and that iteration
+        // must not work a child the backlog still reads as unclaimed.
+        //
+        // A closed child stops here instead: the work is done, and neither
+        // continuing the session nor handing the tree on would do anything but
+        // redo it.
+        const claim = yield* ports.backlog.claimChild(input.cwd, issueId);
+        if (claim === "closed") {
+          return yield* refuseResume(resumedWorker, {
+            _tag: "child-closed",
+            detail: `${issueId} closed while the run was down`,
+          });
+        }
         // The typed capability, read before anything is asked of the harness.
         // A harness that persists no artifact until the child closes has
         // nothing to adopt, and saying so is the honest answer — starting a
         // blank session that looks resumed is not.
         if (ports.dispatch.capabilities.lifecycle.resume === "unsupported") {
-          return yield* abandonResume({
-            worker: resumedWorker,
-            refusal: {
-              _tag: "capability",
-              detail: "this harness cannot adopt an iteration whose handle died",
-            },
-          });
-        }
-        // The claim may not have survived the restart: the run's own finalizer
-        // reopens every child it stranded. Re-take it, and stop here when the
-        // child is already closed — that work is done, and continuing the
-        // session would only redo it.
-        const claim = yield* ports.backlog.claimChild(input.cwd, issueId);
-        if (claim === "closed") {
-          return yield* abandonResume({
-            worker: resumedWorker,
-            refusal: {
-              _tag: "child-closed",
-              detail: `${issueId} closed while the run was down`,
-            },
+          return yield* refuseResume(resumedWorker, {
+            _tag: "capability",
+            detail: "this harness cannot adopt an iteration whose handle died",
           });
         }
       }
@@ -828,10 +952,11 @@ export const runParallelEpicLoop = (
         })),
       );
       const initialWorktreeFingerprint = yield* ports.vcs.worktreeFingerprint(workspace.cwd);
-      // Only a resumed worker is shown its tree: a fresh iteration starts on a
-      // clean one and has nothing to be told about.
-      const resumeEvidence =
-        resumedWorker === null ? null : yield* ports.vcs.worktreeEvidence(workspace.cwd);
+      // Only a restart-recovery iteration is shown its tree: an ordinary
+      // iteration starts on a clean one and has nothing to be told about.
+      // Both the resumed worker and the stranger taking over from it need it.
+      const restartEvidence =
+        selection._tag === "child" ? null : yield* ports.vcs.worktreeEvidence(workspace.cwd);
       const commentsBefore = issueEvidenceBefore.commentCount;
       const isResearchChild = yield* ports.backlog.issueIsResearch(
         input.cwd,
@@ -907,8 +1032,13 @@ export const runParallelEpicLoop = (
         finishedAt: null,
       });
 
-      // The setup script already ran in this worktree before the restart.
-      if (resumedWorker === null && workspace.branch !== null && workspace.worktreePath !== null) {
+      // The setup script already ran in this worktree before the restart, for
+      // the agent that is being taken over from as much as for a resume.
+      if (
+        selection._tag === "child" &&
+        workspace.branch !== null &&
+        workspace.worktreePath !== null
+      ) {
         yield* ports.dispatch.prepareIteration({
           threadId,
           projectId: run.projectId,
@@ -943,20 +1073,32 @@ export const runParallelEpicLoop = (
           // A resume continues the thread that already holds the epic context
           // and the orientation card, so its turn repeats neither. It says the
           // one thing the agent cannot know: the process died under it.
+          //
+          // A pinned iteration is the opposite case: a brand new thread that
+          // knows nothing, so it gets the whole ordinary prompt with the
+          // handover — and the same tree snapshot — spliced ahead of it.
           const prompt =
-            resumedWorker === null
-              ? assembleIterationPrompt({
-                  basePrompt: current.prompt,
+            resumedWorker !== null
+              ? EPIC_RUN_RESTART_RESUME_PROMPT({
+                  issueId,
+                  branch: workspace.branch,
+                  worktreePath: workspace.worktreePath,
+                  evidence: restartEvidence,
+                })
+              : assembleIterationPrompt({
+                  basePrompt:
+                    pinned === null
+                      ? current.prompt
+                      : `${EPIC_RUN_RESTART_HANDOFF_PROMPT({
+                          issueId,
+                          branch: workspace.branch,
+                          worktreePath: workspace.worktreePath,
+                          evidence: restartEvidence,
+                        })}\n\n${current.prompt}`,
                   issueId,
                   epicContext,
                   orientationCard,
                   siblingRule: workspace.siblingRule,
-                })
-              : EPIC_RUN_RESTART_RESUME_PROMPT({
-                  issueId,
-                  branch: workspace.branch,
-                  worktreePath: workspace.worktreePath,
-                  evidence: resumeEvidence,
                 });
           if (resumedWorker !== null) {
             // Continuity is proved before the run row moves, so a refusal
@@ -1041,10 +1183,7 @@ export const runParallelEpicLoop = (
         return { _tag: "dispatch-skipped", providerTurnDispatched: false } as const;
       }
       if (dispatched._tag === "refused") {
-        return yield* abandonResume({
-          worker: dispatched.worker,
-          refusal: dispatched.refusal,
-        });
+        return yield* refuseResume(dispatched.worker, dispatched.refusal);
       }
       if (resumedWorker !== null) {
         // Every resume decision is on the record, not just the ones that lost

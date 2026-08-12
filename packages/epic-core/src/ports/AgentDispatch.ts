@@ -56,7 +56,14 @@ export type IterationResumeRefusal =
       readonly _tag: "not-continued";
       readonly origin: "started-fresh" | "forked" | "unknown";
       readonly detail: string;
-    };
+    }
+  /**
+   * The adapter accepted the resume and then errored on it. Still a refusal
+   * and not a failure: the work is untouched, the agent heard nothing, and
+   * the caller's answer is the same as for every other arm — start this child
+   * fresh in the tree the dead one left.
+   */
+  | { readonly _tag: "failed"; readonly detail: string };
 
 /**
  * The outcome of adopting an iteration. Both this union and

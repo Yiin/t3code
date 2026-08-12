@@ -697,7 +697,9 @@ export const PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND = "provider.session.r
  * at all (`capability`), nothing durable is left to resume from
  * (`no-durable-state`), or the provider started a session that is not a
  * continuation (`not-continued`). `failed` is the fault arm — the resume broke
- * on something that says nothing about whether resuming is possible.
+ * on something that says nothing about whether resuming is possible. It is
+ * still not a reason to lose work: the agent heard nothing either way, so the
+ * epic runner recovers from it exactly as it does from a refusal.
  *
  * The union is open: a `forked` outcome is an added arm, never a changed one.
  */

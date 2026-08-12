@@ -263,6 +263,7 @@ const fixture = (input: {
   const claimChildCalls: string[] = [];
   const stopAbandonedCalls: string[] = [];
   const stopForcedCalls: string[] = [];
+  const interruptForcedCalls: string[] = [];
   const releasedClaims: string[] = [];
   const enqueuedMerges: Array<Parameters<MergeDrainShape["enqueueMerge"]>[0]> = [];
   const parkedBranchReads: string[] = [];
@@ -377,6 +378,7 @@ const fixture = (input: {
     releaseClaimedChild: (_cwd, issueId) =>
       Effect.sync(() => {
         releasedClaims.push(issueId);
+        ordering.push("backlog:release");
         if (child.status === "in_progress") {
           child = { ...child, status: "open" };
           return true;
@@ -552,6 +554,11 @@ const fixture = (input: {
         stopAbandonedCalls.push(threadId);
         ordering.push("dispatch:stopAbandoned");
       }),
+    interruptForced: (threadId) =>
+      Effect.sync(() => {
+        interruptForcedCalls.push(threadId);
+        ordering.push("dispatch:interruptForced");
+      }),
     stopForced: (threadId) =>
       Effect.sync(() => {
         stopForcedCalls.push(threadId);
@@ -656,6 +663,7 @@ const fixture = (input: {
     claimChildCalls,
     stopAbandonedCalls,
     stopForcedCalls,
+    interruptForcedCalls,
     releasedClaims,
     enqueuedMerges,
     parkedBranchReads,
@@ -1211,6 +1219,7 @@ it.live(
             };
           }),
         stopAbandoned: () => Effect.void,
+        interruptForced: () => Effect.void,
         stopForced: () => Effect.void,
       };
 
@@ -1639,23 +1648,34 @@ it.live("never asks a harness that declares resume unsupported", () =>
     yield* test.run;
 
     assert.deepEqual(test.resumeCalls, []);
-    // The refusal is decided from the capability alone, before the claim read.
-    assert.deepEqual(test.claimChildCalls, []);
+    // The claim is re-taken before the capability is even read: every refusal
+    // but a closed child hands this child straight on to a new iteration.
+    assert.deepEqual(test.claimChildCalls, ["epic.1"]);
 
-    // The interrupted row is abandoned and its dead session stopped.
+    // The interrupted row is abandoned, and its dead thread is interrupted
+    // before its session is stopped.
     assert.equal(test.iterations[0]?.iterationIndex, 3);
     assert.equal(test.iterations[0]?.turnStatus, "abandoned");
-    assert.equal(test.iterations[0]?.failureReason, "server-restart");
+    assert.equal(test.iterations[0]?.failureReason, "infra:resume-unsupported");
+    assert.deepEqual(test.interruptForcedCalls, [worker.threadId]);
     assert.deepEqual(test.stopForcedCalls, [worker.threadId]);
-    assert.include(test.releasedClaims, "epic.1");
+
+    // The child and its worktree are handed over, never given back: the only
+    // release is the terminal sweep, long after the handover dispatched.
+    assert.deepEqual(test.acquireCalls, []);
+    assert.isBelow(
+      test.ordering.indexOf("dispatch:beginTurn"),
+      test.ordering.indexOf("backlog:release"),
+    );
 
     const decisions = resumeDecisions(test.events);
     assert.equal(decisions.length, 1);
     assert.deepInclude(decisions[0], { decision: "capability", origin: null, iterationIndex: 3 });
 
-    // The child is redispatched fresh through the ordinary tick.
-    assert.deepEqual(test.acquireCalls, ["epic.1"]);
+    // One new iteration, on a new thread, in that same worktree.
     assert.equal(test.beginTurnCalls.length, 1);
+    assert.equal(test.beginTurnCalls[0]?.workspace.worktreePath, "/wt/epic.1");
+    assert.equal(test.beginTurnCalls[0]?.workspace.branch, "epic/epic.1");
     assert.equal(test.iterations[1]?.iterationIndex, 4);
     assert.equal(test.iterations[1]?.turnStatus, "completed");
     assert.equal(test.runRecord().status, "done");
@@ -1681,17 +1701,89 @@ it.live("takes the same fallback when the harness refuses to continue the sessio
 
     assert.equal(test.resumeCalls.length, 1);
     assert.equal(test.iterations[0]?.turnStatus, "abandoned");
-    assert.equal(test.iterations[0]?.failureReason, "server-restart");
-    assert.include(test.releasedClaims, "epic.1");
+    assert.equal(test.iterations[0]?.failureReason, "infra:resume-blocked");
+    assert.isBelow(
+      test.ordering.indexOf("dispatch:beginTurn"),
+      test.ordering.indexOf("backlog:release"),
+    );
 
     const decisions = resumeDecisions(test.events);
     assert.equal(decisions.length, 1);
     assert.deepInclude(decisions[0], { decision: "not-continued", origin: "started-fresh" });
 
-    // Identical recovery to the unsupported case: one fresh dispatch.
-    assert.deepEqual(test.acquireCalls, ["epic.1"]);
+    // Identical recovery to the unsupported case: one pinned handover.
+    assert.deepEqual(test.acquireCalls, []);
+    assert.equal(test.iterations[1]?.iterationIndex, 4);
     assert.equal(test.iterations[1]?.turnStatus, "completed");
     assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("hands the worktree on when the adapter errors on a resume it accepted", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      claimChildResult: "already-claimed",
+      resumeRefusals: [{ _tag: "failed", detail: "the adapter lost the session mid-load" }],
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    // The old thread was asked exactly once and never prompted again.
+    assert.equal(test.resumeCalls.length, 1);
+    assert.equal(test.iterations[0]?.failureReason, "infra:resume-failed");
+    assert.deepInclude(resumeDecisions(test.events)[0], { decision: "failed" });
+    assert.deepEqual(test.acquireCalls, []);
+    assert.equal(test.beginTurnCalls.length, 1);
+    assert.equal(test.runRecord().status, "done");
+  }),
+);
+
+it.live("tells the taking-over agent whose changes it inherited", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      claimChildResult: "already-claimed",
+      resumeCapability: "unsupported",
+      worktreeEvidence: "$ git status --porcelain=v1\n M src/half-done.ts",
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    // Evidence is read from the inherited worktree, not the run checkout.
+    assert.deepEqual(test.evidenceCwds, ["/wt/epic.1"]);
+
+    const prompt = test.beginTurnCalls[0]?.prompt ?? "";
+    assert.include(prompt, "its session could not be continued");
+    assert.include(prompt, "`epic.1`");
+    assert.include(prompt, "`epic/epic.1`");
+    assert.include(prompt, "`/wt/epic.1`");
+    assert.include(prompt, " M src/half-done.ts");
+    // Unlike a resume, this thread has no history, so it gets the whole thing.
+    assert.include(prompt, "Cook exactly `epic.1` this iteration.");
+    assert.include(prompt, "## Epic context (resolved at dispatch)");
+  }),
+);
+
+it.live("charges the pinned handover exactly one dispatch", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      claimChildResult: "already-claimed",
+      resumeCapability: "unsupported",
+      attempts: [{ commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    // The interrupted row was paid for before the restart; the handover is a
+    // genuinely new provider turn, so it pays once and no more.
+    const run = test.runRecord();
+    assert.equal(run.iterationsDispatched, 1);
+    assert.equal(run.iterationsCompleted, 1);
+    assert.equal(test.iterations.length, 2);
   }),
 );
 
@@ -1757,7 +1849,7 @@ it.live("decides two interrupted rows of one run independently", () =>
     const rows = new Map(test.iterations.map((row) => [row.iterationIndex, row]));
     assert.equal(rows.get(3)?.turnStatus, "completed");
     assert.equal(rows.get(4)?.turnStatus, "abandoned");
-    assert.equal(rows.get(4)?.failureReason, "server-restart");
+    assert.equal(rows.get(4)?.failureReason, "infra:resume-blocked");
 
     const decisions = resumeDecisions(test.events);
     assert.equal(decisions.length, 2);

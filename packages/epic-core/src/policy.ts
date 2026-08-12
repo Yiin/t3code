@@ -356,6 +356,47 @@ Run \`git status\` and \`git diff\` yourself before you change anything, so you 
 Then finish the child end-to-end per the instructions you were given, and end the turn with the RALPH_MSG line, or RALPH_DONE if no work remains.`;
 };
 
+/**
+ * The preamble for the iteration that takes over a worktree whose own session
+ * could NOT be resumed.
+ *
+ * The difference from {@link EPIC_RUN_RESTART_RESUME_PROMPT} is whose work the
+ * tree holds. A resumed worker reads its own conversation above the prompt, so
+ * it is told "this is you". This agent has an empty thread and inherits a
+ * stranger's half-finished tree, so it is told to review the changes and
+ * decide what to keep. The caller splices this ahead of the ordinary
+ * iteration instructions, because the new thread has no history at all.
+ */
+export const EPIC_RUN_RESTART_HANDOFF_PROMPT = (input: {
+  readonly issueId: string;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  /** Bounded `git status` / `git diff --stat` output, or `null` when unreadable. */
+  readonly evidence: string | null;
+}): string => {
+  const where =
+    input.worktreePath === null
+      ? "You are in the run's main checkout"
+      : `Your worktree is \`${input.worktreePath}\``;
+  const branch =
+    input.branch === null
+      ? "you are on the run's base branch"
+      : `your branch is \`${input.branch}\``;
+  const evidence =
+    input.evidence === null
+      ? "The git probes for this worktree failed, so there is no snapshot below. Do not read that as a clean tree."
+      : `What that agent left behind, read at handover:\n\n${input.evidence}`;
+  return `The t3code server restarted while another agent was working on \`${input.issueId}\`, and its session could not be continued. You are a new agent taking that work over. The conversation above is not that agent's; you cannot see what it was doing, only what it left on disk.
+
+You now own \`${input.issueId}\`. ${where}, and ${branch}. The uncommitted changes here are that agent's work, not yours.
+
+Nothing it started is proven to have finished: not a build, not a test run, not a commit, not a push, not a \`bd\` write. Assume none of it landed until you check.
+
+${evidence}
+
+Run \`git status\` and \`git diff\` yourself first. Review those changes, decide what to keep and what to throw away, then finish the child end-to-end from there.`;
+};
+
 /** How long the runner waits for a still-running subagent before grace ends. */
 export const DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS = 15 * 60 * 1_000;
 export const DEFAULT_MAX_GRACE_CONTINUATIONS = 10;
@@ -392,7 +433,15 @@ export interface PersistedFailureReasonInput {
   readonly outcome: EpicIterationOutcome;
 }
 
-/** Build the complete persisted failure reason in its required override order. */
+/**
+ * Build the complete persisted failure reason in its required override order.
+ *
+ * The resume family (`EPIC_RUN_FAILURE_RESUME_UNSUPPORTED` / `_BLOCKED` /
+ * `_FAILED`) never comes through here. The restart path assigns those directly
+ * to the row it could not continue, because no turn ever ran and so there is
+ * no `EpicIterationOutcome` to classify. Do not invent an
+ * `EpicIterationOutcomeKind` for them.
+ */
 export const persistedFailureReason = (input: PersistedFailureReasonInput): string | null => {
   if (input.iterationStatus === "completed") {
     return null;

@@ -8,8 +8,8 @@
  * `startIteration`, whose `IterationHandle` is exactly what the pool loop
  * expects. Process lifetime stays with the terminal dispatch — its
  * `timeoutSeconds`/`stopGraceSeconds` enforcement and the handle's
- * `interrupt`/`release` own every stop — so `stopAbandoned` and `stopForced`
- * have nothing to clean up.
+ * `interrupt`/`release` own every stop — so `interruptForced`, `stopAbandoned`
+ * and `stopForced` have nothing to clean up.
  */
 import * as Effect from "effect/Effect";
 
@@ -64,6 +64,7 @@ export const makeTerminalPoolDispatch = (deps: {
         detail: `The terminal harness cannot resume iteration ${String(input.iterationIndex)} at ref '${input.ref}': it declares lifecycle.resume "unsupported".`,
       },
     }),
+  interruptForced: () => Effect.void,
   stopAbandoned: () => Effect.void,
   stopForced: () => Effect.void,
 });

@@ -6203,6 +6203,70 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  // A refusal the harness reaches BEFORE it prompts leaves the dead agent's
+  // uncommitted work sitting in a worktree nobody owns. The child keeps its
+  // claim and its tree, and a new thread inherits both.
+  it.live("hands a refused resume's worktree to a pinned fresh iteration", () => {
+    const runId = EpicRunId.make("run-restart-resume-handoff");
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-1" }],
+      initialHead: "head-1",
+      // Nothing on the frontier: the pinned iteration must find its child
+      // without `bd ready`, because a still-claimed child is never listed.
+      readyChildren: [],
+      resumeOutcomes: {
+        [`epic-run-${runId}-0`]: { _tag: "no-durable-state", detail: "no cursor persisted" },
+      },
+      seedRuns: [
+        interruptedRun({
+          runId,
+          cwd: "/tmp/epic-runner-repo",
+          workers: 1,
+          overrides: sequentialOverrides,
+        }),
+      ],
+      seedIterations: [
+        interruptedRow({ runId, iterationIndex: 0, worktreePath: null, resumeCount: 0 }),
+      ],
+      childStatuses: { "child-0": "in_progress" },
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.start();
+      yield* waitFor(() => harness.commandsOfType("thread.create").length === 1);
+
+      // The claim was handed over, not given back, before the new thread ran.
+      assert.lengthOf(unclaimRequests(harness, "child-0"), 0);
+      assert.strictEqual(harness.childStatus("child-0"), "in_progress");
+
+      yield* waitFor(() => harness.store.runs.get(runId)?.status === "done");
+
+      // Asked once, refused, and never prompted on that thread again.
+      assert.lengthOf(harness.commandsOfType("thread.session.resume"), 1);
+      assert.strictEqual(harness.store.iterations[0]?.turnStatus, "abandoned");
+      assert.strictEqual(harness.store.iterations[0]?.failureReason, "infra:resume-blocked");
+      // The dead thread is interrupted as well as stopped: it still projects
+      // the turn the previous process left running.
+      assert.isAbove(
+        firstIndexOf(harness, "thread.turn.interrupt", ThreadId.make(`epic-run-${runId}-0`)),
+        -1,
+      );
+
+      // Exactly one new iteration, for the SAME child, on its own thread.
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.create").map((command) => command.threadId),
+        [`epic-run-${runId}-1`],
+      );
+      assert.strictEqual(harness.store.iterations.length, 2);
+      assert.strictEqual(harness.store.iterations[1]?.iterationIndex, 1);
+      assert.strictEqual(harness.store.iterations[1]?.issueId, "child-0");
+
+      // It pays for itself: a new provider turn is a charged dispatch.
+      assert.strictEqual(harness.store.runs.get(runId)?.iterationsDispatched, 2);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   // The budget is per row. A resumed row that finishes hands the next
   // iteration a full budget, because the crash loop it guards against is one
   // row being picked back up over and over.

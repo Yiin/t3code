@@ -15,6 +15,9 @@
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EPIC_RUN_FAILURE_RESUME_BLOCKED,
+  EPIC_RUN_FAILURE_RESUME_FAILED,
+  EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
   type EpicRun as TransportEpicRun,
   EpicRunId,
   MessageId,
@@ -127,6 +130,9 @@ const MAX_RESUMES_PER_ITERATION = 1;
 const RESTART_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "server-restart",
   "server-restart-unresumable",
+  EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
+  EPIC_RUN_FAILURE_RESUME_BLOCKED,
+  EPIC_RUN_FAILURE_RESUME_FAILED,
 ]);
 /**
  * Server runs have no on-disk run directory; this fixed discriminator keeps
