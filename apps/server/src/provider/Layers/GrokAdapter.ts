@@ -1,4 +1,5 @@
 import {
+  attachmentCapabilityForDriver,
   ApprovalRequestId,
   type GrokSettings,
   EventId,
@@ -68,11 +69,21 @@ import {
   XAiAskUserQuestionRequest,
 } from "../acp/XAiAcpExtension.ts";
 import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
+import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("grok");
+
+/**
+ * Attachment and session capabilities this adapter declares. Sourced from the
+ * shared contracts table so the server and the clients cannot drift.
+ */
+export const GROK_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
+  sessionModelSwitch: "in-session",
+  attachments: attachmentCapabilityForDriver(PROVIDER),
+};
 const GROK_RESUME_VERSION = 1 as const;
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
@@ -1455,7 +1466,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: GROK_ADAPTER_CAPABILITIES,
       startSession,
       sendTurn,
       interruptTurn,

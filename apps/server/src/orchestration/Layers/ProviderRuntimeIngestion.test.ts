@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   decodeSubagentTranscriptActivityPayload,
   OrchestrationReadModel,
   ProviderDriverKind,
@@ -120,7 +121,11 @@ function createProviderServiceHarness() {
     listSessions: () => Effect.succeed([...runtimeSessions]),
     hasLiveSession: (threadId) =>
       Effect.succeed(runtimeSessions.some((session) => session.threadId === threadId)),
-    getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getCapabilities: () =>
+      Effect.succeed({
+        sessionModelSwitch: "in-session",
+        attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
+      }),
     getInstanceInfo: (instanceId) => {
       const driverKind = ProviderDriverKind.make(String(instanceId));
       return Effect.succeed({

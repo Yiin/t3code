@@ -5,6 +5,7 @@
  */
 
 import {
+  attachmentCapabilityForDriver,
   ApprovalRequestId,
   type KimiSettings,
   EventId,
@@ -76,10 +77,20 @@ import {
   trackKimiSubagentToolCall,
 } from "../acp/KimiAcpSupport.ts";
 import { type KimiAdapterShape } from "../Services/KimiAdapter.ts";
+import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("kimi");
+
+/**
+ * Attachment and session capabilities this adapter declares. Sourced from the
+ * shared contracts table so the server and the clients cannot drift.
+ */
+export const KIMI_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
+  sessionModelSwitch: "in-session",
+  attachments: attachmentCapabilityForDriver(PROVIDER),
+};
 const KIMI_RESUME_VERSION = 1 as const;
 const ACP_PLAN_MODE_ALIASES = ["plan", "architect"];
 const ACP_IMPLEMENT_MODE_ALIASES = ["code", "agent", "default", "chat", "implement"];
@@ -1081,7 +1092,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: KIMI_ADAPTER_CAPABILITIES,
       startSession,
       sendTurn,
       interruptTurn,

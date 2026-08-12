@@ -166,3 +166,114 @@ export type ProviderInstanceConfigMap = typeof ProviderInstanceConfigMap.Type;
  */
 export const defaultInstanceIdForDriver = (driver: ProviderDriverKind): ProviderInstanceId =>
   ProviderInstanceId.make(driver);
+
+/**
+ * How a driver takes one class of attachment.
+ *
+ *   - `native`: the driver's own protocol carries the attachment, so the
+ *     model sees its content without touching the disk.
+ *   - `path-reference`: the driver gets the absolute path plus an instruction
+ *     to read it. The model still reaches the content, one tool call later.
+ *   - `unsupported`: the driver cannot take the attachment at all. A composer
+ *     should refuse the file before the user uploads it.
+ */
+export const ProviderAttachmentSupport = Schema.Literals([
+  "native",
+  "path-reference",
+  "unsupported",
+]);
+export type ProviderAttachmentSupport = typeof ProviderAttachmentSupport.Type;
+
+/**
+ * What one driver can do with the two attachment classes a chat can carry.
+ *
+ * A mime list names the types handled at the declared support level; `null`
+ * means every type of that class is handled there. A type outside a non-null
+ * list is not refused. The driver's encoder falls back to whatever it can do
+ * for that type. Only `unsupported` means "refuse it".
+ */
+export interface ProviderAttachmentCapability {
+  readonly images: ProviderAttachmentSupport;
+  /** `null` = any `image/*`. */
+  readonly imageMimeTypes: ReadonlyArray<string> | null;
+  readonly files: ProviderAttachmentSupport;
+  /** `null` = any mime type. */
+  readonly fileMimeTypes: ReadonlyArray<string> | null;
+}
+
+/**
+ * Conservative capability for a driver this build does not know about (a fork's
+ * driver, or one from a newer branch). Images stay native because every driver
+ * this product has ever shipped takes them; files are refused because an
+ * unknown protocol has no path we can trust.
+ */
+export const UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY: ProviderAttachmentCapability = {
+  images: "native",
+  imageMimeTypes: null,
+  files: "unsupported",
+  fileMimeTypes: null,
+};
+
+/** Image types the Claude Agent SDK carries as an image block. */
+const CLAUDE_AGENT_IMAGE_MIME_TYPES: ReadonlyArray<string> = [
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+];
+
+/**
+ * File types the Claude Agent SDK carries as a document block: PDF through a
+ * base64 source, plain text through a text source. Anything else falls back to
+ * the absolute path.
+ */
+const CLAUDE_AGENT_FILE_MIME_TYPES: ReadonlyArray<string> = ["application/pdf", "text/plain"];
+
+/**
+ * Per-driver attachment support for the built-in drivers.
+ *
+ * Seeded from the six-provider probe in `t3code-vzb.33`, which ran live turns
+ * against Claude, Codex, Grok and Kimi and read the official sources for Cursor
+ * and Prime. Keep this table and each adapter's declared
+ * `capabilities.attachments` equal; a server test asserts they match.
+ *
+ * This is static data and safe to import in browser code. It says what a
+ * driver's protocol can express, never whether the driver is installed.
+ */
+const BUILT_IN_DRIVER_ATTACHMENT_CAPABILITIES: Readonly<
+  Record<string, ProviderAttachmentCapability>
+> = {
+  // The app-server input union has no file member, so a file rides as text
+  // naming the absolute path. Images have their own member.
+  codex: { images: "native", imageMimeTypes: null, files: "path-reference", fileMimeTypes: null },
+  claudeAgent: {
+    images: "native",
+    imageMimeTypes: CLAUDE_AGENT_IMAGE_MIME_TYPES,
+    files: "native",
+    fileMimeTypes: CLAUDE_AGENT_FILE_MIME_TYPES,
+  },
+  // Cursor drops the content of any resource outside the workspace, so a file
+  // reaches it only as a path into a copy materialized under the workspace.
+  cursor: { images: "native", imageMimeTypes: null, files: "path-reference", fileMimeTypes: null },
+  // Grok and Kimi both read an ACP `resource_link` to an absolute path.
+  grok: { images: "native", imageMimeTypes: null, files: "native", fileMimeTypes: null },
+  kimi: { images: "native", imageMimeTypes: null, files: "native", fileMimeTypes: null },
+  // OpenCode already sends a `file` part carrying mime, filename and url.
+  opencode: { images: "native", imageMimeTypes: null, files: "native", fileMimeTypes: null },
+  // Prime's kernel reads the absolute path once the runtime mode allows it.
+  primeAgent: {
+    images: "native",
+    imageMimeTypes: null,
+    files: "path-reference",
+    fileMimeTypes: null,
+  },
+};
+
+/**
+ * Attachment support for a driver. Unknown drivers get
+ * {@link UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY}.
+ */
+export const attachmentCapabilityForDriver = (
+  driver: ProviderDriverKind,
+): ProviderAttachmentCapability =>
+  BUILT_IN_DRIVER_ATTACHMENT_CAPABILITIES[driver] ?? UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY;

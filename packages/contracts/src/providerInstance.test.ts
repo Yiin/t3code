@@ -2,13 +2,16 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
+  attachmentCapabilityForDriver,
   BUILT_IN_PROVIDER_DRIVER_KINDS,
   PRIME_AGENT_DRIVER_KIND,
+  ProviderAttachmentSupport,
   ProviderDriverKind,
   ProviderInstanceConfig,
   ProviderInstanceConfigMap,
   ProviderInstanceId,
   ProviderInstanceRef,
+  UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
 } from "./providerInstance.ts";
 
 describe("built-in provider catalog", () => {
@@ -214,5 +217,57 @@ describe("ProviderInstanceConfigMap", () => {
         "1codex": { driver: "codex" },
       }),
     ).toThrow();
+  });
+});
+
+describe("attachmentCapabilityForDriver", () => {
+  const isSupport = Schema.is(ProviderAttachmentSupport);
+
+  it.each([...BUILT_IN_PROVIDER_DRIVER_KINDS])("declares %s explicitly", (driver) => {
+    const capability = attachmentCapabilityForDriver(driver);
+    expect(capability).not.toBe(UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY);
+    expect(isSupport(capability.images)).toBe(true);
+    expect(isSupport(capability.files)).toBe(true);
+  });
+
+  it.each([...BUILT_IN_PROVIDER_DRIVER_KINDS])("gives %s a valid mime list or null", (driver) => {
+    const { imageMimeTypes, fileMimeTypes } = attachmentCapabilityForDriver(driver);
+    for (const list of [imageMimeTypes, fileMimeTypes]) {
+      if (list === null) continue;
+      expect(list.length).toBeGreaterThan(0);
+      for (const mimeType of list) {
+        expect(mimeType).toMatch(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i);
+      }
+    }
+  });
+
+  it("falls back to the conservative default for an unknown driver", () => {
+    expect(attachmentCapabilityForDriver(ProviderDriverKind.make("futureDriver"))).toBe(
+      UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
+    );
+  });
+
+  it("refuses files in the conservative default", () => {
+    expect(UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY.files).toBe("unsupported");
+    expect(UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY.fileMimeTypes).toBeNull();
+  });
+
+  it("limits Claude to the mime types its SDK blocks carry", () => {
+    const capability = attachmentCapabilityForDriver(ProviderDriverKind.make("claudeAgent"));
+    expect(capability.imageMimeTypes).toEqual([
+      "image/gif",
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+    ]);
+    expect(capability.fileMimeTypes).toEqual(["application/pdf", "text/plain"]);
+  });
+
+  it("routes files by path for the drivers whose protocol has no file member", () => {
+    for (const driver of ["codex", "cursor", "primeAgent"]) {
+      expect(attachmentCapabilityForDriver(ProviderDriverKind.make(driver)).files).toBe(
+        "path-reference",
+      );
+    }
   });
 });

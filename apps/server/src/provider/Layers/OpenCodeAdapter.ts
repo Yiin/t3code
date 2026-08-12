@@ -1,4 +1,5 @@
 import {
+  attachmentCapabilityForDriver,
   EventId,
   type OpenCodeSettings,
   ProviderDriverKind,
@@ -41,6 +42,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import {
   buildOpenCodePermissionRules,
   OpenCodeRuntime,
@@ -57,6 +59,15 @@ import {
 import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
+
+/**
+ * Attachment and session capabilities this adapter declares. Sourced from the
+ * shared contracts table so the server and the clients cannot drift.
+ */
+export const OPENCODE_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
+  sessionModelSwitch: "in-session",
+  attachments: attachmentCapabilityForDriver(PROVIDER),
+};
 
 /**
  * Version tag stamped into the OpenCode resume cursor. Bump if the cursor
@@ -1776,9 +1787,7 @@ export function makeOpenCodeAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: {
-        sessionModelSwitch: "in-session",
-      },
+      capabilities: OPENCODE_ADAPTER_CAPABILITIES,
       startSession,
       sendTurn,
       interruptTurn,

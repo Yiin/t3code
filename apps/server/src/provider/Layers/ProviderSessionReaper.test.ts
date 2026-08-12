@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   epicRunIterationThreadId,
@@ -253,7 +254,11 @@ describe("ProviderSessionReaper", () => {
       stopSession,
       listSessions: () => Effect.succeed([]),
       hasLiveSession,
-      getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+      getCapabilities: () =>
+        Effect.succeed({
+          sessionModelSwitch: "in-session",
+          attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
+        }),
       getInstanceInfo: (instanceId) => {
         const driverKind = ProviderDriverKind.make(String(instanceId));
         return Effect.succeed({
@@ -643,7 +648,11 @@ describe("ProviderSessionReaper", () => {
           stopSession,
           listSessions: () => Effect.succeed([]),
           hasLiveSession: () => Effect.succeed(false),
-          getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+          getCapabilities: () =>
+            Effect.succeed({
+              sessionModelSwitch: "in-session",
+              attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
+            }),
           getInstanceInfo: (instanceId) => {
             const driverKind = ProviderDriverKind.make(String(instanceId));
             return Effect.succeed({

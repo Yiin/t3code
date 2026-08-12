@@ -2,6 +2,7 @@
 import * as NodePath from "node:path";
 
 import {
+  attachmentCapabilityForDriver,
   EventId,
   type PrimeSettings,
   PRIME_AGENT_DRIVER_KIND,
@@ -38,6 +39,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import type { PrimeAdapterShape } from "../Services/PrimeAdapter.ts";
+import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import {
   initialPrimeEventMapperState,
   mapPrimeRpcEvent,
@@ -56,6 +58,15 @@ import {
 } from "../prime/PrimeRpcTransport.ts";
 
 const PROVIDER = PRIME_AGENT_DRIVER_KIND;
+
+/**
+ * Attachment and session capabilities this adapter declares. Sourced from the
+ * shared contracts table so the server and the clients cannot drift.
+ */
+export const PRIME_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
+  sessionModelSwitch: "in-session",
+  attachments: attachmentCapabilityForDriver(PROVIDER),
+};
 const CURSOR_VERSION = 1;
 const RESERVED_FLAGS = new Set([
   "--mode",
@@ -980,7 +991,7 @@ export const makePrimeAdapter = Effect.fn("makePrimeAdapter")(function* (
 
   return {
     provider: PROVIDER,
-    capabilities: { sessionModelSwitch: "in-session" },
+    capabilities: PRIME_ADAPTER_CAPABILITIES,
     startSession,
     sendTurn,
     interruptTurn,

@@ -22,6 +22,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import {
+  attachmentCapabilityForDriver,
   ApprovalRequestId,
   type CanonicalItemType,
   type CanonicalRequestType,
@@ -98,11 +99,21 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+
+/**
+ * Attachment and session capabilities this adapter declares. Sourced from the
+ * shared contracts table so the server and the clients cannot drift.
+ */
+export const CLAUDE_ADAPTER_CAPABILITIES: ProviderAdapterCapabilities = {
+  sessionModelSwitch: "in-session",
+  attachments: attachmentCapabilityForDriver(PROVIDER),
+};
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -4545,9 +4556,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   return {
     provider: PROVIDER,
-    capabilities: {
-      sessionModelSwitch: "in-session",
-    },
+    capabilities: CLAUDE_ADAPTER_CAPABILITIES,
     startSession,
     sendTurn,
     interruptTurn,

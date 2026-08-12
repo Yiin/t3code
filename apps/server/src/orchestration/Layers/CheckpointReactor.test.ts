@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 
 import {
+  UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   ProviderDriverKind,
   ProviderRuntimeEvent,
   ProviderSession,
@@ -128,7 +129,11 @@ function createProviderServiceHarness(
     listSessions,
     hasLiveSession: (threadId) =>
       Effect.succeed(hasSession && threadId === ThreadId.make("thread-1")),
-    getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getCapabilities: () =>
+      Effect.succeed({
+        sessionModelSwitch: "in-session",
+        attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
+      }),
     getInstanceInfo: (instanceId) =>
       Effect.succeed({
         instanceId,

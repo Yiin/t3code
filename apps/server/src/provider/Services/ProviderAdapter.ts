@@ -10,6 +10,7 @@
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
+  ProviderAttachmentCapability,
   ProviderDriverKind,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
@@ -30,6 +31,14 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+
+  /**
+   * Declares what the driver can do with an image or file attachment. Must
+   * equal `attachmentCapabilityForDriver(provider)` from the contracts table,
+   * which is the copy clients read. `Layers/adapterAttachmentCapabilities.test.ts`
+   * asserts the two never drift.
+   */
+  readonly attachments: ProviderAttachmentCapability;
 }
 
 export interface ProviderThreadTurnSnapshot {

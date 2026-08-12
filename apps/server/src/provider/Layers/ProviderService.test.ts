@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY } from "@t3tools/contracts";
 import type {
   ProviderApprovalDecision,
   ProviderRuntimeEvent,
@@ -246,6 +247,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
     },
     startSession,
     sendTurn,

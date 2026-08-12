@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   type ChatAttachment,
   ModelSelection,
   ProviderRuntimeEvent,
@@ -344,6 +345,7 @@ describe("ProviderCommandReactor", () => {
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
+          attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
