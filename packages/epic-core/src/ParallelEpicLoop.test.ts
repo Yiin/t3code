@@ -33,7 +33,7 @@ import {
 } from "./ParallelEpicLoop.ts";
 import { parseMergeFixTitle } from "./policy.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
-import type { IterationHandle } from "./ports/AgentDispatch.ts";
+import type { AgentDispatchCapabilities, IterationHandle } from "./ports/AgentDispatch.ts";
 import type { BacklogIssue } from "./ports/Backlog.ts";
 import type { RunEvent } from "./ports/RunEvents.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
@@ -63,6 +63,17 @@ type Attempt = {
   readonly dispatchFails?: boolean;
   /** Never settle, so the loop's iteration timeout fires. */
   readonly neverSettles?: boolean;
+};
+
+/** What the server pool dispatch declares, mirrored for the loop fakes. */
+const serverLikeCapabilities: AgentDispatchCapabilities = {
+  terminalSignal: "projection",
+  continuation: "same-thread",
+  subagentLiveness: "native",
+  finalMessage: "projection",
+  providerErrors: "session-and-assistant",
+  cost: "none",
+  lifecycle: { resume: "adopt-ref" },
 };
 
 const provider = (instanceId: string, driver: string, model: string): ServerProvider => ({
@@ -372,6 +383,7 @@ const fixture = (input: {
   };
 
   const dispatch: ParallelEpicLoopPorts["dispatch"] = {
+    capabilities: serverLikeCapabilities,
     createIteration: (create) =>
       Effect.sync(() => {
         createCalls.push(create);
@@ -398,14 +410,7 @@ const fixture = (input: {
       }
       const handle: IterationHandle = {
         ref: begin.threadId,
-        capabilities: {
-          terminalSignal: "projection",
-          continuation: "same-thread",
-          subagentLiveness: "native",
-          finalMessage: "projection",
-          providerErrors: "session-and-assistant",
-          cost: "none",
-        },
+        capabilities: serverLikeCapabilities,
         awaitSettled:
           attempt.neverSettles === true
             ? Effect.never
@@ -1062,6 +1067,7 @@ it.live(
       };
 
       const dispatch: ParallelEpicLoopPorts["dispatch"] = {
+        capabilities: serverLikeCapabilities,
         createIteration: () => Effect.void,
         prepareIteration: () => Effect.void,
         beginTurn: (begin) =>
@@ -1069,14 +1075,7 @@ it.live(
             const isFix = begin.workspace.worktreePath === `/wt/${fixChildId}`;
             return {
               ref: begin.threadId,
-              capabilities: {
-                terminalSignal: "projection",
-                continuation: "same-thread",
-                subagentLiveness: "native",
-                finalMessage: "projection",
-                providerErrors: "session-and-assistant",
-                cost: "none",
-              },
+              capabilities: serverLikeCapabilities,
               awaitSettled: isFix
                 ? Deferred.await(fixGate).pipe(
                     Effect.map(() => {

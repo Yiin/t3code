@@ -65,4 +65,17 @@ describe("epic runner turn origin", () => {
       }
     }),
   );
+
+  it.effect("declares adopt-ref resume before any iteration exists", () =>
+    Effect.gen(function* () {
+      const { dispatch, beginTurnInput } = harness();
+
+      // Restart reconciliation reads this with no handle in hand: an
+      // iteration's ref is its thread id, which outlives the process.
+      expect(dispatch.capabilities.lifecycle.resume).toBe("adopt-ref");
+
+      const handle = yield* dispatch.beginTurn(beginTurnInput);
+      expect(handle.capabilities).toEqual(dispatch.capabilities);
+    }),
+  );
 });

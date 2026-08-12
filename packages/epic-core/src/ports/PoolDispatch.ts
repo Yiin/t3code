@@ -13,10 +13,20 @@ import type * as Effect from "effect/Effect";
 
 import type { EpicRunnerDispatchError } from "../Errors.ts";
 import type { PoolTimings } from "../ParallelEpicLoop.ts";
-import type { AgentSelection, IterationHandle } from "./AgentDispatch.ts";
+import type {
+  AgentDispatchCapabilities,
+  AgentSelection,
+  IterationHandle,
+} from "./AgentDispatch.ts";
 import type { IterationWorkspace } from "./Workspace.ts";
 
 export interface PoolDispatchShape {
+  /**
+   * What this dispatch can do, readable with no handle. Restart
+   * reconciliation reads `capabilities.lifecycle.resume` before it holds an
+   * iteration, so the declaration cannot live on the handle alone.
+   */
+  readonly capabilities: AgentDispatchCapabilities;
   /** Create the iteration's thread. Runs inside the loop's transition. */
   readonly createIteration: (input: {
     readonly runId: EpicRunId;

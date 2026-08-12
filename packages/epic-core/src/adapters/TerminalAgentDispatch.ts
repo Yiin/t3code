@@ -231,6 +231,21 @@ const capabilities = (harness: TerminalHarness): IterationHandle["capabilities"]
       : harness === "opencode"
         ? "step-cost"
         : "none",
+  /**
+   * The terminal side cannot adopt an iteration whose coordinator died.
+   *
+   * The artifact file is written only inside the child close handler
+   * (`writeFile(artifactPath, ...)` below), the harness session id lives only
+   * in a closure variable that the same handler reads, and children are
+   * spawned `detached: true`. A coordinator killed mid-turn therefore leaves
+   * no artifact and no recoverable session id.
+   *
+   * The CLIs themselves do support resume — `claude --resume`, `codex exec
+   * resume`, `kimi -r`, `opencode --session` are all built above. Teaching
+   * this adapter to persist a cursor early enough to use them is out of scope
+   * for the restart-safety epic, so it declares the honest answer instead.
+   */
+  lifecycle: { resume: "unsupported" },
 });
 
 const codexPermissionArgs = (permissionMode: string | undefined): ReadonlyArray<string> =>
@@ -906,6 +921,7 @@ export const makeTerminalAgentDispatch = (
   };
 
   return {
+    capabilities: capabilities(options.harness),
     startIteration,
     runAuxiliary,
   };

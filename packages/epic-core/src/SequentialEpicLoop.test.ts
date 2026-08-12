@@ -11,11 +11,26 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import { runSequentialEpicLoop, type SequentialEpicLoopPorts } from "./SequentialEpicLoop.ts";
-import { DispatchError, type IterationHandle } from "./ports/AgentDispatch.ts";
+import {
+  DispatchError,
+  type AgentDispatchCapabilities,
+  type IterationHandle,
+} from "./ports/AgentDispatch.ts";
 import { BacklogError, type BacklogIssue, type BacklogShape } from "./ports/Backlog.ts";
 import type { RunEvent } from "./ports/RunEvents.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
 import { VcsError } from "./ports/Vcs.ts";
+
+/** What a terminal dispatch declares, mirrored for the loop fakes. */
+const terminalLikeCapabilities: AgentDispatchCapabilities = {
+  terminalSignal: "process-exit",
+  continuation: "none",
+  subagentLiveness: "unavailable",
+  finalMessage: "result-field",
+  providerErrors: "session-and-assistant",
+  cost: "none",
+  lifecycle: { resume: "unsupported" },
+};
 
 type Attempt = {
   readonly infra?: boolean;
@@ -244,6 +259,7 @@ const fixture = (input: {
     },
     providerInventory: { getProviders: Effect.succeed(input.providers ?? []) },
     dispatch: {
+      capabilities: terminalLikeCapabilities,
       startIteration: ({ selection, prompt }) => {
         selections.push(selection);
         prompts.push(prompt);
@@ -252,14 +268,7 @@ const fixture = (input: {
           return Effect.fail(new DispatchError({ operation: "start", detail: "offline" }));
         const handle: IterationHandle = {
           ref: `attempt-${String(dispatches)}`,
-          capabilities: {
-            terminalSignal: "process-exit",
-            continuation: "none",
-            subagentLiveness: "unavailable",
-            finalMessage: "result-field",
-            providerErrors: "session-and-assistant",
-            cost: "none",
-          },
+          capabilities: terminalLikeCapabilities,
           awaitSettled: Effect.sync(() => {
             if (attempt.claim) child = { ...child, status: "in_progress" };
             if (attempt.commit) head += 1;

@@ -7,8 +7,32 @@ import * as Schema from "effect/Schema";
 export const AgentSelection = ModelSelection;
 export type AgentSelection = ModelSelection;
 
+/**
+ * How an adapter can adopt work whose iteration handle is gone.
+ *
+ * `adopt-ref` means the adapter can pick the work up again from the ref it
+ * persisted (a server thread id). `unsupported` means it cannot, and must
+ * say so instead of starting a blank session that looks like a resume.
+ */
+export type IterationResumeMode = "adopt-ref" | "unsupported";
+
+/**
+ * Session-lifecycle capabilities, one key per operation.
+ *
+ * `fork` is deliberately absent. When forking lands it is an ADDED KEY here,
+ * never a changed type, so an adapter that only resumes keeps compiling.
+ */
+export interface AgentLifecycleCapabilities {
+  readonly resume: IterationResumeMode;
+}
+
 export interface AgentDispatchCapabilities {
   readonly terminalSignal: "projection" | "process-exit" | "turn-record" | "step-record";
+  /**
+   * How to continue a turn on a handle this process still holds. This is NOT
+   * the resume question: see {@link AgentLifecycleCapabilities.resume} for
+   * adopting work whose handle died.
+   */
   readonly continuation: "same-thread" | "resume-command" | "none";
   readonly subagentLiveness: SubagentLiveness["mode"];
   readonly finalMessage:
@@ -21,7 +45,27 @@ export interface AgentDispatchCapabilities {
   /** Whether final assistant prose is trusted as provider-owned failure evidence. */
   readonly providerErrors: "session-only" | "session-and-assistant";
   readonly cost: "total-cost-usd" | "step-cost" | "none";
+  readonly lifecycle: AgentLifecycleCapabilities;
 }
+
+/** Why an adapter declined to adopt an iteration. */
+export type IterationResumeRefusal =
+  | { readonly _tag: "capability"; readonly detail: string }
+  | { readonly _tag: "no-durable-state"; readonly detail: string }
+  | {
+      readonly _tag: "not-continued";
+      readonly origin: "started-fresh" | "forked" | "unknown";
+      readonly detail: string;
+    };
+
+/**
+ * The outcome of adopting an iteration. Both this union and
+ * {@link IterationResumeRefusal} are open by construction, so a `forked` arm
+ * is additive later.
+ */
+export type IterationResume =
+  | { readonly _tag: "resumed"; readonly handle: IterationHandle }
+  | { readonly _tag: "unavailable"; readonly refusal: IterationResumeRefusal };
 
 export interface IterationSettle {
   readonly turnState: "completed" | "error" | "interrupted";
@@ -86,6 +130,12 @@ export interface IterationHandle {
 }
 
 export interface AgentDispatchShape {
+  /**
+   * What this dispatch can do, readable with no handle. A restart decides
+   * whether to adopt an iteration before it owns one, so the declaration
+   * cannot live on {@link IterationHandle} alone.
+   */
+  readonly capabilities: AgentDispatchCapabilities;
   readonly startIteration: (input: {
     readonly runId: string;
     readonly iterationIndex: number;

@@ -20,6 +20,8 @@ import type { PoolDispatchShape } from "../ports/PoolDispatch.ts";
 export const makeTerminalPoolDispatch = (deps: {
   readonly dispatch: AgentDispatchShape;
 }): PoolDispatchShape => ({
+  /** Whatever the wrapped terminal dispatch declares, including `resume`. */
+  capabilities: deps.dispatch.capabilities,
   createIteration: (input) =>
     Effect.logDebug("epic.cook.pool-create-iteration", {
       runId: input.runId,

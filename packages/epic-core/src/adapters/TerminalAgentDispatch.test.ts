@@ -189,6 +189,33 @@ const startWorker = (
     return { ...fixture, handle };
   });
 
+describe("TerminalAgentDispatch lifecycle capabilities", () => {
+  it("states resume support with no iteration started", () => {
+    const dispatch = makeTerminalAgentDispatch({
+      harness: "claude",
+      artifactsDirectory: NodePath.join(NodeOS.tmpdir(), "terminal-capabilities"),
+    });
+    // A restart decides whether to adopt an iteration before it owns a handle,
+    // so the declaration has to be readable off the dispatch itself.
+    assert.equal(dispatch.capabilities.lifecycle.resume, "unsupported");
+    // The turn-level continuation answer is a different question and unchanged.
+    assert.equal(dispatch.capabilities.continuation, "resume-command");
+  });
+
+  it.live("gives the handle the same declaration as the dispatch", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { handle, directory } = yield* startWorker("echo RALPH_DONE");
+        const dispatch = makeTerminalAgentDispatch({
+          harness: "worker-cmd",
+          artifactsDirectory: directory,
+        });
+        assert.deepEqual(handle.capabilities, dispatch.capabilities);
+      }),
+    ),
+  );
+});
+
 it.live("bounds worker artifacts and keeps the final tail", () =>
   Effect.scoped(
     Effect.gen(function* () {

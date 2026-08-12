@@ -34,6 +34,7 @@ import type {
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import type { PoolDispatchShape } from "@t3tools/epic-core/ports/PoolDispatch";
 import {
+  type AgentDispatchCapabilities,
   DispatchError,
   type FinalMessageRead,
   type IterationHandle,
@@ -1782,6 +1783,26 @@ const dispatchErrorFromRunner = (error: EpicRunnerDispatchError) =>
   });
 
 /**
+ * What the server dispatch can do, stated once for both the dispatch shape and
+ * every handle it hands back.
+ *
+ * `lifecycle.resume` is `adopt-ref`: an iteration's ref is its orchestration
+ * thread id, which outlives the process in the durable store, so a restart can
+ * ask the same thread to carry on. Whether a given thread's provider session
+ * really continued is a per-iteration answer the resume operation checks; this
+ * only says the adapter can try.
+ */
+const serverDispatchCapabilities: AgentDispatchCapabilities = {
+  terminalSignal: "projection",
+  continuation: "same-thread",
+  subagentLiveness: "native",
+  finalMessage: "projection",
+  providerErrors: "session-and-assistant",
+  cost: "none",
+  lifecycle: { resume: "adopt-ref" },
+};
+
+/**
  * The two-phase pool dispatch adapter: orchestration thread creation, worktree
  * setup, provider turn start, settle polling, grace continuations, and the
  * guarded session release. All behaviour is ported from the pre-extraction
@@ -2081,6 +2102,7 @@ export const makeServerPoolDispatch = (deps: {
     });
 
   return {
+    capabilities: serverDispatchCapabilities,
     createIteration: (input) =>
       Effect.gen(function* () {
         // Bind the thread to its worker unit before the thread exists so the
@@ -2172,14 +2194,7 @@ export const makeServerPoolDispatch = (deps: {
 
         const handle: IterationHandle = {
           ref: input.threadId,
-          capabilities: {
-            terminalSignal: "projection",
-            continuation: "same-thread",
-            subagentLiveness: "native",
-            finalMessage: "projection",
-            providerErrors: "session-and-assistant",
-            cost: "none",
-          },
+          capabilities: serverDispatchCapabilities,
           awaitSettled,
           continueTurn: (prompt) =>
             Effect.gen(function* () {
