@@ -4585,6 +4585,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return {
       threadId: context.session.threadId,
       turnId,
+      ...(steeringTurnState !== null ? { steeredIntoActiveTurn: true } : {}),
       ...(context.session.resumeCursor !== undefined
         ? { resumeCursor: context.session.resumeCursor }
         : {}),

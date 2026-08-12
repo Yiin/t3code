@@ -1214,6 +1214,7 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
       });
       assert.equal(String(steeredTurn.turnId), String(turn.turnId));
+      assert.equal(steeredTurn.steeredIntoActiveTurn, true);
 
       harness.query.emit({
         type: "assistant",
