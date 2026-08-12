@@ -14,6 +14,11 @@ import { KimiSettings, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
 import {
+  describeAcpMidTurnDeliveryConformance,
+  readAgentRequests,
+  MID_TURN_PROMPT_DELAY_MILLIS,
+} from "../testUtils/acpMidTurnDeliveryConformance.ts";
+import {
   readAcpProviderSessionsCreated,
   readAcpSessionSetupMethods,
   readAcpTurnTargets,
@@ -376,6 +381,31 @@ it.layer(kimiAdapterTestLayer)("KimiAdapterLive", (it) => {
           startSessionInput: { cwd: process.cwd() },
           // The mock agent loads any session id it is handed, so it cannot
           // stage a cursor that names a conversation the agent has lost.
+        });
+      }),
+  });
+
+  describeAcpMidTurnDeliveryConformance(it, {
+    name: "Kimi",
+    provider: ProviderDriverKind.make("kimi"),
+    promptDelayMillis: MID_TURN_PROMPT_DELAY_MILLIS,
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "kimi-acp-mid-turn-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockKimiWrapper({
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+            T3_ACP_PROMPT_DELAY_MS: String(MID_TURN_PROMPT_DELAY_MILLIS),
+          }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        return yield* body({
+          adapter,
+          readAgentRequests: () => readAgentRequests(requestLogPath),
+          startSessionInput: { cwd: process.cwd() },
         });
       }),
   });

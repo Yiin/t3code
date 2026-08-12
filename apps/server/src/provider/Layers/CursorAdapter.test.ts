@@ -29,6 +29,11 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import {
+  describeAcpMidTurnDeliveryConformance,
+  readAgentRequests,
+  MID_TURN_PROMPT_DELAY_MILLIS,
+} from "../testUtils/acpMidTurnDeliveryConformance.ts";
+import {
   readAcpProviderSessionsCreated,
   readAcpSessionSetupMethods,
   readAcpTurnTargets,
@@ -256,6 +261,9 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
+  // Pins today's fake steer, which the "Cursor mid-turn delivery" rows below
+  // reject: Cursor never sees the second message mid-turn. `t3code-6f3.12`
+  // deletes this test as it makes those rows pass.
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
@@ -1679,6 +1687,36 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
           },
           // The mock agent loads any session id it is handed, so it cannot
           // stage a cursor that names a conversation the agent has lost.
+        });
+      }),
+  });
+
+  describeAcpMidTurnDeliveryConformance(it, {
+    name: "Cursor",
+    provider: ProviderDriverKind.make("cursor"),
+    promptDelayMillis: MID_TURN_PROMPT_DELAY_MILLIS,
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const settings = yield* ServerSettingsService;
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-mid-turn-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+            T3_ACP_PROMPT_DELAY_MS: String(MID_TURN_PROMPT_DELAY_MILLIS),
+          }),
+        );
+        yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+        return yield* body({
+          adapter,
+          readAgentRequests: () => readAgentRequests(requestLogPath),
+          startSessionInput: {
+            cwd: process.cwd(),
+            modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "default"),
+          },
         });
       }),
   });

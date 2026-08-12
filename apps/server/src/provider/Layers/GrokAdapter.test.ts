@@ -27,6 +27,11 @@ import {
 
 import { ServerConfig } from "../../config.ts";
 import {
+  describeAcpMidTurnDeliveryConformance,
+  readAgentRequests,
+  MID_TURN_PROMPT_DELAY_MILLIS,
+} from "../testUtils/acpMidTurnDeliveryConformance.ts";
+import {
   readAcpProviderSessionsCreated,
   readAcpSessionSetupMethods,
   readAcpTurnTargets,
@@ -1453,6 +1458,37 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
           },
           // The mock agent loads any session id it is handed, so it cannot
           // stage a cursor that names a conversation the agent has lost.
+        });
+      }),
+  });
+
+  describeAcpMidTurnDeliveryConformance(it, {
+    name: "Grok",
+    provider: ProviderDriverKind.make("grok"),
+    promptDelayMillis: MID_TURN_PROMPT_DELAY_MILLIS,
+    runScenario: (body) =>
+      Effect.gen(function* () {
+        const tempDir = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-mid-turn-")),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockGrokWrapper({
+            T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+            T3_ACP_PROMPT_DELAY_MS: String(MID_TURN_PROMPT_DELAY_MILLIS),
+          }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        return yield* body({
+          adapter,
+          readAgentRequests: () => readAgentRequests(requestLogPath),
+          startSessionInput: {
+            cwd: process.cwd(),
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("grok"),
+              model: "grok-build",
+            },
+          },
         });
       }),
   });
