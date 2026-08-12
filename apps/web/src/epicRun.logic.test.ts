@@ -1,12 +1,22 @@
 import { describe, expect, it } from "@effect/vitest";
-import { ThreadId, type BeadsIssueSummary, type EpicRun } from "@t3tools/contracts";
+import {
+  EPIC_RUN_FAILURE_RESUME_BLOCKED,
+  EPIC_RUN_FAILURE_RESUME_FAILED,
+  EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
+  ThreadId,
+  type BeadsIssueSummary,
+  type EpicRun,
+} from "@t3tools/contracts";
 
 import {
   currentEpicRunIssue,
+  epicRunFailureReasonLabel,
   epicRunHistory,
   epicRunHistoryHasRun,
   epicRunIterationCountLabel,
   epicRunIterationDuration,
+  epicRunIterationResumeLabel,
+  epicRunResumeFailureNotice,
   epicRunUiState,
   epicRuntimeModeLabel,
   epicStartControl,
@@ -43,6 +53,9 @@ const iteration = (
     turnStatus: "completed",
     summary: null,
     why: null,
+    failureReason: null,
+    resumeCount: 0,
+    lastResumedAt: null,
     startedAt: "2026-07-29T00:00:00.000Z",
     finishedAt: "2026-07-29T00:01:00.000Z",
     ...overrides,
@@ -252,5 +265,63 @@ describe("epic run history", () => {
 
     expect(currentEpicRunIssue(withoutId, [])).toBeNull();
     expect(currentEpicRunIssue(unknownId, [])).toBeNull();
+  });
+});
+
+describe("epicRunIterationResumeLabel", () => {
+  it("says nothing about an iteration that never stopped", () => {
+    expect(epicRunIterationResumeLabel(iteration({ resumeCount: 0 }))).toBeNull();
+  });
+
+  it("names a single restart without counting it", () => {
+    expect(epicRunIterationResumeLabel(iteration({ resumeCount: 1 }))).toBe(
+      "resumed after restart",
+    );
+  });
+
+  it("counts repeated resumes", () => {
+    expect(epicRunIterationResumeLabel(iteration({ resumeCount: 3 }))).toBe("resumed 3 times");
+  });
+});
+
+describe("epicRunFailureReasonLabel", () => {
+  it.each([
+    [EPIC_RUN_FAILURE_RESUME_UNSUPPORTED, "provider cannot resume a session"],
+    [EPIC_RUN_FAILURE_RESUME_BLOCKED, "session could not be resumed"],
+    [EPIC_RUN_FAILURE_RESUME_FAILED, "resume failed"],
+  ])("explains %s", (reason, label) => {
+    expect(epicRunFailureReasonLabel(reason)).toBe(label);
+  });
+
+  // Every other reason keeps its raw rendering, so the caller falls back.
+  it.each(["infra:timeout", "child:blocked", "server-restart"])("passes %s through", (reason) => {
+    expect(epicRunFailureReasonLabel(reason)).toBeNull();
+  });
+});
+
+describe("epicRunResumeFailureNotice", () => {
+  it("explains a run whose newest iteration could not be continued", () => {
+    const value = run("failed", [
+      iteration({ iterationIndex: 0, failureReason: "infra:timeout" }),
+      iteration({
+        iterationIndex: 1,
+        turnStatus: "abandoned",
+        failureReason: EPIC_RUN_FAILURE_RESUME_BLOCKED,
+      }),
+    ]);
+
+    expect(epicRunResumeFailureNotice(value)).toContain("could not be continued");
+    expect(epicRunResumeFailureNotice(value)).toContain("fresh iteration");
+  });
+
+  it("stays quiet when the newest iteration failed for another reason", () => {
+    const other = run("failed", [
+      iteration({ iterationIndex: 0, failureReason: EPIC_RUN_FAILURE_RESUME_FAILED }),
+      iteration({ iterationIndex: 1, turnStatus: "failed", failureReason: "infra:timeout" }),
+    ]);
+
+    expect(epicRunResumeFailureNotice(other)).toBeNull();
+    expect(epicRunResumeFailureNotice(run("running", [iteration({})]))).toBeNull();
+    expect(epicRunResumeFailureNotice(run("running", []))).toBeNull();
   });
 });

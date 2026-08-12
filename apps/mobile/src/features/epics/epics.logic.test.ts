@@ -4,6 +4,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   boundedRunLog,
   epicLoadState,
+  epicRunIterationResumeLabel,
   epicRunUiState,
   epicSourceKey,
   installPrefillIfEmpty,
@@ -106,5 +107,11 @@ describe("mobile epics logic", () => {
     } as unknown as EpicRun;
     expect(latestEpicThreadId(run, "child")).toBe("new");
     expect(boundedRunLog([1, 2, 3, 4], 2)).toEqual([3, 4]);
+  });
+
+  it("names a resumed iteration and stays quiet about one that never stopped", () => {
+    expect(epicRunIterationResumeLabel({ resumeCount: 0 })).toBeNull();
+    expect(epicRunIterationResumeLabel({ resumeCount: 1 })).toBe("resumed after restart");
+    expect(epicRunIterationResumeLabel({ resumeCount: 3 })).toBe("resumed 3 times");
   });
 });

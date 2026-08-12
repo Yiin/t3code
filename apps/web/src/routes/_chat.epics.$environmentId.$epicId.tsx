@@ -36,9 +36,12 @@ import {
 import {
   currentEpicRunIssue,
   epicRunHistory,
+  epicRunFailureReasonLabel,
   epicRunHistoryHasRun,
   epicRunIterationCountLabel,
   epicRunIterationDuration,
+  epicRunIterationResumeLabel,
+  epicRunResumeFailureNotice,
   epicRunUiState,
   epicRuntimeModeLabel,
   epicStartControl,
@@ -200,7 +203,16 @@ function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId:
   );
 }
 
-function EpicRunLog(props: {
+/**
+ * One muted sentence under the error box when the run's newest iteration died
+ * of a failed resume. The box says what went wrong; this says what it means.
+ */
+export function EpicRunResumeFailureNote(props: { readonly run: EpicRun }) {
+  const notice = epicRunResumeFailureNotice(props.run);
+  return notice ? <p className="text-sm text-muted-foreground">{notice}</p> : null;
+}
+
+export function EpicRunLog(props: {
   readonly run: EpicRun;
   readonly environmentId: string;
   readonly cwd: string;
@@ -240,8 +252,14 @@ function EpicRunLog(props: {
                     <span className="font-mono">{iteration.issueId}</span>
                   ) : null}
                   <span>{iteration.turnStatus}</span>
+                  {epicRunIterationResumeLabel(iteration) ? (
+                    <span>{epicRunIterationResumeLabel(iteration)}</span>
+                  ) : null}
                   {iteration.failureReason ? (
-                    <span className="font-mono text-destructive">{iteration.failureReason}</span>
+                    <span className="font-mono text-destructive">
+                      {epicRunFailureReasonLabel(iteration.failureReason) ??
+                        iteration.failureReason}
+                    </span>
                   ) : null}
                   <span className="tabular-nums">{epicRunIterationDuration(iteration, now)}</span>
                 </div>
@@ -324,6 +342,7 @@ function EpicRunHistoryEntry(props: {
               {props.run.lastError}
             </p>
           ) : null}
+          <EpicRunResumeFailureNote run={props.run} />
           <EpicRunLog run={props.run} environmentId={props.environmentId} cwd={props.cwd} />
         </div>
       ) : null}
@@ -678,6 +697,7 @@ function EpicRunSection(props: {
               {run.lastError}
             </p>
           ) : null}
+          <EpicRunResumeFailureNote run={run} />
           <EpicRunLog
             run={run}
             environmentId={props.environmentId}

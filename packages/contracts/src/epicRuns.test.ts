@@ -6,6 +6,9 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 import { EnvironmentEpicRunsHttpApi } from "./environmentHttp.ts";
 import { DEFAULT_EPIC_RUN_CONFIG_PROVENANCE } from "./epicRunConfig.ts";
 import {
+  EPIC_RUN_FAILURE_RESUME_BLOCKED,
+  EPIC_RUN_FAILURE_RESUME_FAILED,
+  EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
   EpicRun,
   EpicRunEvent,
   EpicRunInput,
@@ -262,5 +265,19 @@ describe("EpicRun contracts", () => {
     expect(() => decodeQuery({ limit: "0" })).toThrow();
     expect(() => decodeQuery({ limit: "2.5" })).toThrow();
     expect(() => decodeQuery({ limit: "many" })).toThrow();
+  });
+});
+
+describe("resume failure reasons", () => {
+  const reasons = [
+    EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
+    EPIC_RUN_FAILURE_RESUME_BLOCKED,
+    EPIC_RUN_FAILURE_RESUME_FAILED,
+  ];
+
+  it("keeps the three resume reasons distinct and in the infra failure class", () => {
+    expect(new Set(reasons).size).toBe(3);
+    // Downstream failure-class parsing splits on the prefix, so it must be there.
+    for (const reason of reasons) expect(reason.startsWith("infra:")).toBe(true);
   });
 });

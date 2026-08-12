@@ -31,6 +31,7 @@ import {
   epicChildren,
   epicLoadState,
   epicProgress,
+  epicRunIterationResumeLabel,
   epicRunUiState,
   isActiveRun,
   issueStatusLabel,
@@ -639,6 +640,9 @@ export function EpicDetailScreen({ route }: StaticScreenProps<DetailParams>) {
             <View key={iteration.iterationIndex} className="border-t border-border py-3">
               <Text className="text-xs text-foreground-muted">
                 Iteration {iteration.iterationIndex + 1} · {iteration.turnStatus}
+                {epicRunIterationResumeLabel(iteration)
+                  ? ` · ${epicRunIterationResumeLabel(iteration)}`
+                  : ""}
               </Text>
               {iteration.summary ? <Text className="mt-1 text-sm">{iteration.summary}</Text> : null}
               {iteration.why ? (

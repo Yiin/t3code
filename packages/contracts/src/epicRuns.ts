@@ -48,6 +48,20 @@ export const LaunchEpicRunInput = Schema.Struct({
 });
 export type LaunchEpicRunInput = typeof LaunchEpicRunInput.Type;
 
+/**
+ * The resume family of `EpicRunIterationReport.failureReason`, in the `infra:`
+ * failure class because a failed resume is infrastructure, never agent
+ * behaviour. Runner, epic-core and the clients all import these rather than
+ * retyping the strings.
+ */
+
+/** The provider adapter declares no resume capability at all. */
+export const EPIC_RUN_FAILURE_RESUME_UNSUPPORTED = "infra:resume-unsupported";
+/** The adapter can resume in principle, but this attempt was refused. */
+export const EPIC_RUN_FAILURE_RESUME_BLOCKED = "infra:resume-blocked";
+/** The resume was accepted and then errored. */
+export const EPIC_RUN_FAILURE_RESUME_FAILED = "infra:resume-failed";
+
 export const EpicRunIterationReport = Schema.Struct({
   iterationIndex: NonNegativeInt,
   threadId: ThreadId,
@@ -70,9 +84,13 @@ export const EpicRunIterationReport = Schema.Struct({
    * "closed-without-findings", and "blocked"). Provider-attributed failures
    * read "infra:provider-error" when only the session's error text is known,
    * or "infra:provider-error:spend-limit" / ":auth" / ":rate-limit" when the
-   * text matched the runner's curated pattern table. "cancelled" and
-   * "server-restart" never had a classified outcome and stay unprefixed; rows
-   * written before the class prefix existed carry the bare reasons.
+   * text matched the runner's curated pattern table. The resume family —
+   * "infra:resume-unsupported", "infra:resume-blocked" and
+   * "infra:resume-failed" — says an interrupted iteration could not be
+   * continued after a server restart. "cancelled" and "server-restart" never
+   * had a classified outcome and stay unprefixed; "server-restart" means only
+   * that the row was reconciled at boot, never a resume outcome. Rows written
+   * before the class prefix existed carry the bare reasons.
    */
   failureReason: Schema.NullOr(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),

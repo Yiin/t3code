@@ -13,6 +13,7 @@ import {
   type EpicPageSummary,
 } from "../epicsPage.logic";
 import { EpicProjectGroupSection, EpicsEmptyState } from "./_chat.epics.index";
+import { EpicRunLog, EpicRunResumeFailureNote } from "./_chat.epics.$environmentId.$epicId";
 
 function findButton(node: ReactNode): ReactElement<{ readonly onClick: () => void }> | null {
   if (!isValidElement(node)) return null;
@@ -148,5 +149,95 @@ describe("EpicProjectGroupSection", () => {
     );
     expect(markup).toContain("2 ready");
     expect(markup).not.toContain("animate-status-pulse");
+  });
+});
+
+const logIteration = (
+  overrides: Partial<EpicRun["recentIterations"][number]>,
+): EpicRun["recentIterations"][number] =>
+  ({
+    iterationIndex: 0,
+    threadId: "thread-1",
+    issueId: "t3code-j8s.1",
+    workerId: null,
+    branch: null,
+    worktreePath: null,
+    turnStatus: "completed",
+    summary: null,
+    why: null,
+    failureReason: null,
+    resumeCount: 0,
+    lastResumedAt: null,
+    startedAt: "2026-08-03T00:00:00.000Z",
+    finishedAt: "2026-08-03T00:01:00.000Z",
+    ...overrides,
+  }) as unknown as EpicRun["recentIterations"][number];
+
+const logRun = (iterations: ReadonlyArray<EpicRun["recentIterations"][number]>): EpicRun =>
+  run({ recentIterations: iterations } as Partial<EpicRun>);
+
+describe("EpicRunLog", () => {
+  it("says an iteration was resumed, and says nothing when it never stopped", () => {
+    const resumed = renderToStaticMarkup(
+      <EpicRunLog
+        run={logRun([logIteration({ resumeCount: 2 })])}
+        environmentId="env"
+        cwd="/repo"
+      />,
+    );
+    const untouched = renderToStaticMarkup(
+      <EpicRunLog run={logRun([logIteration({})])} environmentId="env" cwd="/repo" />,
+    );
+
+    expect(resumed).toContain("resumed 2 times");
+    expect(untouched).not.toContain("resumed");
+  });
+
+  it("explains a resume-family failure and leaves every other reason verbatim", () => {
+    const unsupported = renderToStaticMarkup(
+      <EpicRunLog
+        run={logRun([
+          logIteration({ turnStatus: "abandoned", failureReason: "infra:resume-unsupported" }),
+        ])}
+        environmentId="env"
+        cwd="/repo"
+      />,
+    );
+    const timedOut = renderToStaticMarkup(
+      <EpicRunLog
+        run={logRun([logIteration({ turnStatus: "failed", failureReason: "infra:timeout" })])}
+        environmentId="env"
+        cwd="/repo"
+      />,
+    );
+
+    expect(unsupported).toContain("provider cannot resume a session");
+    expect(unsupported).not.toContain("infra:resume-unsupported");
+    expect(timedOut).toContain("infra:timeout");
+  });
+});
+
+describe("EpicRunResumeFailureNote", () => {
+  it("appears only when the newest iteration could not be continued", () => {
+    const blocked = renderToStaticMarkup(
+      <EpicRunResumeFailureNote
+        run={logRun([
+          logIteration({ iterationIndex: 0, failureReason: "infra:timeout" }),
+          logIteration({
+            iterationIndex: 1,
+            turnStatus: "abandoned",
+            failureReason: "infra:resume-blocked",
+          }),
+        ])}
+      />,
+    );
+    const ordinary = renderToStaticMarkup(
+      <EpicRunResumeFailureNote
+        run={logRun([logIteration({ turnStatus: "failed", failureReason: "infra:timeout" })])}
+      />,
+    );
+
+    expect(blocked).toContain("could not be continued");
+    expect(ordinary).toBe("");
   });
 });

@@ -138,6 +138,22 @@ export function epicRunUiState(
   return "terminal";
 }
 
+/**
+ * That this iteration covers more than one server lifetime, or null when it
+ * never stopped. A resume reuses the interrupted row, so without this line the
+ * log freezes and then continues with nothing to explain the gap. Duplicated
+ * from `apps/web/src/epicRun.logic.ts` on purpose — the two logic modules do
+ * not import each other.
+ */
+export function epicRunIterationResumeLabel(
+  iteration: Pick<EpicRun["recentIterations"][number], "resumeCount">,
+): string | null {
+  if (iteration.resumeCount <= 0) return null;
+  return iteration.resumeCount === 1
+    ? "resumed after restart"
+    : `resumed ${iteration.resumeCount} times`;
+}
+
 export function boundedRunLog<T>(items: ReadonlyArray<T>, limit = 40): ReadonlyArray<T> {
   return items.slice(Math.max(0, items.length - limit));
 }

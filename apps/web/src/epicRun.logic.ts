@@ -1,9 +1,12 @@
-import type {
-  BeadsIssueSummary,
-  EpicRun,
-  EpicRunIterationReport,
-  EpicRunStatus,
-  RuntimeMode,
+import {
+  EPIC_RUN_FAILURE_RESUME_BLOCKED,
+  EPIC_RUN_FAILURE_RESUME_FAILED,
+  EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
+  type BeadsIssueSummary,
+  type EpicRun,
+  type EpicRunIterationReport,
+  type EpicRunStatus,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 
 import { epicRunsForIdentity } from "./epicsPage.logic";
@@ -173,6 +176,47 @@ export function epicRunIterationDuration(
 ): string {
   const finished = iteration.finishedAt === null ? Number.NaN : Date.parse(iteration.finishedAt);
   return formatEpicRunElapsed(iteration.startedAt, Number.isFinite(finished) ? finished : now);
+}
+
+/**
+ * That this iteration covers more than one server lifetime, or null when it
+ * never stopped. A resume reuses the interrupted row, so without this line the
+ * log freezes and then continues with nothing to explain the gap.
+ */
+export function epicRunIterationResumeLabel(
+  iteration: Pick<EpicRunIterationReport, "resumeCount">,
+): string | null {
+  if (iteration.resumeCount <= 0) return null;
+  return iteration.resumeCount === 1
+    ? "resumed after restart"
+    : `resumed ${iteration.resumeCount} times`;
+}
+
+/**
+ * Human copy for the resume family of `failureReason`, and null for every
+ * other reason. Deliberately narrow: the rest of the vocabulary reads well
+ * enough raw, and a full map would just duplicate the schema's doc comment.
+ */
+const RESUME_FAILURE_LABELS: Record<string, string> = {
+  [EPIC_RUN_FAILURE_RESUME_UNSUPPORTED]: "provider cannot resume a session",
+  [EPIC_RUN_FAILURE_RESUME_BLOCKED]: "session could not be resumed",
+  [EPIC_RUN_FAILURE_RESUME_FAILED]: "resume failed",
+};
+
+export function epicRunFailureReasonLabel(reason: string): string | null {
+  return RESUME_FAILURE_LABELS[reason] ?? null;
+}
+
+/**
+ * The one sentence a run gets when its newest iteration died of a failed
+ * resume. The error box above it carries the provider's own words; this says
+ * what the user can do about it.
+ */
+export function epicRunResumeFailureNotice(run: Pick<EpicRun, "recentIterations">): string | null {
+  const newest = run.recentIterations.at(-1);
+  if (!newest?.failureReason) return null;
+  if (epicRunFailureReasonLabel(newest.failureReason) === null) return null;
+  return "The interrupted iteration could not be continued, so the run stopped. Starting a new run begins a fresh iteration.";
 }
 
 export function currentEpicRunIssue(
