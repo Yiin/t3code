@@ -87,6 +87,21 @@ describe("EpicRunPreflightInput", () => {
       decodeInput({ workspaceRoot: "/repo", epicId: "t3code-y5l", mode: "sequential" }).intent,
     ).toBeUndefined();
   });
+
+  it("round-trips the resumed run's own artifacts", () => {
+    const input = {
+      workspaceRoot: "/repo",
+      epicId: "t3code-y5l",
+      mode: "parallel" as const,
+      intent: "resume" as const,
+      resume: {
+        runId: "run-9",
+        worktreePaths: ["/home/dev/.t3/worktrees/epic-run-9/t3code-y5l.11"],
+      },
+    };
+
+    expect(decodeInput(encodeInput(input))).toEqual(input);
+  });
 });
 
 describe("EpicRunPreflightResult", () => {
@@ -128,6 +143,10 @@ describe("EpicRunPreflightResult", () => {
           message: "Sequential execution limits parallel workers to 1.",
         },
         { _tag: "dirty_tree_accepted" as const, paths: ["src/unfinished.ts"] },
+        {
+          _tag: "resume_worktree_missing" as const,
+          paths: ["/home/dev/.t3/worktrees/epic-run-9/t3code-vst.1"],
+        },
       ],
       resolvedConfig: {
         ...DEFAULT_EPIC_RUN_CONFIG,

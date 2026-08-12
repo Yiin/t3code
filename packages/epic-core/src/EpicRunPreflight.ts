@@ -348,6 +348,19 @@ export const layer = Layer.effect(
         }
         if (detached) blockers.push({ _tag: "detached_head" });
 
+        const resume = input.resume;
+        const resumeWorktreePaths = new Set(resume?.worktreePaths ?? []);
+        // One `worktree list` serves every check that reads it: the parallel
+        // nested-dirtiness probe, the integration leftover scan, and the
+        // resume's own missing-worktree report. A sequential launch still
+        // issues no worktree command at all.
+        const worktrees =
+          input.mode === "parallel" || resumeWorktreePaths.size > 0
+            ? parseWorktreeList(
+                (yield* runGit(input.workspaceRoot, ["worktree", "list", "--porcelain"])).stdout,
+              )
+            : [];
+
         if (input.mode === "sequential") {
           // Sequential workers commit directly on the base branch in the main
           // checkout: any dirt — tracked or untracked — is fatal.
@@ -366,12 +379,6 @@ export const layer = Layer.effect(
           // registered nested worktree must not make the checkout look dirty
           // (run-legacy.sh registered_nested_worktree_dirty /
           // sequential_untracked_paths).
-          const worktreeList = yield* runGit(input.workspaceRoot, [
-            "worktree",
-            "list",
-            "--porcelain",
-          ]);
-          const worktrees = parseWorktreeList(worktreeList.stdout);
           const dirtyWorktrees: Array<string> = [];
           for (const worktree of worktrees) {
             if (!worktree.path.startsWith(`${input.workspaceRoot}/`)) continue;
@@ -380,6 +387,14 @@ export const layer = Layer.effect(
               isWorktreeStatusPath(path, relative),
             );
             if (reported.length === 0) continue;
+            // A worktree the resumed run owns holds the interrupted agent's
+            // unfinished work. Continuing it is the point of the resume, so it
+            // is neither probed nor counted as dirt — only the collapsed
+            // directory entry is cleared so it does not read as untracked.
+            if (resumeWorktreePaths.has(worktree.path)) {
+              for (const path of reported) untrackedPaths.delete(path);
+              continue;
+            }
             const nestedStatus = yield* processRunner
               .run({
                 command: "git",
@@ -440,20 +455,39 @@ export const layer = Layer.effect(
           // Treating them as leftovers refused a crashed run permission to
           // continue itself, naming its own run id back at the operator.
           const ownIntegrationBranch =
-            input.resumingRunId === undefined ? null : integrationBranch(input.resumingRunId);
+            resume === undefined ? null : integrationBranch(resume.runId);
           const isOwn = (value: string): boolean =>
             ownIntegrationBranch !== null && value === ownIntegrationBranch;
-          const leftoverBranch =
-            branchList.stdout
-              .split(/\r?\n/)
-              .map((line) => line.trim())
-              .find((line) => line.length > 0 && !isOwn(line)) ?? null;
+          const integrationBranches = branchList.stdout
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+          const leftoverBranch = integrationBranches.find((line) => !isOwn(line)) ?? null;
+          const integrationWorktrees = worktrees.filter(
+            (worktree) =>
+              worktree.branch?.startsWith(`refs/heads/${INTEGRATION_BRANCH_PREFIX}`) === true,
+          );
           const leftoverWorktree =
-            worktrees.find(
-              (worktree) =>
-                worktree.branch?.startsWith(`refs/heads/${INTEGRATION_BRANCH_PREFIX}`) === true &&
-                !isOwn(worktree.branch.slice("refs/heads/".length)),
+            integrationWorktrees.find(
+              (worktree) => !isOwn((worktree.branch ?? "").slice("refs/heads/".length)),
             )?.path ?? null;
+          if (resume !== undefined) {
+            // Say what was forgiven and why: a resume that silently walks past
+            // an integration branch is indistinguishable from one that never
+            // saw it, which is the log line an operator needs after a restart.
+            const adoptedBranch = integrationBranches.find((line) => isOwn(line)) ?? null;
+            const adoptedWorktree =
+              integrationWorktrees.find((worktree) =>
+                isOwn((worktree.branch ?? "").slice("refs/heads/".length)),
+              )?.path ?? null;
+            if (adoptedBranch !== null || adoptedWorktree !== null) {
+              yield* Effect.logInfo("epic.preflight.integration-adopted", {
+                runId: resume.runId,
+                branch: adoptedBranch,
+                worktreePath: adoptedWorktree,
+              });
+            }
+          }
           if (leftoverBranch !== null || leftoverWorktree !== null) {
             blockers.push({
               _tag: "integration_leftover",
@@ -508,6 +542,26 @@ export const layer = Layer.effect(
                 });
               }
             }
+          }
+        }
+
+        // A worktree the run expects to resume into can be gone: git pruned
+        // it, or an operator removed the directory. Warn rather than block —
+        // the run can still cook that child, it just has to dispatch it fresh
+        // instead of picking the interrupted agent's work back up.
+        if (resumeWorktreePaths.size > 0) {
+          const listed = new Set(worktrees.map((worktree) => worktree.path));
+          const missing: Array<string> = [];
+          for (const path of resumeWorktreePaths) {
+            if (!listed.has(path)) {
+              missing.push(path);
+              continue;
+            }
+            const onDisk = yield* fileSystem.exists(path).pipe(Effect.exit);
+            if (Exit.isFailure(onDisk) || !onDisk.value) missing.push(path);
+          }
+          if (missing.length > 0) {
+            warnings.push({ _tag: "resume_worktree_missing", paths: missing.toSorted() });
           }
         }
 

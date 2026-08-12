@@ -40,7 +40,9 @@ const run = (
     readonly workspaceExists?: boolean;
     readonly worktreeList?: string;
     readonly branchList?: string;
-    readonly resumingRunId?: string;
+    readonly resume?: { readonly runId: string; readonly worktreePaths?: readonly string[] };
+    /** Per-path `exists` answers for the resume probe; `/repo` uses `workspaceExists`. */
+    readonly pathExists?: Readonly<Record<string, boolean>>;
     readonly nestedStatus?: Readonly<
       Record<string, { readonly stdout: string; readonly code?: number }>
     >;
@@ -135,7 +137,12 @@ const run = (
     ),
     Layer.provide(
       FileSystem.layerNoop({
-        exists: () => Effect.succeed(options?.workspaceExists ?? true),
+        exists: (path) =>
+          Effect.succeed(
+            path === "/repo"
+              ? (options?.workspaceExists ?? true)
+              : (options?.pathExists?.[String(path)] ?? true),
+          ),
       }),
     ),
   );
@@ -146,7 +153,14 @@ const run = (
         epicId: "epic-1",
         mode: options?.mode ?? "sequential",
         ...(options?.intent === undefined ? {} : { intent: options.intent }),
-        ...(options?.resumingRunId === undefined ? {} : { resumingRunId: options.resumingRunId }),
+        ...(options?.resume === undefined
+          ? {}
+          : {
+              resume: {
+                runId: options.resume.runId,
+                worktreePaths: options.resume.worktreePaths ?? [],
+              },
+            }),
       },
       options?.configSnapshot,
     ),
@@ -853,7 +867,7 @@ describe("EpicRunPreflight", () => {
           branchList: "cook-epic-integration-run-9\n",
           worktreeList:
             "worktree /repo\nbranch refs/heads/main\n\nworktree /worktrees/epic-run-9/integration\nbranch refs/heads/cook-epic-integration-run-9\n",
-          resumingRunId: "run-9",
+          resume: { runId: "run-9" },
         });
         expect(result.blockers.some((blocker) => blocker._tag === "integration_leftover")).toBe(
           false,
@@ -867,7 +881,7 @@ describe("EpicRunPreflight", () => {
         const result = yield* run("# branch.head main\n", undefined, undefined, {
           mode: "parallel",
           branchList: "cook-epic-integration-run-other\n",
-          resumingRunId: "run-9",
+          resume: { runId: "run-9" },
         });
         expect(result.ok).toBe(false);
         expect(result.blockers).toContainEqual({
@@ -1197,6 +1211,137 @@ describe("EpicRunPreflight", () => {
         );
         expect(result.ok).toBe(true);
         expect(result.warnings).toContainEqual({ _tag: "nothing_ready", epicId: "epic-1" });
+      }),
+    );
+  });
+
+  describe("resume worktrees", () => {
+    const WORKER = "/repo/workers/child-1";
+    const workerWorktreeList = `worktree /repo\nbranch refs/heads/main\n\nworktree ${WORKER}\nbranch refs/heads/epic-child-1\n`;
+
+    it.effect("ignores dirt inside a worktree the resumed run owns", () =>
+      Effect.gen(function* () {
+        const nestedProbes: Array<string> = [];
+        const result = yield* run(
+          "# branch.head main\n? workers/child-1/\n",
+          undefined,
+          undefined,
+          {
+            mode: "parallel",
+            intent: "resume",
+            resume: { runId: "run-9", worktreePaths: [WORKER] },
+            worktreeList: workerWorktreeList,
+            nestedStatus: { [WORKER]: { stdout: " M src/a.ts\n" } },
+            onGit: (input) => {
+              if (input.args[0] === "status" && input.cwd !== "/repo")
+                nestedProbes.push(input.cwd ?? "");
+            },
+          },
+        );
+        expect(result.ok).toBe(true);
+        expect(result.blockers).toEqual([]);
+        // The interrupted agent's own unfinished work: not probed, not dirt,
+        // and not left behind as an untracked directory either.
+        expect(nestedProbes).toEqual([]);
+        expect(result.warnings.some((warning) => warning._tag === "untracked_files")).toBe(false);
+      }),
+    );
+
+    it.effect("still blocks a dirty nested worktree the resume does not name", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n? workers/child-1/\n? workers/stranger/\n",
+          undefined,
+          undefined,
+          {
+            mode: "parallel",
+            intent: "resume",
+            resume: { runId: "run-9", worktreePaths: [WORKER] },
+            worktreeList: `${workerWorktreeList}\nworktree /repo/workers/stranger\nbranch refs/heads/epic-stranger\n`,
+            nestedStatus: {
+              [WORKER]: { stdout: " M src/a.ts\n" },
+              "/repo/workers/stranger": { stdout: " M src/b.ts\n" },
+            },
+          },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "dirty_tree",
+          paths: ["workers/stranger"],
+        });
+      }),
+    );
+
+    it.effect("warns when a resumed worktree is no longer registered", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          intent: "resume",
+          resume: { runId: "run-9", worktreePaths: [WORKER, "/repo/workers/pruned"] },
+          worktreeList: workerWorktreeList,
+        });
+        expect(result.ok).toBe(true);
+        expect(result.warnings).toContainEqual({
+          _tag: "resume_worktree_missing",
+          paths: ["/repo/workers/pruned"],
+        });
+      }),
+    );
+
+    it.effect("warns when a registered resumed worktree is gone from disk", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          intent: "resume",
+          resume: { runId: "run-9", worktreePaths: [WORKER] },
+          worktreeList: workerWorktreeList,
+          pathExists: { [WORKER]: false },
+        });
+        expect(result.warnings).toContainEqual({
+          _tag: "resume_worktree_missing",
+          paths: [WORKER],
+        });
+      }),
+    );
+
+    it.effect("says nothing when every resumed worktree is still there", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "parallel",
+          intent: "resume",
+          resume: { runId: "run-9", worktreePaths: [WORKER] },
+          worktreeList: workerWorktreeList,
+        });
+        expect(result.warnings.some((warning) => warning._tag === "resume_worktree_missing")).toBe(
+          false,
+        );
+      }),
+    );
+
+    it.effect("checks resumed worktrees in sequential mode too", () =>
+      Effect.gen(function* () {
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "sequential",
+          intent: "resume",
+          resume: { runId: "run-9", worktreePaths: ["/repo/workers/pruned"] },
+        });
+        expect(result.warnings).toContainEqual({
+          _tag: "resume_worktree_missing",
+          paths: ["/repo/workers/pruned"],
+        });
+      }),
+    );
+
+    it.effect("issues no worktree command for a sequential launch", () =>
+      Effect.gen(function* () {
+        const seen: Array<ReadonlyArray<string>> = [];
+        yield* run("# branch.head main\n", undefined, undefined, {
+          mode: "sequential",
+          onGit: (input) => {
+            seen.push(input.args);
+          },
+        });
+        expect(seen.some((args) => args[0] === "worktree")).toBe(false);
       }),
     );
   });

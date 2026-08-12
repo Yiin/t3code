@@ -360,7 +360,9 @@ it.live.skipIf(unsupportedReason !== null)(
               workspaceRoot: repo,
               epicId: EPIC_ID,
               mode: "parallel",
-              ...(resumingRunId === undefined ? {} : { resumingRunId }),
+              ...(resumingRunId === undefined
+                ? {}
+                : { resume: { runId: resumingRunId, worktreePaths: [] } }),
             }),
           ).pipe(Effect.provide(preflightLayer));
 

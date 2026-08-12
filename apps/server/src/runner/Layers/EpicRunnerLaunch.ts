@@ -162,7 +162,9 @@ export const makeEpicRunnerLaunch = (deps: {
           mode: configSnapshot.config.execution.sequential ? "sequential" : "parallel",
           // Resuming this run forgives this run's own integration leftovers.
           // A fresh launch passes no run id, so nothing is forgiven there.
-          ...(resuming === true ? { resumingRunId: runId } : {}),
+          // The per-worker worktree paths stay empty until the boot path
+          // sources them from `epic_run_iterations` (t3code-y5l.15).
+          ...(resuming === true ? { resume: { runId, worktreePaths: [] } } : {}),
         },
         configSnapshot,
       )

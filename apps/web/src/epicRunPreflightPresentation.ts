@@ -49,6 +49,8 @@ export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): s
       return `The run excludes your uncommitted changes to: ${warning.paths.join(", ")}`;
     case "dirty_tree_accepted":
       return `The resumed run keeps its own uncommitted changes to: ${warning.paths.join(", ")}`;
+    case "resume_worktree_missing":
+      return `These worktrees are gone, so the resumed run starts those children fresh: ${warning.paths.join(", ")}`;
   }
 }
 

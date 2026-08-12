@@ -59,6 +59,7 @@ describe("epic run preflight presentation", () => {
         commitsBehind: 3,
       }),
       epicRunPreflightWarningText({ _tag: "dirty_tree_accepted", paths: ["a.ts"] }),
+      epicRunPreflightWarningText({ _tag: "resume_worktree_missing", paths: ["/wt/child-1"] }),
     ]).toEqual([
       "These children have stale claims: epic-1.1",
       "Epic epic-1 has no ready children.",
@@ -66,6 +67,7 @@ describe("epic run preflight presentation", () => {
       "parallel.workers: Pinned to 1.",
       "epic/t3code-5m4/base is 3 commit(s) behind the checked-out branch; a run reusing it starts fresh workers from old code.",
       "The resumed run keeps its own uncommitted changes to: a.ts",
+      "These worktrees are gone, so the resumed run starts those children fresh: /wt/child-1",
     ]);
   });
 });

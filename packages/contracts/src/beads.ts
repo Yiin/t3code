@@ -120,15 +120,27 @@ export const EpicRunPreflightInput = Schema.Struct({
   /** Absent means `launch`, so every existing caller decodes unchanged. */
   intent: Schema.optional(EpicRunPreflightIntent),
   /**
-   * The run being resumed, when this check is a resume rather than a launch.
+   * The artifacts the resumed run already owns, when this check is a resume.
+   *
+   * `intent` stays the discriminator — this struct only carries facts, so a
+   * resume that owns nothing yet still says `intent: "resume"` and omits it.
    *
    * A parallel run owns an integration branch and worktree for its whole life,
-   * so on resume they are still there. Without this, the run's own leftovers
-   * read as "a previous parallel run left these behind" and the run is refused
-   * permission to continue itself. Only leftovers carrying this exact run id
-   * are forgiven; anything else still blocks.
+   * and one worktree per in-flight child, so on resume they are all still
+   * there. Without this, the run's own artifacts read as "a previous parallel
+   * run left these behind" and the run is refused permission to continue
+   * itself. Only artifacts named here are forgiven; anything else still blocks.
+   *
+   * `worktreePaths` are absolute per-worker worktree paths, which the caller
+   * reads from `epic_run_iterations.worktree_path`. Preflight neither creates
+   * nor repairs them; it reports the ones that vanished.
    */
-  resumingRunId: Schema.optional(TrimmedNonEmptyString),
+  resume: Schema.optional(
+    Schema.Struct({
+      runId: TrimmedNonEmptyString,
+      worktreePaths: Schema.Array(TrimmedNonEmptyString),
+    }),
+  ),
 });
 export type EpicRunPreflightInput = typeof EpicRunPreflightInput.Type;
 
@@ -220,6 +232,14 @@ export const EpicRunPreflightWarning = Schema.Union([
    * refusing them would refuse the run permission to continue itself.
    */
   Schema.TaggedStruct("dirty_tree_accepted", {
+    paths: Schema.Array(TrimmedNonEmptyString),
+  }),
+  /**
+   * Worktrees the resumed run still expects, which git no longer lists or the
+   * disk no longer holds. The work they held is gone, so the run must dispatch
+   * those children fresh instead of resuming them in place.
+   */
+  Schema.TaggedStruct("resume_worktree_missing", {
     paths: Schema.Array(TrimmedNonEmptyString),
   }),
 ]);
