@@ -15,8 +15,9 @@
  * The cost is that two agents can write the same files, and that
  * `restoreCheckpoint` on either thread rewrites the shared tree under the other
  * (`apps/server/src/vcs/GitVcsDriver.ts` *capture* is safe — it uses a per-call
- * `GIT_INDEX_FILE` temp index — but *restore* is not).
- * `maxConcurrentChildren` is the only brake in v1.
+ * `GIT_INDEX_FILE` temp index — but *restore* is not). `CheckpointReactor`
+ * refuses a revert while another session runs a turn in the same worktree, and
+ * `maxConcurrentChildren` caps how many children write at once.
  *
  * **Cost warning.** `ProviderCommandReactor` drains provider intents on a
  * single fiber (`ProviderCommandReactor.ts`, `packages/shared/src/DrainableWorker.ts`),

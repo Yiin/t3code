@@ -96,6 +96,7 @@ function createProviderServiceHarness(
   hasSession = true,
   sessionCwd = cwd,
   providerName: ProviderSession["provider"] = ProviderDriverKind.make("codex"),
+  peerSessions: ReadonlyArray<ProviderSession> = [],
 ) {
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
@@ -117,8 +118,9 @@ function createProviderServiceHarness(
             createdAt: now,
             updatedAt: now,
           },
+          ...peerSessions,
         ] satisfies ReadonlyArray<ProviderSession>)
-      : Effect.succeed([] as ReadonlyArray<ProviderSession>);
+      : Effect.succeed(peerSessions);
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
@@ -302,6 +304,9 @@ describe("CheckpointReactor", () => {
     readonly threadWorktreePath?: string | null;
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
+    // Extra provider sessions listed beside thread-1's own, built from the
+    // harness cwd so a peer can be placed in the same worktree.
+    readonly peerSessions?: (cwd: string) => ReadonlyArray<ProviderSession>;
     readonly gitStatusRefreshCalls?: Array<string>;
     readonly receiptCalls?: Array<OrchestrationRuntimeReceipt>;
     readonly startReactor?: boolean;
@@ -314,6 +319,7 @@ describe("CheckpointReactor", () => {
       options?.hasSession ?? true,
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
+      options?.peerSessions?.(cwd) ?? [],
     );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -1482,6 +1488,111 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
     });
+  });
+
+  it("refuses a revert while another session runs a turn in the same worktree", async () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      peerSessions: (cwd) => [
+        {
+          provider: ProviderDriverKind.make("codex"),
+          status: "running",
+          runtimeMode: "full-access",
+          threadId: ThreadId.make("thread-child"),
+          cwd,
+          activeTurnId: asTurnId("turn-child-1"),
+          createdAt,
+          updatedAt: createdAt,
+        },
+      ],
+    });
+
+    await setThreadSession(harness, {
+      status: "ready",
+      activeTurnId: null,
+      commandId: "cmd-session-set-busy-peer",
+    });
+    await dispatch(harness.engine, {
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-busy-peer-diff-1"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      completedAt: createdAt,
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 1,
+      createdAt,
+    });
+
+    await dispatch(harness.engine, {
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("cmd-revert-busy-peer"),
+      threadId: ThreadId.make("thread-1"),
+      turnCount: 1,
+      createdAt,
+    });
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "checkpoint.revert.failed"),
+    );
+
+    const snapshot = await harness.readModel();
+    const failure = snapshot.threads
+      .find((entry) => entry.id === ThreadId.make("thread-1"))
+      ?.activities.find((activity) => activity.kind === "checkpoint.revert.failed");
+    expect(JSON.stringify(failure?.payload)).toContain("thread-child");
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    // The worktree still holds the peer's in-flight state.
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+    const events = await readEvents(harness);
+    expect(events.some((event) => event.type === "thread.reverted")).toBe(false);
+  });
+
+  it("allows a revert when the session sharing the worktree is idle", async () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      peerSessions: (cwd) => [
+        {
+          provider: ProviderDriverKind.make("codex"),
+          status: "ready",
+          runtimeMode: "full-access",
+          threadId: ThreadId.make("thread-child"),
+          cwd,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      ],
+    });
+
+    await setThreadSession(harness, {
+      status: "ready",
+      activeTurnId: null,
+      commandId: "cmd-session-set-idle-peer",
+    });
+    await dispatch(harness.engine, {
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-idle-peer-diff-1"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      completedAt: createdAt,
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 1,
+      createdAt,
+    });
+
+    await dispatch(harness.engine, {
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("cmd-revert-idle-peer"),
+      threadId: ThreadId.make("thread-1"),
+      turnCount: 1,
+      createdAt,
+    });
+
+    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
   });
 
   it("appends an error activity when revert is requested without an active session", async () => {

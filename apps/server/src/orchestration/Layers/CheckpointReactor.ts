@@ -34,7 +34,7 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
-import { isGitRepository } from "../../git/Utils.ts";
+import { isGitRepository, resolveWorktreePath } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 
@@ -178,6 +178,29 @@ const make = Effect.gen(function* () {
     return session?.cwd
       ? Option.some({ threadId: session.threadId, cwd: session.cwd })
       : Option.none();
+  });
+
+  // A revert rewrites the whole worktree: `restoreCheckpoint` runs
+  // `git restore --worktree --staged` plus `git clean -fd`. When another
+  // session shares that tree — a parent and its thread-backed subagent both
+  // run in the project cwd — the revert deletes the peer's uncommitted work,
+  // and a revert racing the peer's turn-completion capture writes a
+  // checkpoint describing a tree that never existed. Refuse while the peer's
+  // turn is still live; an idle peer has nothing in flight to lose.
+  const findBusyPeerSession = Effect.fn("findBusyPeerSession")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly cwd: string;
+  }): Effect.fn.Return<Option.Option<ThreadId>> {
+    const sessions = yield* providerService.listSessions();
+    const cwd = resolveWorktreePath(input.cwd);
+    const busy = sessions.find(
+      (session) =>
+        session.threadId !== input.threadId &&
+        session.cwd !== undefined &&
+        resolveWorktreePath(session.cwd) === cwd &&
+        (session.status === "running" || session.activeTurnId !== undefined),
+    );
+    return busy ? Option.some(busy.threadId) : Option.none();
   });
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
@@ -805,6 +828,20 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
         detail: "Checkpoints are unavailable because this project is not a git repository.",
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+
+    const busyPeerThreadId = yield* findBusyPeerSession({
+      threadId: event.payload.threadId,
+      cwd: sessionRuntime.value.cwd,
+    });
+    if (Option.isSome(busyPeerThreadId)) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail: `Thread ${busyPeerThreadId.value} is running a turn in the same workspace. A revert would discard its work. Wait for it to finish, then revert again.`,
         createdAt: now,
       }).pipe(Effect.catch(() => Effect.void));
       return;
