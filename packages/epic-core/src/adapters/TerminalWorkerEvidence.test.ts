@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import type { InspectorLaunchEvidence } from "../inspectorPrompt.ts";
 import { ProcessRunner, type ProcessRunInput, type ProcessRunOutput } from "../processRunner.ts";
@@ -37,7 +38,7 @@ const LAUNCH_EVIDENCE: InspectorLaunchEvidence = {
 const output = (stdout: string): ProcessRunOutput => ({
   stdout,
   stderr: "",
-  code: 0,
+  code: ChildProcessSpawner.ExitCode(0),
   timedOut: false,
   stdoutTruncated: false,
   stderrTruncated: false,

@@ -1252,7 +1252,12 @@ it.live("refuses to restart a finished run, and leaves its record alone", () =>
       const refused = yield* Effect.result(second.run());
 
       assert.equal(refused._tag, "Failure");
-      assert.equal(refused._tag === "Failure" ? refused.failure.operation : null, "resume");
+      assert.equal(
+        refused._tag === "Failure" && refused.failure._tag === "SequentialEpicLoopError"
+          ? refused.failure.operation
+          : null,
+        "resume",
+      );
       assert.equal(second.dispatches(), 0);
       // A run this process was not allowed to adopt keeps its own verdict.
       const record = yield* journal.getRun(EpicRunId.make("run"));
