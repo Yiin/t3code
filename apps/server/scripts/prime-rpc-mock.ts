@@ -208,6 +208,35 @@ function handle(command: Record<string, unknown>): void {
       NodeTimers.setTimeout(() => {
         NodeProcess.stdout.write(response.slice(middle));
         if (!adapterScenario && !scenario.startsWith("text")) return;
+        if (command.message === "full-turn") {
+          // One turn that touches every canonical item family the mapper
+          // projects: reasoning text, a tool call, and a subagent task.
+          emit({
+            type: "message_update",
+            message: { id: "assistant-1", role: "assistant" },
+            assistantMessageEvent: { type: "thinking_delta", delta: "weighing options" },
+          });
+          emit({
+            type: "tool_execution_start",
+            toolCallId: "tool-1",
+            toolName: "Read",
+            args: { path: "README.md" },
+          });
+          emit({
+            type: "tool_execution_end",
+            toolCallId: "tool-1",
+            toolName: "Read",
+            result: { text: "file body" },
+            isError: false,
+          });
+          emit({
+            type: "subagent_start",
+            taskId: "task-1",
+            description: "survey the repo",
+            agentType: "explore",
+          });
+          emit({ type: "subagent_end", taskId: "task-1", status: "completed", summary: "done" });
+        }
         emit({ type: "message_end", message: { id: "assistant-1", role: "assistant" } });
         if (command.message === "permission" || command.message === "permission-crash") {
           emit({
