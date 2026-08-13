@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
+import { EpicIterationOwnership } from "./epicIterationOwnership.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
@@ -24,6 +25,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const orchestrationEngine = yield* OrchestrationEngineService;
+    const epicIterationOwnership = yield* EpicIterationOwnership;
 
     return handlers
       .handle(
@@ -66,6 +68,12 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );
+          // Same gate as the WebSocket surface: a running epic iteration is
+          // the runner's, whichever client door the command arrives at.
+          const rejection = yield* epicIterationOwnership.checkClientCommand(normalizedCommand);
+          if (rejection !== null) {
+            return yield* failEnvironmentInvalidRequest("epic_run_iteration_owned");
+          }
           return yield* orchestrationEngine
             .dispatch(normalizedCommand)
             .pipe(

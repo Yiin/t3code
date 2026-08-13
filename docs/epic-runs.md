@@ -44,6 +44,24 @@ repository in T3 Code; it reads the current ready frontier from Beads.
 `cook-it` handles one child. It may claim and close that child, but it does not
 own the epic run lock and is not an epic mode to switch into or out of.
 
+### The runner owns a live iteration thread
+
+While an iteration row is `running`, the runner owns that thread's turn. The
+server refuses these client commands on it, over WebSocket and over HTTP:
+`thread.turn.start`, `thread.turn.interrupt`, `thread.session.stop`,
+`thread.checkpoint.revert`, `thread.delete`, `thread.archive`, and
+`thread.settle`. Sending one back gets an error, not a queued turn.
+
+You can still answer an approval or a user-input request on a live iteration,
+steer or stop one of its subagents, and edit its metadata. The refusal also
+lifts as soon as the iteration reaches a terminal status, so you can open a
+finished worker's thread and carry on with it as an ordinary chat.
+
+The check reads the durable `epic_run_iterations` row, so it covers the gap
+between turn end and the runner's evidence read. The runner's own commands go
+straight to the orchestration engine and are never gated. Forced cleanup —
+cancel, timeout, boot reconciliation, and the session reaper — is unchanged.
+
 ## Engine selection
 
 The engine is `core`. The terminal `run.sh` is a shim that validates

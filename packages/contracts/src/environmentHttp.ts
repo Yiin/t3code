@@ -63,6 +63,8 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "scope_not_granted",
   "invalid_command",
   "invalid_epic_run",
+  /** The thread is an epic run iteration the runner still owns. */
+  "epic_run_iteration_owned",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 

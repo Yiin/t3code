@@ -76,6 +76,7 @@ import { vi } from "vite-plus/test";
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
 import * as ServerConfig from "./config.ts";
+import { EpicIterationOwnership } from "./orchestration/epicIterationOwnership.ts";
 import { makeRoutesLayer } from "./server.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -568,15 +569,24 @@ const buildAppUnderTest = (options?: {
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
+      // `pipe` tops out at 20 arguments, so these two share one slot. Neither
+      // depends on the other. No epic run exists in these tests, so the
+      // ownership gate answers "unowned" for every command; the gate itself is
+      // covered by `epicIterationOwnership.test.ts`.
       Layer.provide(
-        Layer.mock(Keybindings.Keybindings)({
-          loadConfigState: Effect.succeed({
-            keybindings: [],
-            issues: [],
+        Layer.mergeAll(
+          Layer.mock(EpicIterationOwnership)({
+            checkClientCommand: () => Effect.succeed(null),
           }),
-          streamChanges: Stream.empty,
-          ...options?.layers?.keybindings,
-        }),
+          Layer.mock(Keybindings.Keybindings)({
+            loadConfigState: Effect.succeed({
+              keybindings: [],
+              issues: [],
+            }),
+            streamChanges: Stream.empty,
+            ...options?.layers?.keybindings,
+          }),
+        ),
       ),
       // `pipe` tops out at 20 arguments, so these two share one slot. Neither
       // depends on the other. Only the MCP layer's orphaned-spawn boot sweep

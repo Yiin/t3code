@@ -106,6 +106,7 @@ import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
+import { EpicIterationOwnershipLive } from "./orchestration/epicIterationOwnership.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
@@ -455,9 +456,12 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provide(NetService.layer),
 );
 
-const RuntimeServicesLive = ServerRuntimeStartup.layer.pipe(
-  Layer.provideMerge(RuntimeDependenciesLive),
-);
+const RuntimeServicesLive = Layer.mergeAll(
+  ServerRuntimeStartup.layer,
+  // The gate that keeps client commands off a live epic iteration thread.
+  // It brings its own store, the convention `EpicRunnerLayerLive` follows.
+  EpicIterationOwnershipLive.pipe(Layer.provide(EpicRunStoreLive)),
+).pipe(Layer.provideMerge(RuntimeDependenciesLive));
 
 export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(

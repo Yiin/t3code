@@ -30,7 +30,9 @@ import * as ServerConfig from "./config.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import { EpicIterationOwnershipLive } from "./orchestration/epicIterationOwnership.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
+import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import {
@@ -128,6 +130,9 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
+      // The CLI dispatch endpoint answers to the same epic-iteration gate the
+      // server does.
+      Layer.provide(EpicIterationOwnershipLive.pipe(Layer.provide(EpicRunStoreLive))),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
       disableListenLog: true,

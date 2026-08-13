@@ -75,6 +75,10 @@ import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import {
+  describeEpicIterationRejection,
+  EpicIterationOwnership,
+} from "./orchestration/epicIterationOwnership.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -452,6 +456,7 @@ const makeWsRpcLayer = (
       const beadsStatusBroadcaster = yield* BeadsStatusBroadcaster.BeadsStatusBroadcaster;
       const epicRunPreflight = yield* EpicRunPreflight.EpicRunPreflight;
       const epicRunner = yield* EpicRunner.EpicRunner;
+      const epicIterationOwnership = yield* EpicIterationOwnership;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
@@ -1114,8 +1119,25 @@ const makeWsRpcLayer = (
                   ),
                 );
 
+        // The runner dispatches straight into the engine, so this gate sees
+        // client commands only. It sits inside the startup queue so its
+        // durable read runs after migrations, never against a booting server.
+        const guardedDispatchEffect = epicIterationOwnership
+          .checkClientCommand(normalizedCommand)
+          .pipe(
+            Effect.flatMap((rejection) =>
+              rejection === null
+                ? dispatchEffect
+                : Effect.fail(
+                    new OrchestrationDispatchCommandError({
+                      message: describeEpicIterationRejection(rejection),
+                    }),
+                  ),
+            ),
+          );
+
         return startup
-          .enqueueCommand(dispatchEffect)
+          .enqueueCommand(guardedDispatchEffect)
           .pipe(
             Effect.mapError((cause) =>
               toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
