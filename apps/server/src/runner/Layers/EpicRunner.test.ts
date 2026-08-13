@@ -1952,6 +1952,41 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("refuses a RALPH_DONE that leaves an open child", () => {
+    // The worker says the backlog is empty and Beads says otherwise, so the
+    // run dispatches again instead of reporting work nobody did.
+    const harness = createHarness({
+      script: [
+        { text: "RALPH_DONE", head: "head-0" },
+        { text: 'RALPH_MSG: {"summary":"did work","why":"needed"}', head: "head-1" },
+      ],
+      openChildren: [{ id: "child-2", status: "open" }],
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(2);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      const failed = harness.store.runs.get(run.runId);
+      assert.strictEqual(harness.turnsStarted(), 2);
+      assert.include(failed?.lastError ?? "", "limit:max-iterations");
+      assert.include(failed?.lastError ?? "", "child-2");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("fails the dispatch cap when the epic still has an open child", () => {
+    const harness = createHarness({
+      script: [{ text: 'RALPH_MSG: {"summary":"did work","why":"needed"}', head: "head-1" }],
+      openChildren: [{ id: "child-1", status: "open" }],
+    });
+    return Effect.gen(function* () {
+      const run = yield* startRun(1);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+      const failed = harness.store.runs.get(run.runId);
+      assert.strictEqual(failed?.iterationsDispatched, 1);
+      assert.include(failed?.lastError ?? "", "limit:max-iterations");
+      assert.include(failed?.lastError ?? "", "child-1");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("does not complete an empty frontier while a worker is active", () => {
     const gates = [Deferred.makeUnsafe<void>(), Deferred.makeUnsafe<void>()];
     const harness = createHarness({

@@ -172,6 +172,25 @@ Git, not the transcript. The full rule set lives in
 [`skills/cook-epic/SKILL.md`](../skills/cook-epic/SKILL.md) under **How it
 works**.
 
+## How a run counts as done
+
+A run writes `done` only when Beads shows the epic has no open child. Every
+terminal write goes through one proof (`proveEpicCompletion` in
+`packages/epic-core/src/policy.ts`), so no path can shortcut it:
+
+- A worker's `RALPH_DONE` is a claim, not proof. The loop re-reads the open
+  children and the ready frontier. An open child that is still ready sends the
+  run back for another dispatch pass. An open child that nothing can pick up
+  fails the run with `infra:ready-frontier-stuck`.
+- The dispatch cap ends the run either way. With no open child it writes `done`
+  and `max iterations (N) reached`. With open children it writes `failed` and
+  `limit:max-iterations`, naming up to five of them.
+- Nothing is decided while a worker is still running. A sibling can still close
+  the last child, so the proof waits for the pool to empty.
+
+The proof reads Beads only. A run can still report `done` with entries the merge
+queue never landed; that gap is tracked in t3code-xig.
+
 ## Integration gate and host load
 
 The merge queue runs the integration gate once per merge set. The gate is the

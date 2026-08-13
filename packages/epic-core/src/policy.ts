@@ -621,6 +621,86 @@ export const decideIterationBoundary = (
   };
 };
 
+/** How many open child ids a completion failure names before it summarises. */
+export const MAX_OPEN_CHILD_EVIDENCE = 5;
+
+/** Bound the open-child list so one stuck epic cannot write an unbounded row. */
+export const describeOpenChildren = (openChildIds: ReadonlyArray<string>): string => {
+  const named = openChildIds.slice(0, MAX_OPEN_CHILD_EVIDENCE);
+  const remaining = openChildIds.length - named.length;
+  return remaining > 0 ? `${named.join(", ")}, +${remaining} more` : named.join(", ");
+};
+
+/**
+ * The question the pool loop is asking when it is about to write a terminal
+ * status. Each case carries exactly the evidence its answer needs.
+ */
+export type EpicCompletionCheck =
+  /** A worker reported `RALPH_DONE`; `readyChildIds` is the re-read frontier. */
+  | { readonly _tag: "backlog-empty"; readonly readyChildIds: ReadonlyArray<string> }
+  /** The frontier came back empty with no worker left to change it. */
+  | { readonly _tag: "ready-frontier-empty" }
+  /** The run spent its dispatch budget. */
+  | { readonly _tag: "dispatch-cap"; readonly maxIterations: number };
+
+export interface EpicCompletionProofInput {
+  readonly check: EpicCompletionCheck;
+  /** Workers still running. Any one of them can still close a child. */
+  readonly activeWorkers: number;
+  /** Every still-open child of the epic, re-read for this decision. */
+  readonly openChildIds: ReadonlyArray<string>;
+}
+
+export type EpicCompletionProof =
+  /** No open child remains: the run may finish. */
+  | { readonly _tag: "complete"; readonly lastError: string | null }
+  /** Open children remain and nothing can still close them. */
+  | { readonly _tag: "incomplete"; readonly lastError: string }
+  /** Not proven either way: keep running. */
+  | { readonly _tag: "unproven" };
+
+/**
+ * Prove a run may write `done`, from Beads alone.
+ *
+ * Every terminal write of the pool loop comes through here, so no path can
+ * report `done` over an open child: not a worker's `RALPH_DONE`, not an empty
+ * frontier, not the dispatch cap. A worker's claim is never the proof — the
+ * re-read open-child list is.
+ */
+export const proveEpicCompletion = (input: EpicCompletionProofInput): EpicCompletionProof => {
+  // A live sibling can still close the last child, so nothing is decided while
+  // one runs. The scheduler asks again once the pool empties.
+  if (input.activeWorkers > 0) return { _tag: "unproven" };
+
+  if (input.openChildIds.length === 0) {
+    return {
+      _tag: "complete",
+      lastError:
+        input.check._tag === "dispatch-cap"
+          ? `max iterations (${input.check.maxIterations}) reached`
+          : null,
+    };
+  }
+
+  const open = input.openChildIds.length;
+  const evidence = describeOpenChildren(input.openChildIds);
+  if (input.check._tag === "dispatch-cap") {
+    return {
+      _tag: "incomplete",
+      lastError: `limit:max-iterations: dispatch cap (${input.check.maxIterations}) reached with ${open} open children: ${evidence}`,
+    };
+  }
+  // `RALPH_DONE` over a ready child is a wrong claim, not a stuck epic: the
+  // next dispatch pass picks that child up.
+  if (input.check._tag === "backlog-empty" && input.check.readyChildIds.length > 0) {
+    return { _tag: "unproven" };
+  }
+  return {
+    _tag: "incomplete",
+    lastError: `infra:ready-frontier-stuck: ${open} open children remain but none are ready: ${evidence}`,
+  };
+};
+
 export interface GraceDecisionInput {
   readonly headMoved: boolean;
   readonly turnStatus: IterationTurnState;

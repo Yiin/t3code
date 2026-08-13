@@ -42,6 +42,9 @@ import {
   parseIntegrationFixTitle,
   parseMergeFixTitle,
   persistedFailureReason,
+  proveEpicCompletion,
+  type EpicCompletionCheck,
+  type EpicCompletionProof,
 } from "./policy.ts";
 import {
   classifyIteration,
@@ -123,10 +126,15 @@ export interface PoolBacklogShape {
     cwd: string,
     epicId: string,
   ) => Effect.Effect<ReadyFrontierSelection, import("./ports/Backlog.ts").BacklogError>;
-  readonly countOpenChildren: (
+  /**
+   * Every still-open child of the epic, by id. Completion proof needs the ids
+   * and not just a count, because a run that refuses to finish has to say
+   * which children it is refusing over.
+   */
+  readonly openChildIds: (
     cwd: string,
     epicId: string,
-  ) => Effect.Effect<number, import("./ports/Backlog.ts").BacklogError>;
+  ) => Effect.Effect<ReadonlyArray<string>, import("./ports/Backlog.ts").BacklogError>;
   readonly issueEvidence: (cwd: string, issueId: string) => Effect.Effect<IssueEvidenceRead>;
   readonly issueIsResearch: (
     cwd: string,
@@ -397,6 +405,16 @@ type LoopBoundary =
     };
 
 const LOOP_STOP: LoopBoundary = { _tag: "stop" };
+
+/**
+ * Why the loop is asking whether the run may finish. The backlog-empty case
+ * carries no frontier: the prover re-reads it, because the claim being checked
+ * is exactly that the frontier is empty.
+ */
+type CompletionTrigger =
+  | { readonly _tag: "backlog-empty" }
+  | { readonly _tag: "ready-frontier-empty" }
+  | { readonly _tag: "dispatch-cap"; readonly maxIterations: number };
 
 interface ActiveIteration {
   charged: boolean;
@@ -1580,10 +1598,87 @@ export const runParallelEpicLoop = (
     );
   };
 
+  /**
+   * The run's only path to a terminal status. It re-reads the epic's open
+   * children from Beads and hands that evidence to `proveEpicCompletion`, so
+   * `done` is always written against the backlog and never against a worker's
+   * claim.
+   *
+   * Runs outside the transition semaphore: it is a read, and the caller takes
+   * the semaphore to write the status the proof allows.
+   */
+  const proveCompletion = (
+    trigger: CompletionTrigger,
+    activeWorkers: number,
+  ): Effect.Effect<EpicCompletionProof, EpicRunnerError> =>
+    Effect.gen(function* () {
+      // A live sibling can still close the last child, so there is nothing to
+      // prove yet and no reason to spend a `bd` read proving it.
+      if (activeWorkers > 0) return { _tag: "unproven" } as const;
+      const openChildIds = yield* ports.backlog
+        .openChildIds(input.cwd, input.epicId)
+        .pipe(Effect.mapError(backlogError));
+      // The frontier only separates a wrong `RALPH_DONE` from a stuck epic, so
+      // an epic with nothing open never pays for that read. `unrecognised`
+      // counts as ready work: the next dispatch pass owns that failure.
+      const check: EpicCompletionCheck =
+        trigger._tag !== "backlog-empty"
+          ? trigger
+          : {
+              _tag: "backlog-empty",
+              readyChildIds:
+                openChildIds.length === 0
+                  ? []
+                  : yield* ports.backlog.readyFrontier(input.cwd, input.epicId).pipe(
+                      Effect.mapError(backlogError),
+                      Effect.map((frontier) =>
+                        frontier._tag === "children"
+                          ? frontier.issueIds
+                          : frontier._tag === "unrecognised"
+                            ? frontier.candidateIds
+                            : [],
+                      ),
+                    ),
+            };
+      const proof = proveEpicCompletion({ check, activeWorkers, openChildIds });
+      if (proof._tag !== "complete") {
+        yield* Effect.logInfo("epic.runner.completion-unproven", {
+          runId,
+          check: check._tag,
+          proof: proof._tag,
+          openChildren: openChildIds.length,
+        });
+      }
+      return proof;
+    });
+
+  /** Write the terminal status a proof allows, under the transition lock. */
+  const writeProvenTerminalStatus = (
+    proof: Extract<EpicCompletionProof, { readonly _tag: "complete" | "incomplete" }>,
+  ) =>
+    withTransition(
+      Effect.gen(function* () {
+        const current = yield* requireRun(runId);
+        if (current.status !== "running") return;
+        yield* saveRun({
+          ...current,
+          status: proof._tag === "complete" ? ("done" as const) : ("failed" as const),
+          lastError: proof.lastError,
+          updatedAt: yield* nowIso,
+        });
+      }),
+    );
+
   const applyIterationBoundary = (args: {
     readonly iterationResult: RunIterationResult;
     readonly providerInstanceId: ModelSelection["instanceId"];
     readonly providerFallbackApplied: boolean;
+    /**
+     * The proof read for a `RALPH_DONE` settlement, or `null` when this
+     * settlement cannot finish the run. A `done` status is written only when
+     * the proof allows it.
+     */
+    readonly completionProof: EpicCompletionProof | null;
   }): Effect.Effect<LoopBoundary, EpicRunnerError> =>
     withTransition(
       Effect.gen(function* () {
@@ -1682,13 +1777,25 @@ export const runParallelEpicLoop = (
             args.iterationResult.iterationIndex,
           );
         }
+        // `decision.nextStatus === "done"` is the worker's `RALPH_DONE` claim,
+        // and only `backlog-empty` produces it. Beads decides it: an open child
+        // either sends the loop back for another dispatch pass (`unproven`) or
+        // fails the run (`incomplete`).
+        const refused =
+          decision.nextStatus === "done" &&
+          args.completionProof !== null &&
+          args.completionProof._tag !== "complete"
+            ? args.completionProof
+            : null;
+        const status =
+          refused === null ? decision.nextStatus : refused._tag === "incomplete" ? "failed" : null;
         yield* saveRun({
           ...settledRun,
-          ...(decision.nextStatus === null ? {} : { status: decision.nextStatus }),
+          ...(status === null ? {} : { status }),
           consecutiveFailures: decision.nextConsecutiveFailures,
           noCommitStreak: decision.nextNoCommitStreak,
           infraStreak: decision.nextInfraStreak,
-          lastError: decision.lastError,
+          lastError: refused?._tag === "incomplete" ? refused.lastError : decision.lastError,
           ...(childAttemptBudgetExhausted
             ? {
                 status: "failed" as const,
@@ -1696,7 +1803,8 @@ export const runParallelEpicLoop = (
               }
             : {}),
         });
-        return decision.action === "stop" || childAttemptBudgetExhausted
+        const stop = refused === null ? decision.action === "stop" : refused._tag === "incomplete";
+        return stop || childAttemptBudgetExhausted
           ? LOOP_STOP
           : ({
               _tag: "continue",
@@ -2053,32 +2161,17 @@ export const runParallelEpicLoop = (
             .pipe(Effect.mapError(backlogError));
           if (frontier._tag === "empty") {
             if (active.size === 0) {
-              const openChildren = yield* ports.backlog
-                .countOpenChildren(input.cwd, input.epicId)
-                .pipe(Effect.mapError(backlogError));
-              // Completion honesty (D2, t3code-sha) is deferred: `done` below
-              // is decided from `openChildren` alone, not from whether the
-              // merge queue still holds entries this run never landed
-              // (`lastDrainBlocked`, logged as `epic.runner.merge-drain-blocked`
-              // above). A run can report `done` with parked or blocked work
-              // still sitting in the queue. Follow-up filed: t3code-xig.
-              yield* withTransition(
-                Effect.gen(function* () {
-                  const current = yield* requireRun(runId);
-                  if (current.status === "running") {
-                    yield* saveRun({
-                      ...current,
-                      status: openChildren === 0 ? ("done" as const) : ("failed" as const),
-                      lastError:
-                        openChildren === 0
-                          ? null
-                          : `infra:ready-frontier-stuck: ${openChildren} open children remain but none are ready`,
-                      updatedAt: yield* nowIso,
-                    });
-                  }
-                }),
-              );
-              return;
+              // Completion honesty (D2, t3code-sha) is deferred: the proof
+              // below reads Beads alone, not whether the merge queue still
+              // holds entries this run never landed (`lastDrainBlocked`, logged
+              // as `epic.runner.merge-drain-blocked` above). A run can report
+              // `done` with parked or blocked work still sitting in the queue.
+              // Follow-up filed: t3code-xig.
+              const proof = yield* proveCompletion({ _tag: "ready-frontier-empty" }, active.size);
+              if (proof._tag !== "unproven") {
+                yield* writeProvenTerminalStatus(proof);
+                return;
+              }
             }
           } else {
             const selections: ReadonlyArray<readonly [string, ReadyChildSelection]> =
@@ -2100,22 +2193,17 @@ export const runParallelEpicLoop = (
             if (launched.length > 0) yield* noteProgress;
           }
         } else if (active.size === 0 && run.iterationsDispatched >= policy.maxIterations) {
-          // Same deferred gap as above: max-iterations also writes `done`
-          // without consulting the merge queue.
-          yield* withTransition(
-            Effect.gen(function* () {
-              const current = yield* requireRun(runId);
-              if (current.status === "running") {
-                yield* saveRun({
-                  ...current,
-                  status: "done" as const,
-                  lastError: `max iterations (${policy.maxIterations}) reached`,
-                  updatedAt: yield* nowIso,
-                });
-              }
-            }),
+          // Same deferred gap as above: the cap consults Beads, not the merge
+          // queue. A cap that leaves an open child fails rather than reporting
+          // work the run never did.
+          const proof = yield* proveCompletion(
+            { _tag: "dispatch-cap", maxIterations: policy.maxIterations },
+            active.size,
           );
-          return;
+          if (proof._tag !== "unproven") {
+            yield* writeProvenTerminalStatus(proof);
+            return;
+          }
         }
       }
 
@@ -2165,10 +2253,19 @@ export const runParallelEpicLoop = (
         );
         fallbackAppliesToBoundary = pendingFallback !== null;
       }
+      // A `RALPH_DONE` settlement is the only one that can finish the run, so
+      // it is the only one that pays for the proof reads. `active` no longer
+      // holds this worker, so the count is the siblings still running.
+      const completionProof =
+        settlement.exit.value._tag === "classified" &&
+        settlement.exit.value.outcome.kind === "backlog-empty"
+          ? yield* proveCompletion({ _tag: "backlog-empty" }, active.size)
+          : null;
       const boundary = yield* applyIterationBoundary({
         iterationResult: settlement.exit.value,
         providerInstanceId: settlement.modelSelection.instanceId,
         providerFallbackApplied: fallbackAppliesToBoundary,
+        completionProof,
       });
       if (
         !run.config.execution.sequential &&

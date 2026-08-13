@@ -122,7 +122,7 @@ export const makeProcessPoolBacklog = (
         }),
       );
 
-  const countOpenChildren: PoolBacklogShape["countOpenChildren"] = (cwd, epicId) =>
+  const openChildIds: PoolBacklogShape["openChildIds"] = (cwd, epicId) =>
     processRunner
       .run({
         command: "bd",
@@ -156,9 +156,10 @@ export const makeProcessPoolBacklog = (
                   cause,
                 }),
             ),
-            Effect.map(
-              (children) =>
-                children.filter((child) => child.id !== epicId && child.status !== "closed").length,
+            Effect.map((children) =>
+              children
+                .filter((child) => child.id !== epicId && child.status !== "closed")
+                .map((child) => child.id),
             ),
           );
         }),
@@ -310,7 +311,7 @@ export const makeProcessPoolBacklog = (
 
   return {
     readyFrontier,
-    countOpenChildren,
+    openChildIds,
     issueEvidence,
     issueIsResearch,
     epicDescription,

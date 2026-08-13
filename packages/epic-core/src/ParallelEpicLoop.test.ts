@@ -67,6 +67,8 @@ type Attempt = {
   readonly claim?: boolean;
   /** Settle with a RALPH_BLOCKED final message. */
   readonly blocked?: boolean;
+  /** Settle with a RALPH_DONE final message, claiming the backlog is empty. */
+  readonly backlogEmpty?: boolean;
   /** Settle in an errored turn carrying this provider error. */
   readonly providerError?: string;
   /** Fail `beginTurn` with an EpicRunnerDispatchError. */
@@ -380,7 +382,7 @@ const fixture = (input: {
               ? { _tag: "children", issueIds: [child.id] }
               : { _tag: "empty" },
       ),
-    countOpenChildren: () => Effect.succeed(child.status === "closed" ? 0 : 1),
+    openChildIds: () => Effect.succeed(child.status === "closed" ? [] : [child.id]),
     issueEvidence: () =>
       Effect.succeed({
         status: child.status,
@@ -518,7 +520,9 @@ const fixture = (input: {
             text:
               attempt.blocked === true
                 ? "RALPH_BLOCKED"
-                : 'RALPH_MSG: {"summary":"did work","why":"needed"}',
+                : attempt.backlogEmpty === true
+                  ? "RALPH_DONE"
+                  : 'RALPH_MSG: {"summary":"did work","why":"needed"}',
             streaming: false,
             waitExhausted: false,
           },
@@ -894,6 +898,89 @@ it.live("treats an empty frontier with open children as stuck, never done", () =
     assert.equal(test.runRecord().status, "failed");
     assert.include(test.runRecord().lastError ?? "", "infra:ready-frontier-stuck");
     assert.equal(test.dispatchCount(), 0);
+  }),
+);
+
+it.live("dispatches the child again when RALPH_DONE leaves it open and ready", () =>
+  Effect.gen(function* () {
+    // The agent's word is not the proof. The child is still ready, so the run
+    // goes back to work instead of reporting a backlog it never emptied.
+    const test = fixture({
+      attempts: [{ backlogEmpty: true }, { commit: true, close: true, comment: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.dispatchCount(), 2);
+    assert.equal(test.runRecord().status, "done");
+    assert.isNull(test.runRecord().lastError);
+  }),
+);
+
+it.live("fails a RALPH_DONE that leaves an open child nothing can pick up", () =>
+  Effect.gen(function* () {
+    let frontierReads = 0;
+    const test = fixture({
+      attempts: [{ backlogEmpty: true, claim: true }],
+      frontier: () =>
+        frontierReads++ === 0 ? { _tag: "children", issueIds: ["epic.1"] } : { _tag: "empty" },
+    });
+    yield* test.run;
+
+    assert.equal(test.dispatchCount(), 1);
+    assert.equal(test.runRecord().status, "failed");
+    assert.include(test.runRecord().lastError ?? "", "infra:ready-frontier-stuck");
+    assert.include(test.runRecord().lastError ?? "", "epic.1");
+  }),
+);
+
+it.effect("never completes on RALPH_DONE while a sibling worker is still running", () =>
+  Effect.gen(function* () {
+    let frontierReads = 0;
+    const test = fixture({
+      sequential: false,
+      runSeed: { workers: 2 },
+      frontier: () =>
+        frontierReads++ === 0
+          ? { _tag: "children", issueIds: ["epic.1", "epic.2"] }
+          : { _tag: "empty" },
+      attempts: [{ backlogEmpty: true }, { neverSettles: true }],
+      policy: policy({ runStallTimeoutMs: 60_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.minutes(30));
+
+    assert.equal(test.dispatchCount(), 2);
+    assert.equal(test.runRecord().status, "running");
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
+it.live("fails the dispatch cap when it leaves an open child", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ commit: true, comment: true }],
+      policy: policy({ maxIterations: 1 }),
+    });
+    yield* test.run;
+
+    assert.equal(test.dispatchCount(), 1);
+    assert.equal(test.runRecord().status, "failed");
+    assert.include(test.runRecord().lastError ?? "", "limit:max-iterations");
+    assert.include(test.runRecord().lastError ?? "", "epic.1");
+  }),
+);
+
+it.live("completes the dispatch cap when no open child remains", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ commit: true, close: true, comment: true }],
+      policy: policy({ maxIterations: 1 }),
+    });
+    yield* test.run;
+
+    assert.equal(test.dispatchCount(), 1);
+    assert.equal(test.runRecord().status, "done");
+    assert.equal(test.runRecord().lastError, "max iterations (1) reached");
   }),
 );
 
@@ -1338,10 +1425,11 @@ it.live(
                 : ({ _tag: "children", issueIds } as const);
             })(),
           ),
-        countOpenChildren: () =>
-          Effect.succeed(
-            (fixChildStatus === "open" ? 1 : 0) + (normalChildStatus === "open" ? 1 : 0),
-          ),
+        openChildIds: () =>
+          Effect.succeed([
+            ...(fixChildStatus === "open" ? [fixChildId] : []),
+            ...(normalChildStatus === "open" ? [normalChildId] : []),
+          ]),
         issueEvidence: (_cwd, issueId) =>
           Effect.succeed(
             issueId === fixChildId

@@ -17,6 +17,8 @@ import {
   parseIntegrationFixTitle,
   parseMergeFixTitle,
   persistedFailureReason,
+  proveEpicCompletion,
+  MAX_OPEN_CHILD_EVIDENCE,
   type IterationBoundaryDecision,
   type IterationBoundaryInput,
   mergeSlotHolder,
@@ -765,5 +767,92 @@ describe("EPIC_RUN_RESTART_RESUME_PROMPT", () => {
     expect(text).toContain("main checkout");
     expect(text).toContain("base branch");
     expect(text).not.toContain("null");
+  });
+});
+
+describe("proveEpicCompletion", () => {
+  const openChildIds = ["epic.1", "epic.2"];
+
+  it("refuses to decide while a worker can still close a child", () => {
+    expect(
+      proveEpicCompletion({
+        check: { _tag: "ready-frontier-empty" },
+        activeWorkers: 1,
+        openChildIds,
+      }),
+    ).toEqual({ _tag: "unproven" });
+  });
+
+  it("completes every check once no open child remains", () => {
+    expect(
+      proveEpicCompletion({
+        check: { _tag: "backlog-empty", readyChildIds: [] },
+        activeWorkers: 0,
+        openChildIds: [],
+      }),
+    ).toEqual({ _tag: "complete", lastError: null });
+    expect(
+      proveEpicCompletion({
+        check: { _tag: "ready-frontier-empty" },
+        activeWorkers: 0,
+        openChildIds: [],
+      }),
+    ).toEqual({ _tag: "complete", lastError: null });
+    expect(
+      proveEpicCompletion({
+        check: { _tag: "dispatch-cap", maxIterations: 4 },
+        activeWorkers: 0,
+        openChildIds: [],
+      }),
+    ).toEqual({ _tag: "complete", lastError: "max iterations (4) reached" });
+  });
+
+  it("sends a RALPH_DONE over a ready child back to the dispatcher", () => {
+    expect(
+      proveEpicCompletion({
+        check: { _tag: "backlog-empty", readyChildIds: ["epic.2"] },
+        activeWorkers: 0,
+        openChildIds,
+      }),
+    ).toEqual({ _tag: "unproven" });
+  });
+
+  it("fails a RALPH_DONE whose open children are all unready", () => {
+    const proof = proveEpicCompletion({
+      check: { _tag: "backlog-empty", readyChildIds: [] },
+      activeWorkers: 0,
+      openChildIds,
+    });
+    expect(proof._tag).toBe("incomplete");
+    expect(proof._tag === "incomplete" && proof.lastError).toBe(
+      "infra:ready-frontier-stuck: 2 open children remain but none are ready: epic.1, epic.2",
+    );
+  });
+
+  it("fails the dispatch cap with a stable reason naming the open children", () => {
+    const proof = proveEpicCompletion({
+      check: { _tag: "dispatch-cap", maxIterations: 4 },
+      activeWorkers: 0,
+      openChildIds,
+    });
+    expect(proof._tag).toBe("incomplete");
+    expect(proof._tag === "incomplete" && proof.lastError).toBe(
+      "limit:max-iterations: dispatch cap (4) reached with 2 open children: epic.1, epic.2",
+    );
+  });
+
+  it("bounds the child evidence a single row can carry", () => {
+    const many = Array.from({ length: MAX_OPEN_CHILD_EVIDENCE + 3 }, (_, index) => `epic.${index}`);
+    const proof = proveEpicCompletion({
+      check: { _tag: "dispatch-cap", maxIterations: 9 },
+      activeWorkers: 0,
+      openChildIds: many,
+    });
+    expect(proof._tag === "incomplete" && proof.lastError).toContain(
+      `${many.slice(0, MAX_OPEN_CHILD_EVIDENCE).join(", ")}, +3 more`,
+    );
+    expect(proof._tag === "incomplete" && proof.lastError).not.toContain(
+      many[MAX_OPEN_CHILD_EVIDENCE],
+    );
   });
 });
