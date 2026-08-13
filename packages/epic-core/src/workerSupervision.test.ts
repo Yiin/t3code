@@ -181,13 +181,13 @@ describe("makeWorkerLivenessConfig", () => {
     expect(config.inspectMaxDelaySeconds).toBe(600);
     expect(config.inspectMinDelaySeconds).toBe(30);
     expect(config.inspectRetryDelaySeconds).toBe(120);
-    expect(config.stopGraceSeconds).toBe(20);
   });
 
   it("leaves the machine's absolute deadline off, because the loop owns it", () => {
     const config = makeWorkerLivenessConfig({
       supervision: {
         ...DEFAULT_WORKER_LIVENESS_CONFIG,
+        stopGraceSeconds: 20,
         workerTimeoutSeconds: 3_600,
       },
       inspectorSupported: true,
@@ -200,7 +200,7 @@ describe("makeWorkerLivenessConfig", () => {
     expect(inspectorSupportedFor("claude")).toBe(true);
     expect(
       makeWorkerLivenessConfig({
-        supervision: DEFAULT_WORKER_LIVENESS_CONFIG,
+        supervision: { ...DEFAULT_WORKER_LIVENESS_CONFIG, stopGraceSeconds: 15 },
         inspectorSupported: inspectorSupportedFor("codex"),
       }).inspectorSupported,
     ).toBe(false);

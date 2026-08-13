@@ -40,6 +40,13 @@ import {
  *
  * Declared structurally so `packages/contracts`' `SupervisionConfig` satisfies
  * it without `epic-core` importing the schema for one read.
+ *
+ * Two owners split this block, and every field belongs to exactly one of them:
+ * the liveness machine takes the inspection knobs through
+ * {@link makeWorkerLivenessConfig}, and the dispatch adapter takes the worker's
+ * wall-clock bounds through {@link makeDispatchSupervisionOptions}. A field
+ * neither owner reads is inert, and a run config must not advertise one
+ * (t3code-csa); `supervisionConsumers.test.ts` holds that line.
  */
 export interface SupervisionSettings {
   readonly idleThresholdSeconds: number;
@@ -76,7 +83,6 @@ export const makeWorkerLivenessConfig = (input: {
   inspectMaxDelaySeconds: input.supervision.inspectMaxDelaySeconds,
   inspectMinDelaySeconds: input.supervision.inspectMinDelaySeconds,
   inspectRetryDelaySeconds: input.supervision.inspectRetryDelaySeconds,
-  stopGraceSeconds: input.supervision.stopGraceSeconds,
   uncertainStopCeiling: input.supervision.uncertainStopCeiling,
   /**
    * Left off deliberately. `makePoolPolicy` already turns the same
@@ -86,6 +92,28 @@ export const makeWorkerLivenessConfig = (input: {
    */
   workerTimeoutSeconds: null,
   inspectorSupported: input.inspectorSupported,
+});
+
+/** The wall-clock bounds a dispatch adapter enforces on the worker it spawned. */
+export interface DispatchSupervisionOptions {
+  /** Absolute per-worker cap; `null` means the adapter arms no deadline. */
+  readonly timeoutSeconds: number | null;
+  /** Seconds between the adapter's stop signal and its forced kill. */
+  readonly stopGraceSeconds: number;
+}
+
+/**
+ * Fold a run's supervision settings into the dispatch adapter's options.
+ *
+ * The adapter is the only party that can stop the worker it spawned, so it —
+ * not the liveness machine — owns both the absolute deadline and the grace
+ * before a forced kill.
+ */
+export const makeDispatchSupervisionOptions = (
+  supervision: SupervisionSettings,
+): DispatchSupervisionOptions => ({
+  timeoutSeconds: supervision.workerTimeoutSeconds,
+  stopGraceSeconds: supervision.stopGraceSeconds,
 });
 
 /**

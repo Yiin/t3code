@@ -67,6 +67,7 @@ import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import type { PersistedEpicRun } from "@t3tools/epic-core/ports/RunJournal";
 import { makeSiblingResolver } from "@t3tools/epic-core/siblings";
 import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
+import { makeDispatchSupervisionOptions } from "@t3tools/epic-core/workerSupervision";
 import { resolveEpicRunConfig } from "@t3tools/shared/epicRunConfig";
 import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
@@ -462,8 +463,7 @@ export const cookCommand = Command.make("cook", {
             : { permissionMode: process.env.COOKEPIC_PERMISSION_MODE }),
           useHarnessDefaultModel: snapshot.config.provider.modelSelection === null,
           providerRoutes: terminalProviders.routes,
-          timeoutSeconds: snapshot.config.supervision.workerTimeoutSeconds,
-          stopGraceSeconds: snapshot.config.supervision.stopGraceSeconds,
+          ...makeDispatchSupervisionOptions(snapshot.config.supervision),
           workerScope,
           workerActivity,
         });

@@ -34,8 +34,6 @@ export interface WorkerLivenessConfig {
   readonly inspectMinDelaySeconds: number;
   /** Maximum delay between inspections (run-legacy.sh:137). */
   readonly inspectMaxDelaySeconds: number;
-  /** Stop escalation grace; the stop mechanism is adapter-owned (run-legacy.sh:138). */
-  readonly stopGraceSeconds: number;
   /** Driver tick cadence (run-legacy.sh:139). */
   readonly supervisionTickSeconds: number;
   /** Quiet-tick repository probe interval (run-legacy.sh:140). */
@@ -79,7 +77,6 @@ export const DEFAULT_WORKER_LIVENESS_CONFIG = {
   inspectRetryDelaySeconds: 300,
   inspectMinDelaySeconds: 60,
   inspectMaxDelaySeconds: 7200,
-  stopGraceSeconds: 15,
   supervisionTickSeconds: 5,
   repoProbeIntervalSeconds: 60,
   repoProbeTimeoutSeconds: 2,
@@ -200,6 +197,11 @@ export type WorkerLivenessEvent =
 export type WorkerLivenessAction =
   /** Worker left its scope; the adapter reaps any in-flight inspector (run-legacy.sh:1748-1751). */
   | { readonly _tag: "worker-inactive" }
+  /**
+   * Stop this worker. The dispatch adapter that spawned it owns the stop, and
+   * with it the TERM-to-KILL grace (`supervision.stopGraceSeconds`), so the
+   * machine carries no grace setting of its own (run-legacy.sh:138).
+   */
   | { readonly _tag: "stop-worker"; readonly reason: string }
   /** Inspector exceeded its budget; the adapter kills it and the machine reaps rc 124 (run-legacy.sh:1782-1785). */
   | { readonly _tag: "force-stop-inspector" }
