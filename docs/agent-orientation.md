@@ -7,12 +7,18 @@ EpicRunner adds this card to worker prompts. `AGENTS.md` wins on conflicts.
 Node is pinned by `mise.toml`. Use pnpm through `vp`.
 
 - Focused tests: `vp test run <test-files>`
-- Typecheck: `vp run --filter t3 typecheck` or `vp run --filter @t3tools/web typecheck`
+- Typecheck: `vp run --filter t3 typecheck`, `vp run --filter @t3tools/web typecheck`,
+  `vp run --filter @t3tools/epic-core typecheck`, or
+  `vp run --filter @t3tools/epic-run-conformance typecheck`
 - Touched files: `vp fmt --check <files>` and `vp lint <files>`
 
 Keep worker checks focused. Run a supplied gate command exactly.
 
-Three drivers run the epic-run conformance scenarios: the server driver, plus
+`packages/epic-run-conformance` holds the shared epic-run scenarios. `scenario.ts`
+defines them; each one lists `appliesTo` from `core`, `terminal`, and `server`, and
+every driver runs only the scenarios that name it.
+
+Three drivers run those scenarios: the server driver, plus
 `coreDriver.test.ts` and `terminalDriver.test.ts` in
 `packages/epic-run-conformance/src`. The terminal leg is skipped unless
 `T3CODE_CONFORMANCE_TERMINAL` is set, and `T3CODE_CONFORMANCE_SCENARIO=<name>`
@@ -37,6 +43,11 @@ narrows it to one scenario. Editing one scenario means running all three.
 - `EpicRunnerLaunch.ts` owns preflight, the lease, and run creation.
   `EpicRunnerLifecycle.ts` owns pause, resume, cancel, and the worker cap.
 - `EpicRunnerPoolPorts.ts` adapts server ports.
+- Provisioning is per surface. Mirror every change between
+  `EpicRunnerPoolPorts.ensureIntegrationWorkspace` and
+  `TerminalPoolWorkspace.ensureIntegration`. The drain is shared instead: both
+  surfaces call `drainMergeQueue` (`adapters/TerminalMergeDrain.ts:20`), so a drain
+  change lands once.
 - `apps/server/src/orchestration/ThreadSettleWatch.ts` watches owned turns and final messages.
 - `packages/epic-core/src/EpicRunPreflight.ts` gates both launch and resume. Its
   `blockerPolicy` branches on `mode` and `intent`; it moved out of `apps/server/src/beads`.
@@ -71,6 +82,68 @@ Its linked `node_modules` can damage the source checkout.
 
 Do not infer file conflicts from issue prose. Beads must confirm no open child
 before run completion. Provider fallback uses structured evidence only.
+
+### Test harnesses
+
+- `packages/epic-core/src/MergeQueue.test.ts` builds ports with `makeHarness` and
+  asserts one exact ordered `calls` array per test. A new drain-time git call breaks
+  many tests at once. Extend the fake and the expected array. Never delete entries to
+  make a test pass.
+- `packages/epic-core/src/ParallelEpicLoop.test.ts` builds a run with `fixture()`,
+  stubs `continueTurn` and `nudge` on each iteration handle, and moves time with
+  `TestClock.adjust`. A new required `IterationHandle` or `MergeDrainShape` member
+  means every stub in this file needs it.
+- `apps/server/src/runner/Layers/EpicRunner.test.ts` builds the server with
+  `createHarness` and asserts on the recorded `processRequests` argv, so a changed
+  git or `bd` command line shows up as a failing argv assertion.
+
+### Merge conflicts
+
+- The conflict radar finds a conflict before the merge queue does.
+  `runParallelEpicLoop` forks a probe fiber on `PoolPolicy.conflictProbeIntervalMs`
+  (`DEFAULT_CONFLICT_PROBE_INTERVAL_MS` is 3 min in `runPolicy.ts`; `0` disables it,
+  and sequential runs never arm it). `runIteration` reports each started turn through
+  the `onTurnBegan` hook, and the loop arms it: an in-place or integration-fix
+  iteration is never armed, and a handle whose continuation is not `same-thread` is
+  armed but ineligible. The tick resolves the base through the never-failing
+  `MergeDrainShape.integrationTarget`, probes once per `<baseHead>:<branchHead>`, and
+  speaks through the never-failing `IterationHandle.nudge`. It sends at most two
+  nudges per iteration.
+- `IterationHandle.nudge` answers `sent`, `skipped`, or `unsupported`. The terminal
+  adapter always answers `unsupported`. Never nudge with raw `continueTurn`: the
+  terminal adapter refuses it mid-turn, and the server opens a stray turn on Kimi,
+  Grok, and Cursor. Never send a nudge with `delivery: "turn-boundary"`, which parks
+  it until turn end and returns it as an unsupervised stray turn.
+- The probe itself is `PoolVcsShape.mergeTreeConflicts` in `ProcessPoolVcs.ts`. It
+  runs `git merge-tree --write-tree <base> <branch>`, so it reads objects only, with
+  no worktree, no index, and no trial commit. `[]` is a clean merge, exit 1 yields the
+  conflicted paths, and every other exit is `null`.
+- The drain batches. It measures each entry's file footprint with
+  `MergeGitShape.changedFiles`, groups consecutive entries with pairwise disjoint
+  footprints, and runs one gate per group. A red batch halves instead of falling back
+  to single entries. An unmeasurable footprint (`null`) goes through alone. A queue
+  below two entries is never measured, which is what keeps the `MergeQueue.test.ts`
+  ordered `calls` arrays unchanged.
+- A parked entry carries evidence. The drain reads `MergeGitShape.conflictDetail`
+  BEFORE `abortMerge`, and `policy.conflictFailureDetail` composes the repo path,
+  merge output, unmerged files, and bounded hunks. `mergeFixDescription` heads it
+  "What the conflict looked like:" and indents it, so the gate-failed one-liner stays
+  byte-identical.
+- A merge-fix child gets its author's context. `reconcileParkedEntry` builds
+  `originalContext` and `landedContext` for `mergeFixDescription` on the create path
+  only, from `MergeQueuePorts.iterations` and the never-failing
+  `MergeGitShape.landedSubjects`. Every failure collapses to no section, and a reused
+  fix child spends no reads. `landedSubjects` reads the MAIN repo's
+  `<branch>..<baseBranch>` only, so a sibling-only branch gets no landed list.
+- git rerere replays a resolution the run already recorded. Integration provisioning
+  turns it on in the run repository and each sibling canonical path, on both surfaces
+  and never-failing (`rerere.ts:RERERE_CONFIG_ARGS`), and `trialMerge` carries the
+  same settings as `-c` flags. `git merge` still exits non-zero on a conflict rerere
+  fully staged, so both merge-git adapters COMPLETE such a merge with
+  `RERERE_COMMIT_ARGS` (`git commit --no-verify --no-edit --cleanup=strip`) and report
+  it clean. `--cleanup=strip` is load bearing: without it git leaves its `# Conflicts:`
+  block in the subject, the merge stops matching `trialMergeMessage`, and
+  `landedSubjects` stops parsing.
 
 ## Durable state and boot order
 
