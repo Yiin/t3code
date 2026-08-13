@@ -57,6 +57,27 @@ const failureReason = (lastError: string | null): string => {
   return "child failure budget";
 };
 
+/**
+ * How a row the restart path gave up on reads in a transcript.
+ *
+ * These rows are not retries. No turn ever ran on them: the loop refused to
+ * continue an interrupted iteration and wrote the row terminal on the spot.
+ * Reading them as `retry` would say the agent failed, and would make the two
+ * endings — hand the worktree to a fresh iteration, or reopen the claim and
+ * drop the tree — indistinguishable, which is the whole difference a restart
+ * scenario exists to pin down.
+ *
+ * The keys are the persisted failure reasons `ParallelEpicLoop.abandonResume`
+ * writes: the resume family from `@t3tools/contracts`, plus the
+ * `server-restart` it writes when there was nothing to hand over.
+ */
+const RESUME_ABANDON_REASONS: ReadonlyMap<string, string> = new Map([
+  ["infra:resume-unsupported", "resume unsupported; worktree handed to a fresh iteration"],
+  ["infra:resume-blocked", "resume blocked; worktree handed to a fresh iteration"],
+  ["infra:resume-failed", "resume failed; worktree handed to a fresh iteration"],
+  ["server-restart", "resume abandoned; child reopened"],
+]);
+
 /** Child order first, dispatch order within a child. Unclaimed rows come last. */
 const settledOrder = (left: ParallelIterationRecord, right: ParallelIterationRecord): number => {
   const leftIssue = left.issueId ?? "￿";
@@ -77,6 +98,7 @@ export const normalizeParallelTranscript = (
   const lastFailure = new Map<string, number>();
   for (const iteration of settled) {
     if (iteration.issueId === null || iteration.turnStatus === "completed") continue;
+    if (RESUME_ABANDON_REASONS.has(iteration.failureReason ?? "")) continue;
     lastFailure.set(
       iteration.issueId,
       Math.max(lastFailure.get(iteration.issueId) ?? -1, iteration.iterationIndex),
@@ -116,6 +138,13 @@ export const normalizeParallelTranscript = (
       continue;
     }
     const failure = iteration.failureReason ?? "infra:turn-error";
+    const abandonedResume = RESUME_ABANDON_REASONS.get(failure);
+    if (abandonedResume !== undefined) {
+      // No attempt number: the durable per-child budget only charges a `child:`
+      // failure, so numbering this row would claim a retry the run never spent.
+      output.push({ _tag: "blocked", ...common, failureReason: failure, reason: abandonedResume });
+      continue;
+    }
     const attempts =
       issueId === null
         ? 1

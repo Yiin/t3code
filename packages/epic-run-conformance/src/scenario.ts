@@ -65,6 +65,48 @@ const ScenarioExecution = Schema.Union([
   Schema.TaggedStruct("parallel", { workers: Schema.Number }),
 ]);
 
+/**
+ * A crash mid-run, then a second loop invocation over the same journal.
+ *
+ * Every restart behaviour needs the same two things a single invocation cannot
+ * produce: an iteration row a dead process left `running`, and a live loop
+ * that is handed that row back. The driver cuts the first invocation once the
+ * journal holds `cutAfterRows` rows and the newest one is running, then starts
+ * a second invocation over the same run directory.
+ */
+const ScenarioRestart = Schema.Struct({
+  /**
+   * How many iteration rows must exist before the first invocation is cut.
+   * The cut also waits for the newest row to be `running`, so the count is a
+   * position in the run, not a race.
+   */
+  cutAfterRows: Schema.Number,
+  /**
+   * Whether the second invocation adopts the leftover row as a
+   * `resumedWorker`. `false` strands it, which is what a process that lost
+   * its own store leaves behind.
+   */
+  adopt: Schema.Boolean,
+  /**
+   * Delete the leftover worktree before the second invocation. `workspace.adopt`
+   * then refuses, which is the one refusal with nothing to hand over: the claim
+   * is reopened instead of the tree being passed on.
+   */
+  dropWorktree: Schema.optional(Schema.Boolean),
+});
+export type ScenarioRestart = typeof ScenarioRestart.Type;
+
+/**
+ * Liveness supervision for this scenario, and what its evidence reports.
+ *
+ * `wedge-first-worker` makes the first dispatched worker read as the
+ * 2026-08-09 incident did — no output, no CPU, no repository change, every
+ * process asleep — and every later worker read as healthy. Absent means the
+ * run carries no evidence port at all, which is how every other pool scenario
+ * runs: only the dispatch deadline bounds a worker.
+ */
+const ScenarioSupervision = Schema.Literals(["wedge-first-worker"]);
+
 export const ConformanceScenario = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
@@ -92,6 +134,8 @@ export const ConformanceScenario = Schema.Struct({
   }),
   agentScript: Schema.Array(AgentStep),
   execution: Schema.optional(ScenarioExecution),
+  restart: Schema.optional(ScenarioRestart),
+  supervision: Schema.optional(ScenarioSupervision),
   expectedTranscript: Schema.Array(EpicRunTranscriptEvent),
   appliesTo: Schema.Array(Schema.Literals(["core", "terminal", "server"])),
 });

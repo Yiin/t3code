@@ -1,0 +1,72 @@
+{
+  "name": "parallel-restart-stranded-claim",
+  "description": "A restart whose leftover worktree is gone has nothing to hand over, so it reopens the stranded claim and lets the next tick take the child fresh.",
+  "repo": {
+    "files": [{ "path": "README.md", "content": "fixture\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "restart": { "cutAfterRows": 1, "adopt": true, "dropWorktree": true },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "repoAction": "no-commit",
+      "report": { "_tag": "none" },
+      "closeChild": false,
+      "hangMs": 30000
+    },
+    {
+      "childId": "epic.1",
+      "repoAction": "commit",
+      "writes": [{ "path": "one.txt", "content": "one\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built one", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "blocked",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "failureReason": "server-restart",
+      "reason": "resume abandoned; child reopened"
+    },
+    {
+      "_tag": "dispatched",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1
+    },
+    { "_tag": "done", "sequence": 2, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 1 },
+    {
+      "_tag": "finished",
+      "sequence": 3,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "done"
+    }
+  ],
+  "appliesTo": ["core"]
+}

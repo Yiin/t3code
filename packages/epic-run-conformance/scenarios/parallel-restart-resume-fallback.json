@@ -1,0 +1,72 @@
+{
+  "name": "parallel-restart-resume-fallback",
+  "description": "A restart cannot continue the interrupted worker's session, so it hands that worker's worktree and standing claim to a fresh iteration instead of losing the work.",
+  "repo": {
+    "files": [{ "path": "README.md", "content": "fixture\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "restart": { "cutAfterRows": 1, "adopt": true },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "repoAction": "no-commit",
+      "report": { "_tag": "none" },
+      "closeChild": false,
+      "hangMs": 30000
+    },
+    {
+      "childId": "epic.1",
+      "repoAction": "commit",
+      "writes": [{ "path": "one.txt", "content": "one\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built one", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "blocked",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "failureReason": "infra:resume-unsupported",
+      "reason": "resume unsupported; worktree handed to a fresh iteration"
+    },
+    {
+      "_tag": "dispatched",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1
+    },
+    { "_tag": "done", "sequence": 2, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 1 },
+    {
+      "_tag": "finished",
+      "sequence": 3,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "done"
+    }
+  ],
+  "appliesTo": ["core"]
+}

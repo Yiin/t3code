@@ -23,6 +23,7 @@ import {
   runParallelEpicLoop,
   type ParallelEpicLoopPorts,
   type PoolSchedulerEvent,
+  type ResumedWorker,
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import {
   runSequentialEpicLoop,
@@ -50,7 +51,12 @@ import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import type { RunEvent } from "@t3tools/epic-core/ports/RunEvents";
 import type { PersistedEpicRun } from "@t3tools/epic-core/ports/RunJournal";
+import type { WorkerEvidenceShape, WorkerRef } from "@t3tools/epic-core/ports/WorkerEvidence";
+import type { IterationWorkspace, WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
+import type { SupervisionClock } from "@t3tools/epic-core/workerSupervision";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -163,6 +169,12 @@ const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
     // the sub-second deadline for the scenarios that assert on it.
     workerTimeoutSeconds: Math.max(1, Math.ceil(workerDeadlineSeconds(scenario))),
     stopGraceSeconds: 1,
+    // Compressed inspection cadence for the supervision scenarios, so the
+    // machine reaches its verdict in a handful of simulated minutes. The
+    // clock below is fake, so these are counted, not waited out.
+    ...(scenario.supervision === undefined
+      ? {}
+      : { idleThresholdSeconds: 30, inspectMinDelaySeconds: 5, inspectRetryDelaySeconds: 10 }),
   },
   server: {
     ...DEFAULT_EPIC_RUN_CONFIG.server,
@@ -173,6 +185,83 @@ const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
     retryMaxDelayMs: 5,
   },
 });
+
+/**
+ * The scenario's liveness evidence: the first worker reads as wedged, every
+ * later one as busy.
+ *
+ * Only the platform sampling is faked. The machine, its cadence, the stop
+ * decision and everything the loop does with the verdict are the shipped ones
+ * — `makeTerminalWorkerEvidence` is what a real cook wires here, and it reads
+ * cgroup counters this fixture has no honest way to produce. The wedged
+ * numbers are the 2026-08-09 incident's: no output, no CPU, no I/O, an
+ * unchanged repository and an unchanged process histogram.
+ */
+const wedgeFirstWorkerEvidence = (): WorkerEvidenceShape => {
+  let wedgedWorker: string | null = null;
+  let busyTicks = 0;
+  const condemned = JSON.stringify({
+    decision: "stop",
+    confidence: "high",
+    rationale: "every process is asleep and the repository has not changed",
+  });
+  const isWedged = (ref: WorkerRef): boolean => {
+    wedgedWorker ??= ref.worker;
+    return wedgedWorker === ref.worker;
+  };
+  return {
+    inspectorSupported: true,
+    sampleSignals: (ref) =>
+      Effect.sync(() => {
+        if (isWedged(ref)) return { isActive: true, outputBytes: 0, cpuUsec: 0, ioBytes: 0 };
+        busyTicks += 1;
+        // Strictly growing, so the machine never calls a healthy worker idle
+        // and its supervision never completes.
+        return {
+          isActive: true,
+          outputBytes: busyTicks * 4_096,
+          cpuUsec: busyTicks * 1_000_000,
+          ioBytes: busyTicks * 8_192,
+        };
+      }),
+    probeRepository: (ref) =>
+      Effect.succeed(isWedged(ref) ? "deadbeef hash=stable" : `hash=${String(busyTicks)}`),
+    processFingerprint: (ref) =>
+      Effect.succeed(isWedged(ref) ? "fingerprint-a" : `fingerprint-${String(busyTicks)}`),
+    providerFallbackPending: Effect.succeed(false),
+    launchInspector: () => Effect.void,
+    inspectorStatus: () =>
+      Effect.succeed({
+        _tag: "finished",
+        rc: 0,
+        result: { text: condemned, byteSize: condemned.length, overflowed: false },
+      }),
+    stopInspector: () => Effect.void,
+  };
+};
+
+/**
+ * The supervision cadence's clock: counted, not waited out.
+ *
+ * A real idle window is half an hour; these ticks cost twenty milliseconds
+ * each. The real sleep is not the wait — it is the yield. A healthy worker is
+ * supervised for its whole turn, and at one millisecond that loop starved the
+ * fixture agent it was watching until the run's own deadline killed it.
+ */
+const compressedSupervisionClock = (): SupervisionClock => {
+  let now = 0;
+  return {
+    nowSeconds: Effect.sync(() => now),
+    sleepSeconds: (seconds) =>
+      Effect.sleep(Duration.millis(20)).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            now += seconds;
+          }),
+        ),
+      ),
+  };
+};
 
 const stateChildren = (workspace: ConformanceWorkspace): ReadonlyArray<Record<string, unknown>> => {
   const statePath = workspace.env["CONFORMANCE_STATE"];
@@ -667,12 +756,44 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
         // loaded host must not park an innocent branch for it.
         quietHostWaitSeconds: 0,
       });
-      const poolWorkspace = makeTerminalPoolWorkspace({
+      const acquiredWorkspaces = new Map<string, IterationWorkspace>();
+      /**
+       * True while the invocation under way is the one that gets killed.
+       *
+       * A killed process runs no finalizers, and the per-iteration workspace
+       * release is one: interrupting the fiber tore down the very worktree the
+       * restart is supposed to find, so every restart scenario reached the
+       * refusal with nothing to hand over. `cleanupOwnedExternally` does not
+       * cover this — it only skips the loop's own end-of-run sweep.
+       */
+      let crashing = false;
+      const basePoolWorkspace = makeTerminalPoolWorkspace({
         processRunner: runner,
         journal,
         mergeQueueStore,
         worktreesRoot: NodePath.join(runDirectory, "worktrees"),
       });
+      /**
+       * The pool workspace, plus a record of what each child was given.
+       *
+       * A restart has to hand `branch` and `worktreePath` back to the loop, and
+       * the loop's journal port carries neither. The server reads them from its
+       * own store; this leg records them as the workspace hands them out, which
+       * is the same fact from the same side of the port.
+       */
+      const poolWorkspace: WorkspaceShape = {
+        ...basePoolWorkspace,
+        acquire: (poolRun, acquireInput) =>
+          basePoolWorkspace.acquire(poolRun, acquireInput).pipe(
+            Effect.tap((acquired) =>
+              Effect.sync(() => {
+                acquiredWorkspaces.set(acquireInput.issueId, acquired);
+              }),
+            ),
+          ),
+        release: (poolRun, released) =>
+          crashing ? Effect.void : basePoolWorkspace.release(poolRun, released),
+      };
       const run: PersistedEpicRun = {
         runId: EpicRunId.make(runId),
         epicId: scenario.beads.epicId,
@@ -723,9 +844,16 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
         vcs: makeProcessPoolVcs(runner),
         providerInventory: providerSupport.inventory,
         roleSelection: null,
-        // No liveness supervision: these scenarios bound a worker with the
-        // dispatch deadline alone, the way a host with no sampling target does.
-        workerEvidence: null,
+        /**
+         * A scenario without `supervision` carries no evidence port at all,
+         * the way a host with no sampling target does: only the dispatch
+         * deadline bounds its workers. One with it gets the shipped machine
+         * over fixture sampling, on a counted clock.
+         */
+        workerEvidence: scenario.supervision === undefined ? null : wedgeFirstWorkerEvidence(),
+        ...(scenario.supervision === undefined
+          ? {}
+          : { supervisionClock: compressedSupervisionClock() }),
       };
       const policySeed: PoolPolicySeed = {
         iterationTimeoutMs: workerDeadlineSeconds(scenario) * 1_000,
@@ -742,21 +870,145 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
       };
       const transitions = yield* Semaphore.make(1);
       const signals = yield* Queue.unbounded<PoolSchedulerEvent>();
-      yield* runParallelEpicLoop(
-        {
-          runId: run.runId,
-          epicId: scenario.beads.epicId,
-          cwd: workspace.cwd,
-          policy: makePoolPolicy(policySeed, run),
-          withTransition: transitions.withPermits(1),
-          signals,
-          readOrientation: () => Effect.succeed("fixture orientation"),
-          cleanupOwnedExternally: () => false,
-        },
-        ports,
-      );
+      const invokeLoop = (options: {
+        readonly resumedWorkers: ReadonlyArray<ResumedWorker>;
+        /** A crash runs no finalizer, so the first invocation of a restart owns none. */
+        readonly crashes: boolean;
+      }) =>
+        runParallelEpicLoop(
+          {
+            runId: run.runId,
+            epicId: scenario.beads.epicId,
+            cwd: workspace.cwd,
+            policy: makePoolPolicy(policySeed, run),
+            withTransition: transitions.withPermits(1),
+            signals,
+            readOrientation: () => Effect.succeed("fixture orientation"),
+            cleanupOwnedExternally: () => options.crashes,
+            resumedWorkers: options.resumedWorkers,
+          },
+          ports,
+        );
+
+      if (scenario.restart === undefined) {
+        yield* invokeLoop({ resumedWorkers: [], crashes: false });
+      } else {
+        const restart = scenario.restart;
+        /**
+         * Cut the first invocation the way a killed process is cut: mid-turn,
+         * with no finalizer. Interrupting the fiber is the closest an
+         * in-process leg gets, and `cleanupOwnedExternally` keeps it honest by
+         * skipping the sweep a real crash never runs.
+         */
+        crashing = true;
+        const first = yield* invokeLoop({ resumedWorkers: [], crashes: true }).pipe(
+          Effect.forkChild,
+        );
+        const agentStarts = (): number =>
+          workspace.readTranscript().filter((item) => {
+            if (typeof item !== "object" || item === null) return false;
+            return (item as Readonly<Record<string, unknown>>)["tool"] === "agent";
+          }).length;
+        /**
+         * The row alone is not enough. `allocateIteration` writes it inside the
+         * transition, before `beginTurn` spawns anything, so a cut that only
+         * waited for a running row killed a turn that had not started — and the
+         * fixture agent's step counter never moved, which handed the restart's
+         * fresh iteration the same wedged step again.
+         */
+        const reached = yield* Effect.gen(function* () {
+          while (true) {
+            const rows = yield* journal.listIterations(run.runId);
+            if (
+              rows.length >= restart.cutAfterRows &&
+              rows.at(-1)?.turnStatus === "running" &&
+              agentStarts() >= restart.cutAfterRows
+            ) {
+              return;
+            }
+            yield* Effect.sleep(Duration.millis(10));
+          }
+        }).pipe(Effect.timeoutOption(Duration.seconds(30)));
+        if (Option.isNone(reached)) {
+          const rows = yield* journal.listIterations(run.runId);
+          throw new Error(
+            `${scenario.name} never reached ${String(restart.cutAfterRows)} iteration rows with a running worker; rows: ${JSON.stringify(
+              rows.map((row) => [
+                row.iterationIndex,
+                row.issueId,
+                row.turnStatus,
+                row.failureReason,
+              ]),
+            )}`,
+          );
+        }
+        yield* Fiber.interrupt(first);
+        crashing = false;
+
+        const leftover = (yield* journal.listIterations(run.runId)).filter(
+          (row) => row.turnStatus === "running" && row.issueId !== null,
+        );
+        if (restart.dropWorktree === true) {
+          // Gone the way git itself reports it gone. Deleting the directory
+          // alone leaves the registration behind, and the next `worktree add`
+          // then refuses the path outright — a different fault from the one
+          // this scenario is about.
+          for (const row of leftover) {
+            const path = acquiredWorkspaces.get(row.issueId ?? "")?.worktreePath;
+            if (path !== undefined && path !== null) {
+              NodeFS.rmSync(path, { recursive: true, force: true });
+            }
+          }
+          yield* runner
+            .run({ command: "git", args: ["worktree", "prune"], cwd: workspace.cwd })
+            .pipe(Effect.ignore);
+        }
+        yield* invokeLoop({
+          resumedWorkers: restart.adopt
+            ? leftover.map((row) => {
+                const issueId = row.issueId ?? "";
+                const acquired = acquiredWorkspaces.get(issueId);
+                return {
+                  issueId,
+                  iterationIndex: row.iterationIndex,
+                  threadId: row.threadId,
+                  branch: acquired?.branch ?? null,
+                  worktreePath: acquired?.worktreePath ?? null,
+                  startedAt: row.startedAt,
+                  resumeCount: row.resumeCount ?? 0,
+                };
+              })
+            : [],
+          crashes: false,
+        });
+      }
       const finalRun = yield* journal.getRun(run.runId);
       const rows = yield* journal.listIterations(run.runId);
+      /**
+       * The drain is serialized, and the receipts are the only place that
+       * shows it: two branches that landed together were verified by ONE gate
+       * over both, not by two gates racing the same base.
+       *
+       * A batch receipt names every branch it merged, space separated, and
+       * blames nobody — a null `childId`, because one child of several cannot
+       * be held responsible for a red batch.
+       */
+      if (scenario.name === "parallel-happy-path") {
+        const entries = (yield* gateReceipts.list(runId)).filter(
+          (receipt) => receipt.phase === "entry",
+        );
+        const acquiredBranches = [...acquiredWorkspaces.values()]
+          .flatMap((acquired) => (acquired.branch === null ? [] : [acquired.branch]))
+          .toSorted();
+        assert.equal(
+          entries.length,
+          1,
+          `expected one batched entry gate, got ${JSON.stringify(entries.map((entry) => entry.branch))}`,
+        );
+        assert.equal(entries[0]?.childId, null, "a batch gate blames no single child");
+        assert.deepEqual((entries[0]?.branch ?? "").split(" ").toSorted(), acquiredBranches);
+        assert.equal(entries[0]?.outcome, "passed");
+      }
       yield* lease.success.release.pipe(Effect.ignore);
       const landed = landedChildIds(workspace);
       const iterations: ReadonlyArray<ParallelIterationRecord> = rows.map((row) => ({
