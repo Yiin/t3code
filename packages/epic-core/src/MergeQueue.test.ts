@@ -1,6 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
+import { NonNegativeInt, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+
+import { RunJournalError, type PersistedEpicRunIteration } from "./ports/RunJournal.ts";
 
 import { drainMergeQueue, type DrainMergeQueueResult, type MergeQueuePorts } from "./MergeQueue.ts";
 import { GateError, gateCommandDigest, type GateReceipt } from "./ports/Gate.ts";
@@ -120,6 +123,20 @@ const makeHarness = (
     readonly existingIntegrationFixStatuses?: ReadonlyArray<string>;
     /** Make the conflict-detail read fail the way an unreadable worktree does. */
     readonly conflictDetailUnreadable?: boolean;
+    /**
+     * What each child's worker reported, keyed by child id. A child absent
+     * here has no completed iteration at all, which is how a run that never
+     * recorded a summary looks (t3code-2jh.5).
+     */
+    readonly reports?: Readonly<
+      Record<string, { readonly summary: string | null; readonly why: string | null }>
+    >;
+    /** Merge-commit subjects `git log <branch>..<baseBranch>` reports, newest first. */
+    readonly landedSubjects?: ReadonlyArray<string>;
+    /** Make the landed-subject read fail the way an unreadable repository does. */
+    readonly landedSubjectsUnreadable?: boolean;
+    /** Make the iteration lookup fail the way an unreachable journal does. */
+    readonly iterationsUnreadable?: boolean;
   } = {},
 ) => {
   const siblings = options.siblings ?? [];
@@ -256,6 +273,12 @@ const makeHarness = (
           files: [`${cwd === "/worktrees/integration" ? "main" : "sibling"}-conflict.ts`],
           diff: `<<<<<<< HEAD in ${cwd}`,
         };
+      }),
+    landedSubjects: ({ repositoryPath, branch, limit }) =>
+      Effect.sync(() => {
+        calls.push(`landed:${branch}:${String(limit)}`);
+        if (options.landedSubjectsUnreadable === true || repositoryPath !== "/repo") return null;
+        return options.landedSubjects ?? [];
       }),
     abortMerge: (cwd) => Effect.sync(() => void calls.push(`abort:${cwd}`)),
     fastForward: ({ cwd, ref, branch }) =>
@@ -473,6 +496,32 @@ const makeHarness = (
         }),
       writeNotes: ({ note }) => Effect.sync(() => void notes.push(note)),
     },
+    iterations: {
+      listIterations: (runId) =>
+        Effect.gen(function* () {
+          calls.push(`iterations:${runId}`);
+          if (options.iterationsUnreadable === true) {
+            return yield* new RunJournalError({
+              operation: "listIterations",
+              detail: "journal unreachable",
+            });
+          }
+          return Object.entries(options.reports ?? {}).map(
+            ([childId, report], index): PersistedEpicRunIteration => ({
+              runId,
+              iterationIndex: NonNegativeInt.make(index),
+              threadId: ThreadId.make(`thread-${childId}`),
+              issueId: childId,
+              turnStatus: "completed",
+              summary: report.summary,
+              why: report.why,
+              failureReason: null,
+              startedAt: "2026-08-13T00:00:00.000Z",
+              finishedAt: "2026-08-13T00:10:00.000Z",
+            }),
+          );
+        }),
+    },
     events: { emit: (event) => Effect.sync(() => void events.push(event)) },
     fold: { run: (childId) => Effect.sync(() => void calls.push(`fold:${childId}`)) },
   };
@@ -593,6 +642,99 @@ describe("MergeQueue", () => {
       expect(description).not.toContain("Conflicted files:");
     }),
   );
+
+  /**
+   * A repair agent resolving someone else's conflict has to guess which side
+   * meant what. Both sides already said so in their own `RALPH_MSG` line, so
+   * the description quotes them instead (t3code-2jh.5).
+   */
+  describe("author context (t3code-2jh.5)", () => {
+    it.effect("quotes the parked child's own report and every landed sibling's", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          conflicts: ["epic/child-1"],
+          reports: {
+            "child-1": { summary: "added a conflict probe", why: "conflicts were found late" },
+            "child-2": { summary: "batched disjoint branches", why: "one gate per group" },
+          },
+          landedSubjects: [
+            "cook-epic: merge epic/child-2 (child-2)",
+            "chore: an operator commit nobody parsed",
+          ],
+        });
+        yield* drain(harness.ports);
+        const description = harness.fixes[0] ?? "";
+        expect(description).toContain("    added a conflict probe");
+        expect(description).toContain("    Why: conflicts were found late");
+        expect(description).toContain(
+          "    - `epic/child-2` (`child-2`): batched disjoint branches",
+        );
+        // A subject that names no child contributes nothing.
+        expect(description).not.toContain("an operator commit");
+        expect(harness.calls).toContain("landed:epic/child-1:10");
+      }),
+    );
+
+    it.effect("skips a landed child the run journal never recorded", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          conflicts: ["epic/child-1"],
+          reports: { "child-1": { summary: "added a conflict probe", why: null } },
+          landedSubjects: ["cook-epic: merge epic/child-2 (child-2)"],
+        });
+        yield* drain(harness.ports);
+        const description = harness.fixes[0] ?? "";
+        expect(description).toContain("What the original author built:");
+        expect(description).not.toContain("What landed on");
+      }),
+    );
+
+    // Enrichment must never cost a park. Each lookup fails on its own here,
+    // and the description degrades to exactly the one it had before.
+    it.effect("parks normally when the iteration lookup fails", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          conflicts: ["epic/child-1"],
+          iterationsUnreadable: true,
+        });
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 0, parked: 1 });
+        const description = harness.fixes[0] ?? "";
+        expect(description).toContain("What the conflict looked like:");
+        expect(description).not.toContain("What the original author built:");
+        expect(harness.snapshot().entries[0]).toMatchObject({ fixIssueId: "fix-1" });
+      }),
+    );
+
+    it.effect("keeps the author section when only the landed-subject read fails", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          conflicts: ["epic/child-1"],
+          reports: { "child-1": { summary: "added a conflict probe", why: null } },
+          landedSubjectsUnreadable: true,
+        });
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 0, parked: 1 });
+        const description = harness.fixes[0] ?? "";
+        expect(description).toContain("    added a conflict probe");
+        expect(description).not.toContain("What landed on");
+      }),
+    );
+
+    // Reusing an open fix child writes no description, so it must not spend
+    // the two reads either.
+    it.effect("reads nothing when an open merge-fix child already exists", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          conflicts: ["epic/child-1"],
+          existingFixStatuses: ["open"],
+          reports: { "child-1": { summary: "added a conflict probe", why: null } },
+        });
+        yield* drain(harness.ports);
+        expect(harness.fixes).toEqual([]);
+        expect(harness.calls.some((call) => call.startsWith("landed:"))).toBe(false);
+        expect(harness.calls.some((call) => call.startsWith("iterations:"))).toBe(false);
+      }),
+    );
+  });
 
   /**
    * A run that lands or parks with no record of the gate it ran cannot

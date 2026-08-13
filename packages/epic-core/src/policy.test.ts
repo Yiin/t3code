@@ -18,6 +18,7 @@ import {
   mergeFixTitle,
   parseIntegrationFixTitle,
   parseMergeFixTitle,
+  parseTrialMergeMessage,
   persistedFailureReason,
   proveEpicCompletion,
   MAX_OPEN_CHILD_EVIDENCE,
@@ -27,6 +28,7 @@ import {
   parseMergeSlotHolder,
   runBaseBranch,
   shouldReclaimMergeSlot,
+  trialMergeMessage,
 } from "./policy.ts";
 import {
   iterationFailureClass,
@@ -713,6 +715,99 @@ describe("mergeFixDescription failure detail", () => {
     });
     expect(description.endsWith("\n\nWhat the gate reported:\n\n    FAIL src/foo.test.ts")).toBe(
       true,
+    );
+  });
+});
+
+describe("parseTrialMergeMessage", () => {
+  it("round-trips a landing's own commit subject", () => {
+    expect(parseTrialMergeMessage(trialMergeMessage("epic/child-1", "child-1"))).toEqual({
+      branch: "epic/child-1",
+      childId: "child-1",
+    });
+  });
+
+  it("ignores every other commit subject", () => {
+    // The base branch carries the operator's own commits and the run's
+    // integration merges too; only a landing names a child.
+    expect(parseTrialMergeMessage("cook-epic: integrate mine")).toBeNull();
+    expect(parseTrialMergeMessage("feat(epic-core): batch disjoint branches")).toBeNull();
+  });
+});
+
+describe("mergeFixDescription author context (t3code-2jh.5)", () => {
+  const base = {
+    childId: "child-1",
+    branch: "epic/child-1",
+    baseBranch: "mine",
+    reason: "conflict" as const,
+    gateCommand: "vp check",
+    pushEnabled: true,
+  };
+
+  it("names what the original author built and what landed since", () => {
+    const description = mergeFixDescription({
+      ...base,
+      originalContext: { summary: "added a conflict probe", why: "conflicts were found too late" },
+      landedContext: [
+        {
+          childId: "child-2",
+          branch: "epic/child-2",
+          summary: "batched disjoint branches",
+          why: "one gate per compatible group",
+        },
+      ],
+    });
+    expect(description).toContain(
+      "\n\nWhat the original author built:\n" +
+        "\n" +
+        "    added a conflict probe\n" +
+        "    Why: conflicts were found too late",
+    );
+    expect(description).toContain(
+      "\n\nWhat landed on `mine` since, newest first:\n" +
+        "\n" +
+        "    - `epic/child-2` (`child-2`): batched disjoint branches\n" +
+        "      Why: one gate per compatible group",
+    );
+  });
+
+  // Every lookup behind these sections is best-effort, so the description a
+  // repair got before this existed has to survive every one of them failing.
+  it("stays byte-identical when neither lookup produced anything", () => {
+    expect(mergeFixDescription({ ...base, landedContext: [] })).toBe(mergeFixDescription(base));
+    expect(mergeFixDescription({ ...base, originalContext: { summary: null, why: null } })).toBe(
+      mergeFixDescription(base),
+    );
+    expect(
+      mergeFixDescription({
+        ...base,
+        landedContext: [{ childId: "child-2", branch: "epic/child-2", summary: null, why: null }],
+      }),
+    ).toBe(mergeFixDescription(base));
+  });
+
+  it("renders a report that has only one of the two clauses", () => {
+    const description = mergeFixDescription({
+      ...base,
+      originalContext: { summary: "added a conflict probe", why: null },
+    });
+    expect(description).toContain(
+      "\n\nWhat the original author built:\n\n    added a conflict probe",
+    );
+    expect(description).not.toContain("Why:");
+  });
+
+  // The repeat-repair warning is the last thing a repair reads, and it stays
+  // that way: author context is orientation, not the instruction.
+  it("keeps the prior-attempt warning last", () => {
+    const description = mergeFixDescription({
+      ...base,
+      originalContext: { summary: "added a conflict probe", why: null },
+      priorAttempts: 2,
+    });
+    expect(description.indexOf("What the original author built")).toBeLessThan(
+      description.indexOf("has already been repaired"),
     );
   });
 });

@@ -193,6 +193,26 @@ export interface MergeGitShape {
     readonly cwd: string;
     readonly maxOutputBytes: number;
   }) => Effect.Effect<MergeConflictDetail | null>;
+  /**
+   * Subjects of the commits `baseBranch` carries that `branch` does not
+   * (`git log --format=%s <branch>..<baseBranch>`), newest first and capped at
+   * `limit`.
+   *
+   * This is how a parked branch learns what landed ahead of it. Every landing
+   * commits a `trialMergeMessage`, so the base branch's own history names the
+   * sibling children whose work a repair is now merging against — nothing else
+   * records that per branch.
+   *
+   * Never fails. It only enriches a park that is already happening, so a
+   * repository git cannot answer for returns `null` and the park proceeds
+   * without the section (`ProcessPoolVcs` convention).
+   */
+  readonly landedSubjects: (input: {
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+    readonly branch: string;
+    readonly limit: number;
+  }) => Effect.Effect<ReadonlyArray<string> | null>;
   readonly abortMerge: (cwd: string) => Effect.Effect<void, MergeQueuePortError>;
   /**
    * Advance the base branch to `ref`, fast-forward only.

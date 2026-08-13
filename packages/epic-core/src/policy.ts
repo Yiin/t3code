@@ -96,6 +96,31 @@ export interface MergeFixTouchedRepo {
   readonly baseBranch: string;
 }
 
+/**
+ * What one child's worker reported when its iteration finished — the two
+ * clauses of its `RALPH_MSG` line, as the run journal stored them.
+ *
+ * `null` on either field means the run never recorded it. A report with both
+ * `null` says nothing and is dropped by the caller rather than rendered as an
+ * empty section.
+ */
+export interface MergeFixChildReport {
+  readonly summary: string | null;
+  readonly why: string | null;
+}
+
+/** One sibling child that landed on the base branch ahead of a parked one. */
+export interface MergeFixLandedChild extends MergeFixChildReport {
+  readonly childId: string;
+  readonly branch: string;
+}
+
+/** The report's non-empty lines, in the order a description renders them. */
+const reportLines = (report: MergeFixChildReport): ReadonlyArray<string> => [
+  ...(report.summary === null || report.summary.length === 0 ? [] : [report.summary]),
+  ...(report.why === null || report.why.length === 0 ? [] : [`Why: ${report.why}`]),
+];
+
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2863-2881` (single repo) and
  * `skills/cook-epic/run-legacy.sh:2843-2879` (branch set). A non-empty
  * `touchedRepos` produces the multi-repo variant; omitting it keeps the
@@ -110,6 +135,14 @@ export const mergeFixDescription = (input: {
   readonly touchedRepos?: ReadonlyArray<MergeFixTouchedRepo>;
   /** What the gate actually reported, so the repair does not start blind. */
   readonly failureDetail?: string;
+  /**
+   * What the parked child's own worker reported. Omitted when the run journal
+   * has nothing for it, which keeps the description byte-identical to the one
+   * a repair got before this existed.
+   */
+  readonly originalContext?: MergeFixChildReport;
+  /** The children that landed on the base branch ahead of this one, newest first. */
+  readonly landedContext?: ReadonlyArray<MergeFixLandedChild>;
   /** How many times this branch has already been parked for this reason. */
   readonly priorAttempts?: number;
 }): string => {
@@ -150,6 +183,27 @@ export const mergeFixDescription = (input: {
       .map((line) => (line.length > 0 ? `    ${line}` : ""))
       .join("\n");
     description += `\n\n${heading}:\n\n${body}`;
+  }
+  // Intent, not diff. A repair agent resolving someone else's conflict has to
+  // guess which side meant what, and the two sides are exactly the parked
+  // child and the children that landed while it waited — so both say, in their
+  // own author's words, what they were for.
+  const original = input.originalContext === undefined ? [] : reportLines(input.originalContext);
+  if (original.length > 0) {
+    description += `\n\nWhat the original author built:\n\n${original
+      .map((line) => `    ${line}`)
+      .join("\n")}`;
+  }
+  const landed = (input.landedContext ?? []).filter((child) => reportLines(child).length > 0);
+  if (landed.length > 0) {
+    const entries = landed.map((child) => {
+      const [first, ...rest] = reportLines(child);
+      return [
+        `    - \`${child.branch}\` (\`${child.childId}\`): ${first ?? ""}`,
+        ...rest.map((line) => `      ${line}`),
+      ].join("\n");
+    });
+    description += `\n\nWhat landed on \`${input.baseBranch}\` since, newest first:\n\n${entries.join("\n")}`;
   }
   if (input.priorAttempts !== undefined && input.priorAttempts > 0) {
     // Repeating a repair that already failed is the failure mode this text
@@ -192,6 +246,24 @@ export const conflictFailureDetail = (input: {
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2958`. */
 export const trialMergeMessage = (branch: string, childId: string): string =>
   `cook-epic: merge ${branch} (${childId})`;
+
+const TRIAL_MERGE_MESSAGE_PATTERN = /^cook-epic: merge (\S+) \(([^)]+)\)$/;
+
+/**
+ * Recover which child a landed merge commit carried, from its subject alone.
+ *
+ * Every landing writes a {@link trialMergeMessage}, so the base branch's own
+ * history is the record of what landed and in what order. Nothing else stores
+ * that per branch, and a parked branch needs it to say which siblings it is
+ * now being merged against.
+ */
+export const parseTrialMergeMessage = (
+  subject: string,
+): { readonly branch: string; readonly childId: string } | null => {
+  const match = TRIAL_MERGE_MESSAGE_PATTERN.exec(subject);
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  return { branch: match[1], childId: match[2] };
+};
 
 /**
  * The trial-merge commit message for continuously integrating the operator's

@@ -1918,6 +1918,9 @@ export const makeServerMergeDrain = (deps: {
           gateReceipts: makeServerGateReceipts(store),
           repair: mergeRepair,
           backlog: makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
+          // The same journal the loop writes its `RALPH_MSG` clauses into, so
+          // a merge-fix child quotes what each author actually reported.
+          iterations: makeServerPoolJournal(store),
           events: {
             emit: (event) =>
               Effect.logInfo(`epic.runner.merge-${event.event}`, {

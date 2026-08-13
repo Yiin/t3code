@@ -225,6 +225,16 @@ repair agent therefore starts from what git actually said instead of
 reproducing the merge to find out. A worktree git cannot read still gets the
 repository and the merge output; the park never fails over missing detail.
 
+A merge-fix child also gets both sides' intent, not just the diff. The parked
+child's own worker already reported what it built and why in its `RALPH_MSG`
+line, and so did every child that landed while the branch waited, so the
+description quotes them: the original author's summary and why, then the
+landed siblings newest first. The landed list is recovered from the base
+branch's own history — every landing commits `cook-epic: merge <branch>
+(<childId>)` — and is capped at ten. Both lookups are best-effort: a run that
+recorded no summary, or a repository git cannot log, drops the section and
+leaves the rest of the description unchanged.
+
 Run d7580b6c ran one gate command at one commit twice. The main checkout took
 421s and exited 0. The integration worktree took 23m01s and exited 1. The
 difference was the host: load average 29.92 on 16 cores, with 17 vitest

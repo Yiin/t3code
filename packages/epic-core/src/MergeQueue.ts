@@ -1,3 +1,4 @@
+import { EpicRunId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -20,6 +21,7 @@ import type {
   MergeRepairShape,
   MergeSlotShape,
 } from "./ports/MergeQueue.ts";
+import type { RunJournalShape } from "./ports/RunJournal.ts";
 import {
   conflictFailureDetail,
   integrateOperatorBaseMessage,
@@ -28,8 +30,11 @@ import {
   landingDescription,
   mergeFixDescription,
   mergeFixTitle,
+  parseTrialMergeMessage,
   runBaseBranch,
   trialMergeMessage,
+  type MergeFixChildReport,
+  type MergeFixLandedChild,
   type MergeFixTouchedRepo,
   type MergeParkReason,
 } from "./policy.ts";
@@ -81,6 +86,12 @@ export interface MergeQueuePorts {
   readonly gateReceipts: GateReceiptJournalShape;
   readonly repair: MergeRepairShape;
   readonly backlog: Pick<BacklogShape, "createChild" | "listChildren" | "writeNotes">;
+  /**
+   * Read-only access to what this run's workers reported, so a merge-fix child
+   * can be told what the branches it is reconciling were for. Used at park
+   * time only, and never on a path that can fail the park.
+   */
+  readonly iterations: Pick<RunJournalShape, "listIterations">;
   readonly events: MergeEventsShape;
   readonly fold: FoldShape;
 }
@@ -331,6 +342,72 @@ const touchedRepos = Effect.fn("MergeQueue.touchedRepos")(function* (
   return touched;
 });
 
+/**
+ * How many landed siblings a merge-fix child's description names.
+ *
+ * The point is orientation, not a changelog: past a handful the list stops
+ * telling a repair agent which side of a conflict meant what, and every extra
+ * entry is one more thing the agent reads before it starts.
+ */
+const MAX_LANDED_CONTEXT = 10;
+
+/** The author-intent sections of a merge-fix description, both optional. */
+interface MergeFixContext {
+  readonly originalContext?: MergeFixChildReport;
+  readonly landedContext?: ReadonlyArray<MergeFixLandedChild>;
+}
+
+/**
+ * What the parked child and the children that landed ahead of it were for.
+ *
+ * The two sides of a merge conflict are exactly those: the branch that could
+ * not land, and the branches that moved the base under it. Each one's own
+ * worker already said what it built and why, in the run journal, so the repair
+ * gets both authors' intent instead of re-deriving it from the diff.
+ *
+ * Whole-context, best effort: the caller discards every failure, because a
+ * park that cannot be enriched still has to happen.
+ */
+const authorContext = Effect.fn("MergeQueue.authorContext")(function* (
+  input: DrainMergeQueueInput,
+  ports: MergeQueuePorts,
+  snapshot: MergeQueueSnapshot,
+  entry: MergeQueueEntry,
+) {
+  const iterations = yield* ports.iterations.listIterations(EpicRunId.make(input.runId));
+  /** The last thing this child's own worker reported, or `null` for nothing usable. */
+  const reportFor = (childId: string): MergeFixChildReport | null => {
+    for (let index = iterations.length - 1; index >= 0; index -= 1) {
+      const iteration = iterations[index];
+      if (iteration === undefined) continue;
+      if (iteration.issueId !== childId || iteration.turnStatus !== "completed") continue;
+      if (iteration.summary === null && iteration.why === null) continue;
+      return { summary: iteration.summary, why: iteration.why };
+    }
+    return null;
+  };
+
+  const original = reportFor(entry.childId);
+  const subjects = yield* ports.git.landedSubjects({
+    repositoryPath: snapshot.repositoryPath,
+    baseBranch: snapshot.baseBranch,
+    branch: entry.branch,
+    limit: MAX_LANDED_CONTEXT,
+  });
+  const landed: Array<MergeFixLandedChild> = [];
+  for (const subject of subjects ?? []) {
+    const parsed = parseTrialMergeMessage(subject);
+    if (parsed === null) continue;
+    const report = reportFor(parsed.childId);
+    if (report === null) continue;
+    landed.push({ ...parsed, ...report });
+  }
+  return {
+    ...(original === null ? {} : { originalContext: original }),
+    ...(landed.length > 0 ? { landedContext: landed } : {}),
+  } satisfies MergeFixContext;
+});
+
 const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(function* (
   input: DrainMergeQueueInput,
   ports: MergeQueuePorts,
@@ -353,24 +430,32 @@ const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(functi
   if (existing === undefined && priorAttempts >= MAX_MERGE_FIX_ATTEMPTS) {
     return { repaired: false as const, attempts: priorAttempts };
   }
-  const description = mergeFixDescription({
-    childId: entry.childId,
-    branch: entry.branch,
-    baseBranch: snapshot.baseBranch,
-    reason,
-    gateCommand: input.gateCommand,
-    pushEnabled: input.pushEnabled,
-    ...(touched.length > 0 ? { touchedRepos: touched } : {}),
-    ...(failureDetail === undefined ? {} : { failureDetail }),
-    ...(priorAttempts > 0 ? { priorAttempts } : {}),
-  });
   const fix =
     existing ??
-    (yield* ports.backlog.createChild({
-      epicId: input.epicId,
-      title,
-      description,
-      priority: 1,
+    (yield* Effect.gen(function* () {
+      // Enrichment only, so every failure below collapses to "no section":
+      // a journal read that fails, a git log that fails, even a defect. The
+      // park itself is not optional and must not inherit any of that.
+      const context = yield* authorContext(input, ports, snapshot, entry).pipe(
+        Effect.catchCause(() => Effect.succeed({} satisfies MergeFixContext)),
+      );
+      return yield* ports.backlog.createChild({
+        epicId: input.epicId,
+        title,
+        description: mergeFixDescription({
+          childId: entry.childId,
+          branch: entry.branch,
+          baseBranch: snapshot.baseBranch,
+          reason,
+          gateCommand: input.gateCommand,
+          pushEnabled: input.pushEnabled,
+          ...(touched.length > 0 ? { touchedRepos: touched } : {}),
+          ...(failureDetail === undefined ? {} : { failureDetail }),
+          ...context,
+          ...(priorAttempts > 0 ? { priorAttempts } : {}),
+        }),
+        priority: 1,
+      });
     }));
   yield* ports.store.finalizePark({
     runId: input.runId,

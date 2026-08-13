@@ -208,6 +208,9 @@ export const makeTerminalMergeDrain = (deps: {
         repair,
         backlog:
           deps.backlog?.(run.cwd) ?? makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
+        // The same journal the loop writes its `RALPH_MSG` clauses into, so a
+        // merge-fix child quotes what each author actually reported.
+        iterations: journal,
         events: {
           emit: (event) =>
             Effect.logInfo(`epic.cook.merge-${event.event}`, {

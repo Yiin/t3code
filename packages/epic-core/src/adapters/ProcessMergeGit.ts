@@ -176,6 +176,28 @@ export const makeProcessMergeGit = (input: {
           ),
         ),
       ),
+    landedSubjects: ({ repositoryPath, baseBranch, branch, limit }) =>
+      run({
+        operation: "landedSubjects",
+        cwd: repositoryPath,
+        args: ["log", "--format=%s", `--max-count=${String(limit)}`, `${branch}..${baseBranch}`],
+      }).pipe(
+        Effect.map((output) =>
+          output.code === 0
+            ? output.stdout
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0)
+            : null,
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.cook.landed-subjects-failed", {
+            repositoryPath,
+            branch,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      ),
     abortMerge: (cwd) =>
       mutate(
         cwd,

@@ -161,6 +161,21 @@ const makeRealMergeGit = (): MergeGitShape => ({
         diff: diff.status === 0 ? diff.stdout.trim() : "",
       };
     }),
+  landedSubjects: ({ repositoryPath, baseBranch, branch, limit }) =>
+    Effect.sync(() => {
+      const log = gitResult(repositoryPath, [
+        "log",
+        "--format=%s",
+        `--max-count=${String(limit)}`,
+        `${branch}..${baseBranch}`,
+      ]);
+      return log.status === 0
+        ? log.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+        : null;
+    }),
   abortMerge: (cwd) => Effect.sync(() => void git(cwd, ["merge", "--abort"])),
   fastForward: ({ cwd, ref }) =>
     Effect.sync(() => ({
@@ -356,6 +371,9 @@ const makeDrainFixture = (input: {
           }),
         writeNotes: () => Effect.void,
       },
+      // This fixture runs no iterations, so a merge-fix child gets today's
+      // description with no author-context section.
+      iterations: { listIterations: () => Effect.succeed([]) },
       events: { emit: (event) => Effect.sync(() => void events.push(event)) },
       fold: { run: () => Effect.void },
     }),

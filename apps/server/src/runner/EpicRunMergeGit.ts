@@ -115,6 +115,29 @@ export const makeEpicRunMergeGit = (input: {
           ),
         ),
       ),
+    landedSubjects: ({ repositoryPath, baseBranch, branch, limit }) =>
+      run("landedSubjects", repositoryPath, [
+        "log",
+        "--format=%s",
+        `--max-count=${String(limit)}`,
+        `${branch}..${baseBranch}`,
+      ]).pipe(
+        Effect.map((output) =>
+          output.exitCode === 0
+            ? output.stdout
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0)
+            : null,
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.landed-subjects-failed", {
+            repositoryPath,
+            branch,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      ),
     abortMerge: (cwd) =>
       requireSuccess("abortMerge", cwd, ["merge", "--abort"]).pipe(Effect.asVoid),
     fastForward: ({ cwd, ref, branch }) =>
