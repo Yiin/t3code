@@ -31,8 +31,14 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
+  beadCommentCounts,
   decodeConformanceScenario,
+  isParallelScenario,
+  landedChildIds,
   makeConformanceWorkspace,
+  normalizeParallelTranscript,
+  releasedClaimIds,
+  scenarioWorkers,
   type ConformanceScenario,
   type ConformanceWorkspace,
 } from "@t3tools/epic-run-conformance";
@@ -115,9 +121,15 @@ const conformanceInstanceIds = new Set(conformanceProviders.map((entry) => entry
 const projectId = ProjectId.make("project-epic-runner-conformance");
 
 const configOverride = (scenario: ConformanceScenario): EpicRunConfigOverride => ({
-  execution: { sequential: true },
+  execution: { sequential: !isParallelScenario(scenario) },
+  parallel: { workers: scenarioWorkers(scenario) },
   limits: { maxIterations: maximumIterations(scenario) },
-  supervision: { workerTimeoutSeconds: 1, stopGraceSeconds: 1 },
+  // A pool worker has to survive its siblings' merges; one second is the
+  // sequential leg's budget for a lone worker, not two racing ones.
+  supervision: {
+    workerTimeoutSeconds: isParallelScenario(scenario) ? 30 : 1,
+    stopGraceSeconds: 1,
+  },
   server: {
     maxNoCommitStreak: DEFAULT_MAX_NO_COMMIT_STREAK,
     pollIntervalMs: 5,
@@ -155,23 +167,6 @@ const stateEpicStatus = (workspace: ConformanceWorkspace): string | undefined =>
     readonly epic?: Readonly<Record<string, unknown>>;
   };
   return typeof state.epic?.["status"] === "string" ? state.epic["status"] : undefined;
-};
-
-/** Children whose standing claim the loop reopened, observed in the journal. */
-const releasedClaimIds = (workspace: ConformanceWorkspace): ReadonlySet<string> => {
-  const released = new Set<string>();
-  for (const item of workspace.readTranscript()) {
-    if (typeof item !== "object" || item === null) continue;
-    const record = item as Readonly<Record<string, unknown>>;
-    if (record["tool"] !== "bd" || !Array.isArray(record["argv"])) continue;
-    const argv = record["argv"] as ReadonlyArray<unknown>;
-    const statusIndex = argv.indexOf("--status");
-    if (argv[0] === "update" && statusIndex > 0 && argv[statusIndex + 1] === "open") {
-      const issueId = argv[1];
-      if (typeof issueId === "string") released.add(issueId);
-    }
-  }
-  return released;
 };
 
 interface AgentResult {
@@ -489,13 +484,30 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
   >();
   const details = new Map<string, OrchestrationThread>();
   const agentProcesses = new Map<string, NodeChildProcess.ChildProcess>();
+  /**
+   * Where each iteration thread runs and which child it owns.
+   *
+   * A sequential run has one answer for both — the run's own checkout and the
+   * only ready child. A pool run does not: the runner creates each thread with
+   * its own worktree, and the child it must cook is named in its prompt. The
+   * fake engine reads both off the commands it is handed, so the fixture agent
+   * commits in the branch the merge queue will look for.
+   */
+  const threadWorktrees = new Map<string, string>();
+  const threadChildren = new Map<string, string>();
+  const worktreesDir = NodePath.join(NodePath.dirname(workspace.cwd), "worktrees");
   let sequence = 0;
 
   const runAgent = (threadId: string) =>
     new Promise<AgentResult>((resolvePromise) => {
+      const childId = threadChildren.get(threadId);
       const child = NodeChildProcess.spawn(NodePath.join(workspace.binDir, "agent"), [], {
-        cwd: workspace.cwd,
-        env: { ...process.env, ...workspace.env },
+        cwd: threadWorktrees.get(threadId) ?? workspace.cwd,
+        env: {
+          ...process.env,
+          ...workspace.env,
+          ...(childId === undefined ? {} : { COOKEPIC_CHILD: childId }),
+        },
       });
       agentProcesses.set(threadId, child);
       let stdout = "";
@@ -564,6 +576,13 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     ): Effect.Effect<{ sequence: number }, OrchestrationDispatchError> =>
       Effect.gen(function* () {
         dispatched.push(command);
+        if (command.type === "thread.create" && command.worktreePath !== null) {
+          threadWorktrees.set(command.threadId, command.worktreePath);
+        }
+        if (command.type === "thread.turn.start") {
+          const named = /Cook exactly `([^`]+)`/.exec(command.message.text);
+          if (named?.[1] !== undefined) threadChildren.set(command.threadId, named[1]);
+        }
         if (command.type === "thread.turn.start") {
           // Forked so `dispatch` returns before the turn resolves, the way the
           // real engine behaves.
@@ -625,7 +644,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
           runtimeMode: "full-access" as const,
           interactionMode: "default" as const,
           branch: null,
-          worktreePath: null,
+          worktreePath: threadWorktrees.get(threadId) ?? null,
           latestTurn:
             shell.latestTurn === null
               ? null
@@ -722,8 +741,43 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     Layer.provide(gitVcsLayer.pipe(Layer.provide(infraLayer))),
     Layer.provide(
       Layer.succeed(WorktreeProvisioner, {
-        provision: () => Effect.die("sequential runs never provision worktrees"),
-        release: () => Effect.void,
+        /**
+         * Real git worktrees, not recorded intentions.
+         *
+         * A pool scenario is only evidence if the worker's commit exists on a
+         * branch the merge queue can actually merge. A stub that returned a
+         * path would test the runner's bookkeeping and nothing else.
+         */
+        provision: (request) =>
+          Effect.sync(() => {
+            const git = workspace.env["CONFORMANCE_REAL_GIT"] ?? "git";
+            const branch = request.branch ?? request.baseBranch;
+            const target = request.path ?? NodePath.join(worktreesDir, branch);
+            const existing = NodeChildProcess.spawnSync(
+              git,
+              ["rev-parse", "--verify", "-q", branch],
+              { cwd: request.projectCwd, encoding: "utf8" },
+            );
+            const args =
+              existing.status === 0
+                ? ["worktree", "add", target, branch]
+                : ["worktree", "add", "-b", branch, target, request.baseBranch];
+            const added = NodeChildProcess.spawnSync(git, args, {
+              cwd: request.projectCwd,
+              encoding: "utf8",
+            });
+            if (added.status !== 0) {
+              throw new Error(`git ${args.join(" ")} failed: ${added.stderr}`);
+            }
+            return { path: target, refName: branch };
+          }),
+        release: ({ repoCwd, worktreePath }) =>
+          Effect.sync(() => {
+            const git = workspace.env["CONFORMANCE_REAL_GIT"] ?? "git";
+            NodeChildProcess.spawnSync(git, ["worktree", "remove", "--force", worktreePath], {
+              cwd: repoCwd,
+            });
+          }),
       }),
     ),
     Layer.provide(
@@ -731,11 +785,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
         runForThread: () => Effect.succeed({ status: "no-script" } as const),
       }),
     ),
-    Layer.provide(
-      Layer.succeed(ServerConfig, {
-        worktreesDir: NodePath.join(NodePath.dirname(workspace.cwd), "worktrees"),
-      } as ServerConfig["Service"]),
-    ),
+    Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
     Layer.provide(makeProviderRegistryLayer(conformanceProviders)),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(
@@ -794,6 +844,33 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
       scenario,
       workspace,
       failure: failure instanceof Error ? failure : String(failure),
+    });
+  }
+  if (isParallelScenario(scenario)) {
+    const landed = landedChildIds(workspace);
+    const finalRun = history.at(-1)?.run;
+    // Proof the launch really selected the pool loop: a run that silently fell
+    // back to one worker would still match the simpler transcripts.
+    if (finalRun !== undefined && finalRun.workers !== scenarioWorkers(scenario)) {
+      throw new Error(
+        `${scenario.name} ran with ${String(finalRun.workers)} workers, not ${String(scenarioWorkers(scenario))}`,
+      );
+    }
+    return normalizeParallelTranscript({
+      epicId: scenario.beads.epicId,
+      iterations: store.iterations.map((iteration) => ({
+        iterationIndex: iteration.iterationIndex,
+        issueId: iteration.issueId,
+        turnStatus: iteration.turnStatus as "running" | "completed" | "failed" | "abandoned",
+        failureReason: iteration.failureReason,
+        committed: iteration.issueId !== null && landed.has(iteration.issueId),
+      })),
+      run: {
+        status: finalRun?.status ?? "failed",
+        lastError: finalRun?.lastError ?? null,
+      },
+      comments: beadCommentCounts(workspace),
+      releasedClaims: releasedClaimIds(workspace),
     });
   }
   return translateServerRun({

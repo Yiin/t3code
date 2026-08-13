@@ -29,6 +29,79 @@ export const parseCoreMailbox = (contents: string): ReadonlyArray<unknown> =>
 const transcriptProvider = (driver: string): string =>
   driver === "claudeAgent" ? "claude" : driver;
 
+/**
+ * The pool view of a mailbox: the last state each iteration row reached, plus
+ * the run's own last row.
+ *
+ * The sequential normalizer below replays the mailbox in order, because order
+ * is the sequential contract. A pool run has no such order, so this reduces
+ * the same stream to the durable facts `normalizeParallelTranscript` needs.
+ */
+export const parseParallelMailbox = (
+  values: ReadonlyArray<unknown>,
+): {
+  readonly iterations: ReadonlyArray<{
+    readonly iterationIndex: number;
+    readonly issueId: string | null;
+    readonly turnStatus: "running" | "completed" | "failed" | "abandoned";
+    readonly failureReason: string | null;
+  }>;
+  readonly run: {
+    readonly status: string;
+    readonly lastError: string | null;
+    /** The worker cap the run row carries; `null` when it published none. */
+    readonly workers: number | null;
+  };
+} => {
+  const iterations = new Map<
+    number,
+    {
+      readonly iterationIndex: number;
+      readonly issueId: string | null;
+      readonly turnStatus: "running" | "completed" | "failed" | "abandoned";
+      readonly failureReason: string | null;
+    }
+  >();
+  let run: {
+    readonly status: string;
+    readonly lastError: string | null;
+    readonly workers: number | null;
+  } = {
+    status: "failed",
+    lastError: "the run published no terminal row",
+    workers: null,
+  };
+  for (const value of values) {
+    const input = record(value);
+    const type = string(input?.type);
+    if (input === null || type === undefined) continue;
+    if (type === "iteration-state-changed") {
+      const item = record(input.iteration);
+      const iterationIndex = number(item?.iterationIndex);
+      const turnStatus = string(item?.turnStatus);
+      if (item === null || iterationIndex === undefined || turnStatus === undefined) continue;
+      iterations.set(iterationIndex, {
+        iterationIndex,
+        issueId: string(item.issueId) ?? null,
+        turnStatus: turnStatus as "running" | "completed" | "failed" | "abandoned",
+        failureReason: string(item.failureReason) ?? null,
+      });
+      continue;
+    }
+    if (type === "run-state-changed") {
+      const item = record(input.run);
+      const status = string(item?.status);
+      if (item === null || status === undefined) continue;
+      run = {
+        status,
+        lastError: string(item.lastError) ?? null,
+        workers: number(item.workers) ?? null,
+      };
+    }
+  }
+  return { iterations: [...iterations.values()], run };
+};
+
 export interface CoreMailboxOptions {
   /** Bead comment counts by issue id, sampled after the run. */
   readonly comments?: ReadonlyMap<string, number>;

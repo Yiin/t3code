@@ -444,7 +444,7 @@ describe("conformance workspace", () => {
     assert.equal(child.status, "closed");
     assert.equal(child.comment_count, 1);
     const log = run(workspace, "git", ["log", "-1", "--format=%s"]);
-    assert.equal(log.stdout.trim(), "fixture agent commit 0");
+    assert.equal(log.stdout.trim(), "fixture agent commit 0 for epic.1");
     const transcript = workspace.readTranscript() as ReadonlyArray<{
       tool?: string;
       argv?: ReadonlyArray<string>;
@@ -454,7 +454,7 @@ describe("conformance workspace", () => {
         (record) =>
           record.tool === "git" &&
           JSON.stringify(record.argv) ===
-            JSON.stringify(["commit", "-qm", "fixture agent commit 0"]),
+            JSON.stringify(["commit", "-qm", "fixture agent commit 0 for epic.1"]),
       ),
     );
   });
@@ -505,7 +505,7 @@ describe("conformance workspace", () => {
     assert.equal(agent.status, 0, agent.stderr);
     assert.equal(
       run(workspace, "git", ["-C", mainWorktree, "log", "-1", "--format=%s"]).stdout.trim(),
-      "fixture agent commit 0",
+      "fixture agent commit 0 for epic.1",
     );
     assert.equal(
       run(workspace, "git", ["-C", siblingWorktree, "log", "-1", "--format=%s"]).stdout.trim(),

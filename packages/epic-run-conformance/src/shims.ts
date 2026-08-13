@@ -163,15 +163,30 @@ for (let attempt = 0; ; attempt += 1) {
 let ownsLock = true;
 process.on("exit", () => { if (ownsLock) try { rmdirSync(lock); } catch {} });
 const state = JSON.parse(readFileSync(statePath, "utf8"));
-const index = state.agentInvocation++;
-const step = state.agentScript[index] ?? state.agentScript.at(-1);
+// A pool worker learns which child it owns from its own prompt, so two
+// concurrent workers never race over one script counter. Sequential scenarios
+// keep the single fixture child they were written against.
+const promptText = () => {
+  const args = process.argv.slice(2);
+  let text = args.join("\\n");
+  for (const arg of args) {
+    try { if (arg.endsWith(".md")) text += "\\n" + readFileSync(arg, "utf8"); } catch {}
+  }
+  return text;
+};
+const promptChild = process.env.CONFORMANCE_CHILD_FROM_PROMPT ? (/Cook exactly \`([^\`]+)\`/.exec(promptText()) ?? [])[1] ?? null : null;
+const child = process.env.COOKEPIC_CHILD ?? promptChild ?? process.env.CONFORMANCE_CHILD_ID ?? state.children[0]?.id;
+const scripted = state.agentScript.filter((entry) => entry.childId === child);
+state.agentInvocations = state.agentInvocations ?? {};
+const index = scripted.length > 0 ? (state.agentInvocations[child] ?? 0) : state.agentInvocation;
+if (scripted.length > 0) state.agentInvocations[child] = index + 1; else state.agentInvocation = index + 1;
+const step = scripted.length > 0 ? (scripted[index] ?? scripted.at(-1)) : (state.agentScript[index] ?? state.agentScript.at(-1));
 if (!step) throw new Error("agent script is empty");
 writeFileSync(statePath, JSON.stringify(state, null, 2) + "\\n");
-appendFileSync(journal, JSON.stringify({ tool: "agent", harness: process.env.CONFORMANCE_HARNESS ?? basename(process.argv[1]), invocation: index, argv: process.argv.slice(2), step }) + "\\n");
+appendFileSync(journal, JSON.stringify({ tool: "agent", harness: process.env.CONFORMANCE_HARNESS ?? basename(process.argv[1]), invocation: index, child, argv: process.argv.slice(2), step }) + "\\n");
 rmdirSync(lock);
 ownsLock = false;
 if (step.hangMs > 0) sleep(step.hangMs);
-const child = process.env.COOKEPIC_CHILD ?? process.env.CONFORMANCE_CHILD_ID ?? state.children[0]?.id;
 if (step.claimChild && child) {
   const result = spawnSync("bd", ["update", child, "--claim"], { stdio: "inherit", env: process.env });
   if (result.status !== 0) process.exit(result.status ?? 1);
@@ -187,7 +202,7 @@ if ((step.repoAction === "dirty-only" || step.repoAction === "commit" || step.re
 }
 if (step.repoAction === "commit" || step.repoAction === "commit-with-siblings") {
   const env = { ...process.env, GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z" };
-  for (const args of [["add", "."], ["commit", "-qm", "fixture agent commit " + String(index)]]) {
+  for (const args of [["add", "."], ["commit", "-qm", "fixture agent commit " + String(index) + " for " + String(child)]]) {
     const result = spawnSync("git", args, { stdio: "inherit", env });
     if (result.status !== 0) process.exit(result.status ?? 1);
   }

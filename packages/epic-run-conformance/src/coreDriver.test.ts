@@ -8,6 +8,8 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   diffTranscripts,
@@ -18,26 +20,56 @@ import {
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
 import {
+  runParallelEpicLoop,
+  type ParallelEpicLoopPorts,
+  type PoolSchedulerEvent,
+} from "@t3tools/epic-core/ParallelEpicLoop";
+import {
   runSequentialEpicLoop,
   type SequentialEpicLoopPorts,
 } from "@t3tools/epic-core/SequentialEpicLoop";
 import { make as makeFileGateReceipts } from "@t3tools/epic-core/adapters/FileGateReceipts";
+import { makeFileMergeQueueStore } from "@t3tools/epic-core/adapters/FileMergeQueueStore";
 import * as FileRunJournal from "@t3tools/epic-core/adapters/FileRunJournal";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
+import { makeProcessMergeRepair } from "@t3tools/epic-core/adapters/ProcessMergeRepair";
+import { makeProcessPoolBacklog } from "@t3tools/epic-core/adapters/ProcessPoolBacklog";
+import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import { makeProcessVcs } from "@t3tools/epic-core/adapters/ProcessVcs";
 import { makeTerminalAgentDispatch } from "@t3tools/epic-core/adapters/TerminalAgentDispatch";
+import { makeTerminalMergeDrain } from "@t3tools/epic-core/adapters/TerminalMergeDrain";
+import { makeTerminalPoolDispatch } from "@t3tools/epic-core/adapters/TerminalPoolDispatch";
+import { makeTerminalPoolWorkspace } from "@t3tools/epic-core/adapters/TerminalPoolWorkspace";
 import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import { DEFAULT_MAX_NO_COMMIT_STREAK } from "@t3tools/epic-core/policy";
+import { DEFAULT_MAX_NO_COMMIT_STREAK, epicRunIterationPrompt } from "@t3tools/epic-core/policy";
+import { makePoolPolicy, type PoolPolicySeed } from "@t3tools/epic-core/runPolicy";
+import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import type { RunEvent } from "@t3tools/epic-core/ports/RunEvents";
+import type { PersistedEpicRun } from "@t3tools/epic-core/ports/RunJournal";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
+import * as Semaphore from "effect/Semaphore";
 
-import { decodeConformanceScenario, type ConformanceScenario } from "./scenario.ts";
-import { makeConformanceWorkspace, type ConformanceWorkspace } from "./workspace.ts";
+import { normalizeParallelTranscript, type ParallelIterationRecord } from "./parallelTranscript.ts";
+import {
+  decodeConformanceScenario,
+  isParallelScenario,
+  scenarioWorkers,
+  type ConformanceScenario,
+} from "./scenario.ts";
+import {
+  beadCommentCounts,
+  landedChildIds,
+  makeConformanceWorkspace,
+  releasedClaimIds,
+  type ConformanceWorkspace,
+} from "./workspace.ts";
 
 const packageDirectory = NodePath.resolve(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
@@ -102,11 +134,25 @@ const TIMEOUT_SCENARIOS = new Set(["infra-failure-budget", "iteration-timeout"])
 const workerDeadlineSeconds = (scenario: ConformanceScenario): number =>
   TIMEOUT_SCENARIOS.has(scenario.name) ? 0.5 : 15;
 
+const FIXTURE_TIME = "2026-01-01T00:00:00.000Z";
+
+/**
+ * Every value the pool leg sets counts as configured.
+ *
+ * `makePoolPolicy` only honours a run-config value whose provenance is not
+ * `default`, so a fixture that left this alone would silently run on the
+ * shipped two-second poll and thirty-minute worker deadline.
+ */
+const poolProvenance = Object.fromEntries(
+  Object.keys(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE).map((key) => [key, "file" as const]),
+);
+
 const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
   gate: { command: "true", disabled: false },
   vcs: { noPush: true, runOwnedBaseBranch: false },
-  execution: { sequential: true },
+  execution: { sequential: !isParallelScenario(scenario) },
+  parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: scenarioWorkers(scenario) },
   limits: {
     ...DEFAULT_EPIC_RUN_CONFIG.limits,
     maxIterations: maximumIterations(scenario),
@@ -513,6 +559,230 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
   });
 });
 
+/**
+ * The pool leg of the core driver: the same fixture workspace, run through
+ * `runParallelEpicLoop` over the terminal pool adapters — the exact wiring
+ * `t3 epic cook` uses for `COOKEPIC_WORKERS > 1`.
+ *
+ * The sequential leg above hands preflight to the loop. The pool loop has no
+ * preflight hook (it consumes a run row that already exists), so this runs the
+ * parallel-mode check itself, exactly as the terminal cook does.
+ */
+const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
+  scenario: ConformanceScenario,
+) {
+  const workspace = makeConformanceWorkspace(scenario);
+  const runDirectory = NodePath.join(NodePath.dirname(workspace.cwd), "run");
+  NodeFS.mkdirSync(runDirectory, { recursive: true });
+  return yield* Effect.gen(function* () {
+    const baseRunner = yield* ProcessRunner.ProcessRunner;
+    const runner = ProcessRunner.ProcessRunner.of({
+      run: (input) =>
+        baseRunner.run({
+          ...input,
+          command:
+            input.command === "git"
+              ? (workspace.env["CONFORMANCE_REAL_GIT"] ?? input.command)
+              : input.command,
+          env: { ...process.env, ...workspace.env, ...input.env },
+          extendEnv: false,
+        }),
+    });
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(ProcessRunner.ProcessRunner, runner),
+      NodeEpicRunLock.layer,
+      EpicRunConfigSource.layer,
+    );
+    const localLayer = Layer.merge(
+      dependencies,
+      EpicRunPreflight.layer.pipe(Layer.provide(dependencies)),
+    );
+    const runId = `conformance-${scenario.name}`;
+    const config = compressedConfig(scenario);
+    const configSnapshot = {
+      fileResult: { _tag: "absent" as const },
+      config,
+      provenance: poolProvenance,
+      violations: [],
+    };
+
+    return yield* Effect.gen(function* () {
+      const preflight = yield* EpicRunPreflight.EpicRunPreflight;
+      const lock = yield* EpicRunLock;
+      const checked = yield* Effect.result(
+        preflight.check(
+          { workspaceRoot: workspace.cwd, epicId: scenario.beads.epicId, mode: "parallel" },
+          configSnapshot,
+        ),
+      );
+      if (checked._tag === "Failure") {
+        return translatePreflightFailure({ scenario, workspace, failure: checked.failure });
+      }
+      if (!checked.success.ok) {
+        return translatePreflightFailure({
+          scenario,
+          workspace,
+          failure: new Error(checked.success.blockers.map((blocker) => blocker._tag).join(", ")),
+        });
+      }
+      const lease = yield* Effect.result(
+        lock.acquire({
+          workspaceRoot: workspace.cwd,
+          epicId: scenario.beads.epicId,
+          owner: `conformance-${String(process.pid)}`,
+          runDir: runDirectory,
+        }),
+      );
+      if (lease._tag === "Failure") {
+        return translatePreflightFailure({ scenario, workspace, failure: lease.failure });
+      }
+
+      const journal = yield* FileRunJournal.makePool({ runDirectory });
+      const mergeQueueStore = yield* makeFileMergeQueueStore({ runDirectory });
+      const gateReceipts = yield* makeFileGateReceipts({ runDirectory });
+      const selection = {
+        instanceId: ProviderInstanceId.make("worker-cmd"),
+        model: "fixture",
+      };
+      const providerSupport = makeTerminalProviderSupport({
+        harness: "worker-cmd",
+        selection,
+        workerCommand: NodePath.join(workspace.binDir, "agent"),
+        environment: workspace.env,
+      });
+      const agentDispatch = makeTerminalAgentDispatch({
+        harness: "worker-cmd",
+        artifactsDirectory: runDirectory,
+        workerCommand: NodePath.join(workspace.binDir, "agent"),
+        providerRoutes: providerSupport.routes,
+        timeoutSeconds: workerDeadlineSeconds(scenario),
+        stopGraceSeconds: 1,
+        environment: workspace.env,
+      });
+      const gate = makeProcessGate({
+        processRunner: runner,
+        environment: { ...process.env, ...workspace.env },
+        uid: process.getuid?.() ?? 0,
+        // See the sequential leg: the fixture gate is a fixture command, and a
+        // loaded host must not park an innocent branch for it.
+        quietHostWaitSeconds: 0,
+      });
+      const poolWorkspace = makeTerminalPoolWorkspace({
+        processRunner: runner,
+        journal,
+        mergeQueueStore,
+        worktreesRoot: NodePath.join(runDirectory, "worktrees"),
+      });
+      const run: PersistedEpicRun = {
+        runId: EpicRunId.make(runId),
+        epicId: scenario.beads.epicId,
+        projectId: ProjectId.make(`local-${scenario.beads.epicId}`),
+        cwd: workspace.cwd,
+        prompt: epicRunIterationPrompt({ pushEnabled: false }),
+        orientationFile: null,
+        modelSelection: selection,
+        runtimeMode: config.runtime.mode,
+        config,
+        configProvenance: poolProvenance,
+        originThreadId: null,
+        status: "running",
+        maxIterations: config.limits.maxIterations,
+        workers: scenarioWorkers(scenario),
+        iterationsDispatched: 0,
+        iterationsCompleted: 0,
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        consecutiveFailures: 0,
+        noCommitStreak: 0,
+        infraStreak: 0,
+        lastError: null,
+        createdAt: FIXTURE_TIME,
+        updatedAt: FIXTURE_TIME,
+      };
+      yield* journal.createRun(run);
+      const ports: ParallelEpicLoopPorts = {
+        journal,
+        events: {
+          publish: () => Effect.void,
+        },
+        backlog: makeProcessPoolBacklog(runner),
+        workspace: poolWorkspace,
+        dispatch: makeTerminalPoolDispatch({ dispatch: agentDispatch }),
+        mergeDrain: makeTerminalMergeDrain({
+          processRunner: runner,
+          journal,
+          mergeQueueStore,
+          gate,
+          gateReceipts,
+          repair: makeProcessMergeRepair({
+            processRunner: runner,
+            environment: { ...process.env, ...workspace.env },
+            uid: process.getuid?.() ?? 0,
+          }),
+        }),
+        vcs: makeProcessPoolVcs(runner),
+        providerInventory: providerSupport.inventory,
+        roleSelection: null,
+        // No liveness supervision: these scenarios bound a worker with the
+        // dispatch deadline alone, the way a host with no sampling target does.
+        workerEvidence: null,
+      };
+      const policySeed: PoolPolicySeed = {
+        iterationTimeoutMs: workerDeadlineSeconds(scenario) * 1_000,
+        runStallTimeoutMs: DEFAULT_RUN_STALL_TIMEOUT_MS,
+        pollIntervalMs: 5,
+        quietPeriodMs: 5,
+        retryBaseDelayMs: 5,
+        retryMaxDelayMs: 5,
+        maxConsecutiveFailures: config.server.maxConsecutiveFailures,
+        maxNoCommitStreak: DEFAULT_MAX_NO_COMMIT_STREAK,
+        infraFailureBudget: config.server.infraFailureBudget,
+        subagentGraceTimeoutMs: config.server.subagentGraceTimeoutMs,
+        maxGraceContinuations: config.server.maxGraceContinuations,
+      };
+      const transitions = yield* Semaphore.make(1);
+      const signals = yield* Queue.unbounded<PoolSchedulerEvent>();
+      yield* runParallelEpicLoop(
+        {
+          runId: run.runId,
+          epicId: scenario.beads.epicId,
+          cwd: workspace.cwd,
+          policy: makePoolPolicy(policySeed, run),
+          withTransition: transitions.withPermits(1),
+          signals,
+          readOrientation: () => Effect.succeed("fixture orientation"),
+          cleanupOwnedExternally: () => false,
+        },
+        ports,
+      );
+      const finalRun = yield* journal.getRun(run.runId);
+      const rows = yield* journal.listIterations(run.runId);
+      yield* lease.success.release.pipe(Effect.ignore);
+      const landed = landedChildIds(workspace);
+      const iterations: ReadonlyArray<ParallelIterationRecord> = rows.map((row) => ({
+        iterationIndex: row.iterationIndex,
+        issueId: row.issueId,
+        turnStatus: row.turnStatus,
+        failureReason: row.failureReason,
+        committed: row.issueId !== null && landed.has(row.issueId),
+      }));
+      return normalizeParallelTranscript({
+        epicId: scenario.beads.epicId,
+        iterations,
+        run: Option.isSome(finalRun)
+          ? { status: finalRun.value.status, lastError: finalRun.value.lastError }
+          : { status: "failed", lastError: "run vanished from its journal" },
+        comments: beadCommentCounts(workspace),
+        releasedClaims: releasedClaimIds(workspace),
+      });
+    }).pipe(Effect.provide(localLayer));
+  }).pipe(
+    Effect.provide(
+      Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
+    ),
+  );
+});
+
 const describeDiff = (
   scenario: ConformanceScenario,
   actual: ReadonlyArray<EpicRunTranscriptEvent>,
@@ -542,7 +812,9 @@ describe("epic-core conformance", () => {
       `matches ${scenario.name} through real git and bd subprocesses`,
       () =>
         Effect.gen(function* () {
-          const actual = yield* runCoreScenario(scenario);
+          const actual = isParallelScenario(scenario)
+            ? yield* runCoreParallelScenario(scenario)
+            : yield* runCoreScenario(scenario);
           assert.equal(
             diffTranscripts(actual, scenario.expectedTranscript),
             null,

@@ -1,0 +1,79 @@
+{
+  "name": "parallel-happy-path",
+  "description": "Two workers take one ready child each, commit on their own branches, close them, and the drain lands both before the run completes.",
+  "repo": {
+    "files": [{ "path": "README.md", "content": "fixture\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      },
+      {
+        "id": "epic.2",
+        "title": "Second child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "repoAction": "commit",
+      "writes": [{ "path": "one.txt", "content": "one\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built one", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    },
+    {
+      "childId": "epic.2",
+      "repoAction": "commit",
+      "writes": [{ "path": "two.txt", "content": "two\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built two", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "dispatched",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0
+    },
+    { "_tag": "done", "sequence": 1, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 0 },
+    {
+      "_tag": "dispatched",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.2",
+      "iterationIndex": 1
+    },
+    { "_tag": "done", "sequence": 3, "epicId": "epic", "issueId": "epic.2", "iterationIndex": 1 },
+    {
+      "_tag": "finished",
+      "sequence": 4,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "done"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

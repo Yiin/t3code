@@ -1,0 +1,43 @@
+{
+  "name": "parallel-lock-held",
+  "description": "A pool run refuses to start while another owner holds this epic's lease, so two coordinators never dispatch workers over each other.",
+  "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "lockHeld": true,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      },
+      {
+        "id": "epic.2",
+        "title": "Second child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "agentScript": [
+    { "repoAction": "no-commit", "report": { "_tag": "none" }, "closeChild": false, "hangMs": 5000 }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "lock_held",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

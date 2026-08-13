@@ -40,7 +40,30 @@ const AgentStep = Schema.Struct({
   closeChild: Schema.Boolean,
   beadComment: Schema.optional(Schema.String),
   hangMs: Schema.Number,
+  /**
+   * Which child this step scripts.
+   *
+   * A sequential run dispatches one worker at a time, so the fixture agent can
+   * read its step off a single counter. Two workers cannot: whichever process
+   * wins the state lock takes the next step, so an unkeyed script makes the
+   * run's behaviour depend on host scheduling. A parallel scenario keys every
+   * step to a child instead, and each child consumes its own steps in order.
+   */
+  childId: Schema.optional(Schema.String),
 });
+
+/**
+ * How many workers the run under test dispatches at once.
+ *
+ * Absent means sequential, which is what every scenario written before the
+ * pool loop existed assumes. `parallel` selects the pool loop on all three
+ * drivers: the terminal cook's `COOKEPIC_WORKERS`, the server runner's
+ * `parallel.workers`, and `runParallelEpicLoop` in the core driver.
+ */
+const ScenarioExecution = Schema.Union([
+  Schema.TaggedStruct("sequential", {}),
+  Schema.TaggedStruct("parallel", { workers: Schema.Number }),
+]);
 
 export const ConformanceScenario = Schema.Struct({
   name: Schema.String,
@@ -68,10 +91,19 @@ export const ConformanceScenario = Schema.Struct({
     children: Schema.Array(ScenarioChild),
   }),
   agentScript: Schema.Array(AgentStep),
+  execution: Schema.optional(ScenarioExecution),
   expectedTranscript: Schema.Array(EpicRunTranscriptEvent),
   appliesTo: Schema.Array(Schema.Literals(["core", "terminal", "server"])),
 });
 export type ConformanceScenario = typeof ConformanceScenario.Type;
+
+/** The worker cap this scenario runs under; `1` for a sequential scenario. */
+export const scenarioWorkers = (scenario: ConformanceScenario): number =>
+  scenario.execution?._tag === "parallel" ? scenario.execution.workers : 1;
+
+/** True when the scenario drives the pool loop rather than the sequential one. */
+export const isParallelScenario = (scenario: ConformanceScenario): boolean =>
+  scenarioWorkers(scenario) > 1;
 
 const decodeScenario = Schema.decodeUnknownSync(ConformanceScenario, {
   onExcessProperty: "error",

@@ -4,6 +4,16 @@ The conformance transcript records stable decisions. It keeps timestamps, thread
 
 The terminal adapter is the shared core reached through `skills/cook-epic/run.sh`, which execs `t3 epic cook`. Its `mailbox.jsonl` records are the `FileRunEvents` format: one JSON `RunEvent` per line (`run-state-changed`, `iteration-state-changed`, `child-claim-released`, `provider-fallback`, and the subagent-liveness records). The terminal adapter adds `pushed` and `verified` to every normalized event. The server adapter must synthesize those values from its launch policy and gate result.
 
+## Sequential and parallel scenarios
+
+A scenario declares its execution shape. Absent means sequential: one worker, and the order the drivers publish events in is part of the contract.
+
+`"execution": { "_tag": "parallel", "workers": 2 }` selects the pool loop instead — `COOKEPIC_WORKERS` on the terminal, `parallel.workers` on the server, `runParallelEpicLoop` in the core driver. A pool run has no fixed event order, so its transcript is built by `normalizeParallelTranscript` in `packages/epic-run-conformance`: every driver reduces its own record to the settled iteration rows, ranks them by child, and renumbers `iterationIndex` and `sequence`. Which dispatch slot a child got is scheduling luck, so nothing asserts on it.
+
+Two facts a pool row cannot carry are read from effects instead. Whether a child's work landed comes from the base branch — the fixture agent stamps its child into every commit subject — because a worker commits inside its own worktree and only the merge puts it on the branch. Whether a claim was handed back comes from the `bd update <id> --status open` in the fixture journal.
+
+Every parallel scenario keys each agent step to a child (`childId`). Two workers share one fixture state file, so an unkeyed script would hand steps out by whoever won the lock.
+
 ## Shared core records
 
 The contract also accepts the shared `run-state-changed` and `iteration-state-changed` records directly. An adapter expands them into the specific decision tags before comparison. This boundary avoids false differences caused by store writes that occur before policy decisions. The shared event stream also has `subagent-liveness-degraded` and `subagent-liveness-unavailable`. Terminal adapters synthesize these from harness capabilities. They are separate from worker-idle inspection events.

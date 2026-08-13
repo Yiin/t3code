@@ -8,9 +8,20 @@ import { assert, describe, it } from "@effect/vitest";
 import { diffTranscripts, type EpicRunTranscriptEvent } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { normalizeCoreMailbox, parseCoreMailbox } from "./coreMailbox.ts";
-import { decodeConformanceScenario, type ConformanceScenario } from "./scenario.ts";
-import { makeConformanceWorkspace } from "./workspace.ts";
+import { normalizeCoreMailbox, parseCoreMailbox, parseParallelMailbox } from "./coreMailbox.ts";
+import { normalizeParallelTranscript } from "./parallelTranscript.ts";
+import {
+  decodeConformanceScenario,
+  isParallelScenario,
+  scenarioWorkers,
+  type ConformanceScenario,
+} from "./scenario.ts";
+import {
+  beadCommentCounts,
+  landedChildIds,
+  makeConformanceWorkspace,
+  releasedClaimIds,
+} from "./workspace.ts";
 
 const packageDirectory = NodePath.resolve(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
@@ -144,13 +155,17 @@ const runTerminalScenario = (
     ...(scenario.name === "provider-fallback-persists"
       ? {}
       : { COOKEPIC_WORKER_CMD: NodePath.join(workspace.binDir, "agent") }),
-    COOKEPIC_SEQUENTIAL: "1",
+    ...(isParallelScenario(scenario)
+      ? { COOKEPIC_WORKERS: String(scenarioWorkers(scenario)) }
+      : { COOKEPIC_SEQUENTIAL: "1" }),
     COOKEPIC_GATE: "true",
     COOKEPIC_NO_PUSH: "1",
     COOKEPIC_MAX_DISPATCHES: String(maximumIterations(scenario)),
     // The core leg always runs with the default per-child budget of 3.
     COOKEPIC_MAX_ATTEMPTS: String(Math.max(3, maxExpectedAttempts(scenario))),
-    COOKEPIC_WORKER_TIMEOUT: "1",
+    // A pool worker has to outlive its siblings' merges; one second only ever
+    // bounded a lone sequential worker.
+    COOKEPIC_WORKER_TIMEOUT: isParallelScenario(scenario) ? "30" : "1",
   };
   const result = NodeChildProcess.spawnSync("setsid", ["env", runner, runDirectory], {
     cwd: workspace.cwd,
@@ -182,6 +197,28 @@ const runTerminalScenario = (
   const values = parseCoreMailbox(NodeFS.readFileSync(mailbox, "utf8"));
   if (values.length === 0) {
     return synthesizePreflightFailure(scenario, `${result.stdout}\n${result.stderr}`);
+  }
+  if (isParallelScenario(scenario)) {
+    const pool = parseParallelMailbox(values);
+    // Proof that `COOKEPIC_WORKERS` actually selected the pool loop. A
+    // sequential fallback would still produce a matching transcript for the
+    // simpler scenarios, and the leg would claim a parallel run it never made.
+    if (pool.run.workers !== scenarioWorkers(scenario)) {
+      throw new Error(
+        `${scenario.name} ran with ${String(pool.run.workers)} workers, not ${String(scenarioWorkers(scenario))}`,
+      );
+    }
+    const landed = landedChildIds(workspace);
+    return normalizeParallelTranscript({
+      epicId: scenario.beads.epicId,
+      iterations: pool.iterations.map((iteration) => ({
+        ...iteration,
+        committed: iteration.issueId !== null && landed.has(iteration.issueId),
+      })),
+      run: pool.run,
+      comments: beadCommentCounts(workspace),
+      releasedClaims: releasedClaimIds(workspace),
+    });
   }
   return normalizeCoreMailbox(values, scenario.beads.epicId, {
     comments: beadComments(workspace.env["CONFORMANCE_STATE"]),

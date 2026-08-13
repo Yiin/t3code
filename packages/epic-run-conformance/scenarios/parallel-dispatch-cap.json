@@ -1,0 +1,64 @@
+{
+  "name": "parallel-dispatch-cap",
+  "description": "The dispatch cap is spent on the first child while a second stays open, so the run fails and says so instead of reporting the epic complete.",
+  "repo": {
+    "files": [{ "path": "README.md", "content": "fixture\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      },
+      {
+        "id": "epic.2",
+        "title": "Second child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "repoAction": "commit",
+      "writes": [{ "path": "one.txt", "content": "one\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built one", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "dispatched",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0
+    },
+    { "_tag": "done", "sequence": 1, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 0 },
+    {
+      "_tag": "finished",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "dispatch cap with open children"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}

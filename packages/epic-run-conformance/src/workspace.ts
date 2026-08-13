@@ -4,7 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import type { ConformanceScenario } from "./scenario.ts";
+import { scenarioWorkers, type ConformanceScenario } from "./scenario.ts";
 import { agentShim, bdShim, gitShim } from "./shims.ts";
 
 export interface ConformanceWorkspace {
@@ -69,6 +69,11 @@ export const materializeConformanceWorkspace = (
   }
   if (scenario.repo.files.length === 0)
     NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "fixture\n");
+  // A pool run writes a `.beads/redirect` into every worker and integration
+  // worktree. A repo that tracks that file makes the fixture agent commit its
+  // own redirect, and the trial merge then refuses to overwrite the
+  // integration worktree's copy. Real repositories ignore it; so does this one.
+  NodeFS.appendFileSync(NodePath.join(cwd, ".gitignore"), ".beads/\n");
 
   const git = realGitPath();
   runGit(git, cwd, ["init", "-q", "-b", "main"]);
@@ -199,6 +204,8 @@ export const materializeConformanceWorkspace = (
     CONFORMANCE_REAL_GIT: git,
     CONFORMANCE_BASE_CWD: cwd,
     CONFORMANCE_CHILD_ID: children[0]?.id ?? "",
+    // A pool worker owns one child of several, and only its prompt says which.
+    ...(scenarioWorkers(scenario) > 1 ? { CONFORMANCE_CHILD_FROM_PROMPT: "1" } : {}),
   };
   return {
     cwd,
@@ -210,6 +217,75 @@ export const materializeConformanceWorkspace = (
         .filter((line) => line !== "")
         .map((line) => JSON.parse(line) as unknown),
   };
+};
+
+/**
+ * Children whose standing claim the run handed back, read from the bd journal.
+ *
+ * The loop announces this as a `child-claim-released` event, but only the
+ * `bd update <id> --status open` it ran is common to every driver.
+ */
+export const releasedClaimIds = (workspace: ConformanceWorkspace): ReadonlySet<string> => {
+  const released = new Set<string>();
+  for (const item of workspace.readTranscript()) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Readonly<Record<string, unknown>>;
+    if (entry["tool"] !== "bd" || !Array.isArray(entry["argv"])) continue;
+    const argv = entry["argv"] as ReadonlyArray<unknown>;
+    const statusIndex = argv.indexOf("--status");
+    if (argv[0] === "update" && statusIndex > 0 && argv[statusIndex + 1] === "open") {
+      const issueId = argv[1];
+      if (typeof issueId === "string") released.add(issueId);
+    }
+  }
+  return released;
+};
+
+/**
+ * Bead comment counts after the run, by issue id.
+ *
+ * The no-commit evidence rule reads them, so every driver needs the same view.
+ */
+export const beadCommentCounts = (workspace: ConformanceWorkspace): ReadonlyMap<string, number> => {
+  const statePath = workspace.env["CONFORMANCE_STATE"];
+  if (statePath === undefined) return new Map();
+  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
+    readonly children?: ReadonlyArray<Record<string, unknown>>;
+  };
+  return new Map(
+    (state.children ?? []).flatMap((child) =>
+      typeof child["id"] === "string" && typeof child["comment_count"] === "number"
+        ? [[child["id"], child["comment_count"]] as const]
+        : [],
+    ),
+  );
+};
+
+/**
+ * Which children left a commit on the branch, read from the repository itself.
+ *
+ * A pool worker commits inside its own worktree on its own branch, so no
+ * iteration row can say whether the work landed — only the merge did. The
+ * fixture agent stamps its child into every commit subject, so the base branch
+ * answers the question the same way for every driver, and answers it by
+ * effect: the commit is on the branch, or the merge never happened.
+ */
+export const landedChildIds = (
+  workspace: ConformanceWorkspace,
+  ref = "HEAD",
+): ReadonlySet<string> => {
+  const git = workspace.env["CONFORMANCE_REAL_GIT"] ?? "git";
+  const result = NodeChildProcess.spawnSync(git, ["log", ref, "--format=%s"], {
+    cwd: workspace.cwd,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return new Set();
+  const landed = new Set<string>();
+  for (const line of result.stdout.split("\n")) {
+    const match = /^fixture agent commit \d+ for (.+)$/.exec(line.trim());
+    if (match?.[1] !== undefined) landed.add(match[1]);
+  }
+  return landed;
 };
 
 export const makeConformanceWorkspace = (scenario: ConformanceScenario): ConformanceWorkspace =>

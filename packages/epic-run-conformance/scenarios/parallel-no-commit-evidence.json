@@ -1,0 +1,79 @@
+{
+  "name": "parallel-no-commit-evidence",
+  "description": "Two workers settle differently: one lands code, the other closes its child on a bead comment alone, and the pool run accepts both.",
+  "repo": {
+    "files": [{ "path": "README.md", "content": "fixture\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      },
+      {
+        "id": "epic.2",
+        "title": "Research: second child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "repoAction": "commit",
+      "writes": [{ "path": "one.txt", "content": "one\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built one", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    },
+    {
+      "childId": "epic.2",
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-msg", "summary": "researched two", "why": "needed" },
+      "closeChild": true,
+      "beadComment": "findings for epic.2",
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "dispatched",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0
+    },
+    { "_tag": "done", "sequence": 1, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 0 },
+    {
+      "_tag": "completed-no-code",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.2",
+      "iterationIndex": 1,
+      "comments": 1
+    },
+    {
+      "_tag": "finished",
+      "sequence": 3,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "done"
+    }
+  ],
+  "appliesTo": ["core", "terminal", "server"]
+}
