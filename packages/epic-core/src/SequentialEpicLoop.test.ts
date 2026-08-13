@@ -1,6 +1,7 @@
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicTierId,
   ProviderInstanceId,
   ProviderDriverKind,
   type EpicRunConfig,
@@ -105,6 +106,8 @@ const fixture = (input: {
    * resolver at all, which is today's run-level behaviour.
    */
   readonly roleSelection?: { readonly instanceId: ProviderInstanceId; readonly model: string };
+  /** The tier the stub resolver reports its selection came from. */
+  readonly roleTier?: EpicTierId;
   readonly siblings?: ReadonlyArray<{
     readonly repositoryPath: string;
     readonly baseBranch: string;
@@ -288,7 +291,10 @@ const fixture = (input: {
             resolve: (request) =>
               Effect.sync(() => {
                 roleRequests.push(request);
-                return input.roleSelection ?? request.fallbackSelection;
+                return {
+                  selection: input.roleSelection ?? request.fallbackSelection,
+                  tierId: input.roleTier ?? null,
+                };
               }),
           },
     dispatch: {
@@ -438,10 +444,21 @@ it.live(
       const resolved = fixture({
         attempts: [{ commit: true, close: true }],
         roleSelection,
+        roleTier: EpicTierId.make("cheap"),
       });
       yield* resolved.run();
 
       assert.deepEqual(resolved.selections, [roleSelection]);
+      // The record names the tier that produced the dispatch, so the outcome
+      // can be counted against it later.
+      assert.deepEqual(
+        resolved.iterations.map((iteration) => [
+          iteration.tierId,
+          iteration.providerInstanceId,
+          iteration.model,
+        ]),
+        [["cheap", roleSelection.instanceId, roleSelection.model]],
+      );
       assert.deepEqual(
         resolved.roleRequests.map((request) => [request.role, request.issueId]),
         [["iteration-worker", "epic.1"]],
@@ -460,6 +477,16 @@ it.live(
         { instanceId: ProviderInstanceId.make("worker"), model: "test" },
       ]);
       assert.deepEqual(unresolved.roleRequests, []);
+      // No resolver means no tier, but the run's own selection still
+      // dispatched, so the account and model are recorded either way.
+      assert.deepEqual(
+        unresolved.iterations.map((iteration) => [
+          iteration.tierId,
+          iteration.providerInstanceId,
+          iteration.model,
+        ]),
+        [[null, "worker", "test"]],
+      );
     }),
 );
 

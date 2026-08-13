@@ -1,4 +1,5 @@
 /** Per-role model selection, resolved once per epic dispatch. */
+import type { EpicTierId } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 
 import type { AgentSelection } from "./AgentDispatch.ts";
@@ -24,7 +25,23 @@ export interface RoleSelectionRequest {
   readonly fallbackSelection: AgentSelection;
 }
 
+/**
+ * What one role resolution decided, and where the decision came from.
+ *
+ * `tierId` is the attribution half: it names the tier whose chain produced
+ * `selection`, so an iteration outcome can be counted against that tier later.
+ * `null` means no tier answered — the role has none configured, or the
+ * adapter fell back to `request.fallbackSelection`.
+ */
+export interface ResolvedRoleSelection {
+  readonly selection: AgentSelection;
+  readonly tierId: EpicTierId | null;
+}
+
 export interface RoleSelectionShape {
-  /** Never fails. On any error the adapter returns request.fallbackSelection. */
-  readonly resolve: (request: RoleSelectionRequest) => Effect.Effect<AgentSelection>;
+  /**
+   * Never fails. On any error the adapter returns `request.fallbackSelection`
+   * with a `null` tier, because nothing was actually resolved.
+   */
+  readonly resolve: (request: RoleSelectionRequest) => Effect.Effect<ResolvedRoleSelection>;
 }

@@ -338,6 +338,22 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         epicRunIterationThreadId({ runId: input.runId, iterationIndex }),
       );
       const startedAt = now();
+      // Resolved before the record is written, so the record can name the tier
+      // that produced it. This loop has no merge queue, so every dispatch it
+      // makes is an iteration worker. Provider fallback keeps writing the run
+      // row, and the resolver reads it back as `fallbackSelection` next
+      // iteration.
+      const resolvedRole =
+        ports.roleSelection === null
+          ? null
+          : yield* ports.roleSelection.resolve({
+              role: "iteration-worker",
+              runId: input.runId,
+              issueId: child.id,
+              issueTitle: freshChild.title,
+              fallbackSelection: run.modelSelection,
+            });
+      const dispatchSelection = resolvedRole?.selection ?? run.modelSelection;
       const pending: PersistedEpicRunIteration = {
         runId: run.runId,
         iterationIndex,
@@ -349,6 +365,9 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         failureReason: null,
         headBefore: beforeHead,
         headAfter: null,
+        tierId: resolvedRole?.tierId ?? null,
+        providerInstanceId: dispatchSelection.instanceId,
+        model: dispatchSelection.model,
         startedAt,
         finishedAt: null,
       };
@@ -376,19 +395,6 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
       // into. Restart recovery for an interrupted iteration lives in
       // `ParallelEpicLoop.ts` (`resumedWorkers`), which is the only loop the
       // server runs; this one is CLI and conformance only.
-      // This loop has no merge queue, so every dispatch it makes is an
-      // iteration worker. Provider fallback keeps writing the run row, and
-      // the resolver reads it back as `fallbackSelection` next iteration.
-      const dispatchSelection =
-        ports.roleSelection === null
-          ? run.modelSelection
-          : yield* ports.roleSelection.resolve({
-              role: "iteration-worker",
-              runId: input.runId,
-              issueId: child.id,
-              issueTitle: freshChild.title,
-              fallbackSelection: run.modelSelection,
-            });
       const started = yield* Effect.result(
         ports.dispatch.startIteration({
           runId: input.runId,

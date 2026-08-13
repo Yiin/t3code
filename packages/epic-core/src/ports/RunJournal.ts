@@ -63,6 +63,21 @@ export const PersistedEpicRunIteration = Schema.Struct({
    */
   resumeCount: Schema.optionalKey(NonNegativeInt),
   lastResumedAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
+  /**
+   * Which tier's chain produced this dispatch, and what that chain resolved
+   * to. Written once, when the record is created, and never rewritten: a
+   * resume continues the same session on the same account, and a handoff to
+   * another account creates a new record.
+   *
+   * `tierId` is `null` when no tier answered — no role policy, or a role
+   * with no tier. The other two are `null` only on a record that dispatched
+   * nothing at all, and absent on every record written before these fields
+   * existed. Tier vocabulary lives in `EpicTierId` in `@t3tools/contracts`;
+   * it is a plain string here so an old record still decodes after a rename.
+   */
+  tierId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  providerInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
+  model: Schema.optionalKey(Schema.NullOr(Schema.String)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });

@@ -3,6 +3,7 @@ import {
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   DEFAULT_MODEL_BY_PROVIDER,
   EpicRunId,
+  EpicTierId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -194,6 +195,8 @@ const fixture = (input: {
    * means no resolver at all, which is today's run-level behaviour.
    */
   readonly roleSelections?: Partial<Record<EpicDispatchRole, ModelSelection>>;
+  /** The tier each role's selection came from, for attribution assertions. */
+  readonly roleTiers?: Partial<Record<EpicDispatchRole, EpicTierId>>;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -344,6 +347,9 @@ const fixture = (input: {
           summary: null,
           why: null,
           failureReason: null,
+          tierId: allocation.tierId,
+          providerInstanceId: allocation.providerInstanceId,
+          model: allocation.model,
           startedAt: allocation.startedAt,
           finishedAt: null,
         });
@@ -640,7 +646,10 @@ const fixture = (input: {
             resolve: (request) =>
               Effect.sync(() => {
                 roleRequests.push(request);
-                return input.roleSelections?.[request.role] ?? request.fallbackSelection;
+                return {
+                  selection: input.roleSelections?.[request.role] ?? request.fallbackSelection,
+                  tierId: input.roleTiers?.[request.role] ?? null,
+                };
               }),
           },
     workerEvidence: input.workerEvidence ?? null,
@@ -1064,6 +1073,54 @@ it.live("keeps every dispatch on the run selection when no role resolver is wire
     assert.deepEqual(
       test.beginTurnCalls.map((call) => call.selection),
       [runSelection],
+    );
+  }),
+);
+
+// Attribution has to survive both endings. A tier counted only on the
+// iterations it finished would flatter itself, which is the whole point of
+// recording it.
+it.live("records the dispatching tier on a failed and a completed iteration", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      attempts: [{}, { commit: true, close: true }],
+      roleSelections: { "iteration-worker": WORKER_SELECTION },
+      roleTiers: { "iteration-worker": EpicTierId.make("cheap") },
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(
+      test.iterations.map((iteration) => [
+        iteration.turnStatus,
+        iteration.tierId,
+        iteration.providerInstanceId,
+        iteration.model,
+      ]),
+      [
+        ["failed", "cheap", WORKER_SELECTION.instanceId, WORKER_SELECTION.model],
+        ["completed", "cheap", WORKER_SELECTION.instanceId, WORKER_SELECTION.model],
+      ],
+    );
+  }),
+);
+
+// Without a resolver there is no tier, but the run's own selection is still
+// what dispatched — so the account and model are recorded either way.
+it.live("records the run selection with no tier when no role resolver is wired", () =>
+  Effect.gen(function* () {
+    const test = fixture({ sequential: false, attempts: [{ commit: true, close: true }] });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(
+      test.iterations.map((iteration) => [
+        iteration.tierId,
+        iteration.providerInstanceId,
+        iteration.model,
+      ]),
+      [[null, "worker", "test"]],
     );
   }),
 );

@@ -425,6 +425,9 @@ export const makePool = (options: FileRunJournalOptions) =>
           summary: null,
           why: null,
           failureReason: null,
+          tierId: input.tierId,
+          providerInstanceId: input.providerInstanceId,
+          model: input.model,
           startedAt: input.startedAt,
           finishedAt: null,
         });

@@ -99,6 +99,21 @@ export const EpicRunIteration = Schema.Struct({
    */
   resumeCount: Schema.optionalKey(NonNegativeInt),
   lastResumedAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
+  /**
+   * Which tier's chain produced this dispatch, and what that chain resolved
+   * to. Written once with the row and never rewritten: a resume continues the
+   * same session on the same account, so the first dispatch's attribution
+   * stays true.
+   *
+   * `tierId` is `null` when no tier answered — no role policy, or a role with
+   * no tier — and the other two are `null` only on a row that dispatched
+   * nothing. All three are absent on a row read through a pre-057 shape. Tier
+   * vocabulary lives in `EpicTierId` in `@t3tools/contracts`; the column is a
+   * plain string so an old row still decodes after a rename.
+   */
+  tierId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  providerInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
+  model: Schema.optionalKey(Schema.NullOr(Schema.String)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -109,6 +124,10 @@ export const AllocateEpicRunIterationInput = Schema.Struct({
   issueId: Schema.NullOr(Schema.String),
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  /** Attribution for the dispatch this row is about to carry; see {@link EpicRunIteration}. */
+  tierId: Schema.NullOr(Schema.String),
+  providerInstanceId: Schema.NullOr(ProviderInstanceId),
+  model: Schema.NullOr(Schema.String),
   startedAt: IsoDateTime,
 });
 export type AllocateEpicRunIterationInput = typeof AllocateEpicRunIterationInput.Type;

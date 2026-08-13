@@ -479,6 +479,9 @@ describe("EpicRunStore", () => {
         issueId: "issue-resume",
         branch: "epic/issue-resume",
         worktreePath: "/tmp/worktrees/issue-resume",
+        tierId: "cheap",
+        providerInstanceId: ProviderInstanceId.make("claude-a"),
+        model: "claude-sonnet-5",
         startedAt: "2026-08-12T00:00:00.000Z",
       });
       yield* store.updateIteration({
@@ -513,6 +516,11 @@ describe("EpicRunStore", () => {
         failureReason: null,
         resumeCount: 1,
         lastResumedAt: "2026-08-12T00:11:00.000Z",
+        // A resume continues the same session on the same account, so the
+        // attribution the first dispatch wrote survives untouched.
+        tierId: "cheap",
+        providerInstanceId: ProviderInstanceId.make("claude-a"),
+        model: "claude-sonnet-5",
         startedAt: "2026-08-12T00:00:00.000Z",
         finishedAt: null,
       });
@@ -564,6 +572,9 @@ describe("EpicRunStore", () => {
             issueId: `issue-${index}`,
             branch: `epic/issue-${index}`,
             worktreePath: `/tmp/worktrees/issue-${index}`,
+            tierId: null,
+            providerInstanceId: null,
+            model: null,
             startedAt: "2026-07-27T00:00:00.000Z",
           }),
         { concurrency: "unbounded" },
@@ -592,6 +603,108 @@ describe("EpicRunStore", () => {
       assert.deepStrictEqual(
         (yield* store.listRunningIterations({ runId })).map((row) => row.iterationIndex),
         [0, 1, 2, 3, 5, 6, 7, 8, 9],
+      );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  // Attribution is what makes "is the cheap tier actually cheaper" a number
+  // instead of a feeling, so both endings have to carry it: a tier that only
+  // showed up on the iterations that succeeded would flatter itself.
+  it.effect("keeps tier attribution on a completed and on a failed iteration", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-attribution");
+      yield* store.upsertRun(makeRun({ runId }));
+
+      const completedIndex = yield* store.allocateIteration({
+        runId,
+        issueId: "issue-cheap",
+        branch: "epic/issue-cheap",
+        worktreePath: "/tmp/worktrees/issue-cheap",
+        tierId: "cheap",
+        providerInstanceId: ProviderInstanceId.make("claude-a"),
+        model: "claude-sonnet-5",
+        startedAt: "2026-08-13T00:00:00.000Z",
+      });
+      const failedIndex = yield* store.allocateIteration({
+        runId,
+        issueId: "issue-strong",
+        branch: "epic/issue-strong",
+        worktreePath: "/tmp/worktrees/issue-strong",
+        tierId: "strong",
+        providerInstanceId: ProviderInstanceId.make("claude-b"),
+        model: "claude-opus-5",
+        startedAt: "2026-08-13T00:01:00.000Z",
+      });
+
+      yield* store.updateIteration({
+        runId,
+        iterationIndex: completedIndex,
+        turnStatus: "completed",
+        summary: "landed",
+        why: null,
+        failureReason: null,
+        finishedAt: "2026-08-13T00:10:00.000Z",
+      });
+      yield* store.updateIteration({
+        runId,
+        iterationIndex: failedIndex,
+        turnStatus: "failed",
+        summary: null,
+        why: null,
+        failureReason: "child:no-commit",
+        finishedAt: "2026-08-13T00:11:00.000Z",
+      });
+
+      const rows = yield* store.listIterations({ runId });
+      assert.deepStrictEqual(
+        rows.map((row) => [row.turnStatus, row.tierId, row.providerInstanceId, row.model]),
+        [
+          ["completed", "cheap", "claude-a", "claude-sonnet-5"],
+          ["failed", "strong", "claude-b", "claude-opus-5"],
+        ],
+      );
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
+  // A dispatch that never happened has nothing to attribute, and a row written
+  // before migration 057 has nothing recorded. Both read back as null.
+  it.effect("leaves attribution null for a row that dispatched nothing", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-unattributed");
+      yield* store.upsertRun(makeRun({ runId }));
+
+      yield* store.allocateIteration({
+        runId,
+        issueId: null,
+        branch: null,
+        worktreePath: null,
+        tierId: null,
+        providerInstanceId: null,
+        model: null,
+        startedAt: "2026-08-13T00:00:00.000Z",
+      });
+      yield* store.appendIteration({
+        runId,
+        iterationIndex: 1,
+        threadId: ThreadId.make(`epic-run-${runId}-1`),
+        issueId: "issue-legacy",
+        turnStatus: "completed",
+        summary: null,
+        why: null,
+        failureReason: null,
+        startedAt: "2026-08-13T00:02:00.000Z",
+        finishedAt: "2026-08-13T00:03:00.000Z",
+      });
+
+      const rows = yield* store.listIterations({ runId });
+      assert.deepStrictEqual(
+        rows.map((row) => [row.tierId, row.providerInstanceId, row.model]),
+        [
+          [null, null, null],
+          [null, null, null],
+        ],
       );
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );

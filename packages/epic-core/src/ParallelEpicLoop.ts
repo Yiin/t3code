@@ -16,6 +16,7 @@ import {
   EpicRunId,
   type ModelSelection,
   type ProviderDriverKind,
+  type ProviderInstanceId,
   ThreadId,
   epicRunIterationThreadId,
 } from "@t3tools/contracts";
@@ -57,7 +58,11 @@ import type {
 } from "./ports/AgentDispatch.ts";
 import type { PoolDispatchShape } from "./ports/PoolDispatch.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
-import type { EpicDispatchRole, RoleSelectionShape } from "./ports/RoleSelection.ts";
+import type {
+  EpicDispatchRole,
+  ResolvedRoleSelection,
+  RoleSelectionShape,
+} from "./ports/RoleSelection.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEvent } from "./ports/RunEvents.ts";
 import type { ProviderDegradationJournalShape, RunJournalShape } from "./ports/RunJournal.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
@@ -85,6 +90,13 @@ export interface PoolRunJournalShape extends RunJournalShape, ProviderDegradatio
     readonly issueId: string | null;
     readonly branch: string | null;
     readonly worktreePath: string | null;
+    /**
+     * Which tier's chain this dispatch came from, and what it resolved to.
+     * All three are `null` for a record that dispatches nothing.
+     */
+    readonly tierId: string | null;
+    readonly providerInstanceId: ProviderInstanceId | null;
+    readonly model: string | null;
     readonly startedAt: string;
   }) => Effect.Effect<number, import("./ports/RunJournal.ts").RunJournalError>;
 }
@@ -804,6 +816,12 @@ export const runParallelEpicLoop = (
                 issueId: null,
                 branch: null,
                 worktreePath: null,
+                // Nothing is dispatched on this row: it exists only to record
+                // that the frontier was unreadable, so there is no tier and no
+                // model to attribute it to.
+                tierId: null,
+                providerInstanceId: null,
+                model: null,
                 startedAt,
               })
               .pipe(Effect.mapError(journalError("allocateIteration")));
@@ -888,7 +906,7 @@ export const runParallelEpicLoop = (
       // is what every call site read before this port existed. A resumed
       // worker stays on the run selection too: its session id belongs to the
       // config directory that created it, so a resume cannot cross accounts.
-      const dispatchSelection: AgentSelection | null =
+      const resolvedRole: ResolvedRoleSelection | null =
         ports.roleSelection === null || resumedWorker !== null
           ? null
           : yield* ports.roleSelection.resolve({
@@ -900,6 +918,7 @@ export const runParallelEpicLoop = (
               issueTitle: issueEvidenceBefore.title,
               fallbackSelection: run.modelSelection,
             });
+      const dispatchSelection: AgentSelection | null = resolvedRole?.selection ?? null;
       if (dispatchSelection !== null) args.onSelectionResolved(dispatchSelection);
 
       // A resume rebuilds the record of a worktree that already exists; it
@@ -1021,12 +1040,21 @@ export const runParallelEpicLoop = (
               threadId: resumedWorker.threadId,
             } as const;
           }
+          // Attribution is written with the row, from the same expression the
+          // dispatch below uses. A later provider fallback moves the run row,
+          // not this one: the record keeps the account and model this
+          // iteration actually started on, which is what a tier's failure
+          // rate has to be counted against.
+          const attribution = dispatchSelection ?? current.modelSelection;
           const iterationIndex = yield* ports.journal
             .allocateIteration({
               runId,
               issueId,
               branch: workspace.branch,
               worktreePath: workspace.worktreePath,
+              tierId: resolvedRole?.tierId ?? null,
+              providerInstanceId: attribution.instanceId,
+              model: attribution.model,
               startedAt,
             })
             .pipe(Effect.mapError(journalError("allocateIteration")));

@@ -267,6 +267,9 @@ const makeEpicRunStore = Effect.gen(function* () {
           failure_reason,
           resume_count,
           last_resumed_at,
+          tier_id,
+          provider_instance_id,
+          model,
           started_at,
           finished_at
         )
@@ -284,6 +287,9 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.failureReason},
           ${row.resumeCount ?? 0},
           ${row.lastResumedAt ?? null},
+          ${row.tierId ?? null},
+          ${row.providerInstanceId ?? null},
+          ${row.model ?? null},
           ${row.startedAt},
           ${row.finishedAt}
         )
@@ -299,7 +305,8 @@ const makeEpicRunStore = Effect.gen(function* () {
         INSERT INTO epic_run_iterations (
           run_id, iteration_index, thread_id, issue_id, worker_id, branch,
           worktree_path, turn_status, summary, why, failure_reason,
-          resume_count, last_resumed_at, started_at, finished_at
+          resume_count, last_resumed_at, tier_id, provider_instance_id, model,
+          started_at, finished_at
         )
         SELECT
           ${row.runId},
@@ -315,6 +322,9 @@ const makeEpicRunStore = Effect.gen(function* () {
           NULL,
           0,
           NULL,
+          ${row.tierId},
+          ${row.providerInstanceId},
+          ${row.model},
           ${row.startedAt},
           NULL
         FROM epic_run_iterations
@@ -377,6 +387,9 @@ const makeEpicRunStore = Effect.gen(function* () {
     failure_reason AS "failureReason",
     resume_count AS "resumeCount",
     last_resumed_at AS "lastResumedAt",
+    tier_id AS "tierId",
+    provider_instance_id AS "providerInstanceId",
+    model,
     started_at AS "startedAt",
     finished_at AS "finishedAt"
   `);
