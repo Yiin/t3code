@@ -16,6 +16,10 @@ import {
   type TerminalHarness,
 } from "./TerminalAgentDispatch.ts";
 import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
+import {
+  makeTerminalWorkerActivity,
+  type TerminalWorkerActivity,
+} from "./TerminalWorkerActivity.ts";
 
 describe("TerminalAgentDispatch final assistant selection", () => {
   it("ignores protocol text outside the Codex final agent message", () => {
@@ -169,6 +173,7 @@ const startWorker = (
     timeoutSeconds?: number;
     stopGraceSeconds?: number;
     workerScope?: WorkerScopePreparation;
+    workerActivity?: TerminalWorkerActivity;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -221,6 +226,33 @@ describe("TerminalAgentDispatch lifecycle capabilities", () => {
     ),
   );
 });
+
+it.live("publishes worker liveness facts the compacted artifact cannot carry", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const workerActivity = makeTerminalWorkerActivity();
+      const { handle } = yield* startWorker(
+        "head -c 10000 /dev/zero | tr '\\0' x; echo RALPH_DONE",
+        {
+          maxArtifactBytes: 256,
+          workerActivity,
+        },
+      );
+      const started = workerActivity.sample(handle.ref);
+      assert.isNotNull(started);
+      assert.isTrue(started?.live);
+      assert.isNumber(started?.pid);
+
+      yield* handle.awaitSettled;
+      const settled = workerActivity.sample(handle.ref);
+      // The artifact is capped at 256 bytes; the liveness counter is not, so
+      // the machine still sees the full 10 kB of progress.
+      assert.isAtLeast(settled?.outputBytes ?? 0, 10_000);
+      assert.isAtMost(NodeFS.statSync(handle.ref).size, 256);
+      assert.isFalse(settled?.live);
+    }),
+  ),
+);
 
 it.live("bounds worker artifacts and keeps the final tail", () =>
   Effect.scoped(

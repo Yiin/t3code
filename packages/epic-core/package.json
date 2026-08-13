@@ -215,6 +215,14 @@
       "types": "./src/adapters/TerminalAgentDispatch.ts",
       "import": "./src/adapters/TerminalAgentDispatch.ts"
     },
+    "./adapters/TerminalWorkerActivity": {
+      "types": "./src/adapters/TerminalWorkerActivity.ts",
+      "import": "./src/adapters/TerminalWorkerActivity.ts"
+    },
+    "./adapters/TerminalWorkerEvidence": {
+      "types": "./src/adapters/TerminalWorkerEvidence.ts",
+      "import": "./src/adapters/TerminalWorkerEvidence.ts"
+    },
     "./adapters/TerminalProviderSupport": {
       "types": "./src/adapters/TerminalProviderSupport.ts",
       "import": "./src/adapters/TerminalProviderSupport.ts"

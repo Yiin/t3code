@@ -17,6 +17,7 @@ import {
 } from "../ports/AgentDispatch.ts";
 import { wrapWorkerScopeSpawn, type WorkerScopePreparation } from "../workerScope.ts";
 import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
+import type { TerminalWorkerActivity } from "./TerminalWorkerActivity.ts";
 
 export type TerminalHarness =
   | "worker-cmd"
@@ -52,6 +53,15 @@ export interface TerminalAgentDispatchOptions {
    * unwrapped. See `workerScope.ts`.
    */
   readonly workerScope?: WorkerScopePreparation | undefined;
+  /**
+   * Where each worker's live process facts are published for liveness
+   * supervision (`TerminalWorkerActivity.ts`). Absent means the run supervises
+   * nothing, so the dispatch records nothing.
+   *
+   * Only `startIteration` writes here. `runAuxiliary` spawns a fold or
+   * inspector, not a worker, and must never move a worker's counters.
+   */
+  readonly workerActivity?: TerminalWorkerActivity | undefined;
 }
 
 interface ParsedArtifact {
@@ -634,8 +644,10 @@ export const makeTerminalAgentDispatch = (
           });
           const current = child;
           childStartTicks = current.pid === undefined ? null : processStartTicks(current.pid);
+          options.workerActivity?.started(artifactPath, current.pid ?? null);
           const append = (value: Buffer | string) => {
             const next = String(value);
+            options.workerActivity?.appended(artifactPath, Buffer.byteLength(next));
             chunks += next;
             parseBuffer += next;
             const lines = parseBuffer.split(/\r?\n/);
@@ -693,6 +705,7 @@ export const makeTerminalAgentDispatch = (
             current.on("close", async (code, signal) => {
               if (timer !== undefined) clearTimeout(timer);
               if (timeoutKillTimer !== undefined) clearTimeout(timeoutKillTimer);
+              options.workerActivity?.ended(artifactPath);
               const max = options.maxArtifactBytes ?? 1024 * 1024;
               const bounded = Buffer.from(chunks).subarray(-max).toString();
               await NodeFSP.writeFile(artifactPath, bounded);

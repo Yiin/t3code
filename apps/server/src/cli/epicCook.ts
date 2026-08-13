@@ -59,6 +59,8 @@ import { makeTerminalMergeDrain } from "@t3tools/epic-core/adapters/TerminalMerg
 import { makeTerminalPoolDispatch } from "@t3tools/epic-core/adapters/TerminalPoolDispatch";
 import { makeTerminalPoolWorkspace } from "@t3tools/epic-core/adapters/TerminalPoolWorkspace";
 import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
+import { makeTerminalWorkerActivity } from "@t3tools/epic-core/adapters/TerminalWorkerActivity";
+import { makeTerminalWorkerEvidence } from "@t3tools/epic-core/adapters/TerminalWorkerEvidence";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import type { PersistedEpicRun } from "@t3tools/epic-core/ports/RunJournal";
@@ -393,6 +395,9 @@ export const cookCommand = Command.make("cook", {
               new EpicCookCliError({ operation: "epicCook.workerScope", detail: error.detail }),
           ),
         );
+        // Where the dispatch publishes each worker's pid, liveness and
+        // cumulative output bytes for liveness supervision to read back.
+        const workerActivity = makeTerminalWorkerActivity();
         const terminalProviders = makeTerminalProviderSupport({
           harness,
           selection: modelSelection,
@@ -450,6 +455,7 @@ export const cookCommand = Command.make("cook", {
           timeoutSeconds: snapshot.config.supervision.workerTimeoutSeconds,
           stopGraceSeconds: snapshot.config.supervision.stopGraceSeconds,
           workerScope,
+          workerActivity,
         });
         const fileEvents = makeFileRunEvents({
           runDirectory,
@@ -612,13 +618,15 @@ export const cookCommand = Command.make("cook", {
               providerInventory: terminalProviders.inventory,
               roleSelection: null,
               /**
-               * Liveness supervision is server-only for now. The terminal
-               * dispatch adapter owns a real worker pid and its own kill path
-               * (`TerminalAgentDispatch.ts`), but its worker key is an
-               * artifact path, not a scope binding, so it needs its own
-               * evidence adapter rather than the cgroup one.
+               * The terminal worker key is the artifact path, so evidence is
+               * resolved through `workerActivity` — the same map the dispatch
+               * writes the worker's pid and output bytes into — rather than
+               * through the server's thread-id scope registry.
                */
-              workerEvidence: null,
+              workerEvidence: makeTerminalWorkerEvidence({
+                processRunner: runner,
+                activity: workerActivity,
+              }),
             };
             // The terminal seed mirrors the server layer's defaults
             // (`EpicRunner.ts`); a persisted non-default run config replaces

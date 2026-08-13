@@ -135,6 +135,15 @@ export interface CgroupWorkerEvidenceOptions {
    * progress, which is no progress at all (run-legacy.sh:946-949).
    */
   readonly outputBytes: (ref: WorkerRef) => Effect.Effect<number>;
+  /**
+   * Whether the worker's own process is still running, for a harness that
+   * spawned it and therefore knows. `null` means "cannot tell" and leaves the
+   * cgroup's process set as the only answer.
+   *
+   * A harness that owns the process outranks the cgroup here: it sees the
+   * child close, while an unscoped worker has no cgroup of its own to empty.
+   */
+  readonly isActive?: ((ref: WorkerRef) => Effect.Effect<boolean | null>) | undefined;
   readonly providerFallbackPending: Effect.Effect<boolean>;
   /** Bounds every git call in the probe. Defaults to the machine's 2s. */
   readonly repoProbeTimeoutSeconds?: number | undefined;
@@ -182,17 +191,18 @@ export const makeCgroupWorkerEvidence = (
 
     sampleSignals: (ref: WorkerRef): Effect.Effect<WorkerSignalSample, WorkerEvidenceError> =>
       Effect.gen(function* () {
-        const [cpuStat, ioStat, procs, outputBytes] = yield* Effect.all([
+        const [cpuStat, ioStat, procs, outputBytes, ownerIsActive] = yield* Effect.all([
           readCgroupFile(ref, "cpu.stat"),
           readCgroupFile(ref, "io.stat"),
           readCgroupFile(ref, "cgroup.procs"),
           options.outputBytes(ref),
+          options.isActive?.(ref) ?? Effect.succeed(null),
         ]);
         return {
           // No cgroup means no evidence of departure either, so the worker is
           // reported active. Rule 1 would otherwise skip supervision entirely
           // for every unsampled host.
-          isActive: procs === null ? true : parseCgroupProcs(procs).length > 0,
+          isActive: ownerIsActive ?? (procs === null ? true : parseCgroupProcs(procs).length > 0),
           outputBytes,
           cpuUsec: cpuStat === null ? 0 : (parseCgroupCpuUsec(cpuStat) ?? 0),
           ioBytes: ioStat === null ? 0 : parseCgroupIoBytes(ioStat),
