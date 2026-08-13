@@ -8,7 +8,8 @@
     "inspectMinDelaySeconds": 60,
     "inspectRetryDelaySeconds": 300,
     "stopGraceSeconds": 15,
-    "workerTimeoutSeconds": null
+    "workerTimeoutSeconds": null,
+    "uncertainStopCeiling": 12
   },
   "limits": { "maxAttemptsPerChild": 3, "maxIterations": 50 },
   "provider": { "modelSelection": null },

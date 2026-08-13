@@ -9,10 +9,12 @@
  * (gathered by `ports/WorkerEvidence.ts`) and every side effect leaves as a
  * `WorkerLivenessAction` for the driving adapter to perform.
  *
- * The conservatism is the design: sampling can only request an inspection,
- * and only a high-confidence inspector verdict, confirmed twice against
- * unchanged fingerprints and an unchanged progress generation, ever stops a
- * worker (run-legacy.sh:1114-1116).
+ * The conservatism is the design: sampling can only request an inspection, and
+ * a high-confidence inspector verdict stops a worker only after a second check
+ * confirms unchanged fingerprints and an unchanged progress generation
+ * (run-legacy.sh:1114-1116). A harness with no inspector reaches the same
+ * confirmation the slow way, through `uncertainStopCeiling`: the same three
+ * facts, unchanged across N consecutive checks.
  */
 import type { InspectorLaunchEvidence } from "./inspectorPrompt.ts";
 
@@ -57,6 +59,17 @@ export interface WorkerLivenessConfig {
    * launches an inspector (run-legacy.sh:1427-1430).
    */
   readonly inspectorSupported: boolean;
+  /**
+   * Consecutive uncertain checks against unchanged evidence that stop a worker
+   * on a harness with no inspector; null disables the ceiling.
+   *
+   * Without it that harness has no stop path at all: an idle worker records an
+   * uncertain reason, waits `inspectRetryDelaySeconds`, and records it again
+   * forever (t3code-77b). The ceiling reuses the confirmation shape the
+   * inspector-confirmed stop already uses — process fingerprint, repository
+   * fingerprint and progress generation, all unchanged — so it needs no verdict.
+   */
+  readonly uncertainStopCeiling: number | null;
 }
 
 export const DEFAULT_WORKER_LIVENESS_CONFIG = {
@@ -77,6 +90,13 @@ export const DEFAULT_WORKER_LIVENESS_CONFIG = {
   cpuProgressUsec: 100000,
   ioProgressBytes: 4096,
   inspectorSupported: true,
+  /**
+   * 12 checks is 55 minutes past the idle threshold at the default 300s retry
+   * delay, so a worker only dies after roughly 85 minutes in which no process
+   * changed, no file changed and no signal moved. A slow worker moves at least
+   * one of those.
+   */
+  uncertainStopCeiling: 12,
 } satisfies WorkerLivenessConfig;
 
 /** The literal the bounded repository probe yields on timeout (run-legacy.sh:1232). */
@@ -210,6 +230,11 @@ interface PendingStop {
   readonly generation: number;
 }
 
+/** The same three facts a `PendingStop` carries, plus how often they repeated. */
+interface UncertainStreak extends PendingStop {
+  readonly count: number;
+}
+
 export interface WorkerLivenessState {
   readonly worker: string;
   readonly child: string;
@@ -227,6 +252,8 @@ export interface WorkerLivenessState {
   readonly deadlineAt: number | null;
   readonly inspector: InspectorInFlight | null;
   readonly pendingStop: PendingStop | null;
+  /** Only the no-inspector path writes this; progress clears it back to null. */
+  readonly uncertainStreak: UncertainStreak | null;
 }
 
 export interface WorkerLivenessTick {
@@ -259,6 +286,7 @@ export const startWorkerLiveness = (input: {
       : input.now + input.config.workerTimeoutSeconds,
   inspector: null,
   pendingStop: null,
+  uncertainStreak: null,
 });
 
 /**
@@ -332,6 +360,16 @@ export const parseInspectorDecision = (
   };
 };
 
+/**
+ * The stop reason for a ceiling escalation. It carries the evidence itself, not
+ * a verdict, because no inspector spoke: whoever reads it must be able to see
+ * which three facts stayed still and for how many checks.
+ */
+const unchangedEvidenceRationale = (streak: UncertainStreak): string =>
+  `no inspector on this harness and evidence unchanged across ${String(streak.count)} checks: ` +
+  `process fingerprint ${streak.processFingerprint}, repository ${streak.repoFingerprint}, ` +
+  `progress generation ${String(streak.generation)}`;
+
 const uncertainReason = (rc: number, config: WorkerLivenessConfig): string =>
   rc === 124
     ? `inspector timed out after ${config.inspectorTimeoutSeconds}s` // run-legacy.sh:1648
@@ -357,7 +395,7 @@ export const tickWorkerLiveness = (
   if (!evidence.signals.isActive) {
     const hadInspector = state.inspector !== null;
     return {
-      state: { ...state, inspector: null, pendingStop: null },
+      state: { ...state, inspector: null, pendingStop: null, uncertainStreak: null },
       actions: hadInspector ? [{ _tag: "worker-inactive" }] : [],
     };
   }
@@ -401,6 +439,7 @@ export const tickWorkerLiveness = (
     next = {
       ...next,
       pendingStop: null,
+      uncertainStreak: null,
       lastProgressAt: now,
       nextInspectAt: now + config.idleThresholdSeconds,
       generation: next.generation + 1,
@@ -549,7 +588,46 @@ export const tickWorkerLiveness = (
       elapsedSeconds: now - next.startedAt,
     }); // run-legacy.sh:1424-1426
     if (!config.inspectorSupported) {
-      return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions }; // run-legacy.sh:1427-1430
+      // run-legacy.sh:1427-1430, bounded by the uncertain ceiling (t3code-77b).
+      const processFingerprint = evidence.processFingerprint();
+      const repoFingerprint = evidence.probeRepository();
+      // Unprovable evidence defers: neither an absent process fingerprint nor a
+      // timed-out probe can show that nothing changed, so neither counts toward
+      // the ceiling. Such a check leaves the streak as it was, because a probe
+      // that failed is no evidence that the worker moved either.
+      if (
+        config.uncertainStopCeiling === null ||
+        processFingerprint === PROCESS_FINGERPRINT_UNAVAILABLE ||
+        repoFingerprint.includes(REPO_PROBE_TIMEOUT_MARKER)
+      ) {
+        return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions };
+      }
+      const previous = next.uncertainStreak;
+      const unchanged =
+        previous !== null &&
+        previous.processFingerprint === processFingerprint &&
+        previous.repoFingerprint === repoFingerprint &&
+        previous.generation === next.generation;
+      const streak: UncertainStreak = {
+        processFingerprint,
+        repoFingerprint,
+        generation: next.generation,
+        count: unchanged ? previous.count + 1 : 1,
+      };
+      // One check is a sample, never a confirmation, so the floor is two even
+      // if a driver folds a lower number into its config.
+      if (streak.count < Math.max(2, config.uncertainStopCeiling)) {
+        return {
+          state: { ...uncertain(CODEX_INSPECTION_DISABLED_REASON), uncertainStreak: streak },
+          actions,
+        };
+      }
+      const rationale = unchangedEvidenceRationale(streak);
+      emit({ type: "inspection-stop", worker: next.worker, child: next.child, rationale });
+      return {
+        state: { ...next, pendingStop: null, uncertainStreak: null },
+        actions: [...actions, { _tag: "stop-worker", reason: rationale }],
+      };
     }
     const processFingerprint = evidence.processFingerprint();
     const repoFingerprint = evidence.probeRepository();

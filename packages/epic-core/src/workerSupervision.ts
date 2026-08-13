@@ -9,10 +9,10 @@
  * `ParallelEpicLoop` the stop is the existing interrupt-then-forced-stop path
  * an iteration timeout already takes.
  *
- * Nothing in here may change a verdict. The machine's conservatism — only a
- * high-confidence inspector verdict, confirmed twice against unchanged
- * fingerprints, ever stops a worker — is the design, so every failure mode
- * here degrades to "skip this tick", never to "stop the worker".
+ * Nothing in here may change a verdict. The machine's conservatism — a worker
+ * dies only on evidence confirmed unchanged across two or more checks — is the
+ * design, so every failure mode here degrades to "skip this tick", never to
+ * "stop the worker".
  */
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -49,6 +49,7 @@ export interface SupervisionSettings {
   readonly inspectRetryDelaySeconds: number;
   readonly stopGraceSeconds: number;
   readonly workerTimeoutSeconds: number | null;
+  readonly uncertainStopCeiling: number | null;
 }
 
 /** Harnesses that cannot enforce the inspector's no-tool contract. */
@@ -58,9 +59,8 @@ const INSPECTOR_UNSUPPORTED_DRIVERS = new Set<string>(["codex"]);
  * Whether this run's harness may launch an idle inspector.
  *
  * Codex cannot deny tools to a subagent, so the machine records an uncertain
- * reason instead of launching (`workerLiveness.ts:52-56, 538-540`). Wiring
- * alone therefore does not stop a wedged Codex worker; that ceiling is
- * `t3code-77b`.
+ * reason instead of launching. A wedged worker on such a harness is stopped by
+ * `WorkerLivenessConfig.uncertainStopCeiling` instead of by a verdict.
  */
 export const inspectorSupportedFor = (driver: string): boolean =>
   !INSPECTOR_UNSUPPORTED_DRIVERS.has(driver);
@@ -77,6 +77,7 @@ export const makeWorkerLivenessConfig = (input: {
   inspectMinDelaySeconds: input.supervision.inspectMinDelaySeconds,
   inspectRetryDelaySeconds: input.supervision.inspectRetryDelaySeconds,
   stopGraceSeconds: input.supervision.stopGraceSeconds,
+  uncertainStopCeiling: input.supervision.uncertainStopCeiling,
   /**
    * Left off deliberately. `makePoolPolicy` already turns the same
    * `supervision.workerTimeoutSeconds` into the loop's `iterationTimeoutMs`,

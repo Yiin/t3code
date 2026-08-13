@@ -171,9 +171,11 @@ describe("makeWorkerLivenessConfig", () => {
         inspectRetryDelaySeconds: 120,
         stopGraceSeconds: 20,
         workerTimeoutSeconds: 7_200,
+        uncertainStopCeiling: 8,
       },
       inspectorSupported: true,
     });
+    expect(config.uncertainStopCeiling).toBe(8);
     expect(config.idleThresholdSeconds).toBe(60);
     expect(config.inspectorTimeoutSeconds).toBe(90);
     expect(config.inspectMaxDelaySeconds).toBe(600);
@@ -340,7 +342,29 @@ describe("superviseWorker", () => {
     }),
   );
 
-  it.effect("never stops a worker whose harness cannot run an inspector", () =>
+  it.effect("stops a worker whose harness cannot run an inspector at the ceiling", () =>
+    Effect.gen(function* () {
+      const { evidence, counters } = fakeEvidence({ inspector: stopDecision() });
+      const { events, emit } = collect();
+      const verdict = yield* superviseWorker({
+        ref: REF,
+        child: "epic.6",
+        config: { ...CONFIG, inspectorSupported: false, uncertainStopCeiling: 3 },
+        evidence,
+        emit,
+        clock: fakeClock({ budget: 40 }),
+      });
+      // No inspector ever runs, so the evidence itself is the confirmation.
+      expect(counters.launches).toBe(0);
+      expect(verdict.reason).toContain("no inspector on this harness");
+      expect(verdict.reason).toContain("across 3 checks");
+      expect(verdict.reason).toContain("fingerprint-a");
+      expect(events.filter((event) => event.type === "inspection-uncertain")).toHaveLength(2);
+      expect(events.map((event) => event.type).at(-1)).toBe("inspection-stop");
+    }),
+  );
+
+  it.effect("never stops a worker whose harness has no inspector and no ceiling", () =>
     Effect.gen(function* () {
       const { evidence, counters } = fakeEvidence({ inspector: stopDecision() });
       const { events, emit } = collect();
@@ -348,14 +372,12 @@ describe("superviseWorker", () => {
         superviseWorker({
           ref: REF,
           child: "epic.6",
-          config: { ...CONFIG, inspectorSupported: false },
+          config: { ...CONFIG, inspectorSupported: false, uncertainStopCeiling: null },
           evidence,
           emit,
           clock: fakeClock({ budget: 40 }),
         }),
       );
-      // The documented `t3code-77b` ceiling: idle is detected and reported, but
-      // an uncertain verdict never escalates on its own.
       expect(exit._tag).toBe("Failure");
       expect(counters.launches).toBe(0);
       expect(events.map((event) => event.type)).toContain("worker-idle");

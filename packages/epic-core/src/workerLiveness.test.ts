@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   CODEX_INSPECTION_DISABLED_REASON,
   DEFAULT_WORKER_LIVENESS_CONFIG,
+  PROCESS_FINGERPRINT_UNAVAILABLE,
+  REPO_PROBE_TIMEOUT_MARKER,
   boundedInspectDelay,
   parseInspectorDecision,
   startWorkerLiveness,
@@ -264,6 +266,120 @@ describe("tickWorkerLiveness inspector launch", () => {
     ]);
     expect(state.inspector).toBeNull();
     expect(state.nextInspectAt).toBe(1800 + 300);
+  });
+});
+
+describe("tickWorkerLiveness uncertain ceiling without an inspector (t3code-77b)", () => {
+  const CEILING = 12;
+  const NO_INSPECTOR: WorkerLivenessConfig = {
+    ...CONFIG,
+    inspectorSupported: false,
+    uncertainStopCeiling: CEILING,
+  };
+
+  /**
+   * Every check lands exactly on `nextInspectAt`, which an uncertain result
+   * pushes out by the retry delay. That is the real cadence of a wedged worker
+   * on a harness with no inspector.
+   */
+  const idleChecks = (
+    count: number,
+    config: WorkerLivenessConfig = NO_INSPECTOR,
+    scripted: (check: number) => Partial<ScriptedEvidence> = () => ({}),
+  ): { state: WorkerLivenessState; actions: ReadonlyArray<WorkerLivenessAction> } => {
+    let state = start(0, config);
+    let actions: ReadonlyArray<WorkerLivenessAction> = [];
+    let now = config.idleThresholdSeconds;
+    for (let check = 1; check <= count; check += 1) {
+      const tick = tickWorkerLiveness(state, makeEvidence({ now, ...scripted(check) }), config);
+      state = tick.state;
+      actions = tick.actions;
+      now += config.inspectRetryDelaySeconds;
+    }
+    return { state, actions };
+  };
+
+  it("stops the worker once the evidence repeats up to the ceiling", () => {
+    const below = idleChecks(CEILING - 1);
+    expect(stopActions(below.actions)).toEqual([]);
+    expect(below.state.uncertainStreak?.count).toBe(CEILING - 1);
+
+    const { state, actions } = idleChecks(CEILING);
+    const [stop] = stopActions(actions);
+    expect(stop?.reason).toContain("no inspector on this harness");
+    expect(stop?.reason).toContain("across 12 checks");
+    expect(stop?.reason).toContain("process fingerprint fp-a");
+    expect(stop?.reason).toContain("repository main hash=1:1");
+    expect(stop?.reason).toContain("progress generation 0");
+    expect(emitted(actions, "inspection-stop")).toHaveLength(1);
+    expect(state.uncertainStreak).toBeNull();
+  });
+
+  it("still confirms once before stopping when the ceiling is below two", () => {
+    const eager: WorkerLivenessConfig = { ...NO_INSPECTOR, uncertainStopCeiling: 1 };
+    expect(stopActions(idleChecks(1, eager).actions)).toEqual([]);
+    expect(stopActions(idleChecks(2, eager).actions)).toHaveLength(1);
+  });
+
+  it("never stops when the ceiling is disabled", () => {
+    const disabled: WorkerLivenessConfig = { ...NO_INSPECTOR, uncertainStopCeiling: null };
+    const { state, actions } = idleChecks(40, disabled);
+    expect(stopActions(actions)).toEqual([]);
+    expect(state.uncertainStreak).toBeNull();
+  });
+
+  it("restarts the count when the process fingerprint changes", () => {
+    const { state, actions } = idleChecks(CEILING, NO_INSPECTOR, (check) =>
+      check === CEILING ? { processFingerprint: "fp-b" } : {},
+    );
+    expect(stopActions(actions)).toEqual([]);
+    expect(state.uncertainStreak).toEqual({
+      processFingerprint: "fp-b",
+      repoFingerprint: "main hash=1:1",
+      generation: 0,
+      count: 1,
+    });
+  });
+
+  it("clears the count on progress, which also bumps the generation", () => {
+    const { state, actions } = idleChecks(CEILING, NO_INSPECTOR, (check) =>
+      check === CEILING ? { signals: { outputBytes: 1 } } : {},
+    );
+    expect(stopActions(actions)).toEqual([]);
+    expect(state.uncertainStreak).toBeNull();
+    expect(state.generation).toBe(1);
+  });
+
+  it("clears the count when the worker leaves its scope", () => {
+    const { state, actions } = idleChecks(CEILING, NO_INSPECTOR, (check) =>
+      check === CEILING ? { signals: { isActive: false } } : {},
+    );
+    expect(stopActions(actions)).toEqual([]);
+    expect(state.uncertainStreak).toBeNull();
+  });
+
+  it("does not count a check with no process fingerprint", () => {
+    const missing = (check: number): Partial<ScriptedEvidence> =>
+      check === 3 ? { processFingerprint: PROCESS_FINGERPRINT_UNAVAILABLE } : {};
+
+    const atCeiling = idleChecks(CEILING, NO_INSPECTOR, missing);
+    expect(stopActions(atCeiling.actions)).toEqual([]);
+    // The unprovable check neither counted nor broke the chain.
+    expect(atCeiling.state.uncertainStreak?.count).toBe(CEILING - 1);
+    expect(stopActions(idleChecks(CEILING + 1, NO_INSPECTOR, missing).actions)).toHaveLength(1);
+  });
+
+  it("does not count a check whose repository probe timed out", () => {
+    // Rule 4 already read the repository on the first check, so only the
+    // ceiling's own probe sees the timeout line.
+    const quiet: WorkerLivenessConfig = { ...NO_INSPECTOR, repoProbeIntervalSeconds: 100_000 };
+    const timedOut = (check: number): Partial<ScriptedEvidence> =>
+      check === 3 ? { repoHash: `unknown hash=${REPO_PROBE_TIMEOUT_MARKER}` } : {};
+
+    const atCeiling = idleChecks(CEILING, quiet, timedOut);
+    expect(stopActions(atCeiling.actions)).toEqual([]);
+    expect(atCeiling.state.uncertainStreak?.count).toBe(CEILING - 1);
+    expect(stopActions(idleChecks(CEILING + 1, quiet, timedOut).actions)).toHaveLength(1);
   });
 });
 

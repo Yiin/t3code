@@ -50,6 +50,11 @@ const InspectMinDelaySeconds = PositiveInt;
 const InspectRetryDelaySeconds = PositiveInt;
 const StopGraceSeconds = PositiveInt;
 const WorkerTimeoutSeconds = Schema.NullOr(PositiveInt);
+/**
+ * At least two, because one check is a sample and never a confirmation. null
+ * disables the ceiling and restores the unbounded pre-t3code-77b behaviour.
+ */
+const UncertainStopCeiling = Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(2)));
 const MaxAttemptsPerChild = PositiveInt;
 const MaxIterations = PositiveInt;
 const ProviderModelSelection = Schema.NullOr(ModelSelection);
@@ -92,6 +97,7 @@ const SupervisionConfig = Schema.Struct({
   inspectRetryDelaySeconds: defaultTo(InspectRetryDelaySeconds, 300),
   stopGraceSeconds: defaultTo(StopGraceSeconds, 15),
   workerTimeoutSeconds: defaultTo(WorkerTimeoutSeconds, null),
+  uncertainStopCeiling: defaultTo(UncertainStopCeiling, 12),
 });
 
 const LimitsConfig = Schema.Struct({
@@ -195,6 +201,7 @@ export const EpicRunConfigOverride = Schema.Struct({
       inspectRetryDelaySeconds: Schema.optionalKey(InspectRetryDelaySeconds),
       stopGraceSeconds: Schema.optionalKey(StopGraceSeconds),
       workerTimeoutSeconds: Schema.optionalKey(WorkerTimeoutSeconds),
+      uncertainStopCeiling: Schema.optionalKey(UncertainStopCeiling),
     }),
   ),
   limits: Schema.optionalKey(
@@ -353,6 +360,13 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     scope: "core",
     label: "Worker timeout",
     doc: "Sets the absolute worker or hosted iteration limit in seconds.",
+    control: "number",
+  },
+  {
+    key: "supervision.uncertainStopCeiling",
+    scope: "core",
+    label: "Uncertain stop ceiling",
+    doc: "Stops a worker after this many checks with no inspector and no change in evidence.",
     control: "number",
   },
   {
