@@ -9,7 +9,7 @@ state and launches work; it does not keep a second copy of issue status.
 | State                                         | Location                                                                                                               | Owner                                 |
 | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
 | Issue status, claims, dependencies, and notes | The repository's `.beads` database                                                                                     | Workers using `bd`                    |
-| Commits and branches                          | Git; the sequential terminal core commits on the base branch, server runs use `epic/<child-id>` branches and worktrees | Workers and cook-epic                 |
+| Commits and branches                          | Git; parallel runs use `epic/<child-id>` branches and worktrees, a sequential terminal cook commits on the base branch | Workers and cook-epic                 |
 | Loop prompt and reports                       | A Ralph `RUN_DIR` under `/var/tmp`, including `prompt.md`, `mailbox.jsonl`, `summary.md`, and `iter-N.json`            | Ralph                                 |
 | Epic run lock                                 | `<repo>/.beads/run-lock.<epic-id>.json`                                                                                | The active terminal or T3 Code runner |
 | T3 Code run recovery state                    | `epic_runs` rows in `~/.t3/userdata/state.sqlite`                                                                      | T3 Code server                        |
@@ -377,8 +377,9 @@ already on disk is rewritten.
 A run that already reached `done` is finished. Restarting it fails with a
 `resume` error and its record is left alone.
 
-This is the sequential engine only. A parallel terminal cook still refuses a run
-id it has already created.
+This is the sequential engine only, so a restart needs the same one-worker
+escape the first call used (`COOKEPIC_SEQUENTIAL=1` or `COOKEPIC_WORKERS=1`). A
+parallel terminal cook still refuses a run id it has already created.
 
 ## Recover a run that failed at boot
 

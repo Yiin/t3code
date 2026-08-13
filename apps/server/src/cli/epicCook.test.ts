@@ -7,23 +7,26 @@ const snapshot = (environment: Parameters<typeof resolveEpicRunConfig>[0]["envir
   resolveEpicRunConfig({ file: null, environment, override: null, harness: null });
 
 describe("selectTerminalExecution", () => {
-  it("defaults to sequential when nothing is configured", () => {
-    assert.equal(selectTerminalExecution(snapshot(null)), "sequential");
+  it("defaults to the three-worker pool when nothing is configured", () => {
+    const resolved = snapshot(null);
+    assert.equal(resolved.config.parallel.workers, 3);
+    assert.equal(resolved.provenance["parallel.workers"], "default");
+    assert.equal(selectTerminalExecution(resolved), "parallel");
   });
 
-  it("stays sequential on the default worker count alone", () => {
-    // parallel.workers defaults to 3; an untouched config must never select
-    // the pool loop.
+  it("selects the pool on the default worker count alone", () => {
+    // parallel.workers defaults to 3, and no override is needed to take it.
     const resolved = snapshot({});
     assert.equal(resolved.config.parallel.workers, 3);
-    assert.equal(selectTerminalExecution(resolved), "sequential");
+    assert.equal(selectTerminalExecution(resolved), "parallel");
   });
 
   it("selects parallel when the environment sets workers above 1", () => {
     assert.equal(selectTerminalExecution(snapshot({ parallel: { workers: 2 } })), "parallel");
   });
 
-  it("stays sequential when workers is 1 even if explicitly set", () => {
+  it("stays sequential when workers is explicitly 1", () => {
+    // COOKEPIC_WORKERS=1 is one of the two one-worker escapes.
     assert.equal(selectTerminalExecution(snapshot({ parallel: { workers: 1 } })), "sequential");
   });
 
@@ -39,9 +42,10 @@ describe("selectTerminalExecution", () => {
   });
 
   it("stays sequential when sequential execution is forced without workers", () => {
-    assert.equal(
-      selectTerminalExecution(snapshot({ execution: { sequential: true } })),
-      "sequential",
-    );
+    // COOKEPIC_SEQUENTIAL=1 is the other one-worker escape, and it clamps the
+    // default worker count to 1.
+    const resolved = snapshot({ execution: { sequential: true } });
+    assert.equal(resolved.config.parallel.workers, 1);
+    assert.equal(selectTerminalExecution(resolved), "sequential");
   });
 });

@@ -11,7 +11,6 @@ import {
   ProjectId,
   ProviderInstanceId,
   type EpicRunConfig,
-  type EpicRunConfigProvenance,
 } from "@t3tools/contracts";
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
@@ -210,25 +209,19 @@ const selectHarness = (environment: NodeJS.ProcessEnv): TerminalHarness => {
 };
 
 /**
- * The terminal execution shape. Sequential stays the default: only an
- * explicitly configured `parallel.workers` above 1 selects the pool loop. The
- * config default (`workers: 3`, provenance `default`), the sequential policy
- * clamp (`workers: 1`, provenance `policy`), and an explicit
- * `execution.sequential: false` on its own never select it.
+ * The terminal execution shape, read from the resolved values alone. The pool
+ * loop runs whenever execution is not sequential and `parallel.workers` is
+ * above 1, so the shared default (`workers: 3`) is the terminal default too.
+ * Two escapes select one worker in the base checkout: `execution.sequential`
+ * (`COOKEPIC_SEQUENTIAL=1`), which the config policy also clamps to
+ * `workers: 1`, and `parallel.workers: 1` (`COOKEPIC_WORKERS=1`).
  */
 export const selectTerminalExecution = (snapshot: {
   readonly config: EpicRunConfig;
-  readonly provenance: EpicRunConfigProvenance;
-}): "sequential" | "parallel" => {
-  const workersProvenance = snapshot.provenance["parallel.workers"];
-  return !snapshot.config.execution.sequential &&
-    snapshot.config.parallel.workers > 1 &&
-    workersProvenance !== undefined &&
-    workersProvenance !== "default" &&
-    workersProvenance !== "policy"
+}): "sequential" | "parallel" =>
+  !snapshot.config.execution.sequential && snapshot.config.parallel.workers > 1
     ? "parallel"
     : "sequential";
-};
 
 export const cookCommand = Command.make("cook", {
   epic: Flag.string("epic").pipe(Flag.withDescription("Beads epic id.")),

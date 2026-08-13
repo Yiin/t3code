@@ -372,6 +372,20 @@ if [ -n "$(git -C "$parallel_root/repo" branch --list 'cook-epic-integration-*')
   fail 'parallel cook left its integration branch behind'
 fi
 
+# No shape knob at all: the shared default of three workers must select the
+# pool loop through the shim.
+default_root="$TMP_ROOT/default-shape"
+make_fixture "$default_root"
+run_fixture "$default_root"
+assert_contains "$default_root/final-state.json" '"status": "closed"'
+jq -e '.status == "done" and .config.parallel.workers == 3
+  and .configProvenance["parallel.workers"] == "default"' \
+  "$default_root/run/run.json" >/dev/null \
+  || fail 'the default shape did not record a done three-worker pool run'
+[ "$(git -C "$default_root/repo" rev-list --count HEAD)" = 3 ] \
+  || fail 'the default shape did not land the child commit on the base branch'
+assert_not_exists "$default_root/run/worktrees"
+
 prime_sequential_root="$TMP_ROOT/prime-sequential"
 make_fixture "$prime_sequential_root"
 make_prime_fallback_binaries "$prime_sequential_root"

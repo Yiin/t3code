@@ -28,9 +28,10 @@
 #   COOKEPIC_WORKER_CMD        test hook: run this instead of a harness
 #   COOKEPIC_T3_BIN            t3 entrypoint override
 #   COOKEPIC_SEQUENTIAL        1 = force one worker in the base checkout -> execution.sequential
-# COOKEPIC_WORKERS > 1 selects the parallel pool loop (per-worker worktrees,
-# merge queue); unset means sequential. Every other COOKEPIC_* knob refuses to
-# start, loudly.
+# Unset means the parallel pool loop at the shared default of three workers
+# (per-worker worktrees, merge queue). COOKEPIC_SEQUENTIAL=1 and
+# COOKEPIC_WORKERS=1 are the two escapes to one worker in the base checkout.
+# Every other COOKEPIC_* knob refuses to start, loudly.
 # docs/epic-runs-rollout.md lists each dropped knob and its reason.
 #
 # loop.log, mailbox.jsonl, summary.md, and the STOP control file keep their

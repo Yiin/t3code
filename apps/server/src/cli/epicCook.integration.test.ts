@@ -98,6 +98,9 @@ printf 'RALPH_MSG: {"summary":"completed %s","why":"integration test"}\\n' "$chi
     COOKEPIC_HARNESS: "worker-cmd",
     COOKEPIC_WORKER_CMD: worker,
     COOKEPIC_NO_PUSH: "1",
+    // The pool loop is the default shape now, and this worker reads the
+    // sequential loop's prompt. Tests of the pool drop this escape.
+    COOKEPIC_SEQUENTIAL: "1",
   };
   return { root, repo, runDirectory, fakeHome, epic, environment, bdEnvironment };
 };
@@ -287,7 +290,7 @@ it("drains a worker after SIGINT and releases the lock", async () => {
   );
 });
 
-it("cooks two children through the parallel pool loop", () => {
+it("cooks two children through the parallel pool loop with no override", () => {
   const fixture = makeFixture(2);
   const { repo, runDirectory, epic, environment, bdEnvironment } = fixture;
   // The pool prompt carries the child as "Cook exactly `<id>` this
@@ -309,17 +312,17 @@ printf 'RALPH_MSG: {"summary":"completed %s","why":"integration test"}\\n' "$chi
 `,
   );
   NodeFS.chmodSync(poolWorker, 0o755);
-  const result = run("node", cookArgs(fixture), repo, {
-    ...environment,
-    COOKEPIC_WORKER_CMD: poolWorker,
-    COOKEPIC_WORKERS: "2",
-  });
+  // No worker count and no execution shape: the shared default alone must
+  // select the three-worker pool.
+  const poolEnvironment: NodeJS.ProcessEnv = { ...environment, COOKEPIC_WORKER_CMD: poolWorker };
+  delete poolEnvironment.COOKEPIC_SEQUENTIAL;
+  const result = run("node", cookArgs(fixture), repo, poolEnvironment);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /\tdone\t2\/50/);
   const state = JSON.parse(NodeFS.readFileSync(NodePath.join(runDirectory, "run.json"), "utf8"));
   assert.equal(state.status, "done");
-  assert.equal(state.config.parallel.workers, 2);
-  assert.equal(state.configProvenance["parallel.workers"], "environment");
+  assert.equal(state.config.parallel.workers, 3);
+  assert.equal(state.configProvenance["parallel.workers"], "default");
   // Both child commits landed on the base branch through the merge queue.
   const children = JSON.parse(
     requireOk(

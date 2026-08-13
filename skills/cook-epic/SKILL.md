@@ -1,6 +1,6 @@
 ---
 name: cook-epic
-description: Execute a beads epic unattended with fresh-context workers on the shared epic core: sequential on the base branch by default, or a parallel worker pool with per-worker worktrees and a merge queue. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
+description: Execute a beads epic unattended with fresh-context workers on the shared epic core: a three-worker pool with per-worker worktrees and a merge queue by default, or one worker at a time on the base branch. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
 ---
 
 # cook-epic — epic executor
@@ -15,11 +15,11 @@ status) and git (commits, merges).
 **This is the only skill for running an epic.** It handles a chain, a wide
 frontier, and every mix of the two in one run — nobody has to predict the shape
 up front. `run.sh` execs `t3 epic cook`, the same shared orchestration core the
-T3 Code server runner drives. The default shape is sequential: one worker at a
-time, directly in the main checkout on the base branch, with claiming, retry
-budgets, a per-child gate, and verify-by-effects. `COOKEPIC_WORKERS` above 1
-selects the parallel pool: per-worker worktrees, an integration branch, and a
-serialized merge queue — the same loop the server runner drives.
+T3 Code server runner drives. The default shape is the parallel pool at three
+workers: per-worker worktrees, an integration branch, and a serialized merge
+queue, with claiming, retry budgets, a per-child gate, and verify-by-effects.
+`COOKEPIC_SEQUENTIAL=1` or `COOKEPIC_WORKERS=1` escapes to one worker at a
+time, directly in the main checkout on the base branch.
 
 ## When this fits
 
@@ -65,9 +65,9 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
 
    | User says                                  | Environment variable                                        | Default                                                                                                 |
    | ------------------------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-   | "3 workers", "in parallel"                 | `COOKEPIC_WORKERS` (positive integer)                       | unset — sequential                                                                                      |
+   | "5 workers", "more parallelism"            | `COOKEPIC_WORKERS` (positive integer)                       | unset — 3 workers, parallel                                                                             |
    | "sibling repos ../api ../web"              | `COOKEPIC_SIBLINGS` (space-separated paths)                 | unset                                                                                                   |
-   | "sequential", "one at a time"              | `COOKEPIC_SEQUENTIAL=1`                                     | unset — sequential unless `COOKEPIC_WORKERS` > 1                                                        |
+   | "sequential", "one at a time"              | `COOKEPIC_SEQUENTIAL=1` (or `COOKEPIC_WORKERS=1`)           | unset — parallel                                                                                        |
    | "gate: bun run build"                      | `COOKEPIC_GATE`                                             | **required** — see below                                                                                |
    | "no gate", "skip verification"             | `COOKEPIC_NO_GATE=1`                                        | unset                                                                                                   |
    | "2h absolute limit per worker"             | `COOKEPIC_WORKER_TIMEOUT` (positive seconds)                | unset; no absolute timeout                                                                              |
@@ -110,15 +110,16 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    `COOKEPIC_WORKER_TIMEOUT` only when an operator needs a fixed positive
    limit. Zero and other invalid values fail preflight.
 
-2. **Execution shape.** Sequential is the default: one worker at a time in the
-   main checkout on the base branch. `COOKEPIC_WORKERS` above 1 selects the
-   parallel pool loop: each child cooks in its own worktree on an
-   `epic/<child>` branch, a serialized merge queue trial-merges finished
-   branches into the run's integration branch, gates once per merge set, and
-   fast-forwards the base branch. Conflicting or gate-failing branches park
-   and spawn `Merge fix:` children. `COOKEPIC_SEQUENTIAL=1` forces the
-   sequential shape and contradicts `COOKEPIC_WORKERS` above 1 — the shim
-   refuses that combination. `COOKEPIC_SIBLINGS` names sibling repositories;
+2. **Execution shape.** The parallel pool loop at three workers is the default:
+   each child cooks in its own worktree on an `epic/<child>` branch, a
+   serialized merge queue trial-merges finished branches into the run's
+   integration branch, gates once per merge set, and fast-forwards the base
+   branch. Conflicting or gate-failing branches park and spawn `Merge fix:`
+   children. `COOKEPIC_WORKERS` sets another worker count. Two escapes select
+   one worker at a time in the main checkout on the base branch:
+   `COOKEPIC_SEQUENTIAL=1` and `COOKEPIC_WORKERS=1`. `COOKEPIC_SEQUENTIAL=1`
+   contradicts `COOKEPIC_WORKERS` above 1 — the shim refuses that
+   combination. `COOKEPIC_SIBLINGS` names sibling repositories;
    sequential mode works them as the real checkouts, parallel mode mirrors
    them into per-worker layouts so `../sibling` references resolve inside the
    worker sandbox. Inspectors and budget caps retired with the legacy Bash
@@ -323,8 +324,7 @@ pausing a finished run). Report it; do not retry.
 
 ## How it works (what to tell the user when asked)
 
-The sequential shape runs one worker at a time, in the main checkout on the
-base branch, like ralph. The parallel shape (`COOKEPIC_WORKERS` above 1) runs a
+The parallel shape is the default, at three workers. It runs a
 pool: each iteration cooks in its own worktree on an `epic/<child>` branch, and
 a serialized merge queue lands finished branches on the base branch through the
 run's integration branch — trial merge, one gate per merge set, fast-forward,
@@ -333,6 +333,9 @@ push. A branch that conflicts or fails the gate parks, and the queue creates a
 each worker also gets mirrored worktrees of the sibling repositories in a
 run-scoped layout, so cross-repo relative paths resolve; merges land in every
 repository's base branch together.
+
+The sequential shape (`COOKEPIC_SEQUENTIAL=1` or `COOKEPIC_WORKERS=1`) runs one
+worker at a time, in the main checkout on the base branch, like ralph.
 
 The bullets below describe the sequential mechanics; the pool loop applies the
 same claiming, attempt budgets, provider fallback, and evidence rules per

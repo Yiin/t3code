@@ -56,25 +56,25 @@ terminal,core --mode run` ran against three real Beads epics of 1, 2, and 3
 The shim maps these onto the shared run config (the deprecated environment
 layer of `.t3code/epic-run.json` resolution) or passes them to `t3 epic cook`:
 
-| Knob                        | Lands as                                                      |
-| --------------------------- | ------------------------------------------------------------- |
-| `COOKEPIC_EPIC`             | `--epic` (required)                                           |
-| `COOKEPIC_HARNESS`          | harness selection at dispatch                                 |
-| `COOKEPIC_GATE`             | `gate.command`                                                |
-| `COOKEPIC_NO_GATE`          | `gate.disabled`                                               |
-| `COOKEPIC_NO_PUSH`          | `vcs.noPush`                                                  |
-| `COOKEPIC_MAX_DISPATCHES`   | `limits.maxIterations`                                        |
-| `COOKEPIC_MAX_ATTEMPTS`     | `limits.maxAttemptsPerChild`                                  |
-| `COOKEPIC_WORKER_TIMEOUT`   | `supervision.workerTimeoutSeconds`                            |
-| `COOKEPIC_STOP_GRACE`       | `supervision.stopGraceSeconds`                                |
-| `COOKEPIC_MODEL`            | `provider.modelSelection`                                     |
-| `COOKEPIC_PERMISSION_MODE`  | `runtime.mode`                                                |
-| `COOKEPIC_ORIENTATION_FILE` | `orientation.file`                                            |
-| `COOKEPIC_BIN`              | harness binary override at dispatch                           |
-| `COOKEPIC_WORKER_CMD`       | `worker-cmd` harness (test seam)                              |
-| `COOKEPIC_T3_BIN`           | shim entrypoint resolution (shim-only)                        |
-| `COOKEPIC_CORE`             | engine selection (shim-only)                                  |
-| `COOKEPIC_SEQUENTIAL`       | must be `1` or unset; the core cook loop is always sequential |
+| Knob                        | Lands as                                               |
+| --------------------------- | ------------------------------------------------------ |
+| `COOKEPIC_EPIC`             | `--epic` (required)                                    |
+| `COOKEPIC_HARNESS`          | harness selection at dispatch                          |
+| `COOKEPIC_GATE`             | `gate.command`                                         |
+| `COOKEPIC_NO_GATE`          | `gate.disabled`                                        |
+| `COOKEPIC_NO_PUSH`          | `vcs.noPush`                                           |
+| `COOKEPIC_MAX_DISPATCHES`   | `limits.maxIterations`                                 |
+| `COOKEPIC_MAX_ATTEMPTS`     | `limits.maxAttemptsPerChild`                           |
+| `COOKEPIC_WORKER_TIMEOUT`   | `supervision.workerTimeoutSeconds`                     |
+| `COOKEPIC_STOP_GRACE`       | `supervision.stopGraceSeconds`                         |
+| `COOKEPIC_MODEL`            | `provider.modelSelection`                              |
+| `COOKEPIC_PERMISSION_MODE`  | `runtime.mode`                                         |
+| `COOKEPIC_ORIENTATION_FILE` | `orientation.file`                                     |
+| `COOKEPIC_BIN`              | harness binary override at dispatch                    |
+| `COOKEPIC_WORKER_CMD`       | `worker-cmd` harness (test seam)                       |
+| `COOKEPIC_T3_BIN`           | shim entrypoint resolution (shim-only)                 |
+| `COOKEPIC_CORE`             | engine selection (shim-only)                           |
+| `COOKEPIC_SEQUENTIAL`       | must be `1` or unset; `1` escapes the parallel default |
 
 Every other knob refuses to start. The dropped knobs and their reasons:
 
@@ -143,8 +143,11 @@ Completed 2026-08-07 under t3code-06s.42, after one release with no rollback:
   `serialized-trial-merge`, `sibling-repo-layout`) are deleted; t3code-06s.41
   closed the remaining gap with this retirement call. **Superseded 2026-08-08
   by t3code-06s.43:** parallel terminal execution is restored on the shared
-  core (`COOKEPIC_WORKERS` above 1 selects `runParallelEpicLoop` in
-  `t3 epic cook`). The 5 deleted conformance scenarios stay deleted — the
+  core (`parallel.workers` above 1 selects `runParallelEpicLoop` in
+  `t3 epic cook`). **Made the default 2026-08-13 by t3code-22o.10:** the
+  shared default of three workers now selects the pool with no override, and
+  `COOKEPIC_SEQUENTIAL=1` or `COOKEPIC_WORKERS=1` escapes to one worker in the
+  base checkout. The 5 deleted conformance scenarios stay deleted — the
   parallel terminal path is covered by the pool fixture in
   `core-delegation.sh` and the parallel case in
   `apps/server/src/cli/epicCook.integration.test.ts`.
