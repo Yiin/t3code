@@ -26,6 +26,8 @@ const workspaceFiles = [
   "packages/tailscale/package.json",
   "packages/effect-acp/package.json",
   "packages/effect-codex-app-server/package.json",
+  "packages/epic-core/package.json",
+  "packages/epic-run-conformance/package.json",
   "scripts/package.json",
 ] as const;
 
@@ -41,6 +43,17 @@ function copyWorkspaceManifestFixture(targetRoot: string): void {
   if (NodeFS.existsSync(patchesDirectory)) {
     NodeFS.cpSync(patchesDirectory, NodePath.resolve(targetRoot, "patches"), { recursive: true });
   }
+
+  // The rehearsal copies only a subset of workspace packages, so patches for
+  // packages outside that subset (expo, react-native) would fail the install
+  // with ERR_PNPM_UNUSED_PATCH. Drop the section from the copied manifest; the
+  // smoke exercises version bumps and lockfile regeneration, not patching.
+  const workspaceManifestPath = NodePath.resolve(targetRoot, "pnpm-workspace.yaml");
+  const workspaceManifest = NodeFS.readFileSync(workspaceManifestPath, "utf8");
+  NodeFS.writeFileSync(
+    workspaceManifestPath,
+    workspaceManifest.replace(/^patchedDependencies:\n(?:[ \t]+\S.*\n?)*/m, ""),
+  );
 }
 
 function writeMacManifestFixtures(targetRoot: string): { arm64Path: string; x64Path: string } {
