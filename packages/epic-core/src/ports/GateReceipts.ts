@@ -19,7 +19,9 @@ import type { GateError, GateReceipt } from "./Gate.ts";
 /**
  * Which gate produced the receipt.
  *
- * - `entry`: the branch's own gate, with the trial merge applied.
+ * - `entry`: the queued work's own gate, with the trial merges applied. One
+ *   receipt covers every branch that gate verified, which is one branch for a
+ *   single entry and several for a batch.
  * - `control`: the same gate on the base branch with nothing merged, run to
  *   decide whether the branch or the environment is at fault.
  * - `recheck`: the control gate re-run after the integration worktrees were
@@ -42,8 +44,18 @@ export const PersistedGateReceipt = Schema.Struct({
    */
   sequence: Schema.Number,
   phase: GateReceiptPhase,
-  /** The child whose branch was under test, or `null` for a `control` gate. */
+  /**
+   * The child whose branch was under test.
+   *
+   * `null` for a `control` or `recheck` gate, which test the base with nothing
+   * merged, and for an `entry` gate over a batch of several branches — naming
+   * one child there would blame it for work it may not have caused.
+   */
   childId: Schema.NullOr(Schema.String),
+  /**
+   * The branches the trial merge applied, space separated. One branch for a
+   * single-entry gate, several for a batch, `null` when nothing was merged.
+   */
   branch: Schema.NullOr(Schema.String),
   commandDigest: Schema.String,
   cwd: Schema.String,

@@ -69,7 +69,15 @@ const makeHarness = (
     readonly slotHeld?: boolean;
     readonly conflicts?: ReadonlyArray<string>;
     readonly conflictCwds?: ReadonlyArray<string>;
+    /** Branches that conflict in every sibling worktree but merge in the main one. */
+    readonly siblingConflicts?: ReadonlyArray<string>;
     readonly gatePasses?: boolean;
+    /**
+     * Branches that make the gate red whenever one of them is in the trial
+     * merge — the batch equivalent of `gatePasses: false`, and the only way to
+     * model a batch that is red because of one member.
+     */
+    readonly gateRedBranches?: ReadonlyArray<string>;
     /** Per-call gate answers: [merge set, control on base, …]. */
     readonly gateSequence?: ReadonlyArray<boolean>;
     readonly gateOutput?: string;
@@ -161,6 +169,13 @@ const makeHarness = (
   ];
   let createFailed = false;
   let gateCall = 0;
+  /**
+   * The branches currently trial-merged into the main integration worktree.
+   *
+   * A batch gate's verdict depends on what is merged, not on how many gates
+   * ran before it, so a positional `gateSequence` cannot express it.
+   */
+  let mergedInWorktree: ReadonlyArray<string> = [];
 
   const git: MergeGitShape = {
     head: (cwd, ref) =>
@@ -178,7 +193,16 @@ const makeHarness = (
         }
         return options.empty?.includes(branch) === true ? 0 : 1;
       }),
-    resetHard: (cwd, ref) => Effect.sync(() => void calls.push(`reset:${cwd}:${ref}`)),
+    resetHard: (cwd, ref) =>
+      Effect.sync(() => {
+        calls.push(`reset:${cwd}:${ref}`);
+        // Only a reset back to the base branch empties the worktree; a reset
+        // to a recorded commit rolls back exactly one member's merge.
+        if (cwd === "/worktrees/integration") {
+          mergedInWorktree = ref === snapshot.baseBranch ? [] : mergedInWorktree.slice(0, -1);
+          heads[cwd] = ref;
+        }
+      }),
     clean: (cwd) => Effect.sync(() => void calls.push(`clean:${cwd}`)),
     setupWorktree: (cwd) => Effect.sync(() => void calls.push(`setup:${cwd}`)),
     trialMerge: ({ cwd, branch, message }) =>
@@ -188,12 +212,17 @@ const makeHarness = (
             ? `merge:${branch}:${message}`
             : `merge:${cwd}:${branch}:${message}`,
         );
-        return {
-          merged:
-            options.conflicts?.includes(branch) !== true &&
-            options.conflictCwds?.includes(cwd) !== true,
-          output: "trial",
-        };
+        const merged =
+          options.conflicts?.includes(branch) !== true &&
+          options.conflictCwds?.includes(cwd) !== true &&
+          !(
+            cwd !== "/worktrees/integration" && options.siblingConflicts?.includes(branch) === true
+          );
+        if (merged && cwd === "/worktrees/integration") {
+          mergedInWorktree = [...mergedInWorktree, branch];
+          heads[cwd] = `merged-${String(mergedInWorktree.length)}`;
+        }
+        return { merged, output: "trial" };
       }),
     abortMerge: (cwd) => Effect.sync(() => void calls.push(`abort:${cwd}`)),
     fastForward: ({ cwd, ref, branch }) =>
@@ -341,7 +370,10 @@ const makeHarness = (
           const sequenced = options.gateSequence?.[gateCall];
           const sequencedOutput = options.gateOutputSequence?.[gateCall];
           gateCall += 1;
-          const passed = sequenced ?? options.gatePasses ?? true;
+          const redMember = options.gateRedBranches?.some((branch) =>
+            mergedInWorktree.includes(branch),
+          );
+          const passed = redMember === true ? false : (sequenced ?? options.gatePasses ?? true);
           const output = sequencedOutput ?? options.gateOutput ?? "";
           return {
             passed,
@@ -1441,6 +1473,217 @@ describe("MergeQueue", () => {
             "slot-holder",
           ]);
         }),
+    );
+  });
+
+  describe("compatible batches (t3code-22o.8)", () => {
+    const three = [entry(0, "first"), entry(1, "second"), entry(2, "third")];
+
+    it.effect("verifies three compatible entries with one gate and lands them in order", () =>
+      Effect.gen(function* () {
+        // The gate is the most expensive thing a run does. Three children that
+        // merge cleanly together are one integration state, so they are worth
+        // exactly one gate — the measured 30h40m run spent one per child.
+        const harness = makeHarness({ entries: three });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 3, parked: 0 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(1);
+        // One trial merge each, stacked into one integration state, then one
+        // fast-forward and one push carry all three.
+        expect(harness.calls.filter((call) => call.startsWith("merge:"))).toHaveLength(3);
+        expect(harness.calls.filter((call) => call.startsWith("reset:"))).toHaveLength(1);
+        expect(harness.calls.filter((call) => call.startsWith("ff:"))).toHaveLength(1);
+        expect(harness.calls.filter((call) => call.startsWith("push:"))).toHaveLength(1);
+        // Every child still settles on its own, in queue order.
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0, 1, 2]);
+        expect(harness.events.map((event) => (event as { readonly child: string }).child)).toEqual([
+          "first",
+          "second",
+          "third",
+        ]);
+        expect(harness.calls.filter((call) => call.startsWith("fold:"))).toEqual([
+          "fold:first",
+          "fold:second",
+          "fold:third",
+        ]);
+      }),
+    );
+
+    it.effect("names every branch the batch gate verified, and no single child", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ entries: three });
+
+        yield* drain(harness.ports);
+
+        expect(harness.gateReceipts).toHaveLength(1);
+        expect(harness.gateReceipts[0]).toMatchObject({
+          phase: "entry",
+          // A batch failure could come from any member, so naming one child
+          // here would blame it.
+          childId: null,
+          branch: "epic/first epic/second epic/third",
+        });
+      }),
+    );
+
+    it.effect("isolates a red member by halving, and lands the rest", () =>
+      Effect.gen(function* () {
+        // Bounded fallback: the batch halves instead of re-testing every green
+        // member on its own, and nothing lands on evidence from the red run.
+        const harness = makeHarness({ entries: three, gateRedBranches: ["epic/third"] });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 1 });
+
+        // batch of 3 (red), control, half of 2 (green), the single red entry,
+        // control again on the base it moved to.
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(5);
+        expect(harness.events.at(0)).toEqual({
+          event: "split",
+          branches: ["epic/first", "epic/second", "epic/third"],
+          halves: [2, 1],
+          detail: "no failure line found in gate output (0 lines)",
+        });
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0, 1]);
+        expect(harness.snapshot().entries).toEqual([
+          expect.objectContaining({
+            sequence: 2,
+            status: "parked",
+            reason: "gate-failed",
+            fixIssueId: "fix-1",
+          }),
+        ]);
+        // Only the isolated entry was ever blamed by a receipt.
+        expect(
+          harness.gateReceipts.filter((receipt) => receipt.childId !== null).map((r) => r.childId),
+        ).toEqual(["third"]);
+      }),
+    );
+
+    it.effect("never lands a head the batch gate rejected", () =>
+      Effect.gen(function* () {
+        // Every member of a red batch is red until proven otherwise: the base
+        // must not move at all before the isolation pass says which is which.
+        const harness = makeHarness({
+          entries: three,
+          gateRedBranches: ["epic/first", "epic/second", "epic/third"],
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 0, parked: 3 });
+
+        expect(harness.calls.some((call) => call.startsWith("ff:"))).toBe(false);
+        expect(harness.calls.some((call) => call.startsWith("push:"))).toBe(false);
+        expect(harness.heads()).toMatchObject({ "/repo": "base-0" });
+        // 3 red, control, 2 red, 1 red (parked), 1 red (parked), 1 red
+        // (parked): halving costs at most one gate per member plus the split
+        // gates, and never more than a per-entry pass would have.
+        expect(harness.calls.filter((call) => call === "gate").length).toBeLessThanOrEqual(8);
+      }),
+    );
+
+    it.effect("parks one conflicting branch and lands the rest of the batch", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ entries: three, conflicts: ["epic/second"] });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 1 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(1);
+        expect(harness.calls).toContain("abort:/worktrees/integration");
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0, 2]);
+        expect(harness.snapshot().entries).toEqual([
+          expect.objectContaining({ sequence: 1, status: "parked", reason: "conflict" }),
+        ]);
+      }),
+    );
+
+    it.effect("rolls a parked member out of the batch without losing the members before it", () =>
+      Effect.gen(function* () {
+        // A set that merges into the main repository and then conflicts in a
+        // sibling has to come back out of the batch. Resetting to the base
+        // branch would take every earlier member with it, and aborting the
+        // sibling merge alone would leave the main worktree carrying work
+        // that is about to be parked — and the gate would then verify it.
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          siblings: [
+            {
+              repositoryPath: "/sib",
+              baseBranch: "sib-main",
+              integrationWorktreePath: "/worktrees/integ-sib",
+              lastAcceptedHead: "sib-0",
+            },
+          ],
+          siblingConflicts: ["epic/second"],
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 1, parked: 1 });
+
+        expect(harness.calls).toContain("abort:/worktrees/integ-sib");
+        // Back to where the first member left it, not back to the base branch.
+        expect(harness.calls).toContain("reset:/worktrees/integration:merged-1");
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(1);
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0]);
+        expect(harness.snapshot().entries).toEqual([
+          expect.objectContaining({ sequence: 1, status: "parked", reason: "conflict" }),
+        ]);
+      }),
+    );
+
+    it.effect("is idempotent when a restart re-drains entries left draining", () =>
+      Effect.gen(function* () {
+        // A crash between the fast-forward and the completion leaves an entry
+        // `draining` on a base that already carries its commits. The re-drain
+        // must drop it, not land it twice.
+        const harness = makeHarness({
+          entries: [
+            { ...entry(0, "first"), status: "draining" },
+            { ...entry(1, "second"), status: "draining" },
+          ],
+          empty: ["epic/first"],
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+
+        expect(harness.calls).toContain("drop:0");
+        expect(harness.calls.some((call) => call.startsWith("merge:epic/first"))).toBe(false);
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([1]);
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(1);
+      }),
+    );
+
+    it.effect("restores the whole batch when the landing fast-forward is rejected", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          entries: three,
+          fastForwardFails: ["cook-epic-integration-run-1"],
+        });
+
+        expect(yield* drain(harness.ports)).toMatchObject({ _tag: "fatal", queueLength: 3 });
+
+        expect(harness.calls).toContain("restore:0");
+        expect(harness.snapshot().entries.map((item) => item.status)).toEqual([
+          "queued",
+          "queued",
+          "queued",
+        ]);
+      }),
+    );
+
+    it.effect("asks the base the blameless question once per batch, not once per member", () =>
+      Effect.gen(function* () {
+        // The control gate answers "is the base itself broken?". Nothing lands
+        // between a batch and its halves, so the halves sit on the same base
+        // and the answer cannot have changed. Re-asking it costs a full gate.
+        const harness = makeHarness({ entries: three, gateRedBranches: ["epic/second"] });
+
+        yield* drain(harness.ports);
+
+        // One control before the split; the second only after the first half
+        // landed and moved the base.
+        expect(harness.gateReceipts.filter((receipt) => receipt.phase === "control")).toHaveLength(
+          2,
+        );
+      }),
     );
   });
 });

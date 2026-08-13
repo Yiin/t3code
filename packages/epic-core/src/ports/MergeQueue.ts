@@ -278,6 +278,19 @@ export type MergeQueueEvent =
       readonly fix: string;
     }
   | {
+      /**
+       * One gate verified several branches at once and came back red, so the
+       * batch is halved to find which branch is at fault.
+       *
+       * Without this the only visible trace of an isolation pass is a run that
+       * suddenly spends several gates without landing anything.
+       */
+      readonly event: "split";
+      readonly branches: ReadonlyArray<string>;
+      readonly halves: ReadonlyArray<number>;
+      readonly detail: string;
+    }
+  | {
       readonly event: "merged";
       readonly child: string;
       readonly branch: string;

@@ -152,7 +152,10 @@ const makeRealMergeGit = (): MergeGitShape => ({
       pushed: gitResult(cwd, ["push", remote, refspec]).status === 0,
       output: "",
     })),
-  deleteLocalBranch: (cwd, branch) => Effect.sync(() => void git(cwd, ["branch", "-D", branch])),
+  // A branch that never existed in this repo is not an error: the server
+  // adapter reports the failure and the drain ignores it.
+  deleteLocalBranch: (cwd, branch) =>
+    Effect.sync(() => void gitResult(cwd, ["branch", "-D", branch])),
   deleteRemoteBranch: () => Effect.void,
 });
 
@@ -167,10 +170,10 @@ interface DrainFixture {
   readonly ports: (gate?: MergeQueuePorts["gate"]) => MergeQueuePorts;
 }
 
-const entry = (sequence: number): MergeQueueEntry => ({
+const entry = (sequence: number, childId = "child-1", branch = CHILD_BRANCH): MergeQueueEntry => ({
   sequence,
-  childId: "child-1",
-  branch: CHILD_BRANCH,
+  childId,
+  branch,
   status: "queued",
   reason: null,
   fixIssueId: null,
@@ -184,6 +187,8 @@ const entry = (sequence: number): MergeQueueEntry => ({
 const makeDrainFixture = (input: {
   readonly commitChild: (fixture: RepoFixture) => void;
   readonly siblingLastAcceptedHead?: (fixture: RepoFixture) => string;
+  /** The queue to drain; defaults to the one `child-1` entry. */
+  readonly entries?: ReadonlyArray<MergeQueueEntry>;
 }): DrainFixture => {
   const fixture = makeRepos();
   input.commitChild(fixture);
@@ -209,7 +214,7 @@ const makeDrainFixture = (input: {
         lastAcceptedHead: input.siblingLastAcceptedHead?.(fixture) ?? head(fixture.sibling),
       },
     ],
-    entries: [entry(0)],
+    entries: input.entries ?? [entry(0)],
   };
   const completions: DrainFixture["completions"] = [];
   const events: Array<unknown> = [];
@@ -351,11 +356,16 @@ const drain = (fixture: DrainFixture, gate?: MergeQueuePorts["gate"]) =>
     fixture.ports(gate),
   );
 
-/** Commit on the child branch in one repo via a scratch worktree. */
-const commitOnChildBranch = (fixture: RepoFixture, repo: "main" | "sibling", file: string) => {
+/** Commit on a child branch in one repo via a scratch worktree. */
+const commitOnChildBranch = (
+  fixture: RepoFixture,
+  repo: "main" | "sibling",
+  file: string,
+  branch: string = CHILD_BRANCH,
+) => {
   const repositoryPath = fixture[repo];
-  const worktree = NodePath.join(fixture.root, "work", repo);
-  git(repositoryPath, ["worktree", "add", worktree, "-b", CHILD_BRANCH, "main"]);
+  const worktree = NodePath.join(fixture.root, "work", repo, branch.replaceAll("/", "-"));
+  git(repositoryPath, ["worktree", "add", worktree, "-b", branch, "main"]);
   commitFile(worktree, file, `${file} contents\n`, `child work in ${repo}`);
   git(repositoryPath, ["worktree", "remove", "--force", worktree]);
 };
@@ -565,6 +575,64 @@ describe("drainMergeQueue over real git repositories", () => {
         expect(head(drainFixture.fixture.sibling)).not.toBe(siblingBefore);
         expect(git(drainFixture.fixture.sibling, ["log", "-1", "--format=%s"])).toBe(
           "external move",
+        );
+      }),
+    ),
+  );
+
+  it.effect("stacks a compatible batch into one gate and one fast-forward per repo", () =>
+    withFixture(() =>
+      Effect.gen(function* () {
+        // The batch has to be a real integration state, not a bookkeeping
+        // trick: two children's merges stack in the integration worktree and
+        // the base fast-forwards over both of them at once.
+        const second = "epic/child-2";
+        const drainFixture = makeDrainFixture({
+          entries: [entry(0), entry(1, "child-2", second)],
+          commitChild: (fixture) => {
+            commitOnChildBranch(fixture, "main", "feature.txt");
+            commitOnChildBranch(fixture, "sibling", "sibling-feature.txt");
+            commitOnChildBranch(fixture, "main", "second.txt", second);
+          },
+        });
+        let gates = 0;
+        const gate: MergeQueuePorts["gate"] = {
+          run: () =>
+            Effect.sync(() => {
+              gates += 1;
+              return passingGate();
+            }),
+        };
+
+        expect(yield* drain(drainFixture, gate)).toEqual({
+          _tag: "drained",
+          merged: 2,
+          parked: 0,
+        });
+
+        expect(gates).toBe(1);
+        // Both children's work is reachable from the base, and both merge
+        // commits are on it.
+        const mainRepo = drainFixture.fixture.main;
+        expect(NodeFS.readFileSync(NodePath.join(mainRepo, "feature.txt"), "utf8")).toBe(
+          "feature.txt contents\n",
+        );
+        expect(NodeFS.readFileSync(NodePath.join(mainRepo, "second.txt"), "utf8")).toBe(
+          "second.txt contents\n",
+        );
+        expect(git(mainRepo, ["log", "--format=%s", "-2"]).split("\n")).toEqual([
+          `cook-epic: merge ${second} (child-2)`,
+          `cook-epic: merge ${CHILD_BRANCH} (child-1)`,
+        ]);
+        // Both settle at the same landed head, in queue order.
+        const landed = head(mainRepo);
+        expect(drainFixture.completions.map((completion) => completion.sequence)).toEqual([0, 1]);
+        expect(
+          drainFixture.completions.every((completion) => completion.lastAcceptedHead === landed),
+        ).toBe(true);
+        // The sibling landed only what its own entry carried.
+        expect(git(drainFixture.fixture.sibling, ["log", "-1", "--format=%s"])).toBe(
+          `cook-epic: merge ${CHILD_BRANCH} (child-1)`,
         );
       }),
     ),

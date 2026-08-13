@@ -193,9 +193,21 @@ queue never landed; that gap is tracked in t3code-xig.
 
 ## Integration gate and host load
 
-The merge queue runs the integration gate once per merge set. The gate is the
-heaviest thing an epic run does, and its result depends on the machine it runs
-on, not only on the code it tests.
+The merge queue runs the integration gate once per batch. Every branch queued
+when a drain starts is trial-merged into one integration state, and one gate
+verifies the lot. Three children that merge cleanly together cost one gate, not
+three. The gate is the heaviest thing an epic run does, and its result depends
+on the machine it runs on, not only on the code it tests.
+
+A red batch is halved and each half re-verified, until a single branch fails on
+its own and is parked with a merge-fix child. Nothing lands from a red batch:
+the base branch only ever fast-forwards to a tree a gate passed. A branch that
+conflicts while the batch is being stacked is parked on its own and the rest of
+the batch carries on; a set spanning sibling repositories is rolled back out of
+the batch whole, so a parked branch never leaves commits in the tree the gate
+tests. The blameless control gate — the same command on the base with nothing
+merged — runs once per batch, and the halves inherit its answer because nothing
+landed in between.
 
 Run d7580b6c ran one gate command at one commit twice. The main checkout took
 421s and exited 0. The integration worktree took 23m01s and exited 1. The
