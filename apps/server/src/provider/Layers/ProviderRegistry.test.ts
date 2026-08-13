@@ -48,6 +48,7 @@ import {
 } from "./ProviderRegistry.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ServerSettingsModule from "../../serverSettings.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { readProviderStatusCache, resolveProviderStatusCachePath } from "../providerStatusCache.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
@@ -75,6 +76,17 @@ const TestHttpClientLive = Layer.succeed(
   HttpClient.make((request) =>
     Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ version: "0.0.0" }))),
   ),
+);
+
+const NoOpProviderUsageLedgerStoreLive = Layer.succeed(ProviderUsageLedgerStore, {
+  recordSamples: () => Effect.void,
+  listForInstance: () => Effect.succeed([]),
+  listAll: Effect.succeed([]),
+  pruneObservedBefore: () => Effect.void,
+});
+
+const TestProviderInstanceRegistryHydrationLive = ProviderInstanceRegistryHydrationLive.pipe(
+  Layer.provide(NoOpProviderUsageLedgerStoreLive),
 );
 
 function selectDescriptor(
@@ -108,6 +120,7 @@ type TestClaudeCapabilities = {
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  readonly usage: ReadonlyArray<never>;
 };
 
 function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
@@ -119,6 +132,7 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
       apiProvider: undefined,
       slashCommands: [],
       skills: [],
+      usage: [],
       ...overrides,
     });
 }
@@ -1460,7 +1474,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           const scope = yield* Scope.make();
           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
           const providerRegistryLayer = ProviderRegistryLive.pipe(
-            Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+            Layer.provideMerge(TestProviderInstanceRegistryHydrationLive),
             Layer.provideMerge(NoOpProviderInstanceTeardownLive),
             Layer.provideMerge(
               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -1554,7 +1568,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           const scope = yield* Scope.make();
           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
           const providerRegistryLayer = ProviderRegistryLive.pipe(
-            Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+            Layer.provideMerge(TestProviderInstanceRegistryHydrationLive),
             Layer.provideMerge(NoOpProviderInstanceTeardownLive),
             Layer.provideMerge(
               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -1669,7 +1683,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           const scope = yield* Scope.make();
           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
           const providerRegistryLayer = ProviderRegistryLive.pipe(
-            Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+            Layer.provideMerge(TestProviderInstanceRegistryHydrationLive),
             Layer.provideMerge(NoOpProviderInstanceTeardownLive),
             Layer.provideMerge(
               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -1733,7 +1747,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             const scope = yield* Scope.make();
             yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
             const providerRegistryLayer = ProviderRegistryLive.pipe(
-              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+              Layer.provideMerge(TestProviderInstanceRegistryHydrationLive),
               Layer.provideMerge(NoOpProviderInstanceTeardownLive),
               Layer.provideMerge(
                 Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),

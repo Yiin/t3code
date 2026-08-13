@@ -239,6 +239,7 @@ const ProviderInstanceTeardownLayerLive = ProviderInstanceTeardownLive.pipe(
 
 const ProviderInstanceRegistryLayerLive = ProviderInstanceRegistryHydrationLive.pipe(
   Layer.provide(ProviderInstanceTeardownLayerLive),
+  Layer.provide(ProviderUsageLedgerStoreLive),
 );
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(

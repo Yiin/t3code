@@ -39,7 +39,7 @@ it("isolates Claude capability probes without dropping workspace setting sources
 });
 
 it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
-  it.effect("serializes strict no-MCP options and still resolves account capabilities", () =>
+  it.effect("resolves account capabilities when get_usage succeeds or times out", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -105,6 +105,22 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
           "      },",
           '    }) + "\\n");',
           "  }",
+          '  if (message.request?.subtype === "get_usage" && process.env.T3_PROBE_IGNORE_GET_USAGE !== "true") {',
+          "    process.stdout.write(JSON.stringify({",
+          '      type: "control_response",',
+          "      response: {",
+          '        subtype: "success",',
+          "        request_id: message.request_id,",
+          "        response: {",
+          "          session: { total_cost_usd: 0, total_api_duration_ms: 0, total_duration_ms: 0, total_lines_added: 0, total_lines_removed: 0, model_usage: {} },",
+          '          subscription_type: "pro",',
+          "          rate_limits_available: true,",
+          '          rate_limits: { five_hour: { utilization: 12, resets_at: "2026-08-11T05:00:00.000Z" } },',
+          "          behaviors: null,",
+          "        },",
+          "      },",
+          '    }) + "\\n");',
+          "  }",
           "});",
           "setInterval(() => {}, 1_000);",
           "",
@@ -143,6 +159,14 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
             description: "Work with PDFs",
           },
         ],
+        usage: [
+          {
+            window: "five_hour",
+            utilization: 12,
+            resetsAt: "2026-08-11T05:00:00.000Z",
+            source: "claude.sdk.get_usage",
+          },
+        ],
       });
 
       // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -159,6 +183,29 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
       assert.equal(invocation.mcpConfig, undefined);
 
       assert.equal(invocation.args.includes("--setting-sources=user,project,local"), true);
+
+      const timedOutUsageCapabilities = yield* probeClaudeCapabilities(
+        decodeClaudeSettings({ binaryPath: executablePath }),
+        {
+          ...process.env,
+          T3_PROBE_INVOCATION_PATH: invocationPath,
+          T3_PROBE_IGNORE_GET_USAGE: "true",
+        },
+        workspaceCwd,
+      );
+      assert.equal(timedOutUsageCapabilities?.email, "dev@example.com");
+      assert.equal(timedOutUsageCapabilities?.subscriptionType, "pro");
+      assert.deepEqual(timedOutUsageCapabilities?.slashCommands, [
+        {
+          name: "review",
+          description: "Review changes",
+          input: { hint: "[path]" },
+        },
+      ]);
+      assert.deepEqual(timedOutUsageCapabilities?.skills, [
+        { name: "pdf", enabled: true, description: "Work with PDFs" },
+      ]);
+      assert.deepEqual(timedOutUsageCapabilities?.usage, []);
     }).pipe(Effect.scoped),
   );
 });

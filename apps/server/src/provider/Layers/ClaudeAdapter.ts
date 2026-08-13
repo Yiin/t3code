@@ -74,6 +74,7 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS } from "../../mcp/mcpToolCallCeiling.ts";
+import type { ProviderUsageLedgerStoreShape } from "../../persistence/Services/ProviderUsageLedger.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveSpawnPolicy, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import {
@@ -98,6 +99,7 @@ import {
   resolveClaudeApiModelId,
   resolveClaudeContextWindow,
   resolveClaudeEffort,
+  mapClaudeRateLimitInfo,
 } from "./ClaudeProvider.ts";
 import {
   ProviderAdapterProcessError,
@@ -333,6 +335,7 @@ export interface ClaudeAdapterLiveOptions {
    * instance's own config changes, and `subagentSpawn` is a top-level setting.
    */
   readonly subagentSpawnPolicy?: Effect.Effect<SpawnPolicy>;
+  readonly recordUsageSamples?: ProviderUsageLedgerStoreShape["recordSamples"];
 }
 
 function isUuid(value: string): boolean {
@@ -3554,6 +3557,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           rateLimits: message,
         },
       });
+      const usageReading = mapClaudeRateLimitInfo(message.rate_limit_info);
+      const recordUsageSamples = options?.recordUsageSamples;
+      if (usageReading && recordUsageSamples) {
+        yield* recordUsageSamples({
+          samples: [
+            {
+              ...usageReading,
+              providerInstanceId: boundInstanceId,
+              observedAt: base.createdAt,
+            },
+          ],
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("claude.usage-ledger.record-failed", { cause }),
+          ),
+        );
+      }
       const rateLimitInfo = (
         message as { rate_limit_info?: { status?: string; overageDisabledReason?: string } }
       ).rate_limit_info;
