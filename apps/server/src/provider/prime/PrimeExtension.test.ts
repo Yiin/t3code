@@ -148,4 +148,34 @@ describe("Prime permission extension", () => {
       PrimeExtensionNotFoundError,
     );
   });
+
+  it("prefers the app.asar.unpacked copy a non-Electron child can read", () => {
+    const packagedModule = NodeURL.pathToFileURL(
+      "/opt/T3 Code/resources/app.asar/apps/server/dist/bin.mjs",
+    ).href;
+    // Electron's asar-aware fs reports the in-asar path as existing, and
+    // electron-builder unpacks a real copy next to it. Both look present here.
+    const resolved = resolvePrimePermissionExtensionPath(packagedModule, (path) =>
+      path.includes(`${NodePath.sep}prime${NodePath.sep}`),
+    );
+    expect(resolved).toBe(
+      NodePath.normalize(
+        "/opt/T3 Code/resources/app.asar.unpacked/apps/server/dist/prime/t3-permission-extension.mjs",
+      ),
+    );
+
+    // An already-unpacked path is left alone, so the rewrite never stacks.
+    const unpackedModule = NodeURL.pathToFileURL(
+      "/opt/T3 Code/resources/app.asar.unpacked/apps/server/dist/bin.mjs",
+    ).href;
+    expect(
+      resolvePrimePermissionExtensionPath(unpackedModule, (path) =>
+        path.includes(`${NodePath.sep}prime${NodePath.sep}`),
+      ),
+    ).toBe(
+      NodePath.normalize(
+        "/opt/T3 Code/resources/app.asar.unpacked/apps/server/dist/prime/t3-permission-extension.mjs",
+      ),
+    );
+  });
 });
