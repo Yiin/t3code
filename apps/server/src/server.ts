@@ -373,6 +373,13 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunConfigSource.layer),
   Layer.provide(NodeEpicRunLock.layer),
   Layer.provide(EpicWorkerScopeRegistry.layer),
+  // The same two registries `ProviderLayerLive` provides. Effect memoizes a
+  // layer by reference, so both chains see one instance: the runner writes a
+  // binding here and `ProviderService` reads it at session start.
+  Layer.provide(EpicSubagentRegistry.layer),
+  // Read-only here: the runner reads account usage to pick each role's tier
+  // hop. The poller owns the writes.
+  Layer.provide(ProviderUsageLedgerStoreLive),
   Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 

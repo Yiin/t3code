@@ -19,6 +19,8 @@ import {
   ProviderSessionResumeSettledActivityPayload,
   ThreadId,
   type EpicRun as TransportEpicRun,
+  type EpicRunId,
+  type EpicSubagentMap,
   type ProviderSessionResumeOutcome,
   type TurnId,
 } from "@t3tools/contracts";
@@ -39,6 +41,7 @@ import type {
 import type { PoolDispatchShape } from "@t3tools/epic-core/ports/PoolDispatch";
 import {
   type AgentDispatchCapabilities,
+  type AgentSelection,
   DispatchError,
   type FinalMessageRead,
   type IterationHandle,
@@ -95,6 +98,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import type { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
 import type { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { countFreshRunningSubagents } from "../../orchestration/subagentLiveness.ts";
 import {
@@ -1972,6 +1976,17 @@ export const makeServerPoolDispatch = (deps: {
   readonly projectSetupScriptRunner: ProjectSetupScriptRunner["Service"];
   readonly crypto: Crypto.Crypto;
   readonly workerScopeRegistry: EpicWorkerScopeRegistry["Service"];
+  readonly subagentRegistry: EpicSubagentRegistry["Service"];
+  /**
+   * The role subagents this run's worker sessions carry, read once per
+   * iteration thread so a policy or usage change lands on the next iteration.
+   * Takes the session's own selection, because a subagent runs inside that
+   * session and cannot use another provider's model. Never fails: an empty
+   * map means "inject nothing".
+   */
+  readonly readIterationSubagents: (
+    sessionSelection: AgentSelection,
+  ) => Effect.Effect<EpicSubagentMap>;
   readonly ownedIterationTurnIds?: Map<ThreadId, TurnId>;
 }): PoolDispatchShape => {
   const {
@@ -1981,6 +1996,8 @@ export const makeServerPoolDispatch = (deps: {
     projectSetupScriptRunner,
     crypto,
     workerScopeRegistry,
+    subagentRegistry,
+    readIterationSubagents,
   } = deps;
   const ownedIterationTurnIds = deps.ownedIterationTurnIds ?? new Map<ThreadId, TurnId>();
   const vcs = makeProcessPoolVcs(processRunner);
@@ -2013,6 +2030,25 @@ export const makeServerPoolDispatch = (deps: {
     dispatchCommand(command).pipe(
       Effect.catchCause((cause) => Effect.logWarning(label, { cause })),
     );
+
+  /**
+   * Bind one iteration thread to the role subagents its worker session gets.
+   *
+   * Bound before the thread exists, for the same reason the worker scope is:
+   * the provider session starts lazily on the first turn and resolves the
+   * binding then. An empty map binds nothing, so a server with no in-session
+   * roles configured leaves the harness's own agents untouched.
+   */
+  const bindIterationSubagents = (
+    runId: EpicRunId,
+    threadId: ThreadId,
+    sessionSelection: AgentSelection,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const subagents = yield* readIterationSubagents(sessionSelection);
+      if (Object.keys(subagents).length === 0) return;
+      yield* subagentRegistry.bindThread({ runId, threadId, subagents });
+    });
 
   const { readThreadDetail, awaitTurnEnd, readSettledFinalMessage } = makeThreadSettleWatch({
     projectionSnapshotQuery,
@@ -2488,6 +2524,7 @@ export const makeServerPoolDispatch = (deps: {
           threadId: input.threadId,
           worker: `iteration-${String(input.iterationIndex)}`,
         });
+        yield* bindIterationSubagents(input.runId, input.threadId, input.selection);
         yield* dispatchCommand({
           type: "thread.create",
           commandId: yield* commandId("thread-create"),
@@ -2555,6 +2592,10 @@ export const makeServerPoolDispatch = (deps: {
     resumeIteration: (input) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make(input.ref);
+        // The registry is in-memory, so a restart lost this thread's binding.
+        // Rebind before the resume: if the session has to start again, it
+        // starts with the role subagents rather than without them.
+        yield* bindIterationSubagents(input.runId, threadId, input.selection);
         const resumeCommandId = yield* commandId("session-resume");
         yield* dispatchCommand({
           type: "thread.session.resume",

@@ -1,6 +1,7 @@
 import {
   DEFAULT_EPIC_ROLE_POLICY,
   EPIC_ROLE_IDS,
+  EpicInSessionRoleName,
   EpicTierId,
   ProviderInstanceId,
   type EpicRolePolicy,
@@ -15,18 +16,24 @@ import {
   assignRoleTier,
   buildEpicRolePolicyPatch,
   buildEpicRoleRows,
+  buildInSessionRoleRows,
+  createInSessionRole,
   createTier,
+  deleteInSessionRole,
   deleteTier,
   isEpicRolePolicyDirty,
   moveTierHop,
   removeTierHop,
   renameTier,
+  setInSessionRoleText,
+  setInSessionRoleTier,
   setTierHopSelection,
   setTierHopSkipAboveUtilization,
 } from "./EpicsSettings.logic";
 
 const primaryTierId = EpicTierId.make("primary");
 const backupTierId = EpicTierId.make("backup");
+const plannerName = EpicInSessionRoleName.make("planner");
 const claudeInstanceId = ProviderInstanceId.make("claude_work");
 const codexInstanceId = ProviderInstanceId.make("codex_personal");
 
@@ -50,6 +57,13 @@ function makePolicy(): EpicRolePolicy {
     roles: {
       "iteration-worker": primaryTierId,
       "merge-fix": primaryTierId,
+    },
+    inSessionRoles: {
+      [plannerName]: {
+        tier: primaryTierId,
+        description: "Plans one child.",
+        prompt: "You plan.",
+      },
     },
   };
 }
@@ -140,6 +154,74 @@ describe("EpicsSettings.logic", () => {
     expect(invalid).toEqual(makePolicy());
   });
 
+  it("builds one row per in-session subagent", () => {
+    const rows = buildInSessionRoleRows(makePolicy());
+
+    expect(rows).toEqual([
+      {
+        name: plannerName,
+        role: { tier: primaryTierId, description: "Plans one child.", prompt: "You plan." },
+        tierId: primaryTierId,
+        hopCount: 3,
+        tierMissing: false,
+      },
+    ]);
+  });
+
+  it("flags an in-session subagent whose tier is gone", () => {
+    const rows = buildInSessionRoleRows(deleteTier(makePolicy(), primaryTierId));
+
+    expect(rows[0]).toMatchObject({ tierId: null, hopCount: 0, tierMissing: false });
+    expect(rows[0]?.role).not.toHaveProperty("tier");
+  });
+
+  it("repoints in-session subagents when their tier is renamed", () => {
+    const result = renameTier(makePolicy(), primaryTierId, "premium");
+
+    expect("policy" in result && result.policy.inSessionRoles[plannerName]?.tier).toBe(
+      EpicTierId.make("premium"),
+    );
+  });
+
+  it("creates, retiers, and deletes an in-session subagent", () => {
+    const created = createInSessionRole(makePolicy(), "reviewer");
+    expect("policy" in created).toBe(true);
+    if (!("policy" in created)) return;
+
+    const reviewerName = EpicInSessionRoleName.make("reviewer");
+    expect(created.policy.inSessionRoles[reviewerName]).toEqual({
+      description: "The reviewer subagent.",
+      prompt: "You are the reviewer.",
+    });
+
+    const tiered = setInSessionRoleTier(created.policy, reviewerName, backupTierId);
+    expect(tiered.inSessionRoles[reviewerName]?.tier).toBe(backupTierId);
+    expect(
+      setInSessionRoleTier(tiered, reviewerName, null).inSessionRoles[reviewerName],
+    ).not.toHaveProperty("tier");
+
+    expect(deleteInSessionRole(tiered, reviewerName).inSessionRoles[reviewerName]).toBeUndefined();
+    // The tier the deleted subagent used stays; only the subagent goes.
+    expect(deleteInSessionRole(tiered, reviewerName).tiers[backupTierId]).toBeDefined();
+  });
+
+  it("rejects duplicate and invalid in-session subagent names", () => {
+    expect(createInSessionRole(makePolicy(), "planner")).toEqual({
+      error: "A subagent with this name already exists.",
+    });
+    expect(createInSessionRole(makePolicy(), "not a name")).toEqual({
+      error: "Use 1 to 64 letters, numbers, underscores, or hyphens. Start with a letter.",
+    });
+  });
+
+  it("trims subagent text and refuses to store an empty value", () => {
+    const trimmed = setInSessionRoleText(makePolicy(), plannerName, "prompt", "  You plan well.  ");
+    expect(trimmed.inSessionRoles[plannerName]?.prompt).toBe("You plan well.");
+
+    const blanked = setInSessionRoleText(makePolicy(), plannerName, "description", "   ");
+    expect(blanked.inSessionRoles[plannerName]?.description).toBe("Plans one child.");
+  });
+
   it("builds one whole-value settings patch", () => {
     const nextPolicy = removeTierHop(makePolicy(), primaryTierId, 1);
     const updates: ServerSettingsPatch[] = [];
@@ -173,6 +255,11 @@ describe("EpicsSettings.logic", () => {
     moveTierHop(policy, primaryTierId, 1, "up");
     setTierHopSelection(policy, primaryTierId, 0, nextSelection);
     setTierHopSkipAboveUtilization(policy, primaryTierId, 0, 75);
+    buildInSessionRoleRows(policy);
+    createInSessionRole(policy, "reviewer");
+    setInSessionRoleTier(policy, plannerName, backupTierId);
+    setInSessionRoleText(policy, plannerName, "prompt", "changed");
+    deleteInSessionRole(policy, plannerName);
     buildEpicRolePolicyPatch(policy);
     isEpicRolePolicyDirty(policy);
 

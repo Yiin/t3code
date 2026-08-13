@@ -45,23 +45,15 @@ export interface EpicFallbackHop {
   readonly options?: ModelSelection["options"];
 }
 
-export const resolveEpicProviderChainFallback = (input: {
+/** The first candidate whose provider can run its model right now. */
+const firstEligibleHop = (input: {
   readonly providers: ReadonlyArray<ServerProvider>;
-  readonly chain: ReadonlyArray<EpicFallbackHop>;
-  readonly current: ModelSelection;
-  readonly failureReason: string | undefined;
-  readonly providerFallbackEligible: boolean;
+  readonly candidates: ReadonlyArray<EpicFallbackHop>;
+  readonly skip?: (hop: EpicFallbackHop) => boolean;
   readonly isBlocked?: (hop: EpicFallbackHop) => boolean;
 }): ModelSelection | null => {
-  if (!input.providerFallbackEligible || !input.failureReason?.startsWith("provider-error")) {
-    return null;
-  }
-
-  const currentIndex = input.chain.findIndex((hop) => hop.instanceId === input.current.instanceId);
-  const candidates = currentIndex === -1 ? input.chain : input.chain.slice(currentIndex + 1);
-
-  for (const hop of candidates) {
-    if (hop.instanceId === input.current.instanceId) {
+  for (const hop of input.candidates) {
+    if (input.skip?.(hop) === true) {
       continue;
     }
 
@@ -82,6 +74,48 @@ export const resolveEpicProviderChainFallback = (input: {
   }
 
   return null;
+};
+
+/**
+ * Enter a chain: the first hop that can run, walking from the head.
+ *
+ * Fallback enters a chain after a failure and therefore starts past the hop
+ * that failed. A caller with no failure behind it — one picking a role's model
+ * for a fresh dispatch — wants the head of the same chain instead, under the
+ * same eligibility rules.
+ */
+export const resolveEpicProviderChainEntry = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly chain: ReadonlyArray<EpicFallbackHop>;
+  readonly isBlocked?: (hop: EpicFallbackHop) => boolean;
+}): ModelSelection | null =>
+  firstEligibleHop({
+    providers: input.providers,
+    candidates: input.chain,
+    ...(input.isBlocked === undefined ? {} : { isBlocked: input.isBlocked }),
+  });
+
+export const resolveEpicProviderChainFallback = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly chain: ReadonlyArray<EpicFallbackHop>;
+  readonly current: ModelSelection;
+  readonly failureReason: string | undefined;
+  readonly providerFallbackEligible: boolean;
+  readonly isBlocked?: (hop: EpicFallbackHop) => boolean;
+}): ModelSelection | null => {
+  if (!input.providerFallbackEligible || !input.failureReason?.startsWith("provider-error")) {
+    return null;
+  }
+
+  const currentIndex = input.chain.findIndex((hop) => hop.instanceId === input.current.instanceId);
+  const candidates = currentIndex === -1 ? input.chain : input.chain.slice(currentIndex + 1);
+
+  return firstEligibleHop({
+    providers: input.providers,
+    candidates,
+    skip: (hop) => hop.instanceId === input.current.instanceId,
+    ...(input.isBlocked === undefined ? {} : { isBlocked: input.isBlocked }),
+  });
 };
 
 /**

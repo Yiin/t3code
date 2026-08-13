@@ -23,6 +23,7 @@ import {
   type EpicRolePolicy,
   type EpicRunPreflightInput,
   type EpicRunPreflightResult,
+  type EpicSubagentMap,
   type ModelSelection,
   type ProviderSessionResumeOutcome,
   type ServerProvider,
@@ -82,6 +83,7 @@ import {
 import { WorktreeProvisioner, type ProvisionWorktreeInput } from "../../vcs/WorktreeProvisioner.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
+import { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import {
   makeMemoryStore,
@@ -464,6 +466,11 @@ function createHarness(input: {
   const releasedWorktrees: string[] = [];
   const setupInputs: ProjectSetupScriptRunnerInput[] = [];
   const iterationLifecycle: string[] = [];
+  const subagentBindings: Array<{
+    readonly threadId: ThreadId;
+    readonly subagents: EpicSubagentMap;
+  }> = [];
+  const releasedSubagentRuns: EpicRunId[] = [];
   harnessSequence += 1;
   const worktreesDir = `/tmp/t3-epic-runner-worktrees-${harnessSequence}`;
   let landedHead = baseHead;
@@ -1276,6 +1283,22 @@ function createHarness(input: {
     ),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(EpicWorkerScopeRegistry.layer),
+    // A recording stand-in for the real registry: the binding is the only
+    // evidence a worker session would carry the role subagents, because the
+    // session itself never starts in this harness.
+    Layer.provide(
+      Layer.succeed(EpicSubagentRegistry, {
+        bindThread: ({ threadId, subagents }) =>
+          Effect.sync(() => {
+            subagentBindings.push({ threadId, subagents });
+          }),
+        resolve: () => Effect.succeed(Option.none()),
+        releaseRun: (runId) =>
+          Effect.sync(() => {
+            releasedSubagentRuns.push(runId);
+          }),
+      }),
+    ),
     Layer.provide(
       Layer.succeed(AgentAwarenessRelay, {
         publishThread: () => Effect.void,
@@ -1334,6 +1357,8 @@ function createHarness(input: {
     releasedWorktrees,
     setupInputs,
     iterationLifecycle,
+    subagentBindings,
+    releasedSubagentRuns,
     worktreesDir,
     childStatus: (issueId: string) => childStatuses.get(issueId),
     commands: dispatched,
@@ -4541,6 +4566,77 @@ describe("EpicRunner", () => {
         harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
         CLAUDE_WORK_SELECTION,
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("carries the policy's in-session subagents into every iteration thread", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+      ],
+      epicRolePolicy: decodeEpicRolePolicy({
+        // The planner's tier starts on the second account, so a resolved model
+        // proves the tier chain was walked and not the run's own selection.
+        tiers: { planning: { hops: [{ selection: CLAUDE_PERSONAL_SELECTION }] } },
+        roles: {},
+        inSessionRoles: {
+          planner: {
+            tier: "planning",
+            description: "Plans one child.",
+            prompt: "You plan.",
+          },
+        },
+      }),
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const threadId = harness.commandsOfType("thread.create")[0]?.threadId;
+      assert.isDefined(threadId);
+      assert.deepStrictEqual(harness.subagentBindings, [
+        {
+          threadId,
+          subagents: {
+            planner: {
+              description: "Plans one child.",
+              prompt: "You plan.",
+              model: CLAUDE_PERSONAL_SELECTION.model,
+            },
+          },
+        },
+      ]);
+      // The bindings are per run, and the loop owns their release.
+      assert.include(harness.releasedSubagentRuns, run.runId);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("binds no subagents when the policy configures no in-session role", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [provider("claude-work", "claudeAgent", "claude-sonnet-5")],
+      epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION]),
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(harness.subagentBindings, []);
     }).pipe(Effect.provide(harness.layer));
   });
 

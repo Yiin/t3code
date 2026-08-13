@@ -41,6 +41,35 @@ export const EpicTier = Schema.Struct({
 });
 export type EpicTier = typeof EpicTier.Type;
 
+const EPIC_IN_SESSION_ROLE_MAX_CHARS = 64;
+const EPIC_IN_SESSION_ROLE_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+/**
+ * The name a worker spawns the subagent by, e.g. `planner`. It reaches the
+ * harness as an agent name, so it takes the same shape as a tier id.
+ */
+export const EpicInSessionRoleName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(EPIC_IN_SESSION_ROLE_MAX_CHARS),
+  Schema.isPattern(EPIC_IN_SESSION_ROLE_PATTERN),
+).pipe(Schema.brand("EpicInSessionRoleName"));
+export type EpicInSessionRoleName = typeof EpicInSessionRoleName.Type;
+
+/**
+ * One subagent the runner injects into a worker session.
+ *
+ * `tier` names the chain the role's model comes from; only the model crosses
+ * into the session, because a subagent always runs inside its parent session's
+ * account. A role with no tier, or one naming a missing tier, inherits the
+ * session model.
+ */
+export const EpicInSessionRole = Schema.Struct({
+  tier: Schema.optionalKey(EpicTierId),
+  description: TrimmedNonEmptyString,
+  prompt: TrimmedNonEmptyString,
+  tools: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+});
+export type EpicInSessionRole = typeof EpicInSessionRole.Type;
+
 export const EpicRolePolicy = Schema.Struct({
   tiers: Schema.Record(EpicTierId, EpicTier).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   /**
@@ -48,6 +77,15 @@ export const EpicRolePolicy = Schema.Struct({
    * to a missing tier, has no policy and keeps the caller's existing selection.
    */
   roles: Schema.Record(EpicRoleId, Schema.optionalKey(EpicTierId)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /**
+   * Subagents injected into every iteration worker session. These are not
+   * runner dispatches: the worker spawns them itself, so the runner only
+   * supplies the definition and the tier-resolved model. An empty map injects
+   * nothing and leaves the harness's own agents alone.
+   */
+  inSessionRoles: Schema.Record(EpicInSessionRoleName, EpicInSessionRole).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
 });

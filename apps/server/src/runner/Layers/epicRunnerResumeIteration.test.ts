@@ -113,6 +113,8 @@ function harness(outcome: ProviderSessionResumeOutcome) {
     projectSetupScriptRunner: {} as never,
     crypto: { randomUUIDv4: Effect.succeed("uuid-1") } as never,
     workerScopeRegistry: {} as never,
+    subagentRegistry: {} as never,
+    readIterationSubagents: () => Effect.succeed({}),
   });
 
   const input: ResumableIteration = {

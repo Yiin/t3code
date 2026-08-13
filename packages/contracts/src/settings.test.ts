@@ -142,9 +142,53 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 });
 
 describe("ServerSettings.epicRolePolicy", () => {
-  it("defaults to empty tiers and role assignments", () => {
-    expect(DEFAULT_SERVER_SETTINGS.epicRolePolicy).toEqual({ tiers: {}, roles: {} });
-    expect(decodeServerSettings({}).epicRolePolicy).toEqual({ tiers: {}, roles: {} });
+  it("defaults to empty tiers, role assignments, and in-session subagents", () => {
+    const empty = { tiers: {}, roles: {}, inSessionRoles: {} };
+    expect(DEFAULT_SERVER_SETTINGS.epicRolePolicy).toEqual(empty);
+    expect(decodeServerSettings({}).epicRolePolicy).toEqual(empty);
+  });
+
+  it("round-trips in-session subagent definitions", () => {
+    const decoded = decodeServerSettings({
+      epicRolePolicy: {
+        tiers: { primary: { hops: [] } },
+        inSessionRoles: {
+          planner: {
+            tier: "primary",
+            description: "Plans one child.",
+            prompt: "You plan.",
+            tools: ["Read", "Grep"],
+          },
+          reviewer: { description: "Reviews the change.", prompt: "You review." },
+        },
+      },
+    });
+    const roundTripped = decodeServerSettings(encodeServerSettings(decoded));
+
+    expect(roundTripped.epicRolePolicy.inSessionRoles).toEqual({
+      planner: {
+        tier: "primary",
+        description: "Plans one child.",
+        prompt: "You plan.",
+        tools: ["Read", "Grep"],
+      },
+      reviewer: { description: "Reviews the change.", prompt: "You review." },
+    });
+  });
+
+  it("rejects an in-session subagent with a bad name or empty prompt", () => {
+    expect(() =>
+      decodeServerSettings({
+        epicRolePolicy: {
+          inSessionRoles: { "1bad": { description: "x", prompt: "y" } },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettings({
+        epicRolePolicy: { inSessionRoles: { planner: { description: "x", prompt: "  " } } },
+      }),
+    ).toThrow();
   });
 
   it("preserves ordered tier hops through decode, encode, and decode", () => {
@@ -237,6 +281,7 @@ describe("ServerSettings.epicRolePolicy", () => {
     ).toEqual({
       tiers: { primary: { hops: [] } },
       roles: { "merge-fix": "primary" },
+      inSessionRoles: {},
     });
   });
 });

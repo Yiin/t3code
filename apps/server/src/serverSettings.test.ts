@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
+  EpicInSessionRoleName,
   EpicTierId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -549,6 +550,13 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         },
         roles: {},
+        inSessionRoles: {
+          [EpicInSessionRoleName.make("planner")]: {
+            tier: primaryId,
+            description: "Plans one child before the implementer touches code.",
+            prompt: "You plan the change and hand back a numbered plan.",
+          },
+        },
       } as const;
 
       const next = yield* serverSettings.updateSettings({ epicRolePolicy: policy });

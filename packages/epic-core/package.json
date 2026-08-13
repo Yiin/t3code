@@ -11,6 +11,10 @@
       "types": "./src/providerFallback.ts",
       "import": "./src/providerFallback.ts"
     },
+    "./epicSubagents": {
+      "types": "./src/epicSubagents.ts",
+      "import": "./src/epicSubagents.ts"
+    },
     "./Errors": {
       "types": "./src/Errors.ts",
       "import": "./src/Errors.ts"

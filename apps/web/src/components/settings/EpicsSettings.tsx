@@ -33,6 +33,7 @@ import {
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import {
   SettingResetButton,
@@ -45,14 +46,20 @@ import {
   assignRoleTier,
   buildEpicRolePolicyPatch,
   buildEpicRoleRows,
+  buildInSessionRoleRows,
+  createInSessionRole,
   createTier,
+  deleteInSessionRole,
   deleteTier,
   isEpicRolePolicyDirty,
   moveTierHop,
   removeTierHop,
   renameTier,
+  setInSessionRoleText,
+  setInSessionRoleTier,
   setTierHopSelection,
   setTierHopSkipAboveUtilization,
+  type EpicInSessionRoleRow,
 } from "./EpicsSettings.logic";
 
 const UNASSIGNED_VALUE = "__unassigned__";
@@ -419,18 +426,175 @@ function TierEditor({
   );
 }
 
+interface InSessionRoleEditorProps {
+  readonly row: EpicInSessionRoleRow;
+  readonly policy: EpicRolePolicy;
+  readonly tierIds: ReadonlyArray<EpicTierId>;
+  readonly onPolicyChange: (policy: EpicRolePolicy) => void;
+}
+
+/**
+ * One injected subagent: its tier, its description, and its prompt.
+ *
+ * The two text fields commit on blur rather than on every keystroke, because
+ * each edit saves the whole policy and the schema rejects an empty string.
+ */
+export function InSessionRoleEditor({
+  row,
+  policy,
+  tierIds,
+  onPolicyChange,
+}: InSessionRoleEditorProps) {
+  const [description, setDescription] = useState(row.role.description);
+  const [prompt, setPrompt] = useState(row.role.prompt);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  const commit = (field: "description" | "prompt", value: string) => {
+    const trimmed = value.trim();
+    if (trimmed === "" || trimmed === row.role[field]) {
+      if (field === "description") setDescription(row.role.description);
+      else setPrompt(row.role.prompt);
+      return;
+    }
+    onPolicyChange(setInSessionRoleText(policy, row.name, field, trimmed));
+  };
+
+  return (
+    <>
+      <SettingsRow
+        title={row.name}
+        description={
+          row.tierId
+            ? `Runs on tier ${row.tierId} (${row.hopCount} ${row.hopCount === 1 ? "hop" : "hops"}).`
+            : "Inherits the worker session's model."
+        }
+        control={
+          <Button
+            size="xs"
+            variant="destructive-outline"
+            aria-label={`Delete subagent ${row.name}`}
+            onClick={() => setConfirmingDelete(true)}
+          >
+            <Trash2Icon />
+            Delete
+          </Button>
+        }
+      >
+        <div className="space-y-3 pb-4 pt-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs text-muted-foreground" htmlFor={`epic-role-${row.name}-tier`}>
+              Model tier
+            </label>
+            <Select
+              value={row.tierId ?? UNASSIGNED_VALUE}
+              onValueChange={(value) => {
+                if (!value) return;
+                onPolicyChange(
+                  setInSessionRoleTier(
+                    policy,
+                    row.name,
+                    value === UNASSIGNED_VALUE ? null : EpicTierId.make(value),
+                  ),
+                );
+              }}
+            >
+              <SelectTrigger
+                id={`epic-role-${row.name}-tier`}
+                className="w-full sm:w-48"
+                aria-label={`Tier for subagent ${row.name}`}
+              >
+                <SelectValue>{row.tierId ?? "Unassigned"}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem value={UNASSIGNED_VALUE}>Unassigned</SelectItem>
+                {tierIds.map((tierId) => (
+                  <SelectItem key={tierId} value={tierId}>
+                    {tierId}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor={`epic-role-${row.name}-description`}
+            >
+              Description
+            </label>
+            <Input
+              id={`epic-role-${row.name}-description`}
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              onBlur={() => commit("description", description)}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label
+              className="text-xs text-muted-foreground"
+              htmlFor={`epic-role-${row.name}-prompt`}
+            >
+              Prompt
+            </label>
+            <Textarea
+              id={`epic-role-${row.name}-prompt`}
+              className="min-h-24"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              onBlur={() => commit("prompt", prompt)}
+            />
+          </div>
+        </div>
+      </SettingsRow>
+
+      <AlertDialog
+        open={confirmingDelete}
+        onOpenChange={(open) => {
+          if (!open) setConfirmingDelete(false);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete subagent &quot;{row.name}&quot;?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Workers stop receiving this subagent. Its tier stays.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                onPolicyChange(deleteInSessionRole(policy, row.name));
+                setConfirmingDelete(false);
+              }}
+            >
+              Delete subagent
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
+  );
+}
+
 export function EpicsSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const [newTierInput, setNewTierInput] = useState("");
   const [newTierError, setNewTierError] = useState<string | null>(null);
+  const [newRoleInput, setNewRoleInput] = useState("");
+  const [newRoleError, setNewRoleError] = useState<string | null>(null);
   const policy = settings.epicRolePolicy;
   const instanceEntries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(deriveProviderInstanceEntries(serverProviders), settings),
   );
   const modelOptionsByInstance = getCustomModelOptionsByInstance(settings, serverProviders);
   const roleRows = buildEpicRoleRows({ policy, entries: instanceEntries });
+  const inSessionRoleRows = buildInSessionRoleRows(policy);
   const tierIds = Object.keys(policy.tiers) as EpicTierId[];
 
   const updatePolicy = (nextPolicy: EpicRolePolicy) => {
@@ -445,6 +609,17 @@ export function EpicsSettingsPanel() {
     }
     setNewTierInput("");
     setNewTierError(null);
+    updatePolicy(result.policy);
+  };
+
+  const handleCreateRole = () => {
+    const result = createInSessionRole(policy, newRoleInput);
+    if ("error" in result) {
+      setNewRoleError(result.error);
+      return;
+    }
+    setNewRoleInput("");
+    setNewRoleError(null);
     updatePolicy(result.policy);
   };
 
@@ -564,6 +739,64 @@ export function EpicsSettingsPanel() {
             policy={policy}
             instanceEntries={instanceEntries}
             modelOptionsByInstance={modelOptionsByInstance}
+            onPolicyChange={updatePolicy}
+          />
+        ))}
+      </SettingsSection>
+
+      <SettingsSection title="In-session subagents">
+        <SettingsRow
+          title="Add subagent"
+          description="Injected into every epic worker session, on the tier you give it."
+        >
+          <div className="space-y-2 pb-4 pt-3">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <label className="sr-only" htmlFor="epic-new-role-name">
+                New subagent name
+              </label>
+              <Input
+                id="epic-new-role-name"
+                value={newRoleInput}
+                placeholder="planner"
+                aria-invalid={newRoleError ? true : undefined}
+                aria-describedby={newRoleError ? "epic-new-role-error" : undefined}
+                onChange={(event) => {
+                  setNewRoleInput(event.target.value);
+                  setNewRoleError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  handleCreateRole();
+                }}
+                spellCheck={false}
+              />
+              <Button size="sm" variant="outline" onClick={handleCreateRole}>
+                <PlusIcon />
+                Add subagent
+              </Button>
+            </div>
+            {newRoleError ? (
+              <p id="epic-new-role-error" className="text-xs text-destructive" role="alert">
+                {newRoleError}
+              </p>
+            ) : null}
+          </div>
+        </SettingsRow>
+
+        {inSessionRoleRows.length === 0 ? (
+          <SettingsRow
+            title="No subagents configured"
+            description="Workers keep whatever agents their harness ships with."
+          />
+        ) : null}
+
+        {inSessionRoleRows.map((row) => (
+          <InSessionRoleEditor
+            key={row.name}
+            row={row}
+            policy={policy}
+            tierIds={tierIds}
             onPolicyChange={updatePolicy}
           />
         ))}

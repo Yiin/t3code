@@ -22,7 +22,9 @@ import {
   type EpicRolePolicy,
   type EpicRun as TransportEpicRun,
   EpicRunId,
+  type EpicSubagentMap,
   MessageId,
+  type ModelSelection,
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
@@ -51,6 +53,10 @@ import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
 import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
 import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
+import {
+  maxLiveUtilizationByInstance,
+  resolveEpicSubagents,
+} from "@t3tools/epic-core/epicSubagents";
 import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
 import { makeProcessPoolBacklog } from "@t3tools/epic-core/adapters/ProcessPoolBacklog";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
@@ -89,7 +95,9 @@ import {
   type EpicRun,
   type EpicRunIteration,
 } from "../../persistence/Services/EpicRuns.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
@@ -203,6 +211,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
     const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
     const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
+    const subagentRegistry = yield* EpicSubagentRegistry;
+    const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
 
     /**
      * The epic role policy, or an empty one. A server without a settings
@@ -219,6 +229,46 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             ),
           ),
         );
+
+    /**
+     * The subagents an iteration worker session carries, resolved fresh per
+     * iteration so a role picks up both a policy edit and the newest usage
+     * sample. Empty when no in-session role is configured, which is the whole
+     * cost of leaving the map alone: the session then keeps the harness's own
+     * agents.
+     *
+     * Every failure below the policy read is fail-soft. A missing usage ledger
+     * or provider registry only costs a subagent its tier-resolved model, and
+     * the definition still ships without one, so the worker inherits the
+     * session model instead of losing the subagent.
+     */
+    const readIterationSubagents = (
+      sessionSelection: ModelSelection,
+    ): Effect.Effect<EpicSubagentMap> =>
+      Effect.gen(function* () {
+        const policy = yield* readEpicRolePolicy;
+        if (Object.keys(policy.inSessionRoles).length === 0) return {};
+        const providers = Option.isNone(providerRegistry)
+          ? []
+          : yield* providerRegistry.value.getProviders;
+        const samples = Option.isNone(providerUsageLedger)
+          ? []
+          : yield* providerUsageLedger.value.listAll;
+        const utilization = maxLiveUtilizationByInstance(samples, yield* DateTimeNowIso);
+        return resolveEpicSubagents({
+          policy,
+          providers,
+          sessionInstanceId: sessionSelection.instanceId,
+          utilization: (instanceId) => utilization.get(instanceId) ?? null,
+        });
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.subagent-resolution-failed", { cause }).pipe(
+            Effect.as<EpicSubagentMap>({}),
+          ),
+        ),
+      );
+
     const leases = new Map<EpicRunId, EpicRunLockLease>();
 
     const seedRetryBaseDelayMs = Math.max(
@@ -457,6 +507,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         projectSetupScriptRunner,
         crypto,
         workerScopeRegistry,
+        subagentRegistry,
+        readIterationSubagents,
         ownedIterationTurnIds,
       }),
       mergeDrain: makeServerMergeDrain({ store, processRunner, fileSystem, path, gitVcsDriver }),
@@ -557,7 +609,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             resumedWorkers: options?.resumedWorkers,
           },
           poolPorts,
-        ).pipe(Effect.ensuring(workerScopeRegistry.releaseRun(runId)));
+        ).pipe(
+          Effect.ensuring(
+            Effect.andThen(
+              workerScopeRegistry.releaseRun(runId),
+              subagentRegistry.releaseRun(runId),
+            ),
+          ),
+        );
       });
 
     /**

@@ -7,6 +7,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  resolveEpicProviderChainEntry,
   resolveEpicProviderChainFallback,
   resolveEpicProviderFallback,
 } from "./providerFallback.ts";
@@ -42,6 +43,35 @@ const claude = provider("claude-work", "claudeAgent", "claude-sonnet-5");
 const codex = provider("codex-personal", "codex", "gpt-5.6-sol");
 const kimi = provider("kimi-team", "kimi", "kimi-code/k3");
 const prime = provider("prime-work", "primeAgent", "prime/custom-model");
+
+describe("resolveEpicProviderChainEntry", () => {
+  const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+  const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+  const chain = [
+    selection("claude-a", "claude-sonnet-5"),
+    selection("claude-b", "claude-sonnet-5"),
+  ];
+
+  it("enters the chain at its head", () => {
+    expect(resolveEpicProviderChainEntry({ providers: [claudeA, claudeB], chain })).toEqual(
+      selection("claude-a", "claude-sonnet-5"),
+    );
+  });
+
+  it("walks past a blocked head", () => {
+    expect(
+      resolveEpicProviderChainEntry({
+        providers: [claudeA, claudeB],
+        chain,
+        isBlocked: (hop) => hop.instanceId === claudeA.instanceId,
+      }),
+    ).toEqual(selection("claude-b", "claude-sonnet-5"));
+  });
+
+  it("returns null when no hop is eligible", () => {
+    expect(resolveEpicProviderChainEntry({ providers: [], chain })).toBeNull();
+  });
+});
 
 describe("resolveEpicProviderChainFallback", () => {
   const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
