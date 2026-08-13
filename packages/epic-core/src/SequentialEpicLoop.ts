@@ -4,7 +4,11 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import type { EpicRunConfigSnapshot, EpicRunPreflightShape } from "./EpicRunPreflight.ts";
-import { decideIterationBoundary, persistedFailureReason } from "./policy.ts";
+import {
+  childAttemptsFromHistory,
+  decideIterationBoundary,
+  persistedFailureReason,
+} from "./policy.ts";
 import {
   classifyIteration,
   iterationFailureClass,
@@ -185,6 +189,14 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
     createdAt: now(),
     updatedAt: now(),
   };
+  /**
+   * Per-child attempt budgets, shared with the parallel loop: a child that
+   * absorbs `maxAttemptsPerChild` child-class failures fails the run.
+   *
+   * The map is per process, so `body` seeds it from this run's own durable
+   * iteration rows before the first dispatch: a restart must not hand a child
+   * back the attempts a previous process already spent on it.
+   */
   const attempts = new Map<string, number>();
   const trackedChildren = new Map<string, number>();
   const exhaustedIterations = new Map<string, number>();
@@ -268,6 +280,19 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
   const body = Effect.gen(function* () {
     yield* ports.journal.createRun(run);
     yield* ports.events.publish({ type: "run-state-changed", run });
+    // Restore what earlier processes of THIS run already charged, before any
+    // dispatch. An empty journal restores nothing, which is how a first run
+    // behaved before this existed.
+    const restoredAttempts = childAttemptsFromHistory(
+      yield* ports.journal.listIterations(run.runId),
+    );
+    for (const [issueId, spent] of restoredAttempts) attempts.set(issueId, spent);
+    if (restoredAttempts.size > 0) {
+      yield* Effect.logInfo("epic.loop.child-attempts-restored", {
+        runId: run.runId,
+        attempts: Object.fromEntries(restoredAttempts),
+      });
+    }
 
     while (run.status === "running") {
       if (yield* input.shouldStop()) {

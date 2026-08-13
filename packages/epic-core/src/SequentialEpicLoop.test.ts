@@ -1,9 +1,14 @@
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRunId,
   EpicTierId,
+  IsoDateTime,
+  NonNegativeInt,
   ProviderInstanceId,
   ProviderDriverKind,
+  ThreadId,
+  epicRunIterationThreadId,
   type EpicRunConfig,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -113,6 +118,15 @@ const fixture = (input: {
     readonly baseBranch: string;
     readonly worktreeRoot: string;
   }>;
+  /**
+   * Settled iteration rows an earlier process of this run already wrote, in
+   * index order. They are what a restart reads back from the journal.
+   */
+  readonly priorIterations?: ReadonlyArray<{
+    readonly issueId: string | null;
+    readonly turnStatus: PersistedEpicRunIteration["turnStatus"];
+    readonly failureReason: string | null;
+  }>;
 }) => {
   const epic = issue({
     id: "epic",
@@ -143,7 +157,20 @@ const fixture = (input: {
   let releaseAttempts = 0;
   let stopReads = 0;
   let persistedRun: PersistedEpicRun | null = null;
-  const iterations: PersistedEpicRunIteration[] = [];
+  const iterations: PersistedEpicRunIteration[] = (input.priorIterations ?? []).map(
+    (prior, index) => ({
+      runId: EpicRunId.make("run"),
+      iterationIndex: NonNegativeInt.make(index),
+      threadId: ThreadId.make(epicRunIterationThreadId({ runId: "run", iterationIndex: index })),
+      issueId: prior.issueId,
+      turnStatus: prior.turnStatus,
+      summary: null,
+      why: null,
+      failureReason: prior.failureReason,
+      startedAt: IsoDateTime.make("2026-01-01T00:00:00Z"),
+      finishedAt: IsoDateTime.make("2026-01-01T00:01:00Z"),
+    }),
+  );
   const statuses: string[] = [];
   const events: RunEvent[] = [];
   const ordering: string[] = [];
@@ -240,7 +267,10 @@ const fixture = (input: {
         }),
       updateIteration: (update) =>
         Effect.sync(() => {
-          const index = iterations.findIndex(
+          // Last match, not first: a restarted run counts its own dispatches
+          // from zero, so its first row repeats an index a prior process
+          // already used. This settles the row the loop just appended.
+          const index = iterations.findLastIndex(
             (item) => item.iterationIndex === update.iterationIndex,
           );
           if (index >= 0) iterations[index] = { ...iterations[index]!, ...update };
@@ -684,6 +714,73 @@ it.live("keeps an unclaimed child open without emitting recovery at exhaustion",
       test.events.filter((event) => event.type === "child-claim-released"),
       [],
     );
+  }),
+);
+
+it.live("charges a restarted run for the child attempts an earlier process spent", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      priorIterations: [
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "child:blocked" },
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "child:no-commit-child-open" },
+      ],
+      attempts: [{ claim: true, blocked: true }],
+      config: config({
+        // The per-child budget (3) bites before the consecutive-failure budget.
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 3, maxIterations: 5 },
+        server: { ...DEFAULT_EPIC_RUN_CONFIG.server, maxConsecutiveFailures: 5 },
+      }),
+    });
+
+    // Two spent attempts plus this one exhaust the budget, so the run fails on
+    // its first dispatch instead of granting a fresh three.
+    const result = yield* test.run();
+    assert.equal(result.status, "failed");
+    assert.equal(result.lastError, "agent reported RALPH_BLOCKED");
+    assert.equal(test.dispatches(), 1);
+    assert.equal(test.child().status, "open");
+    assert.deepEqual(
+      test.events.filter((event) => event.type === "child-claim-released"),
+      [
+        {
+          type: "child-claim-released",
+          runId: "run",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          reason: "retry budget exhausted; child reopened",
+        },
+      ],
+    );
+  }),
+);
+
+it.live("charges nothing for restart-abandoned, infrastructure, or other children's rows", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      priorIterations: [
+        // Abandoned by a restart or a cancellation: the turn never delivered a
+        // verdict on the child.
+        { issueId: "epic.1", turnStatus: "abandoned", failureReason: "infra:resume-unsupported" },
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "infra:dispatch-failed" },
+        // A no-commit turn that closed its child anyway settles `completed`.
+        { issueId: "epic.1", turnStatus: "completed", failureReason: null },
+        // Another child's spent attempt, and a row that named no child at all.
+        { issueId: "epic.2", turnStatus: "failed", failureReason: "child:blocked" },
+        { issueId: null, turnStatus: "failed", failureReason: "child:blocked" },
+      ],
+      attempts: [
+        { claim: true, blocked: true },
+        { claim: true, blocked: true },
+        { claim: true, blocked: true },
+      ],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 3, maxIterations: 5 },
+        server: { ...DEFAULT_EPIC_RUN_CONFIG.server, maxConsecutiveFailures: 5 },
+      }),
+    });
+
+    assert.equal((yield* test.run()).status, "failed");
+    assert.equal(test.dispatches(), 3);
   }),
 );
 
