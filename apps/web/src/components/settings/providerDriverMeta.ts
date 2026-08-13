@@ -5,6 +5,8 @@ import {
   GrokSettings,
   KimiSettings,
   OpenCodeSettings,
+  PRIME_AGENT_DRIVER_KIND,
+  PrimeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import type * as Schema from "effect/Schema";
@@ -16,6 +18,7 @@ import {
   KimiIcon,
   OpenAI,
   OpenCodeIcon,
+  PrimeAgentIcon,
 } from "../Icons";
 
 type ProviderSettingsSchema = {
@@ -82,6 +85,13 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: PRIME_AGENT_DRIVER_KIND,
+    label: "Prime Agent",
+    icon: PrimeAgentIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: PrimeSettings,
   },
 ];
 

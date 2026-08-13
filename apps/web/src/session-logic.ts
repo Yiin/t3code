@@ -9,6 +9,7 @@ import {
   type OrchestrationThreadSubagent,
   type OrchestrationThreadSubagentStatus,
   type OrchestrationProposedPlanId,
+  PRIME_AGENT_DRIVER_KIND,
   ProviderDriverKind,
   SubagentSteerDeliveredActivityPayload,
   SubagentSteerFailedActivityPayload,
@@ -63,6 +64,12 @@ export const PROVIDER_OPTIONS: Array<{
   {
     value: ProviderDriverKind.make("kimi"),
     label: "Kimi",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
+    value: PRIME_AGENT_DRIVER_KIND,
+    label: "Prime Agent",
     available: true,
     pickerSidebarBadge: "new",
   },
