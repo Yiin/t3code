@@ -22,8 +22,7 @@ for example `ubuntu-24.04`, `macos-latest`, and `windows-latest`. Leave the vari
 nothing changes.
 
 One variable covers every Linux job, so the 8, 16, and 32 vCPU tiers all collapse to the same label when
-the override is set. `pr-size.yml`, `pr-vouch.yml`, and `issue-labels.yml` already use `ubuntu-24.04`
-directly and ignore the variables.
+the override is set.
 
 `scripts/workflow-runner-labels.test.ts` fails the `test` job if any workflow pins a bare `blacksmith-*`
 label again, which is the shape an upstream merge brings back.
