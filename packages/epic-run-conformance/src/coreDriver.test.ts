@@ -758,13 +758,21 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
       });
       const acquiredWorkspaces = new Map<string, IterationWorkspace>();
       /**
-       * True while the invocation under way is the one that gets killed.
+       * True from the moment the kill is decided until the fiber is gone.
        *
        * A killed process runs no finalizers, and the per-iteration workspace
        * release is one: interrupting the fiber tore down the very worktree the
        * restart is supposed to find, so every restart scenario reached the
        * refusal with nothing to hand over. `cleanupOwnedExternally` does not
        * cover this — it only skips the loop's own end-of-run sweep.
+       *
+       * It covers the interrupt alone, not the whole first invocation. A killed
+       * process only strands the worktrees it still held; every iteration that
+       * settled before it died released its own. Suppressing those releases too
+       * left the leftover branch and worktree of a settled attempt on disk, and
+       * the child's next `acquire` refused them — one iteration row, no second
+       * dispatch, and a run that looked like the pool loop had stopped
+       * scheduling (t3code-22o.18).
        */
       let crashing = false;
       const basePoolWorkspace = makeTerminalPoolWorkspace({
@@ -894,13 +902,6 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
         yield* invokeLoop({ resumedWorkers: [], crashes: false });
       } else {
         const restart = scenario.restart;
-        /**
-         * Cut the first invocation the way a killed process is cut: mid-turn,
-         * with no finalizer. Interrupting the fiber is the closest an
-         * in-process leg gets, and `cleanupOwnedExternally` keeps it honest by
-         * skipping the sweep a real crash never runs.
-         */
-        crashing = true;
         const first = yield* invokeLoop({ resumedWorkers: [], crashes: true }).pipe(
           Effect.forkChild,
         );
@@ -942,6 +943,13 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
             )}`,
           );
         }
+        /**
+         * Cut the first invocation the way a killed process is cut: mid-turn,
+         * with no finalizer. Interrupting the fiber is the closest an
+         * in-process leg gets, and `cleanupOwnedExternally` keeps it honest by
+         * skipping the sweep a real crash never runs.
+         */
+        crashing = true;
         yield* Fiber.interrupt(first);
         crashing = false;
 

@@ -1,0 +1,110 @@
+{
+  "name": "parallel-child-retry-exhaustion",
+  "description": "Two child failures charged before a crash plus one after exhaust the per-child budget, so the restored count is what stops the run.",
+  "repo": {
+    "files": [{ "path": "README.md", "content": "fixture\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "restart": { "cutAfterRows": 3, "adopt": true },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "claimChild": true,
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-blocked" },
+      "closeChild": false,
+      "hangMs": 0
+    },
+    {
+      "childId": "epic.1",
+      "claimChild": true,
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-msg", "summary": "none", "why": "no commit" },
+      "closeChild": false,
+      "hangMs": 0
+    },
+    {
+      "childId": "epic.1",
+      "claimChild": true,
+      "repoAction": "no-commit",
+      "report": { "_tag": "none" },
+      "closeChild": false,
+      "hangMs": 30000
+    },
+    {
+      "childId": "epic.1",
+      "claimChild": true,
+      "repoAction": "no-commit",
+      "report": { "_tag": "ralph-blocked" },
+      "closeChild": false,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "retry",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 0,
+      "failureReason": "child:blocked",
+      "attempts": 1
+    },
+    {
+      "_tag": "retry",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1,
+      "failureReason": "child:no-commit-child-open",
+      "attempts": 2
+    },
+    {
+      "_tag": "blocked",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 2,
+      "failureReason": "infra:resume-unsupported",
+      "reason": "resume unsupported; worktree handed to a fresh iteration"
+    },
+    {
+      "_tag": "blocked",
+      "sequence": 3,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 3,
+      "failureReason": "child:blocked",
+      "attempts": 3,
+      "reason": "retry budget exhausted; child reopened"
+    },
+    {
+      "_tag": "finished",
+      "sequence": 4,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "failed",
+      "reason": "child failure budget"
+    }
+  ],
+  "appliesTo": ["core"]
+}
