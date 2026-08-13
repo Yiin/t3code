@@ -24,14 +24,17 @@ import {
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
+  MAX_RESUMES_PER_ITERATION,
   epicRunIterationPrompt,
 } from "@t3tools/epic-core/policy";
 import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import {
+  RESUME_ABANDONED_REASON,
   runParallelEpicLoop,
   type ParallelEpicLoopPorts,
   type PoolRunEventsShape,
   type PoolSchedulerEvent,
+  type ResumedWorker,
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import {
   DEFAULT_POOL_POLL_INTERVAL_MS,
@@ -227,10 +230,7 @@ export const cookCommand = Command.make("cook", {
   epic: Flag.string("epic").pipe(Flag.withDescription("Beads epic id.")),
   cwd: Flag.string("cwd").pipe(Flag.withDescription("Repository root.")),
   runDir: optionalString("run-dir", "Artifact directory."),
-  runId: optionalString(
-    "run-id",
-    "Continue this run id instead of minting a new one. Sequential engine only.",
-  ),
+  runId: optionalString("run-id", "Continue this run id instead of minting a new one."),
   gate: optionalString("gate", "Integration gate command."),
   noGate: Flag.boolean("no-gate").pipe(
     Flag.withDescription("Explicitly disable the integration gate."),
@@ -386,15 +386,58 @@ export const cookCommand = Command.make("cook", {
           });
         }
         const degradationsDirectory = NodePath.join(commonDirResult.stdout.trim(), "t3code");
+        /**
+         * The pool run this directory already holds, when there is one to
+         * continue.
+         *
+         * A run directory is one run's journal. The pool loop consumes a run
+         * row that already exists, so a second process pointed at the same
+         * directory is a restart of that run, not a new run over its
+         * worktrees. Only a row still marked `running` is picked back up: a
+         * terminal row means the run is over, and creating a second one there
+         * still fails loudly, exactly as it did before this path existed.
+         *
+         * Only the pool arm reads this. The sequential loop owns its own
+         * `--run-id` continuation.
+         */
+        const resumedRun = yield* selectTerminalExecution(snapshot) === "parallel"
+          ? FileRunJournal.readRunRecord({ runDirectory }).pipe(
+              Effect.map((existing) =>
+                Option.isSome(existing) && existing.value.status === "running"
+                  ? existing.value
+                  : null,
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new EpicCookCliError({
+                    operation: "epicCook.resume",
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            )
+          : Effect.succeed(null);
+        if (resumedRun !== null && resumedRun.epicId !== flags.epic) {
+          return yield* new EpicCookCliError({
+            operation: "epicCook.resume",
+            detail: `Run directory ${runDirectory} holds a run of ${resumedRun.epicId}, not ${flags.epic}.`,
+          });
+        }
+        const poolRunId = resumedRun?.runId ?? EpicRunId.make(runId);
         // Optional systemd scope governance for worker spawns. A colliding
         // pre-existing scope is fatal (run identity clash); every other
         // degradation warns and spawns unwrapped inside prepareWorkerScope.
-        const workerScope = yield* prepareWorkerScope({
-          repositoryPath: cwd,
-          runDirectory,
-          epicId: flags.epic,
-          runId,
-        }).pipe(
+        // A resume is the exception: the scopes holding this run's identity
+        // are its own dead workers' orphans, so it stops them and carries on.
+        const workerScope = yield* prepareWorkerScope(
+          {
+            repositoryPath: cwd,
+            runDirectory,
+            epicId: flags.epic,
+            runId: poolRunId,
+          },
+          { reclaimOwnScopes: resumedRun !== null },
+        ).pipe(
           Effect.mapError(
             (error) =>
               new EpicCookCliError({ operation: "epicCook.workerScope", detail: error.detail }),
@@ -507,10 +550,60 @@ export const cookCommand = Command.make("cook", {
          * existing run row, so this creates it — mirroring the sequential
          * loop's row, with the configured worker cap — and reconciles the
          * printed result from the journal after the loop returns.
+         *
+         * A restart takes the same path with the row already there: it adopts
+         * the persisted run, hands the loop the iterations the dead process
+         * left `running`, and lets the loop decide what can be continued.
          */
         const runParallelCook = Effect.gen(function* () {
+          const backlog = makeProcessPoolBacklog(runner);
+          const journal = yield* FileRunJournal.makePool({
+            runDirectory,
+            degradationsDirectory,
+          });
+          /**
+           * What the dead process left in flight, read before preflight rather
+           * than after it: these worktrees are the ones preflight has to
+           * forgive, or the run is refused permission to continue itself.
+           */
+          const interrupted =
+            resumedRun === null
+              ? []
+              : yield* journal.listIterations(poolRunId).pipe(
+                  Effect.map((rows) => rows.filter((row) => row.turnStatus === "running")),
+                  Effect.mapError(
+                    (cause) =>
+                      new EpicCookCliError({
+                        operation: "epicCook.resume",
+                        detail: cause.message,
+                        cause,
+                      }),
+                  ),
+                );
           const preflightResult = yield* preflight
-            .check({ workspaceRoot: cwd, epicId: flags.epic, mode: "parallel" }, snapshot)
+            .check(
+              {
+                workspaceRoot: cwd,
+                epicId: flags.epic,
+                mode: "parallel",
+                ...(resumedRun === null
+                  ? {}
+                  : {
+                      intent: "resume" as const,
+                      resume: {
+                        runId: poolRunId,
+                        worktreePaths: [
+                          ...new Set(
+                            interrupted.flatMap((row) =>
+                              row.worktreePath == null ? [] : [row.worktreePath],
+                            ),
+                          ),
+                        ],
+                      },
+                    }),
+              },
+              snapshot,
+            )
             .pipe(
               Effect.mapError(
                 (cause) =>
@@ -547,10 +640,6 @@ export const cookCommand = Command.make("cook", {
 
           const body = Effect.gen(function* () {
             const now = () => new Date().toISOString();
-            const journal = yield* FileRunJournal.makePool({
-              runDirectory,
-              degradationsDirectory,
-            });
             const events: PoolRunEventsShape = {
               publish: (event) =>
                 fileEvents
@@ -561,8 +650,14 @@ export const cookCommand = Command.make("cook", {
                     ),
                   ),
             };
-            const run: PersistedEpicRun = {
-              runId: EpicRunId.make(runId),
+            /**
+             * A resume keeps the persisted row verbatim. Its config, worker
+             * cap, model selection and counters are what this run has been
+             * running under; re-resolving them from today's environment would
+             * change the run's own terms halfway through it.
+             */
+            const run: PersistedEpicRun = resumedRun ?? {
+              runId: poolRunId,
               epicId: flags.epic,
               projectId: ProjectId.make(`local-${flags.epic}`),
               cwd,
@@ -587,8 +682,77 @@ export const cookCommand = Command.make("cook", {
               createdAt: now(),
               updatedAt: now(),
             };
-            yield* journal.createRun(run);
+            if (resumedRun === null) yield* journal.createRun(run);
             yield* events.publish({ type: "run-state-changed", run });
+
+            /**
+             * The interrupted iterations this process hands back to the loop,
+             * and the ones it writes off first.
+             *
+             * Only two decisions belong here, because only this side knows
+             * them: a row that names no child has no work to pick back up, and
+             * a row that has already spent its resume budget gets no more.
+             * Every other refusal — a worktree that is gone, a child that
+             * closed while the process was down, a harness that cannot adopt a
+             * dead handle — is the loop's own to make, and it abandons those
+             * rows itself with the reason it decided on.
+             */
+            const resumedWorkers: ReadonlyArray<ResumedWorker> = interrupted.flatMap((row) => {
+              const issueId = row.issueId;
+              const resumeCount = row.resumeCount ?? 0;
+              return issueId === null || resumeCount >= MAX_RESUMES_PER_ITERATION
+                ? []
+                : [
+                    {
+                      issueId,
+                      iterationIndex: row.iterationIndex,
+                      threadId: row.threadId,
+                      branch: row.branch ?? null,
+                      worktreePath: row.worktreePath ?? null,
+                      startedAt: row.startedAt,
+                      resumeCount,
+                    },
+                  ];
+            });
+            const resumableIndexes = new Set(resumedWorkers.map((worker) => worker.iterationIndex));
+            for (const row of interrupted) {
+              if (resumableIndexes.has(row.iterationIndex)) continue;
+              const finishedAt = now();
+              const summary = "abandoned by restart";
+              yield* journal.updateIteration({
+                runId: run.runId,
+                iterationIndex: row.iterationIndex,
+                turnStatus: "abandoned",
+                summary,
+                why: null,
+                failureReason: RESUME_ABANDONED_REASON,
+                finishedAt,
+              });
+              yield* events.publish({
+                type: "iteration-state-changed",
+                iteration: {
+                  ...row,
+                  turnStatus: "abandoned",
+                  summary,
+                  why: null,
+                  failureReason: RESUME_ABANDONED_REASON,
+                  finishedAt,
+                },
+              });
+              // Hand the claim back now, not at the end of the run. Nothing is
+              // going to work this child in this row, and a child left
+              // `in_progress` is absent from `bd ready` for as long as the run
+              // lives — so the run would sit on work it had already given up on.
+              if (row.issueId !== null) yield* backlog.releaseClaimedChild(cwd, row.issueId);
+            }
+            if (resumedRun !== null) {
+              yield* Effect.logInfo("epic.cook.restart-resume", {
+                runId: run.runId,
+                epicId: run.epicId,
+                resumed: resumedWorkers.length,
+                abandoned: interrupted.length - resumedWorkers.length,
+              });
+            }
 
             const mergeQueueStore = yield* makeFileMergeQueueStore({ runDirectory });
             const gateReceipts = yield* FileGateReceipts.make({ runDirectory });
@@ -601,7 +765,7 @@ export const cookCommand = Command.make("cook", {
             const ports: ParallelEpicLoopPorts = {
               journal,
               events,
-              backlog: makeProcessPoolBacklog(runner),
+              backlog,
               workspace,
               dispatch: makeTerminalPoolDispatch({ dispatch: agentDispatch }),
               mergeDrain: makeTerminalMergeDrain({
@@ -714,6 +878,7 @@ export const cookCommand = Command.make("cook", {
                         Effect.orElseSucceed(() => "(no orientation card in this repo)"),
                       ),
                     cleanupOwnedExternally: () => false,
+                    resumedWorkers,
                   },
                   ports,
                 ),

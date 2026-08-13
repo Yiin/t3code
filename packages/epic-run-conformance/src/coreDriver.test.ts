@@ -51,9 +51,7 @@ import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
 import type { RunEvent } from "@t3tools/epic-core/ports/RunEvents";
 import type { PersistedEpicRun } from "@t3tools/epic-core/ports/RunJournal";
-import type { WorkerEvidenceShape, WorkerRef } from "@t3tools/epic-core/ports/WorkerEvidence";
 import type { IterationWorkspace, WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
-import type { SupervisionClock } from "@t3tools/epic-core/workerSupervision";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -63,6 +61,11 @@ import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
 
 import { normalizeParallelTranscript, type ParallelIterationRecord } from "./parallelTranscript.ts";
+import {
+  COMPRESSED_SUPERVISION_SETTINGS,
+  compressedSupervisionClock,
+  wedgeFirstWorkerEvidence,
+} from "./supervision.ts";
 import {
   decodeConformanceScenario,
   isParallelScenario,
@@ -172,9 +175,7 @@ const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
     // Compressed inspection cadence for the supervision scenarios, so the
     // machine reaches its verdict in a handful of simulated minutes. The
     // clock below is fake, so these are counted, not waited out.
-    ...(scenario.supervision === undefined
-      ? {}
-      : { idleThresholdSeconds: 30, inspectMinDelaySeconds: 5, inspectRetryDelaySeconds: 10 }),
+    ...(scenario.supervision === undefined ? {} : COMPRESSED_SUPERVISION_SETTINGS),
   },
   server: {
     ...DEFAULT_EPIC_RUN_CONFIG.server,
@@ -185,83 +186,6 @@ const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
     retryMaxDelayMs: 5,
   },
 });
-
-/**
- * The scenario's liveness evidence: the first worker reads as wedged, every
- * later one as busy.
- *
- * Only the platform sampling is faked. The machine, its cadence, the stop
- * decision and everything the loop does with the verdict are the shipped ones
- * — `makeTerminalWorkerEvidence` is what a real cook wires here, and it reads
- * cgroup counters this fixture has no honest way to produce. The wedged
- * numbers are the 2026-08-09 incident's: no output, no CPU, no I/O, an
- * unchanged repository and an unchanged process histogram.
- */
-const wedgeFirstWorkerEvidence = (): WorkerEvidenceShape => {
-  let wedgedWorker: string | null = null;
-  let busyTicks = 0;
-  const condemned = JSON.stringify({
-    decision: "stop",
-    confidence: "high",
-    rationale: "every process is asleep and the repository has not changed",
-  });
-  const isWedged = (ref: WorkerRef): boolean => {
-    wedgedWorker ??= ref.worker;
-    return wedgedWorker === ref.worker;
-  };
-  return {
-    inspectorSupported: true,
-    sampleSignals: (ref) =>
-      Effect.sync(() => {
-        if (isWedged(ref)) return { isActive: true, outputBytes: 0, cpuUsec: 0, ioBytes: 0 };
-        busyTicks += 1;
-        // Strictly growing, so the machine never calls a healthy worker idle
-        // and its supervision never completes.
-        return {
-          isActive: true,
-          outputBytes: busyTicks * 4_096,
-          cpuUsec: busyTicks * 1_000_000,
-          ioBytes: busyTicks * 8_192,
-        };
-      }),
-    probeRepository: (ref) =>
-      Effect.succeed(isWedged(ref) ? "deadbeef hash=stable" : `hash=${String(busyTicks)}`),
-    processFingerprint: (ref) =>
-      Effect.succeed(isWedged(ref) ? "fingerprint-a" : `fingerprint-${String(busyTicks)}`),
-    providerFallbackPending: Effect.succeed(false),
-    launchInspector: () => Effect.void,
-    inspectorStatus: () =>
-      Effect.succeed({
-        _tag: "finished",
-        rc: 0,
-        result: { text: condemned, byteSize: condemned.length, overflowed: false },
-      }),
-    stopInspector: () => Effect.void,
-  };
-};
-
-/**
- * The supervision cadence's clock: counted, not waited out.
- *
- * A real idle window is half an hour; these ticks cost twenty milliseconds
- * each. The real sleep is not the wait — it is the yield. A healthy worker is
- * supervised for its whole turn, and at one millisecond that loop starved the
- * fixture agent it was watching until the run's own deadline killed it.
- */
-const compressedSupervisionClock = (): SupervisionClock => {
-  let now = 0;
-  return {
-    nowSeconds: Effect.sync(() => now),
-    sleepSeconds: (seconds) =>
-      Effect.sleep(Duration.millis(20)).pipe(
-        Effect.andThen(
-          Effect.sync(() => {
-            now += seconds;
-          }),
-        ),
-      ),
-  };
-};
 
 const stateChildren = (workspace: ConformanceWorkspace): ReadonlyArray<Record<string, unknown>> => {
   const statePath = workspace.env["CONFORMANCE_STATE"];

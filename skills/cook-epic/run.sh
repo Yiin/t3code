@@ -34,8 +34,14 @@
 # Every other COOKEPIC_* knob refuses to start, loudly.
 # docs/epic-runs-rollout.md lists each dropped knob and its reason.
 #
+# A run directory is one run's journal. Pointing this script at a directory
+# whose pool run is still `running` continues that run: the interrupted
+# iterations are handed back to the loop, which decides what it can pick up and
+# writes off the rest. A directory whose run already finished is still refused.
+#
 # loop.log, mailbox.jsonl, summary.md, and the STOP control file keep their
-# exact meanings from the retired Bash coordinator.
+# exact meanings from the retired Bash coordinator. mailbox.jsonl is truncated
+# at every invocation, so a continued run's mailbox covers that invocation only.
 set -uo pipefail
 
 RUN_DIR="${1:?usage: run.sh <run-dir>}"

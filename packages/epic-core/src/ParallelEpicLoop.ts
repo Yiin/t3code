@@ -309,8 +309,15 @@ type ResumeAttempt =
   | { readonly _tag: "refused"; readonly refusal: IterationResumeRefusal }
   | { readonly _tag: "failed"; readonly error: EpicRunnerDispatchError };
 
-/** The persisted failure reason for a row a restart reconciled and nothing more. */
-const RESUME_ABANDONED_REASON = "server-restart";
+/**
+ * The persisted failure reason for a row a restart reconciled and nothing more.
+ *
+ * Exported because the restart path outside the loop writes it too: a row the
+ * caller cannot even hand back — one that names no child, or one whose resume
+ * budget is spent — ends the same way as one the loop gave up on, and reading
+ * two different reasons for one ending would split the transcript in half.
+ */
+export const RESUME_ABANDONED_REASON = "server-restart";
 
 /**
  * The typed failure reason for a refusal that leaves real work behind, or

@@ -16,6 +16,8 @@ import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  EpicRunId,
+  EventId,
   ProjectId,
   ThreadId,
   ProviderDriverKind,
@@ -31,7 +33,9 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
+  COMPRESSED_SUPERVISION_SETTINGS,
   beadCommentCounts,
+  compressedSupervisionClock,
   decodeConformanceScenario,
   isParallelScenario,
   landedChildIds,
@@ -39,6 +43,7 @@ import {
   normalizeParallelTranscript,
   releasedClaimIds,
   scenarioWorkers,
+  wedgeFirstWorkerEvidence,
   type ConformanceScenario,
   type ConformanceWorkspace,
 } from "@t3tools/epic-run-conformance";
@@ -47,6 +52,11 @@ import { layer as epicRunPreflightLayer } from "@t3tools/epic-core/EpicRunPrefli
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { DEFAULT_MAX_NO_COMMIT_STREAK, epicRunIterationPrompt } from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
+import {
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+  type OrchestrationThreadActivity,
+  type ProviderSessionResumeSettledActivityPayload,
+} from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -129,6 +139,9 @@ const configOverride = (scenario: ConformanceScenario): EpicRunConfigOverride =>
   supervision: {
     workerTimeoutSeconds: isParallelScenario(scenario) ? 30 : 1,
     stopGraceSeconds: 1,
+    // Compressed inspection cadence for the supervision scenarios; the clock
+    // below is counted, so these are never waited out.
+    ...(scenario.supervision === undefined ? {} : COMPRESSED_SUPERVISION_SETTINGS),
   },
   server: {
     maxNoCommitStreak: DEFAULT_MAX_NO_COMMIT_STREAK,
@@ -495,6 +508,14 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
    */
   const threadWorktrees = new Map<string, string>();
   const threadChildren = new Map<string, string>();
+  /**
+   * Durable per-thread activities, which is where a resume outcome lands.
+   *
+   * The projection is the server's durable memory of a thread, so these survive
+   * the restart below exactly as the real projection does. Only the runner
+   * layer is rebuilt; what a thread already recorded is still there.
+   */
+  const threadActivities = new Map<string, Array<OrchestrationThreadActivity>>();
   const worktreesDir = NodePath.join(NodePath.dirname(workspace.cwd), "worktrees");
   let sequence = 0;
 
@@ -594,6 +615,35 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
         ) {
           agentProcesses.get(command.threadId)?.kill("SIGKILL");
         }
+        if (command.type === "thread.session.resume") {
+          /**
+           * The fixture provider is a shell script. It holds no session, so
+           * there is nothing for a resume to continue and nothing it could
+           * honestly claim to have continued — which is exactly what
+           * `capability` states. The real reactor records the same answer as a
+           * durable activity carrying the request's command id, and that
+           * activity is how the runner learns it.
+           */
+          const settled: ProviderSessionResumeSettledActivityPayload = {
+            threadId: command.threadId,
+            requestCommandId: command.commandId,
+            outcome: {
+              _tag: "capability",
+              detail: "the conformance fixture provider holds no session to resume",
+            },
+          };
+          const activities = threadActivities.get(command.threadId) ?? [];
+          activities.push({
+            id: EventId.make(`${command.threadId}-resume-${String(activities.length)}`),
+            tone: "info",
+            kind: PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+            summary: "provider session resume settled",
+            payload: settled,
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+          });
+          threadActivities.set(command.threadId, activities);
+        }
         sequence += 1;
         return { sequence };
       }),
@@ -687,9 +737,25 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     getThreadDetailSnapshot: (threadId) =>
       Effect.sync(() => {
         const detail = details.get(threadId);
-        return detail === undefined
-          ? Option.none()
-          : Option.some({ snapshotSequence: sequence, thread: detail });
+        const activities = threadActivities.get(threadId) ?? [];
+        // A thread whose turn was cut has no detail yet, but it can still carry
+        // the activity a resume settled on — and that answer is the only thing
+        // the runner is waiting for.
+        if (detail === undefined && activities.length === 0) return Option.none();
+        const thread =
+          detail ??
+          makeThreadDetail({
+            threadId: ThreadId.make(threadId),
+            turnId: TurnId.make(`${threadId}-turn`),
+            turnState: "interrupted",
+            text: null,
+            streaming: false,
+            sessionStatus: "interrupted",
+          });
+        return Option.some({
+          snapshotSequence: sequence,
+          thread: { ...thread, activities },
+        });
       }),
   });
 
@@ -731,6 +797,18 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     quietPeriodMs: 5,
     retryBaseDelayMs: 5,
     retryMaxDelayMs: 5,
+    /**
+     * A scenario without `supervision` keeps the shipped evidence port, the way
+     * a host with no worker scope runs: only the dispatch deadline bounds a
+     * worker. One with it gets the shipped machine over fixture sampling, on a
+     * counted clock.
+     */
+    ...(scenario.supervision === undefined
+      ? {}
+      : {
+          workerEvidence: wedgeFirstWorkerEvidence(),
+          supervisionClock: compressedSupervisionClock(),
+        }),
   }).pipe(
     Layer.provide(preflightLayer),
     Layer.provide(infraLayer),
@@ -773,6 +851,30 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
           }),
         release: ({ repoCwd, worktreePath }) =>
           Effect.sync(() => {
+            /**
+             * A killed process runs no finalizer, and this release is one.
+             *
+             * The rule is stated over durable state, not over a window in time:
+             * the cut's own finalizers land whenever the runtime gets to them,
+             * which is after the layer scope has already closed. A worktree an
+             * iteration still owns as `running` is one whose process was killed
+             * holding it, and a killed process leaves it on disk. That is the
+             * whole difference the restart scenarios turn on.
+             *
+             * It is deliberately not "suppress everything the first leg does":
+             * an attempt that settled before the cut released its own worktree,
+             * its record is terminal by then, and leaving that tree behind makes
+             * the child's next `acquire` refuse a branch it should never have
+             * found (t3code-22o.18).
+             */
+            if (
+              store.iterations.some(
+                (iteration) =>
+                  iteration.turnStatus === "running" && iteration.worktreePath === worktreePath,
+              )
+            ) {
+              return;
+            }
             const git = workspace.env["CONFORMANCE_REAL_GIT"] ?? "git";
             NodeChildProcess.spawnSync(git, ["worktree", "remove", "--force", worktreePath], {
               cwd: repoCwd,
@@ -803,25 +905,8 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
     : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
 
-  const executed = yield* Effect.gen(function* () {
-    const service = yield* EpicRunner;
-    const startExit = yield* Effect.result(
-      service.startRun({
-        epicId: scenario.beads.epicId,
-        projectId,
-        cwd: workspace.cwd,
-        prompt: epicRunIterationPrompt({ pushEnabled: true }),
-        orientationFile: null,
-        modelSelection: initialSelection,
-        config: configOverride(scenario),
-      }),
-    );
-    if (startExit._tag === "Failure") {
-      return { startFailure: startExit.failure };
-    }
-    const runId = startExit.success.runId;
-    // Wait for the run to reach a terminal state.
-    yield* Effect.gen(function* () {
+  const awaitTerminalRun = (runId: EpicRunId) =>
+    Effect.gen(function* () {
       while (true) {
         const run = store.runs.get(runId);
         if (
@@ -833,8 +918,99 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
         yield* Effect.sleep("10 millis");
       }
     }).pipe(Effect.timeout("60 seconds"));
-    return { startFailure: null };
-  }).pipe(Effect.scoped, Effect.provide(runnerLayer));
+
+  /**
+   * Wait for the run to reach the position the cut is defined at.
+   *
+   * The row alone is not enough: it is written inside the dispatch transition,
+   * before the turn is started, so a cut that only waited for a running row
+   * would kill a worker that never ran — and the fixture agent's step counter
+   * would still be where it started, handing the restart's fresh iteration the
+   * same wedged step again.
+   */
+  const awaitRestartCut = (runId: EpicRunId, cutAfterRows: number) =>
+    Effect.gen(function* () {
+      while (true) {
+        const rows = store.iterations.filter((iteration) => iteration.runId === runId);
+        if (
+          rows.length >= cutAfterRows &&
+          rows.at(-1)?.turnStatus === "running" &&
+          dispatched.filter((command) => command.type === "thread.turn.start").length >=
+            cutAfterRows
+        ) {
+          return;
+        }
+        yield* Effect.sleep("10 millis");
+      }
+    }).pipe(Effect.timeout("30 seconds"));
+
+  const startRun = Effect.gen(function* () {
+    const service = yield* EpicRunner;
+    return yield* Effect.result(
+      service.startRun({
+        epicId: scenario.beads.epicId,
+        projectId,
+        cwd: workspace.cwd,
+        prompt: epicRunIterationPrompt({ pushEnabled: true }),
+        orientationFile: null,
+        modelSelection: initialSelection,
+        config: configOverride(scenario),
+      }),
+    );
+  });
+
+  const restart = scenario.restart;
+  const executed =
+    restart === undefined
+      ? yield* Effect.gen(function* () {
+          const startExit = yield* startRun;
+          if (startExit._tag === "Failure") return { startFailure: startExit.failure };
+          yield* awaitTerminalRun(startExit.success.runId);
+          return { startFailure: null };
+        }).pipe(Effect.scoped, Effect.provide(runnerLayer))
+      : yield* Effect.gen(function* () {
+          /**
+           * The cut is the layer scope closing, which is what a server stop is:
+           * every loop is interrupted, every lease released, and the in-memory
+           * registries go with it. What survives is what really survives — the
+           * store, the orchestration projection, and the worktrees on disk.
+           */
+          const first = yield* Effect.gen(function* () {
+            const startExit = yield* startRun;
+            if (startExit._tag === "Failure") {
+              return { startFailure: startExit.failure, runId: null };
+            }
+            yield* awaitRestartCut(startExit.success.runId, restart.cutAfterRows);
+            return { startFailure: null, runId: startExit.success.runId };
+          }).pipe(Effect.scoped, Effect.provide(runnerLayer));
+          if (first.startFailure !== null || first.runId === null) {
+            return { startFailure: first.startFailure };
+          }
+          if (restart.dropWorktree === true) {
+            // Gone the way git itself reports it gone. Removing the directory
+            // alone leaves the registration behind, and the next `worktree add`
+            // then refuses the path outright — a different fault entirely.
+            const git = workspace.env["CONFORMANCE_REAL_GIT"] ?? "git";
+            for (const iteration of store.iterations) {
+              if (iteration.turnStatus !== "running") continue;
+              const worktreePath = iteration.worktreePath ?? null;
+              if (worktreePath === null) continue;
+              NodeFS.rmSync(worktreePath, { recursive: true, force: true });
+            }
+            NodeChildProcess.spawnSync(git, ["worktree", "prune"], {
+              cwd: workspace.cwd,
+              stdio: "ignore",
+            });
+          }
+          // The server comes back: a fresh runner layer over the same store,
+          // reconciling what the dead one left running.
+          yield* Effect.gen(function* () {
+            const service = yield* EpicRunner;
+            yield* service.start();
+            yield* awaitTerminalRun(first.runId);
+          }).pipe(Effect.scoped, Effect.provide(runnerLayer));
+          return { startFailure: null };
+        });
 
   for (const child of agentProcesses.values()) child.kill("SIGKILL");
 

@@ -43,6 +43,7 @@ import {
   DEFAULT_RETRY_BASE_DELAY_MS,
   DEFAULT_RETRY_MAX_DELAY_MS,
   DEFAULT_SUBAGENT_GRACE_TIMEOUT_MS,
+  MAX_RESUMES_PER_ITERATION,
   parseMergeSlotHolder,
   shouldReclaimMergeSlot,
 } from "@t3tools/epic-core/policy";
@@ -52,6 +53,8 @@ import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
 import { EpicRunLock, type EpicRunLockLease } from "@t3tools/epic-core/ports/EpicRunLock";
+import type { WorkerEvidenceShape } from "@t3tools/epic-core/ports/WorkerEvidence";
+import type { SupervisionClock } from "@t3tools/epic-core/workerSupervision";
 import { prepareWorkerScope } from "@t3tools/epic-core/workerScope";
 import {
   maxLiveUtilizationByInstance,
@@ -126,15 +129,6 @@ const DEFAULT_PROVIDER_DEGRADATION_TTL_MS = 60 * 60 * 1000;
 /** How long a resume waits for a dying loop to release the run's own lock. */
 const LOOP_EXIT_WAIT_MS = 5_000;
 /**
- * How many times one iteration row may be picked back up after a restart.
- *
- * A row that keeps being interrupted is more likely a crash loop than bad
- * luck, and each resume spends the whole iteration budget again on a thread
- * whose transcript is already long. One retry, then the child is dispatched
- * fresh — which is exactly what the pre-resume runner always did.
- */
-const MAX_RESUMES_PER_ITERATION = 1;
-/**
  * Persisted failure reasons that mean "a restart ended this row". Counted per
  * child when a row predates the `resume_count` column and cannot say for
  * itself how often it was already resumed.
@@ -177,6 +171,19 @@ interface EpicRunLoopOptions {
  * layer-wide launch policy.
  */
 export interface EpicRunnerLiveOptions {
+  /**
+   * The worker liveness evidence port, and the clock its cadence runs on.
+   *
+   * Both default to the shipped ones: cgroup sampling through the worker scope
+   * registry, on the system clock. They are options for the same reason the
+   * timings above are — a conformance run has to produce a wedged worker and
+   * reach a verdict about it without waiting out half an hour of real idle
+   * time, and neither is something a fixture can honestly fake from outside
+   * the layer. Nothing else about supervision moves: the machine, its
+   * conservatism and the loop's stop path are the shipped ones.
+   */
+  readonly workerEvidence?: WorkerEvidenceShape | undefined;
+  readonly supervisionClock?: SupervisionClock | undefined;
   readonly iterationTimeoutMs?: number;
   readonly runStallTimeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -519,7 +526,11 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       // The tier-walking adapter lands separately (t3code-pg7): until then
       // every dispatch stays on the run-level selection.
       roleSelection: null,
-      workerEvidence: makeServerWorkerEvidence({ workerScopeRegistry, processRunner }),
+      workerEvidence:
+        options?.workerEvidence ?? makeServerWorkerEvidence({ workerScopeRegistry, processRunner }),
+      ...(options?.supervisionClock === undefined
+        ? {}
+        : { supervisionClock: options.supervisionClock }),
     };
     const readOrientation = makeReadOrientation({ fileSystem, path });
     const abandonRunningIterations = makeAbandonRunningIterations({

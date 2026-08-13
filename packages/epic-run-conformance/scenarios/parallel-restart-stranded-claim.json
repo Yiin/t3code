@@ -68,5 +68,5 @@
       "status": "done"
     }
   ],
-  "appliesTo": ["core"]
+  "appliesTo": ["core", "terminal", "server"]
 }

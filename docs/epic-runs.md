@@ -352,6 +352,26 @@ To prove all of this on a real machine, follow
 [`docs/operations/epic-run-restart-resume.md`](operations/epic-run-restart-resume.md).
 It holds a detached verification script and the risk register.
 
+## What a terminal cook restart checks
+
+A terminal pool cook restarts the same way, from the same shared loop. A run
+directory is one run's journal, so `t3 epic cook --run-dir <dir>` — and
+`skills/cook-epic/run.sh <dir>` through it — continues the run that directory
+holds whenever that run is still `running`. A directory holding a finished run
+is still refused, and so is one holding a run of a different epic.
+
+The cook reads the run record before preflight, so the worktrees of every row
+still marked `running` are named in the resume and forgiven. It hands the loop
+every such row whose child is named and whose `resume_count` is under the same
+cap of one, writes the rest off as `server-restart`, and lets the loop decide the
+rest. The terminal harness declares `lifecycle.resume: "unsupported"`, so in
+practice the loop hands the worktree and the claim to a fresh iteration and
+scores the old row `infra:resume-unsupported`.
+
+`branch` and `worktree_path` live in the iteration record for this one reader:
+without them a restarted cook cannot find the tree the dead worker was
+committing into.
+
 Parallel workers get one worktree each at
 `<baseDir>/worktrees/epic-<runId>/<issueId>`, and the merge queue gets
 `<baseDir>/worktrees/epic-<runId>/integration`. `baseDir` is the server base

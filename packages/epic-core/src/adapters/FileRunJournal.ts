@@ -95,6 +95,34 @@ const writeAtomically = (
     );
   });
 
+/**
+ * The run a directory holds, whatever its id.
+ *
+ * `getRun` filters by run id, which is right for every caller that already
+ * knows which run it wants. A restart does not: the run id it must continue is
+ * the one this directory was written with, and a process that lost its own
+ * memory of it has only the directory to go on. So this reads the record and
+ * lets the caller decide whether it is the one to pick back up.
+ *
+ * An absent record is `None`. An unreadable or undecodable one is an error:
+ * silently treating a corrupt journal as "no run here" would create a second
+ * run over the first one's worktrees.
+ */
+export const readRunRecord = (options: {
+  readonly runDirectory: string;
+}): Effect.Effect<
+  Option.Option<PersistedEpicRun>,
+  RunJournalError,
+  FileSystem.FileSystem | Path.Path
+> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const runPath = path.join(options.runDirectory, "run.json");
+    if (!(yield* fileSystem.exists(runPath))) return Option.none<PersistedEpicRun>();
+    return Option.some(yield* decodeRunJson(yield* fileSystem.readFileString(runPath)));
+  }).pipe(Effect.mapError(journalError("readRunRecord")));
+
 export const make = (options: FileRunJournalOptions) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -425,6 +453,11 @@ export const makePool = (options: FileRunJournalOptions) =>
           summary: null,
           why: null,
           failureReason: null,
+          // The only durable record of where this dispatch works. A restart
+          // reads them straight back off this file to build its resumed
+          // workers; the server reads the same two columns from its store.
+          branch: input.branch,
+          worktreePath: input.worktreePath,
           tierId: input.tierId,
           providerInstanceId: input.providerInstanceId,
           model: input.model,

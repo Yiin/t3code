@@ -83,6 +83,21 @@ export const PersistedEpicRunIteration = Schema.Struct({
   headBefore: Schema.optional(Schema.NullOr(Schema.String)),
   headAfter: Schema.optional(Schema.NullOr(Schema.String)),
   /**
+   * The worktree this dispatch worked in, and the branch it committed to.
+   *
+   * Written once, when the record is allocated, and never rewritten: a resume
+   * continues the same iteration in the same tree. Both are `null` for a
+   * sequential dispatch, which works the base checkout, and absent on every
+   * record written before these fields existed.
+   *
+   * They exist for one reader: the process that picks this record back up
+   * after a crash. `ResumedWorker` in `ParallelEpicLoop` needs both to find
+   * the tree the dead worker was committing into, and a file-backed run has
+   * nowhere else to read them from.
+   */
+  branch: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  worktreePath: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
    * How many times `markIterationResumed` reopened this record. Absent on
    * every record written before the column existed; treat absent as `0`. A
    * resume reuses the record, so `iterationIndex`, `threadId` and `startedAt`

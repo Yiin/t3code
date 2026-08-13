@@ -20,6 +20,19 @@ export const DEFAULT_MAX_NO_COMMIT_STREAK = 2;
 export const DEFAULT_INFRA_FAILURE_BUDGET = 5;
 export const DEFAULT_MAX_ITERATIONS = 50;
 
+/**
+ * How many times one iteration record may be picked back up after a restart.
+ *
+ * A record that keeps being interrupted is more likely a crash loop than bad
+ * luck, and each resume spends the whole iteration budget again on a session
+ * whose transcript is already long. One retry, then the child is dispatched
+ * fresh — which is what the pre-resume runner always did.
+ *
+ * Shared by both restart paths so a terminal cook and the server give an
+ * interrupted iteration the same number of second chances.
+ */
+export const MAX_RESUMES_PER_ITERATION = 1;
+
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:3053-3056`. */
 export const landingDescription = (input: {
   readonly pushEnabled: boolean;

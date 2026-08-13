@@ -15,8 +15,8 @@ Keep worker checks focused. Run a supplied gate command exactly.
 Three drivers run the epic-run conformance scenarios: the server driver, plus
 `coreDriver.test.ts` and `terminalDriver.test.ts` in
 `packages/epic-run-conformance/src`. The terminal leg is skipped unless
-`T3CODE_CONFORMANCE_TERMINAL` is set. Editing one scenario means running all
-three.
+`T3CODE_CONFORMANCE_TERMINAL` is set, and `T3CODE_CONFORMANCE_SCENARIO=<name>`
+narrows it to one scenario. Editing one scenario means running all three.
 
 `apps/server/vite.config.ts` sets `fileParallelism: false` and raises both
 `hookTimeout` and `testTimeout` to 120 s. Server tests are load sensitive.
