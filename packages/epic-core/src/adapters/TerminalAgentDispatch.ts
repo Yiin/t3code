@@ -762,6 +762,11 @@ export const makeTerminalAgentDispatch = (
               catch: (cause) =>
                 new DispatchError({ operation: "continueTurn", detail: detail(cause), cause }),
             }),
+          // No terminal harness absorbs a message into a running turn: a
+          // continuation is a second `spawn`, which is exactly what
+          // `continueTurn` above refuses while the child is alive. Saying so
+          // once here stops the caller asking again.
+          nudge: () => Effect.succeed("unsupported" as const),
           interrupt: Effect.tryPromise({
             try: async () => {
               const pgid = child?.pid;

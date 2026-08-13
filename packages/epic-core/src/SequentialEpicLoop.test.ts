@@ -375,6 +375,7 @@ const fixture = (input: {
             };
           }),
           continueTurn: () => Effect.void,
+          nudge: () => Effect.succeed("unsupported" as const),
           interrupt: Effect.void,
           release: Effect.void,
           runningSubagents: Effect.succeed({ mode: "unavailable", reason: "test" }),

@@ -792,6 +792,7 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
         runStallTimeoutMs: DEFAULT_RUN_STALL_TIMEOUT_MS,
         pollIntervalMs: 5,
         quietPeriodMs: 5,
+        conflictProbeIntervalMs: 0,
         retryBaseDelayMs: 5,
         retryMaxDelayMs: 5,
         maxConsecutiveFailures: config.server.maxConsecutiveFailures,

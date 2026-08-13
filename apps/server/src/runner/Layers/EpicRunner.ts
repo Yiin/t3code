@@ -70,6 +70,7 @@ import {
   type ResumedWorker,
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import {
+  DEFAULT_CONFLICT_PROBE_INTERVAL_MS,
   DEFAULT_POOL_POLL_INTERVAL_MS,
   DEFAULT_POOL_QUIET_PERIOD_MS,
   makePoolPolicy,
@@ -287,6 +288,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       runStallTimeoutMs: Math.max(1, options?.runStallTimeoutMs ?? DEFAULT_RUN_STALL_TIMEOUT_MS),
       pollIntervalMs: Math.max(1, options?.pollIntervalMs ?? DEFAULT_POOL_POLL_INTERVAL_MS),
       quietPeriodMs: Math.max(1, options?.quietPeriodMs ?? DEFAULT_POOL_QUIET_PERIOD_MS),
+      conflictProbeIntervalMs: DEFAULT_CONFLICT_PROBE_INTERVAL_MS,
       retryBaseDelayMs: seedRetryBaseDelayMs,
       retryMaxDelayMs: Math.max(
         seedRetryBaseDelayMs,

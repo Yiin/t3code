@@ -112,6 +112,24 @@ export type SubagentLiveness =
   | { readonly mode: "external"; readonly active: boolean; readonly evidence: string }
   | { readonly mode: "unavailable"; readonly reason: string };
 
+/**
+ * What a guarded mid-turn nudge did, and whether asking again is worth it.
+ *
+ * A nudge is advisory: it tells a worker something the runner learned while
+ * the worker was still working. Nothing depends on it landing, so this never
+ * fails — every refusal is one of these three answers.
+ *
+ * `sent` means the message reached the iteration's own running turn and the
+ * provider absorbed it as a steer. `skipped` is a refusal for now — the turn
+ * is not the one this handle owns, or it is no longer running — and the
+ * caller may ask again later. `unsupported` is a refusal forever: either the
+ * handle can never steer a running turn, or one that was delivered opened a
+ * turn of its own instead of being absorbed. A caller that reads
+ * `unsupported` must stop nudging this iteration, because every further
+ * attempt is a stray turn running unsupervised in the worker's worktree.
+ */
+export type IterationNudgeOutcome = "sent" | "skipped" | "unsupported";
+
 export class DispatchError extends Schema.TaggedErrorClass<DispatchError>()("DispatchError", {
   operation: Schema.String,
   detail: Schema.String,
@@ -124,6 +142,18 @@ export interface IterationHandle {
   readonly capabilities: AgentDispatchCapabilities;
   readonly awaitSettled: Effect.Effect<IterationSettle, DispatchError>;
   readonly continueTurn: (prompt: string) => Effect.Effect<void, DispatchError>;
+  /**
+   * Say something to a turn that is still running, under the adapter's own
+   * guards. Never fails; the adapter logs and answers with an outcome.
+   *
+   * This is deliberately NOT {@link IterationHandle.continueTurn}. A raw
+   * continuation sent mid-turn opens a second turn on a provider that cannot
+   * steer, and a second CLI process on a terminal harness — in both cases in
+   * the same worktree the first one is still writing. Only the adapter knows
+   * whether its provider absorbs a message into the running turn, so only the
+   * adapter can decide; the caller reads the outcome.
+   */
+  readonly nudge: (prompt: string) => Effect.Effect<IterationNudgeOutcome>;
   readonly interrupt: Effect.Effect<void, DispatchError>;
   readonly release: Effect.Effect<void, DispatchError>;
   /**

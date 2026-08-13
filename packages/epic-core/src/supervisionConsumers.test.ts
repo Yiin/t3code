@@ -57,6 +57,7 @@ const POLICY_SEED: PoolPolicySeed = {
   runStallTimeoutMs: 2_000,
   pollIntervalMs: 3_000,
   quietPeriodMs: 4_000,
+  conflictProbeIntervalMs: 8_000,
   retryBaseDelayMs: 5_000,
   retryMaxDelayMs: 6_000,
   maxConsecutiveFailures: 3,

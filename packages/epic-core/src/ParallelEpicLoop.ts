@@ -37,6 +37,7 @@ import {
 } from "./Errors.ts";
 import {
   childAttemptsFromHistory,
+  conflictRadarNudgePrompt,
   decideIterationBoundary,
   describeOpenChildren,
   EPIC_RUN_RESTART_HANDOFF_PROMPT,
@@ -208,6 +209,20 @@ export interface MergeDrainShape {
    * externally" and fails the run.
    */
   readonly recordIntegratedHead: (run: PoolRunContext) => Effect.Effect<void, EpicRunnerError>;
+  /**
+   * Where this run integrates: the main repository the merge queue merges in,
+   * and the branch every worker's branch must merge into.
+   *
+   * The loop core never learns the base branch name from anywhere else — it
+   * dispatches by child id and reads heads by path — so the conflict radar
+   * asks the party that already persists it. Never fails: `null` is a
+   * sequential run, a run whose merge state is not provisioned yet, and an
+   * unreadable store alike, and all three mean "no radar this tick".
+   */
+  readonly integrationTarget: (run: PoolRunContext) => Effect.Effect<{
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+  } | null>;
 }
 
 /** Never-failing git probes; `null` never counts as progress. */
@@ -467,6 +482,46 @@ interface ActiveIteration {
    * base branch out from under them.
    */
   isIntegrationFix: boolean;
+}
+
+/**
+ * How many times the conflict radar may speak to one iteration.
+ *
+ * Two, because the second nudge is the last one that can still be acted on: a
+ * worker that ignored the first is not going to resolve the third, and a
+ * provider that turns extra nudges into follow-ups (Prime) quietly stuffs the
+ * turn with them.
+ */
+const MAX_CONFLICT_RADAR_NUDGES = 2;
+
+/**
+ * One running worker the conflict radar watches.
+ *
+ * Armed when the worker's turn begins and dropped when its iteration ends, so
+ * the radar can only ever speak to a turn the loop still owns.
+ */
+interface ConflictRadarTarget {
+  readonly issueId: string;
+  readonly iterationIndex: number;
+  readonly branch: string;
+  readonly handle: IterationHandle;
+  /**
+   * The worker's own pool record, read live rather than copied: a child whose
+   * integration-fix title is only recognised after dispatch flips this flag,
+   * and the radar must never speak to the one worker allowed to move the base
+   * branch.
+   */
+  readonly iteration: ActiveIteration;
+  /**
+   * The `<baseHead>:<branchHead>` this worker was last probed at, or `null`
+   * before its first probe. Nothing has changed on either side while it holds,
+   * so re-probing it would re-read the same objects and re-send the same
+   * nudge.
+   */
+  lastProbedSignature: string | null;
+  nudgesSent: number;
+  /** False once this iteration must never be nudged again. */
+  eligible: boolean;
 }
 
 interface WorkerSettlement {
@@ -835,6 +890,22 @@ export const runParallelEpicLoop = (
      * `true` here still corrects a `false` that slipped through.
      */
     readonly onIntegrationFixDetected: () => void;
+    /**
+     * Fired once this iteration's provider turn is running and the loop holds
+     * a handle on it. Never fired for a dispatch that failed, so every armed
+     * worker has something that can be spoken to.
+     *
+     * The workspace travels with it because the conflict radar reads the
+     * branch, and the branch is a property of the tree this iteration got, not
+     * of the child it is cooking — a merge-fix child works a parked branch
+     * whose name no child id derives.
+     */
+    readonly onTurnBegan: (armed: {
+      readonly handle: IterationHandle;
+      readonly workspace: IterationWorkspace;
+      readonly issueId: string;
+      readonly iterationIndex: number;
+    }) => void;
   }): Effect.Effect<RunIterationResult, EpicRunnerError> => {
     let releaseContext: { readonly workspace: IterationWorkspace } | null = null;
     let releaseError: EpicRunnerError | null = null;
@@ -1344,6 +1415,15 @@ export const runParallelEpicLoop = (
           decision: "resumed",
           origin: null,
           detail: `continued at ${resumedWorker.threadId}`,
+        });
+      }
+
+      if (dispatched.handle !== null) {
+        args.onTurnBegan({
+          handle: dispatched.handle,
+          workspace,
+          issueId,
+          iterationIndex,
         });
       }
 
@@ -2028,6 +2108,8 @@ export const runParallelEpicLoop = (
     const initialMergeState = yield* ports.workspace.ensureIntegration(runCtx);
     const events = input.signals;
     const active = new Map<string, ActiveIteration>();
+    /** The workers the conflict radar may probe, keyed like {@link active}. */
+    const radar = new Map<string, ConflictRadarTarget>();
     let drainBeforeDispatch =
       initialMergeState?.entries.some(
         (entry) => entry.status === "queued" || entry.status === "draining",
@@ -2087,6 +2169,102 @@ export const runParallelEpicLoop = (
         );
         return true;
       });
+    /**
+     * One sweep of the conflict radar: trial-merge every armed worker's branch
+     * against the base branch, and tell the worker what it would hit.
+     *
+     * The whole tick reads objects only (`git merge-tree --write-tree`), so it
+     * needs no worktree, no index and no lock, and it can run beside a drain
+     * without either seeing the other. The one thing it must not run beside is
+     * an integration-fix child, which is the only worker allowed to move the
+     * base branch: reading a head that is being rewritten produces a signature
+     * that names a state nobody is in.
+     *
+     * Every port it touches is never-failing by construction, so a tick that
+     * learns nothing simply nudges nobody.
+     */
+    const conflictRadarTick = Effect.gen(function* () {
+      const armed = [...radar.values()].filter(
+        (worker) => worker.eligible && !worker.iteration.isIntegrationFix,
+      );
+      if (armed.length === 0) return;
+      if ([...active.values()].some((worker) => worker.isIntegrationFix)) return;
+      const target = yield* ports.mergeDrain.integrationTarget(runCtx);
+      if (target === null) return;
+      const baseHead = yield* ports.vcs.headCommit(target.repositoryPath, target.baseBranch);
+      if (baseHead === null) return;
+      for (const worker of armed) {
+        const branchHead = yield* ports.vcs.headCommit(target.repositoryPath, worker.branch);
+        if (branchHead === null) continue;
+        const signature = `${baseHead}:${branchHead}`;
+        if (signature === worker.lastProbedSignature) continue;
+        const conflicts = yield* ports.vcs.mergeTreeConflicts({
+          cwd: target.repositoryPath,
+          base: target.baseBranch,
+          branch: worker.branch,
+        });
+        if (conflicts === null || conflicts.length === 0) {
+          // A clean read is as final as a conflicting one: neither side can
+          // change without moving a head, and moving a head changes the
+          // signature.
+          worker.lastProbedSignature = signature;
+          continue;
+        }
+        if (worker.nudgesSent >= MAX_CONFLICT_RADAR_NUDGES) {
+          worker.eligible = false;
+          continue;
+        }
+        const outcome = yield* worker.handle.nudge(
+          conflictRadarNudgePrompt({ baseBranch: target.baseBranch, conflicts }),
+        );
+        if (outcome === "skipped") {
+          // Not a verdict on this signature — the turn was simply not
+          // speakable-to right now — so leave it unrecorded and try again.
+          yield* Effect.logDebug("epic.runner.conflict-radar-skipped", {
+            runId,
+            iterationIndex: worker.iterationIndex,
+            issueId: worker.issueId,
+            branch: worker.branch,
+          });
+          continue;
+        }
+        worker.lastProbedSignature = signature;
+        if (outcome === "unsupported") {
+          worker.eligible = false;
+        } else {
+          worker.nudgesSent += 1;
+        }
+        yield* Effect.logInfo("epic.runner.conflict-radar-nudge", {
+          runId,
+          iterationIndex: worker.iterationIndex,
+          issueId: worker.issueId,
+          branch: worker.branch,
+          baseBranch: target.baseBranch,
+          conflicts: conflicts.length,
+          outcome,
+        });
+      }
+    });
+
+    /**
+     * The radar's own fiber, forked as a child of this loop so it dies with
+     * it. It never fails the run: a probe or a nudge that blew up is one lost
+     * early warning, and the merge queue still catches the conflict later.
+     */
+    const conflictRadar = Effect.gen(function* () {
+      while (true) {
+        yield* Effect.sleep(Duration.millis(policy.conflictProbeIntervalMs));
+        yield* conflictRadarTick.pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("epic.runner.conflict-radar-failed", {
+              runId,
+              detail: Cause.pretty(cause),
+            }),
+          ),
+        );
+      }
+    });
+
     let terminalWorkerError: EpicRunnerError | null = null;
     let pendingFallback: PendingProviderFallback | null = null;
     let syntheticSequence = 0;
@@ -2159,7 +2337,33 @@ export const runParallelEpicLoop = (
           onIntegrationFixDetected: () => {
             activeIteration.isIntegrationFix = true;
           },
+          onTurnBegan: (armed) => {
+            // An in-place worker has no branch of its own to trial-merge — it
+            // commits where the base branch already is — and an
+            // integration-fix child IS the base branch writer.
+            if (armed.workspace.branch === null || armed.workspace.worktreePath === null) return;
+            if (activeIteration.isIntegrationFix) return;
+            radar.set(key, {
+              issueId: armed.issueId,
+              iterationIndex: armed.iterationIndex,
+              branch: armed.workspace.branch,
+              handle: armed.handle,
+              iteration: activeIteration,
+              lastProbedSignature: null,
+              nudgesSent: 0,
+              // The capability gate, applied before the first read rather than
+              // at the nudge: a harness that cannot absorb a mid-turn message
+              // is not worth probing for, and this keeps the radar out of
+              // every terminal run without it knowing what a harness is.
+              eligible: armed.handle.capabilities.continuation === "same-thread",
+            });
+          },
         }).pipe(
+          // The radar may only ever speak to a turn this loop still owns. A
+          // nudge sent after settlement opens a stray turn with no timeout, no
+          // liveness watch and no owner, inside a worktree the drain is about
+          // to trial-merge.
+          Effect.ensuring(Effect.sync(() => radar.delete(key))),
           Effect.exit,
           Effect.flatMap((exit) =>
             Queue.offer(events, {
@@ -2172,6 +2376,13 @@ export const runParallelEpicLoop = (
           Effect.forkChild,
         );
       });
+
+    // A sequential run has one worker committing on the base branch itself,
+    // so there is no second branch for anything to conflict with, and nothing
+    // for the radar to read.
+    if (!initialRun.config.execution.sequential && policy.conflictProbeIntervalMs > 0) {
+      yield* Effect.forkChild(conflictRadar);
+    }
 
     // Adopt what a previous process left running, before the scheduler gets a
     // chance to dispatch anything fresh. Each adopted worker holds its pool

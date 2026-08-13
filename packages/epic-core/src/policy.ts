@@ -243,6 +243,31 @@ export const conflictFailureDetail = (input: {
   return sections.join("\n\n");
 };
 
+/** How many conflicting paths a radar nudge names before it stops listing. */
+export const CONFLICT_RADAR_PROMPT_FILE_LIMIT = 20;
+
+/**
+ * What the conflict radar says to a worker whose branch has started to
+ * conflict with the base branch while it is still working.
+ *
+ * The radar reads with `git merge-tree`, so this is the conflict the merge
+ * queue would hit later, named before the author has forgotten why they wrote
+ * the code. It asks for a resolution, not a rebase: the queue trial-merges the
+ * branch, and a rebase mid-turn would rewrite commits the run already recorded.
+ */
+export const conflictRadarNudgePrompt = (input: {
+  readonly baseBranch: string;
+  readonly conflicts: ReadonlyArray<string>;
+}): string => {
+  const listed = input.conflicts.slice(0, CONFLICT_RADAR_PROMPT_FILE_LIMIT);
+  const omitted = input.conflicts.length - listed.length;
+  const files = [
+    ...listed.map((file) => `- ${file}`),
+    ...(omitted > 0 ? [`- (${String(omitted)} more)`] : []),
+  ].join("\n");
+  return `Epic runner: your branch now conflicts with \`${input.baseBranch}\` in these files:\n\n${files}\n\nA sibling child landed work that overlaps yours. Merge \`${input.baseBranch}\` into your branch now and resolve those conflicts while you still hold the context — keep both intents, do not discard the landed side. Re-run your focused checks after the resolution, commit it, then carry on with the child you were cooking. Do not merge your branch into \`${input.baseBranch}\`; the coordinator lands it.`;
+};
+
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2958`. */
 export const trialMergeMessage = (branch: string, childId: string): string =>
   `cook-epic: merge ${branch} (${childId})`;

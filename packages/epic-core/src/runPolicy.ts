@@ -12,6 +12,17 @@ import type { PersistedEpicRun } from "./ports/RunJournal.ts";
 /** Loop-scheduler polling defaults shared by the server runner and the terminal cook. */
 export const DEFAULT_POOL_POLL_INTERVAL_MS = 2_000;
 export const DEFAULT_POOL_QUIET_PERIOD_MS = 1_000;
+/**
+ * How often the conflict radar trial-merges every active worker's branch
+ * against the base branch (`ParallelEpicLoop.ts`).
+ *
+ * Three minutes because the probe is only worth what the worker can still do
+ * with it: a conflict found in the first minutes of an hour-long iteration is
+ * repaired by its own author, and one found at the merge queue is repaired by
+ * a stranger. It costs one `git merge-tree` per worker per tick, which reads
+ * objects only.
+ */
+export const DEFAULT_CONFLICT_PROBE_INTERVAL_MS = 3 * 60 * 1_000;
 
 export interface PoolPolicySeed {
   readonly iterationTimeoutMs: number;
@@ -23,6 +34,12 @@ export interface PoolPolicySeed {
   readonly runStallTimeoutMs: number;
   readonly pollIntervalMs: number;
   readonly quietPeriodMs: number;
+  /**
+   * The conflict radar's cadence. Layer-wide like `runStallTimeoutMs`, not
+   * per-run: it bounds a background read, not the epic. `0` disables the radar
+   * entirely, which is what a host with no merge queue wants.
+   */
+  readonly conflictProbeIntervalMs: number;
   readonly retryBaseDelayMs: number;
   readonly retryMaxDelayMs: number;
   readonly maxConsecutiveFailures: number;
@@ -81,6 +98,7 @@ export const makePoolPolicy = (seed: PoolPolicySeed, run: PersistedEpicRun): Poo
       run.config.server.quietPeriodMs,
       seed.quietPeriodMs,
     ),
+    conflictProbeIntervalMs: seed.conflictProbeIntervalMs,
     retryBaseDelayMs,
     retryMaxDelayMs,
     maxConsecutiveFailures: configured(

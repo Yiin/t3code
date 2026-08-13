@@ -191,6 +191,31 @@ terminal write goes through one proof (`proveEpicCompletion` in
 The proof reads Beads only. A run can still report `done` with entries the merge
 queue never landed; that gap is tracked in t3code-xig.
 
+## Conflict radar
+
+A parallel run trial-merges every running worker's branch into the base branch
+every three minutes, with `git merge-tree`. It reads objects only: no worktree,
+no index, no commit, nothing a worker or a drain can see. When the merge would
+conflict, the run tells that worker, in its running turn, which files conflict
+and to merge the base branch and resolve them now. The author still has the
+context; the merge-fix child that would otherwise get the conflict does not.
+
+The radar speaks at most twice per iteration, and only once per pair of heads:
+until the worker commits or something lands on the base branch, there is
+nothing new to say. A clean read is as final as a conflicting one. Sequential
+runs, in-place workers and integration-fix children are never probed, and
+neither is a run whose merge state has no base branch yet.
+
+A nudge is only ever delivered into the turn the run itself started, while that
+turn is still running. Claude, Codex, OpenCode and Prime absorb it as a steer.
+Kimi, Grok and Cursor cannot: their answer to a mid-turn message is a whole new
+turn, so the first nudge to one of them is the last — the run checks whether
+the provider reported a steer, and stops nudging that iteration when it did
+not. Terminal harnesses are never nudged at all; a continuation there is a
+second CLI process in the same worktree. A probe or a nudge that fails costs
+one early warning and nothing else. The merge queue still catches the conflict
+later, exactly as it did before the radar existed.
+
 ## Integration gate and host load
 
 The merge queue runs the integration gate once per batch. A drain reads what

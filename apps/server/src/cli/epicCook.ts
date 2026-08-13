@@ -37,6 +37,7 @@ import {
   type ResumedWorker,
 } from "@t3tools/epic-core/ParallelEpicLoop";
 import {
+  DEFAULT_CONFLICT_PROBE_INTERVAL_MS,
   DEFAULT_POOL_POLL_INTERVAL_MS,
   DEFAULT_POOL_QUIET_PERIOD_MS,
   makePoolPolicy,
@@ -821,6 +822,7 @@ export const cookCommand = Command.make("cook", {
               runStallTimeoutMs: DEFAULT_RUN_STALL_TIMEOUT_MS,
               pollIntervalMs: DEFAULT_POOL_POLL_INTERVAL_MS,
               quietPeriodMs: DEFAULT_POOL_QUIET_PERIOD_MS,
+              conflictProbeIntervalMs: DEFAULT_CONFLICT_PROBE_INTERVAL_MS,
               retryBaseDelayMs: DEFAULT_RETRY_BASE_DELAY_MS,
               retryMaxDelayMs: DEFAULT_RETRY_MAX_DELAY_MS,
               maxConsecutiveFailures: DEFAULT_MAX_CONSECUTIVE_FAILURES,

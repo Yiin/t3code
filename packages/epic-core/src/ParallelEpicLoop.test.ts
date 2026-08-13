@@ -42,6 +42,7 @@ import type { PoolPolicy } from "./runPolicy.ts";
 import type {
   AgentDispatchCapabilities,
   IterationHandle,
+  IterationNudgeOutcome,
   IterationResume,
   IterationResumeMode,
   IterationResumeRefusal,
@@ -137,6 +138,9 @@ const policy = (override: Partial<PoolPolicy> = {}): PoolPolicy => ({
   runStallTimeoutMs: 600_000,
   pollIntervalMs: 1,
   quietPeriodMs: 1,
+  // Off unless a test arms it, so every other test issues exactly the port
+  // calls it issued before the conflict radar existed.
+  conflictProbeIntervalMs: 0,
   retryBaseDelayMs: 0,
   retryMaxDelayMs: 0,
   maxConsecutiveFailures: 3,
@@ -211,6 +215,25 @@ const fixture = (input: {
   readonly roleSelections?: Partial<Record<EpicDispatchRole, ModelSelection>>;
   /** The tier each role's selection came from, for attribution assertions. */
   readonly roleTiers?: Partial<Record<EpicDispatchRole, EpicTierId>>;
+  /** Where the run integrates, as the conflict radar reads it. */
+  readonly integrationTarget?: {
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+  } | null;
+  /** The head of each named ref, re-read on every radar probe. */
+  readonly refHeads?: () => Readonly<Record<string, string | null>>;
+  /** What the conflict probe reports; `null` is git telling us nothing. */
+  readonly conflicts?: () => ReadonlyArray<string> | null;
+  /** Kill the conflict probe with a defect. */
+  readonly probeDies?: boolean;
+  /** Kill the nudge with a defect. */
+  readonly nudgeDies?: boolean;
+  /** What each nudge answers, in order; absent entries answer `sent`. */
+  readonly nudgeOutcomes?: ReadonlyArray<IterationNudgeOutcome>;
+  /** Called with the running nudge count, so a test can move a head between probes. */
+  readonly onNudge?: (count: number) => void;
+  /** Hand out a workspace with no branch of its own, as an in-place worker has. */
+  readonly inPlaceWorkspace?: boolean;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -306,6 +329,8 @@ const fixture = (input: {
   const releasedClaims: string[] = [];
   const enqueuedMerges: Array<Parameters<MergeDrainShape["enqueueMerge"]>[0]> = [];
   const parkedBranchReads: string[] = [];
+  const conflictProbes: Array<{ readonly base: string; readonly branch: string }> = [];
+  const nudges: Array<{ readonly ref: string; readonly prompt: string }> = [];
   const providerDegradations: Array<{
     readonly providerInstanceId: string;
     readonly failureReason: string;
@@ -478,6 +503,15 @@ const fixture = (input: {
             siblingRule: input.siblingRule ?? null,
           };
         }
+        if (input.inPlaceWorkspace === true) {
+          return {
+            cwd: "/repo",
+            branch: null,
+            worktreePath: null,
+            siblingWorktrees,
+            siblingRule: input.siblingRule ?? null,
+          };
+        }
         const mergeFix = parseMergeFixTitle(acquireInput.issueTitle);
         const branch = mergeFix?.branch ?? `epic/${acquireInput.issueId}`;
         return {
@@ -531,6 +565,13 @@ const fixture = (input: {
             };
           }),
     continueTurn: () => Effect.void,
+    nudge: (prompt) =>
+      Effect.sync(() => {
+        if (input.nudgeDies === true) throw new Error("nudge blew up");
+        nudges.push({ ref, prompt });
+        input.onNudge?.(nudges.length);
+        return input.nudgeOutcomes?.[nudges.length - 1] ?? "sent";
+      }),
     interrupt: Effect.sync(() => {
       interrupts += 1;
       ordering.push("handle:interrupt");
@@ -634,15 +675,28 @@ const fixture = (input: {
       Effect.sync(() => {
         ordering.push("merge:recordIntegratedHead");
       }),
+    integrationTarget: () =>
+      Effect.succeed(
+        input.integrationTarget === undefined
+          ? { repositoryPath: "/repo", baseBranch: "epic/base" }
+          : input.integrationTarget,
+      ),
   };
 
   const vcs: PoolVcsShape = {
-    headCommit: (cwd) =>
-      Effect.succeed(
-        siblingHeads.has(cwd)
-          ? `sib-head-${String(siblingHeads.get(cwd) ?? 0)}`
-          : `head-${String(head)}`,
-      ),
+    headCommit: (cwd, ref) =>
+      Effect.suspend(() => {
+        // Only the radar names a ref; every other reader asks for the head of
+        // the tree it is standing in.
+        if (ref !== undefined) {
+          return Effect.succeed(input.refHeads?.()[ref] ?? `head-of-${ref}`);
+        }
+        return Effect.succeed(
+          siblingHeads.has(cwd)
+            ? `sib-head-${String(siblingHeads.get(cwd) ?? 0)}`
+            : `head-${String(head)}`,
+        );
+      }),
     worktreeFingerprint: () => Effect.succeed(""),
     worktreeEvidence: (cwd) =>
       Effect.sync(() => {
@@ -650,7 +704,12 @@ const fixture = (input: {
         return input.worktreeEvidence ?? null;
       }),
     commitsAhead: () => Effect.succeed(0),
-    mergeTreeConflicts: () => Effect.succeed([]),
+    mergeTreeConflicts: (probe) =>
+      Effect.suspend(() => {
+        conflictProbes.push({ base: probe.base, branch: probe.branch });
+        if (input.probeDies === true) return Effect.die(new Error("merge-tree blew up"));
+        return Effect.succeed(input.conflicts?.() ?? []);
+      }),
   };
 
   const ports: ParallelEpicLoopPorts = {
@@ -726,6 +785,8 @@ const fixture = (input: {
     releasedClaims,
     enqueuedMerges,
     parkedBranchReads,
+    conflictProbes,
+    nudges,
     providerDegradations,
     providerClears,
     roleRequests,
@@ -1552,6 +1613,7 @@ it.live(
                     };
                   }).pipe(Effect.tap(() => Deferred.succeed(normalSettled, undefined))),
               continueTurn: () => Effect.void,
+              nudge: () => Effect.succeed("skipped" as const),
               interrupt: Effect.void,
               release: Effect.void,
               runningSubagents: Effect.succeed({ mode: "native", running: 0 }),
@@ -1583,6 +1645,7 @@ it.live(
         enqueueMerge: () => Effect.void,
         findParkedOriginalChild: () => Effect.succeed(Option.some("orig.child")),
         recordIntegratedHead: () => Effect.sync(() => void (recordIntegratedHeadCalls += 1)),
+        integrationTarget: () => Effect.succeed(null),
       };
 
       const vcs: PoolVcsShape = {
@@ -2338,5 +2401,206 @@ it.effect("carries a run's failure streaks into a resumed iteration", () =>
     assert.equal(run.infraStreak, 1);
     assert.equal(run.status, "running");
     yield* Fiber.interrupt(fiber);
+  }),
+);
+
+/**
+ * The conflict radar (t3code-2jh.7).
+ *
+ * Every case holds one worker open with `neverSettles` and lets the iteration
+ * timeout end it, which is the only way to keep a worker armed while the radar
+ * ticks. The radar's cadence is 1ms here, so each of these runs sweeps many
+ * times — what the assertions pin is how OFTEN it acts, not how often it ticks.
+ */
+const radarPolicy = (override: Partial<PoolPolicy> = {}): PoolPolicy =>
+  policy({
+    conflictProbeIntervalMs: 1,
+    iterationTimeoutMs: 80,
+    infraFailureBudget: 1,
+    ...override,
+  });
+
+it.live("nudges an active worker with the files its branch would conflict on", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      refHeads: () => ({ "epic/base": "base-1", "epic/epic.1": "branch-1" }),
+      conflicts: () => ["src/a.ts", "src/b.ts"],
+    });
+    yield* test.run;
+
+    // The probe trial-merges the worker's branch into the run's base branch,
+    // in the main repository — never in the worker's own worktree.
+    assert.deepEqual(test.conflictProbes[0], { base: "epic/base", branch: "epic/epic.1" });
+    assert.lengthOf(test.nudges, 1);
+    const prompt = test.nudges[0]?.prompt ?? "";
+    assert.include(prompt, "src/a.ts");
+    assert.include(prompt, "src/b.ts");
+    assert.include(prompt, "epic/base");
+    // The nudge goes to the worker's own handle, not to a fresh thread.
+    assert.equal(
+      test.nudges[0]?.ref,
+      epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+    );
+  }),
+);
+
+it.live("nudges nobody when the probe reads clean, and none when it reads nothing", () =>
+  Effect.gen(function* () {
+    const clean = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      conflicts: () => [],
+    });
+    yield* clean.run;
+    assert.isAbove(clean.conflictProbes.length, 0);
+    assert.deepEqual(clean.nudges, []);
+
+    // `null` is git telling us nothing — an unreadable repo, an unknown ref, a
+    // conflict it refused to name. None of them is evidence of a conflict.
+    const unreadable = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      conflicts: () => null,
+    });
+    yield* unreadable.run;
+    assert.isAbove(unreadable.conflictProbes.length, 0);
+    assert.deepEqual(unreadable.nudges, []);
+  }),
+);
+
+it.live("probes a signature once, and probes again once a head moves", () =>
+  Effect.gen(function* () {
+    const stationary = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      refHeads: () => ({ "epic/base": "base-1", "epic/epic.1": "branch-1" }),
+      conflicts: () => ["src/a.ts"],
+    });
+    yield* stationary.run;
+    // Many ticks, one probe: neither side moved, so re-reading them would
+    // re-send the same nudge for the same conflict.
+    assert.lengthOf(stationary.conflictProbes, 1);
+    assert.lengthOf(stationary.nudges, 1);
+
+    let branchHead = "branch-1";
+    const moved = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      refHeads: () => ({ "epic/base": "base-1", "epic/epic.1": branchHead }),
+      conflicts: () => ["src/a.ts"],
+      // The worker committed after the first nudge, so its branch is a
+      // different thing to trial-merge now.
+      onNudge: (count) => {
+        if (count === 1) branchHead = "branch-2";
+      },
+    });
+    yield* moved.run;
+    assert.lengthOf(moved.conflictProbes, 2);
+    assert.lengthOf(moved.nudges, 2);
+  }),
+);
+
+it.live("never probes an in-place worker or an integration-fix child", () =>
+  Effect.gen(function* () {
+    // An in-place worker commits where the base branch already is, so it has
+    // no branch of its own to trial-merge.
+    const inPlace = fixture({
+      sequential: false,
+      inPlaceWorkspace: true,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      conflicts: () => ["src/a.ts"],
+    });
+    yield* inPlace.run;
+    assert.deepEqual(inPlace.conflictProbes, []);
+    assert.deepEqual(inPlace.nudges, []);
+
+    // An integration-fix child (t3code-sha) IS the base branch writer. Reading
+    // a head it is rewriting produces a signature naming a state nobody is in.
+    const integrationFix = fixture({
+      sequential: false,
+      childTitle: "Merge fix: integrate team/mine into epic/epic-1/base",
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      conflicts: () => ["src/a.ts"],
+    });
+    yield* integrationFix.run;
+    assert.deepEqual(integrationFix.conflictProbes, []);
+    assert.deepEqual(integrationFix.nudges, []);
+  }),
+);
+
+it.live("survives a probe or a nudge that blows up", () =>
+  Effect.gen(function* () {
+    const brokenProbe = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      probeDies: true,
+    });
+    yield* brokenProbe.run;
+    // The iteration ends on its own timeout, exactly as it does with no radar
+    // at all: a lost early warning is not a run failure.
+    assert.equal(brokenProbe.iterations[0]?.failureReason, "infra:timeout");
+    assert.equal(brokenProbe.runRecord().status, "failed");
+    assert.deepEqual(brokenProbe.nudges, []);
+
+    const brokenNudge = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      conflicts: () => ["src/a.ts"],
+      nudgeDies: true,
+    });
+    yield* brokenNudge.run;
+    assert.equal(brokenNudge.iterations[0]?.failureReason, "infra:timeout");
+    assert.equal(brokenNudge.runRecord().status, "failed");
+  }),
+);
+
+it.live("never probes in sequential mode", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ commit: true, close: true, comment: true }],
+      policy: radarPolicy({ iterationTimeoutMs: null, infraFailureBudget: 5 }),
+      conflicts: () => ["src/a.ts"],
+    });
+    yield* test.run;
+
+    // One worker on the base branch itself: there is no second branch for
+    // anything to conflict with.
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(test.conflictProbes, []);
+    assert.deepEqual(test.nudges, []);
+  }),
+);
+
+it.live("stops nudging an iteration whose provider did not absorb the message", () =>
+  Effect.gen(function* () {
+    let branchHead = "branch-1";
+    const test = fixture({
+      sequential: false,
+      attempts: [{ neverSettles: true }],
+      policy: radarPolicy(),
+      refHeads: () => ({ "epic/base": "base-1", "epic/epic.1": branchHead }),
+      conflicts: () => ["src/a.ts"],
+      nudgeOutcomes: ["unsupported"],
+      // Even a moved head must not reopen the conversation: the first message
+      // opened a turn of its own instead of steering the running one.
+      onNudge: (count) => {
+        if (count === 1) branchHead = "branch-2";
+      },
+    });
+    yield* test.run;
+
+    assert.lengthOf(test.nudges, 1);
+    assert.lengthOf(test.conflictProbes, 1);
   }),
 );

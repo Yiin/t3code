@@ -17,8 +17,10 @@ import {
   EpicRunId,
   MessageId,
   PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+  PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
   ProviderSessionResumeSettledActivityPayload,
   ThreadId,
+  decodeProviderTurnSteerAttributedActivityPayload,
   type EpicRun as TransportEpicRun,
   type EpicSubagentMap,
   type ProviderSessionResumeOutcome,
@@ -146,6 +148,16 @@ const FORCED_STOP_POLL_INTERVAL_MS = 250;
 const decodeResumeSettledActivity = Schema.decodeUnknownOption(
   ProviderSessionResumeSettledActivityPayload,
 );
+/**
+ * How many projection reads a nudge waits for its steer attribution.
+ *
+ * The activity is written when the provider answers the send, so this is
+ * provider latency, not projection lag. Ten reads at the run's quiet period is
+ * ten seconds by default — long enough that a slow steer still counts as
+ * absorbed, short enough that a driver which never steers is written off
+ * inside one radar tick.
+ */
+const NUDGE_ABSORPTION_READS = 10;
 const RECENT_ITERATIONS_LIMIT = 25;
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1971,6 +1983,19 @@ export const makeServerMergeDrain = (deps: {
       store
         .findParkedOriginalChild(input)
         .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
+    integrationTarget: (runCtx) =>
+      store.getMergeState({ runId: runCtx.runId }).pipe(
+        Effect.map((state) =>
+          Option.match(state, {
+            onNone: () => null,
+            onSome: (merge) => ({
+              repositoryPath: merge.repositoryPath,
+              baseBranch: merge.baseBranch,
+            }),
+          }),
+        ),
+        Effect.catchCause(() => Effect.succeed(null)),
+      ),
     recordIntegratedHead: (runCtx) =>
       Effect.gen(function* () {
         const state = Option.getOrThrow(
@@ -2498,6 +2523,8 @@ export const makeServerPoolDispatch = (deps: {
   }): IterationHandle => {
     let settledTurn: SettledTurn | null = null;
     let ownedTurnId: TurnId | null = null;
+    /** False once a delivered nudge proved this provider does not absorb one. */
+    let nudgeEligible = true;
     const observeOwnedTurn = (turnId: TurnId) => {
       ownedTurnId = turnId;
       ownedIterationTurnIds.set(input.threadId, turnId);
@@ -2565,6 +2592,79 @@ export const makeServerPoolDispatch = (deps: {
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             createdAt: yield* nowIso,
           }).pipe(Effect.mapError(dispatchErrorFromRunner));
+        }),
+      nudge: (prompt) =>
+        Effect.gen(function* () {
+          if (!nudgeEligible) return "unsupported" as const;
+          // The message must land in the turn this iteration owns, and that
+          // turn must still be running. After settlement the ids no longer
+          // match, and a nudge sent then would start a turn of its own — with
+          // no timeout, no liveness watch and no owner — in a worktree the
+          // merge queue is about to trial-merge.
+          const snapshot = yield* readThreadDetail(input.threadId);
+          const latestTurn = snapshot?.thread.latestTurn ?? null;
+          if (
+            ownedTurnId === null ||
+            latestTurn === null ||
+            latestTurn.turnId !== ownedTurnId ||
+            latestTurn.state !== "running"
+          ) {
+            return "skipped" as const;
+          }
+          const messageId = MessageId.make(
+            `${input.threadId}-nudge-${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`,
+          );
+          // Deliberately no `delivery` field: `turn-boundary` would park this
+          // until the turn ends, which is the opposite of a nudge and comes
+          // back as exactly the stray turn the guard above exists to prevent.
+          const dispatched = yield* dispatchCommand({
+            type: "thread.turn.start",
+            commandId: yield* commandId("turn-nudge"),
+            threadId: input.threadId,
+            message: { messageId, role: "user", text: prompt, attachments: [] },
+            origin: "agent",
+            modelSelection: input.selection,
+            runtimeMode: input.runtimeMode,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            createdAt: yield* nowIso,
+          }).pipe(
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("epic.runner.nudge-failed", {
+                threadId: input.threadId,
+                cause,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+          if (!dispatched) return "skipped" as const;
+          // No adapter declares steer support before a send, so absorption is
+          // the only available evidence: the reactor writes this activity only
+          // when the provider reported that it steered the running turn. A
+          // driver that opened a second turn instead (Kimi, Grok, Cursor, or a
+          // Codex fallback) never writes it, and must never be nudged again.
+          const absorbed = yield* Effect.gen(function* () {
+            for (let read = 0; read < NUDGE_ABSORPTION_READS; read += 1) {
+              yield* Effect.sleep(Duration.millis(input.policy.quietPeriodMs));
+              const after = yield* readThreadDetail(input.threadId);
+              const attributed = (after?.thread.activities ?? []).some(
+                (activity) =>
+                  activity.kind === PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND &&
+                  Option.match(decodeProviderTurnSteerAttributedActivityPayload(activity.payload), {
+                    onNone: () => false,
+                    onSome: (payload) => payload.messageId === messageId,
+                  }),
+              );
+              if (attributed) return true;
+            }
+            return false;
+          });
+          if (absorbed) return "sent" as const;
+          nudgeEligible = false;
+          yield* Effect.logWarning("epic.runner.nudge-not-absorbed", {
+            threadId: input.threadId,
+            messageId,
+          });
+          return "unsupported" as const;
         }),
       interrupt: Effect.gen(function* () {
         yield* dispatchBestEffort("epic.runner.interrupt-failed", {

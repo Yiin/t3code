@@ -255,6 +255,14 @@ export const makeTerminalMergeDrain = (deps: {
       mergeQueueStore
         .parkedOriginalChild(input.runId, input.branch)
         .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
+    integrationTarget: (runCtx) =>
+      mergeQueueStore.read(runCtx.runId).pipe(
+        Effect.map((state) => ({
+          repositoryPath: state.repositoryPath,
+          baseBranch: state.baseBranch,
+        })),
+        Effect.catchCause(() => Effect.succeed(null)),
+      ),
     recordIntegratedHead: (runCtx) =>
       Effect.gen(function* () {
         const state = yield* mergeQueueStore
