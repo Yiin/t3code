@@ -9,6 +9,7 @@
 import type { OrchestrationCommand, ThreadId as ThreadIdType } from "@t3tools/contracts";
 import { ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -71,11 +72,11 @@ describe("epic runner forced stop grace", () => {
     Effect.gen(function* () {
       const { dispatched, reads, dispatch } = harness(["completed"]);
 
-      const startedAt = Date.now();
+      const startedAt = yield* Clock.currentTimeMillis;
       yield* dispatch.stopForced(threadId, { graceSeconds: 30 });
 
       // The grace is a bound, never a delay: a closed turn costs one read.
-      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect((yield* Clock.currentTimeMillis) - startedAt).toBeLessThan(1_000);
       expect(reads.length).toBe(1);
       expect(sessionStops(dispatched)).toHaveLength(1);
     }),
@@ -85,10 +86,10 @@ describe("epic runner forced stop grace", () => {
     Effect.gen(function* () {
       const { dispatched, reads, dispatch } = harness(["running"]);
 
-      const startedAt = Date.now();
+      const startedAt = yield* Clock.currentTimeMillis;
       yield* dispatch.stopForced(threadId, { graceSeconds: 0.75 });
 
-      const elapsed = Date.now() - startedAt;
+      const elapsed = (yield* Clock.currentTimeMillis) - startedAt;
       expect(elapsed).toBeGreaterThanOrEqual(700);
       expect(reads.length).toBeGreaterThan(1);
       // The grace bounds the wait; it never cancels the stop.

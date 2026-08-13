@@ -482,8 +482,6 @@ describe("EpicRunStore", () => {
         tierId: "cheap",
         providerInstanceId: ProviderInstanceId.make("claude-a"),
         model: "claude-sonnet-5",
-        phaseTimings: null,
-        promptBytes: null,
         startedAt: "2026-08-12T00:00:00.000Z",
       });
       yield* store.updateIteration({

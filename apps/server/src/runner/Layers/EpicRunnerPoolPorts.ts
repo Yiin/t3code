@@ -484,7 +484,15 @@ export const makeServerPoolJournal = (store: EpicRunStore["Service"]): PoolRunJo
   appendIteration: (iteration) => {
     // The server row carries worker identity instead of head probes.
     const { headBefore: _headBefore, headAfter: _headAfter, ...row } = iteration;
-    return store.appendIteration(row).pipe(Effect.mapError(journalError("appendIteration")));
+    // A fresh row has measured nothing yet. The store spells that `null`; the
+    // port spells it "key absent". They mean the same thing, so translate.
+    return store
+      .appendIteration({
+        ...row,
+        phaseTimings: row.phaseTimings ?? null,
+        promptBytes: row.promptBytes ?? null,
+      })
+      .pipe(Effect.mapError(journalError("appendIteration")));
   },
   allocateIteration: (input) =>
     store.allocateIteration(input).pipe(Effect.mapError(journalError("allocateIteration"))),
