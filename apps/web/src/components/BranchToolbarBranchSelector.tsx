@@ -22,9 +22,11 @@ import {
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { useRunnerOwnedIteration } from "../hooks/useRunnerOwnedIteration";
 import { readLocalApi } from "../localApi";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { usePaginatedBranches } from "../state/queries";
+import { describeRunnerOwnedIteration } from "../state/epics";
 import { useProject, useThread } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { threadEnvironment } from "../state/threads";
@@ -130,6 +132,14 @@ export function BranchToolbarBranchSelector({
   );
   const serverThread = useThread(threadRef);
   const serverSession = serverThread?.session ?? null;
+  // Switching a branch under a live epic worker would stop its session and
+  // repoint its worktree. The server refuses the session stop; lock the picker
+  // so the metadata half never lands on its own.
+  const runnerOwnedIteration = useRunnerOwnedIteration(threadRef);
+  const runnerOwnedReason =
+    runnerOwnedIteration === null
+      ? null
+      : describeRunnerOwnedIteration(runnerOwnedIteration).description;
   const draftThread = useComposerDraftStore((store) =>
     draftId ? store.getDraftSession(draftId) : store.getDraftThreadByRef(threadRef),
   );
@@ -164,7 +174,7 @@ export function BranchToolbarBranchSelector({
   // ---------------------------------------------------------------------------
   const setThreadBranch = useCallback(
     (branch: string | null, worktreePath: string | null) => {
-      if (!activeThreadId || !activeProject) return;
+      if (!activeThreadId || !activeProject || runnerOwnedReason !== null) return;
       if (serverSession && worktreePath !== activeWorktreePath) {
         void stopThreadSession({
           environmentId,
@@ -209,6 +219,7 @@ export function BranchToolbarBranchSelector({
       threadRef,
       environmentId,
       effectiveEnvMode,
+      runnerOwnedReason,
       stopThreadSession,
       updateThreadMetadata,
     ],
@@ -732,7 +743,10 @@ export function BranchToolbarBranchSelector({
           <ComboboxTrigger
             render={<Button variant="ghost" size="xs" />}
             className="min-w-0 text-muted-foreground/70 hover:text-foreground/80"
-            disabled={isInitialBranchesLoadPending || isBranchActionPending}
+            disabled={
+              isInitialBranchesLoadPending || isBranchActionPending || runnerOwnedReason !== null
+            }
+            title={runnerOwnedReason ?? undefined}
           >
             <GitBranchIcon className="size-3 shrink-0 opacity-70" />
             <span className="min-w-0 max-w-[240px] truncate">{triggerLabel}</span>

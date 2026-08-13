@@ -21,6 +21,11 @@ import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
 import { readLocalApi } from "../localApi";
 import {
+  describeRunnerOwnedIteration,
+  readEpicRuns,
+  runnerOwnedIterationForThread,
+} from "../state/epics";
+import {
   readEnvironmentSupportsSettlement,
   readEnvironmentThreadRefs,
   readProject,
@@ -72,6 +77,28 @@ export class ThreadSettleBlockedError extends Schema.TaggedErrorClass<ThreadSett
   }
 }
 
+/**
+ * An epic run holds this thread's iteration open, so the server would refuse
+ * the command.
+ *
+ * Raised here rather than let through, because these three actions reach the
+ * server from menus, the command palette and the settings list alike — the one
+ * place they all pass through is this hook. The message says which run and
+ * which child, which the transport-level refusal cannot.
+ */
+export class ThreadRunnerOwnedError extends Schema.TaggedErrorClass<ThreadRunnerOwnedError>()(
+  "ThreadRunnerOwnedError",
+  {
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export function useThreadActions() {
   const closeTerminal = useAtomCommand(terminalEnvironment.close);
   const archiveThreadMutation = useAtomCommand(threadEnvironment.archive, {
@@ -112,6 +139,24 @@ export function useThreadActions() {
   const handleNewThreadRef = useRef(handleNewThread);
   handleNewThreadRef.current = handleNewThread;
 
+  /** `null` when no run owns the thread, a ready-to-return failure when one does. */
+  const runnerOwnershipFailure = useCallback((target: ScopedThreadRef) => {
+    const owned = runnerOwnedIterationForThread(
+      readEpicRuns(target.environmentId),
+      target.threadId,
+    );
+    if (owned === null) return null;
+    return AsyncResult.failure(
+      Cause.fail(
+        new ThreadRunnerOwnedError({
+          environmentId: target.environmentId,
+          threadId: target.threadId,
+          detail: describeRunnerOwnedIteration(owned).description,
+        }),
+      ),
+    );
+  }, []);
+
   const resolveThreadTarget = useCallback((target: ScopedThreadRef) => {
     const thread = readThreadShell(target);
     if (!thread) {
@@ -129,6 +174,8 @@ export function useThreadActions() {
 
   const archiveThread = useCallback(
     async (target: ScopedThreadRef, opts: { onArchived?: () => void } = {}) => {
+      const ownedFailure = runnerOwnershipFailure(target);
+      if (ownedFailure) return ownedFailure;
       const resolved = resolveThreadTarget(target);
       if (!resolved) return AsyncResult.success(undefined);
       const { thread, threadRef } = resolved;
@@ -169,7 +216,7 @@ export function useThreadActions() {
 
       return archiveResult;
     },
-    [archiveThreadMutation, getCurrentRouteThreadRef, resolveThreadTarget],
+    [archiveThreadMutation, getCurrentRouteThreadRef, resolveThreadTarget, runnerOwnershipFailure],
   );
 
   const unarchiveThread = useCallback(
@@ -188,6 +235,8 @@ export function useThreadActions() {
 
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
+      const ownedFailure = runnerOwnershipFailure(target);
+      if (ownedFailure) return ownedFailure;
       const resolved = resolveThreadTarget(target);
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
@@ -379,6 +428,7 @@ export function useThreadActions() {
       removeWorktree,
       router,
       resolveThreadTarget,
+      runnerOwnershipFailure,
       sidebarThreadSortOrder,
       stopThreadSession,
     ],
@@ -386,6 +436,8 @@ export function useThreadActions() {
 
   const settleThread = useCallback(
     async (target: ScopedThreadRef) => {
+      const ownedFailure = runnerOwnershipFailure(target);
+      if (ownedFailure) return ownedFailure;
       // Version skew: never send the command to a server that predates it —
       // the raw protocol rejection would read as a random failure.
       if (!readEnvironmentSupportsSettlement(target.environmentId)) {
@@ -419,7 +471,7 @@ export function useThreadActions() {
         input: { threadId: target.threadId },
       });
     },
-    [resolveThreadTarget, settleThreadMutation],
+    [resolveThreadTarget, runnerOwnershipFailure, settleThreadMutation],
   );
 
   const unsettleThread = useCallback(

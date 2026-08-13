@@ -116,6 +116,7 @@ import {
   type Thread,
   type TurnDiffSummary,
 } from "../types";
+import { useRunnerOwnedIteration } from "../hooks/useRunnerOwnedIteration";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
@@ -219,7 +220,7 @@ import {
   useThreadSubagents,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
-import { epicsEnvironment } from "../state/epics";
+import { describeRunnerOwnedIteration, epicsEnvironment } from "../state/epics";
 import { launchPlannedEpic, plannedEpicIdentity, plannedEpicRoute } from "../plannedEpicFollowUp";
 import {
   epicRunPreflightBlockersFromError,
@@ -1486,6 +1487,17 @@ function ChatViewContent(props: ChatViewProps) {
       : null,
   );
   const activeEpicRun = activeEpicRunQuery.data;
+  // The run's own iteration row, when this thread is one the runner still
+  // holds. `epicIterationOwnership.ts` refuses the matching commands server
+  // side; this is the same fact, read from the run subscription, so the UI can
+  // turn them off and say why instead of failing them.
+  const runnerOwnedIteration = useRunnerOwnedIteration(activeThreadRef);
+  const runnerOwnedNotice = useMemo(
+    () =>
+      runnerOwnedIteration === null ? null : describeRunnerOwnedIteration(runnerOwnedIteration),
+    [runnerOwnedIteration],
+  );
+  const runnerOwnedReason = runnerOwnedNotice?.description ?? null;
   const plannedEpic = useMemo(
     () => resolveLatestFinalizedPlannedEpic(activeThread ?? null),
     [activeThread],
@@ -4110,6 +4122,30 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items = [...systemComposerBannerItems];
+    if (runnerOwnedNotice && runnerOwnedIteration) {
+      items.push({
+        id: `runner-owned:${runnerOwnedIteration.runId}:${String(runnerOwnedIteration.iterationIndex)}`,
+        variant: "info",
+        icon: <ChefHatIcon />,
+        title: runnerOwnedNotice.title,
+        description: <p className="text-pretty">{runnerOwnedNotice.description}</p>,
+        actions: (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() =>
+              void navigate({
+                to: "/epics/$environmentId/$epicId",
+                params: { environmentId, epicId: runnerOwnedIteration.epicId },
+                search: { project: runnerOwnedIteration.projectId },
+              })
+            }
+          >
+            View run
+          </Button>
+        ),
+      });
+    }
     if (activeThreadId !== null && runningSubagentCount > 0) {
       items.push({
         id: `subagent-presence:${activeThreadId}`,
@@ -4193,11 +4229,15 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread?.id,
     activeThreadId,
     branchRepairAction,
+    environmentId,
     firstRunningSubagentRowId,
     handleSwitchCheckoutToThread,
     handleUpdateThreadToCheckout,
     localCheckoutBranchMismatch,
+    navigate,
     onOpenSubagentInspector,
+    runnerOwnedIteration,
+    runnerOwnedNotice,
     runningSubagentCount,
     subagentRoster,
     systemComposerBannerItems,
@@ -4438,6 +4478,10 @@ function ChatViewContent(props: ChatViewProps) {
         );
         return;
       }
+      if (runnerOwnedNotice) {
+        setThreadError(activeThread.id, runnerOwnedNotice.description);
+        return;
+      }
       if (phase === "running" || isSendBusy || isConnecting) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
         return;
@@ -4481,6 +4525,7 @@ function ChatViewContent(props: ChatViewProps) {
       isSendBusy,
       phase,
       revertThreadCheckpoint,
+      runnerOwnedNotice,
       setThreadError,
     ],
   );
@@ -4495,6 +4540,10 @@ function ChatViewContent(props: ChatViewProps) {
       sendInFlightRef.current
     )
       return;
+    if (runnerOwnedNotice) {
+      setThreadError(activeThread.id, runnerOwnedNotice.description);
+      return;
+    }
     if (activePendingProgress) {
       onAdvanceActivePendingUserInput();
       return;
@@ -4880,6 +4929,10 @@ function ChatViewContent(props: ChatViewProps) {
 
   const onInterrupt = async () => {
     if (!activeThread) return;
+    if (runnerOwnedNotice) {
+      setThreadError(activeThread.id, runnerOwnedNotice.description);
+      return;
+    }
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
@@ -5937,6 +5990,7 @@ function ChatViewContent(props: ChatViewProps) {
                         isSendBusy={isSendBusy}
                         isPreparingWorktree={isPreparingWorktree}
                         environmentUnavailable={activeEnvironmentUnavailableState}
+                        runnerOwnedReason={runnerOwnedReason}
                         activePendingApproval={activePendingApproval}
                         pendingApprovals={pendingApprovals}
                         pendingUserInputs={pendingUserInputs}
