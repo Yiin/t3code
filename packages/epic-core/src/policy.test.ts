@@ -7,6 +7,7 @@ import {
   backoffDelayMs,
   childAttemptsFromHistory,
   childBranch,
+  conflictFailureDetail,
   decideGraceStep,
   decideIterationBoundary,
   failureReasonForOutcome,
@@ -638,6 +639,81 @@ describe("mergeFixDescription branch-set variant", () => {
     });
     expect(description).not.toContain("this repository");
     expect(description).toContain("- sibling `/work/proga-api` (base `main`)");
+  });
+});
+
+describe("conflictFailureDetail", () => {
+  it("names the repository, the merge output, the files and the hunks", () => {
+    expect(
+      conflictFailureDetail({
+        repositoryPath: "/repo",
+        mergeOutput: "CONFLICT (content): Merge conflict in foo.ts\n",
+        files: ["foo.ts", "bar.ts"],
+        diff: "@@ -1 +1 @@\n<<<<<<< HEAD",
+      }),
+    ).toBe(
+      "Conflict in `/repo`:\n" +
+        "\n" +
+        "CONFLICT (content): Merge conflict in foo.ts\n" +
+        "\n" +
+        "Conflicted files:\n" +
+        "- foo.ts\n" +
+        "- bar.ts\n" +
+        "\n" +
+        "Conflict hunks:\n" +
+        "@@ -1 +1 @@\n" +
+        "<<<<<<< HEAD",
+    );
+  });
+
+  // An unreadable worktree must not cost the repair the one thing git did say.
+  it("keeps the repository line when nothing else could be read", () => {
+    expect(
+      conflictFailureDetail({
+        repositoryPath: "/sib",
+        mergeOutput: "Automatic merge failed",
+        files: [],
+        diff: "",
+      }),
+    ).toBe("Conflict in `/sib`:\n\nAutomatic merge failed");
+  });
+});
+
+describe("mergeFixDescription failure detail", () => {
+  const base = {
+    childId: "child-1",
+    branch: "epic/child-1",
+    baseBranch: "mine",
+    gateCommand: "vp check",
+    pushEnabled: true,
+  };
+
+  it("indents every line of a multi-line conflict detail", () => {
+    const description = mergeFixDescription({
+      ...base,
+      reason: "conflict",
+      failureDetail: "Conflict in `/repo`:\n\nConflicted files:\n- foo.ts",
+    });
+    expect(description).toContain(
+      "\n\nWhat the conflict looked like:\n" +
+        "\n" +
+        "    Conflict in `/repo`:\n" +
+        "\n" +
+        "    Conflicted files:\n" +
+        "    - foo.ts",
+    );
+  });
+
+  // A gate diagnosis is one line, and its rendering predates this change.
+  it("keeps the one-line gate rendering byte-identical", () => {
+    const description = mergeFixDescription({
+      ...base,
+      reason: "gate-failed",
+      failureDetail: "FAIL src/foo.test.ts",
+    });
+    expect(description.endsWith("\n\nWhat the gate reported:\n\n    FAIL src/foo.test.ts")).toBe(
+      true,
+    );
   });
 });
 

@@ -21,6 +21,7 @@ import type {
   MergeSlotShape,
 } from "./ports/MergeQueue.ts";
 import {
+  conflictFailureDetail,
   integrateOperatorBaseMessage,
   integrationFixDescription,
   integrationFixTitle,
@@ -842,10 +843,20 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
         // Every integration worktree this branch set has commits for, main
         // first.
         const targets = [
-          ...(member.commits > 0 ? [snapshot.integrationWorktreePath] : []),
+          ...(member.commits > 0
+            ? [
+                {
+                  cwd: snapshot.integrationWorktreePath,
+                  repositoryPath: snapshot.repositoryPath,
+                },
+              ]
+            : []),
           ...member.siblingCommits
             .filter(({ ahead }) => ahead > 0)
-            .map(({ sibling }) => sibling.integrationWorktreePath),
+            .map(({ sibling }) => ({
+              cwd: sibling.integrationWorktreePath,
+              repositoryPath: sibling.repositoryPath,
+            })),
         ];
         /**
          * Where each repository stood before this member merged into it.
@@ -858,23 +869,34 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
          * sets; for a single repository the abort is the whole rollback.
          */
         const rollback: Array<{ readonly cwd: string; readonly head: string }> = [];
-        let conflicted = false;
+        let conflictDetail: string | undefined;
         for (const target of targets) {
           if (targets.length > 1) {
-            rollback.push({ cwd: target, head: yield* ports.git.head(target) });
+            rollback.push({ cwd: target.cwd, head: yield* ports.git.head(target.cwd) });
           }
           const trial = yield* ports.git.trialMerge({
-            cwd: target,
+            cwd: target.cwd,
             branch: member.entry.branch,
             message: trialMergeMessage(member.entry.branch, member.entry.childId),
           });
           if (!trial.merged) {
-            yield* ports.git.abortMerge(target);
-            conflicted = true;
+            // Read the conflict BEFORE aborting: the abort is what destroys
+            // the unmerged index and the conflict markers this describes.
+            const conflict = yield* ports.git.conflictDetail({
+              cwd: target.cwd,
+              maxOutputBytes: input.maxGateOutputBytes,
+            });
+            conflictDetail = conflictFailureDetail({
+              repositoryPath: target.repositoryPath,
+              mergeOutput: trial.output,
+              files: conflict?.files ?? [],
+              diff: conflict?.diff ?? "",
+            });
+            yield* ports.git.abortMerge(target.cwd);
             break;
           }
         }
-        if (!conflicted) {
+        if (conflictDetail === undefined) {
           batch.push(member);
           continue;
         }
@@ -890,6 +912,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           member.entry,
           "conflict",
           member.touched,
+          conflictDetail,
         );
         if (!repair.repaired) {
           return {

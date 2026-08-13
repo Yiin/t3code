@@ -148,6 +148,19 @@ const makeRealMergeGit = (): MergeGitShape => ({
       merged: gitResult(cwd, ["merge", "--no-ff", branch, "-m", message]).status === 0,
       output: "",
     })),
+  conflictDetail: ({ cwd }) =>
+    Effect.sync(() => {
+      const files = gitResult(cwd, ["diff", "--name-only", "--diff-filter=U"]);
+      if (files.status !== 0) return null;
+      const diff = gitResult(cwd, ["diff", "--diff-filter=U"]);
+      return {
+        files: files.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0),
+        diff: diff.status === 0 ? diff.stdout.trim() : "",
+      };
+    }),
   abortMerge: (cwd) => Effect.sync(() => void git(cwd, ["merge", "--abort"])),
   fastForward: ({ cwd, ref }) =>
     Effect.sync(() => ({

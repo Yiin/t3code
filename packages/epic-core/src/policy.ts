@@ -140,7 +140,16 @@ export const mergeFixDescription = (input: {
       ? " The coordinator lands the whole set when this issue closes, so leave the base branches and the sibling remotes to it."
       : ` The coordinator lands this branch when the issue closes, so leave \`${input.baseBranch}\` to it.`;
   if (input.failureDetail !== undefined && input.failureDetail.length > 0) {
-    description += `\n\nWhat the gate reported:\n\n    ${input.failureDetail}`;
+    const heading =
+      input.reason === "conflict" ? "What the conflict looked like" : "What the gate reported";
+    // Indented per line, not just at the front: a gate diagnosis is one line,
+    // but conflict detail is a block, and only indenting its first line would
+    // drop the rest out of the code block and reflow the hunks as prose.
+    const body = input.failureDetail
+      .split("\n")
+      .map((line) => (line.length > 0 ? `    ${line}` : ""))
+      .join("\n");
+    description += `\n\n${heading}:\n\n${body}`;
   }
   if (input.priorAttempts !== undefined && input.priorAttempts > 0) {
     // Repeating a repair that already failed is the failure mode this text
@@ -152,6 +161,32 @@ export const mergeFixDescription = (input: {
       `If it fails there too, do not "fix" this branch: report that on the epic and close this issue.`;
   }
   return description;
+};
+
+/**
+ * The conflict evidence a merge-fix child needs, composed from what the trial
+ * merge printed and what it left behind in the worktree.
+ *
+ * A conflict park used to reach its fix child carrying nothing at all, so the
+ * repair agent re-derived the conflict from scratch. `files` and `diff` are
+ * empty when the port could not read the worktree; the merge output alone is
+ * still worth sending.
+ */
+export const conflictFailureDetail = (input: {
+  readonly repositoryPath: string;
+  readonly mergeOutput: string;
+  readonly files: ReadonlyArray<string>;
+  readonly diff: string;
+}): string => {
+  const sections = [`Conflict in \`${input.repositoryPath}\`:`];
+  const output = input.mergeOutput.trim();
+  if (output.length > 0) sections.push(output);
+  if (input.files.length > 0) {
+    sections.push(`Conflicted files:\n${input.files.map((file) => `- ${file}`).join("\n")}`);
+  }
+  const diff = input.diff.trim();
+  if (diff.length > 0) sections.push(`Conflict hunks:\n${diff}`);
+  return sections.join("\n\n");
 };
 
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2958`. */

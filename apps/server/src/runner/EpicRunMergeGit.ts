@@ -89,6 +89,32 @@ export const makeEpicRunMergeGit = (input: {
           output: outputDetail(output),
         })),
       ),
+    conflictDetail: ({ cwd, maxOutputBytes }) =>
+      Effect.gen(function* () {
+        const files = yield* run("conflictFiles", cwd, ["diff", "--name-only", "--diff-filter=U"]);
+        if (files.exitCode !== 0) return null;
+        const diff = yield* input.git.execute({
+          operation: "EpicRunner.merge.conflictDiff",
+          cwd,
+          args: ["diff", "--diff-filter=U"],
+          allowNonZeroExit: true,
+          maxOutputBytes,
+          appendTruncationMarker: true,
+        });
+        return {
+          files: files.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0),
+          diff: diff.exitCode === 0 ? diff.stdout.trim() : "",
+        };
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.conflict-detail-failed", { cwd, cause }).pipe(
+            Effect.as(null),
+          ),
+        ),
+      ),
     abortMerge: (cwd) =>
       requireSuccess("abortMerge", cwd, ["merge", "--abort"]).pipe(Effect.asVoid),
     fastForward: ({ cwd, ref, branch }) =>

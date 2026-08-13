@@ -135,6 +135,14 @@ export interface MergeQueueStoreShape {
   }) => Effect.Effect<void, MergeQueuePortError>;
 }
 
+/** What a failed trial merge left behind in one worktree. */
+export interface MergeConflictDetail {
+  /** Repository-relative paths git reports as unmerged. */
+  readonly files: ReadonlyArray<string>;
+  /** The conflict hunks, bounded by the caller's byte cap. Empty when git reported none. */
+  readonly diff: string;
+}
+
 export interface MergeGitShape {
   /**
    * `git rev-parse <ref>`. `ref` defaults to `HEAD` — the branch actually
@@ -170,6 +178,21 @@ export interface MergeGitShape {
     readonly branch: string;
     readonly message: string;
   }) => Effect.Effect<{ readonly merged: boolean; readonly output: string }, MergeQueuePortError>;
+  /**
+   * The unmerged paths and conflict hunks a failed `trialMerge` left at `cwd`.
+   *
+   * Must be read BEFORE {@link MergeGitShape.abortMerge} — the abort throws
+   * away the very state this reports, which is why a conflict park used to
+   * reach its merge-fix child carrying nothing but the merge's own output.
+   *
+   * Never fails. It only enriches a park that is already happening, so a
+   * worktree git cannot answer for returns `null` and the park proceeds with
+   * the merge output alone (`ProcessPoolVcs` convention).
+   */
+  readonly conflictDetail: (input: {
+    readonly cwd: string;
+    readonly maxOutputBytes: number;
+  }) => Effect.Effect<MergeConflictDetail | null>;
   readonly abortMerge: (cwd: string) => Effect.Effect<void, MergeQueuePortError>;
   /**
    * Advance the base branch to `ref`, fast-forward only.

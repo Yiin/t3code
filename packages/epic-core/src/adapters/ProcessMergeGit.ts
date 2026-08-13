@@ -146,6 +146,36 @@ export const makeProcessMergeGit = (input: {
         cwd,
         run({ operation: "trialMerge", cwd, args: ["merge", "--no-ff", branch, "-m", message] }),
       ).pipe(Effect.map((output) => ({ merged: output.code === 0, output: outputDetail(output) }))),
+    conflictDetail: ({ cwd, maxOutputBytes }) =>
+      Effect.gen(function* () {
+        const files = yield* run({
+          operation: "conflictFiles",
+          cwd,
+          args: ["diff", "--name-only", "--diff-filter=U"],
+        });
+        if (files.code !== 0) return null;
+        const diff = yield* input.processRunner.run({
+          command: "git",
+          args: ["diff", "--diff-filter=U"],
+          cwd,
+          maxOutputBytes,
+          outputMode: "truncate",
+          truncatedMarker: "\n[output truncated]",
+        });
+        return {
+          files: files.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0),
+          diff: diff.code === 0 ? diff.stdout.trim() : "",
+        };
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.conflict-detail-failed", { cwd, cause }).pipe(
+            Effect.as(null),
+          ),
+        ),
+      ),
     abortMerge: (cwd) =>
       mutate(
         cwd,

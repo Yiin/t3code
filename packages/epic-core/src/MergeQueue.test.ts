@@ -118,6 +118,8 @@ const makeHarness = (
     readonly operatorBaseBranch?: string | null;
     /** Existing integration-fix children (t3code-sha), reusing `existingFixStatuses`' shape. */
     readonly existingIntegrationFixStatuses?: ReadonlyArray<string>;
+    /** Make the conflict-detail read fail the way an unreadable worktree does. */
+    readonly conflictDetailUnreadable?: boolean;
   } = {},
 ) => {
   const siblings = options.siblings ?? [];
@@ -245,6 +247,15 @@ const makeHarness = (
           heads[cwd] = `merged-${String(mergedInWorktree.length)}`;
         }
         return { merged, output: "trial" };
+      }),
+    conflictDetail: ({ cwd }) =>
+      Effect.sync(() => {
+        calls.push(`conflict-detail:${cwd}`);
+        if (options.conflictDetailUnreadable === true) return null;
+        return {
+          files: [`${cwd === "/worktrees/integration" ? "main" : "sibling"}-conflict.ts`],
+          diff: `<<<<<<< HEAD in ${cwd}`,
+        };
       }),
     abortMerge: (cwd) => Effect.sync(() => void calls.push(`abort:${cwd}`)),
     fastForward: ({ cwd, ref, branch }) =>
@@ -546,6 +557,40 @@ describe("MergeQueue", () => {
         reason: "conflict",
         fixIssueId: "fix-1",
       });
+    }),
+  );
+
+  /**
+   * The abort destroys the unmerged index, so a park that reads the conflict
+   * afterwards reads nothing. The order here is the whole point of the test.
+   */
+  it.effect("hands the conflict's repo, output and files to the merge-fix child", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ conflicts: ["epic/child-1"] });
+      yield* drain(harness.ports);
+      expect(harness.calls.indexOf("conflict-detail:/worktrees/integration")).toBeLessThan(
+        harness.calls.indexOf("abort:/worktrees/integration"),
+      );
+      const description = harness.fixes[0] ?? "";
+      expect(description).toContain("What the conflict looked like:");
+      expect(description).toContain("    Conflict in `/repo`:");
+      expect(description).toContain("    trial");
+      expect(description).toContain("    - main-conflict.ts");
+      expect(description).toContain("    <<<<<<< HEAD in /worktrees/integration");
+    }),
+  );
+
+  it.effect("still names the conflicting repo when the worktree cannot be read", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({
+        conflicts: ["epic/child-1"],
+        conflictDetailUnreadable: true,
+      });
+      yield* drain(harness.ports);
+      const description = harness.fixes[0] ?? "";
+      expect(description).toContain("    Conflict in `/repo`:");
+      expect(description).toContain("    trial");
+      expect(description).not.toContain("Conflicted files:");
     }),
   );
 
@@ -1065,6 +1110,10 @@ describe("MergeQueue", () => {
         expect(description).toContain("- this repository (`/repo`, base `mine`)");
         expect(description).toContain("- sibling `/sib` (base `sib-main`)");
         expect(description).toContain("leave the base branches and the sibling remotes to it");
+        // The sibling repository conflicted, so the detail names it — not the
+        // main repository the set merged into cleanly first.
+        expect(description).toContain("    Conflict in `/sib`:");
+        expect(description).toContain("    - sibling-conflict.ts");
       }),
     );
 

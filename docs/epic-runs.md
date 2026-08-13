@@ -218,6 +218,13 @@ tests. The blameless control gate — the same command on the base with nothing
 merged — runs once per batch, and the halves inherit its answer because nothing
 landed in between.
 
+A conflict park reads the conflict before it aborts the merge, and writes it
+into the merge-fix child: which repository conflicted, what the merge printed,
+the unmerged file list, and the conflict hunks up to the run's output cap. The
+repair agent therefore starts from what git actually said instead of
+reproducing the merge to find out. A worktree git cannot read still gets the
+repository and the merge output; the park never fails over missing detail.
+
 Run d7580b6c ran one gate command at one commit twice. The main checkout took
 421s and exited 0. The integration worktree took 23m01s and exited 1. The
 difference was the host: load average 29.92 on 16 cores, with 17 vitest
