@@ -836,12 +836,9 @@ export const make = (
             ).pipe(Effect.forkIn(runtimeScope));
             return yield* Effect.raceFirst(
               Fiber.join(promptRpcFiber),
+              // `cancel` already sent `session/cancel` before completing the
+              // signal; sending another one here would poison the next turn.
               Deferred.await(cancelSignal).pipe(
-                Effect.tap(() =>
-                  acp.agent
-                    .cancel({ sessionId: started.sessionId })
-                    .pipe(Effect.ignore, Effect.forkIn(runtimeScope)),
-                ),
                 Effect.andThen(Ref.set(lingeringPromptFiberRef, Option.some(promptRpcFiber))),
                 Effect.as(cancelledResponse),
               ),

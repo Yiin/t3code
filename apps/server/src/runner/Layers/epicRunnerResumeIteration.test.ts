@@ -238,17 +238,22 @@ describe("epic runner resumeIteration", () => {
     }),
   );
 
-  it.effect("fails on an infra fault instead of calling the child unresumable", () =>
+  it.effect("returns an infra fault as a refusal, not a failure", () =>
     Effect.gen(function* () {
       const { dispatch, dispatched, input } = harness({
         _tag: "failed",
         detail: "provider service exploded",
       });
 
-      const error = yield* dispatch.resumeIteration(input).pipe(Effect.flip);
+      const outcome = yield* dispatch.resumeIteration(input);
 
-      expect(error.commandType).toBe("thread.session.resume");
-      expect(error.detail).toBe("provider service exploded");
+      expect(outcome).toEqual({
+        _tag: "unavailable",
+        refusal: {
+          _tag: "failed",
+          detail: "provider service exploded",
+        },
+      });
       expect(turnStarts(dispatched)).toHaveLength(0);
     }),
   );

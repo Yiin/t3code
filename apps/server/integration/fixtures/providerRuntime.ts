@@ -183,7 +183,7 @@ export const claudeSubagentTurnFixture = [
     payload: {
       taskId: "task-subagent-explore",
       description: "Explore the auth module",
-      taskType: "subagent",
+      taskType: "local_agent",
       subagentType: "Explore",
       toolUseId: "toolu-spawn-explore",
     },
@@ -275,7 +275,7 @@ export const claudeSubagentFailedTurnFixture = [
     payload: {
       taskId: "task-subagent-migrate",
       description: "Migrate the settings schema",
-      taskType: "subagent",
+      taskType: "local_agent",
       subagentType: "general-purpose",
       toolUseId: "toolu-spawn-migrate",
     },
@@ -344,7 +344,7 @@ export const claudeParallelSubagentsTurnFixture = [
     payload: {
       taskId: "task-parallel-a",
       description: "Audit server routes",
-      taskType: "subagent",
+      taskType: "local_agent",
       subagentType: "Explore",
       toolUseId: "toolu-spawn-a",
     },
@@ -357,7 +357,7 @@ export const claudeParallelSubagentsTurnFixture = [
     payload: {
       taskId: "task-parallel-b",
       description: "Audit web components",
-      taskType: "subagent",
+      taskType: "local_agent",
       subagentType: "general-purpose",
       toolUseId: "toolu-spawn-b",
     },
