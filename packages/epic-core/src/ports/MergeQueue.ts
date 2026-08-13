@@ -148,6 +148,20 @@ export interface MergeGitShape {
     readonly baseBranch: string;
     readonly branch: string;
   }) => Effect.Effect<number, MergeQueuePortError>;
+  /**
+   * The files a branch changes relative to its merge base with `baseBranch`
+   * (`git diff --name-only <baseBranch>...<branch>`), as repository-relative
+   * paths.
+   *
+   * Two-dot would also report everything the base branch changed since the
+   * branch forked, which is not this branch's work and would make every
+   * long-lived branch look like it touches the whole tree.
+   */
+  readonly changedFiles: (input: {
+    readonly repositoryPath: string;
+    readonly baseBranch: string;
+    readonly branch: string;
+  }) => Effect.Effect<ReadonlyArray<string>, MergeQueuePortError>;
   readonly resetHard: (cwd: string, ref: string) => Effect.Effect<void, MergeQueuePortError>;
   readonly clean: (cwd: string) => Effect.Effect<void, MergeQueuePortError>;
   readonly setupWorktree: (cwd: string) => Effect.Effect<void, MergeQueuePortError>;

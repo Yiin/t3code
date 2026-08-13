@@ -133,6 +133,13 @@ const makeRealMergeGit = (): MergeGitShape => ({
       const count = gitResult(repositoryPath, ["rev-list", "--count", `${baseBranch}..${branch}`]);
       return count.status === 0 ? Number.parseInt(count.stdout.trim(), 10) || 0 : 0;
     }),
+  changedFiles: ({ repositoryPath, baseBranch, branch }) =>
+    Effect.sync(() =>
+      git(repositoryPath, ["diff", "--name-only", `${baseBranch}...${branch}`])
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0),
+    ),
   resetHard: (cwd, ref) => Effect.sync(() => void git(cwd, ["reset", "--hard", ref])),
   clean: (cwd) => Effect.sync(() => void git(cwd, ["clean", "-fdx"])),
   setupWorktree: () => Effect.void,

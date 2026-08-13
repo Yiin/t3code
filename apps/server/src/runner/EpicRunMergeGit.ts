@@ -65,6 +65,19 @@ export const makeEpicRunMergeGit = (input: {
         ]);
         return ahead.exitCode === 0 ? Number.parseInt(ahead.stdout.trim(), 10) || 0 : 0;
       }),
+    changedFiles: ({ repositoryPath, baseBranch, branch }) =>
+      requireSuccess("changedFiles", repositoryPath, [
+        "diff",
+        "--name-only",
+        `${baseBranch}...${branch}`,
+      ]).pipe(
+        Effect.map((output) =>
+          output.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0),
+        ),
+      ),
     resetHard: (cwd, ref) =>
       requireSuccess("resetHard", cwd, ["reset", "--hard", ref]).pipe(Effect.asVoid),
     clean: (cwd) => requireSuccess("clean", cwd, ["clean", "-fdx"]).pipe(Effect.asVoid),

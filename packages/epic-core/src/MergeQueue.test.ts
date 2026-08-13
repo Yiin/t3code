@@ -14,6 +14,7 @@ import {
   parseMergeFixTitle,
   runBaseBranch,
 } from "./policy.ts";
+import { MergeQueuePortError } from "./ports/MergeQueue.ts";
 import type {
   MergeGitShape,
   MergeQueueEntry,
@@ -80,6 +81,14 @@ const makeHarness = (
     readonly gateRedBranches?: ReadonlyArray<string>;
     /** Per-call gate answers: [merge set, control on base, …]. */
     readonly gateSequence?: ReadonlyArray<boolean>;
+    /**
+     * The files each branch changes, keyed by branch and reported in every
+     * repository the set touches. Defaults to one file named after the branch,
+     * so unrelated branches are disjoint unless a test says otherwise.
+     */
+    readonly files?: Readonly<Record<string, ReadonlyArray<string>>>;
+    /** Branches whose file footprint git refuses to report. */
+    readonly changedFilesFails?: ReadonlyArray<string>;
     readonly gateOutput?: string;
     /** Per-call gate output, for a control that differs from the merge set. */
     readonly gateOutputSequence?: ReadonlyArray<string>;
@@ -192,6 +201,19 @@ const makeHarness = (
           return options.siblingAhead?.[repositoryPath] ?? 1;
         }
         return options.empty?.includes(branch) === true ? 0 : 1;
+      }),
+    changedFiles: ({ repositoryPath, branch }) =>
+      Effect.gen(function* () {
+        calls.push(
+          repositoryPath === "/repo" ? `changed:${branch}` : `changed:${repositoryPath}:${branch}`,
+        );
+        if (options.changedFilesFails?.includes(branch) === true) {
+          return yield* new MergeQueuePortError({
+            operation: "changedFiles",
+            detail: "git diff failed",
+          });
+        }
+        return options.files?.[branch] ?? [`${branch}.ts`];
       }),
     resetHard: (cwd, ref) =>
       Effect.sync(() => {
@@ -1683,6 +1705,202 @@ describe("MergeQueue", () => {
         expect(harness.gateReceipts.filter((receipt) => receipt.phase === "control")).toHaveLength(
           2,
         );
+      }),
+    );
+  });
+
+  describe("disjoint file footprints (t3code-2jh.8)", () => {
+    const three = [entry(0, "first"), entry(1, "second"), entry(2, "third")];
+
+    it.effect("batches two entries that change different files into one gate", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          files: { "epic/first": ["src/a.ts"], "epic/second": ["src/b.ts"] },
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 0 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(1);
+        expect(harness.calls.filter((call) => call.startsWith("ff:"))).toHaveLength(1);
+        // Both footprints are measured before the first trial merge: a batch
+        // has to know its whole membership before it merges anything.
+        expect(harness.calls.slice(0, 6)).toEqual([
+          "head:/repo",
+          "slot-acquire:cook-epic-run-1",
+          "begin-drain",
+          "ahead:epic/first",
+          "ahead:epic/second",
+          "changed:epic/first",
+        ]);
+      }),
+    );
+
+    it.effect("gives two entries that change the same file a gate each", () =>
+      Effect.gen(function* () {
+        // Two branches touching one file can break each other in ways neither
+        // breaks alone, so one verdict cannot answer for both: batching them
+        // only buys the isolation pass that follows a red batch.
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          files: { "epic/first": ["src/a.ts"], "epic/second": ["src/a.ts", "src/b.ts"] },
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 0 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(2);
+        // Each merge set lands on its own, so each gets its own reset, trial
+        // merge, fast-forward and push.
+        expect(harness.calls.filter((call) => call.startsWith("reset:"))).toHaveLength(2);
+        expect(harness.calls.filter((call) => call.startsWith("ff:"))).toHaveLength(2);
+        expect(harness.calls.filter((call) => call.startsWith("push:"))).toHaveLength(2);
+        // Per-entry bookkeeping is unchanged: one completion, one merged
+        // event and one fold each, in queue order.
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0, 1]);
+        expect(harness.events.map((event) => (event as { readonly child: string }).child)).toEqual([
+          "first",
+          "second",
+        ]);
+        expect(harness.calls.filter((call) => call.startsWith("fold:"))).toEqual([
+          "fold:first",
+          "fold:second",
+        ]);
+        // Each gate names only the branches it verified.
+        expect(harness.gateReceipts.map((receipt) => receipt.branch)).toEqual([
+          "epic/first",
+          "epic/second",
+        ]);
+      }),
+    );
+
+    it.effect("keeps a disjoint neighbour batched around an overlapping pair", () =>
+      Effect.gen(function* () {
+        // Grouping is by consecutive runs, never by reordering: queue order is
+        // landing order, so `third` may batch with `second` but never jump
+        // ahead of it to join `first`.
+        const harness = makeHarness({
+          entries: three,
+          files: {
+            "epic/first": ["src/a.ts"],
+            "epic/second": ["src/a.ts"],
+            "epic/third": ["src/c.ts"],
+          },
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 3, parked: 0 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(2);
+        expect(harness.gateReceipts.map((receipt) => receipt.branch)).toEqual([
+          "epic/first",
+          "epic/second epic/third",
+        ]);
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0, 1, 2]);
+      }),
+    );
+
+    it.effect("puts a branch with an unreadable footprint through on its own", () =>
+      Effect.gen(function* () {
+        // A footprint git could not report is not an empty one. Batching on
+        // evidence that does not exist is how a shared verdict stops meaning
+        // anything, so an unmeasurable branch just goes alone.
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          changedFilesFails: ["epic/first"],
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 0 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(2);
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0, 1]);
+      }),
+    );
+
+    it.effect("measures a footprint in every repository the branch set touches", () =>
+      Effect.gen(function* () {
+        // The same relative path in two repositories is two different files,
+        // so a footprint that forgot which repository it came from would call
+        // disjoint sets overlapping.
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          siblings: [
+            {
+              repositoryPath: "/sib",
+              baseBranch: "sib-main",
+              integrationWorktreePath: "/worktrees/integ-sib",
+              lastAcceptedHead: "sib-0",
+            },
+          ],
+          files: { "epic/first": ["src/a.ts"], "epic/second": ["src/b.ts"] },
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 0 });
+
+        expect(harness.calls.filter((call) => call.startsWith("changed:"))).toEqual([
+          "changed:epic/first",
+          "changed:/sib:epic/first",
+          "changed:epic/second",
+          "changed:/sib:epic/second",
+        ]);
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(1);
+      }),
+    );
+
+    it.effect("splits a set that overlaps only inside a sibling repository", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          entries: [entry(0, "first"), entry(1, "second")],
+          siblings: [
+            {
+              repositoryPath: "/sib",
+              baseBranch: "sib-main",
+              integrationWorktreePath: "/worktrees/integ-sib",
+              lastAcceptedHead: "sib-0",
+            },
+          ],
+          // Reported in both repositories, so the overlap is in the sibling
+          // too — and one shared file anywhere is enough to split the set.
+          files: { "epic/first": ["src/a.ts"], "epic/second": ["src/a.ts"] },
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 0 });
+
+        expect(harness.calls.filter((call) => call === "gate")).toHaveLength(2);
+      }),
+    );
+
+    it.effect("never reads a footprint when only one entry is queued", () =>
+      Effect.gen(function* () {
+        // Nothing to be disjoint from, so the reads would buy nothing.
+        const harness = makeHarness();
+
+        yield* drain(harness.ports);
+
+        expect(harness.calls.some((call) => call.startsWith("changed:"))).toBe(false);
+      }),
+    );
+
+    it.effect("still halves a disjoint batch its gate rejected", () =>
+      Effect.gen(function* () {
+        // Disjoint footprints make a shared gate honest, not infallible: a
+        // member can still be red on its own, and the isolation pass is
+        // unchanged.
+        const harness = makeHarness({
+          entries: three,
+          gateRedBranches: ["epic/third"],
+          files: {
+            "epic/first": ["src/a.ts"],
+            "epic/second": ["src/b.ts"],
+            "epic/third": ["src/c.ts"],
+          },
+        });
+
+        expect(yield* drain(harness.ports)).toEqual({ _tag: "drained", merged: 2, parked: 1 });
+
+        expect(harness.events.at(0)).toMatchObject({
+          event: "split",
+          branches: ["epic/first", "epic/second", "epic/third"],
+          halves: [2, 1],
+        });
       }),
     );
   });

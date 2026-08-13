@@ -112,6 +112,19 @@ export const makeProcessMergeGit = (input: {
         });
         return ahead.code === 0 ? Number.parseInt(ahead.stdout.trim(), 10) || 0 : 0;
       }),
+    changedFiles: ({ repositoryPath, baseBranch, branch }) =>
+      requireSuccess({
+        operation: "changedFiles",
+        cwd: repositoryPath,
+        args: ["diff", "--name-only", `${baseBranch}...${branch}`],
+      }).pipe(
+        Effect.map((output) =>
+          output.stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0),
+        ),
+      ),
     resetHard: (cwd, ref) =>
       // Terminal parity: `skills/cook-epic/run-legacy.sh:2942-2946`.
       mutate(

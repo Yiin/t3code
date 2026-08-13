@@ -193,11 +193,20 @@ queue never landed; that gap is tracked in t3code-xig.
 
 ## Integration gate and host load
 
-The merge queue runs the integration gate once per batch. Every branch queued
-when a drain starts is trial-merged into one integration state, and one gate
-verifies the lot. Three children that merge cleanly together cost one gate, not
-three. The gate is the heaviest thing an epic run does, and its result depends
-on the machine it runs on, not only on the code it tests.
+The merge queue runs the integration gate once per batch. A drain reads what
+each queued branch changes (`git diff --name-only <base>...<branch>`, across
+every repository the branch set touches) and groups the queue into runs of
+consecutive branches that share no file. Each group is trial-merged into one
+integration state, and one gate verifies the lot. Three children that merge
+cleanly together and touch different files cost one gate, not three. The gate is
+the heaviest thing an epic run does, and its result depends on the machine it
+runs on, not only on the code it tests.
+
+Two branches that change the same file get a gate each. They can break each
+other in ways neither breaks alone, so one verdict cannot answer for both, and
+batching them only buys the isolation pass that follows a red batch. Grouping
+never reorders the queue: queue order is landing order. A branch whose file list
+git could not report goes through on its own.
 
 A red batch is halved and each half re-verified, until a single branch fails on
 its own and is parked with a merge-fix child. Nothing lands from a red batch:

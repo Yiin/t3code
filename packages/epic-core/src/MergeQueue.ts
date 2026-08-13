@@ -180,6 +180,95 @@ interface BatchMember {
 }
 
 /**
+ * One member with its file footprint measured, or `null` when git could not
+ * report it.
+ *
+ * `null` is not "no files": a member whose footprint is unknown batches with
+ * nobody, because disjointness is the only thing that makes a shared gate
+ * verdict attributable.
+ */
+interface MeasuredMember {
+  readonly member: BatchMember;
+  readonly files: ReadonlySet<string> | null;
+}
+
+/**
+ * One file, qualified by the repository it lives in.
+ *
+ * A branch set spans repositories, and `src/index.ts` in the main repo has
+ * nothing to do with `src/index.ts` in a sibling — comparing the bare relative
+ * paths would call two disjoint sets overlapping.
+ */
+const fileKey = (repositoryPath: string, path: string): string => `${repositoryPath}\u0000${path}`;
+
+/**
+ * Every file a branch set changes, across every repository it has commits in,
+ * or `null` when any of those reads failed.
+ *
+ * Fail-soft on purpose: a footprint this drain could not measure is not an
+ * empty one, and treating it as empty would batch a branch on evidence that
+ * does not exist. An unmeasurable branch just goes through alone, which is
+ * exactly what the queue did before batching by footprint.
+ */
+const measureFiles = Effect.fn("MergeQueue.measureFiles")(function* (
+  ports: MergeQueuePorts,
+  member: BatchMember,
+) {
+  const files = new Set<string>();
+  for (const repo of member.touched) {
+    const changed = yield* ports.git
+      .changedFiles({
+        repositoryPath: repo.path,
+        baseBranch: repo.baseBranch,
+        branch: member.entry.branch,
+      })
+      .pipe(Effect.orElseSucceed(() => null));
+    if (changed === null) return null;
+    for (const path of changed) files.add(fileKey(repo.path, path));
+  }
+  return files;
+});
+
+/**
+ * Split the queue into runs of consecutive entries whose file footprints are
+ * pairwise disjoint.
+ *
+ * Disjointness is what makes a shared gate honest. Members that touch the same
+ * file can break each other in ways no single member breaks alone, so a red
+ * batch of them costs the isolation pass to learn nothing about any member;
+ * members that touch nothing in common are as independent as separate runs, so
+ * one gate answers for all of them. Consecutive because queue order is landing
+ * order — reordering entries to pack fuller batches would let a later child
+ * land before the one it was written against.
+ */
+const groupByFootprint = (
+  measured: ReadonlyArray<MeasuredMember>,
+): Array<ReadonlyArray<BatchMember>> => {
+  const groups: Array<ReadonlyArray<BatchMember>> = [];
+  let current: Array<BatchMember> = [];
+  // The union of the current group's footprints. Checking a candidate against
+  // the union is the same test as checking it against every member in turn.
+  let claimed = new Set<string>();
+  const flush = () => {
+    if (current.length > 0) groups.push(current);
+    current = [];
+    claimed = new Set<string>();
+  };
+  for (const { member, files } of measured) {
+    if (files === null) {
+      flush();
+      groups.push([member]);
+      continue;
+    }
+    if ([...files].some((file) => claimed.has(file))) flush();
+    current.push(member);
+    for (const file of files) claimed.add(file);
+  }
+  flush();
+  return groups;
+};
+
+/**
  * Halve a batch its gate rejected.
  *
  * Halving, not one-by-one retesting: a batch of N with a single bad branch
@@ -697,12 +786,25 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     /**
      * The batches still to verify, in queue order.
      *
-     * Starts as one batch holding everything queued: the whole point is that
-     * three compatible children cost one gate, not three. A red batch is
-     * replaced here by its two halves, so the list only ever shrinks toward
-     * single entries, and a single entry never splits again.
+     * Starts as runs of consecutive entries with disjoint file footprints: the
+     * whole point is that three compatible children cost one gate, not three,
+     * and disjointness is what lets one verdict answer for all three. A red
+     * batch is replaced here by its two halves, so the list only ever shrinks
+     * toward single entries, and a single entry never splits again.
+     *
+     * A lone entry is never measured — there is nothing to be disjoint from,
+     * so the footprint reads would buy nothing.
      */
-    const batches: Array<ReadonlyArray<BatchMember>> = pending.length > 0 ? [pending] : [];
+    const batches: Array<ReadonlyArray<BatchMember>> =
+      pending.length > 1
+        ? groupByFootprint(
+            yield* Effect.forEach(pending, (member) =>
+              measureFiles(ports, member).pipe(Effect.map((files) => ({ member, files }))),
+            ),
+          )
+        : pending.length > 0
+          ? [pending]
+          : [];
     /**
      * Whether the base already passed this gate, with nothing merged, since
      * the last thing landed.
