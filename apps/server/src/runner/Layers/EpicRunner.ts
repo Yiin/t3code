@@ -1075,6 +1075,8 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                   summary: "abandoned by server restart",
                   why: null,
                   failureReason: "server-restart",
+                  phaseTimings: null,
+                  promptBytes: null,
                   finishedAt: yield* DateTimeNowIso,
                 })
                 .pipe(Effect.mapError(storeError("updateIteration")));

@@ -16,7 +16,28 @@ import type {
   MergeQueueSnapshot,
   MergeQueueStoreShape,
 } from "./ports/MergeQueue.ts";
+import { gateCommandDigest, type GateReceipt } from "./ports/Gate.ts";
 import { mirrorPath } from "./siblings.ts";
+
+/** A gate result carrying the receipt shape `ProcessGate` measures. */
+const passingGate = () => ({
+  passed: true as const,
+  repositoryPaths: [] as ReadonlyArray<string>,
+  output: "",
+  receipt: {
+    commandDigest: gateCommandDigest("gate"),
+    cwd: "/integration",
+    outcome: "passed",
+    exitCode: 0,
+    queuedAt: "2026-08-13T00:00:00.000Z",
+    acquiredAt: "2026-08-13T00:00:00.000Z",
+    finishedAt: "2026-08-13T00:00:01.000Z",
+    lockWaitMs: 0,
+    executionMs: 1_000,
+    inputHeads: [],
+    output: "",
+  } satisfies GateReceipt,
+});
 
 const INTEGRATION_BRANCH = "cook-epic-integration-run-1";
 const CHILD_BRANCH = "epic/child-1";
@@ -283,9 +304,8 @@ const makeDrainFixture = (input: {
         reclaim: () => Effect.succeed({ reclaimed: false }),
         holder: Effect.succeed(Option.none()),
       },
-      gate: gate ?? {
-        run: () => Effect.succeed({ passed: true, repositoryPaths: [], output: "" }),
-      },
+      gate: gate ?? { run: () => Effect.succeed(passingGate()) },
+      gateReceipts: { record: () => Effect.void, list: () => Effect.succeed([]) },
       repair: {
         restoreDependencies: () =>
           Effect.succeed({ restored: false, detail: "no repair in this fixture" }),
@@ -529,7 +549,7 @@ describe("drainMergeQueue over real git repositories", () => {
           run: () =>
             Effect.sync(() => {
               commitFile(drainFixture.fixture.sibling, "external.txt", "raced\n", "external move");
-              return { passed: true, repositoryPaths: [], output: "" };
+              return passingGate();
             }),
         };
 

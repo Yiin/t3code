@@ -14,12 +14,12 @@
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EpicRunId,
   MessageId,
   PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   ProviderSessionResumeSettledActivityPayload,
   ThreadId,
   type EpicRun as TransportEpicRun,
-  type EpicRunId,
   type EpicSubagentMap,
   type ProviderSessionResumeOutcome,
   type TurnId,
@@ -75,6 +75,11 @@ import { hasRalphBlocked, hasRalphDone, parseRalphReport } from "@t3tools/epic-c
 import { drainMergeQueue } from "@t3tools/epic-core/MergeQueue";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
 import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
+import { GateError } from "@t3tools/epic-core/ports/Gate";
+import type {
+  GateReceiptJournalShape,
+  PersistedGateReceipt,
+} from "@t3tools/epic-core/ports/GateReceipts";
 import { makeProcessMergeRepair } from "@t3tools/epic-core/adapters/ProcessMergeRepair";
 import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
@@ -485,7 +490,16 @@ export const makeServerPoolJournal = (store: EpicRunStore["Service"]): PoolRunJo
     store.allocateIteration(input).pipe(Effect.mapError(journalError("allocateIteration"))),
   updateIteration: (input) => {
     const { headBefore: _headBefore, headAfter: _headAfter, ...row } = input;
-    return store.updateIteration(row).pipe(Effect.mapError(journalError("updateIteration")));
+    // An absent measurement is `null` here, which the store reads as "leave
+    // the stored value alone" — an abandon flip must not erase what the
+    // settle before it measured.
+    return store
+      .updateIteration({
+        ...row,
+        phaseTimings: row.phaseTimings ?? null,
+        promptBytes: row.promptBytes ?? null,
+      })
+      .pipe(Effect.mapError(journalError("updateIteration")));
   },
   markIterationResumed: (input) =>
     store.reopenIteration(input).pipe(Effect.mapError(journalError("markIterationResumed"))),
@@ -507,6 +521,42 @@ export const makeServerPoolJournal = (store: EpicRunStore["Service"]): PoolRunJo
     store
       .clearProviderDegradation(input)
       .pipe(Effect.mapError(journalError("clearProviderDegradation"))),
+});
+
+/**
+ * The durable gate-receipt journal behind the merge drain's evidence port.
+ *
+ * Append-only by construction: the store allocates the sequence and nothing
+ * updates a row, so a restart reads back exactly what every earlier lifetime
+ * of the run recorded.
+ */
+export const makeServerGateReceipts = (
+  store: EpicRunStore["Service"],
+): GateReceiptJournalShape => ({
+  record: (receipt) =>
+    store
+      .recordGateReceipt({
+        ...receipt,
+        runId: EpicRunId.make(receipt.runId),
+        inputHeads: receipt.inputHeads,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new GateError({
+              operation: "gateReceipts.record",
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      ),
+  list: (runId) =>
+    store.listGateReceipts({ runId: EpicRunId.make(runId) }).pipe(
+      Effect.map((rows): ReadonlyArray<PersistedGateReceipt> => rows),
+      Effect.mapError(
+        (cause) => new GateError({ operation: "gateReceipts.list", detail: cause.message, cause }),
+      ),
+    ),
 });
 
 /** Worktree lifecycle for pool iterations and the integration branch. */
@@ -1857,6 +1907,7 @@ export const makeServerMergeDrain = (deps: {
           git,
           slot: makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner }),
           gate: mergeGateWithLog,
+          gateReceipts: makeServerGateReceipts(store),
           repair: mergeRepair,
           backlog: makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
           events: {
@@ -2848,6 +2899,8 @@ export const makeAbandonRunningIterations = (deps: {
           summary,
           why: null,
           failureReason,
+          phaseTimings: null,
+          promptBytes: null,
           finishedAt: abandonedAt,
         })
         .pipe(Effect.mapError(storeError("updateIteration")));

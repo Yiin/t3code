@@ -19,6 +19,7 @@ import type { AgentDispatchShape, AgentSelection, IterationHandle } from "./port
 import type { BacklogIssue, BacklogShape } from "./ports/Backlog.ts";
 import type { EpicRunLockShape } from "./ports/EpicRunLock.ts";
 import type { GateShape } from "./ports/Gate.ts";
+import { persistedGateReceipt, type GateReceiptJournalShape } from "./ports/GateReceipts.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
 import type { RoleSelectionShape } from "./ports/RoleSelection.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEventsShape } from "./ports/RunEvents.ts";
@@ -76,6 +77,8 @@ export interface SequentialEpicLoopPorts {
   readonly roleSelection: RoleSelectionShape | null;
   readonly dispatch: AgentDispatchShape;
   readonly gate: GateShape;
+  /** Where this loop's own gate lands before its verdict changes the outcome. */
+  readonly gateReceipts: GateReceiptJournalShape;
   readonly vcs: VcsShape;
 }
 
@@ -124,6 +127,18 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
   ports: SequentialEpicLoopPorts,
 ) {
   const now = input.now ?? (() => new Date().toISOString());
+  // Phase timings read the SAME clock the records are stamped from, so an
+  // injected clock cannot produce a record whose stamps and durations disagree.
+  const nowMs = () => {
+    const parsed = Date.parse(now());
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const sinceMs = (from: number) => Math.max(0, nowMs() - from);
+  /** Elapsed between a stamped record time and a measured one. */
+  const sinceAtMs = (fromIso: string, to: number) => {
+    const from = Date.parse(fromIso);
+    return Number.isFinite(from) ? Math.max(0, to - from) : 0;
+  };
   const snapshot = input.configSnapshot;
   const config = snapshot.config;
   const preflight = yield* ports.preflight
@@ -495,6 +510,10 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
       };
       yield* saveRun();
 
+      const preparedAtMs = nowMs();
+      let providerMs = 0;
+      let settlementMs = 0;
+      let gateMs = 0;
       let dispatchFailed = false;
       let outcome: EpicIterationOutcome;
       // No resume path here, on purpose. This loop dispatches through the
@@ -519,6 +538,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
       } else {
         activeHandle = started.success;
         const settled = yield* activeHandle.awaitSettled;
+        providerMs = sinceMs(preparedAtMs);
         const liveness = yield* activeHandle.runningSubagents;
         if (liveness.mode === "unavailable") {
           yield* ports.events.publish({
@@ -554,6 +574,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         activeHandle = null;
       }
 
+      const settlementStartMs = nowMs();
       const afterHead = yield* ports.vcs.headCommit(input.repository);
       const afterSiblingHeads = yield* readSiblingHeads();
       const committed =
@@ -608,6 +629,8 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         forceChildRetry = true;
       }
 
+      settlementMs = sinceMs(settlementStartMs);
+
       if (outcome.kind === "done" && committed) {
         if (!config.gate.disabled) {
           const command = config.gate.command;
@@ -615,12 +638,25 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
             outcome = { kind: "error", detail: "gate command is required", report: outcome.report };
             evidenceFailure = "gate-missing";
           } else {
+            const gateStartMs = nowMs();
             const gated = yield* ports.gate.run({
               command,
               repositories: [input.repository],
               cwd: input.cwd,
               maxOutputBytes: 1024 * 1024,
             });
+            gateMs = sinceMs(gateStartMs);
+            // Persisted before the verdict changes the outcome, so a crash
+            // between the two still leaves proof of what was verified.
+            yield* ports.gateReceipts.record(
+              persistedGateReceipt({
+                runId: run.runId,
+                phase: "sequential",
+                childId: child.id,
+                branch: null,
+                receipt: gated.receipt,
+              }),
+            );
             if (!gated.passed) {
               outcome = {
                 kind: "blocked",
@@ -757,6 +793,16 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         }),
         headBefore: beforeHead,
         headAfter: afterHead,
+        phaseTimings: {
+          prepareMs: sinceAtMs(startedAt, preparedAtMs),
+          providerMs,
+          settlementMs,
+          // No merge queue in this loop: the child commits onto the base
+          // branch directly, so there is no merge for an iteration to wait on.
+          mergeWaitMs: 0,
+          gateMs,
+        },
+        promptBytes: new TextEncoder().encode(prompt).byteLength,
         finishedAt,
       };
       yield* ports.journal.updateIteration(updated);

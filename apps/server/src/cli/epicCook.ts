@@ -44,6 +44,7 @@ import { runSequentialEpicLoop } from "@t3tools/epic-core/SequentialEpicLoop";
 import { harnessSupportsInspector } from "@t3tools/epic-core/adapters/AgentInspector";
 import { makeFileMergeQueueStore } from "@t3tools/epic-core/adapters/FileMergeQueueStore";
 import { makeFileRunEvents } from "@t3tools/epic-core/adapters/FileRunEvents";
+import * as FileGateReceipts from "@t3tools/epic-core/adapters/FileGateReceipts";
 import * as FileRunJournal from "@t3tools/epic-core/adapters/FileRunJournal";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
@@ -597,6 +598,7 @@ export const cookCommand = Command.make("cook", {
             yield* events.publish({ type: "run-state-changed", run });
 
             const mergeQueueStore = yield* makeFileMergeQueueStore({ runDirectory });
+            const gateReceipts = yield* FileGateReceipts.make({ runDirectory });
             const workspace = makeTerminalPoolWorkspace({
               processRunner: runner,
               journal,
@@ -618,6 +620,7 @@ export const cookCommand = Command.make("cook", {
                   environment: process.env,
                   uid: process.getuid?.() ?? 0,
                 }),
+                gateReceipts,
                 repair: makeProcessMergeRepair({
                   processRunner: runner,
                   environment: process.env,
@@ -785,6 +788,7 @@ export const cookCommand = Command.make("cook", {
             return yield* Effect.uninterruptible(runParallelCook);
           }
           const journal = yield* FileRunJournal.make({ runDirectory });
+          const gateReceipts = yield* FileGateReceipts.make({ runDirectory });
           // Sequential siblings are the real checkouts, validated with layout
           // mirroring off.
           const siblingRefs = yield* makeSiblingResolver(runner.run)
@@ -841,6 +845,7 @@ export const cookCommand = Command.make("cook", {
                   environment: process.env,
                   uid: process.getuid?.() ?? 0,
                 }),
+                gateReceipts,
                 vcs: makeProcessVcs({ processRunner: runner }),
               },
             ),

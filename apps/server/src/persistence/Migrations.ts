@@ -70,6 +70,7 @@ import Migration0054 from "./Migrations/054_ProjectionThreadMessageOriginDeliver
 import Migration0055 from "./Migrations/055_OrchestrationEventRetentionIndex.ts";
 import Migration0056 from "./Migrations/056_EpicRunIterationResume.ts";
 import Migration0057 from "./Migrations/057_EpicRunIterationTierAttribution.ts";
+import Migration0058 from "./Migrations/058_EpicRunGateReceipts.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -139,6 +140,7 @@ export const migrationEntries = [
   [55, "OrchestrationEventRetentionIndex", Migration0055],
   [56, "EpicRunIterationResume", Migration0056],
   [57, "EpicRunIterationTierAttribution", Migration0057],
+  [58, "EpicRunGateReceipts", Migration0058],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

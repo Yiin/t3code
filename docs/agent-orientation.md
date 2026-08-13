@@ -76,8 +76,13 @@ before run completion. Provider fallback uses structured evidence only.
 
 - The live database is `~/.t3/userdata/state.sqlite`. Read-only `sqlite3` selects
   against `epic_runs`, `epic_run_iterations`, `epic_run_merge_state`,
-  `epic_run_merge_entries`, and `provider_session_runtime` are the fastest way to
-  check a real run.
+  `epic_run_merge_entries`, `epic_run_gate_receipts`, and
+  `provider_session_runtime` are the fastest way to check a real run.
+- `epic_run_gate_receipts` holds one append-only row per gate run: input heads,
+  command digest, outcome, exit code, lock wait, execution time, and bounded
+  output. Nothing updates a row, and `outcome = 'passed'` requires exit code 0.
+  `epic_run_iterations.phase_timings` separates the provider turn from the
+  runner's own time; the pool loop's gate time lives in the receipts, not there.
 - Migrations are statically imported into `migrationEntries` in
   `apps/server/src/persistence/Migrations.ts` and run at boot. Tests step the
   schema with `runMigrations({ toMigrationInclusive: N })`.

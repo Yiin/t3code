@@ -43,6 +43,33 @@ export const PersistedEpicRunIterationStatus = Schema.Literals([
 ]);
 export type PersistedEpicRunIterationStatus = typeof PersistedEpicRunIterationStatus.Type;
 
+/**
+ * Where one iteration's wall time went, in milliseconds.
+ *
+ * The run's own duration says nothing about what to fix. These five buckets
+ * do: they separate the provider turn — the only part an agent controls —
+ * from everything the runner spent around it.
+ *
+ * `mergeWaitMs` and `gateMs` are attributed only where an iteration can own
+ * them. The sequential loop runs its gate inline, so `gateMs` is that gate.
+ * The pool loop's gates belong to the merge drain, which serves a batch and
+ * not one iteration; those live in the gate receipts instead
+ * (`ports/GateReceipts.ts`), so a pool iteration reports `gateMs: 0`.
+ */
+export const EpicRunIterationPhaseTimings = Schema.Struct({
+  /** Row allocation until the provider turn was dispatched. */
+  prepareMs: NonNegativeInt,
+  /** The provider turn itself, dispatch until settled. */
+  providerMs: NonNegativeInt,
+  /** Settlement and the evidence reads that classify the turn. */
+  settlementMs: NonNegativeInt,
+  /** Merge-queue work this iteration caused. */
+  mergeWaitMs: NonNegativeInt,
+  /** Verification this iteration ran itself. */
+  gateMs: NonNegativeInt,
+});
+export type EpicRunIterationPhaseTimings = typeof EpicRunIterationPhaseTimings.Type;
+
 /** The complete durable record for one dispatch attempt. */
 export const PersistedEpicRunIteration = Schema.Struct({
   runId: EpicRunId,
@@ -78,6 +105,18 @@ export const PersistedEpicRunIteration = Schema.Struct({
   tierId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   providerInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
   model: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * Where this iteration's wall time went, written once when the record is
+   * settled. `null` while it is still running, and absent on every record
+   * written before the field existed — both read the same way: not measured.
+   */
+  phaseTimings: Schema.optional(Schema.NullOr(EpicRunIterationPhaseTimings)),
+  /**
+   * How many bytes of prompt the dispatch sent. The cheapest available proxy
+   * for what the turn was asked to hold, and the one number that makes two
+   * iterations of very different duration comparable.
+   */
+  promptBytes: Schema.optional(Schema.NullOr(NonNegativeInt)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -92,6 +131,9 @@ export const UpdatePersistedEpicRunIteration = Schema.Struct({
   failureReason: Schema.NullOr(Schema.String),
   headBefore: Schema.optional(Schema.NullOr(Schema.String)),
   headAfter: Schema.optional(Schema.NullOr(Schema.String)),
+  /** See {@link PersistedEpicRunIteration}. Absent leaves the stored value alone. */
+  phaseTimings: Schema.optional(Schema.NullOr(EpicRunIterationPhaseTimings)),
+  promptBytes: Schema.optional(Schema.NullOr(NonNegativeInt)),
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type UpdatePersistedEpicRunIteration = typeof UpdatePersistedEpicRunIteration.Type;

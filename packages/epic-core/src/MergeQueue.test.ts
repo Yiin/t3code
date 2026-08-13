@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import { drainMergeQueue, type DrainMergeQueueResult, type MergeQueuePorts } from "./MergeQueue.ts";
+import { GateError, gateCommandDigest, type GateReceipt } from "./ports/Gate.ts";
+import type { PersistedGateReceipt } from "./ports/GateReceipts.ts";
 import { BacklogError, type BacklogIssue } from "./ports/Backlog.ts";
 import {
   integrationFixTitle,
@@ -18,6 +20,26 @@ import type {
   MergeQueueSnapshot,
   MergeQueueStoreShape,
 } from "./ports/MergeQueue.ts";
+
+/** A receipt shaped like the one `ProcessGate` measures, with fixed stamps. */
+const fakeReceipt = (input: {
+  readonly passed: boolean;
+  readonly output: string;
+  readonly outputPath?: string;
+}): GateReceipt => ({
+  commandDigest: gateCommandDigest("gate"),
+  cwd: "/worktrees/integration",
+  outcome: input.passed ? "passed" : "failed",
+  exitCode: input.passed ? 0 : 1,
+  queuedAt: "2026-08-13T00:00:00.000Z",
+  acquiredAt: "2026-08-13T00:00:01.000Z",
+  finishedAt: "2026-08-13T00:00:04.000Z",
+  lockWaitMs: 1_000,
+  executionMs: 3_000,
+  inputHeads: [{ repositoryPath: "/repo", head: "head-1" }],
+  output: input.output,
+  ...(input.outputPath === undefined ? {} : { outputPath: input.outputPath }),
+});
 
 const baseSnapshot = (entries: ReadonlyArray<MergeQueueEntry>): MergeQueueSnapshot => ({
   runId: "run-1",
@@ -94,6 +116,7 @@ const makeHarness = (
       options.siblingExternalHeads?.[sibling.repositoryPath] ?? sibling.lastAcceptedHead;
   }
   const calls: string[] = [];
+  const gateReceipts: Array<PersistedGateReceipt> = [];
   const events: unknown[] = [];
   const notes: string[] = [];
   const fixes: string[] = [];
@@ -318,13 +341,26 @@ const makeHarness = (
           const sequenced = options.gateSequence?.[gateCall];
           const sequencedOutput = options.gateOutputSequence?.[gateCall];
           gateCall += 1;
+          const passed = sequenced ?? options.gatePasses ?? true;
+          const output = sequencedOutput ?? options.gateOutput ?? "";
           return {
-            passed: sequenced ?? options.gatePasses ?? true,
+            passed,
             repositoryPaths: ["/repo"],
-            output: sequencedOutput ?? options.gateOutput ?? "",
+            output,
             ...(options.gateOutputPath === undefined ? {} : { outputPath: options.gateOutputPath }),
+            receipt: fakeReceipt({
+              passed,
+              output,
+              ...(options.gateOutputPath === undefined
+                ? {}
+                : { outputPath: options.gateOutputPath }),
+            }),
           };
         }),
+    },
+    gateReceipts: {
+      record: (receipt) => Effect.sync(() => void gateReceipts.push(receipt)),
+      list: (runId) => Effect.succeed(gateReceipts.filter((receipt) => receipt.runId === runId)),
     },
     repair: {
       restoreDependencies: ({ worktrees }) =>
@@ -384,6 +420,7 @@ const makeHarness = (
     notes,
     completions,
     gateRepositories,
+    gateReceipts,
     heads: () => heads,
     snapshot: () => snapshot,
   };
@@ -455,6 +492,78 @@ describe("MergeQueue", () => {
         reason: "conflict",
         fixIssueId: "fix-1",
       });
+    }),
+  );
+
+  /**
+   * A run that lands or parks with no record of the gate it ran cannot
+   * explain its own wall time or prove its verification. The receipt has to
+   * land before the drain acts on the verdict, for every gate it runs.
+   */
+  it.effect("records a receipt for the entry gate, the control gate and the recheck", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({
+        gatePasses: false,
+        gateOutput: "Cannot find module 'vite-plus/binding'\n2 failed",
+      });
+
+      yield* drain(harness.ports);
+
+      expect(harness.gateReceipts.map((entry) => entry.phase)).toEqual([
+        "entry",
+        "control",
+        "recheck",
+      ]);
+      // Only the branch's own gate names a child; the control and the recheck
+      // test the base with nothing merged, so naming one would blame it.
+      expect(harness.gateReceipts.map((entry) => entry.childId)).toEqual(["child-1", null, null]);
+      expect(harness.gateReceipts.every((entry) => entry.runId === "run-1")).toBe(true);
+      expect(harness.gateReceipts[0]).toMatchObject({
+        outcome: "failed",
+        exitCode: 1,
+        lockWaitMs: 1_000,
+        executionMs: 3_000,
+        inputHeads: [{ repositoryPath: "/repo", head: "head-1" }],
+      });
+      expect(harness.gateReceipts[0]?.output).toContain("vite-plus/binding");
+    }),
+  );
+
+  it.effect("records a receipt for a gate the adapter never ran", () =>
+    Effect.gen(function* () {
+      const gateReceipts: Array<PersistedGateReceipt> = [];
+      const harness = makeHarness({});
+      const ports: MergeQueuePorts = {
+        ...harness.ports,
+        gate: {
+          run: () =>
+            Effect.fail(
+              new GateError({
+                operation: "lock",
+                detail: "Could not take the shared gate lock within 900s",
+              }),
+            ),
+        },
+        gateReceipts: {
+          record: (receipt) => Effect.sync(() => void gateReceipts.push(receipt)),
+          list: () => Effect.succeed(gateReceipts),
+        },
+      };
+
+      const error = yield* drain(ports).pipe(Effect.flip);
+
+      // The failure is re-raised unchanged, but the two hours it may have
+      // cost are on the record either way.
+      expect(error.operation).toBe("lock");
+      expect(gateReceipts).toHaveLength(1);
+      expect(gateReceipts[0]).toMatchObject({
+        phase: "entry",
+        outcome: "error",
+        exitCode: null,
+        // Nothing ran, so nothing was tested: no head may be claimed.
+        inputHeads: [],
+      });
+      expect(gateReceipts[0]?.output).toContain("Could not take the shared gate lock");
     }),
   );
 

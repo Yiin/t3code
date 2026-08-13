@@ -482,6 +482,8 @@ describe("EpicRunStore", () => {
         tierId: "cheap",
         providerInstanceId: ProviderInstanceId.make("claude-a"),
         model: "claude-sonnet-5",
+        phaseTimings: null,
+        promptBytes: null,
         startedAt: "2026-08-12T00:00:00.000Z",
       });
       yield* store.updateIteration({
@@ -491,6 +493,8 @@ describe("EpicRunStore", () => {
         summary: "abandoned by the restart",
         why: "the process died",
         failureReason: "server-restart",
+        phaseTimings: null,
+        promptBytes: null,
         finishedAt: "2026-08-12T00:10:00.000Z",
       });
 
@@ -521,6 +525,8 @@ describe("EpicRunStore", () => {
         tierId: "cheap",
         providerInstanceId: ProviderInstanceId.make("claude-a"),
         model: "claude-sonnet-5",
+        phaseTimings: null,
+        promptBytes: null,
         startedAt: "2026-08-12T00:00:00.000Z",
         finishedAt: null,
       });
@@ -539,6 +545,8 @@ describe("EpicRunStore", () => {
         summary: "finished after the restart",
         why: null,
         failureReason: null,
+        phaseTimings: null,
+        promptBytes: null,
         finishedAt: "2026-08-12T00:30:00.000Z",
       });
 
@@ -598,6 +606,8 @@ describe("EpicRunStore", () => {
         summary: "done",
         why: null,
         failureReason: null,
+        phaseTimings: null,
+        promptBytes: null,
         finishedAt: "2026-07-27T00:01:00.000Z",
       });
       assert.deepStrictEqual(
@@ -644,6 +654,8 @@ describe("EpicRunStore", () => {
         summary: "landed",
         why: null,
         failureReason: null,
+        phaseTimings: null,
+        promptBytes: null,
         finishedAt: "2026-08-13T00:10:00.000Z",
       });
       yield* store.updateIteration({
@@ -653,6 +665,8 @@ describe("EpicRunStore", () => {
         summary: null,
         why: null,
         failureReason: "child:no-commit",
+        phaseTimings: null,
+        promptBytes: null,
         finishedAt: "2026-08-13T00:11:00.000Z",
       });
 
@@ -749,6 +763,8 @@ describe("EpicRunStore", () => {
         summary: null,
         why: null,
         failureReason: "server-restart",
+        phaseTimings: null,
+        promptBytes: null,
         finishedAt: "2026-07-27T00:10:00.000Z",
       });
 
@@ -1058,6 +1074,126 @@ describe("EpicRunStore", () => {
       const listByStatusFailure = yield* Effect.flip(store.listRuns({ status: "running" }));
       assert.strictEqual(listByStatusFailure._tag, "PersistenceDecodeError");
       assert.strictEqual(listByStatusFailure.operation, "EpicRunStore.listRuns:decodeRows");
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+  /**
+   * Wall time and verification proof are the two things a finished run could
+   * not explain about itself. The receipts are append-only and the timings
+   * ride the settle, so both survive the restart that reads them back.
+   */
+  it.effect("keeps gate receipts and iteration phase timings across a restart", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const runId = EpicRunId.make("run-receipts");
+      yield* store.upsertRun(makeRun({ runId }));
+
+      const iterationIndex = yield* store.allocateIteration({
+        runId,
+        issueId: "issue-receipts",
+        branch: "epic/issue-receipts",
+        worktreePath: "/tmp/worktrees/issue-receipts",
+        tierId: null,
+        providerInstanceId: null,
+        model: null,
+        startedAt: "2026-08-13T00:00:00.000Z",
+      });
+      yield* store.updateIteration({
+        runId,
+        iterationIndex,
+        turnStatus: "completed",
+        summary: "built it",
+        why: "needed",
+        failureReason: null,
+        phaseTimings: {
+          prepareMs: 1_000,
+          providerMs: 900_000,
+          settlementMs: 2_000,
+          mergeWaitMs: 3_000,
+          gateMs: 0,
+        },
+        promptBytes: 4_096,
+        finishedAt: "2026-08-13T00:15:06.000Z",
+      });
+
+      yield* store.recordGateReceipt({
+        runId,
+        phase: "entry",
+        childId: "issue-receipts",
+        branch: "epic/issue-receipts",
+        commandDigest: "digest-a",
+        cwd: "/integration",
+        outcome: "failed",
+        exitCode: 1,
+        queuedAt: "2026-08-13T00:15:06.000Z",
+        acquiredAt: "2026-08-13T00:16:06.000Z",
+        finishedAt: "2026-08-13T00:20:06.000Z",
+        lockWaitMs: 60_000,
+        executionMs: 240_000,
+        inputHeads: [{ repositoryPath: "/repo", head: "head-a" }],
+        output: "2 failed",
+        outputPath: "/repo/.git/t3code/gate.log",
+      });
+      yield* store.recordGateReceipt({
+        runId,
+        phase: "control",
+        childId: null,
+        branch: null,
+        commandDigest: "digest-a",
+        cwd: "/integration",
+        outcome: "passed",
+        exitCode: 0,
+        queuedAt: "2026-08-13T00:20:06.000Z",
+        acquiredAt: "2026-08-13T00:20:07.000Z",
+        finishedAt: "2026-08-13T00:24:07.000Z",
+        lockWaitMs: 1_000,
+        executionMs: 240_000,
+        inputHeads: [{ repositoryPath: "/repo", head: "head-base" }],
+        output: "ok",
+        outputPath: null,
+      });
+
+      const receipts = yield* store.listGateReceipts({ runId });
+      // The store owns the sequence, so the order is the order they happened.
+      assert.deepStrictEqual(
+        receipts.map((receipt) => [receipt.sequence, receipt.phase, receipt.outcome]),
+        [
+          [0, "entry", "failed"],
+          [1, "control", "passed"],
+        ],
+      );
+      assert.deepStrictEqual(receipts[0]?.inputHeads, [
+        { repositoryPath: "/repo", head: "head-a" },
+      ]);
+      assert.strictEqual(receipts[0]?.outputPath, "/repo/.git/t3code/gate.log");
+      assert.strictEqual(receipts[1]?.childId, null);
+      assert.deepStrictEqual(yield* store.listGateReceipts({ runId: EpicRunId.make("other") }), []);
+
+      const [iteration] = yield* store.listIterations({ runId });
+      assert.deepStrictEqual(iteration?.phaseTimings, {
+        prepareMs: 1_000,
+        providerMs: 900_000,
+        settlementMs: 2_000,
+        mergeWaitMs: 3_000,
+        gateMs: 0,
+      });
+      assert.strictEqual(iteration?.promptBytes, 4_096);
+
+      // A later abandon flip measures nothing, and must not erase what the
+      // settle before it measured.
+      yield* store.updateIteration({
+        runId,
+        iterationIndex,
+        turnStatus: "abandoned",
+        summary: "reconciled at boot",
+        why: null,
+        failureReason: "server-restart",
+        phaseTimings: null,
+        promptBytes: null,
+        finishedAt: "2026-08-13T01:00:00.000Z",
+      });
+      const [reconciled] = yield* store.listIterations({ runId });
+      assert.strictEqual(reconciled?.phaseTimings?.providerMs, 900_000);
+      assert.strictEqual(reconciled?.promptBytes, 4_096);
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 });

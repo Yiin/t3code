@@ -30,6 +30,8 @@ import { BacklogError, type BacklogIssue, type BacklogShape } from "./ports/Back
 import type { RunEvent } from "./ports/RunEvents.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
 import { VcsError } from "./ports/Vcs.ts";
+import { gateCommandDigest } from "./ports/Gate.ts";
+import type { PersistedGateReceipt } from "./ports/GateReceipts.ts";
 
 /** What a terminal dispatch declares, mirrored for the loop fakes. */
 const terminalLikeCapabilities: AgentDispatchCapabilities = {
@@ -225,6 +227,7 @@ const fixture = (input: {
       }),
   } as unknown as BacklogShape;
 
+  const recordedGateReceipts: Array<PersistedGateReceipt> = [];
   const ports: SequentialEpicLoopPorts = {
     preflight: {
       check: () =>
@@ -391,7 +394,25 @@ const fixture = (input: {
           passed: input.gatePasses ?? true,
           repositoryPaths: ["/repo"],
           output: "gate output",
+          receipt: {
+            commandDigest: gateCommandDigest("gate"),
+            cwd: "/repo",
+            outcome: (input.gatePasses ?? true) ? ("passed" as const) : ("failed" as const),
+            exitCode: (input.gatePasses ?? true) ? 0 : 1,
+            queuedAt: "2026-08-13T00:00:00.000Z",
+            acquiredAt: "2026-08-13T00:00:01.000Z",
+            finishedAt: "2026-08-13T00:00:03.000Z",
+            lockWaitMs: 1_000,
+            executionMs: 2_000,
+            inputHeads: [{ repositoryPath: "/repo", head: "head-1" }],
+            output: "gate output",
+          },
         }),
+    },
+    gateReceipts: {
+      record: (receipt) => Effect.sync(() => void recordedGateReceipts.push(receipt)),
+      list: (runId) =>
+        Effect.succeed(recordedGateReceipts.filter((receipt) => receipt.runId === runId)),
     },
     vcs: {
       headCommit: (repository: { readonly repositoryPath: string }) =>
@@ -471,8 +492,49 @@ const fixture = (input: {
     selections,
     roleRequests,
     degradations,
+    gateReceipts: recordedGateReceipts,
   };
 };
+
+/**
+ * The run's own duration says nothing about what to fix. Separating the
+ * provider turn from the gate is what makes a 30-hour run explainable, and the
+ * receipt is what proves the gate ran at all.
+ */
+it.live("records its gate receipt and where the iteration's wall time went", () =>
+  Effect.gen(function* () {
+    const resolved = fixture({
+      attempts: [{ commit: true, close: true }],
+      config: config({ gate: { command: "gate", disabled: false } }),
+    });
+    yield* resolved.run();
+
+    assert.deepEqual(
+      resolved.gateReceipts.map((receipt) => [receipt.phase, receipt.childId, receipt.outcome]),
+      [["sequential", "epic.1", "passed"]],
+    );
+    assert.deepEqual(resolved.gateReceipts[0]?.inputHeads, [
+      { repositoryPath: "/repo", head: "head-1" },
+    ]);
+
+    const timings = resolved.iterations.at(-1)?.phaseTimings;
+    assert.notEqual(timings, undefined);
+    assert.notEqual(timings, null);
+    // Every bucket is present and non-negative. The injected clock is frozen,
+    // so the durations are zero; what this pins is that the record carries
+    // the provider turn apart from the merge and gate work.
+    assert.deepEqual(timings, {
+      prepareMs: 0,
+      providerMs: 0,
+      settlementMs: 0,
+      // No merge queue in this loop; the child commits onto the base branch.
+      mergeWaitMs: 0,
+      gateMs: 0,
+    });
+    assert.equal(typeof resolved.iterations.at(-1)?.promptBytes, "number");
+    assert.equal((resolved.iterations.at(-1)?.promptBytes ?? 0) > 0, true);
+  }),
+);
 
 it.live(
   "dispatches the iteration-worker role selection, and the run's own without a resolver",

@@ -30,6 +30,7 @@ import {
   CompleteEpicRunMergeInput,
   DropEpicRunMergeInput,
   EnqueueEpicRunMergeInput,
+  EpicRunGateReceipt,
   EpicRunStore,
   EpicRunLandingEffects,
   EpicRunMergeEntry,
@@ -40,10 +41,12 @@ import {
   GetLatestEpicRunIterationInput,
   InitializeEpicRunMergeStateInput,
   EpicRunMergeStateSibling,
+  ListEpicRunGateReceiptsInput,
   ListEpicRunIterationsInput,
   ListEpicRunsInput,
   ListRecentEpicRunIterationsInput,
   ParkEpicRunMergeInput,
+  RecordEpicRunGateReceiptInput,
   ReopenEpicRunIterationInput,
   RestoreEpicRunMergeTailInput,
   UpdateEpicRunIterationInput,
@@ -270,6 +273,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           tier_id,
           provider_instance_id,
           model,
+          phase_timings,
+          prompt_bytes,
           started_at,
           finished_at
         )
@@ -290,6 +295,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           ${row.tierId ?? null},
           ${row.providerInstanceId ?? null},
           ${row.model ?? null},
+          ${row.phaseTimings ?? null},
+          ${row.promptBytes ?? null},
           ${row.startedAt},
           ${row.finishedAt}
         )
@@ -343,6 +350,8 @@ const makeEpicRunStore = Effect.gen(function* () {
           summary = ${input.summary},
           why = ${input.why},
           failure_reason = ${input.failureReason},
+          phase_timings = COALESCE(${input.phaseTimings}, phase_timings),
+          prompt_bytes = COALESCE(${input.promptBytes}, prompt_bytes),
           finished_at = ${input.finishedAt}
         WHERE run_id = ${input.runId}
           AND iteration_index = ${input.iterationIndex}
@@ -390,6 +399,8 @@ const makeEpicRunStore = Effect.gen(function* () {
     tier_id AS "tierId",
     provider_instance_id AS "providerInstanceId",
     model,
+    phase_timings AS "phaseTimings",
+    prompt_bytes AS "promptBytes",
     started_at AS "startedAt",
     finished_at AS "finishedAt"
   `);
@@ -457,6 +468,72 @@ const makeEpicRunStore = Effect.gen(function* () {
         ORDER BY iteration_index DESC
         LIMIT 1
       `,
+  });
+
+  const gateReceiptColumns = sql.literal(`
+    run_id AS "runId",
+    sequence,
+    phase,
+    child_id AS "childId",
+    branch,
+    command_digest AS "commandDigest",
+    cwd,
+    outcome,
+    exit_code AS "exitCode",
+    queued_at AS "queuedAt",
+    acquired_at AS "acquiredAt",
+    finished_at AS "finishedAt",
+    lock_wait_ms AS "lockWaitMs",
+    execution_ms AS "executionMs",
+    input_heads AS "inputHeads",
+    output,
+    output_path AS "outputPath"
+  `);
+
+  /**
+   * Append-only, with the sequence allocated in the same statement so two
+   * concurrent gates cannot claim one slot. Nothing ever updates a receipt.
+   */
+  const recordEpicRunGateReceiptRow = SqlSchema.void({
+    Request: RecordEpicRunGateReceiptInput,
+    execute: (row) => sql`
+      INSERT INTO epic_run_gate_receipts (
+        run_id, sequence, phase, child_id, branch, command_digest, cwd,
+        outcome, exit_code, queued_at, acquired_at, finished_at,
+        lock_wait_ms, execution_ms, input_heads, output, output_path
+      )
+      SELECT
+        ${row.runId},
+        COALESCE(MAX(sequence) + 1, 0),
+        ${row.phase},
+        ${row.childId},
+        ${row.branch},
+        ${row.commandDigest},
+        ${row.cwd},
+        ${row.outcome},
+        ${row.exitCode},
+        ${row.queuedAt},
+        ${row.acquiredAt},
+        ${row.finishedAt},
+        ${row.lockWaitMs},
+        ${row.executionMs},
+        ${row.inputHeads},
+        ${row.output},
+        ${row.outputPath}
+      FROM epic_run_gate_receipts
+      WHERE run_id = ${row.runId}
+    `,
+  });
+
+  const listEpicRunGateReceiptRows = SqlSchema.findAll({
+    Request: ListEpicRunGateReceiptsInput,
+    Result: EpicRunGateReceipt,
+    execute: ({ runId }) => sql`
+      SELECT ${gateReceiptColumns}
+      FROM epic_run_gate_receipts
+      WHERE run_id = ${runId}
+      ORDER BY sequence ASC
+    `,
   });
 
   const upsertProviderDegradationRow = SqlSchema.void({
@@ -842,6 +919,28 @@ const makeEpicRunStore = Effect.gen(function* () {
       ),
     );
 
+  const recordGateReceipt: EpicRunStoreShape["recordGateReceipt"] = (input) =>
+    recordEpicRunGateReceiptRow(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.recordGateReceipt:query",
+          "EpicRunStore.recordGateReceipt:encodeRequest",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
+  const listGateReceipts: EpicRunStoreShape["listGateReceipts"] = (input) =>
+    listEpicRunGateReceiptRows(input).pipe(
+      Effect.mapError(
+        toEpicRunStoreError(
+          "EpicRunStore.listGateReceipts:query",
+          "EpicRunStore.listGateReceipts:decodeRows",
+          { runId: input.runId },
+        ),
+      ),
+    );
+
   const upsertProviderDegradation: EpicRunStoreShape["upsertProviderDegradation"] = (input) =>
     upsertProviderDegradationRow(input).pipe(
       Effect.mapError(
@@ -1123,6 +1222,8 @@ const makeEpicRunStore = Effect.gen(function* () {
     listRunningIterations,
     listRecentIterationsForRuns,
     getLatestIteration,
+    recordGateReceipt,
+    listGateReceipts,
     upsertProviderDegradation,
     getProviderDegradation,
     clearProviderDegradation,

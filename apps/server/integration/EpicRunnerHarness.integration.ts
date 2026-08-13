@@ -13,6 +13,7 @@ import * as Option from "effect/Option";
 
 import type {
   EpicRun,
+  EpicRunGateReceipt,
   EpicRunLandingEffects,
   EpicRunIteration,
   EpicRunMergeState,
@@ -110,6 +111,7 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
     readonly turnStatus: EpicRunIteration["turnStatus"];
   }> = [];
   const iterationReadCounts = { perRun: 0, batched: 0 };
+  const gateReceipts: Array<EpicRunGateReceipt> = [];
 
   const shape: EpicRunStoreShape = {
     upsertRun: (run) => {
@@ -237,6 +239,12 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
         const found = iterations.filter((iteration) => iteration.runId === runId);
         return found.length === 0 ? Option.none() : Option.some(found[found.length - 1]!);
       }),
+    recordGateReceipt: (receipt) =>
+      Effect.sync(() => {
+        gateReceipts.push({ ...receipt, sequence: gateReceipts.length });
+      }),
+    listGateReceipts: ({ runId }) =>
+      Effect.sync(() => gateReceipts.filter((receipt) => receipt.runId === runId)),
     upsertProviderDegradation: (value) =>
       Effect.sync(() => void degradations.set(value.providerInstanceId, value)),
     getProviderDegradation: ({ providerInstanceId }) =>

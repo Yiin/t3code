@@ -283,6 +283,8 @@ export const makeEpicRunnerLifecycle = (deps: {
               summary: "cancelled",
               why: null,
               failureReason: "cancelled",
+              phaseTimings: null,
+              promptBytes: null,
               finishedAt: cancelledAt,
             })
             .pipe(Effect.mapError(storeError("updateIteration")));

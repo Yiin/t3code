@@ -21,6 +21,7 @@ import {
   runSequentialEpicLoop,
   type SequentialEpicLoopPorts,
 } from "@t3tools/epic-core/SequentialEpicLoop";
+import { make as makeFileGateReceipts } from "@t3tools/epic-core/adapters/FileGateReceipts";
 import * as FileRunJournal from "@t3tools/epic-core/adapters/FileRunJournal";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
@@ -450,6 +451,7 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
           // and this scenario must not sit in the quiet-host wait for it.
           quietHostWaitSeconds: 0,
         }),
+        gateReceipts: yield* makeFileGateReceipts({ runDirectory }),
         vcs: makeProcessVcs({ processRunner: runner }),
       };
       const result = yield* Effect.result(

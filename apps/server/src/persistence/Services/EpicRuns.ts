@@ -67,6 +67,16 @@ export const EpicRunIterationStatus = Schema.Literals([
 ]);
 export type EpicRunIterationStatus = typeof EpicRunIterationStatus.Type;
 
+/** Milliseconds per iteration phase; see `EpicRunIterationPhaseTimings` in epic-core. */
+export const EpicRunIterationPhaseTimings = Schema.Struct({
+  prepareMs: NonNegativeInt,
+  providerMs: NonNegativeInt,
+  settlementMs: NonNegativeInt,
+  mergeWaitMs: NonNegativeInt,
+  gateMs: NonNegativeInt,
+});
+export type EpicRunIterationPhaseTimings = typeof EpicRunIterationPhaseTimings.Type;
+
 export const EpicRunIteration = Schema.Struct({
   runId: EpicRunId,
   iterationIndex: NonNegativeInt,
@@ -114,6 +124,19 @@ export const EpicRunIteration = Schema.Struct({
   tierId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   providerInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
   model: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /**
+   * Where this iteration's wall time went, stored as one JSON column.
+   *
+   * `null` while the row is running, and absent on a row read through a
+   * pre-058 shape. Both read the same way: not measured. The vocabulary is
+   * `EpicRunIterationPhaseTimings` in `@t3tools/epic-core`; it is mirrored
+   * here because this column is what the runner writes.
+   */
+  phaseTimings: Schema.optionalKey(
+    Schema.NullOr(Schema.fromJsonString(EpicRunIterationPhaseTimings)),
+  ),
+  /** Prompt size of the dispatch this row carried. `null` when unmeasured. */
+  promptBytes: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
   startedAt: IsoDateTime,
   finishedAt: Schema.NullOr(IsoDateTime),
 });
@@ -161,6 +184,13 @@ export const UpdateEpicRunIterationInput = Schema.Struct({
   summary: Schema.NullOr(Schema.String),
   why: Schema.NullOr(Schema.String),
   failureReason: Schema.NullOr(Schema.String),
+  /**
+   * `null` leaves the stored value alone. A settle writes them; the abandon
+   * and cancel paths have nothing to measure and pass `null` rather than
+   * erasing what an earlier lifetime measured.
+   */
+  phaseTimings: Schema.NullOr(Schema.fromJsonString(EpicRunIterationPhaseTimings)),
+  promptBytes: Schema.NullOr(NonNegativeInt),
   finishedAt: Schema.NullOr(IsoDateTime),
 });
 export type UpdateEpicRunIterationInput = typeof UpdateEpicRunIterationInput.Type;
@@ -171,6 +201,59 @@ export const ReopenEpicRunIterationInput = Schema.Struct({
   resumedAt: IsoDateTime,
 });
 export type ReopenEpicRunIterationInput = typeof ReopenEpicRunIterationInput.Type;
+
+export const EpicRunGateReceiptPhase = Schema.Literals([
+  "entry",
+  "control",
+  "recheck",
+  "sequential",
+]);
+export type EpicRunGateReceiptPhase = typeof EpicRunGateReceiptPhase.Type;
+
+export const EpicRunGateInputHead = Schema.Struct({
+  repositoryPath: Schema.String,
+  head: Schema.NullOr(Schema.String),
+});
+
+/**
+ * One gate run, exactly as the adapter measured it.
+ *
+ * Append-only: nothing updates a receipt, so a restart reads back what every
+ * earlier lifetime of the run wrote. `outcome: "passed"` requires
+ * `exitCode === 0`, and the table enforces that too.
+ */
+export const EpicRunGateReceipt = Schema.Struct({
+  runId: EpicRunId,
+  /** Allocated by the store, ascending per run. Ignored on write. */
+  sequence: NonNegativeInt,
+  phase: EpicRunGateReceiptPhase,
+  childId: Schema.NullOr(Schema.String),
+  branch: Schema.NullOr(Schema.String),
+  commandDigest: Schema.String,
+  cwd: Schema.String,
+  outcome: Schema.Literals(["passed", "failed", "error"]),
+  /** `null` when the command never produced one — a spawn failure or a timeout. */
+  exitCode: Schema.NullOr(Schema.Number),
+  queuedAt: Schema.String,
+  acquiredAt: Schema.NullOr(Schema.String),
+  finishedAt: Schema.String,
+  lockWaitMs: NonNegativeInt,
+  executionMs: NonNegativeInt,
+  /** The commits the command read, stored as one JSON column. */
+  inputHeads: Schema.fromJsonString(Schema.Array(EpicRunGateInputHead)),
+  /** Bounded by the caller. The unbounded log, if kept, is at `outputPath`. */
+  output: Schema.String,
+  outputPath: Schema.NullOr(Schema.String),
+});
+export type EpicRunGateReceipt = typeof EpicRunGateReceipt.Type;
+
+export const RecordEpicRunGateReceiptInput = Schema.Struct(
+  (({ sequence: _sequence, ...rest }) => rest)(EpicRunGateReceipt.fields),
+);
+export type RecordEpicRunGateReceiptInput = typeof RecordEpicRunGateReceiptInput.Type;
+
+export const ListEpicRunGateReceiptsInput = Schema.Struct({ runId: EpicRunId });
+export type ListEpicRunGateReceiptsInput = typeof ListEpicRunGateReceiptsInput.Type;
 
 export const EpicProviderDegradation = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
@@ -439,6 +522,21 @@ export interface EpicRunStoreShape {
   readonly getLatestIteration: (
     input: GetLatestEpicRunIterationInput,
   ) => Effect.Effect<Option.Option<EpicRunIteration>, EpicRunStoreError>;
+
+  /**
+   * Append one gate receipt, allocating its sequence atomically.
+   *
+   * Callers write this BEFORE they act on the gate's verdict, so a crash
+   * between the gate and the land or park still leaves the evidence.
+   */
+  readonly recordGateReceipt: (
+    input: RecordEpicRunGateReceiptInput,
+  ) => Effect.Effect<void, EpicRunStoreError>;
+
+  /** Every receipt for one run, in the order it was recorded. */
+  readonly listGateReceipts: (
+    input: ListEpicRunGateReceiptsInput,
+  ) => Effect.Effect<ReadonlyArray<EpicRunGateReceipt>, EpicRunStoreError>;
 
   /** Insert or replace the degradation for one provider instance. */
   readonly upsertProviderDegradation: (

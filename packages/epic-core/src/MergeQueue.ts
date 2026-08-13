@@ -1,8 +1,14 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import type { BacklogShape } from "./ports/Backlog.ts";
-import type { GateShape } from "./ports/Gate.ts";
+import { gateCommandDigest, type GateShape } from "./ports/Gate.ts";
+import {
+  persistedGateReceipt,
+  type GateReceiptJournalShape,
+  type GateReceiptPhase,
+} from "./ports/GateReceipts.ts";
 import type {
   FoldShape,
   MergeEventsShape,
@@ -70,11 +76,86 @@ export interface MergeQueuePorts {
   readonly git: MergeGitShape;
   readonly slot: MergeSlotShape;
   readonly gate: GateShape;
+  /** Every gate this drain runs lands here before the drain acts on its verdict. */
+  readonly gateReceipts: GateReceiptJournalShape;
   readonly repair: MergeRepairShape;
   readonly backlog: Pick<BacklogShape, "createChild" | "listChildren" | "writeNotes">;
   readonly events: MergeEventsShape;
   readonly fold: FoldShape;
 }
+
+/**
+ * Run one gate and persist its receipt before anyone acts on the verdict.
+ *
+ * Every gate the drain runs goes through here, including the ones that fail
+ * the adapter outright: a gate that timed out after two hours is the single
+ * most expensive thing an epic run does, and a run that lands or parks with
+ * no record of it cannot explain either its wall time or its verification.
+ * The receipt is written first, then the failure is re-raised unchanged.
+ */
+const runGate = Effect.fn("MergeQueue.runGate")(function* (
+  ports: MergeQueuePorts,
+  input: {
+    readonly runId: string;
+    readonly phase: GateReceiptPhase;
+    readonly childId: string | null;
+    readonly branch: string | null;
+    readonly gate: {
+      readonly command: string;
+      readonly repositories: Parameters<GateShape["run"]>[0]["repositories"];
+      readonly cwd: string;
+      readonly maxOutputBytes: number;
+    };
+  },
+) {
+  const queuedAt = yield* DateTime.now;
+  const outcome = yield* Effect.result(ports.gate.run(input.gate));
+  if (outcome._tag === "Failure") {
+    const finishedAt = yield* DateTime.now;
+    yield* ports.gateReceipts.record(
+      persistedGateReceipt({
+        runId: input.runId,
+        phase: input.phase,
+        childId: input.childId,
+        branch: input.branch,
+        receipt: {
+          commandDigest: gateCommandDigest(input.gate.command),
+          cwd: input.gate.cwd,
+          outcome: "error",
+          exitCode: null,
+          queuedAt: DateTime.formatIso(queuedAt),
+          acquiredAt: null,
+          finishedAt: DateTime.formatIso(finishedAt),
+          lockWaitMs: 0,
+          executionMs: Math.max(
+            0,
+            DateTime.toEpochMillis(finishedAt) - DateTime.toEpochMillis(queuedAt),
+          ),
+          // The adapter never started the command, so nothing was tested and
+          // no head can be claimed as an input.
+          inputHeads: [],
+          output: outcome.failure.message.slice(0, input.gate.maxOutputBytes),
+        },
+      }),
+    );
+    return yield* outcome.failure;
+  }
+  yield* ports.gateReceipts.record(
+    persistedGateReceipt({
+      runId: input.runId,
+      phase: input.phase,
+      childId: input.childId,
+      branch: input.branch,
+      receipt: {
+        ...outcome.success.receipt,
+        ...(outcome.success.outputPath === undefined
+          ? {}
+          : { outputPath: outcome.success.outputPath }),
+      },
+    }),
+  );
+  return outcome.success;
+});
 
 const activeEntries = (entries: ReadonlyArray<MergeQueueEntry>): ReadonlyArray<MergeQueueEntry> =>
   entries.filter((entry) => entry.status === "queued" || entry.status === "draining");
@@ -648,7 +729,13 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           cwd: snapshot.integrationWorktreePath,
           maxOutputBytes: input.maxGateOutputBytes,
         };
-        const gate = yield* ports.gate.run(gateInput);
+        const gate = yield* runGate(ports, {
+          runId: input.runId,
+          phase: "entry",
+          childId: entry.childId,
+          branch: entry.branch,
+          gate: gateInput,
+        });
         if (!gate.passed) {
           yield* ports.git.resetHard(snapshot.integrationWorktreePath, snapshot.baseBranch);
           for (const sibling of snapshot.siblings) {
@@ -662,7 +749,15 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           // branch and asking an agent to repair working code only burns
           // iterations: one such loop spent 15 of them on a missing native
           // binding that no branch had touched.
-          const control = yield* ports.gate.run(gateInput);
+          const control = yield* runGate(ports, {
+            runId: input.runId,
+            phase: "control",
+            // The control gate tests the base with nothing merged, so it
+            // belongs to no child. Naming one here would blame it.
+            childId: null,
+            branch: null,
+            gate: gateInput,
+          });
           if (!control.passed) {
             const blameless =
               `gate also fails on ${snapshot.baseBranch} with nothing merged, ` +
@@ -702,7 +797,15 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
             const restored = yield* ports.repair.restoreDependencies({ worktrees });
             // Repairing something is not a pass. The base has to clear the
             // same gate on its own merits before the drain trusts it again.
-            const recheck = restored.restored ? yield* ports.gate.run(gateInput) : null;
+            const recheck = restored.restored
+              ? yield* runGate(ports, {
+                  runId: input.runId,
+                  phase: "recheck",
+                  childId: null,
+                  branch: null,
+                  gate: gateInput,
+                })
+              : null;
             const recovered = recheck?.passed === true;
             yield* ports.events.emit({
               event: "remediated",

@@ -558,6 +558,12 @@ const settleErrorDetail = (error: EpicRunnerDispatchError | DispatchError): stri
   error._tag === "EpicRunnerDispatchError" ? error.message : `${error.operation}: ${error.detail}`;
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const nowMillis = Effect.map(DateTime.now, DateTime.toEpochMillis);
+/** Elapsed since a stamped record time, floored at zero. */
+const sinceIso = (fromIso: string, to: number): number => {
+  const from = Date.parse(fromIso);
+  return Number.isFinite(from) && Number.isFinite(to) ? Math.max(0, to - from) : 0;
+};
 
 export const runParallelEpicLoop = (
   input: ParallelEpicLoopInput,
@@ -1239,9 +1245,24 @@ export const runParallelEpicLoop = (
             };
             yield* saveRun(resumedRun);
             args.onDispatched(threadId);
+            const promptBytes = new TextEncoder().encode(prompt).byteLength;
             return attempt._tag === "handle"
-              ? ({ _tag: "started", run: resumedRun, handle: attempt.handle, error: null } as const)
-              : ({ _tag: "started", run: resumedRun, handle: null, error: attempt.error } as const);
+              ? ({
+                  _tag: "started",
+                  run: resumedRun,
+                  handle: attempt.handle,
+                  error: null,
+                  dispatchedAt,
+                  promptBytes,
+                } as const)
+              : ({
+                  _tag: "started",
+                  run: resumedRun,
+                  handle: null,
+                  error: attempt.error,
+                  dispatchedAt,
+                  promptBytes,
+                } as const);
           }
           const next = {
             ...current,
@@ -1272,7 +1293,13 @@ export const runParallelEpicLoop = (
                 onSuccess: (handle) => ({ handle, error: null }),
               }),
             );
-          return { _tag: "started", run: next, ...started } as const;
+          return {
+            _tag: "started",
+            run: next,
+            ...started,
+            dispatchedAt,
+            promptBytes: new TextEncoder().encode(prompt).byteLength,
+          } as const;
         }),
       );
       if (dispatched === null) {
@@ -1379,6 +1406,10 @@ export const runParallelEpicLoop = (
           }),
         ),
       );
+      // The provider turn ends here. Everything after it is the runner's own
+      // time, and keeping the two apart is the only way to tell a slow agent
+      // from a slow runner.
+      const settledAtMs = yield* nowMillis;
 
       const supervisionStop =
         settleResult._tag === "supervision-stopped" ? settleResult.reason : null;
@@ -1493,6 +1524,7 @@ export const runParallelEpicLoop = (
             });
       const noCommitChildClosed = evidenceVerdict?.accepted ?? false;
 
+      const mergeStartedAtMs = yield* nowMillis;
       if (!run.config.execution.sequential && workspace.branch !== null) {
         const integrationFix = parseIntegrationFixTitle(issueEvidenceBefore.title ?? "");
         if (integrationFix !== null) {
@@ -1525,6 +1557,8 @@ export const runParallelEpicLoop = (
         }
       }
 
+      const mergeEndedAtMs = yield* nowMillis;
+
       const iterationStatus =
         outcome.kind === "backlog-empty" || outcome.kind === "done" || noCommitChildClosed
           ? ("completed" as const)
@@ -1544,6 +1578,17 @@ export const runParallelEpicLoop = (
           summary: outcome.report?.summary ?? outcome.detail,
           why: outcome.report?.why ?? null,
           failureReason,
+          phaseTimings: {
+            prepareMs: sinceIso(startedAt, Date.parse(dispatched.dispatchedAt)),
+            providerMs: sinceIso(dispatched.dispatchedAt, settledAtMs),
+            settlementMs: Math.max(0, mergeStartedAtMs - settledAtMs),
+            mergeWaitMs: Math.max(0, mergeEndedAtMs - mergeStartedAtMs),
+            // This loop never runs a gate itself. Its gates belong to the
+            // merge drain, which serves a batch of branches rather than one
+            // iteration; those are in the run's gate receipts.
+            gateMs: 0,
+          },
+          promptBytes: dispatched.promptBytes,
           finishedAt,
         })
         .pipe(Effect.mapError(journalError("updateIteration")));

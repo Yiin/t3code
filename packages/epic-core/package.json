@@ -103,6 +103,10 @@
       "types": "./src/ports/Gate.ts",
       "import": "./src/ports/Gate.ts"
     },
+    "./ports/GateReceipts": {
+      "types": "./src/ports/GateReceipts.ts",
+      "import": "./src/ports/GateReceipts.ts"
+    },
     "./ports/RunEvents": {
       "types": "./src/ports/RunEvents.ts",
       "import": "./src/ports/RunEvents.ts"
@@ -162,6 +166,10 @@
     "./adapters/FileRunJournal": {
       "types": "./src/adapters/FileRunJournal.ts",
       "import": "./src/adapters/FileRunJournal.ts"
+    },
+    "./adapters/FileGateReceipts": {
+      "types": "./src/adapters/FileGateReceipts.ts",
+      "import": "./src/adapters/FileGateReceipts.ts"
     },
     "./adapters/FileMergeQueueStore": {
       "types": "./src/adapters/FileMergeQueueStore.ts",

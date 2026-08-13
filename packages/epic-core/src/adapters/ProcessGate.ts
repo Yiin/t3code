@@ -1,12 +1,18 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import { awaitQuietHost, sampleHostLoad } from "../hostContention.ts";
 import { ProcessRunner } from "../processRunner.ts";
-import { GateError, type GateShape } from "../ports/Gate.ts";
+import { GateError, gateCommandDigest, type GateInputHead, type GateShape } from "../ports/Gate.ts";
+
+/** Single-quote one path for `bash -c`. Runtime directories can hold anything. */
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
 const cleanEnvironment = (environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
   Object.fromEntries(
@@ -113,6 +119,37 @@ export const makeProcessGate = (input: {
     const lockWaitSeconds = input.lockWaitSeconds ?? DEFAULT_LOCK_WAIT_SECONDS;
     const startedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
 
+    // The commits the command is about to read, resolved before it starts.
+    // The receipt has to name what was tested, and only the worktree the gate
+    // runs against can answer that — `repositoryPath` names the repo, but the
+    // trial merge lives in `worktreeRoot`.
+    const inputHeads: Array<GateInputHead> = [];
+    for (const repository of repositories) {
+      for (const worktree of [
+        { repositoryPath: repository.repositoryPath, worktreeRoot: repository.worktreeRoot },
+        ...repository.siblings,
+      ]) {
+        const head = yield* input.processRunner
+          .run({
+            command: "git",
+            args: ["-C", worktree.worktreeRoot, "rev-parse", "HEAD"],
+            env,
+            extendEnv: false,
+          })
+          .pipe(Effect.result);
+        inputHeads.push({
+          repositoryPath: worktree.repositoryPath,
+          // An unreadable head stays null. A receipt that guesses proves nothing.
+          head:
+            head._tag === "Success" &&
+            head.success.code === 0 &&
+            head.success.stdout.trim().length > 0
+              ? head.success.stdout.trim()
+              : null,
+        });
+      }
+    }
+
     // Hold nothing while waiting: the lock is machine-global, and a gate that
     // sleeps on a busy host with the lock held stalls every other epic run too.
     const host = yield* awaitQuietHost({
@@ -143,6 +180,14 @@ export const makeProcessGate = (input: {
       hostWaitedMs: host.waitedMs,
     });
 
+    // `flock` only returns once the whole command is done, so the moment the
+    // lock was actually taken is invisible from here. The inner shell stamps
+    // it: this is the one line that separates "waited two hours for another
+    // run's gate" from "this gate is slow", which is the whole point of the
+    // receipt.
+    const markerPath = NodePath.join(lockDirectory, `gate-${NodeCrypto.randomUUID()}.acquired`);
+    const quotedMarker = shellQuote(markerPath);
+
     const output = yield* input.processRunner
       .run({
         command: "flock",
@@ -157,7 +202,9 @@ export const makeProcessGate = (input: {
           lockPath,
           "bash",
           "-c",
-          command,
+          // The stamp runs first and its own failure is swallowed, so the
+          // gate's exit code stays the gate command's and nothing else.
+          `date +%s%3N >${quotedMarker} 2>/dev/null\n${command}`,
         ],
         cwd,
         env,
@@ -185,6 +232,25 @@ export const makeProcessGate = (input: {
     // The command's own duration, excluding the quiet-host wait, so this number
     // stays comparable with the pre-wait telemetry the diagnosis was built on.
     const durationMs = finishedAt - startedAt - host.waitedMs;
+
+    const marker = yield* input.processRunner
+      .run({
+        command: "bash",
+        args: ["-c", `cat ${quotedMarker} 2>/dev/null; rm -f ${quotedMarker}`],
+        env,
+        extendEnv: false,
+      })
+      .pipe(Effect.result);
+    const stampedAt =
+      marker._tag === "Success" ? Number.parseInt(marker.success.stdout.trim(), 10) : Number.NaN;
+    // Clamp into the run: a stamp from a clock that disagrees with this
+    // process's would otherwise produce a negative wait or a negative
+    // execution, and a receipt that reports either is worse than one that
+    // reports the bound it could prove.
+    const acquiredAtMillis =
+      Number.isFinite(stampedAt) && stampedAt >= startedAt && stampedAt <= finishedAt
+        ? stampedAt
+        : null;
     const finishLoad = yield* sampleHostLoad;
     yield* Effect.logInfo("epic.gate.finished", {
       cwd,
@@ -202,16 +268,43 @@ export const makeProcessGate = (input: {
       });
     }
 
+    const passed = output.code === 0;
+    const boundedOutput = boundOutput(
+      [output.stdout, output.stderr]
+        .filter((part) => part.length > 0)
+        .join("\n")
+        .trim(),
+      maxOutputBytes,
+    );
+    // An epoch stamp the process itself produced always converts; the
+    // fallback only exists because `DateTime.make` is total.
+    const iso = (millis: number) =>
+      Option.match(DateTime.make(millis), {
+        onNone: () => "",
+        onSome: DateTime.formatIso,
+      });
     return {
-      passed: output.code === 0,
+      passed,
       repositoryPaths: repositories.map((repository) => repository.repositoryPath),
-      output: boundOutput(
-        [output.stdout, output.stderr]
-          .filter((part) => part.length > 0)
-          .join("\n")
-          .trim(),
-        maxOutputBytes,
-      ),
+      output: boundedOutput,
+      receipt: {
+        commandDigest: gateCommandDigest(command),
+        cwd,
+        // Nothing but exit zero is a pass, and a timed-out run has no exit
+        // code at all — it must never read as one.
+        outcome: output.timedOut ? "error" : passed ? "passed" : "failed",
+        exitCode: output.timedOut ? null : output.code,
+        queuedAt: iso(startedAt),
+        acquiredAt: acquiredAtMillis === null ? null : iso(acquiredAtMillis),
+        finishedAt: iso(finishedAt),
+        // Everything before the command ran: the quiet-host wait plus the
+        // shared lock. Without the stamp only the host wait is provable, so
+        // that is what it falls back to rather than guessing the rest.
+        lockWaitMs: acquiredAtMillis === null ? host.waitedMs : acquiredAtMillis - startedAt,
+        executionMs: acquiredAtMillis === null ? durationMs : finishedAt - acquiredAtMillis,
+        inputHeads,
+        output: boundedOutput,
+      },
     };
   });
 
