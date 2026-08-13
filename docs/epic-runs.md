@@ -260,6 +260,33 @@ branch's own history — every landing commits `cook-epic: merge <branch>
 recorded no summary, or a repository git cannot log, drops the section and
 leaves the rest of the description unchanged.
 
+## Recorded conflict resolutions (rerere)
+
+A parallel run meets the same conflict more than once. A branch is trial-merged,
+parked, repaired by a merge-fix child, then trial-merged again; and every later
+drain replays the same base-versus-branch hunks. So a run turns on git rerere in
+every repository it touches — the main checkout and each sibling — when it
+provisions its integration worktrees. The trial merge also passes
+`rerere.enabled` and `rerere.autoUpdate` as `-c` flags, so replay survives a
+repository whose config was never written or has since drifted.
+
+The cache lives in the repository's common git directory
+(`<repo>/.git/rr-cache`), shared by every worktree of that repository and never
+touched by worktree removal. A resolution a merge-fix child commits in its own
+worktree is therefore replayed in the integration worktree, and in the next run
+against the same repository. When the run shares your checkout, that is your
+repository, and the config write and the cache land in it.
+
+Replay is not a merge on its own: `git merge` still stops on a conflict even
+after rerere stages a resolution for every conflicted path. So a trial merge
+that ends with a live `MERGE_HEAD` and nothing unmerged is committed and treated
+as a clean merge. Anything else — paths still conflicting, a refused commit —
+parks exactly as it did before, and the merge-fix child is told rerere is on so
+it knows both that hunks may arrive pre-resolved and that its own resolution
+will be reused.
+
+Nothing prunes the cache. `git rerere gc` is the operator's call.
+
 Run d7580b6c ran one gate command at one commit twice. The main checkout took
 421s and exited 0. The integration worktree took 23m01s and exited 1. The
 difference was the host: load average 29.92 on 16 cores, with 17 vitest

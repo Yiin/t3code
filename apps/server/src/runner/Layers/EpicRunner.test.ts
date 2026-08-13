@@ -7636,6 +7636,31 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(Layer.merge(harness.layer, NodeServices.layer)));
   });
 
+  it.live("enables git rerere in the run's repository when it provisions integration", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const configs = harness.processRequests.filter(
+        (request) =>
+          request.command === "git" &&
+          request.args[0] === "config" &&
+          request.args[1]?.startsWith("rerere.") === true,
+      );
+      assert.deepStrictEqual(
+        configs.map((request) => [request.cwd, ...request.args]),
+        [
+          ["/tmp/epic-runner-repo", "config", "rerere.enabled", "true"],
+          ["/tmp/epic-runner-repo", "config", "rerere.autoUpdate", "true"],
+        ],
+      );
+    }).pipe(Effect.provide(Layer.merge(harness.layer, NodeServices.layer)));
+  });
+
   it.live("reuses a parked branch for Merge-fix and drains it before completion", () => {
     const runId = EpicRunId.make("run-merge-fix");
     const pausedRun: EpicRun = {

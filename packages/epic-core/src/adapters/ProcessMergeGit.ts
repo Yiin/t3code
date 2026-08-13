@@ -3,6 +3,12 @@ import * as Semaphore from "effect/Semaphore";
 
 import { ProcessRunner, type ProcessRunOutput } from "../processRunner.ts";
 import { MergeQueuePortError, type MergeGitShape } from "../ports/MergeQueue.ts";
+import {
+  MERGE_HEAD_ARGS,
+  RERERE_COMMIT_ARGS,
+  RERERE_MERGE_FLAGS,
+  UNMERGED_PATHS_ARGS,
+} from "../rerere.ts";
 
 const outputDetail = (output: ProcessRunOutput): string =>
   [output.stdout, output.stderr]
@@ -91,6 +97,39 @@ export const makeProcessMergeGit = (input: {
     return output;
   });
 
+  /**
+   * Turn a conflicted merge that rerere fully resolved into a real merge commit.
+   *
+   * See `rerere.ts:RERERE_COMMIT_ARGS` for why this is needed at all. Anything
+   * that does not fit the pattern — no `MERGE_HEAD`, paths still unmerged, a
+   * refused commit — reports the original merge failure verbatim, so the drain
+   * parks exactly as it did before rerere existed.
+   */
+  const completeRerereMerge = Effect.fn("ProcessMergeGit.completeRerereMerge")(function* (
+    cwd: string,
+    merge: ProcessRunOutput,
+  ) {
+    const failed = { merged: false, output: outputDetail(merge) } as const;
+    const mergeHead = yield* run({
+      operation: "trialMergeHead",
+      cwd,
+      args: [...MERGE_HEAD_ARGS],
+    });
+    if (mergeHead.code !== 0) return failed;
+    const unmerged = yield* run({
+      operation: "trialMergeUnmerged",
+      cwd,
+      args: [...UNMERGED_PATHS_ARGS],
+    });
+    if (unmerged.code !== 0 || unmerged.stdout.trim().length > 0) return failed;
+    const commit = yield* run({
+      operation: "trialMergeRerereCommit",
+      cwd,
+      args: [...RERERE_COMMIT_ARGS],
+    });
+    return commit.code === 0 ? ({ merged: true, output: outputDetail(commit) } as const) : failed;
+  });
+
   return {
     head: (cwd, ref) =>
       requireSuccess({ operation: "head", cwd, args: ["rev-parse", ref ?? "HEAD"] }).pipe(
@@ -144,8 +183,16 @@ export const makeProcessMergeGit = (input: {
       // Exact message parity: `skills/cook-epic/run-legacy.sh:2958`.
       mutate(
         cwd,
-        run({ operation: "trialMerge", cwd, args: ["merge", "--no-ff", branch, "-m", message] }),
-      ).pipe(Effect.map((output) => ({ merged: output.code === 0, output: outputDetail(output) }))),
+        Effect.gen(function* () {
+          const merge = yield* run({
+            operation: "trialMerge",
+            cwd,
+            args: [...RERERE_MERGE_FLAGS, "merge", "--no-ff", branch, "-m", message],
+          });
+          if (merge.code === 0) return { merged: true, output: outputDetail(merge) };
+          return yield* completeRerereMerge(cwd, merge);
+        }),
+      ),
     conflictDetail: ({ cwd, maxOutputBytes }) =>
       Effect.gen(function* () {
         const files = yield* run({

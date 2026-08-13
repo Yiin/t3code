@@ -35,6 +35,7 @@ import {
 } from "../policy.ts";
 import type * as ProcessRunner from "../processRunner.ts";
 import { resolveRunBaseBranch } from "../runBaseBranch.ts";
+import { RERERE_CONFIG_ARGS } from "../rerere.ts";
 import {
   makeSiblingResolver,
   mirrorPath,
@@ -109,6 +110,35 @@ export const makeTerminalPoolWorkspace = (deps: {
               }),
             ),
       ),
+    );
+
+  /**
+   * Turn on git rerere for one repository a parallel run is about to touch.
+   *
+   * Idempotent, and never fails the provisioning it runs inside: rerere only
+   * makes repeated conflicts cheaper, so a repository whose config git declines
+   * to write still runs — the trial merge carries the same settings as `-c`
+   * flags anyway (`../rerere.ts`). Server twin:
+   * `EpicRunnerPoolPorts.enableRerere`.
+   */
+  const enableRerere = (repositoryPath: string) =>
+    Effect.forEach(
+      RERERE_CONFIG_ARGS,
+      (args) =>
+        git({ operation: "git.rerere-config", cwd: repositoryPath, args }).pipe(
+          Effect.flatMap((output) =>
+            output.code === 0
+              ? Effect.void
+              : Effect.logWarning("epic.runner.rerere-config-failed", {
+                  repositoryPath,
+                  detail: output.stderr.trim(),
+                }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("epic.runner.rerere-config-failed", { repositoryPath, cause }),
+          ),
+        ),
+      { discard: true },
     );
 
   const readCurrentBranch = (cwd: string) =>
@@ -417,6 +447,12 @@ export const makeTerminalPoolWorkspace = (deps: {
           target: targetPath,
         });
         provisioned.push({ repo: run.cwd, target: targetPath });
+        // The cache lives in the repository's common git directory, so one
+        // write here covers the integration worktree and every worker worktree
+        // this run cuts from the same repository. When the run shares the
+        // operator's checkout, `run.cwd` IS the operator's repository and the
+        // config lands there.
+        yield* enableRerere(run.cwd);
         yield* writeBeadsRedirect(run.cwd, targetPath);
         // One integration worktree per sibling, mirrored beside the main one
         // (`skills/cook-epic/run-legacy.sh:1055-1069`).
@@ -446,6 +482,8 @@ export const makeTerminalPoolWorkspace = (deps: {
             target,
           });
           provisioned.push({ repo: sibling.canonicalPath, target });
+          // A sibling is its own repository with its own rr-cache.
+          yield* enableRerere(sibling.canonicalPath);
           // Sibling integration worktrees get assets only — siblings have no
           // beads database (`skills/cook-epic/run-legacy.sh:1008-1009`).
           yield* setupWorktreeAssets(

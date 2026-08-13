@@ -31,6 +31,10 @@
       "types": "./src/runBaseBranch.ts",
       "import": "./src/runBaseBranch.ts"
     },
+    "./rerere": {
+      "types": "./src/rerere.ts",
+      "import": "./src/rerere.ts"
+    },
     "./processRunner": {
       "types": "./src/processRunner.ts",
       "import": "./src/processRunner.ts"

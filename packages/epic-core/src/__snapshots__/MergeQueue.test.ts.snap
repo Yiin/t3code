@@ -3,13 +3,13 @@
 exports[`merge policy > snapshots conflict with pushEnabled=false 1`] = `
 "Branch \`epic/child-1\` (child \`child-1\`) failed to land on \`mine\`: conflict.
 
-Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Do not push (disabled this run). Close this issue and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it."
+Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Do not push (disabled this run). Close this issue and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it. git rerere is on, so a conflict this run already resolved once comes back resolved, and the resolution you commit here is replayed on every later merge of the same hunks."
 `;
 
 exports[`merge policy > snapshots conflict with pushEnabled=true 1`] = `
 "Branch \`epic/child-1\` (child \`child-1\`) failed to land on \`mine\`: conflict.
 
-Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it."
+Repair procedure: you will be on branch \`epic/child-1\` in an isolated worktree. Merge \`mine\` into it, resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. The coordinator lands this branch when the issue closes, so leave \`mine\` to it. git rerere is on, so a conflict this run already resolved once comes back resolved, and the resolution you commit here is replayed on every later merge of the same hunks."
 `;
 
 exports[`merge policy > snapshots gate-failed with pushEnabled=false 1`] = `

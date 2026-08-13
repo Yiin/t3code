@@ -608,8 +608,25 @@ describe("mergeFixDescription branch-set variant", () => {
         "- this repository (`/repo`, base `mine`)\n" +
         "- sibling `/work/proga-api` (base `main`)\n" +
         "\n" +
-        "Repair procedure: you will be on branch `epic/child-1` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into `epic/child-1` and resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. The coordinator lands the whole set when this issue closes, so leave the base branches and the sibling remotes to it.",
+        "Repair procedure: you will be on branch `epic/child-1` in an isolated layout, with the same branch checked out in each sibling worktree beside your main worktree. In EVERY repository listed above, merge that repository's base branch into `epic/child-1` and resolve conflicts, then run the project quality gates. Push the branch, close this issue, and note the epic. The coordinator lands the whole set when this issue closes, so leave the base branches and the sibling remotes to it. git rerere is on, so a conflict this run already resolved once comes back resolved, and the resolution you commit here is replayed on every later merge of the same hunks.",
     );
+  });
+
+  it("promises rerere replay to a conflict repair, and says nothing about it to a gate repair", () => {
+    const forReason = (reason: "conflict" | "gate-failed") =>
+      mergeFixDescription({
+        childId: "child-1",
+        branch: "epic/child-1",
+        baseBranch: "mine",
+        reason,
+        gateCommand: "vp check",
+        pushEnabled: true,
+        touchedRepos,
+      });
+    expect(forReason("conflict")).toContain(
+      "git rerere is on, so a conflict this run already resolved once comes back resolved",
+    );
+    expect(forReason("gate-failed")).not.toContain("rerere");
   });
 
   it("names the gate command for gate-failed sets", () => {

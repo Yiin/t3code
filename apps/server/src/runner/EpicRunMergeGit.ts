@@ -1,5 +1,11 @@
 import type { MergeGitShape } from "@t3tools/epic-core/ports/MergeQueue";
 import { MergeQueuePortError } from "@t3tools/epic-core/ports/MergeQueue";
+import {
+  MERGE_HEAD_ARGS,
+  RERERE_COMMIT_ARGS,
+  RERERE_MERGE_FLAGS,
+  UNMERGED_PATHS_ARGS,
+} from "@t3tools/epic-core/rerere";
 import * as Effect from "effect/Effect";
 
 import type { ExecuteGitResult, GitVcsDriver } from "../vcs/GitVcsDriver.ts";
@@ -44,6 +50,26 @@ export const makeEpicRunMergeGit = (input: {
     return output;
   });
 
+  /**
+   * Turn a conflicted merge that rerere fully resolved into a real merge commit.
+   * Terminal twin: `ProcessMergeGit.completeRerereMerge`. See
+   * `@t3tools/epic-core/rerere` for why `git merge` cannot do this itself.
+   */
+  const completeRerereMerge = Effect.fn("EpicRunMergeGit.completeRerereMerge")(function* (
+    cwd: string,
+    merge: ExecuteGitResult,
+  ) {
+    const failed = { merged: false, output: outputDetail(merge) } as const;
+    const mergeHead = yield* run("trialMergeHead", cwd, [...MERGE_HEAD_ARGS]);
+    if (mergeHead.exitCode !== 0) return failed;
+    const unmerged = yield* run("trialMergeUnmerged", cwd, [...UNMERGED_PATHS_ARGS]);
+    if (unmerged.exitCode !== 0 || unmerged.stdout.trim().length > 0) return failed;
+    const commit = yield* run("trialMergeRerereCommit", cwd, [...RERERE_COMMIT_ARGS]);
+    return commit.exitCode === 0
+      ? ({ merged: true, output: outputDetail(commit) } as const)
+      : failed;
+  });
+
   return {
     head: (cwd, ref) =>
       requireSuccess("head", cwd, ["rev-parse", ref ?? "HEAD"]).pipe(
@@ -83,12 +109,18 @@ export const makeEpicRunMergeGit = (input: {
     clean: (cwd) => requireSuccess("clean", cwd, ["clean", "-fdx"]).pipe(Effect.asVoid),
     setupWorktree: input.setupWorktree,
     trialMerge: ({ cwd, branch, message }) =>
-      run("trialMerge", cwd, ["merge", "--no-ff", branch, "-m", message]).pipe(
-        Effect.map((output) => ({
-          merged: output.exitCode === 0,
-          output: outputDetail(output),
-        })),
-      ),
+      Effect.gen(function* () {
+        const merge = yield* run("trialMerge", cwd, [
+          ...RERERE_MERGE_FLAGS,
+          "merge",
+          "--no-ff",
+          branch,
+          "-m",
+          message,
+        ]);
+        if (merge.exitCode === 0) return { merged: true, output: outputDetail(merge) };
+        return yield* completeRerereMerge(cwd, merge);
+      }),
     conflictDetail: ({ cwd, maxOutputBytes }) =>
       Effect.gen(function* () {
         const files = yield* run("conflictFiles", cwd, ["diff", "--name-only", "--diff-filter=U"]);

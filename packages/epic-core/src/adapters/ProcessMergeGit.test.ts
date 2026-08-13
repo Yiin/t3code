@@ -103,6 +103,110 @@ it.effect("fast-forwards by checkout-based merge without a branch, ref-only fetc
   }),
 );
 
+it.effect("carries rerere flags on the trial merge and reports a clean merge unchanged", () =>
+  Effect.gen(function* () {
+    const seen: Array<ReadonlyArray<string>> = [];
+    const processRunner = ProcessRunner.of({
+      run: (request: ProcessRunInput) => {
+        if (request.args[0] === "rev-parse") return Effect.succeed(output("/repo/.git\n"));
+        seen.push(request.args);
+        return Effect.succeed(output("Merge made by the 'ort' strategy.\n"));
+      },
+    });
+    const git = makeProcessMergeGit({ processRunner });
+
+    const result = yield* git.trialMerge({
+      cwd: "/repo/integration",
+      branch: "epic/child-1",
+      message: "merge child-1",
+    });
+
+    expect(result.merged).toBe(true);
+    expect(seen).toEqual([
+      [
+        "-c",
+        "rerere.enabled=true",
+        "-c",
+        "rerere.autoUpdate=true",
+        "merge",
+        "--no-ff",
+        "epic/child-1",
+        "-m",
+        "merge child-1",
+      ],
+    ]);
+  }),
+);
+
+it.effect("commits a conflicted merge that rerere resolved down to zero unmerged paths", () =>
+  Effect.gen(function* () {
+    const seen: Array<ReadonlyArray<string>> = [];
+    const processRunner = ProcessRunner.of({
+      run: (request: ProcessRunInput) => {
+        if (request.args[0] === "rev-parse" && request.args[1] === "--path-format=absolute")
+          return Effect.succeed(output("/repo/.git\n"));
+        seen.push(request.args);
+        if (request.args[1] === "rerere.enabled=true")
+          return Effect.succeed(output("Automatic merge failed; fix conflicts\n", 1));
+        if (request.args[0] === "rev-parse") return Effect.succeed(output("deadbeef\n"));
+        if (request.args[0] === "diff") return Effect.succeed(output("\n"));
+        return Effect.succeed(output("[integration abc1234] merge child-1\n"));
+      },
+    });
+    const git = makeProcessMergeGit({ processRunner });
+
+    const result = yield* git.trialMerge({
+      cwd: "/repo/integration",
+      branch: "epic/child-1",
+      message: "merge child-1",
+    });
+
+    expect(result.merged).toBe(true);
+    expect(seen.slice(1)).toEqual([
+      ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
+      ["diff", "--name-only", "--diff-filter=U"],
+      ["commit", "--no-verify", "--no-edit", "--cleanup=strip"],
+    ]);
+  }),
+);
+
+for (const leftover of ["src/app.ts\n", ""] as const) {
+  it.effect(
+    leftover.length > 0
+      ? "leaves a merge with unmerged paths parked"
+      : "leaves a failed merge with no MERGE_HEAD parked",
+    () =>
+      Effect.gen(function* () {
+        const seen: Array<ReadonlyArray<string>> = [];
+        const processRunner = ProcessRunner.of({
+          run: (request: ProcessRunInput) => {
+            if (request.args[0] === "rev-parse" && request.args[1] === "--path-format=absolute")
+              return Effect.succeed(output("/repo/.git\n"));
+            seen.push(request.args);
+            if (request.args[1] === "rerere.enabled=true")
+              return Effect.succeed(output("CONFLICT (content): Merge conflict in src/app.ts", 1));
+            if (request.args[0] === "rev-parse")
+              return Effect.succeed(leftover.length > 0 ? output("deadbeef\n") : output("", 1));
+            return Effect.succeed(output(leftover));
+          },
+        });
+        const git = makeProcessMergeGit({ processRunner });
+
+        const result = yield* git.trialMerge({
+          cwd: "/repo/integration",
+          branch: "epic/child-1",
+          message: "merge child-1",
+        });
+
+        expect(result).toEqual({
+          merged: false,
+          output: "CONFLICT (content): Merge conflict in src/app.ts",
+        });
+        expect(seen.some((args) => args[0] === "commit")).toBe(false);
+      }),
+  );
+}
+
 for (const failure of ["show-ref", "rev-list"] as const) {
   it.effect(`treats a ${failure} failure as a missing branch`, () =>
     Effect.gen(function* () {

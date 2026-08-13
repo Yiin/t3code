@@ -33,6 +33,7 @@ import {
 } from "@t3tools/epic-core/Errors";
 import type * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { resolveRunBaseBranch } from "@t3tools/epic-core/runBaseBranch";
+import { RERERE_CONFIG_ARGS } from "@t3tools/epic-core/rerere";
 import type {
   MergeDrainShape,
   PoolBacklogShape,
@@ -601,6 +602,42 @@ export const makeServerPoolWorkspace = (deps: {
     projectionSnapshotQuery,
   } = deps;
 
+  /**
+   * Turn on git rerere for one repository a parallel run is about to touch.
+   *
+   * Idempotent, and never fails the provisioning it runs inside: rerere only
+   * makes repeated conflicts cheaper, so a repository whose config git declines
+   * to write still runs — the trial merge carries the same settings as `-c`
+   * flags anyway (`@t3tools/epic-core/rerere`). Terminal twin:
+   * `TerminalPoolWorkspace.enableRerere`.
+   */
+  const enableRerere = (repositoryPath: string) =>
+    Effect.forEach(
+      RERERE_CONFIG_ARGS,
+      (args) =>
+        processRunner
+          .run({
+            command: "git",
+            args,
+            cwd: repositoryPath,
+            timeout: Duration.millis(GIT_HEAD_TIMEOUT_MS),
+          })
+          .pipe(
+            Effect.flatMap((output) =>
+              output.code === 0
+                ? Effect.void
+                : Effect.logWarning("epic.runner.rerere-config-failed", {
+                    repositoryPath,
+                    detail: output.stderr.trim(),
+                  }),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("epic.runner.rerere-config-failed", { repositoryPath, cause }),
+            ),
+          ),
+      { discard: true },
+    );
+
   const readCurrentBranch = (cwd: string): Effect.Effect<string, EpicRunnerDispatchError> =>
     processRunner
       .run({
@@ -885,6 +922,12 @@ export const makeServerPoolWorkspace = (deps: {
         readonly worktreePath: string;
       }> = [];
       return yield* Effect.gen(function* () {
+        // The cache lives in the repository's common git directory, so one
+        // write here covers the integration worktree and every worker worktree
+        // this run cuts from the same repository. When the run shares the
+        // operator's checkout, `run.cwd` IS the operator's repository and the
+        // config lands there.
+        yield* enableRerere(run.cwd);
         yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
           Effect.mapError(
             (cause) =>
@@ -969,6 +1012,8 @@ export const makeServerPoolWorkspace = (deps: {
             repo: sibling.canonicalPath,
             worktreePath: siblingWorktree.path,
           });
+          // A sibling is its own repository with its own rr-cache.
+          yield* enableRerere(sibling.canonicalPath);
           // Sibling integration worktrees get assets only — siblings have no
           // beads database (`skills/cook-epic/run-legacy.sh:1008-1009`).
           yield* setupWorktreeAssets(

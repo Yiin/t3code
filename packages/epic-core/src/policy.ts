@@ -172,6 +172,14 @@ export const mergeFixDescription = (input: {
     touched.length > 0
       ? " The coordinator lands the whole set when this issue closes, so leave the base branches and the sibling remotes to it."
       : ` The coordinator lands this branch when the issue closes, so leave \`${input.baseBranch}\` to it.`;
+  if (input.reason === "conflict") {
+    // Two reasons the repair agent needs to know: hunks it never resolved may
+    // already be resolved when it opens the file, and its own resolution is
+    // worth getting right because the drain will replay it verbatim.
+    description +=
+      " git rerere is on, so a conflict this run already resolved once comes back resolved, and" +
+      " the resolution you commit here is replayed on every later merge of the same hunks.";
+  }
   if (input.failureDetail !== undefined && input.failureDetail.length > 0) {
     const heading =
       input.reason === "conflict" ? "What the conflict looked like" : "What the gate reported";
