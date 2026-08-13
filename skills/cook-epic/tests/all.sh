@@ -17,6 +17,19 @@ TOTAL_CEILING_SECONDS=${COOKEPIC_TESTS_TOTAL_CEILING_SECONDS:-600}
   exit 2
 }
 
+# The suite drives the real bd CLI. Without it there is nothing to run, so
+# skip with a stated reason instead of failing — the Epic Runs CI job owns
+# this suite and sets COOKEPIC_REQUIRE_BD=1 to turn the skip back into a
+# failure there.
+if ! command -v bd >/dev/null 2>&1; then
+  if [[ "${COOKEPIC_REQUIRE_BD:-0}" == 1 ]]; then
+    echo "FAIL: bd not found on PATH and COOKEPIC_REQUIRE_BD=1" >&2
+    exit 1
+  fi
+  echo "SKIP: bd not found; install beads to run this suite (CI: the Epic Runs job owns it)" >&2
+  exit 0
+fi
+
 mapfile -t tests < <(
   find "$SCRIPT_DIR" -maxdepth 1 -type f -name '*.sh' ! -name 'all.sh' -printf '%f\n' | sort
 )
@@ -97,9 +110,13 @@ for name in "${tests[@]}"; do
     # $$ (this run's own pid), not $PPID: two all.sh invocations launched by
     # the same parent — which is what `vp run` does — would otherwise pick the
     # same unit name, and the second dies instantly with "already loaded".
+    # --setenv PATH: units get the user manager's environment, not ours, so a
+    # bd installed for this job (CI installs it into ~/go/bin via setup-go)
+    # would otherwise vanish inside the unit with "env: 'bd': No such file".
     unit="cook-epic-test-$$-${name%.sh}"
     command=(systemd-run --user --wait --collect --pipe --quiet
       --unit "$unit"
+      --setenv "PATH=$PATH"
       --property "RuntimeMaxSec=${PER_FILE_TIMEOUT_SECONDS}s"
       --property "TimeoutStopSec=5s"
       bash "$SCRIPT_DIR/$name")

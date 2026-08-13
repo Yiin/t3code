@@ -3,8 +3,8 @@
 `.github/workflows/ci.yml` runs on pull requests and on pushes to `main` or `mine`.
 
 - The `check` job runs `vp check` (lint plus typecheck), `vpr typecheck`, and the desktop build.
-- The `test` job runs `vp run test` across the workspace.
-- The `epic_runs` job installs Beads `v1.1.2`, verifies `bd --version`, runs `skills/cook-epic/tests/all.sh`, then runs the terminal conformance driver with `T3CODE_CONFORMANCE_TERMINAL=1`.
+- The `test` job runs `vp run test` across the workspace. It installs no Beads, so the cook-epic shell suite skips itself there with a stated reason.
+- The `epic_runs` job installs Beads `v1.1.2`, verifies `bd --version`, runs `skills/cook-epic/tests/all.sh` with `COOKEPIC_REQUIRE_BD=1` (it is the suite's mandatory owner, so a missing `bd` fails the job instead of skipping green), then runs the terminal conformance driver with `T3CODE_CONFORMANCE_TERMINAL=1`.
 
 ## Runner labels
 
@@ -46,7 +46,7 @@ Measured locally on 2026-08-12, not on a CI runner.
 | `T3CODE_CONFORMANCE_TERMINAL=1 vp run --filter @t3tools/epic-run-conformance test` | 38 s                       |
 | `vp test run apps/server/integration/epicRunnerConformance.integration.test.ts`    | 23 s                       |
 
-The shell suite is one file, `core-delegation.sh`. It has no skips.
+The shell suite is one file, `core-delegation.sh`. It needs the `bd` CLI; `all.sh` skips the suite with a stated reason when `bd` is absent unless `COOKEPIC_REQUIRE_BD=1`.
 
 ## Budgets
 

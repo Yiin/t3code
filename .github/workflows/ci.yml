@@ -89,6 +89,10 @@ jobs:
 
       - name: Run epic regression gates
         run: bash skills/cook-epic/tests/all.sh
+        env:
+          # This job owns the cook-epic suite: all.sh skips when bd is absent
+          # (the Test job relies on that), so a missing bd here must fail.
+          COOKEPIC_REQUIRE_BD: "1"
 
       - name: Run terminal conformance driver
         run: vp run --filter @t3tools/epic-run-conformance test
