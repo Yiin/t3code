@@ -157,6 +157,12 @@ skills into `${PRIME_SKILLS_DIR:-~/.prime/skills}`. Set `PRIME_SKILLS_DIR` when
 Prime keeps its skills somewhere else. The installer skips Prime with a printed
 reason when neither directory exists.
 
+T3 Code reads the same directory when it checks the provider, and lists what it
+finds on the provider card. A skill shows up after the next provider check, so
+run `skills/install.sh` before you start the thread. Set `PRIME_SKILLS_DIR` on
+the instance's Environment variables when that instance uses a different
+directory.
+
 ## Prime And Epic Runs
 
 Prime works as both an EpicRunner origin and a terminal `cook-epic` worker.

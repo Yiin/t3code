@@ -25,7 +25,12 @@ export interface SkillCommandRegistry {
 
 const SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/;
 
-function parseFrontmatter(content: string): Omit<SkillCommand, "content"> | undefined {
+/**
+ * Read a skill's `name` and `description` out of its SKILL.md frontmatter.
+ * Exported so provider-side skill discovery (Prime lists its own skills
+ * directory) parses skills exactly the way workspace skills are parsed.
+ */
+export function parseSkillFrontmatter(content: string): Omit<SkillCommand, "content"> | undefined {
   const lines = content.split(/\r?\n/);
   if (lines[0] !== "---") return undefined;
   const end = lines.findIndex((line, index) => index > 0 && line === "---");
@@ -84,7 +89,7 @@ async function scan(root: string, cached: CacheEntry | undefined): Promise<Cache
 
   const commands = new Map<string, SkillCommand>();
   for (const candidate of candidates) {
-    const parsed = parseFrontmatter(candidate.content);
+    const parsed = parseSkillFrontmatter(candidate.content);
     if (parsed && !commands.has(parsed.name)) {
       commands.set(parsed.name, { ...parsed, content: candidate.content });
     }

@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type PrimeSettings,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -25,6 +26,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { findReservedPrimeLaunchArg } from "../prime/PrimeLaunchArgs.ts";
+import { readPrimeSkills } from "../prime/PrimeSkills.ts";
 import {
   makePrimeRpcTransport,
   type PrimeRpcTransportError,
@@ -153,6 +155,7 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
   const snapshot = (
     probe: Parameters<typeof buildServerProvider>[0]["probe"],
     models: ReadonlyArray<ServerProviderModel> = [],
+    skills: ReadonlyArray<ServerProviderSkill> = [],
   ) =>
     buildServerProvider({
       driver: PRIME_AGENT_DRIVER_KIND,
@@ -160,6 +163,7 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
       enabled: settings.enabled,
       checkedAt,
       models,
+      skills,
       probe,
     });
   if (!settings.enabled) {
@@ -227,6 +231,10 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
     });
   }
 
+  // Prime never reports skills over RPC, so read its skills directory. The
+  // `/skill:<name>` rewrite in ProviderCommandReactor fires off this list.
+  const skills = yield* readPrimeSkills(environment);
+
   const rpcResult = yield* Effect.scoped(
     Effect.gen(function* () {
       const transportFactory: NonNullable<PrimeProviderOptions["makeTransport"]> =
@@ -246,22 +254,30 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
     }).pipe(Effect.timeoutOption(options.rpcTimeoutMs ?? RPC_TIMEOUT_MS)),
   ).pipe(Effect.result);
   if (Result.isFailure(rpcResult)) {
-    return snapshot({
-      installed: true,
-      version,
-      status: "error",
-      auth: { status: "unknown" },
-      message: "Prime Agent RPC returned invalid data.",
-    });
+    return snapshot(
+      {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: "Prime Agent RPC returned invalid data.",
+      },
+      [],
+      skills,
+    );
   }
   if (Option.isNone(rpcResult.success)) {
-    return snapshot({
-      installed: true,
-      version,
-      status: "error",
-      auth: { status: "unknown" },
-      message: "Prime Agent RPC health check timed out.",
-    });
+    return snapshot(
+      {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: "Prime Agent RPC health check timed out.",
+      },
+      [],
+      skills,
+    );
   }
   const { state, models: metadata } = rpcResult.success.value;
   const activeSlug = state.model ? `${state.model.provider}/${state.model.id}` : undefined;
@@ -277,16 +293,21 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
         message: "Prime Agent is not authenticated.",
       },
       models,
+      skills,
     );
   }
   if (models.length === 0) {
-    return snapshot({
-      installed: true,
-      version,
-      status: "warning",
-      auth: { status: authenticated === true ? "authenticated" : "unknown" },
-      message: "Prime Agent returned no available models.",
-    });
+    return snapshot(
+      {
+        installed: true,
+        version,
+        status: "warning",
+        auth: { status: authenticated === true ? "authenticated" : "unknown" },
+        message: "Prime Agent returned no available models.",
+      },
+      [],
+      skills,
+    );
   }
   return snapshot(
     {
@@ -296,5 +317,6 @@ export const checkPrimeProviderStatus = Effect.fn("checkPrimeProviderStatus")(fu
       auth: { status: authenticated === true ? "authenticated" : "unknown" },
     },
     models,
+    skills,
   );
 });

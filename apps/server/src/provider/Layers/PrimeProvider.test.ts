@@ -44,14 +44,30 @@ it.layer(NodeServices.layer)("PrimeProvider", (it) => {
   it.effect("maps typed models, capabilities, defaults, and duplicates", () =>
     Effect.gen(function* () {
       const wrapper = yield* makeWrapper;
+      const skillsDir = NodePath.join(wrapper.dir, "skills");
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(NodePath.join(skillsDir, "plan-epic"), { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(skillsDir, "plan-epic", "SKILL.md"),
+          "---\nname: plan-epic\ndescription: Plan a beads epic\n---\n\nBody\n",
+          "utf8",
+        );
+      });
       const snapshot = yield* checkPrimeProviderStatus(
         decodeSettings({ binaryPath: wrapper.path }),
         {
           ...process.env,
+          PRIME_SKILLS_DIR: skillsDir,
           T3_PRIME_RPC_SCENARIO: "health-ready",
         },
       );
       assert.strictEqual(snapshot.status, "ready");
+      // Prime reports no skills over RPC, so the snapshot comes from the
+      // skills directory. Without it the `/skill:` rewrite never fires.
+      assert.deepStrictEqual(
+        snapshot.skills.map((skill) => skill.name),
+        ["plan-epic"],
+      );
       assert.strictEqual(snapshot.version, "1.2.3");
       assert.deepStrictEqual(
         snapshot.models.map((model) => model.slug),

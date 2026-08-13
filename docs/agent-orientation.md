@@ -168,6 +168,10 @@ inside the config directory that created it.
   for Prime, but only when the provider reports that skill. Otherwise the
   workspace skill body expands inline. `skills/install.sh` links the canonical
   skills into `${PRIME_SKILLS_DIR:-~/.prime/skills}`.
+- Prime reports no skills over RPC, so `prime/PrimeSkills.ts` reads that same
+  directory and `PrimeProvider.ts` puts the result in the snapshot. Its
+  resolution mirrors `skills/install.sh`: `PRIME_SKILLS_DIR`, then
+  `$PRIME_HOME/skills`, then `~/.prime/skills`.
 - User-facing setup, diagnostics, and troubleshooting: `docs/providers/prime.md`.
 
 ## Provider session lifecycle
