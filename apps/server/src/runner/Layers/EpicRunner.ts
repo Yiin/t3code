@@ -43,6 +43,7 @@ import {
   shouldReclaimMergeSlot,
 } from "@t3tools/epic-core/policy";
 import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
+import { isEpicRunTerminal } from "@t3tools/epic-core/runStatus";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { EpicRunPreflight } from "@t3tools/epic-core/EpicRunPreflight";
 import { EpicRunConfigSource } from "@t3tools/epic-core/EpicRunConfigSource";
@@ -277,6 +278,51 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    /**
+     * Best-effort detail for a terminal origin-thread post: which children
+     * landed, and which `epic/*` branches the run left unmerged. Both reads
+     * come from the store — the merge queue holds exactly the entries the
+     * drain never completed, so a completed iteration whose branch is absent
+     * from the queue landed. Any failure degrades to no detail; the post must
+     * still go out.
+     */
+    const readTerminalDetail = (
+      run: EpicRun,
+    ): Effect.Effect<{
+      readonly landed: ReadonlyArray<string>;
+      readonly strandedBranches: ReadonlyArray<string>;
+    } | null> =>
+      Effect.gen(function* () {
+        const iterations = yield* store.listIterations({ runId: run.runId });
+        const mergeState = yield* store.getMergeState({ runId: run.runId });
+        const strandedBranches = Option.match(mergeState, {
+          onNone: () => [] as Array<string>,
+          onSome: (state) => state.entries.map((entry) => entry.branch),
+        });
+        const stranded = new Set(strandedBranches);
+        const landed = [
+          ...new Set(
+            iterations
+              .filter(
+                (iteration) =>
+                  iteration.turnStatus === "completed" &&
+                  iteration.branch !== null &&
+                  iteration.branch !== undefined &&
+                  !stranded.has(iteration.branch),
+              )
+              .map((iteration) => iteration.issueId ?? iteration.branch!),
+          ),
+        ];
+        return { landed, strandedBranches };
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.origin-status-detail-failed", {
+            runId: run.runId,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+
     const reportOriginThreadTransitions = (
       previous: PriorRun,
       run: EpicRun,
@@ -289,20 +335,35 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       if (Option.isSome(previous) && run.iterationsCompleted > previous.value.iterationsCompleted) {
         transitions.push("iteration settled");
       }
-      if (
-        (run.status === "done" || run.status === "failed" || run.status === "cancelled") &&
-        (Option.isNone(previous) || previous.value.status !== run.status)
-      ) {
+      const terminalTransition =
+        isEpicRunTerminal(run.status) &&
+        (Option.isNone(previous) || previous.value.status !== run.status);
+      if (terminalTransition) {
         transitions.push(run.status === "done" ? "completed" : run.status);
       }
       if (transitions.length === 0) return Effect.void;
 
       return Effect.gen(function* () {
+        const terminalDetail = terminalTransition ? yield* readTerminalDetail(run) : null;
         for (const transition of transitions) {
           yield* Effect.gen(function* () {
             const commandUuid = yield* crypto.randomUUIDv4;
             const messageUuid = yield* crypto.randomUUIDv4;
             const createdAt = yield* DateTimeNowIso;
+            let text = `EpicRunner run ${run.runId} for ${run.epicId}: ${transition}. Iterations ${run.iterationsCompleted}/${run.maxIterations}.`;
+            if (
+              transition === "completed" ||
+              transition === "failed" ||
+              transition === "cancelled"
+            ) {
+              if (run.lastError !== null) text += ` Error: ${run.lastError}.`;
+              if (terminalDetail !== null && terminalDetail.landed.length > 0) {
+                text += ` Landed: ${terminalDetail.landed.join(", ")}.`;
+              }
+              if (terminalDetail !== null && terminalDetail.strandedBranches.length > 0) {
+                text += ` Unmerged branches: ${terminalDetail.strandedBranches.join(", ")}.`;
+              }
+            }
             yield* engine.dispatch({
               type: "thread.turn.start",
               commandId: CommandId.make(`server:epic-run-status:${commandUuid}`),
@@ -310,7 +371,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               message: {
                 messageId: MessageId.make(`epic-run-status:${run.runId}:${messageUuid}`),
                 role: "user",
-                text: `EpicRunner run ${run.runId} for ${run.epicId}: ${transition}. Iterations ${run.iterationsCompleted}/${run.maxIterations}.`,
+                text,
                 attachments: [],
               },
               origin: "agent",
@@ -476,20 +537,27 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ).pipe(Effect.ensuring(workerScopeRegistry.releaseRun(runId)));
       });
 
-    /** Best-effort terminal write for a loop that died on an unexpected error. */
+    /**
+     * Best-effort terminal write for a loop that died on an unexpected error.
+     * Under the same transition semaphore as every other status write: a
+     * cancel racing this save must not read a stale prior row and double-post
+     * the origin-thread terminal message.
+     */
     const markRunFailed = (runId: EpicRunId, detail: string) =>
-      requireRun(runId).pipe(
-        Effect.flatMap((run) => Effect.map(DateTimeNowIso, (updatedAt) => ({ run, updatedAt }))),
-        Effect.flatMap(({ run, updatedAt }) =>
-          saveRun({
+      withTransition(
+        Effect.gen(function* () {
+          const run = yield* requireRun(runId);
+          const updatedAt = yield* DateTimeNowIso;
+          yield* saveRun({
             ...run,
             status: "failed",
             currentThreadId: null,
             currentTurnStartedAt: null,
             lastError: detail,
             updatedAt,
-          }),
-        ),
+          });
+        }),
+      ).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("epic.runner.mark-failed-failed", { runId, cause }),
         ),

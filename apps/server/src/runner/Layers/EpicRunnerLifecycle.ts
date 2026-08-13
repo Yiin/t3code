@@ -18,6 +18,7 @@ import {
 } from "@t3tools/epic-core/Errors";
 import type { PoolBacklogShape, PoolSchedulerEvent } from "@t3tools/epic-core/ParallelEpicLoop";
 import type { EpicRunConfigSnapshot } from "@t3tools/epic-core/EpicRunPreflight";
+import { isEpicRunTerminal } from "@t3tools/epic-core/runStatus";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -228,11 +229,7 @@ export const makeEpicRunnerLifecycle = (deps: {
       const transition = yield* withTransition(
         Effect.gen(function* () {
           const fresh = yield* requireRun(runId);
-          if (
-            fresh.status === "done" ||
-            fresh.status === "failed" ||
-            fresh.status === "cancelled"
-          ) {
+          if (isEpicRunTerminal(fresh.status)) {
             return yield* new EpicRunStateError({
               runId,
               detail: `run already ${fresh.status}`,

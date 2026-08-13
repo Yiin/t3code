@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClientError } from "effect/unstable/http";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import { isEpicRunTerminal as isTerminalRunStatus } from "@t3tools/epic-core/runStatus";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
@@ -122,7 +123,7 @@ export const findEpicProject = (snapshot: OrchestrationShellSnapshot, normalized
   snapshot.projects.find((project) => project.workspaceRoot === normalizedCwd);
 
 export const isEpicRunTerminal = (run: Pick<EpicRun, "status">): boolean =>
-  run.status === "done" || run.status === "failed" || run.status === "cancelled";
+  isTerminalRunStatus(run.status);
 
 export const formatEpicRunCompact = (run: EpicRun): string =>
   [

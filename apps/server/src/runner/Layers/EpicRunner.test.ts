@@ -2663,7 +2663,7 @@ describe("EpicRunner", () => {
         [
           `EpicRunner run ${completed.runId} for epic-origin-completed: started. Iterations 0/50.`,
           `EpicRunner run ${completed.runId} for epic-origin-completed: iteration settled. Iterations 1/50.`,
-          `EpicRunner run ${completed.runId} for epic-origin-completed: completed. Iterations 1/50.`,
+          `EpicRunner run ${completed.runId} for epic-origin-completed: completed. Iterations 1/50. Landed: child-1.`,
         ],
       );
       assert.isTrue(
@@ -2697,7 +2697,7 @@ describe("EpicRunner", () => {
         [
           `EpicRunner run ${failed.runId} for epic-origin-failed: started. Iterations 0/50.`,
           `EpicRunner run ${failed.runId} for epic-origin-failed: iteration settled. Iterations 1/50.`,
-          `EpicRunner run ${failed.runId} for epic-origin-failed: failed. Iterations 1/50.`,
+          `EpicRunner run ${failed.runId} for epic-origin-failed: failed. Iterations 1/50. Error: gutter: 1 iterations without a commit.`,
         ],
       );
     }).pipe(Effect.provide(failedHarness.layer));
@@ -2732,6 +2732,153 @@ describe("EpicRunner", () => {
       yield* cancellationScenario;
       yield* refusalScenario;
     });
+  });
+
+  it.live("posts one terminal message when a terminal run is cancelled again", () => {
+    const originThreadId = ThreadId.make("thread-epic-origin-double-terminal");
+    const pausedRun: EpicRun = {
+      runId: EpicRunId.make("run-origin-double-terminal"),
+      epicId: "epic-origin-double-terminal",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 2,
+      iterationsCompleted: 1,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({ script: [], seedRuns: [pausedRun] });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.cancelRun({ runId: pausedRun.runId });
+      // The terminal row is durable; a second cancel must be refused before
+      // any save, so the transition guard never re-posts.
+      const second = yield* Effect.flip(runner.cancelRun({ runId: pausedRun.runId }));
+      assert.strictEqual(second._tag, "EpicRunStateError");
+      assert.deepStrictEqual(
+        harness
+          .commandsOfType("thread.turn.start")
+          .filter((command) => command.threadId === originThreadId)
+          .map((command) => command.message.text),
+        [
+          "EpicRunner run run-origin-double-terminal for epic-origin-double-terminal: cancelled. Iterations 1/10.",
+        ],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("names the error, landed children, and stranded branches in the terminal message", () => {
+    const originThreadId = ThreadId.make("thread-epic-origin-terminal-detail");
+    const runId = EpicRunId.make("run-origin-terminal-detail");
+    const pausedRun: EpicRun = {
+      runId,
+      epicId: "epic-origin-detail",
+      projectId,
+      cwd: "/tmp/epic-runner-repo",
+      prompt: "do one unit of work",
+      orientationFile: null,
+      modelSelection,
+      runtimeMode: "full-access",
+      ...defaultConfigSnapshot,
+      originThreadId,
+      status: "paused",
+      maxIterations: 10,
+      workers: 1,
+      iterationsDispatched: 2,
+      iterationsCompleted: 2,
+      currentThreadId: null,
+      currentTurnStartedAt: null,
+      consecutiveFailures: 0,
+      noCommitStreak: 0,
+      infraStreak: 0,
+      lastError: "infra:merge-reconciliation: gate timeout",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const harness = createHarness({
+      script: [],
+      seedRuns: [pausedRun],
+      seedIterations: [
+        {
+          runId,
+          iterationIndex: 0,
+          threadId: ThreadId.make("thread-detail-0"),
+          issueId: "child-1",
+          branch: "epic/child-1",
+          turnStatus: "completed",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: NOW,
+        },
+        {
+          runId,
+          iterationIndex: 1,
+          threadId: ThreadId.make("thread-detail-1"),
+          issueId: "child-2",
+          branch: "epic/child-2",
+          turnStatus: "completed",
+          summary: null,
+          why: null,
+          failureReason: null,
+          startedAt: NOW,
+          finishedAt: NOW,
+        },
+      ],
+    });
+    // child-2's branch never drained: it is exactly the work a relaunch will
+    // not pick up, so the terminal message must name it.
+    harness.store.mergeStates.set(runId, {
+      runId,
+      initialHead: "head-0",
+      lastAcceptedHead: "head-0",
+      parkedCount: 0,
+      repositoryPath: "/tmp/epic-runner-repo",
+      baseBranch: "mine",
+      integrationBranch: `cook-epic-integration-${runId}`,
+      integrationWorktreePath: `${harness.worktreesDir}/epic-${runId}/integration`,
+      operatorBaseBranch: null,
+      siblings: [],
+      entries: [
+        {
+          runId,
+          sequence: 0,
+          childId: "child-2",
+          branch: "epic/child-2",
+          status: "queued",
+          reason: null,
+          fixIssueId: null,
+        },
+      ],
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      yield* runner.cancelRun({ runId });
+      assert.deepStrictEqual(
+        harness
+          .commandsOfType("thread.turn.start")
+          .filter((command) => command.threadId === originThreadId)
+          .map((command) => command.message.text),
+        [
+          `EpicRunner run ${runId} for epic-origin-detail: cancelled. Iterations 2/10. Error: infra:merge-reconciliation: gate timeout. Landed: child-1. Unmerged branches: epic/child-2.`,
+        ],
+      );
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.live("reports a stored status when later run fan-out fails", () => {

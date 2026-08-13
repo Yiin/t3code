@@ -51,6 +51,10 @@
       "types": "./src/runStall.ts",
       "import": "./src/runStall.ts"
     },
+    "./runStatus": {
+      "types": "./src/runStatus.ts",
+      "import": "./src/runStatus.ts"
+    },
     "./runPolicy": {
       "types": "./src/runPolicy.ts",
       "import": "./src/runPolicy.ts"
