@@ -14,10 +14,12 @@
  */
 import {
   CommandId,
+  DEFAULT_EPIC_ROLE_POLICY,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EPIC_RUN_FAILURE_RESUME_BLOCKED,
   EPIC_RUN_FAILURE_RESUME_FAILED,
   EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
+  type EpicRolePolicy,
   type EpicRun as TransportEpicRun,
   EpicRunId,
   MessageId,
@@ -91,6 +93,7 @@ import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
@@ -198,7 +201,24 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const gitVcsDriver = yield* GitVcsDriver;
     const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
     const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
+    const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
     const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
+
+    /**
+     * The epic role policy, or an empty one. A server without a settings
+     * runtime, or a settings read that fails, keeps the pre-tier behaviour
+     * rather than blocking a launch on a policy lookup.
+     */
+    const readEpicRolePolicy: Effect.Effect<EpicRolePolicy> = Option.isNone(serverSettings)
+      ? Effect.succeed(DEFAULT_EPIC_ROLE_POLICY)
+      : serverSettings.value.getSettings.pipe(
+          Effect.map((settings) => settings.epicRolePolicy),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("epic.runner.role-policy-read-failed", { cause }).pipe(
+              Effect.as(DEFAULT_EPIC_ROLE_POLICY),
+            ),
+          ),
+        );
     const leases = new Map<EpicRunId, EpicRunLockLease>();
 
     const seedRetryBaseDelayMs = Math.max(
@@ -684,6 +704,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         0,
         options?.providerDegradationTtlMs ?? DEFAULT_PROVIDER_DEGRADATION_TTL_MS,
       ),
+      readEpicRolePolicy,
     });
 
     const lifecycle = makeEpicRunnerLifecycle({

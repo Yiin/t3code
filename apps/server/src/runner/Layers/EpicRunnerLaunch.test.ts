@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  DEFAULT_EPIC_ROLE_POLICY,
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   EpicRunId,
@@ -87,6 +88,7 @@ const makeLaunch = (input: {
     forkLoop: undefined as never,
     releaseLeaseOnFailure: undefined as never,
     providerDegradationTtlMs: 0,
+    readEpicRolePolicy: Effect.succeed(DEFAULT_EPIC_ROLE_POLICY),
   });
 };
 
@@ -229,6 +231,7 @@ const makeLaunchHarness = (
     forkLoop: () => Effect.void,
     releaseLeaseOnFailure: () => (effect) => effect,
     providerDegradationTtlMs: 60_000,
+    readEpicRolePolicy: Effect.succeed(DEFAULT_EPIC_ROLE_POLICY),
   });
   const input = (overrides: Partial<LaunchEpicRunInput>): LaunchEpicRunInput => ({
     epicId: "epic-1",

@@ -3,6 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EpicRolePolicy as EpicRolePolicySchema,
   EpicRunConfig as EpicRunConfigSchema,
   EpicRunId,
   EpicRunPreflightError,
@@ -19,6 +20,7 @@ import {
   type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProjectionThreadTurnStatus,
+  type EpicRolePolicy,
   type EpicRunPreflightInput,
   type EpicRunPreflightResult,
   type ModelSelection,
@@ -72,6 +74,7 @@ import {
 } from "../../persistence/Services/EpicRuns.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
+import { layerTest as serverSettingsLayerTest } from "../../serverSettings.ts";
 import {
   ProjectSetupScriptRunner,
   type ProjectSetupScriptRunnerInput,
@@ -149,6 +152,29 @@ const provider = (instanceId: string, driver: string, model: string): ServerProv
   slashCommands: [],
   skills: [],
 });
+
+const CLAUDE_WORK_SELECTION = {
+  instanceId: ProviderInstanceId.make("claude-work"),
+  model: "claude-sonnet-5",
+} as const satisfies ModelSelection;
+const CLAUDE_PERSONAL_SELECTION = {
+  instanceId: ProviderInstanceId.make("claude-personal"),
+  model: "claude-sonnet-5",
+} as const satisfies ModelSelection;
+const CHAIN_CODEX_SELECTION = {
+  instanceId: ProviderInstanceId.make("codex-personal"),
+  model: "gpt-5.6-sol",
+  options: [{ id: "reasoningEffort", value: "high" }],
+} as const satisfies ModelSelection;
+
+const decodeEpicRolePolicy = Schema.decodeUnknownSync(EpicRolePolicySchema);
+
+/** A role policy that points the iteration worker at one ordered hop chain. */
+const iterationWorkerPolicy = (hops: ReadonlyArray<ModelSelection>): EpicRolePolicy =>
+  decodeEpicRolePolicy({
+    tiers: { primary: { hops: hops.map((selection) => ({ selection })) } },
+    roles: { "iteration-worker": "primary" },
+  });
 
 /**
  * What a scripted iteration does when its turn is dispatched. `head` is what
@@ -353,6 +379,8 @@ function createHarness(input: {
   readonly originThreadShells?: Readonly<
     Record<string, { readonly projectId?: ProjectId; readonly modelSelection: ModelSelection }>
   >;
+  /** The global epic role policy; absent means no policy, the legacy path. */
+  readonly epicRolePolicy?: EpicRolePolicy;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   if (input.failAllocationFor !== undefined) {
@@ -1241,6 +1269,11 @@ function createHarness(input: {
     ),
     Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
     Layer.provide(makeProviderRegistryLayer(input.providers ?? [])),
+    Layer.provide(
+      serverSettingsLayerTest(
+        input.epicRolePolicy === undefined ? {} : { epicRolePolicy: input.epicRolePolicy },
+      ),
+    ),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(EpicWorkerScopeRegistry.layer),
     Layer.provide(
@@ -4317,6 +4350,196 @@ describe("EpicRunner", () => {
       assert.deepStrictEqual(
         harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
         kimiSelection,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("launches on the second Claude account in the iteration-worker chain", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+      ],
+      epicRolePolicy: iterationWorkerPolicy([
+        CLAUDE_WORK_SELECTION,
+        CLAUDE_PERSONAL_SELECTION,
+        CHAIN_CODEX_SELECTION,
+      ]),
+    });
+
+    return Effect.gen(function* () {
+      const degradedAt = DateTime.formatIso(yield* DateTime.now);
+      harness.store.degradations.set(CLAUDE_WORK_SELECTION.instanceId, {
+        providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+        failureReason: "provider-error:spend-limit",
+        degradedAt,
+      });
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_PERSONAL_SELECTION,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("launches on the last chain hop when every hop is degraded", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        provider("codex-personal", "codex", "gpt-5.6-sol"),
+      ],
+      // The chain ends on a second Claude account, which the driver-order
+      // walker could never reach: it proves the last hop came from the chain.
+      epicRolePolicy: iterationWorkerPolicy([
+        CLAUDE_WORK_SELECTION,
+        CHAIN_CODEX_SELECTION,
+        CLAUDE_PERSONAL_SELECTION,
+      ]),
+    });
+
+    return Effect.gen(function* () {
+      const degradedAt = DateTime.formatIso(yield* DateTime.now);
+      for (const instanceId of [
+        CLAUDE_WORK_SELECTION.instanceId,
+        CLAUDE_PERSONAL_SELECTION.instanceId,
+        CHAIN_CODEX_SELECTION.instanceId,
+      ]) {
+        harness.store.degradations.set(instanceId, {
+          providerInstanceId: instanceId,
+          failureReason: "provider-error:rate-limit",
+          degradedAt,
+        });
+      }
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_PERSONAL_SELECTION,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("terminates the last-resort walk when a chain names one instance twice", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+      ],
+      epicRolePolicy: iterationWorkerPolicy([
+        CLAUDE_WORK_SELECTION,
+        CLAUDE_PERSONAL_SELECTION,
+        CLAUDE_WORK_SELECTION,
+      ]),
+    });
+
+    return Effect.gen(function* () {
+      const degradedAt = DateTime.formatIso(yield* DateTime.now);
+      for (const instanceId of [
+        CLAUDE_WORK_SELECTION.instanceId,
+        CLAUDE_PERSONAL_SELECTION.instanceId,
+      ]) {
+        harness.store.degradations.set(instanceId, {
+          providerInstanceId: instanceId,
+          failureReason: "provider-error:rate-limit",
+          degradedAt,
+        });
+      }
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_PERSONAL_SELECTION,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("clears an expired degradation on the first chain hop and stays there", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      options: { providerDegradationTtlMs: 1_000 },
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+      ],
+      epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+    });
+    harness.store.degradations.set(CLAUDE_WORK_SELECTION.instanceId, {
+      providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+      failureReason: "provider-error:spend-limit",
+      degradedAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_WORK_SELECTION,
+      );
+      assert.isFalse(harness.store.degradations.has(CLAUDE_WORK_SELECTION.instanceId));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("keeps a caller-supplied startRun selection despite a chain and a degradation", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+      ],
+      epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+    });
+
+    return Effect.gen(function* () {
+      const degradedAt = DateTime.formatIso(yield* DateTime.now);
+      harness.store.degradations.set(CLAUDE_WORK_SELECTION.instanceId, {
+        providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+        failureReason: "provider-error:spend-limit",
+        degradedAt,
+      });
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: CLAUDE_WORK_SELECTION,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_WORK_SELECTION,
       );
     }).pipe(Effect.provide(harness.layer));
   });

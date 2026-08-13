@@ -10,6 +10,8 @@
  */
 import {
   DEFAULT_RUNTIME_MODE,
+  type EpicRoleId,
+  type EpicRolePolicy,
   type EpicRunConfigProvenance,
   EpicRunId,
   type LaunchEpicRunInput,
@@ -34,7 +36,11 @@ import {
   type EpicRunLockHeldError,
   type EpicRunLockLease,
 } from "@t3tools/epic-core/ports/EpicRunLock";
-import { resolveEpicProviderFallback } from "@t3tools/epic-core/providerFallback";
+import {
+  type EpicFallbackHop,
+  resolveEpicProviderChainFallback,
+  resolveEpicProviderFallback,
+} from "@t3tools/epic-core/providerFallback";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -48,6 +54,9 @@ import type { StartEpicRunInput } from "../Services/EpicRunner.ts";
 
 const ACTIVE_RUN_RETRY_ATTEMPTS = 20;
 const ACTIVE_RUN_RETRY_DELAY_MS = 5;
+
+/** The run-level selection is the iteration worker's, so launch resolves that role. */
+const ITERATION_WORKER_ROLE: EpicRoleId = "iteration-worker";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -129,6 +138,12 @@ export const makeEpicRunnerLaunch = (deps: {
     runId: EpicRunId,
   ) => <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
   readonly providerDegradationTtlMs: number;
+  /**
+   * The global role policy, read fresh per launch so a settings edit applies
+   * to the next run without a restart. It never fails: a missing or broken
+   * settings runtime reads as an empty policy, which is the legacy path.
+   */
+  readonly readEpicRolePolicy: Effect.Effect<EpicRolePolicy>;
 }) => {
   const {
     store,
@@ -144,6 +159,7 @@ export const makeEpicRunnerLaunch = (deps: {
     forkLoop,
     releaseLeaseOnFailure,
     providerDegradationTtlMs,
+    readEpicRolePolicy,
   } = deps;
 
   const storeError = (operation: string) => (cause: unknown) =>
@@ -388,6 +404,16 @@ export const makeEpicRunnerLaunch = (deps: {
     return yield* enrichRun(run);
   });
 
+  /**
+   * Start a run on the selection its caller named.
+   *
+   * `startRun` deliberately skips {@link resolveLaunchModelSelection}: its
+   * `modelSelection` is required input a client or the CLI picked on purpose,
+   * so rerouting it would silently ignore an explicit choice. `launchRun`
+   * resolves a selection itself, from the project default or the repo config,
+   * and therefore owns the degradation and tier-chain checks. Carrying a
+   * degradation across separate runs of one epic is tracked as t3code-4eh.
+   */
   const startRun = (input: StartEpicRunInput) =>
     Effect.gen(function* () {
       const orientationFile = input.orientationFile ?? null;
@@ -405,6 +431,69 @@ export const makeEpicRunnerLaunch = (deps: {
       return yield* startNewRun(input, configSnapshot);
     });
 
+  /**
+   * The hop chain the iteration-worker role points at, or an empty chain.
+   *
+   * A role with no tier, or one naming a tier that no longer exists, has no
+   * policy at all: the caller then keeps today's driver-order fallback, so an
+   * unconfigured server behaves exactly as it did before tiers existed.
+   */
+  const iterationWorkerChain: Effect.Effect<ReadonlyArray<EpicFallbackHop>> = Effect.gen(
+    function* () {
+      const policy = yield* readEpicRolePolicy;
+      const tierId = policy.roles[ITERATION_WORKER_ROLE];
+      if (tierId === undefined) return [];
+      return policy.tiers[tierId]?.hops.map((hop) => hop.selection) ?? [];
+    },
+  );
+
+  /**
+   * The live degradation row for one instance, clearing an expired one first.
+   *
+   * `null` means "usable": either nothing is recorded, or what was recorded
+   * has aged past the TTL and has just been deleted.
+   */
+  const liveProviderDegradation = (input: {
+    readonly providerInstanceId: ModelSelection["instanceId"];
+    readonly cutoff: string;
+  }) =>
+    Effect.gen(function* () {
+      const degradation = yield* store
+        .getProviderDegradation({ providerInstanceId: input.providerInstanceId })
+        .pipe(Effect.mapError(storeError("getProviderDegradation")));
+      if (Option.isNone(degradation)) return null;
+      if (degradation.value.degradedAt > input.cutoff) return degradation.value;
+      // The predicate is repeated by SQL. A newer replacement written
+      // after this read is therefore safe from this cleanup.
+      yield* store
+        .clearExpiredProviderDegradation({
+          providerInstanceId: input.providerInstanceId,
+          cutoff: input.cutoff,
+        })
+        .pipe(Effect.mapError(storeError("clearExpiredProviderDegradation")));
+      return null;
+    });
+
+  const logLaunchFallback = (input: {
+    readonly from: ModelSelection;
+    readonly to: ModelSelection;
+    readonly reason: string;
+    readonly chain: ReadonlyArray<EpicFallbackHop>;
+  }) =>
+    Effect.logInfo("epic.runner.launch-provider-fallback", {
+      fromInstanceId: input.from.instanceId,
+      toInstanceId: input.to.instanceId,
+      reason: input.reason,
+      role: ITERATION_WORKER_ROLE,
+      // Where the target sits in the role's chain, and how long that chain
+      // is. Both are null on the legacy driver-order path, which has no chain.
+      chainPosition:
+        input.chain.length === 0
+          ? null
+          : input.chain.findIndex((hop) => hop.instanceId === input.to.instanceId),
+      chainLength: input.chain.length === 0 ? null : input.chain.length,
+    });
+
   const resolveLaunchModelSelection = (
     defaultSelection: ModelSelection,
   ): Effect.Effect<ModelSelection, EpicRunnerError> =>
@@ -417,40 +506,99 @@ export const makeEpicRunnerLaunch = (deps: {
       const cutoff = DateTime.formatIso(
         DateTime.subtractDuration(checkedAt, Duration.millis(providerDegradationTtlMs)),
       );
-      let selection = defaultSelection;
+      const chain = yield* iterationWorkerChain;
 
-      while (true) {
-        const degradation = yield* store
-          .getProviderDegradation({ providerInstanceId: selection.instanceId })
-          .pipe(Effect.mapError(storeError("getProviderDegradation")));
-        if (Option.isNone(degradation)) return selection;
+      const degradation = yield* liveProviderDegradation({
+        providerInstanceId: defaultSelection.instanceId,
+        cutoff,
+      });
+      // A healthy selection always wins, chain or no chain: the caller already
+      // resolved the most specific signal there was.
+      if (degradation === null) return defaultSelection;
 
-        if (degradation.value.degradedAt <= cutoff) {
-          // The predicate is repeated by SQL. A newer replacement written
-          // after this read is therefore safe from this cleanup.
-          yield* store
-            .clearExpiredProviderDegradation({
-              providerInstanceId: selection.instanceId,
-              cutoff,
-            })
-            .pipe(Effect.mapError(storeError("clearExpiredProviderDegradation")));
-          return selection;
+      if (chain.length === 0) {
+        let selection = defaultSelection;
+        let reason = degradation.failureReason;
+        while (true) {
+          const fallback = resolveEpicProviderFallback({
+            providers,
+            current: selection,
+            failureReason: "provider-error",
+            providerFallbackEligible: true,
+          });
+          if (fallback === null) return selection;
+          yield* logLaunchFallback({ from: selection, to: fallback, reason, chain });
+          selection = fallback;
+          const next = yield* liveProviderDegradation({
+            providerInstanceId: selection.instanceId,
+            cutoff,
+          });
+          if (next === null) return selection;
+          reason = next.failureReason;
         }
+      }
 
-        const fallback = resolveEpicProviderFallback({
+      // Probe every hop once so the walker can skip a degraded account in a
+      // single pass. Reading a hop also retires its expired row, so a stale
+      // degradation never blocks a chain.
+      const blocked = new Set<ModelSelection["instanceId"]>([defaultSelection.instanceId]);
+      for (const hop of chain) {
+        if (blocked.has(hop.instanceId)) continue;
+        const hopDegradation = yield* liveProviderDegradation({
+          providerInstanceId: hop.instanceId,
+          cutoff,
+        });
+        if (hopDegradation !== null) blocked.add(hop.instanceId);
+      }
+
+      const healthyHop = resolveEpicProviderChainFallback({
+        providers,
+        chain,
+        current: defaultSelection,
+        failureReason: "provider-error",
+        providerFallbackEligible: true,
+        isBlocked: (hop) => blocked.has(hop.instanceId),
+      });
+      if (healthyHop !== null) {
+        yield* logLaunchFallback({
+          from: defaultSelection,
+          to: healthyHop,
+          reason: degradation.failureReason,
+          chain,
+        });
+        return healthyHop;
+      }
+
+      // Every hop is degraded. The run still has to start, so take the
+      // deepest hop the chain names: it is the policy's own last resort, and
+      // it is the one furthest from the account that just failed. Walking
+      // forward repeatedly reuses the walker's own eligibility rules. The
+      // visited set bounds the walk, because a chain may name one instance
+      // twice and the walker resolves an instance to its first position.
+      let lastResort: ModelSelection | null = null;
+      let cursor = defaultSelection;
+      const visited = new Set<ModelSelection["instanceId"]>([defaultSelection.instanceId]);
+      while (true) {
+        const next = resolveEpicProviderChainFallback({
           providers,
-          current: selection,
+          chain,
+          current: cursor,
           failureReason: "provider-error",
           providerFallbackEligible: true,
         });
-        if (fallback === null) return selection;
-        yield* Effect.logInfo("epic.runner.launch-provider-fallback", {
-          fromInstanceId: selection.instanceId,
-          toInstanceId: fallback.instanceId,
-          reason: degradation.value.failureReason,
-        });
-        selection = fallback;
+        if (next === null || visited.has(next.instanceId)) break;
+        visited.add(next.instanceId);
+        lastResort = next;
+        cursor = next;
       }
+      if (lastResort === null) return defaultSelection;
+      yield* logLaunchFallback({
+        from: defaultSelection,
+        to: lastResort,
+        reason: degradation.failureReason,
+        chain,
+      });
+      return lastResort;
     });
 
   /**
