@@ -142,6 +142,23 @@ export interface PoolDispatchShape {
   /**
    * Best-effort unguarded session stop for the timeout and dispatch-failed
    * paths. The settled path uses the handle's guarded `release` instead.
+   *
+   * The caller states the grace because only it knows whether it interrupted
+   * this turn first; see {@link ForcedStopOptions}.
    */
-  readonly stopForced: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly stopForced: (threadId: ThreadId, options: ForcedStopOptions) => Effect.Effect<void>;
+}
+
+/** What a forced stop owes a turn the caller interrupted a moment ago. */
+export interface ForcedStopOptions {
+  /**
+   * Seconds the stop lets an interrupted turn close itself before it kills
+   * the session — the run's `supervision.stopGraceSeconds`.
+   *
+   * An interrupt is asynchronous: the turn leaves `running` only once the
+   * agent unwinds, so a stop issued in the same breath kills that unwind. `0`
+   * is the honest value when no interrupt preceded this stop, and an adapter
+   * whose own stop already enforces the grace ignores this field.
+   */
+  readonly graceSeconds: number;
 }

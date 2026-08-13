@@ -150,7 +150,8 @@ const CONSUMERS: Record<SupervisionField, ConsumerProof> = {
     },
   },
   stopGraceSeconds: {
-    consumer: "TerminalAgentDispatch.ts stop escalation, via makeDispatchSupervisionOptions",
+    consumer:
+      "TerminalAgentDispatch.ts stop escalation and the loop's forced stop, via makeDispatchSupervisionOptions",
     assert: () => {
       expect(dispatchOptions.stopGraceSeconds).toBe(SENTINEL.stopGraceSeconds);
     },

@@ -75,6 +75,7 @@ import type { PoolPolicy } from "./runPolicy.ts";
 import { resolveEpicProviderFallback } from "./providerFallback.ts";
 import { RUN_STALL_WARN_INTERVAL_MS, evaluateRunStall, type RunWait } from "./runStall.ts";
 import {
+  makeDispatchSupervisionOptions,
   makeWorkerLivenessConfig,
   superviseWorker,
   workerLivenessEventDetail,
@@ -686,6 +687,8 @@ export const runParallelEpicLoop = (
     readonly refusal: ResumeRefusalDecision;
     /** The adopted worktree, when the refusal happened after it was adopted. */
     readonly workspace: IterationWorkspace | null;
+    /** The run this dead worker belongs to, for its stop grace. */
+    readonly run: import("./ports/RunJournal.ts").PersistedEpicRun;
   }): Effect.Effect<ResumeRefusalOutcome, EpicRunnerError> =>
     Effect.gen(function* () {
       const { worker, refusal } = abandoned;
@@ -732,9 +735,15 @@ export const runParallelEpicLoop = (
       // Nobody will ever hold this session again. The interrupt closes the
       // turn the dead process left projected as running — a stop alone leaves
       // it open forever — and the stop keeps the session from sitting there
-      // while the same child is worked by someone else.
+      // while the same child is worked by someone else. The stop grace gives
+      // that interrupt the time to land before the session goes.
       yield* ports.dispatch.interruptForced(worker.threadId).pipe(Effect.ignore);
-      yield* ports.dispatch.stopForced(worker.threadId).pipe(Effect.ignore);
+      yield* ports.dispatch
+        .stopForced(worker.threadId, {
+          graceSeconds: makeDispatchSupervisionOptions(abandoned.run.config.supervision)
+            .stopGraceSeconds,
+        })
+        .pipe(Effect.ignore);
       if (handoff !== null) {
         yield* Effect.logWarning("epic.runner.resume-handed-over", {
           runId,
@@ -818,6 +827,7 @@ export const runParallelEpicLoop = (
           worker,
           refusal,
           workspace: releaseContext?.workspace ?? null,
+          run: args.run,
         });
         if (decision._tag === "released") return decision.result;
         releaseContext = null;
@@ -1376,8 +1386,10 @@ export const runParallelEpicLoop = (
       // Both early ends interrupt the turn before it is classified. A worker
       // the machine confirmed dead is treated like a timed-out one: interrupt
       // first, then the forced stop further down.
+      let interruptedBeforeStop = false;
       if ((timedOut || supervisionStop !== null) && dispatched.handle !== null) {
         yield* dispatched.handle.interrupt.pipe(Effect.ignore);
+        interruptedBeforeStop = true;
       }
 
       const outcome: EpicIterationOutcome =
@@ -1443,15 +1455,22 @@ export const runParallelEpicLoop = (
       // Settlement is user-owned. EpicRunner only releases the provider
       // session after an iteration ends. Normal cleanup uses an atomic
       // subagent guard; timeout and dispatch-failure paths remain forced
-      // stops, and the timeout interrupt above always precedes its stop. A
-      // failed dispatch has no handle, but its thread may hold a session, so
-      // the forced stop runs regardless.
+      // stops, and the timeout interrupt above always precedes its stop —
+      // which is what the run's stop grace is for, so the interrupted turn
+      // gets to close before the session dies under it. A failed dispatch has
+      // no handle and no interrupt, so it stops with no grace at all.
       if (settleResult._tag === "settled") {
         if (dispatched.handle !== null) {
           yield* dispatched.handle.release.pipe(Effect.ignore);
         }
       } else {
-        yield* ports.dispatch.stopForced(threadId).pipe(Effect.ignore);
+        yield* ports.dispatch
+          .stopForced(threadId, {
+            graceSeconds: interruptedBeforeStop
+              ? makeDispatchSupervisionOptions(dispatched.run.config.supervision).stopGraceSeconds
+              : 0,
+          })
+          .pipe(Effect.ignore);
       }
 
       // A turn that ends cleanly with no commit only counts as completed

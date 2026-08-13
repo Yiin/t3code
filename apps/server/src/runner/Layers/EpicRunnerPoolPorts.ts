@@ -131,6 +131,13 @@ const GIT_HEAD_TIMEOUT_MS = 15_000;
  */
 const RESUME_SETTLE_TIMEOUT_MS = 120_000;
 
+/**
+ * How often a forced stop re-reads the turn it is waiting on inside the run's
+ * stop grace. Short enough that a turn closing early costs almost nothing, and
+ * the whole wait is bounded by the grace regardless.
+ */
+const FORCED_STOP_POLL_INTERVAL_MS = 250;
+
 const decodeResumeSettledActivity = Schema.decodeUnknownOption(
   ProviderSessionResumeSettledActivityPayload,
 );
@@ -2121,6 +2128,42 @@ export const makeServerPoolDispatch = (deps: {
     );
 
   /**
+   * Let a turn the loop just interrupted close itself before the session stop
+   * kills it — the server's half of `supervision.stopGraceSeconds`.
+   *
+   * A turn interrupt is asynchronous: the command reaches the provider through
+   * the reactor and the turn leaves `running` only once the agent unwinds. A
+   * `thread.session.stop` dispatched in the same breath ends the process
+   * mid-unwind, which is what the terminal harness already avoids by waiting
+   * between its TERM and its KILL.
+   *
+   * Bounded by the grace and by nothing else: the wait ends the moment the
+   * turn is no longer running, an unreadable projection reads as "not running"
+   * and stops the wait, and a grace of `0` waits for nothing at all.
+   */
+  const awaitInterruptedTurnClose = (threadId: ThreadId, graceSeconds: number) =>
+    graceSeconds <= 0
+      ? Effect.void
+      : Effect.gen(function* () {
+          while (true) {
+            const snapshot = yield* readThreadDetail(threadId);
+            if (threadTurnState(snapshot?.thread) !== "running") return;
+            yield* Effect.sleep(Duration.millis(FORCED_STOP_POLL_INTERVAL_MS));
+          }
+        }).pipe(
+          Effect.timeoutOption(Duration.seconds(graceSeconds)),
+          Effect.tap((closed) =>
+            Option.isSome(closed)
+              ? Effect.void
+              : Effect.logWarning("epic.runner.stop-grace-exhausted", {
+                  threadId,
+                  graceSeconds,
+                }),
+          ),
+          Effect.asVoid,
+        );
+
+  /**
    * The grace path for an agent that ended its turn while its subagents were
    * still working — the exact incident shape this exists for: the SDK
    * reports a legitimate turn end, the runner would classify no-commit and
@@ -2702,8 +2745,9 @@ export const makeServerPoolDispatch = (deps: {
         ownedIterationTurnIds.delete(threadId);
       }),
 
-    stopForced: (threadId) =>
+    stopForced: (threadId, options) =>
       Effect.gen(function* () {
+        yield* awaitInterruptedTurnClose(threadId, options.graceSeconds);
         yield* dispatchBestEffort("epic.runner.session-stop-failed", {
           type: "thread.session.stop",
           commandId: yield* commandId("session-stop"),
@@ -2785,6 +2829,10 @@ export const makeAbandonRunningIterations = (deps: {
             : {}),
           createdAt: abandonedAt,
         });
+        // No stop grace here, unlike the loop's own forced stop: these rows
+        // belong to nobody. A boot pass is interrupting turns whose process
+        // already died, and a cancel is a person asking for the run to stop
+        // now, so waiting seconds per row would buy neither of them anything.
         yield* dispatchBestEffort(`epic.runner.${commandPrefix}-session-stop-failed`, {
           type: "thread.session.stop",
           commandId: yield* commandId(`${commandPrefix}-session-stop`),

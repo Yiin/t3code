@@ -300,7 +300,7 @@ const fixture = (input: {
   const adoptCalls: Array<Parameters<WorkspaceShape["adopt"]>[1]> = [];
   const claimChildCalls: string[] = [];
   const stopAbandonedCalls: string[] = [];
-  const stopForcedCalls: string[] = [];
+  const stopForcedCalls: Array<{ readonly threadId: string; readonly graceSeconds: number }> = [];
   const interruptForcedCalls: string[] = [];
   const releasedClaims: string[] = [];
   const enqueuedMerges: Array<Parameters<MergeDrainShape["enqueueMerge"]>[0]> = [];
@@ -603,9 +603,9 @@ const fixture = (input: {
         interruptForcedCalls.push(threadId);
         ordering.push("dispatch:interruptForced");
       }),
-    stopForced: (threadId) =>
+    stopForced: (threadId, options) =>
       Effect.sync(() => {
-        stopForcedCalls.push(threadId);
+        stopForcedCalls.push({ threadId, graceSeconds: options.graceSeconds });
         ordering.push("dispatch:stopForced");
       }),
   };
@@ -1617,6 +1617,9 @@ it.live("interrupts a timed-out turn and classifies it as an infra timeout", () 
     const test = fixture({
       attempts: [{ neverSettles: true }],
       policy: policy({ iterationTimeoutMs: 20, infraFailureBudget: 1 }),
+      runConfig: config({
+        supervision: { ...DEFAULT_EPIC_RUN_CONFIG.supervision, stopGraceSeconds: 9 },
+      }),
     });
     yield* test.run;
 
@@ -1624,8 +1627,13 @@ it.live("interrupts a timed-out turn and classifies it as an infra timeout", () 
     assert.equal(run.status, "failed");
     assert.include(run.lastError ?? "", "1 consecutive infrastructure failures");
     assert.equal(test.interrupts(), 1);
+    // The stop carries the run's grace, because it follows an interrupt the
+    // turn has not answered yet.
     assert.deepEqual(test.stopForcedCalls, [
-      epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+      {
+        threadId: epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+        graceSeconds: 9,
+      },
     ]);
     // The interrupt precedes the forced stop.
     assert.isBelow(
@@ -1690,6 +1698,7 @@ it.live("stops a wedged worker that would otherwise never settle", () =>
           idleThresholdSeconds: 30,
           inspectMinDelaySeconds: 5,
           inspectRetryDelaySeconds: 10,
+          stopGraceSeconds: 4,
         },
       }),
       workerEvidence: wedgedWorkerEvidence(),
@@ -1700,10 +1709,14 @@ it.live("stops a wedged worker that would otherwise never settle", () =>
     assert.equal(test.iterations[0]?.turnStatus, "failed");
     assert.equal(test.iterations[0]?.failureReason, "infra:worker-liveness-stop");
     assert.include(test.iterations[0]?.summary ?? "", "worker liveness supervision stopped");
-    // Interrupt first, then the forced stop, exactly as the timeout path does.
+    // Interrupt first, then the forced stop, exactly as the timeout path does
+    // — grace included.
     assert.equal(test.interrupts(), 1);
     assert.deepEqual(test.stopForcedCalls, [
-      epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+      {
+        threadId: epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+        graceSeconds: 4,
+      },
     ]);
     assert.isBelow(
       test.ordering.indexOf("handle:interrupt"),
@@ -1772,8 +1785,13 @@ it.live("classifies a failed dispatch and force-stops its session", () =>
     const run = test.runRecord();
     assert.equal(run.status, "failed");
     assert.equal(test.iterations[0]?.failureReason, "infra:dispatch-failed");
+    // No interrupt preceded this stop — there is no turn to let close — so it
+    // waits for nothing.
     assert.deepEqual(test.stopForcedCalls, [
-      epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+      {
+        threadId: epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 0 }),
+        graceSeconds: 0,
+      },
     ]);
     assert.equal(test.releases(), 0);
   }),
@@ -2015,6 +2033,9 @@ it.live("never asks a harness that declares resume unsupported", () =>
       resumeCapability: "unsupported",
       claimChildResult: "already-claimed",
       attempts: [{ commit: true, close: true, comment: true }],
+      runConfig: config({
+        supervision: { ...DEFAULT_EPIC_RUN_CONFIG.supervision, stopGraceSeconds: 6 },
+      }),
     });
     yield* test.run;
 
@@ -2029,7 +2050,7 @@ it.live("never asks a harness that declares resume unsupported", () =>
     assert.equal(test.iterations[0]?.turnStatus, "abandoned");
     assert.equal(test.iterations[0]?.failureReason, "infra:resume-unsupported");
     assert.deepEqual(test.interruptForcedCalls, [worker.threadId]);
-    assert.deepEqual(test.stopForcedCalls, [worker.threadId]);
+    assert.deepEqual(test.stopForcedCalls, [{ threadId: worker.threadId, graceSeconds: 6 }]);
 
     // The child and its worktree are handed over, never given back: the only
     // release is the terminal sweep, long after the handover dispatched.

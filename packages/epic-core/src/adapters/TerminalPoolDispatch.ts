@@ -66,5 +66,11 @@ export const makeTerminalPoolDispatch = (deps: {
     }),
   interruptForced: () => Effect.void,
   stopAbandoned: () => Effect.void,
+  /**
+   * The caller's `graceSeconds` is dropped on purpose: the terminal dispatch
+   * already spends the same `supervision.stopGraceSeconds` between its TERM
+   * and its KILL, and waiting it out a second time here would only double the
+   * stop.
+   */
   stopForced: () => Effect.void,
 });
