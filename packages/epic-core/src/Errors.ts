@@ -93,6 +93,12 @@ export class EpicRunLaunchError extends Schema.TaggedErrorClass<EpicRunLaunchErr
       "cwd_mismatch",
       "model_default_missing",
       "orientation_file_invalid",
+      // The `inheritOriginModelSelection` family. A launch that asked to run
+      // on the launching thread's provider never falls back to the project
+      // default: the caller picked that provider on purpose.
+      "origin_thread_required",
+      "origin_thread_not_found",
+      "origin_thread_project_mismatch",
     ]),
   },
 ) {

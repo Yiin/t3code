@@ -21,6 +21,7 @@ import {
   type ProjectionThreadTurnStatus,
   type EpicRunPreflightInput,
   type EpicRunPreflightResult,
+  type ModelSelection,
   type ProviderSessionResumeOutcome,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -344,6 +345,14 @@ function createHarness(input: {
    * restart that left its cursor intact.
    */
   readonly resumeOutcomes?: Readonly<Record<string, ProviderSessionResumeOutcome>>;
+  /**
+   * Threads that exist before any run does, so a launch can read one as its
+   * origin. Each is served as a live shell with the given project and model
+   * selection, which is what `inheritOriginModelSelection` reads.
+   */
+  readonly originThreadShells?: Readonly<
+    Record<string, { readonly projectId?: ProjectId; readonly modelSelection: ModelSelection }>
+  >;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   if (input.failAllocationFor !== undefined) {
@@ -384,6 +393,9 @@ function createHarness(input: {
       readonly session: OrchestrationSessionStatus;
     }
   >();
+  for (const originThreadId of Object.keys(input.originThreadShells ?? {})) {
+    shells.set(originThreadId, { latestTurn: "completed", session: "ready" });
+  }
   let head = input.initialHead ?? "head-0";
   const baseHead = input.initialHead ?? "head-0";
   let worktreeFingerprint = input.initialWorktreeFingerprint ?? "";
@@ -701,11 +713,12 @@ function createHarness(input: {
         if (shell === undefined) {
           return Option.none();
         }
+        const origin = input.originThreadShells?.[threadId];
         return Option.some({
           id: threadId,
-          projectId,
+          projectId: origin?.projectId ?? projectId,
           title: "Epic iteration",
-          modelSelection,
+          modelSelection: origin?.modelSelection ?? modelSelection,
           runtimeMode: "full-access" as const,
           interactionMode: "default" as const,
           branch: null,
@@ -2519,6 +2532,71 @@ describe("EpicRunner", () => {
           .map((command) => command.threadId),
         ["thread-launcher"],
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("dispatches every iteration on the launching thread's provider", () => {
+    const originThreadId = ThreadId.make("thread-prime-launcher");
+    const primeSelection: ModelSelection = {
+      instanceId: ProviderInstanceId.make("prime-work"),
+      model: "prime/sonnet",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    };
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      originThreadShells: { [originThreadId]: { modelSelection: primeSelection } },
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-inherit",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        originThreadId,
+        inheritOriginModelSelection: true,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      // Persisted on the run row, so a restart replays the same provider.
+      assert.deepStrictEqual(harness.store.runs.get(run.runId)?.modelSelection, primeSelection);
+      // And carried into the iteration thread, not just the run row.
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.create").map((command) => command.modelSelection),
+        [primeSelection],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("refuses to inherit from an origin thread in another project", () => {
+    const originThreadId = ThreadId.make("thread-other-project");
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      originThreadShells: {
+        [originThreadId]: {
+          projectId: ProjectId.make("project-elsewhere"),
+          modelSelection,
+        },
+      },
+    });
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const error = yield* Effect.flip(
+        runner.launchRun({
+          epicId: "epic-cross-project",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+          originThreadId,
+          inheritOriginModelSelection: true,
+        }),
+      );
+      assert.strictEqual(error._tag, "EpicRunLaunchError");
+      if (error._tag === "EpicRunLaunchError") {
+        assert.strictEqual(error.reason, "origin_thread_project_mismatch");
+      }
+      // A refused launch takes no lock and creates no run.
+      assert.strictEqual(harness.store.runs.size, 0);
+      assert.strictEqual(harness.activeLockCount(), 0);
     }).pipe(Effect.provide(harness.layer));
   });
 

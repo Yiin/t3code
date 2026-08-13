@@ -66,6 +66,23 @@ describe("EpicRun contracts", () => {
     expect(decodeEpicRunInput(input).runtimeMode).toBe("full-access");
   });
 
+  it("defaults origin model inheritance off and carries an explicit opt-in", () => {
+    const launch = { epicId: input.epicId, projectId: input.projectId, cwd: input.cwd };
+    // An older client sends no such key, and must keep the project default.
+    expect(
+      decodeEpicRunLaunchPayload({ ...launch, _tag: WS_METHODS.epicRunLaunch })
+        .inheritOriginModelSelection,
+    ).toBeUndefined();
+    expect(
+      decodeEpicRunLaunchPayload({
+        ...launch,
+        originThreadId: ThreadId.make("thread-origin"),
+        inheritOriginModelSelection: true,
+        _tag: WS_METHODS.epicRunLaunch,
+      }).inheritOriginModelSelection,
+    ).toBe(true);
+  });
+
   it("accepts config unchanged through WS and HTTP start and launch payloads", () => {
     const config = {
       limits: { maxIterations: 7 },

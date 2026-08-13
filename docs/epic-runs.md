@@ -77,6 +77,25 @@ hosted runner runs the same core.
 Config is strict. An unknown engine value rejects the launch like any other
 invalid config value. It does not silently select a different engine.
 
+## Which provider a run uses
+
+A run resolves one model selection at launch and dispatches every iteration
+thread with it. The order is most specific first: the launch input, then
+`provider.modelSelection` in `.t3code/epic-run.json`, then the project default.
+
+Cooking an epic from inside a conversation sends
+`inheritOriginModelSelection: true`, so the run keeps that thread's exact
+provider instance, model, and options. The origin thread must be live and in the
+same project; otherwise the launch fails with `origin_thread_required`,
+`origin_thread_not_found`, or `origin_thread_project_mismatch`. It never falls
+back to the project default, because the caller picked that provider on purpose.
+A launch from the Epics page sends no such flag and keeps the project default.
+
+The resolved selection is persisted on the run row, so a boot resume replays the
+same provider. After that, only a provider-attributed failure moves the run
+forward through the fallback chain in
+[`providerFallback.ts`](../packages/epic-core/src/providerFallback.ts).
+
 ## Run lock
 
 Only one runner may own an epic. Epic-targeted `ralph`, `cook-epic`, and the T3

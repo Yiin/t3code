@@ -45,6 +45,16 @@ export const LaunchEpicRunInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   config: Schema.optional(EpicRunConfigOverride),
   originThreadId: Schema.optional(ThreadId),
+  /**
+   * Run every iteration on the launching thread's own provider instance,
+   * model and options, instead of the persisted project default.
+   *
+   * Absent means off, so an Epics-page launch and any older client keep
+   * today's behaviour. When it is on, `originThreadId` must name a live
+   * thread in `projectId`; anything else fails the launch with a typed
+   * `EpicRunLaunchError` rather than quietly running on another provider.
+   */
+  inheritOriginModelSelection: Schema.optional(Schema.Boolean),
 });
 export type LaunchEpicRunInput = typeof LaunchEpicRunInput.Type;
 
@@ -290,11 +300,15 @@ export class EpicRunPreflightBlockedError extends Schema.TaggedErrorClass<EpicRu
 export class EpicRunLaunchError extends Schema.TaggedErrorClass<EpicRunLaunchError>()(
   "EpicRunLaunchError",
   {
+    // Kept in step with `EpicRunLaunchError` in @t3tools/epic-core/Errors.
     reason: Schema.Literals([
       "project_not_found",
       "cwd_mismatch",
       "model_default_missing",
       "orientation_file_invalid",
+      "origin_thread_required",
+      "origin_thread_not_found",
+      "origin_thread_project_mismatch",
     ]),
   },
 ) {}

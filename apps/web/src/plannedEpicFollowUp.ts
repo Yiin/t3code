@@ -27,6 +27,11 @@ export function plannedEpicLaunchInput(correlation: ScopedEpicPlanCorrelation) {
       // sidebar group floats at project level and never tidies away with
       // the thread it came from.
       originThreadId: correlation.threadId,
+      // Cooking from inside a conversation continues that conversation's
+      // work, so the run keeps the provider instance, model and options the
+      // user is already planning with. The Epics page has no such thread and
+      // stays on the project default.
+      inheritOriginModelSelection: true,
     },
   };
 }

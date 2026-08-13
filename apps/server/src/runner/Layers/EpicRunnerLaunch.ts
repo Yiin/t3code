@@ -453,6 +453,37 @@ export const makeEpicRunnerLaunch = (deps: {
       }
     });
 
+  /**
+   * The launching thread's own provider instance, model and options.
+   *
+   * A native cook-epic launch runs from inside a session the user already
+   * chose a provider for, so the run has to keep that exact routing rather
+   * than the project default: a Prime-launched run stays on Prime, on the
+   * same instance id, with the same options. The origin has to be live and in
+   * the same project, because a run in another project's repo would dispatch
+   * its iterations against the wrong workspace.
+   */
+  const resolveOriginModelSelection = (
+    input: LaunchEpicRunInput,
+  ): Effect.Effect<ModelSelection, EpicRunnerError> =>
+    Effect.gen(function* () {
+      if (input.originThreadId === undefined) {
+        return yield* new EpicRunLaunchError({ reason: "origin_thread_required" });
+      }
+      // Archived and deleted threads are both absent here, and both mean the
+      // launcher is gone.
+      const shell = yield* projectionSnapshotQuery
+        .getThreadShellById(input.originThreadId)
+        .pipe(Effect.mapError(storeError("getThreadShellById")));
+      if (Option.isNone(shell)) {
+        return yield* new EpicRunLaunchError({ reason: "origin_thread_not_found" });
+      }
+      if (shell.value.projectId !== input.projectId) {
+        return yield* new EpicRunLaunchError({ reason: "origin_thread_project_mismatch" });
+      }
+      return shell.value.modelSelection;
+    });
+
   const launchRun = (input: LaunchEpicRunInput) =>
     Effect.gen(function* () {
       const active = yield* findActiveRun(input);
@@ -470,11 +501,16 @@ export const makeEpicRunnerLaunch = (deps: {
       }
       const configSnapshot = yield* readConfigSnapshot(input);
       const configuredModelSelection = configSnapshot.config.provider.modelSelection;
+      // Per-launch input is the most specific signal there is, so inheriting
+      // the origin outranks the repo file, which in turn outranks the
+      // persisted project default.
       const selectedModel =
-        configuredModelSelection !== null &&
-        hasConfiguredValue(configSnapshot.provenance, "provider.modelSelection")
-          ? configuredModelSelection
-          : project.value.defaultModelSelection;
+        input.inheritOriginModelSelection === true
+          ? yield* resolveOriginModelSelection(input)
+          : configuredModelSelection !== null &&
+              hasConfiguredValue(configSnapshot.provenance, "provider.modelSelection")
+            ? configuredModelSelection
+            : project.value.defaultModelSelection;
       if (selectedModel === null) {
         return yield* new EpicRunLaunchError({ reason: "model_default_missing" });
       }

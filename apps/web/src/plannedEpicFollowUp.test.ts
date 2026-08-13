@@ -31,6 +31,9 @@ describe("planned epic follow-up", () => {
         projectId: "project-1",
         cwd: "/workspace/t3code",
         originThreadId: "thread-1",
+        // Cooking from the planning conversation runs on that conversation's
+        // provider, not the project default.
+        inheritOriginModelSelection: true,
       },
     });
   });
