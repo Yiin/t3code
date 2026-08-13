@@ -1,4 +1,9 @@
-import { ServerSettings, type ServerSettingsPatch } from "@t3tools/contracts";
+import {
+  DEFAULT_EPIC_ROLE_POLICY,
+  EpicRolePolicy,
+  ServerSettings,
+  type ServerSettingsPatch,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
@@ -7,6 +12,11 @@ import { createModelSelection } from "./model.ts";
 
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownOption(ServerSettingsJson);
+
+const EpicRolePolicySettingsJson = fromLenientJson(
+  Schema.Struct({ epicRolePolicy: Schema.optionalKey(EpicRolePolicy) }),
+);
+const decodeEpicRolePolicySettingsJson = Schema.decodeUnknownOption(EpicRolePolicySettingsJson);
 
 export interface PersistedServerObservabilitySettings {
   readonly otlpTracesUrl: string | undefined;
@@ -40,6 +50,22 @@ export function parsePersistedServerObservabilitySettings(
     return extractPersistedServerObservabilitySettings(decoded.value);
   }
   return { otlpTracesUrl: undefined, otlpMetricsUrl: undefined };
+}
+
+/**
+ * The epic role policy inside a persisted settings file, or the empty policy.
+ *
+ * Only `epicRolePolicy` is decoded, not the whole settings document: a reader
+ * that has no settings service — the `t3 epic cook` CLI — must not lose the
+ * policy because some unrelated key in the file fails to decode. An unreadable
+ * or absent policy yields the empty one, which injects no subagents at all.
+ */
+export function parsePersistedEpicRolePolicy(raw: string): EpicRolePolicy {
+  const decoded = decodeEpicRolePolicySettingsJson(raw);
+  if (Option.isSome(decoded) && decoded.value.epicRolePolicy !== undefined) {
+    return decoded.value.epicRolePolicy;
+  }
+  return DEFAULT_EPIC_ROLE_POLICY;
 }
 
 function shouldReplaceTextGenerationModelSelection(

@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalDateInEffect:off globalProcess:off preferSchemaOverJson:off
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
@@ -76,6 +77,8 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { Command, Flag } from "effect/unstable/cli";
+
+import { readCookSubagents, resolveCookSettingsPath } from "./epicCookSubagents.ts";
 
 class EpicCookCliError extends Schema.TaggedErrorClass<EpicCookCliError>()("EpicCookCliError", {
   operation: Schema.String,
@@ -382,9 +385,21 @@ export const cookCommand = Command.make("cook", {
             : { workerCommand: process.env.COOKEPIC_WORKER_CMD }),
           environment: process.env,
         });
+        // The injected in-session roles, read from the same settings file the
+        // server runner uses. Only the claude/ccx arm emits them, as `--agents`;
+        // every other harness ignores the map.
+        const subagents = yield* readCookSubagents({
+          settingsPath: resolveCookSettingsPath({
+            environment: process.env,
+            homeDirectory: NodeOS.homedir(),
+          }),
+          inventory: terminalProviders.inventory,
+          sessionSelection: modelSelection,
+        });
         const agentDispatch = makeTerminalAgentDispatch({
           harness,
           artifactsDirectory: runDirectory,
+          subagents,
           ...(process.env.COOKEPIC_BIN === undefined ? {} : { binary: process.env.COOKEPIC_BIN }),
           ...(process.env.COOKEPIC_WORKER_CMD === undefined
             ? {}

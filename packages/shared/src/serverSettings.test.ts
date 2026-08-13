@@ -10,6 +10,7 @@ import {
   applyServerSettingsPatch,
   extractPersistedServerObservabilitySettings,
   normalizePersistedServerSettingString,
+  parsePersistedEpicRolePolicy,
   parsePersistedServerObservabilitySettings,
 } from "./serverSettings.ts";
 
@@ -211,6 +212,53 @@ describe("serverSettings helpers", () => {
         subagentSpawn: { enabled: true },
       }).subagentSpawn,
     ).toEqual({ enabled: true });
+  });
+
+  it("parses the epic role policy out of a persisted settings file", () => {
+    const policy = parsePersistedEpicRolePolicy(
+      JSON.stringify({
+        epicRolePolicy: {
+          tiers: {
+            primary: { hops: [{ selection: { instanceId: "claude-work", model: "opus" } }] },
+          },
+          inSessionRoles: {
+            planner: { tier: "primary", description: "Plans the change", prompt: "Plan it." },
+          },
+        },
+      }),
+    );
+
+    expect(policy.inSessionRoles.planner?.tier).toBe("primary");
+    expect(policy.tiers.primary?.hops[0]?.selection.model).toBe("opus");
+  });
+
+  it("keeps the epic role policy when an unrelated settings key is invalid", () => {
+    // The cook CLI reads this file without a settings service, so one bad key
+    // elsewhere must not cost it the whole policy.
+    const policy = parsePersistedEpicRolePolicy(
+      JSON.stringify({
+        textGenerationModelSelection: 42,
+        epicRolePolicy: {
+          inSessionRoles: { reviewer: { description: "Reviews", prompt: "Review it." } },
+        },
+      }),
+    );
+
+    expect(Object.keys(policy.inSessionRoles)).toEqual(["reviewer"]);
+  });
+
+  it("falls back to the empty epic role policy on missing or invalid input", () => {
+    expect(parsePersistedEpicRolePolicy("{")).toEqual({ tiers: {}, roles: {}, inSessionRoles: {} });
+    expect(parsePersistedEpicRolePolicy("{}")).toEqual({
+      tiers: {},
+      roles: {},
+      inSessionRoles: {},
+    });
+    expect(parsePersistedEpicRolePolicy(JSON.stringify({ epicRolePolicy: { tiers: 7 } }))).toEqual({
+      tiers: {},
+      roles: {},
+      inSessionRoles: {},
+    });
   });
 
   it("replaces epic role policies so omitted tiers and hops are cleared", () => {

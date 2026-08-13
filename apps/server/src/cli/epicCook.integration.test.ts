@@ -380,6 +380,85 @@ it("maps supported terminal settings into the shared config", () => {
   );
 });
 
+/**
+ * The policy has no CLI surface: it is read from the same `settings.json` the
+ * server writes, under the home directory this fixture fakes.
+ */
+const writeEpicRolePolicy = (fixture: ReturnType<typeof makeFixture>, policy: unknown): void => {
+  const settingsDirectory = NodePath.join(fixture.fakeHome, ".t3", "userdata");
+  NodeFS.mkdirSync(settingsDirectory, { recursive: true });
+  NodeFS.writeFileSync(
+    NodePath.join(settingsDirectory, "settings.json"),
+    JSON.stringify({ epicRolePolicy: policy }),
+  );
+};
+
+/** A stand-in `claude` that records its argv and reports an epic with no work. */
+const writeFakeClaude = (fixture: ReturnType<typeof makeFixture>): { readonly capture: string } => {
+  const capture = NodePath.join(fixture.root, "claude-args");
+  const binaryPath = NodePath.join(fixture.root, "claude.sh");
+  NodeFS.writeFileSync(
+    binaryPath,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "${capture}"
+printf '%s\\n' '{"type":"result","result":"RALPH_DONE","session_id":"s"}'
+`,
+  );
+  NodeFS.chmodSync(binaryPath, 0o755);
+  return { capture };
+};
+
+const claudeEnvironment = (fixture: ReturnType<typeof makeFixture>): NodeJS.ProcessEnv => {
+  const environment: NodeJS.ProcessEnv = {
+    ...fixture.environment,
+    COOKEPIC_HARNESS: "claude",
+    COOKEPIC_BIN: NodePath.join(fixture.root, "claude.sh"),
+    // Pin the settings home: a developer shell that exports T3CODE_HOME would
+    // otherwise point the cook at the real policy.
+    T3CODE_HOME: NodePath.join(fixture.fakeHome, ".t3"),
+  };
+  // The fixture cooks with a worker command by default, and that wins the
+  // harness selection.
+  delete environment.COOKEPIC_WORKER_CMD;
+  delete environment.VITE_DEV_SERVER_URL;
+  return environment;
+};
+
+it("hands a claude worker the in-session roles from the persisted policy", () => {
+  const fixture = makeFixture(1);
+  writeEpicRolePolicy(fixture, {
+    tiers: {
+      high: {
+        hops: [
+          // The first hop names an account no terminal cook has, so the chain
+          // must walk on to the harness instance.
+          { selection: { instanceId: "claude-work", model: "claude-opus-5" } },
+          { selection: { instanceId: "claude", model: "sonnet" } },
+        ],
+      },
+    },
+    inSessionRoles: {
+      planner: { tier: "high", description: "Plans the child.", prompt: "You plan." },
+    },
+  });
+  const { capture } = writeFakeClaude(fixture);
+  run("node", cookArgs(fixture), fixture.repo, claudeEnvironment(fixture));
+  const args = NodeFS.readFileSync(capture, "utf8").trim().split("\n");
+  const agentsIndex = args.indexOf("--agents");
+  assert.isAtLeast(agentsIndex, 0, args.join(" "));
+  assert.deepEqual(JSON.parse(args[agentsIndex + 1]!), {
+    planner: { description: "Plans the child.", prompt: "You plan.", model: "sonnet" },
+  });
+});
+
+it("emits no --agents when no policy is persisted", () => {
+  const fixture = makeFixture(1);
+  const { capture } = writeFakeClaude(fixture);
+  run("node", cookArgs(fixture), fixture.repo, claudeEnvironment(fixture));
+  const args = NodeFS.readFileSync(capture, "utf8").trim().split("\n");
+  assert.notInclude(args, "--agents");
+});
+
 it("lets the typed engine flag override the deprecated environment shim", () => {
   const fixture = makeFixture(1);
   const result = run("node", [...cookArgs(fixture), "--engine", "shadow"], fixture.repo, {
