@@ -188,7 +188,24 @@ describe("tickWorkerLiveness absolute deadline", () => {
 describe("tickWorkerLiveness inspector launch", () => {
   it("launches one inspector once idle passes the threshold (run-legacy.sh:1790-1792)", () => {
     const { state, actions } = tickWorkerLiveness(start(), makeEvidence({ now: 1800 }), CONFIG);
-    expect(actions).toContainEqual({ _tag: "launch-inspector", timeoutSeconds: 120 });
+    // The request carries the structural snapshot the prompt renders from, so
+    // no adapter has to re-sample and disagree with the machine.
+    expect(actions).toContainEqual({
+      _tag: "launch-inspector",
+      timeoutSeconds: 120,
+      evidence: {
+        worker: "w1",
+        child: "c1",
+        elapsedSeconds: 1800,
+        idleSeconds: 1800,
+        outputBytes: 0,
+        outputBytesDelta: 0,
+        cpuUsecDelta: 0,
+        ioBytesDelta: 0,
+        processFingerprint: "fp-a",
+        repoFingerprint: "main hash=1:1",
+      },
+    });
     expect(emitted(actions, "worker-idle")).toEqual([
       {
         _tag: "emit",

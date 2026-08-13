@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
+import { ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import type { InspectorLaunchEvidence } from "../inspectorPrompt.ts";
 import { ProcessRunner, type ProcessRunInput, type ProcessRunOutput } from "../processRunner.ts";
 import type { WorkerRef } from "../ports/WorkerEvidence.ts";
 import { makeTerminalWorkerActivity } from "./TerminalWorkerActivity.ts";
@@ -18,6 +20,19 @@ const UNSCOPED_PROC_CGROUP =
   "0::/user.slice/user-1000.slice/user@1000.service/app.slice/t3code.service\n";
 
 const REF: WorkerRef = { worker: "/runs/run-1/run-1-3.jsonl", repositoryPath: null };
+
+const LAUNCH_EVIDENCE: InspectorLaunchEvidence = {
+  worker: REF.worker,
+  child: "t3code-22o.12",
+  elapsedSeconds: 5_400,
+  idleSeconds: 1_800,
+  outputBytes: 41_312,
+  outputBytesDelta: 0,
+  cpuUsecDelta: 0,
+  ioBytesDelta: 0,
+  processFingerprint: "9f2c1b",
+  repoFingerprint: "abc123 hash=deadbeef",
+};
 
 const output = (stdout: string): ProcessRunOutput => ({
   stdout,
@@ -135,7 +150,48 @@ describe("makeTerminalWorkerEvidence", () => {
     }),
   );
 
-  it("declares no inspector until a harness can enforce the no-tool contract", () => {
+  it("declares no inspector for a harness that cannot enforce the no-tool contract", () => {
     expect(evidenceOn({ activity: makeTerminalWorkerActivity() }).inspectorSupported).toBe(false);
   });
+
+  it.effect("launches the inspector with this adapter's own structural summary", () =>
+    Effect.gen(function* () {
+      const activity = makeTerminalWorkerActivity();
+      activity.started(REF.worker, 4242);
+      const prompts: string[] = [];
+      const evidence = makeTerminalWorkerEvidence({
+        processRunner: ProcessRunner.of({
+          run: (command) =>
+            Effect.succeed(
+              output(command.args.includes("status") ? " M src/a.ts\n?? src/b.ts\n" : ""),
+            ),
+        }),
+        activity,
+        readProcCgroup: () => Effect.succeed(SCOPED_PROC_CGROUP),
+        inspector: {
+          runAuxiliary: (input) =>
+            Effect.sync(() => {
+              prompts.push(input.prompt);
+              return { output: "", succeeded: true };
+            }),
+          selection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
+          cwd: "/repo",
+        },
+      });
+
+      expect(evidence.inspectorSupported).toBe(true);
+      yield* evidence.launchInspector(
+        { worker: REF.worker, repositoryPath: "/repo" },
+        { timeoutSeconds: 120, evidence: LAUNCH_EVIDENCE },
+      );
+      yield* Effect.yieldNow;
+
+      const prompt = prompts[0] ?? "";
+      expect(prompt).toContain("idle-seconds=1800");
+      // The status counts come from this adapter's own bounded git read.
+      expect(prompt).toContain("tracked-modified=1 added=0 deleted=0");
+      expect(prompt).toContain("untracked=1");
+      expect(prompt).not.toContain("src/a.ts");
+    }),
+  );
 });

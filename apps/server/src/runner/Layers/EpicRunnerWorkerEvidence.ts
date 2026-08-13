@@ -81,7 +81,10 @@ export const makeServerWorkerEvidence = (
     outputBytes: () => Effect.succeed(0),
     /**
      * Provider fallback only gates inspections, and the server has no
-     * inspector yet (`t3code-77b`).
+     * inspector: the terminal one runs over
+     * `TerminalAgentDispatch.runAuxiliary`, and the server has no tool-denied
+     * subagent path to launch. So no `inspector` is passed above either, and
+     * the machine records an uncertain reason instead of launching.
      */
     providerFallbackPending: Effect.succeed(false),
   });

@@ -911,8 +911,11 @@ export const makeTerminalAgentDispatch = (
         child.on("error", (error) => {
           spawnError = error.message;
         });
+        // The caller's budget wins: an idle inspection is minutes where the
+        // iteration timeout these options carry is hours.
+        const timeoutSeconds = input.timeoutSeconds ?? routed.options.timeoutSeconds;
         const timer =
-          routed.options.timeoutSeconds == null
+          timeoutSeconds == null
             ? undefined
             : setTimeout(() => {
                 timedOut = true;
@@ -927,7 +930,7 @@ export const makeTerminalAgentDispatch = (
                   (routed.options.stopGraceSeconds ?? 15) * 1_000,
                 );
                 timeoutKillTimer.unref();
-              }, routed.options.timeoutSeconds * 1_000);
+              }, timeoutSeconds * 1_000);
         timer?.unref();
         return await new Promise<{ output: string; succeeded: boolean }>((resolve) => {
           child.on("close", async (code, signal) => {

@@ -1272,6 +1272,34 @@ it.live("rejects unsupported auxiliary harnesses with a dispatch error", () =>
   }),
 );
 
+it.live("bounds an auxiliary by the caller's budget, not the iteration timeout", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() => makeWorker(`sleep 30`)),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        // An iteration runs for hours; an idle inspection must not.
+        timeoutSeconds: 3_600,
+        stopGraceSeconds: 0.05,
+      });
+      const result = yield* dispatch.runAuxiliary({
+        purpose: "idle-inspection",
+        cwd: fixture.directory,
+        prompt: "inspect",
+        selection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
+        timeoutSeconds: 0.05,
+      });
+      assert.isFalse(result.succeeded);
+    }),
+  ),
+);
+
 it.live("kills a TERM-resistant Prime auxiliary process group after timeout", () =>
   Effect.scoped(
     Effect.gen(function* () {

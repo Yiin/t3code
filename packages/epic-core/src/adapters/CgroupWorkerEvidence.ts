@@ -13,10 +13,11 @@
  * or a git probe that overruns its budget reports the machine's documented
  * "I could not tell" values, never a value that could confirm a stop.
  *
- * The inspector is not wired here. No harness in this repo can currently
- * enforce the inspector's no-tool contract, so `inspectorSupported` is false
- * and the machine records an uncertain reason instead of launching. Raising
- * that ceiling is `t3code-77b`.
+ * The inspector is optional and injected. With one, this adapter also supplies
+ * its structural summary — an allowlisted process histogram and repository
+ * status counts, both from evidence it already reads. Without one,
+ * `inspectorSupported` is false and the machine records an uncertain reason
+ * instead of launching. What to do when no inspector can run is `t3code-77b`.
  */
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
@@ -26,6 +27,7 @@ import * as NodePath from "node:path";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
+import type { WorkerStructureSummary } from "../inspectorPrompt.ts";
 import type * as ProcessRunner from "../processRunner.ts";
 import type {
   WorkerEvidenceError,
@@ -35,12 +37,52 @@ import type {
 import {
   PROCESS_FINGERPRINT_UNAVAILABLE,
   REPO_PROBE_TIMEOUT_MARKER,
-  type InspectorRunEvidence,
   type WorkerSignalSample,
 } from "../workerLiveness.ts";
+import { disabledInspector, type InspectorPort } from "./AgentInspector.ts";
 
 /** Comm names that say nothing about progress (run-legacy.sh:1302-1315). */
 const FINGERPRINT_IGNORED_COMMS = new Set(["sleep", "timeout"]);
+
+/**
+ * Command names the inspector prompt may see by name (run-legacy.sh:1284-1298).
+ *
+ * An allowlist, so a worker cannot smuggle text to the inspector by naming a
+ * process after it. Everything else is counted as `other`.
+ */
+const SUMMARY_ALLOWED_COMMS = new Set([
+  "bash",
+  "sh",
+  "dash",
+  "zsh",
+  "fish",
+  "git",
+  "node",
+  "bun",
+  "deno",
+  "python",
+  "python3",
+  "ruby",
+  "rails",
+  "go",
+  "cargo",
+  "rustc",
+  "make",
+  "cmake",
+  "ninja",
+  "java",
+  "javac",
+  "gradle",
+  "chromium",
+  "chrome",
+  "playwright",
+  "vite",
+  "tsc",
+  "eslint",
+  "pytest",
+  "rspec",
+  "sleep",
+]);
 
 /**
  * `usage_usec` from a cgroup v2 `cpu.stat`, or `null` when absent.
@@ -103,6 +145,48 @@ export const processCommFingerprint = (comms: ReadonlyArray<string>): string => 
   return NodeCrypto.createHash("sha256").update(canonical).digest("hex");
 };
 
+/**
+ * The allowlisted `tool=<name> count=<n>` histogram the inspector prompt shows
+ * (run-legacy.sh:1284-1298). Sorted, so two identical process sets render the
+ * same way.
+ */
+export const processToolSummary = (comms: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const histogram = new Map<string, number>();
+  for (const raw of comms) {
+    const comm = raw.trim();
+    if (comm.length === 0) continue;
+    const name = SUMMARY_ALLOWED_COMMS.has(comm) ? comm : "other";
+    histogram.set(name, (histogram.get(name) ?? 0) + 1);
+  }
+  return [...histogram.entries()]
+    .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([name, count]) => `tool=${name} count=${String(count)}`);
+};
+
+/**
+ * Repository movement as counts per status class, never as paths
+ * (run-legacy.sh:1240-1252). `null` status means the probe could not run.
+ */
+export const repositoryStatusSummary = (status: string | null): ReadonlyArray<string> => {
+  if (status === null) return ["probe-timeout=true"];
+  const counts = { modified: 0, added: 0, deleted: 0, renamed: 0, conflicted: 0, untracked: 0 };
+  for (const line of status.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const code = line.slice(0, 2);
+    if (code === "??") counts.untracked += 1;
+    else if (/U|AA|DD/.test(code)) counts.conflicted += 1;
+    else if (code.includes("R")) counts.renamed += 1;
+    else if (code.includes("A")) counts.added += 1;
+    else if (code.includes("D")) counts.deleted += 1;
+    else counts.modified += 1;
+  }
+  return [
+    `tracked-modified=${String(counts.modified)} added=${String(counts.added)} deleted=${String(counts.deleted)}`,
+    `renamed=${String(counts.renamed)} conflicted=${String(counts.conflicted)} untracked=${String(counts.untracked)}`,
+    "probe-timeout=false",
+  ];
+};
+
 /** The one line the bounded repository probe folds itself into. */
 export const repositoryProbeLine = (input: {
   readonly head: string;
@@ -147,6 +231,19 @@ export interface CgroupWorkerEvidenceOptions {
   readonly providerFallbackPending: Effect.Effect<boolean>;
   /** Bounds every git call in the probe. Defaults to the machine's 2s. */
   readonly repoProbeTimeoutSeconds?: number | undefined;
+  /**
+   * The inspector, built over this adapter's own structural summary.
+   *
+   * A function rather than a ready port because the summary is assembled from
+   * the cgroup and git reads configured right here, and the caller has neither.
+   * Absent means no inspector: `inspectorSupported` is false and the machine
+   * records an uncertain reason instead of launching.
+   */
+  readonly inspector?:
+    | ((
+        describeStructure: (ref: WorkerRef) => Effect.Effect<WorkerStructureSummary>,
+      ) => InspectorPort)
+    | undefined;
 }
 
 const DEFAULT_REPO_PROBE_TIMEOUT_SECONDS = 2;
@@ -186,8 +283,39 @@ export const makeCgroupWorkerEvidence = (
             Effect.orElseSucceed(() => null),
           );
 
+  /** Every live comm in the worker's cgroup, unfiltered. */
+  const workerComms = (ref: WorkerRef): Effect.Effect<ReadonlyArray<string> | null> =>
+    Effect.gen(function* () {
+      const procs = yield* readCgroupFile(ref, "cgroup.procs");
+      if (procs === null) return null;
+      const comms = yield* Effect.all(
+        parseCgroupProcs(procs).map((pid) => readTextFile(`/proc/${pid}/comm`)),
+        { concurrency: 8 },
+      );
+      return comms.filter((comm): comm is string => comm !== null);
+    });
+
+  /**
+   * The inspector's host-side view: which allowlisted commands run, and how
+   * many paths sit in each repository status class. Counts and names only; no
+   * path, no argument and no file content ever reaches the prompt.
+   */
+  const describeStructure = (ref: WorkerRef): Effect.Effect<WorkerStructureSummary> =>
+    Effect.gen(function* () {
+      const [comms, status] = yield* Effect.all([
+        workerComms(ref),
+        git(ref, ["status", "--porcelain=v1", "--untracked-files=all"]),
+      ]);
+      return {
+        processes: comms === null ? [] : processToolSummary(comms),
+        repository: repositoryStatusSummary(status),
+      };
+    });
+
+  const inspector = options.inspector?.(describeStructure) ?? disabledInspector;
+
   return {
-    inspectorSupported: false,
+    ...inspector,
 
     sampleSignals: (ref: WorkerRef): Effect.Effect<WorkerSignalSample, WorkerEvidenceError> =>
       Effect.gen(function* () {
@@ -224,26 +352,12 @@ export const makeCgroupWorkerEvidence = (
 
     processFingerprint: (ref: WorkerRef): Effect.Effect<string, WorkerEvidenceError> =>
       Effect.gen(function* () {
-        const procs = yield* readCgroupFile(ref, "cgroup.procs");
-        if (procs === null) return PROCESS_FINGERPRINT_UNAVAILABLE;
-        const pids = parseCgroupProcs(procs);
-        const comms = yield* Effect.all(
-          pids.map((pid) => readTextFile(`/proc/${pid}/comm`)),
-          { concurrency: 8 },
-        );
-        return processCommFingerprint(comms.filter((comm): comm is string => comm !== null));
+        const comms = yield* workerComms(ref);
+        return comms === null ? PROCESS_FINGERPRINT_UNAVAILABLE : processCommFingerprint(comms);
       }),
 
     providerFallbackPending: options.providerFallbackPending.pipe(
       Effect.orElseSucceed(() => false),
     ),
-
-    // The inspector needs a harness that can deny tools to a subagent. None
-    // exists yet, so `inspectorSupported` is false and the machine never asks
-    // for one. These stay as honest no-ops until `t3code-77b`.
-    launchInspector: (): Effect.Effect<void, WorkerEvidenceError> => Effect.void,
-    inspectorStatus: (): Effect.Effect<InspectorRunEvidence, WorkerEvidenceError> =>
-      Effect.succeed({ _tag: "none" }),
-    stopInspector: (): Effect.Effect<void, WorkerEvidenceError> => Effect.void,
   };
 };

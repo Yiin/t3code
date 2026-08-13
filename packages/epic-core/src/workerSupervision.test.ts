@@ -8,6 +8,7 @@ import type {
   WorkerRef,
 } from "./ports/WorkerEvidence.ts";
 import { WorkerLivenessStage } from "./ports/RunEvents.ts";
+import type { InspectorLaunchEvidence } from "./inspectorPrompt.ts";
 import {
   DEFAULT_WORKER_LIVENESS_CONFIG,
   startWorkerLiveness,
@@ -63,6 +64,8 @@ interface Counters {
   launches: number;
   stops: number;
   samples: number;
+  /** Everything the driver handed the evidence port on each launch. */
+  launchInputs: Array<{ timeoutSeconds: number; evidence: InspectorLaunchEvidence }>;
 }
 
 interface FakeEvidenceInput {
@@ -81,6 +84,7 @@ const fakeEvidence = (
     launches: 0,
     stops: 0,
     samples: 0,
+    launchInputs: [],
   };
   const evidence: WorkerEvidenceShape = {
     inspectorSupported: true,
@@ -107,9 +111,10 @@ const fakeEvidence = (
         return "fingerprint-a";
       }),
     providerFallbackPending: Effect.succeed(false),
-    launchInspector: () =>
+    launchInspector: (_ref, launch) =>
       Effect.sync(() => {
         counters.launches += 1;
+        counters.launchInputs.push(launch);
       }),
     inspectorStatus: () => Effect.succeed(input.inspector ?? { _tag: "none" }),
     stopInspector: () =>
@@ -378,6 +383,39 @@ describe("superviseWorker", () => {
       expect(exit._tag).toBe("Failure");
       expect(counters.launches).toBe(0);
       expect(events).toEqual([]);
+    }),
+  );
+
+  it.effect("hands the evidence port the machine's own structural snapshot", () =>
+    Effect.gen(function* () {
+      const { evidence, counters } = fakeEvidence();
+      const { emit } = collect();
+      yield* Effect.exit(
+        superviseWorker({
+          ref: REF,
+          child: "epic.7",
+          config: CONFIG,
+          evidence,
+          emit,
+          clock: fakeClock({ budget: 8 }),
+        }),
+      );
+      const launch = counters.launchInputs[0];
+      expect(launch?.timeoutSeconds).toBe(CONFIG.inspectorTimeoutSeconds);
+      // The prompt renders from these, so they must be the same values the
+      // machine will judge the inspector's answer against.
+      expect(launch?.evidence).toEqual({
+        worker: REF.worker,
+        child: "epic.7",
+        elapsedSeconds: 30,
+        idleSeconds: 30,
+        outputBytes: 0,
+        outputBytesDelta: 0,
+        cpuUsecDelta: 0,
+        ioBytesDelta: 0,
+        processFingerprint: "fingerprint-a",
+        repoFingerprint: "abc123 hash=stable",
+      });
     }),
   );
 

@@ -13,6 +13,7 @@
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import type { InspectorLaunchEvidence } from "../inspectorPrompt.ts";
 import type { InspectorRunEvidence, WorkerSignalSample } from "../workerLiveness.ts";
 
 export class WorkerEvidenceError extends Schema.TaggedErrorClass<WorkerEvidenceError>()(
@@ -83,7 +84,11 @@ export interface WorkerEvidenceShape {
    */
   readonly launchInspector: (
     ref: WorkerRef,
-    input: { readonly timeoutSeconds: number },
+    input: {
+      readonly timeoutSeconds: number;
+      /** The machine's own structural snapshot; the prompt renders from it. */
+      readonly evidence: InspectorLaunchEvidence;
+    },
   ) => Effect.Effect<void, WorkerEvidenceError>;
   /** Inspector lifecycle state for the current tick. */
   readonly inspectorStatus: (

@@ -17,7 +17,11 @@
  * Only a `cook-epic-*.scope` leaf is accepted; anything else reports no cgroup
  * and supervision runs on the output counter and repository probe alone.
  *
- * The inspector is not wired here either. Raising that ceiling is `t3code-77b`.
+ * The inspector is wired here when the harness can deny a subagent every tool.
+ * The terminal side has both halves in hand — `TerminalAgentDispatch` spawns
+ * the tool-denied auxiliary and this adapter holds the pid and the cgroup — so
+ * this is where the inspector lands first. What to do for a harness that has no
+ * inspector at all is `t3code-77b`.
  */
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
@@ -26,6 +30,7 @@ import * as Effect from "effect/Effect";
 
 import type * as ProcessRunner from "../processRunner.ts";
 import type { WorkerEvidenceShape, WorkerRef } from "../ports/WorkerEvidence.ts";
+import { makeAgentInspector, type AgentInspectorOptions } from "./AgentInspector.ts";
 import { makeCgroupWorkerEvidence } from "./CgroupWorkerEvidence.ts";
 import type { TerminalWorkerActivity } from "./TerminalWorkerActivity.ts";
 
@@ -58,6 +63,12 @@ export interface TerminalWorkerEvidenceOptions {
   /** Injectable for tests; defaults to reading `/proc/<pid>/cgroup`. */
   readonly readProcCgroup?: ((pid: number) => Effect.Effect<string | null>) | undefined;
   readonly repoProbeTimeoutSeconds?: number | undefined;
+  /**
+   * How to launch the locked-down inspector, or absent for a harness that
+   * cannot deny a subagent its tools. Use {@link harnessSupportsInspector} to
+   * decide; `describeStructure` is supplied by the cgroup layer below.
+   */
+  readonly inspector?: Omit<AgentInspectorOptions, "describeStructure"> | undefined;
 }
 
 const readProcCgroupFile = (pid: number): Effect.Effect<string | null> =>
@@ -70,11 +81,19 @@ export const makeTerminalWorkerEvidence = (
 ): WorkerEvidenceShape => {
   const readProcCgroup = options.readProcCgroup ?? readProcCgroupFile;
 
+  const inspectorOptions = options.inspector;
+
   return makeCgroupWorkerEvidence({
     processRunner: options.processRunner,
     ...(options.repoProbeTimeoutSeconds === undefined
       ? {}
       : { repoProbeTimeoutSeconds: options.repoProbeTimeoutSeconds }),
+    ...(inspectorOptions === undefined
+      ? {}
+      : {
+          inspector: (describeStructure) =>
+            makeAgentInspector({ ...inspectorOptions, describeStructure }),
+        }),
     /**
      * Re-read every tick rather than cached: the scope does not exist yet at
      * the instant of the spawn, and a continuation replaces the pid with a new

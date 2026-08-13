@@ -279,7 +279,10 @@ export const superviseWorker = Effect.fn("superviseWorker")(function* (
           break;
         case "launch-inspector":
           yield* evidence
-            .launchInspector(ref, { timeoutSeconds: action.timeoutSeconds })
+            .launchInspector(ref, {
+              timeoutSeconds: action.timeoutSeconds,
+              evidence: action.evidence,
+            })
             .pipe(Effect.catch(skip("launchInspector")));
           break;
         case "force-stop-inspector":

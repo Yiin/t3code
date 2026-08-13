@@ -41,6 +41,7 @@ import {
   type PoolPolicySeed,
 } from "@t3tools/epic-core/runPolicy";
 import { runSequentialEpicLoop } from "@t3tools/epic-core/SequentialEpicLoop";
+import { harnessSupportsInspector } from "@t3tools/epic-core/adapters/AgentInspector";
 import { makeFileMergeQueueStore } from "@t3tools/epic-core/adapters/FileMergeQueueStore";
 import { makeFileRunEvents } from "@t3tools/epic-core/adapters/FileRunEvents";
 import * as FileRunJournal from "@t3tools/epic-core/adapters/FileRunJournal";
@@ -626,6 +627,21 @@ export const cookCommand = Command.make("cook", {
               workerEvidence: makeTerminalWorkerEvidence({
                 processRunner: runner,
                 activity: workerActivity,
+                /**
+                 * The inspector runs on the same harness and account as the
+                 * run, in the coordinator checkout rather than any worktree.
+                 * A harness that cannot deny a subagent its tools gets no
+                 * inspector, and the machine records an uncertain reason.
+                 */
+                ...(harnessSupportsInspector(harness)
+                  ? {
+                      inspector: {
+                        runAuxiliary: agentDispatch.runAuxiliary,
+                        selection: startSelection,
+                        cwd,
+                      },
+                    }
+                  : {}),
               }),
             };
             // The terminal seed mirrors the server layer's defaults

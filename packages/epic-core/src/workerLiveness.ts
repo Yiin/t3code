@@ -14,6 +14,9 @@
  * unchanged fingerprints and an unchanged progress generation, ever stops a
  * worker (run-legacy.sh:1114-1116).
  */
+import type { InspectorLaunchEvidence } from "./inspectorPrompt.ts";
+
+export type { InspectorLaunchEvidence };
 
 /** Every default cites its run-legacy.sh source line. */
 export interface WorkerLivenessConfig {
@@ -180,7 +183,17 @@ export type WorkerLivenessAction =
   | { readonly _tag: "stop-worker"; readonly reason: string }
   /** Inspector exceeded its budget; the adapter kills it and the machine reaps rc 124 (run-legacy.sh:1782-1785). */
   | { readonly _tag: "force-stop-inspector" }
-  | { readonly _tag: "launch-inspector"; readonly timeoutSeconds: number }
+  /**
+   * The evidence rides along with the request. The machine already holds every
+   * structural fact the inspector prompt is rendered from, so the adapter
+   * re-sampling for the prompt would both cost extra probes and let the prompt
+   * disagree with the decision the machine will judge the answer against.
+   */
+  | {
+      readonly _tag: "launch-inspector";
+      readonly timeoutSeconds: number;
+      readonly evidence: InspectorLaunchEvidence;
+    }
   | { readonly _tag: "emit"; readonly event: WorkerLivenessEvent };
 
 interface InspectorInFlight {
@@ -538,16 +551,33 @@ export const tickWorkerLiveness = (
     if (!config.inspectorSupported) {
       return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions }; // run-legacy.sh:1427-1430
     }
+    const processFingerprint = evidence.processFingerprint();
+    const repoFingerprint = evidence.probeRepository();
     next = {
       ...next,
       inspector: {
         startedAt: now,
         generation: next.generation,
-        processFingerprint: evidence.processFingerprint(),
-        repoFingerprint: evidence.probeRepository(),
+        processFingerprint,
+        repoFingerprint,
       },
     }; // run-legacy.sh:1431-1432, 1611-1612
-    actions.push({ _tag: "launch-inspector", timeoutSeconds: config.inspectorTimeoutSeconds });
+    actions.push({
+      _tag: "launch-inspector",
+      timeoutSeconds: config.inspectorTimeoutSeconds,
+      evidence: {
+        worker: next.worker,
+        child: next.child,
+        elapsedSeconds: now - next.startedAt,
+        idleSeconds: idle,
+        outputBytes: evidence.signals.outputBytes,
+        outputBytesDelta: outputDelta,
+        cpuUsecDelta: cpuDelta,
+        ioBytesDelta: ioDelta,
+        processFingerprint,
+        repoFingerprint,
+      },
+    }); // run-legacy.sh:1321-1354
     emit({
       type: "inspection-started",
       worker: next.worker,

@@ -123,6 +123,14 @@
       "types": "./src/adapters/CgroupWorkerEvidence.ts",
       "import": "./src/adapters/CgroupWorkerEvidence.ts"
     },
+    "./adapters/AgentInspector": {
+      "types": "./src/adapters/AgentInspector.ts",
+      "import": "./src/adapters/AgentInspector.ts"
+    },
+    "./inspectorPrompt": {
+      "types": "./src/inspectorPrompt.ts",
+      "import": "./src/inspectorPrompt.ts"
+    },
     "./workspaceNodeModules": {
       "types": "./src/workspaceNodeModules.ts",
       "import": "./src/workspaceNodeModules.ts"

@@ -157,5 +157,11 @@ export interface AgentDispatchShape {
     readonly cwd: string;
     readonly prompt: string;
     readonly selection: AgentSelection;
+    /**
+     * Wall-clock budget for this one call, overriding the adapter's own. An
+     * idle inspection is minutes where an iteration is hours, and the adapter
+     * is the only party that can stop the process it spawned.
+     */
+    readonly timeoutSeconds?: number | undefined;
   }) => Effect.Effect<AuxiliaryResult, DispatchError>;
 }
