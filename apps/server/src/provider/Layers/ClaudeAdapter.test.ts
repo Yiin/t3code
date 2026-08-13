@@ -5607,6 +5607,98 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "round-trips multiSelect from AskUserQuestion tool input to user-input.requested",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        // Regression evidence for t3code-hmk: the panel auto-advance bug report
+        // traces back to the model omitting `multiSelect: true` from the tool
+        // input. This test pins both directions: a present `true` survives the
+        // adapter-to-event hop, and a missing key coerces to `false`.
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+        });
+
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+        const createInput = harness.getLastCreateQueryInput();
+        const canUseTool = createInput?.options.canUseTool;
+        assert.equal(typeof canUseTool, "function");
+        if (!canUseTool) {
+          return;
+        }
+
+        const askInput = {
+          questions: [
+            {
+              question: "Select one or more options.",
+              header: "Toppings",
+              options: [
+                { label: "Cheese", description: "" },
+                { label: "Bacon", description: "" },
+              ],
+              multiSelect: true,
+            },
+            {
+              question: "Which framework?",
+              header: "Framework",
+              options: [
+                { label: "React", description: "React.js" },
+                { label: "Vue", description: "Vue.js" },
+              ],
+              // No multiSelect key — the shape the t3code-hmk report most
+              // likely hit at runtime.
+            },
+          ],
+        };
+
+        const permissionPromise = canUseTool("AskUserQuestion", askInput, {
+          signal: new AbortController().signal,
+          toolUseID: "tool-ask-multiselect",
+        });
+
+        const requestedEvent = yield* Stream.runHead(adapter.streamEvents);
+        assert.equal(requestedEvent._tag, "Some");
+        if (
+          requestedEvent._tag !== "Some" ||
+          requestedEvent.value.type !== "user-input.requested"
+        ) {
+          assert.fail("Expected user-input.requested event");
+          return;
+        }
+        const requestId = requestedEvent.value.requestId;
+        assert.equal(requestedEvent.value.payload.questions.length, 2);
+        assert.equal(requestedEvent.value.payload.questions[0]?.multiSelect, true);
+        assert.equal(requestedEvent.value.payload.questions[1]?.multiSelect, false);
+
+        // The raw tool input is recorded on the event, so a future report can
+        // confirm from the stored payload whether the model sent the flag.
+        const rawPayload = (
+          requestedEvent.value.raw as { payload?: { input?: Record<string, unknown> } } | undefined
+        )?.payload?.input;
+        assert.deepEqual(rawPayload, askInput);
+
+        yield* adapter.respondToUserInput(session.threadId, ApprovalRequestId.make(requestId!), {
+          "Select one or more options.": "Cheese",
+          "Which framework?": "React",
+        });
+
+        yield* Stream.runHead(adapter.streamEvents);
+
+        const permissionResult = yield* Effect.promise(() => permissionPromise);
+        assert.equal((permissionResult as PermissionResult).behavior, "allow");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("denies AskUserQuestion when the waiting turn is aborted", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
