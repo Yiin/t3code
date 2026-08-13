@@ -4,6 +4,8 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   EpicRunId,
   EpicTierId,
+  IsoDateTime,
+  NonNegativeInt,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -180,6 +182,15 @@ const fixture = (input: {
   readonly supervisionClock?: SupervisionClock;
   /** Iterations a previous process left running, adopted at loop start. */
   readonly resumedWorkers?: ReadonlyArray<ResumedWorker>;
+  /**
+   * Settled iteration rows an earlier process of this run already wrote. They
+   * take the lowest indices, ahead of any resumed worker.
+   */
+  readonly priorIterations?: ReadonlyArray<{
+    readonly issueId: string | null;
+    readonly turnStatus: PersistedEpicRunIteration["turnStatus"];
+    readonly failureReason: string | null;
+  }>;
   /** What the harness declares it can do about a dead handle. */
   readonly resumeCapability?: IterationResumeMode;
   /** What `resumeIteration` answers, one entry per call, in order. */
@@ -243,22 +254,37 @@ const fixture = (input: {
     ...input.runSeed,
   };
   const resumedWorkers = input.resumedWorkers ?? [];
-  const iterations: PersistedEpicRunIteration[] = resumedWorkers.map((worker) => ({
-    runId: RUN_ID,
-    iterationIndex: worker.iterationIndex,
-    threadId: worker.threadId,
-    issueId: worker.issueId,
-    turnStatus: "running" as const,
-    summary: null,
-    why: null,
-    failureReason: null,
-    resumeCount: worker.resumeCount,
-    startedAt: worker.startedAt,
-    finishedAt: null,
-  }));
+  const priorIterations = input.priorIterations ?? [];
+  const iterations: PersistedEpicRunIteration[] = [
+    ...priorIterations.map((prior, index) => ({
+      runId: RUN_ID,
+      iterationIndex: NonNegativeInt.make(index),
+      threadId: ThreadId.make(epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: index })),
+      issueId: prior.issueId,
+      turnStatus: prior.turnStatus,
+      summary: null,
+      why: null,
+      failureReason: prior.failureReason,
+      startedAt: IsoDateTime.make("2026-01-01T00:00:00Z"),
+      finishedAt: IsoDateTime.make("2026-01-01T00:01:00Z"),
+    })),
+    ...resumedWorkers.map((worker) => ({
+      runId: RUN_ID,
+      iterationIndex: worker.iterationIndex,
+      threadId: worker.threadId,
+      issueId: worker.issueId,
+      turnStatus: "running" as const,
+      summary: null,
+      why: null,
+      failureReason: null,
+      resumeCount: worker.resumeCount,
+      startedAt: worker.startedAt,
+      finishedAt: null,
+    })),
+  ];
   nextIterationIndex = resumedWorkers.reduce(
     (next, worker) => Math.max(next, worker.iterationIndex + 1),
-    0,
+    priorIterations.length,
   );
   const events: RunEvent[] = [];
   const ordering: string[] = [];
@@ -1799,6 +1825,60 @@ it.live("charges no per-child attempt when the claim was never standing", () =>
     assert.equal(test.runRecord().status, "failed");
     assert.equal(test.dispatchCount(), 3);
     assert.equal(test.events.filter((event) => event.type === "child-claim-released").length, 0);
+  }),
+);
+
+it.live("charges a restarted run for the child attempts an earlier process spent", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      priorIterations: [
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "child:blocked" },
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "child:no-commit-child-open" },
+      ],
+      attempts: [{ blocked: true, claim: true }],
+      policy: policy({ maxConsecutiveFailures: 5, maxAttemptsPerChild: 3 }),
+    });
+    yield* test.run;
+
+    // Two spent attempts plus this one exhaust the budget, so the run fails on
+    // its first dispatch instead of granting a fresh three.
+    const run = test.runRecord();
+    assert.equal(run.status, "failed");
+    assert.equal(run.lastError, "agent reported RALPH_BLOCKED");
+    assert.equal(test.dispatchCount(), 1);
+    assert.equal(test.iterations[2]?.failureReason, "child:blocked");
+    const recoveries = test.events.filter((event) => event.type === "child-claim-released");
+    assert.equal(recoveries.length, 1);
+    assert.equal(recoveries[0]?.iterationIndex, 2);
+  }),
+);
+
+it.live("charges nothing for restart-abandoned, infrastructure, or other children's rows", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      priorIterations: [
+        // Abandoned by a restart or a cancellation: the turn never delivered a
+        // verdict on the child.
+        { issueId: "epic.1", turnStatus: "abandoned", failureReason: "infra:resume-unsupported" },
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "infra:dispatch-failed" },
+        { issueId: "epic.1", turnStatus: "failed", failureReason: "infra:timeout" },
+        // A no-commit turn that closed its child anyway settles `completed`.
+        { issueId: "epic.1", turnStatus: "completed", failureReason: null },
+        // Another child's spent attempt, and a row that named no child at all.
+        { issueId: "epic.2", turnStatus: "failed", failureReason: "child:blocked" },
+        { issueId: null, turnStatus: "failed", failureReason: "child:blocked" },
+      ],
+      attempts: [
+        { blocked: true, claim: true },
+        { blocked: true, claim: true },
+        { blocked: true, claim: true },
+      ],
+      policy: policy({ maxConsecutiveFailures: 5, maxAttemptsPerChild: 3 }),
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "failed");
+    assert.equal(test.dispatchCount(), 3);
   }),
 );
 

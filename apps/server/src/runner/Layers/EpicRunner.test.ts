@@ -6486,6 +6486,68 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
+  // The per-child budget lives in memory, so before this a restart handed a
+  // wedged child a fresh `maxAttemptsPerChild` every time the server came back.
+  it.live("charges a restarted run for the child attempts an earlier process spent", () =>
+    Effect.gen(function* () {
+      const root = yield* makeTempWorkspace;
+      const runId = EpicRunId.make("run-restart-child-budget");
+      const spentRow = (iterationIndex: number, failureReason: string): EpicRunIteration => ({
+        runId,
+        iterationIndex,
+        threadId: ThreadId.make(`epic-run-${runId}-${iterationIndex}`),
+        issueId: "child-0",
+        turnStatus: "failed",
+        summary: null,
+        why: null,
+        failureReason,
+        startedAt: NOW,
+        finishedAt: NOW,
+      });
+      const harness = createHarness({
+        workspaceRoot: root,
+        script: [{ text: "cannot proceed\nRALPH_BLOCKED", head: "head-0" }],
+        readyOutput: '[{"id":"child-0","parent":"epic-1"}]',
+        seedRuns: [
+          interruptedRun({
+            runId,
+            cwd: root,
+            workers: 1,
+            overrides: { iterationsDispatched: 3, iterationsCompleted: 3 },
+          }),
+        ],
+        // Two spent child attempts, plus three rows the budget must not
+        // absorb: an infra failure, a restart-abandoned row, and another
+        // child's failure.
+        seedIterations: [
+          spentRow(0, "child:blocked"),
+          spentRow(1, "child:no-commit-child-open"),
+          spentRow(2, "infra:dispatch-failed"),
+          { ...spentRow(3, "server-restart"), turnStatus: "abandoned" },
+          { ...spentRow(4, "child:blocked"), issueId: "child-9" },
+        ],
+        childStatuses: { "child-0": "open" },
+      });
+
+      yield* Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        yield* runner.start();
+        yield* waitFor(() => harness.store.runs.get(runId)?.status === "failed");
+        yield* settle;
+
+        // One fresh attempt exhausts the budget of three. Without the restore
+        // the run would have been granted three more dispatches.
+        assert.strictEqual(harness.turnsStarted(), 1);
+        assert.strictEqual(
+          harness.store.runs.get(runId)?.lastError,
+          "agent reported RALPH_BLOCKED",
+        );
+        assert.strictEqual(harness.store.iterations.length, 6);
+        assert.strictEqual(harness.store.iterations[5]?.failureReason, "child:blocked");
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   /** What a sequential run persists, read back by the boot path as-is. */
   const sequentialOverrides = {
     config: {

@@ -5,6 +5,7 @@ import {
   EPIC_RUN_RESTART_RESUME_PROMPT,
   EPIC_RUN_STALLED_PROGRESS_PROMPT,
   backoffDelayMs,
+  childAttemptsFromHistory,
   childBranch,
   decideGraceStep,
   decideIterationBoundary,
@@ -450,6 +451,57 @@ describe("failure vocabulary", () => {
     },
   ])("$name", ({ input, expected }) => {
     expect(persistedFailureReason(input)).toBe(expected);
+  });
+});
+
+describe("childAttemptsFromHistory", () => {
+  it("counts one spent attempt per terminal child failure, per child", () => {
+    expect(
+      Object.fromEntries(
+        childAttemptsFromHistory([
+          { issueId: "epic.1", turnStatus: "failed", failureReason: "child:blocked" },
+          { issueId: "epic.1", turnStatus: "failed", failureReason: "child:no-commit-child-open" },
+          { issueId: "epic.2", turnStatus: "failed", failureReason: "child:no-commit-no-evidence" },
+        ]),
+      ),
+    ).toEqual({ "epic.1": 2, "epic.2": 1 });
+  });
+
+  it.each([
+    {
+      name: "an infrastructure failure",
+      row: {
+        issueId: "epic.1",
+        turnStatus: "failed" as const,
+        failureReason: "infra:dispatch-failed",
+      },
+    },
+    {
+      name: "a restart-abandoned row",
+      row: {
+        issueId: "epic.1",
+        turnStatus: "abandoned" as const,
+        failureReason: "infra:resume-unsupported",
+      },
+    },
+    {
+      name: "a row a cancellation left running",
+      row: { issueId: "epic.1", turnStatus: "running" as const, failureReason: null },
+    },
+    {
+      name: "a no-commit turn that closed its child",
+      row: { issueId: "epic.1", turnStatus: "completed" as const, failureReason: null },
+    },
+    {
+      name: "a failure with no reason at all",
+      row: { issueId: "epic.1", turnStatus: "failed" as const, failureReason: null },
+    },
+    {
+      name: "a row naming no child",
+      row: { issueId: null, turnStatus: "failed" as const, failureReason: "child:blocked" },
+    },
+  ])("charges nothing for $name", ({ row }) => {
+    expect(childAttemptsFromHistory([row]).size).toBe(0);
   });
 });
 

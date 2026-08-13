@@ -455,6 +455,44 @@ export const persistedFailureReason = (input: PersistedFailureReasonInput): stri
   return failureClass === null || reason === null ? null : `${failureClass}:${reason}`;
 };
 
+/** The prefix {@link persistedFailureReason} writes for the `child` class. */
+export const CHILD_FAILURE_REASON_PREFIX = "child:";
+
+/** The persisted iteration fields that decide whether a row charged a child. */
+export interface ChildAttemptHistoryEntry {
+  readonly issueId: string | null;
+  readonly turnStatus: "running" | "completed" | "failed" | "abandoned";
+  readonly failureReason: string | null;
+}
+
+/**
+ * Rebuild the per-child attempt budgets a previous process had spent.
+ *
+ * The budget is in-memory in both loops, so before this a restart handed every
+ * child a fresh `maxAttemptsPerChild`: a child that had already burned its
+ * budget got the whole of it again, and a wedged child could loop for as long
+ * as the run kept restarting.
+ *
+ * A row charges its child exactly when the live boundary would have charged
+ * it, and the durable row already says so: `persistedFailureReason` writes the
+ * failure class as the reason's prefix, so a terminal `failed` row prefixed
+ * `child:` is one spent attempt and nothing else is. That excludes, by
+ * construction, every category the budget must not absorb — an `infra:` row,
+ * a `running` row a restart or a cancellation abandoned, an `abandoned` row,
+ * and a `completed` row whose no-commit turn closed its child anyway.
+ */
+export const childAttemptsFromHistory = (
+  iterations: ReadonlyArray<ChildAttemptHistoryEntry>,
+): ReadonlyMap<string, number> => {
+  const attempts = new Map<string, number>();
+  for (const iteration of iterations) {
+    if (iteration.issueId === null || iteration.turnStatus !== "failed") continue;
+    if (iteration.failureReason?.startsWith(CHILD_FAILURE_REASON_PREFIX) !== true) continue;
+    attempts.set(iteration.issueId, (attempts.get(iteration.issueId) ?? 0) + 1);
+  }
+  return attempts;
+};
+
 /**
  * The ready frontier of one epic, partitioned for the parallel loop.
  *

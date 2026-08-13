@@ -36,6 +36,7 @@ import {
   type EpicRunnerError,
 } from "./Errors.ts";
 import {
+  childAttemptsFromHistory,
   decideIterationBoundary,
   EPIC_RUN_RESTART_HANDOFF_PROMPT,
   EPIC_RUN_RESTART_RESUME_PROMPT,
@@ -595,6 +596,10 @@ export const runParallelEpicLoop = (
    * Per-child attempt budgets, shared with the sequential loop: a child that
    * absorbs `maxAttemptsPerChild` child-class failures fails the run, and a
    * released claim is announced exactly once. Telemetry never fails the loop.
+   *
+   * The map is per process, so `body` seeds it from this run's own durable
+   * iteration rows before the first dispatch: a restart must not hand a child
+   * back the attempts a previous process already spent on it.
    */
   const childAttempts = new Map<string, number>();
   const exhaustedIterations = new Map<string, number>();
@@ -1906,6 +1911,21 @@ export const runParallelEpicLoop = (
 
   const body = Effect.gen(function* () {
     const initialRun = yield* requireRun(runId);
+    // Restore what earlier processes of THIS run already charged, before any
+    // dispatch — including the resumed workers adopted below, whose own
+    // settlement adds to the restored count rather than starting from zero.
+    const restoredAttempts = childAttemptsFromHistory(
+      yield* ports.journal
+        .listIterations(runId)
+        .pipe(Effect.mapError(storeError("listIterations"))),
+    );
+    for (const [issueId, spent] of restoredAttempts) childAttempts.set(issueId, spent);
+    if (restoredAttempts.size > 0) {
+      yield* Effect.logInfo("epic.runner.child-attempts-restored", {
+        runId,
+        attempts: Object.fromEntries(restoredAttempts),
+      });
+    }
     const runCtx: PoolRunContext = {
       runId,
       epicId: input.epicId,
