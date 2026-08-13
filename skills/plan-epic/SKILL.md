@@ -78,21 +78,44 @@ Choose the strongest investigation mode the harness provides:
 1. Prefer the `Workflow` tool when available (the sketch below).
 2. Otherwise, if a subagent tool is available, dispatch one subagent per area in
    parallel (`Agent` with `general-purpose` / `Explore`, or the harness's
-   equivalent).
+   equivalent). In Prime Agent that tool is `rlm()` — see below; it fans out,
+   but it does not return results the way `Agent` does.
 3. With no subagent tool, investigate the areas sequentially in the main thread.
    To preserve fresh context when a supported headless CLI is installed, you may
    instead write each self-contained brief to a temporary file, invoke the same
-   harness as a one-shot process (`claude -p`, `codex exec`, or `kimi -p`), and
-   read its output before synthesis. Do not assume shelling out is available.
+   harness as a one-shot process (`prime-agent --mode json`, `claude -p`,
+   `codex exec`, or `kimi -p`), and read its output before synthesis. Do not
+   assume shelling out is available.
+
+#### Prime Agent fan-out (`rlm()`)
+
+`rlm()` admits work; it does not return the work's result. Each call returns an
+admission handle, and the result arrives later, out of band: as an agent message
+in the session, or as a file the admitted agent wrote. Plan for that:
+
+- Tell every admitted investigator to write its findings to a path you name,
+  under one run directory. A brief without a named output path can only answer
+  through a message you may never correlate.
+- Keep the handles. Match each arriving message or file back to its area
+  through the handle and the path.
+- Never treat the return value of `rlm()` as findings, and never synthesize
+  before the outputs are actually there. Poll the paths, or wait for the
+  messages, until every area has landed or you decide to retry it.
+- An area with no output and no message is a failure to retry, not an empty
+  finding.
 
 Always try harness-native agent dispatch first. If an investigator fails due
 to a provider limit, usage or spend limit, authentication failure, or provider
 unavailability, retry only that failed area with the next harness. Use this
 one-way order:
 
-1. The configured Claude model remains primary.
-2. Codex uses `gpt-5.6-sol` with high reasoning.
-3. Kimi uses `kimi-code/k3`.
+1. The harness you are running in stays primary, with its configured model.
+   From Prime Agent, the next stage is Claude.
+2. Claude uses its configured model.
+3. Codex uses `gpt-5.6-sol` with high reasoning.
+4. Kimi uses `kimi-code/k3`.
+
+Prime Agent is a source only: nothing ever falls back _to_ Prime.
 
 Skip a stage when its binary is missing or it exits 126 or 127. Never move
 backward. Change harnesses only when a structured harness error reports a
@@ -106,10 +129,15 @@ Use self-contained prompts for cross-harness retries. These are the headless
 command shapes:
 
 ```bash
+prime-agent --mode json --no-session --cwd <project-root> --model <primary-model> -- "<prompt>"
 claude -p --permission-mode plan --output-format json --model <primary-model> -- "<prompt>"
 codex -a never -s danger-full-access -m gpt-5.6-sol -c 'model_reasoning_effort="high"' exec --json "<prompt>"
 kimi -p "<prompt>" --output-format stream-json -m kimi-code/k3
 ```
+
+Prime Agent takes the prompt as an argument after `--`, never on stdin.
+`--no-session` keeps the one-shot out of the session store. Drop `--model` to
+use its configured default.
 
 Keep successful investigation results. Retry only missing areas. Each retry
 gets the original area brief and output schema, without another area's result.
@@ -412,6 +440,7 @@ the form the harness you're running in expands:
 | ------------------------- | ---------------------------------------------- |
 | Claude Code typed skills  | `/cook-epic <EPIC>`                            |
 | Codex native skills       | `$cook-epic <EPIC>`                            |
+| Prime Agent native skills | `/skill:cook-epic <EPIC>`                      |
 | No native skill expansion | Paste the `cook-epic` skill body with `<EPIC>` |
 
 No prose belongs in it and no second option belongs beside it. cook-epic reads
@@ -419,15 +448,17 @@ the epic, picks its own execution shape, and re-picks its concurrency every
 tick from the ready frontier.
 
 Put it on the clipboard too, picking the form that matches the harness you're running in
-(Claude Code → the `/` form, Codex → the `$` form). Best-effort: if there's no clipboard tool
+(Claude Code → the `/` form, Codex → the `$` form, Prime Agent → the `/skill:` form).
+Best-effort: if there's no clipboard tool
 or display — a remote or headless session — say so in one clause and move on. Never let this
-fail the handoff. Set `HANDOFF_COMMAND` to the exact Claude or Codex command you printed before
+fail the handoff. Set `HANDOFF_COMMAND` to the exact command you printed before
 running the snippet. The no-expansion fallback includes a skill body and cannot be represented
 by this short command, so skip clipboard copying for that mode and say so.
 
 ```bash
 HANDOFF_COMMAND="/cook-epic $EPIC" # Claude Code
 # HANDOFF_COMMAND="\$cook-epic $EPIC" # Codex
+# HANDOFF_COMMAND="/skill:cook-epic $EPIC" # Prime Agent
 for c in "wl-copy" "xclip -selection clipboard" "pbcopy"; do
   command -v ${c%% *} >/dev/null 2>&1 &&
     printf '%s' "$HANDOFF_COMMAND" | $c && echo "copied to clipboard" && break

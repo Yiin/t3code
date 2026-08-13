@@ -11,10 +11,21 @@ The installer links
 Plain Claude, Codex, and Kimi sessions then use the same files. Existing real
 files or directories are backed up before linking.
 
+Prime Agent reads its own skills directory, so the installer links the same
+five directories into `~/.prime/skills` as well. It creates that directory when
+`~/.prime` exists, and skips Prime Agent with a printed reason when it does
+not. Set `PRIME_SKILLS_DIR` when Prime Agent keeps its skills somewhere else.
+Both targets are links to this checkout, so there is one canonical copy of each
+skill and no fork to keep in step.
+
 The links are absolute, so moving this checkout breaks them. Run the installer
 again from the new checkout location to repair the links.
 
 ## Tests
+
+Run `bash skills/tests/install-links.sh` to check the installer's link targets.
+It redirects every target into a temporary directory, so it never touches the
+machine's real links.
 
 Run the full cook-epic shell suite with `bash skills/cook-epic/tests/all.sh`.
 Set `COOKEPIC_TESTS_FILTER=<name>` to select matching files.

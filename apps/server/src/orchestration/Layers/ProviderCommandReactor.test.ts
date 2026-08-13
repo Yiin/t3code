@@ -1847,6 +1847,173 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it.each([
+    { text: "/cook-epic t3code-b93", expected: "/skill:cook-epic t3code-b93" },
+    { text: "$cook-epic t3code-b93", expected: "/skill:cook-epic t3code-b93" },
+    { text: "/plan-epic add Prime  support", expected: "/skill:plan-epic add Prime  support" },
+    { text: "$plan-epic", expected: "/skill:plan-epic" },
+    { text: "$skill:cook-epic t3code-b93", expected: "/skill:cook-epic t3code-b93" },
+  ])("routes $text to Prime's native skill syntax", async ({ text, expected }) => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("primeAgent"),
+        "anthropic/claude-opus-5",
+      ),
+      skillsRoot,
+      providerSkills: [
+        { name: "cook-epic", enabled: true },
+        { name: "plan-epic", enabled: true },
+        { name: "skill:cook-epic", enabled: true },
+      ],
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-prime-native-skill"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-prime-native-skill"),
+        role: "user",
+        text,
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: expected });
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.messages.at(-1)?.text).toBe(text);
+  });
+
+  it("keeps attachments and turn metadata on a Prime skill turn", async () => {
+    const modelSelection = createModelSelection(
+      ProviderInstanceId.make("primeAgent"),
+      "anthropic/claude-opus-5",
+    );
+    const harness = await createHarness({
+      threadModelSelection: modelSelection,
+      providerSkills: [{ name: "cook-epic", enabled: true }],
+    });
+    const attachment: ChatAttachment = {
+      type: "image",
+      id: "image-1",
+      name: "proof.png",
+      mimeType: "image/png",
+      sizeBytes: 42,
+    };
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-prime-skill-attachments"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-prime-skill-attachments"),
+        role: "user",
+        text: "$cook-epic t3code-b93",
+        attachments: [attachment],
+      },
+      modelSelection,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: ThreadId.make("thread-1"),
+      input: "/skill:cook-epic t3code-b93",
+      attachments: [attachment],
+      modelSelection,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    });
+  });
+
+  it("expands a workspace skill for Prime when Prime does not report it", async () => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const skillDirectory = NodePath.join(skillsRoot, "cook-it");
+    NodeFS.mkdirSync(skillDirectory);
+    NodeFS.writeFileSync(
+      NodePath.join(skillDirectory, "SKILL.md"),
+      "---\nname: cook-it\n---\nSkill instructions.\n",
+    );
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("primeAgent"),
+        "anthropic/claude-opus-5",
+      ),
+      skillsRoot,
+      providerSkills: [{ name: "cook-epic", enabled: true }],
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-prime-workspace-skill"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-prime-workspace-skill"),
+        role: "user",
+        text: "/cook-it t3code-b93.10",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+    expect(sent.input).toContain(
+      "The user invoked the /cook-it skill. Follow its instructions below.",
+    );
+    expect(sent.input).toContain("ARGUMENTS: t3code-b93.10");
+  });
+
+  it.each([
+    " /cook-epic t3code-b93",
+    " $cook-epic t3code-b93",
+    "/cook-epic-extra t3code-b93",
+    "/unknown task",
+    "$unknown task",
+    "run /cook-epic yourself",
+  ])("passes non-matching Prime input through: %s", async (messageText) => {
+    const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
+    createdBaseDirs.add(skillsRoot);
+    const harness = await createHarness({
+      threadModelSelection: createModelSelection(
+        ProviderInstanceId.make("primeAgent"),
+        "anthropic/claude-opus-5",
+      ),
+      skillsRoot,
+      providerSkills: [{ name: "cook-epic", enabled: true }],
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-prime-passthrough"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("message-prime-passthrough"),
+        role: "user",
+        text: messageText,
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: messageText.trim() });
+  });
+
   it("passes $skills through for Codex sessions", async () => {
     const skillsRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-"));
     createdBaseDirs.add(skillsRoot);

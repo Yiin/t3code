@@ -135,6 +135,18 @@ const DEFAULT_THREAD_TITLE = "New thread";
 const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
+const PRIME_DRIVER = ProviderDriverKind.make("primeAgent");
+
+/**
+ * Prime runs an installed skill as `/skill:<name>`. Rebuild the command from
+ * the provider input rather than from the parsed name so the user's arguments
+ * survive byte for byte. A name that already carries the `skill:` prefix is
+ * Prime's explicit syntax and only loses its sigil.
+ */
+const primeSkillProviderInput = (providerInput: string): string => {
+  const body = providerInput.slice(1);
+  return body.toLowerCase().startsWith("skill:") ? `/${body}` : `/skill:${body}`;
+};
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -821,11 +833,26 @@ const make = Effect.gen(function* () {
     return yield* skillCommandRegistry.find(skillsRoot, name);
   });
 
+  const reportsNativeSkill = Effect.fnUntraced(function* (input: {
+    readonly providerInstanceId: ProviderSession["providerInstanceId"];
+    readonly name: string;
+  }) {
+    const providers = yield* providerRegistry.getProviders;
+    const snapshot = providers.find((provider) => provider.instanceId === input.providerInstanceId);
+    return (
+      snapshot?.skills.some(
+        (skill) => skill.enabled && skill.name.toLowerCase() === input.name.toLowerCase(),
+      ) === true
+    );
+  });
+
   /**
    * `$name` is the composer's provider-neutral skill invocation; `/name`
    * is kept for typed-in workspace skills. Codex resolves `$name` itself.
    * Claude runs its native skills as `/name` commands, so a leading
-   * `$name` naming a known Claude skill is rewritten. Everything else
+   * `$name` naming a known Claude skill is rewritten. Prime runs its own
+   * skills as `/skill:name`, and it never expands a bare `/name`, so both
+   * sigils are rewritten for a skill Prime reports. Everything else
    * falls back to expanding the workspace skill body inline, which is the
    * only form providers without native skill support understand.
    * Detection uses the raw message text so a leading space still means
@@ -839,17 +866,15 @@ const make = Effect.gen(function* () {
   }) {
     const skillInvocation = parseSkillInvocation(input.messageText);
     if (skillInvocation !== undefined && input.provider !== CODEX_DRIVER) {
-      if (input.provider === CLAUDE_DRIVER) {
-        const providers = yield* providerRegistry.getProviders;
-        const snapshot = providers.find(
-          (provider) => provider.instanceId === input.providerInstanceId,
-        );
-        const isNativeSkill = snapshot?.skills.some(
-          (skill) =>
-            skill.enabled && skill.name.toLowerCase() === skillInvocation.name.toLowerCase(),
-        );
+      if (input.provider === CLAUDE_DRIVER || input.provider === PRIME_DRIVER) {
+        const isNativeSkill = yield* reportsNativeSkill({
+          providerInstanceId: input.providerInstanceId,
+          name: skillInvocation.name,
+        });
         if (isNativeSkill) {
-          return `/${input.providerInput.slice(1)}`;
+          return input.provider === PRIME_DRIVER
+            ? primeSkillProviderInput(input.providerInput)
+            : `/${input.providerInput.slice(1)}`;
         }
       }
       const workspaceSkill = yield* findWorkspaceSkill(skillInvocation.name);
@@ -858,9 +883,18 @@ const make = Effect.gen(function* () {
       }
       return input.providerInput;
     }
-    if (input.provider === OPENCODE_DRIVER) {
+    if (input.provider === OPENCODE_DRIVER || input.provider === PRIME_DRIVER) {
       const parsedCommand = parseSkillCommand(input.messageText);
       if (parsedCommand !== undefined) {
+        if (input.provider === PRIME_DRIVER) {
+          const isNativeSkill = yield* reportsNativeSkill({
+            providerInstanceId: input.providerInstanceId,
+            name: parsedCommand.name,
+          });
+          if (isNativeSkill) {
+            return primeSkillProviderInput(input.providerInput);
+          }
+        }
         const workspaceSkill = yield* findWorkspaceSkill(parsedCommand.name);
         if (workspaceSkill !== undefined) {
           return expandSkillCommand(workspaceSkill, parsedCommand.arguments);

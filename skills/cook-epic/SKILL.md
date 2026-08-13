@@ -157,7 +157,9 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    not qualify. Prime moves to Claude, Claude and ccx move to Codex, and Codex
    moves to Kimi. Prime trusts failed `auto_retry_end` events and assistant
    messages with `stopReason: "error"`. It never trusts ordinary assistant
-   text as fallback evidence.
+   text as fallback evidence. Prime reports no per-iteration cost, so a Prime
+   run's records and reports carry no spend figure. Say it is unavailable when
+   asked; never infer one.
    Missing binaries and exits 126 or 127 also mark a stage unavailable. The
    core skips an unavailable intermediate binary. It never moves
    backward.
@@ -259,12 +261,33 @@ failed, not just that you fell back).
 curl -sS -X POST "$T3_SERVER_URL/api/epic-runs/launch" \
   -H "Authorization: Bearer $T3_SERVER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"epicId\": \"<beads epic id>\", \"projectId\": \"$T3_PROJECT_ID\", \"cwd\": \"$T3_WORKSPACE_ROOT\", \"originThreadId\": \"$T3_THREAD_ID\"}"
+  -d "{\"epicId\": \"<beads epic id>\", \"projectId\": \"$T3_PROJECT_ID\", \"cwd\": \"$T3_WORKSPACE_ROOT\", \"originThreadId\": \"$T3_THREAD_ID\", \"inheritOriginModelSelection\": true}"
 ```
 
 `originThreadId` is your own thread. The server groups the run's iteration
 threads under it in the sidebar. Drop the field when `T3_THREAD_ID` is unset —
 send it only when you have a real value, never an empty string.
+
+`inheritOriginModelSelection` runs the epic on your own provider instance,
+model, and options, so an epic launched from a Prime Agent session cooks with
+Prime Agent. Send it only together with a real `originThreadId`: the server
+validates the pair and rejects the launch when the origin thread is missing,
+unknown, or belongs to another project. Drop both fields when `T3_THREAD_ID` is
+unset — the run then resolves its model the older way, so an older client that
+never sends either field keeps working unchanged.
+
+**Model selection, most specific first.** The launch input wins, then the
+committed `.t3code/epic-run.json` `provider.modelSelection`, then the project
+default. Inheriting is the launch input, so it never quietly falls back to the
+project default: an origin thread that cannot be validated fails the launch
+with `origin_thread_required`, `origin_thread_not_found`, or
+`origin_thread_project_mismatch`. Report that error; do not retry without the
+field to force a launch on some other model.
+
+**Fallback still applies.** The run's provider is a starting point, not a
+guarantee. The server's forward chain is Prime → Claude → Codex → Kimi, driven
+by structured provider evidence only, and it never moves backward. A run that
+starts on Prime Agent can finish its later iterations on Claude.
 
 **Response handling.**
 
