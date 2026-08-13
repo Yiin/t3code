@@ -14,8 +14,12 @@ const receivedMessages: Array<Record<string, unknown>> = [];
 
 if (argv.includes("--version")) {
   if (scenario === "version-timeout") {
+    // Stay alive and silent so the health probe hits its version timeout. The
+    // interval holds the event loop open; the never-settling await stops the
+    // RPC-mode guard below from turning this into a nonzero exit instead.
     // @effect-diagnostics-next-line globalTimers:off - Standalone fake CLI scheduling.
     NodeTimers.setInterval(() => undefined, 60_000);
+    await new Promise<never>(() => undefined);
   } else if (scenario === "version-nonzero") {
     NodeProcess.stderr.write("Prime Agent unavailable\n");
     NodeProcess.exit(7);

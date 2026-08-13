@@ -212,3 +212,21 @@ it.layer(NodeServices.layer)("PrimeProvider", (it) => {
     }),
   );
 });
+
+// Runs on the real clock: a regressed mock exits before a test-clock advance
+// could fire the timeout, so only real time tells the two branches apart. The
+// mock used to fall through to its RPC-mode guard and exit 64, which reported
+// the failed-version-check message instead of the timeout message.
+it.live("times out on the version-timeout mock instead of failing the check", () =>
+  Effect.gen(function* () {
+    const wrapper = yield* makeWrapper;
+    const snapshot = yield* checkPrimeProviderStatus(
+      decodeSettings({ binaryPath: wrapper.path }),
+      { ...process.env, T3_PRIME_RPC_SCENARIO: "version-timeout" },
+      { versionTimeoutMs: 250 },
+    );
+    assert.strictEqual(snapshot.status, "error");
+    assert.strictEqual(snapshot.installed, true);
+    assert.strictEqual(snapshot.message, "Prime Agent timed out while checking its version.");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
