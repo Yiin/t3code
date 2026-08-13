@@ -30,6 +30,7 @@ import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
+import { EpicSubagentRegistry } from "./provider/epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "./provider/workerScope.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import { ProviderUsagePollerLive } from "./provider/Layers/ProviderUsagePoller.ts";
@@ -202,6 +203,10 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   // scope; `ProviderService` resolves the binding at session start. One
   // shared instance — Effect memoizes the same layer reference.
   Layer.provideMerge(EpicWorkerScopeRegistry.layer),
+  // Same story for the runner's per-role subagent definitions: the runner
+  // binds them per iteration thread, `ProviderService` resolves them at
+  // session start.
+  Layer.provideMerge(EpicSubagentRegistry.layer),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));

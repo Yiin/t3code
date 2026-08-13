@@ -18,6 +18,7 @@ import {
   ProviderEventLoggers,
 } from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
+import { EpicSubagentRegistry } from "../src/provider/epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import {
   ProviderService,
@@ -83,6 +84,7 @@ const makeIntegrationFixture = Effect.gen(function* () {
   const layer = makeProviderServiceLive().pipe(
     Layer.provide(shared),
     Layer.provide(EpicWorkerScopeRegistry.layer),
+    Layer.provide(EpicSubagentRegistry.layer),
     // Real file system: this fixture runs against a real `cwd` on disk, so the
     // session-restart cwd check resolves it the same way production does.
     Layer.provide(NodeServices.layer),

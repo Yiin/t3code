@@ -63,6 +63,7 @@ import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
+import { EpicSubagentRegistry } from "../epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
@@ -390,6 +391,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
+  const subagentRegistry = yield* EpicSubagentRegistry;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   // Auth sessions minted for `t3Environment` injection, keyed by thread so the
@@ -1024,6 +1026,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         workspaceRoot: persistedT3EnvironmentContext?.workspaceRoot,
       });
       const workerScope = yield* workerScopeRegistry.resolve(input.binding.threadId);
+      const subagents = yield* subagentRegistry.resolve(input.binding.threadId);
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -1034,6 +1037,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           ...(t3Environment !== undefined ? { t3Environment } : {}),
           ...(Option.isSome(workerScope) ? { workerScope: workerScope.value } : {}),
+          ...(Option.isSome(subagents) ? { subagents: subagents.value } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         })
         .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
@@ -1249,6 +1253,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           workspaceRoot: parsed.workspaceRoot,
         });
         const workerScope = yield* workerScopeRegistry.resolve(threadId);
+        const subagents = yield* subagentRegistry.resolve(threadId);
         const session = yield* adapter
           .startSession({
             ...input,
@@ -1257,6 +1262,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
             ...(t3Environment !== undefined ? { t3Environment } : {}),
             ...(Option.isSome(workerScope) ? { workerScope: workerScope.value } : {}),
+            ...(Option.isSome(subagents) ? { subagents: subagents.value } : {}),
           })
           .pipe(Effect.onError(() => clearMcpSession(threadId)));
 

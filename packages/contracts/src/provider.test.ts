@@ -153,6 +153,43 @@ describe("ProviderSendTurnInput", () => {
   });
 });
 
+describe("injected subagent definitions", () => {
+  it("preserves an injected subagent map", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+      subagents: {
+        reviewer: {
+          description: "Reviews code",
+          prompt: "You are a reviewer",
+          model: "fable",
+          tools: ["Read", "Grep"],
+        },
+      },
+    });
+
+    expect(parsed.subagents).toEqual({
+      reviewer: {
+        description: "Reviews code",
+        prompt: "You are a reviewer",
+        model: "fable",
+        tools: ["Read", "Grep"],
+      },
+    });
+  });
+
+  it("decodes a payload without subagents (legacy producer)", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+    });
+
+    expect(parsed.subagents).toBeUndefined();
+  });
+});
+
 describe("providerInstanceId routing key (slice-2 invariant)", () => {
   it("decodes a ProviderSessionStartInput without providerInstanceId (legacy producer)", () => {
     const parsed = decodeProviderSessionStartInput({

@@ -29,6 +29,7 @@ import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type ClaudeSettings,
+  type EpicSubagentMap,
   EventId,
   type ProviderApprovalDecision,
   ProviderDriverKind,
@@ -130,6 +131,7 @@ type ClaudeToolResultStreamKind = Extract<
   "command_output" | "file_change_output"
 >;
 type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
+type ClaudeSdkAgentDefinition = NonNullable<ClaudeQueryOptions["agents"]>[string];
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -1046,6 +1048,26 @@ const CLAUDE_SETTING_SOURCES = [
   "project",
   "local",
 ] as const satisfies ReadonlyArray<SettingSource>;
+
+/**
+ * Convert the injected subagent map into the SDK's `agents` option. The
+ * contracts schema is a structural subset of `AgentDefinition`, so the only
+ * work is copying `tools` into the mutable array the SDK declares.
+ */
+function toQueryAgents(
+  subagents: EpicSubagentMap | undefined,
+): NonNullable<ClaudeQueryOptions["agents"]> {
+  const agents: Record<string, ClaudeSdkAgentDefinition> = {};
+  for (const [name, definition] of Object.entries(subagents ?? {})) {
+    agents[name] = {
+      description: definition.description,
+      prompt: definition.prompt,
+      ...(definition.model !== undefined ? { model: definition.model } : {}),
+      ...(definition.tools !== undefined ? { tools: [...definition.tools] } : {}),
+    };
+  }
+  return agents;
+}
 
 function buildPromptText(
   input: ProviderSendTurnInput,
@@ -4297,6 +4319,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             }
           : {}),
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
+        // Per-role subagent definitions the epic runner injected. The SDK
+        // forwards them in its CLI initialize payload, so no argv plumbing.
+        // `extraArgs` could carry `--agents` too, but that is global per
+        // provider instance, string-typed, and unvalidated.
+        ...(subagentDefinitionCount > 0 ? { agents: toQueryAgents(input.subagents) } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
           ? {
@@ -4342,6 +4369,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.subagent_spawn_reason": subagentSpawn.reason,
         "claude.query.subagent_spawn_task_denied": subagentSpawn.mode !== "in-process",
         "claude.query.subagent_definition_count": subagentDefinitionCount,
+        // Names only. A definition's prompt is never a diagnostic.
+        "claude.query.agents": Object.keys(input.subagents ?? {}),
         "claude.query.additional_directories": input.cwd ? [input.cwd] : [],
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",

@@ -10,6 +10,7 @@ import {
   ThreadId,
   TurnId,
 } from "./baseSchemas.ts";
+import { EpicSubagentMap } from "./epicSubagent.ts";
 import {
   ChatAttachment,
   ModelSelection,
@@ -176,6 +177,10 @@ export const ProviderSessionStartInput = Schema.Struct({
   // Set by the server when the session belongs to an epic run with an active
   // worker scope; adapters route the provider CLI spawn through the scope.
   workerScope: Schema.optional(ProviderWorkerScopeBinding),
+  // Per-role subagent definitions injected by the epic runner. `ProviderService`
+  // resolves them from a thread-keyed registry at session start; they never
+  // travel over the wire. Only Claude-family adapters can consume them.
+  subagents: Schema.optional(EpicSubagentMap),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 

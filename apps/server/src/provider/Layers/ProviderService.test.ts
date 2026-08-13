@@ -74,6 +74,7 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
+import { EpicSubagentRegistry } from "../epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../../auth/environmentAuthTestStub.ts";
@@ -107,6 +108,7 @@ const makeProviderServiceLiveForTest = (
     Layer.provide(environmentAuthTestLayer),
     Layer.provide(fileSystemLayer),
     Layer.provideMerge(EpicWorkerScopeRegistry.layer),
+    Layer.provideMerge(EpicSubagentRegistry.layer),
   );
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -613,6 +615,7 @@ function makeT3EnvironmentTestLayers(auth: ReturnType<typeof makeEnvironmentAuth
     Layer.provide(auth.layer),
     Layer.provide(AnalyticsService.layerTest),
     Layer.provide(EpicWorkerScopeRegistry.layer),
+    Layer.provide(EpicSubagentRegistry.layer),
     Layer.provide(
       Layer.succeed(
         ProviderEventLoggers.ProviderEventLoggers,
@@ -2460,6 +2463,52 @@ workerScopeAttachment.layer("ProviderServiceLive epic worker scope attachment", 
 
       const startInput = workerScopeAttachment.codex.startSession.mock.calls.at(-1)?.[0];
       assert.equal(startInput?.workerScope, undefined);
+    }),
+  );
+});
+
+const subagentAttachment = makeProviderServiceLayer();
+subagentAttachment.layer("ProviderServiceLive epic subagent attachment", (it) => {
+  const reviewer = {
+    reviewer: { description: "Reviews code", prompt: "You are a reviewer", model: "fable" },
+  };
+
+  it.effect("attaches the resolved subagent definitions to the adapter start input", () =>
+    Effect.gen(function* () {
+      const subagentRegistry = yield* EpicSubagentRegistry;
+      const provider = yield* ProviderService.ProviderService;
+      const runId = EpicRunId.make("run-subagent-attach");
+      const threadId = asThreadId("thread-subagent-attach");
+      yield* subagentRegistry.bindThread({ runId, threadId, subagents: reviewer });
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = subagentAttachment.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepEqual(startInput?.subagents, reviewer);
+    }),
+  );
+
+  it.effect("omits the subagents for a thread with no binding", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-subagent-unbound");
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = subagentAttachment.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(startInput?.subagents, undefined);
     }),
   );
 });

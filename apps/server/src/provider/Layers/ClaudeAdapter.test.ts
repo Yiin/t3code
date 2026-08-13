@@ -601,6 +601,78 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("forwards injected subagent definitions into query options", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        subagents: {
+          reviewer: {
+            description: "Reviews code",
+            prompt: "You are a reviewer",
+            model: "fable",
+            tools: ["Read", "Grep"],
+          },
+          planner: { description: "Plans work", prompt: "You are a planner" },
+        },
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.deepEqual(createInput?.options.agents, {
+        reviewer: {
+          description: "Reviews code",
+          prompt: "You are a reviewer",
+          model: "fable",
+          tools: ["Read", "Grep"],
+        },
+        planner: { description: "Plans work", prompt: "You are a planner" },
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("omits agents when none are injected", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.agents, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("omits agents for an empty subagent map", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        subagents: {},
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.agents, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("preserves xhigh effort for Claude Fable 5", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -3043,8 +3115,11 @@ describe("ClaudeAdapterLive", () => {
           threadId: THREAD_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           runtimeMode: "full-access",
-          subagents: { planner: {}, implementer: {} },
-        } as Parameters<typeof adapter.startSession>[0]),
+          subagents: {
+            planner: { description: "Plans work", prompt: "You are a planner" },
+            implementer: { description: "Writes code", prompt: "You are an implementer" },
+          },
+        }),
       );
 
       const options = harness.getLastCreateQueryInput()?.options;
