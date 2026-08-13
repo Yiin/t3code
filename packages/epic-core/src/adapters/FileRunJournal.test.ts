@@ -1,3 +1,4 @@
+import { ProviderInstanceId } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -8,7 +9,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { PersistedEpicRun, PersistedEpicRunIteration } from "../ports/RunJournal.ts";
-import { make } from "./FileRunJournal.ts";
+import { make, makePool, makeProviderDegradations } from "./FileRunJournal.ts";
 
 const run = Schema.decodeUnknownSync(PersistedEpicRun)({
   runId: "run-journal-test",
@@ -236,6 +237,49 @@ describe("FileRunJournal", () => {
         assert.equal(exits.filter(Exit.isSuccess).length, 1);
         assert.equal(exits.filter(Exit.isFailure).length, 1);
         assert.deepEqual(yield* journal.listIterations(run.runId), [runningIteration]);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("shares one degradation file across runs that name the same directory", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "epic-file-journal-degradation-test-",
+        });
+        const degradationsDirectory = path.join(root, "workspace");
+
+        const first = yield* makePool({
+          runDirectory: path.join(root, "run-1"),
+          degradationsDirectory,
+        });
+        yield* first.upsertProviderDegradation({
+          providerInstanceId: ProviderInstanceId.make("claude-work"),
+          failureReason: "provider-error:rate-limit",
+          degradedAt: "2026-08-07T10:00:00.000Z",
+        });
+
+        // A later run of the same epic reads what the first one recorded.
+        const second = yield* makeProviderDegradations({ directory: degradationsDirectory });
+        assert.deepEqual(yield* second.readProviderDegradations, {
+          "claude-work": {
+            failureReason: "provider-error:rate-limit",
+            degradedAt: "2026-08-07T10:00:00.000Z",
+          },
+        });
+
+        // Nothing leaks into the run directory it was written from.
+        assert.isFalse(
+          yield* fileSystem.exists(path.join(root, "run-1", "provider-degradations.json")),
+        );
+
+        yield* second.clearProviderDegradation({
+          providerInstanceId: ProviderInstanceId.make("claude-work"),
+        });
+        const third = yield* makeProviderDegradations({ directory: degradationsDirectory });
+        assert.deepEqual(yield* third.readProviderDegradations, {});
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );

@@ -13,13 +13,21 @@ import {
   PersistedEpicRunIteration,
   RunJournal,
   RunJournalError,
+  type ProviderDegradationJournalShape,
   type RunJournalShape,
   type UpdatePersistedEpicRunIteration,
 } from "../ports/RunJournal.ts";
+import type { ProviderDegradationRecord } from "../providerDegradation.ts";
 
 export interface FileRunJournalOptions {
   /** The exact run directory. Files are written directly below this path. */
   readonly runDirectory: string;
+  /**
+   * Where `provider-degradations.json` lives. Defaults to the run directory,
+   * which scopes provider health to one run. Pool callers point it at the
+   * workspace so a later run of the same epic reads what this one recorded.
+   */
+  readonly degradationsDirectory?: string;
 }
 
 const iterationFilePattern = /^iter-(\d+)\.json$/;
@@ -310,6 +318,77 @@ export const make = (options: FileRunJournalOptions) =>
 
 export const layer = (options: FileRunJournalOptions) => Layer.effect(RunJournal, make(options));
 
+/** Everything a caller can do with the degradation file, reads included. */
+export interface FileProviderDegradations extends ProviderDegradationJournalShape {
+  readonly readProviderDegradations: Effect.Effect<
+    Readonly<Record<string, ProviderDegradationRecord>>,
+    RunJournalError
+  >;
+}
+
+/**
+ * Provider health in `<directory>/provider-degradations.json`.
+ *
+ * Point `directory` at the workspace rather than one run directory to carry a
+ * degradation across runs of the same epic, which is what the terminal cook
+ * CLI does. An unreadable or malformed file fails loudly: silently treating it
+ * as empty would route a run straight back onto the account that just failed.
+ */
+export const makeProviderDegradations = (options: { readonly directory: string }) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const degradationsPath = path.join(options.directory, "provider-degradations.json");
+
+    const readDegradations = Effect.fn("FileRunJournal.readDegradations")(function* () {
+      if (!(yield* fileSystem.exists(degradationsPath))) return {};
+      return yield* decodeProviderDegradations(yield* fileSystem.readFileString(degradationsPath));
+    });
+
+    const writeDegradations = Effect.fn("FileRunJournal.writeDegradations")(function* (
+      degradations: Schema.Schema.Type<typeof ProviderDegradations>,
+    ) {
+      yield* writeAtomically(
+        fileSystem,
+        path,
+        options.directory,
+        degradationsPath,
+        yield* encodeProviderDegradations(degradations),
+      );
+    });
+
+    const upsertProviderDegradation: ProviderDegradationJournalShape["upsertProviderDegradation"] =
+      (input) =>
+        Effect.gen(function* () {
+          const degradations = yield* readDegradations();
+          yield* writeDegradations({
+            ...degradations,
+            [input.providerInstanceId]: {
+              failureReason: input.failureReason,
+              degradedAt: input.degradedAt,
+            },
+          });
+        }).pipe(Effect.mapError(journalError("upsertProviderDegradation")));
+
+    const clearProviderDegradation: ProviderDegradationJournalShape["clearProviderDegradation"] = (
+      input,
+    ) =>
+      Effect.gen(function* () {
+        const degradations = yield* readDegradations();
+        if (!(input.providerInstanceId in degradations)) return;
+        const { [input.providerInstanceId]: _dropped, ...remaining } = degradations;
+        yield* writeDegradations(remaining);
+      }).pipe(Effect.mapError(journalError("clearProviderDegradation")));
+
+    return {
+      readProviderDegradations: readDegradations().pipe(
+        Effect.mapError(journalError("readProviderDegradations")),
+      ),
+      upsertProviderDegradation,
+      clearProviderDegradation,
+    } satisfies FileProviderDegradations;
+  });
+
 /**
  * The pool variant of the file journal: the sequential shape plus the atomic
  * iteration allocation and provider-degradation writes
@@ -318,14 +397,15 @@ export const layer = (options: FileRunJournalOptions) => Layer.effect(RunJournal
  * transition semaphore, so the read-then-create gap cannot race in the
  * single-process terminal coordinator. Provider degradations persist to
  * `provider-degradations.json` so a terminal run leaves the same audit trail
- * the server store keeps.
+ * the server store keeps; `degradationsDirectory` moves that file out of the
+ * run directory so later runs of the same epic read it too.
  */
 export const makePool = (options: FileRunJournalOptions) =>
   Effect.gen(function* () {
     const base = yield* make(options);
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const degradationsPath = path.join(options.runDirectory, "provider-degradations.json");
+    const degradations = yield* makeProviderDegradations({
+      directory: options.degradationsDirectory ?? options.runDirectory,
+    });
 
     const allocateIteration: PoolRunJournalShape["allocateIteration"] = (input) =>
       Effect.gen(function* () {
@@ -351,43 +431,6 @@ export const makePool = (options: FileRunJournalOptions) =>
         return iterationIndex;
       }).pipe(Effect.mapError(journalError("allocateIteration")));
 
-    const readDegradations = Effect.fn("FileRunJournal.readDegradations")(function* () {
-      if (!(yield* fileSystem.exists(degradationsPath))) return {};
-      return yield* decodeProviderDegradations(yield* fileSystem.readFileString(degradationsPath));
-    });
-
-    const writeDegradations = Effect.fn("FileRunJournal.writeDegradations")(function* (
-      degradations: Schema.Schema.Type<typeof ProviderDegradations>,
-    ) {
-      yield* writeAtomically(
-        fileSystem,
-        path,
-        options.runDirectory,
-        degradationsPath,
-        yield* encodeProviderDegradations(degradations),
-      );
-    });
-
-    const upsertProviderDegradation: PoolRunJournalShape["upsertProviderDegradation"] = (input) =>
-      Effect.gen(function* () {
-        const degradations = yield* readDegradations();
-        yield* writeDegradations({
-          ...degradations,
-          [input.providerInstanceId]: {
-            failureReason: input.failureReason,
-            degradedAt: input.degradedAt,
-          },
-        });
-      }).pipe(Effect.mapError(journalError("upsertProviderDegradation")));
-
-    const clearProviderDegradation: PoolRunJournalShape["clearProviderDegradation"] = (input) =>
-      Effect.gen(function* () {
-        const degradations = yield* readDegradations();
-        if (!(input.providerInstanceId in degradations)) return;
-        const { [input.providerInstanceId]: _dropped, ...remaining } = degradations;
-        yield* writeDegradations(remaining);
-      }).pipe(Effect.mapError(journalError("clearProviderDegradation")));
-
     return {
       createRun: base.createRun,
       saveRun: base.saveRun,
@@ -398,7 +441,7 @@ export const makePool = (options: FileRunJournalOptions) =>
       listIterations: base.listIterations,
       getLatestIteration: base.getLatestIteration,
       allocateIteration,
-      upsertProviderDegradation,
-      clearProviderDegradation,
+      upsertProviderDegradation: degradations.upsertProviderDegradation,
+      clearProviderDegradation: degradations.clearProviderDegradation,
     } satisfies PoolRunJournalShape;
   });

@@ -146,6 +146,7 @@ const fixture = (input: {
   const ordering: string[] = [];
   const selections: Array<{ readonly instanceId: ProviderInstanceId; readonly model: string }> = [];
   const roleRequests: RoleSelectionRequest[] = [];
+  const degradations = new Map<string, { failureReason: string; degradedAt: string }>();
   const attempts = input.attempts ?? [];
 
   const backlog = {
@@ -250,6 +251,21 @@ const fixture = (input: {
         const latest = iterations.at(-1);
         return Effect.succeed(latest === undefined ? Option.none() : Option.some(latest));
       },
+    },
+    providerDegradation: {
+      upsertProviderDegradation: (record) =>
+        Effect.sync(() => {
+          degradations.set(record.providerInstanceId, {
+            failureReason: record.failureReason,
+            degradedAt: record.degradedAt,
+          });
+          ordering.push(`degradation:set:${record.providerInstanceId}`);
+        }),
+      clearProviderDegradation: (record) =>
+        Effect.sync(() => {
+          degradations.delete(record.providerInstanceId);
+          ordering.push(`degradation:cleared:${record.providerInstanceId}`);
+        }),
     },
     events: {
       publish: (event) =>
@@ -407,6 +423,7 @@ const fixture = (input: {
     ordering,
     selections,
     roleRequests,
+    degradations,
   };
 };
 
@@ -544,6 +561,32 @@ it.live("persists Prime to Claude to Codex to Kimi fallback across dispatches", 
     assert.isBelow(
       test.ordering.indexOf("run:saved:kimi"),
       test.ordering.indexOf("event:provider-fallback:kimi"),
+    );
+  }),
+);
+
+it.live("records each failed account durably and retires the one that then works", () =>
+  Effect.gen(function* () {
+    const claude = provider("claude", "claudeAgent", "claude-sonnet-5");
+    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const test = fixture({
+      attempts: [{ providerError: "rate limit" }, { commit: true, close: true }],
+      providers: [claude, codex],
+      selection: { instanceId: claude.instanceId, model: "claude-sonnet-5" },
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 2, maxIterations: 2 },
+      }),
+    });
+
+    yield* test.run();
+
+    // Claude stays recorded so the NEXT run of this epic starts on Codex.
+    // Codex proved itself, so nothing an earlier run wrote about it survives.
+    assert.deepEqual([...test.degradations.keys()], ["claude"]);
+    assert.equal(test.degradations.get("claude")?.failureReason, "provider-error:rate-limit");
+    assert.deepEqual(
+      test.ordering.filter((entry) => entry.startsWith("degradation:")),
+      ["degradation:set:claude", "degradation:cleared:codex"],
     );
   }),
 );

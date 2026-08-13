@@ -15,6 +15,7 @@ import {
   EpicRunStatus,
   IsoDateTime,
   NonNegativeInt,
+  ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -139,6 +140,25 @@ export interface RunJournalShape {
   readonly getLatestIteration: (
     runId: EpicRunId,
   ) => Effect.Effect<Option.Option<PersistedEpicRunIteration>, RunJournalError>;
+}
+
+/**
+ * Durable provider health, shared by every run in one workspace.
+ *
+ * This is deliberately not part of {@link RunJournalShape}: a degradation
+ * outlives the run that recorded it, so a later run of the same epic can start
+ * past an account that is still rate limited. Both epic loops write it and
+ * both clear it after a provider turn succeeds.
+ */
+export interface ProviderDegradationJournalShape {
+  readonly upsertProviderDegradation: (input: {
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly failureReason: string;
+    readonly degradedAt: string;
+  }) => Effect.Effect<void, RunJournalError>;
+  readonly clearProviderDegradation: (input: {
+    readonly providerInstanceId: ProviderInstanceId;
+  }) => Effect.Effect<void, RunJournalError>;
 }
 
 export class RunJournal extends Context.Service<RunJournal, RunJournalShape>()(

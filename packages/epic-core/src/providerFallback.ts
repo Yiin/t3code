@@ -1,6 +1,8 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   ProviderDriverKind,
+  type EpicRoleId,
+  type EpicRolePolicy,
   type ModelSelection,
   type ProviderInstanceId,
   type ServerProvider,
@@ -44,6 +46,22 @@ export interface EpicFallbackHop {
   readonly model: string;
   readonly options?: ModelSelection["options"];
 }
+
+/**
+ * The hop chain a runner role points at, or an empty chain.
+ *
+ * A role with no tier, or one naming a tier that no longer exists, has no
+ * policy at all: the caller then keeps driver-order fallback, so an
+ * unconfigured server behaves exactly as it did before tiers existed.
+ */
+export const epicRoleFallbackChain = (
+  policy: EpicRolePolicy,
+  roleId: EpicRoleId,
+): ReadonlyArray<EpicFallbackHop> => {
+  const tierId = policy.roles[roleId];
+  if (tierId === undefined) return [];
+  return policy.tiers[tierId]?.hops.map((hop) => hop.selection) ?? [];
+};
 
 /** The first candidate whose provider can run its model right now. */
 const firstEligibleHop = (input: {

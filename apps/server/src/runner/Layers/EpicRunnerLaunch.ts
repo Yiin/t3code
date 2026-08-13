@@ -36,11 +36,11 @@ import {
   type EpicRunLockHeldError,
   type EpicRunLockLease,
 } from "@t3tools/epic-core/ports/EpicRunLock";
+import { epicRoleFallbackChain, type EpicFallbackHop } from "@t3tools/epic-core/providerFallback";
 import {
-  type EpicFallbackHop,
-  resolveEpicProviderChainFallback,
-  resolveEpicProviderFallback,
-} from "@t3tools/epic-core/providerFallback";
+  resolveDegradationAwareSelection,
+  type ProviderDegradationRecord,
+} from "@t3tools/epic-core/providerDegradation";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -411,8 +411,10 @@ export const makeEpicRunnerLaunch = (deps: {
    * `modelSelection` is required input a client or the CLI picked on purpose,
    * so rerouting it would silently ignore an explicit choice. `launchRun`
    * resolves a selection itself, from the project default or the repo config,
-   * and therefore owns the degradation and tier-chain checks. Carrying a
-   * degradation across separate runs of one epic is tracked as t3code-4eh.
+   * and therefore owns the degradation and tier-chain checks. That is what
+   * carries a degradation across separate runs of one epic: the record
+   * outlives its run, so the next launch starts past the failed account
+   * instead of burning an iteration rediscovering it.
    */
   const startRun = (input: StartEpicRunInput) =>
     Effect.gen(function* () {
@@ -431,20 +433,10 @@ export const makeEpicRunnerLaunch = (deps: {
       return yield* startNewRun(input, configSnapshot);
     });
 
-  /**
-   * The hop chain the iteration-worker role points at, or an empty chain.
-   *
-   * A role with no tier, or one naming a tier that no longer exists, has no
-   * policy at all: the caller then keeps today's driver-order fallback, so an
-   * unconfigured server behaves exactly as it did before tiers existed.
-   */
-  const iterationWorkerChain: Effect.Effect<ReadonlyArray<EpicFallbackHop>> = Effect.gen(
-    function* () {
-      const policy = yield* readEpicRolePolicy;
-      const tierId = policy.roles[ITERATION_WORKER_ROLE];
-      if (tierId === undefined) return [];
-      return policy.tiers[tierId]?.hops.map((hop) => hop.selection) ?? [];
-    },
+  /** The hop chain the iteration-worker role points at, or an empty chain. */
+  const iterationWorkerChain: Effect.Effect<ReadonlyArray<EpicFallbackHop>> = Effect.map(
+    readEpicRolePolicy,
+    (policy) => epicRoleFallbackChain(policy, ITERATION_WORKER_ROLE),
   );
 
   /**
@@ -508,97 +500,32 @@ export const makeEpicRunnerLaunch = (deps: {
       );
       const chain = yield* iterationWorkerChain;
 
-      const degradation = yield* liveProviderDegradation({
-        providerInstanceId: defaultSelection.instanceId,
-        cutoff,
-      });
-      // A healthy selection always wins, chain or no chain: the caller already
-      // resolved the most specific signal there was.
-      if (degradation === null) return defaultSelection;
-
+      // Probe every instance the walk could reach, once, so the pure resolver
+      // can answer without further reads. Probing also retires an expired row,
+      // so a stale degradation never blocks a launch. A chain bounds the
+      // candidates to its own hops; without one the walk follows driver order
+      // and any configured instance is reachable.
+      const candidates = new Set<ModelSelection["instanceId"]>([defaultSelection.instanceId]);
+      for (const hop of chain) candidates.add(hop.instanceId);
       if (chain.length === 0) {
-        let selection = defaultSelection;
-        let reason = degradation.failureReason;
-        while (true) {
-          const fallback = resolveEpicProviderFallback({
-            providers,
-            current: selection,
-            failureReason: "provider-error",
-            providerFallbackEligible: true,
-          });
-          if (fallback === null) return selection;
-          yield* logLaunchFallback({ from: selection, to: fallback, reason, chain });
-          selection = fallback;
-          const next = yield* liveProviderDegradation({
-            providerInstanceId: selection.instanceId,
-            cutoff,
-          });
-          if (next === null) return selection;
-          reason = next.failureReason;
-        }
+        for (const provider of providers) candidates.add(provider.instanceId);
+      }
+      const degradations = new Map<ModelSelection["instanceId"], ProviderDegradationRecord>();
+      for (const providerInstanceId of candidates) {
+        const record = yield* liveProviderDegradation({ providerInstanceId, cutoff });
+        if (record !== null) degradations.set(providerInstanceId, record);
       }
 
-      // Probe every hop once so the walker can skip a degraded account in a
-      // single pass. Reading a hop also retires its expired row, so a stale
-      // degradation never blocks a chain.
-      const blocked = new Set<ModelSelection["instanceId"]>([defaultSelection.instanceId]);
-      for (const hop of chain) {
-        if (blocked.has(hop.instanceId)) continue;
-        const hopDegradation = yield* liveProviderDegradation({
-          providerInstanceId: hop.instanceId,
-          cutoff,
-        });
-        if (hopDegradation !== null) blocked.add(hop.instanceId);
-      }
-
-      const healthyHop = resolveEpicProviderChainFallback({
+      const resolved = resolveDegradationAwareSelection({
         providers,
         chain,
         current: defaultSelection,
-        failureReason: "provider-error",
-        providerFallbackEligible: true,
-        isBlocked: (hop) => blocked.has(hop.instanceId),
+        degradationOf: (instanceId) => degradations.get(instanceId) ?? null,
       });
-      if (healthyHop !== null) {
-        yield* logLaunchFallback({
-          from: defaultSelection,
-          to: healthyHop,
-          reason: degradation.failureReason,
-          chain,
-        });
-        return healthyHop;
+      for (const hop of resolved.hops) {
+        yield* logLaunchFallback({ from: hop.from, to: hop.to, reason: hop.reason, chain });
       }
-
-      // Every hop is degraded. The run still has to start, so take the
-      // deepest hop the chain names: it is the policy's own last resort, and
-      // it is the one furthest from the account that just failed. Walking
-      // forward repeatedly reuses the walker's own eligibility rules. The
-      // visited set bounds the walk, because a chain may name one instance
-      // twice and the walker resolves an instance to its first position.
-      let lastResort: ModelSelection | null = null;
-      let cursor = defaultSelection;
-      const visited = new Set<ModelSelection["instanceId"]>([defaultSelection.instanceId]);
-      while (true) {
-        const next = resolveEpicProviderChainFallback({
-          providers,
-          chain,
-          current: cursor,
-          failureReason: "provider-error",
-          providerFallbackEligible: true,
-        });
-        if (next === null || visited.has(next.instanceId)) break;
-        visited.add(next.instanceId);
-        lastResort = next;
-        cursor = next;
-      }
-      if (lastResort === null) return defaultSelection;
-      yield* logLaunchFallback({
-        from: defaultSelection,
-        to: lastResort,
-        reason: degradation.failureReason,
-        chain,
-      });
-      return lastResort;
+      return resolved.selection;
     });
 
   /**

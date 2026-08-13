@@ -20,6 +20,7 @@ import { CHILD_CLAIM_RELEASED_REASON, type RunEventsShape } from "./ports/RunEve
 import type {
   PersistedEpicRun,
   PersistedEpicRunIteration,
+  ProviderDegradationJournalShape,
   RunJournalShape,
 } from "./ports/RunJournal.ts";
 import type { RepoRef, VcsShape } from "./ports/Vcs.ts";
@@ -55,6 +56,12 @@ export interface SequentialEpicLoopPorts {
   readonly lock: EpicRunLockShape;
   readonly backlog: BacklogShape;
   readonly journal: RunJournalShape;
+  /**
+   * Where a provider-attributed failure is recorded so the NEXT run of this
+   * epic starts past the account that failed. `null` keeps a run's fallback to
+   * itself, which is how this loop behaved before the record existed.
+   */
+  readonly providerDegradation?: ProviderDegradationJournalShape | null;
   readonly events: RunEventsShape;
   readonly providerInventory: ProviderInventoryShape;
   /**
@@ -644,6 +651,14 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         yield* publishClaimRecovery(child.id, iterationIndex);
       }
 
+      // A turn that reached the provider and finished proves the account
+      // works, so retire whatever an earlier run recorded against it.
+      if (successful && !dispatchFailed && ports.providerDegradation != null) {
+        yield* ports.providerDegradation.clearProviderDegradation({
+          providerInstanceId: dispatchSelection.instanceId,
+        });
+      }
+
       let providerFallbackEvent: Extract<
         Parameters<RunEventsShape["publish"]>[0],
         { readonly type: "provider-fallback" }
@@ -686,6 +701,15 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
           } else {
             fallbackSelection = null;
           }
+        }
+        if (fallbackSelection !== null && ports.providerDegradation != null) {
+          // Recorded against the instance that failed, not the run, so the
+          // next run of this epic enters the chain past it.
+          yield* ports.providerDegradation.upsertProviderDegradation({
+            providerInstanceId: dispatchSelection.instanceId,
+            failureReason: outcome.failureReason,
+            degradedAt: now(),
+          });
         }
       }
 

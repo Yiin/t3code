@@ -59,7 +59,7 @@ import type { PoolDispatchShape } from "./ports/PoolDispatch.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
 import type { EpicDispatchRole, RoleSelectionShape } from "./ports/RoleSelection.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEvent } from "./ports/RunEvents.ts";
-import type { RunJournalShape } from "./ports/RunJournal.ts";
+import type { ProviderDegradationJournalShape, RunJournalShape } from "./ports/RunJournal.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { IterationWorkspace, PoolRunContext, WorkspaceShape } from "./ports/Workspace.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
@@ -79,7 +79,7 @@ export type PoolTimings = Pick<
 >;
 
 /** The pool journal adds atomic iteration allocation and provider degradation. */
-export interface PoolRunJournalShape extends RunJournalShape {
+export interface PoolRunJournalShape extends RunJournalShape, ProviderDegradationJournalShape {
   readonly allocateIteration: (input: {
     readonly runId: EpicRunId;
     readonly issueId: string | null;
@@ -87,14 +87,6 @@ export interface PoolRunJournalShape extends RunJournalShape {
     readonly worktreePath: string | null;
     readonly startedAt: string;
   }) => Effect.Effect<number, import("./ports/RunJournal.ts").RunJournalError>;
-  readonly upsertProviderDegradation: (input: {
-    readonly providerInstanceId: ModelSelection["instanceId"];
-    readonly failureReason: string;
-    readonly degradedAt: string;
-  }) => Effect.Effect<void, import("./ports/RunJournal.ts").RunJournalError>;
-  readonly clearProviderDegradation: (input: {
-    readonly providerInstanceId: ModelSelection["instanceId"];
-  }) => Effect.Effect<void, import("./ports/RunJournal.ts").RunJournalError>;
 }
 
 /** The ready frontier of one epic, as the loop consumes it. */

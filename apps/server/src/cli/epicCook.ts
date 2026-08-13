@@ -78,6 +78,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { Command, Flag } from "effect/unstable/cli";
 
+import { resolveCookModelSelection } from "./epicCookSelection.ts";
 import { readCookSubagents, resolveCookSettingsPath } from "./epicCookSubagents.ts";
 
 class EpicCookCliError extends Schema.TaggedErrorClass<EpicCookCliError>()("EpicCookCliError", {
@@ -362,6 +363,22 @@ export const cookCommand = Command.make("cook", {
             detail: "Could not resolve the current branch.",
           });
         }
+        // Provider health belongs to the workspace, not to one run: the whole
+        // point is that the NEXT cook of this epic reads it. The common git
+        // directory is the one path every worktree of this repo shares, and it
+        // is never committed.
+        const commonDirResult = yield* runner.run({
+          command: "git",
+          args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+          cwd,
+        });
+        if (commonDirResult.code !== 0 || commonDirResult.stdout.trim() === "") {
+          return yield* new EpicCookCliError({
+            operation: "epicCook.gitCommonDir",
+            detail: "Could not resolve the git common directory.",
+          });
+        }
+        const degradationsDirectory = NodePath.join(commonDirResult.stdout.trim(), "t3code");
         // Optional systemd scope governance for worker spawns. A colliding
         // pre-existing scope is fatal (run identity clash); every other
         // degradation warns and spawns unwrapped inside prepareWorkerScope.
@@ -385,16 +402,37 @@ export const cookCommand = Command.make("cook", {
             : { workerCommand: process.env.COOKEPIC_WORKER_CMD }),
           environment: process.env,
         });
+        const settingsPath = resolveCookSettingsPath({
+          environment: process.env,
+          homeDirectory: NodeOS.homedir(),
+        });
+        const degradations = yield* FileRunJournal.makeProviderDegradations({
+          directory: degradationsDirectory,
+        });
+        // Start past an account a previous cook of this epic already found
+        // degraded, instead of burning one iteration rediscovering it.
+        const start = yield* resolveCookModelSelection({
+          settingsPath,
+          inventory: terminalProviders.inventory,
+          readProviderDegradations: degradations.readProviderDegradations,
+          selection: modelSelection,
+          providerDegradationTtlMs: snapshot.config.server.providerDegradationTtlMs,
+        });
+        const startSelection = start.selection;
+        for (const hop of start.hops) {
+          yield* Effect.logInfo("epic.cook.launch-provider-fallback", {
+            fromInstanceId: hop.from.instanceId,
+            toInstanceId: hop.to.instanceId,
+            reason: hop.reason,
+          });
+        }
         // The injected in-session roles, read from the same settings file the
         // server runner uses. Only the claude/ccx arm emits them, as `--agents`;
         // every other harness ignores the map.
         const subagents = yield* readCookSubagents({
-          settingsPath: resolveCookSettingsPath({
-            environment: process.env,
-            homeDirectory: NodeOS.homedir(),
-          }),
+          settingsPath,
           inventory: terminalProviders.inventory,
-          sessionSelection: modelSelection,
+          sessionSelection: startSelection,
         });
         const agentDispatch = makeTerminalAgentDispatch({
           harness,
@@ -499,7 +537,10 @@ export const cookCommand = Command.make("cook", {
 
           const body = Effect.gen(function* () {
             const now = () => new Date().toISOString();
-            const journal = yield* FileRunJournal.makePool({ runDirectory });
+            const journal = yield* FileRunJournal.makePool({
+              runDirectory,
+              degradationsDirectory,
+            });
             const events: PoolRunEventsShape = {
               publish: (event) =>
                 fileEvents
@@ -517,7 +558,7 @@ export const cookCommand = Command.make("cook", {
               cwd,
               prompt: epicRunIterationPrompt({ pushEnabled: !snapshot.config.vcs.noPush }),
               orientationFile: snapshot.config.orientation.file,
-              modelSelection,
+              modelSelection: startSelection,
               runtimeMode: snapshot.config.runtime.mode,
               config: snapshot.config,
               configProvenance: snapshot.provenance,
@@ -747,7 +788,7 @@ export const cookCommand = Command.make("cook", {
                     worktreeRoot: sibling.canonicalPath,
                   })),
                 },
-                selection: modelSelection,
+                selection: startSelection,
                 configSnapshot: snapshot,
                 readOrientation: (configured) => readOrientation(cwd, configured),
                 shouldStop,
@@ -757,6 +798,7 @@ export const cookCommand = Command.make("cook", {
                 lock,
                 backlog: makeProcessBacklog({ repositoryPath: cwd, processRunner: runner }),
                 journal,
+                providerDegradation: degradations,
                 providerInventory: terminalProviders.inventory,
                 roleSelection: null,
                 events: fileEvents,
