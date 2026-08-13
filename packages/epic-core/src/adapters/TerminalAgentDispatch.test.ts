@@ -302,8 +302,10 @@ it.live("reaps detached descendants after the leader exits", () =>
 it.live("clears timeout escalation when the child closes", () =>
   Effect.scoped(
     Effect.gen(function* () {
+      // The timeout only needs to outlast spawn+echo. 2s leaves headroom on
+      // loaded CI runners; 50ms lost that race (t3code-l1s).
       const { handle } = yield* startWorker("echo RALPH_DONE", {
-        timeoutSeconds: 0.05,
+        timeoutSeconds: 2,
         stopGraceSeconds: 0.05,
       });
       const settled = yield* handle.awaitSettled;
