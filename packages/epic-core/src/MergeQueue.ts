@@ -190,19 +190,37 @@ const reconcileParkedEntry = Effect.fn("MergeQueue.reconcileParkedEntry")(functi
 /**
  * Pull the most useful line out of a gate's output for a one-line diagnosis.
  *
- * Prefers the first line that looks like the actual error, because gate output
- * usually ends in a summary ("2 failed") that says nothing about the cause.
+ * Two traps shaped this (t3code-9hv):
+ *
+ * - A PASSING test name can carry the signal words: "✓ does not emit a second
+ *   process-exit error after a decode failure" matches the error regex, so
+ *   every candidate in every branch must be free of a pass marker (✓/✔).
+ * - Gate packages run concurrently, so the output interleaves and the last
+ *   flushed line is frequently a ✓ line from a package that passed. The bare
+ *   last line is never a diagnosis; the fallback says so instead.
+ *
+ * Priority: vitest FAIL/× entries, then the "Test Files N failed" summary,
+ * then the error regex. ANSI escapes are stripped first — vitest wraps its
+ * markers in color. When the run persisted the full gate output, the log path
+ * rides along so the one line never has to carry everything.
  */
-const gateDiagnosis = (output: string): string => {
+const gateDiagnosis = (output: string, logPath?: string): string => {
   const lines = output
+    // oxlint-disable-next-line no-control-regex -- The ESC byte is the point: strip vitest's ANSI color before matching.
+    .replace(/\u001b\[[0-9;]*m/g, "")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-  const signal = lines.find((line) =>
-    /(^|\b)(error|cannot find|not found|failed to resolve|missing)\b/i.test(line),
-  );
-  const chosen = signal ?? lines.at(-1) ?? "no gate output";
-  return chosen.length > 300 ? `${chosen.slice(0, 300)}…` : chosen;
+  const candidates = lines.filter((line) => !line.includes("✓") && !line.includes("✔"));
+  const chosen =
+    candidates.find((line) => /^(FAIL\s|×)/.test(line)) ??
+    candidates.find((line) => /Test Files\s+\d+ failed|Tests\s+\d+ failed/.test(line)) ??
+    candidates.find((line) =>
+      /(^|\b)(error|cannot find|not found|failed to resolve|missing)\b/i.test(line),
+    ) ??
+    `no failure line found in gate output (${String(lines.length)} lines)`;
+  const withLog = logPath === undefined ? chosen : `${chosen}; full gate log: ${logPath}`;
+  return withLog.length > 300 ? `${withLog.slice(0, 300)}…` : withLog;
 };
 
 /**
@@ -648,7 +666,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           if (!control.passed) {
             const blameless =
               `gate also fails on ${snapshot.baseBranch} with nothing merged, ` +
-              `so ${entry.branch} is not at fault: ${gateDiagnosis(control.output)}`;
+              `so ${entry.branch} is not at fault: ${gateDiagnosis(control.output, control.outputPath)}`;
             const signature = dependencyFaultSignature(control.output);
             // Say what is broken and stop. Only a fault a dependency install
             // understands is worth a repair; anything else needs a human, and
@@ -706,7 +724,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
                 _tag: "fatal" as const,
                 detail:
                   `${blameless} — restoring the integration worktree dependencies did not fix it: ` +
-                  `${recheck === null ? restored.detail : gateDiagnosis(recheck.output)}`,
+                  `${recheck === null ? restored.detail : gateDiagnosis(recheck.output, recheck.outputPath)}`,
                 queueLength: activeEntries(snapshot.entries).length,
               };
             }
@@ -725,7 +743,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
             entry,
             "gate-failed",
             touched,
-            gateDiagnosis(gate.output),
+            gateDiagnosis(gate.output, gate.outputPath),
           );
           if (!repair.repaired) {
             return {
@@ -733,7 +751,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
               detail:
                 `${entry.branch} has failed the gate after ${String(repair.attempts)} repair ` +
                 `attempts and is not converging; stopping instead of opening another. ` +
-                `Last failure: ${gateDiagnosis(gate.output)}`,
+                `Last failure: ${gateDiagnosis(gate.output, gate.outputPath)}`,
               queueLength: activeEntries(snapshot.entries).length,
             };
           }

@@ -53,6 +53,8 @@ const makeHarness = (
     readonly gateOutput?: string;
     /** Per-call gate output, for a control that differs from the merge set. */
     readonly gateOutputSequence?: ReadonlyArray<string>;
+    /** Where the gate adapter persisted the full output (t3code-9hv). */
+    readonly gateOutputPath?: string;
     /** Whether the dependency repair reports success; defaults to true. */
     readonly repairRestores?: boolean;
     readonly fastForwardFails?: ReadonlyArray<string>;
@@ -320,6 +322,7 @@ const makeHarness = (
             passed: sequenced ?? options.gatePasses ?? true,
             repositoryPaths: ["/repo"],
             output: sequencedOutput ?? options.gateOutput ?? "",
+            ...(options.gateOutputPath === undefined ? {} : { outputPath: options.gateOutputPath }),
           };
         }),
     },
@@ -495,6 +498,75 @@ describe("MergeQueue", () => {
       expect(harness.calls.some((call) => call.startsWith("repair:"))).toBe(false);
       expect(harness.calls.filter((call) => call === "gate")).toHaveLength(2);
       expect(harness.fixes).toHaveLength(0);
+    }),
+  );
+
+  it.effect("never names a passing test line as the gate failure cause", () =>
+    Effect.gen(function* () {
+      // Regression (t3code-9hv): two epic runs for t3code-vzb reported this
+      // exact line as the failure cause. It is a PASSING test in
+      // packages/effect-acp/src/protocol.test.ts whose name merely contains
+      // the word "error" — the old signal branch matched on that word.
+      const harness = makeHarness({
+        gatePasses: false,
+        gateOutput:
+          "✓ does not emit a second process-exit error after a decode failure 1029ms\n2 failed",
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      const detail = result._tag === "fatal" ? result.detail : "";
+      expect(detail).not.toContain("✓");
+      expect(detail).toContain("no failure line found in gate output");
+      expect(harness.calls.some((call) => call.startsWith("repair:"))).toBe(false);
+      expect(harness.fixes).toHaveLength(0);
+    }),
+  );
+
+  it.effect("diagnoses the vitest failure entry, not the interleaved passing tail", () =>
+    Effect.gen(function* () {
+      // Gate packages run with --concurrency-limit 2, so the output
+      // interleaves and the last flushed line is often a ✓ line from a
+      // package that passed. The diagnosis must come from the FAIL entries
+      // or the "Test Files N failed" summary, never the bare last line.
+      const harness = makeHarness({
+        gatePasses: false,
+        gateOutput: [
+          "✓ packages/y/src/c.test.ts > passes 12ms",
+          " FAIL  packages/x/src/a.test.ts > b",
+          " Test Files  1 failed | 1 passed (2)",
+          "✓ packages/y/src/c.test.ts > also passes 8ms",
+        ].join("\n"),
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      const detail = result._tag === "fatal" ? result.detail : "";
+      expect(detail).toContain("FAIL  packages/x/src/a.test.ts > b");
+      expect(detail).not.toContain("✓");
+    }),
+  );
+
+  it.effect("points at the persisted full gate log in the diagnosis", () =>
+    Effect.gen(function* () {
+      // The bounded output can lose the failure entirely (t3code-9hv); the
+      // adapter keeps the full log and the diagnosis must carry its path.
+      // ANSI color around the pass marker must not hide it either — vitest
+      // wraps ✓ in green.
+      const harness = makeHarness({
+        gatePasses: false,
+        gateOutput: "\x1b[32m✓\x1b[39m passes 5ms\n2 failed",
+        gateOutputPath: "/repo/.git/t3code/epic-runs/run-1/gate-1.log",
+      });
+
+      const result: DrainMergeQueueResult = yield* drain(harness.ports);
+
+      expect(result._tag).toBe("fatal");
+      const detail = result._tag === "fatal" ? result.detail : "";
+      expect(detail).not.toContain("✓");
+      expect(detail).toContain("full gate log: /repo/.git/t3code/epic-runs/run-1/gate-1.log");
     }),
   );
 

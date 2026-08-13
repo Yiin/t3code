@@ -1794,6 +1794,43 @@ export const makeServerMergeDrain = (deps: {
       yield* processRunner
         .run({ command: "bd", args: ["merge-slot", "create"], cwd: run.cwd })
         .pipe(Effect.ignore);
+      // A red gate's bounded output can hide the real failure (t3code-9hv),
+      // and the one-line diagnosis is all that used to survive a drain.
+      // Persist the full output of every failed gate under the run's git dir
+      // — never inside the integration worktree, which MergeQueue resets and
+      // cleans after a failed gate — and hand the path to the diagnosis.
+      // Best-effort: a write failure must not mask the gate result itself.
+      let gateLogSequence = 0;
+      const mergeGateWithLog: typeof mergeGate = {
+        run: (gateInput) =>
+          mergeGate.run(gateInput).pipe(
+            Effect.flatMap((result) => {
+              if (result.passed) return Effect.succeed(result);
+              gateLogSequence += 1;
+              const sequence = gateLogSequence;
+              return Effect.flatMap(DateTime.now, (now) => {
+                const logPath = path.join(
+                  run.cwd,
+                  ".git",
+                  "t3code",
+                  "epic-runs",
+                  run.runId,
+                  `gate-${String(DateTime.toEpochMillis(now))}-${String(sequence)}.log`,
+                );
+                return fileSystem.makeDirectory(path.dirname(logPath), { recursive: true }).pipe(
+                  Effect.andThen(fileSystem.writeFileString(logPath, result.output)),
+                  Effect.map(() => ({ ...result, outputPath: logPath })),
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("epic.runner.gate-log-persist-failed", {
+                      runId: run.runId,
+                      cause,
+                    }).pipe(Effect.as(result)),
+                  ),
+                );
+              });
+            }),
+          ),
+      };
       const result = yield* drainMergeQueue(
         {
           runId: run.runId,
@@ -1808,7 +1845,7 @@ export const makeServerMergeDrain = (deps: {
           store: mergeQueueStore,
           git,
           slot: makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner }),
-          gate: mergeGate,
+          gate: mergeGateWithLog,
           repair: mergeRepair,
           backlog: makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
           events: {

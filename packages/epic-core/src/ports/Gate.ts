@@ -21,6 +21,14 @@ export interface GateResult {
   readonly repositoryPaths: ReadonlyArray<string>;
   /** Bounded combined output. The adapter must not retain unbounded logs. */
   readonly output: string;
+  /**
+   * Where the full, unbounded gate output was persisted, if anywhere.
+   *
+   * `output` is capped, so a diagnosis built from it can lose the real
+   * failure. Adapters that keep the whole log set this so the diagnosis can
+   * point at it (t3code-9hv).
+   */
+  readonly outputPath?: string;
 }
 
 export interface GateShape {
