@@ -232,6 +232,10 @@ export const cookCommand = Command.make("cook", {
   epic: Flag.string("epic").pipe(Flag.withDescription("Beads epic id.")),
   cwd: Flag.string("cwd").pipe(Flag.withDescription("Repository root.")),
   runDir: optionalString("run-dir", "Artifact directory."),
+  runId: optionalString(
+    "run-id",
+    "Continue this run id instead of minting a new one. Sequential engine only.",
+  ),
   gate: optionalString("gate", "Integration gate command."),
   noGate: Flag.boolean("no-gate").pipe(
     Flag.withDescription("Explicitly disable the integration gate."),
@@ -350,7 +354,12 @@ export const cookCommand = Command.make("cook", {
                     ? "gpt-5.6-sol"
                     : "default"),
         };
-        const runId = `${flags.epic}-${Date.now().toString(36)}-${String(process.pid)}`;
+        // A given run id continues that run: the default run directory is a
+        // pure function of the run id, so `--run-id` alone lands the restart on
+        // the same journal the earlier process wrote.
+        const runId =
+          Option.getOrUndefined(flags.runId) ??
+          `${flags.epic}-${Date.now().toString(36)}-${String(process.pid)}`;
         const runDirectory = NodePath.resolve(
           Option.getOrUndefined(flags.runDir) ??
             NodePath.join(cwd, ".git", "t3code", "epic-runs", runId),

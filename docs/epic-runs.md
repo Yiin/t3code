@@ -346,6 +346,28 @@ Parallel workers get one worktree each at
 directory and defaults to `~/.t3`. Sequential mode uses no worktrees; it works in
 the real checkout.
 
+## Restart a terminal cook
+
+A terminal cook mints a new run id per invocation, so it starts a new run each
+time. Pass `--run-id <id>` to continue an earlier one instead. The default run
+directory is a pure function of the run id, so the flag alone lands the restart
+on the journal the earlier process wrote; pass the same `--run-dir` too if the
+first call used one.
+
+The restart continues the run rather than replaying it. It reads the run record
+back, keeps its iteration count, its completed count, its failure streaks and
+its per-child attempt budgets, and appends its first row past the highest row
+already on disk. A row an interrupted process left `running` settles as
+`abandoned` / `process-restart`: the sequential core has no resume dispatch, so
+that child gets a fresh iteration rather than its old session back. Nothing
+already on disk is rewritten.
+
+A run that already reached `done` is finished. Restarting it fails with a
+`resume` error and its record is left alone.
+
+This is the sequential engine only. A parallel terminal cook still refuses a run
+id it has already created.
+
 ## Recover a run that failed at boot
 
 Servers before this change wrote `failed` on a blocked boot and left the

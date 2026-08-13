@@ -157,6 +157,42 @@ it("cooks two children locally and releases the shared lock", () => {
   );
 });
 
+it("continues a run on its own run id instead of repeating its first iteration", () => {
+  const fixture = makeFixture(2);
+  const restartArgs = [...cookArgs(fixture), "--run-id", "restart-me"];
+  // One iteration for two children: the run stops with a child still open.
+  const first = run(
+    "node",
+    [...restartArgs, "--max-iterations", "1"],
+    fixture.repo,
+    fixture.environment,
+  );
+  assert.notEqual(first.status, 0);
+  assert.isTrue(NodeFS.existsSync(NodePath.join(fixture.runDirectory, "iter-0.json")));
+  const firstIteration = NodeFS.readFileSync(
+    NodePath.join(fixture.runDirectory, "iter-0.json"),
+    "utf8",
+  );
+
+  const second = run(
+    "node",
+    [...restartArgs, "--max-iterations", "2"],
+    fixture.repo,
+    fixture.environment,
+  );
+  assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+  // The second process spent the run's remaining iteration on the second
+  // child, and left the first process's row exactly as it found it.
+  assert.match(second.stdout, /restart-me\tdone\t2\/2/);
+  assert.equal(
+    NodeFS.readFileSync(NodePath.join(fixture.runDirectory, "iter-0.json"), "utf8"),
+    firstIteration,
+  );
+  assert.isTrue(NodeFS.existsSync(NodePath.join(fixture.runDirectory, "iter-1.json")));
+  assert.isFalse(NodeFS.existsSync(NodePath.join(fixture.runDirectory, "iter-2.json")));
+  assert.equal(requireOk(run("git", ["rev-list", "--count", "HEAD"], fixture.repo)), "3");
+});
+
 it("drains a worker after STOP and releases the lock", async () => {
   const fixture = makeFixture(1, 1);
   const child = NodeChildProcess.spawn("node", cookArgs(fixture), {

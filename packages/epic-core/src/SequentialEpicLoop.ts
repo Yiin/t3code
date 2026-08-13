@@ -1,6 +1,7 @@
 // @effect-diagnostics globalDate:off
 import { EpicRunId, ProjectId, ThreadId, epicRunIterationThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { EpicRunConfigSnapshot, EpicRunPreflightShape } from "./EpicRunPreflight.ts";
@@ -277,15 +278,97 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
     yield* ports.events.publish({ type: "run-state-changed", run });
   });
 
-  const body = Effect.gen(function* () {
-    yield* ports.journal.createRun(run);
+  /**
+   * Take ownership of this run id's durable record, and report the rows that
+   * are already on disk under it.
+   *
+   * This runs OUTSIDE the failure handler below, on purpose: a run record this
+   * process was not allowed to adopt must not be rewritten with this process's
+   * failure.
+   */
+  const adoptRun = Effect.gen(function* () {
+    // Read the durable rows BEFORE the run record exists: this is the only
+    // evidence of what earlier processes of this run id already did, and both
+    // the resume index and the attempt budgets are seeded from it.
+    const priorIterations = yield* ports.journal.listIterations(run.runId);
+    const existing = yield* ports.journal.getRun(run.runId);
+    if (Option.isNone(existing)) {
+      yield* ports.journal.createRun(run);
+    } else {
+      // A run that already reached `done` is finished. Re-entering it would
+      // dispatch fresh work against a closed record, so refuse instead.
+      if (existing.value.status === "done") {
+        return yield* new SequentialEpicLoopError({
+          operation: "resume",
+          detail: `Run ${run.runId} already finished`,
+        });
+      }
+      // A run id names one epic's work. Continuing it under another epic would
+      // append that epic's children to this run's evidence.
+      if (existing.value.epicId !== input.epicId) {
+        return yield* new SequentialEpicLoopError({
+          operation: "resume",
+          detail: `Run ${run.runId} belongs to ${existing.value.epicId}, not ${input.epicId}`,
+        });
+      }
+      // Continue past the highest persisted row, the way
+      // `PoolRunJournal.allocateIteration` does. The rows win over the
+      // counter: a crash between `appendIteration` and the run save leaves a
+      // row this run's counter never saw, and reusing that index would fail
+      // the append.
+      const nextIterationIndex = priorIterations.reduce(
+        (next, iteration) => Math.max(next, iteration.iterationIndex + 1),
+        existing.value.iterationsDispatched,
+      );
+      run = {
+        ...run,
+        createdAt: existing.value.createdAt,
+        // Progress an earlier process already spent. A restart inherits the
+        // run's budgets rather than starting them over.
+        iterationsDispatched: nextIterationIndex,
+        iterationsCompleted: existing.value.iterationsCompleted,
+        consecutiveFailures: existing.value.consecutiveFailures,
+        noCommitStreak: existing.value.noCommitStreak,
+        infraStreak: existing.value.infraStreak,
+        lastError: existing.value.lastError,
+        status: "running",
+        currentThreadId: null,
+        currentTurnStartedAt: null,
+        updatedAt: now(),
+      };
+      // No process owns the rows the interrupted one left in flight. This loop
+      // has no resume dispatch (see the note in the dispatch block), so they
+      // are settled as abandoned rather than continued.
+      for (const iteration of priorIterations) {
+        if (iteration.turnStatus !== "running") continue;
+        const abandoned: PersistedEpicRunIteration = {
+          ...iteration,
+          turnStatus: "abandoned",
+          summary: "abandoned by an earlier process of this run",
+          failureReason: "process-restart",
+          finishedAt: now(),
+        };
+        yield* ports.journal.updateIteration(abandoned);
+        yield* ports.events.publish({ type: "iteration-state-changed", iteration: abandoned });
+      }
+      yield* ports.journal.saveRun(run);
+      yield* Effect.logInfo("epic.loop.sequential-resumed", {
+        runId: run.runId,
+        iterationsDispatched: run.iterationsDispatched,
+        previousStatus: existing.value.status,
+      });
+    }
     yield* ports.events.publish({ type: "run-state-changed", run });
+    return priorIterations;
+  });
+
+  const body = Effect.fn("runSequentialEpicLoop.body")(function* (
+    priorIterations: ReadonlyArray<PersistedEpicRunIteration>,
+  ) {
     // Restore what earlier processes of THIS run already charged, before any
     // dispatch. An empty journal restores nothing, which is how a first run
     // behaved before this existed.
-    const restoredAttempts = childAttemptsFromHistory(
-      yield* ports.journal.listIterations(run.runId),
-    );
+    const restoredAttempts = childAttemptsFromHistory(priorIterations);
     for (const [issueId, spent] of restoredAttempts) attempts.set(issueId, spent);
     if (restoredAttempts.size > 0) {
       yield* Effect.logInfo("epic.loop.child-attempts-restored", {
@@ -789,23 +872,27 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
     return run;
   });
 
-  return yield* body.pipe(
-    Effect.catch((cause) => {
-      run = {
-        ...run,
-        status: "failed",
-        lastError: errorDetail(cause),
-        currentThreadId: null,
-        currentTurnStartedAt: null,
-      };
-      return ports.journal
-        .saveRun(run)
-        .pipe(
-          Effect.andThen(ports.events.publish({ type: "run-state-changed", run })),
-          Effect.ignore,
-          Effect.andThen(Effect.fail(cause)),
-        );
-    }),
+  return yield* adoptRun.pipe(
+    Effect.flatMap((priorIterations) =>
+      body(priorIterations).pipe(
+        Effect.catch((cause) => {
+          run = {
+            ...run,
+            status: "failed",
+            lastError: errorDetail(cause),
+            currentThreadId: null,
+            currentTurnStartedAt: null,
+          };
+          return ports.journal
+            .saveRun(run)
+            .pipe(
+              Effect.andThen(ports.events.publish({ type: "run-state-changed", run })),
+              Effect.ignore,
+              Effect.andThen(Effect.fail(cause)),
+            );
+        }),
+      ),
+    ),
     Effect.ensuring(
       Effect.gen(function* () {
         if (activeHandle !== null) {

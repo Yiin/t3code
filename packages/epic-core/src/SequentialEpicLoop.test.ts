@@ -12,10 +12,13 @@ import {
   type EpicRunConfig,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 
+import { make as makeFileRunJournal } from "./adapters/FileRunJournal.ts";
 import { runSequentialEpicLoop, type SequentialEpicLoopPorts } from "./SequentialEpicLoop.ts";
 import type { RoleSelectionRequest } from "./ports/RoleSelection.ts";
 import {
@@ -127,6 +130,14 @@ const fixture = (input: {
     readonly turnStatus: PersistedEpicRunIteration["turnStatus"];
     readonly failureReason: string | null;
   }>;
+  /**
+   * Replace the in-memory journal fake. A restart cell points two fixtures at
+   * one real {@link FileRunJournal}, which is the only journal that enforces
+   * "create once, never rewrite a row".
+   */
+  readonly journal?: SequentialEpicLoopPorts["journal"];
+  /** Which epic this process thinks the run id belongs to. */
+  readonly epicId?: string;
 }) => {
   const epic = issue({
     id: "epic",
@@ -248,7 +259,7 @@ const fixture = (input: {
         }),
     },
     backlog,
-    journal: {
+    journal: input.journal ?? {
       createRun: (run) =>
         Effect.sync(() => {
           persistedRun = run;
@@ -418,7 +429,7 @@ const fixture = (input: {
     runSequentialEpicLoop(
       {
         runId: "run",
-        epicId: "epic",
+        epicId: input.epicId ?? "epic",
         cwd: "/repo",
         runDirectory: "/run",
         repository: {
@@ -1017,4 +1028,174 @@ it.live("does not reopen a closed child after a non-done outcome", () =>
       [],
     );
   }),
+);
+
+/**
+ * Restarting a run on its own id, against the real file journal.
+ *
+ * The in-memory fake above accepts a second `createRun` and merges a repeated
+ * iteration index; only {@link makeFileRunJournal} enforces "create once, and
+ * never rewrite a row". These cells are the acceptance for that.
+ */
+const withRealJournal = <A, E, R>(
+  body: (journal: SequentialEpicLoopPorts["journal"]) => Effect.Effect<A, E, R>,
+) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const runDirectory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "epic-sequential-restart-",
+      });
+      return yield* body(yield* makeFileRunJournal({ runDirectory }));
+    }),
+  ).pipe(Effect.provide(NodeServices.layer));
+
+/** One failed dispatch ends the first process, so the second one restarts it. */
+const restartConfig = config({
+  limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 3, maxIterations: 5 },
+  server: { ...DEFAULT_EPIC_RUN_CONFIG.server, maxConsecutiveFailures: 1 },
+});
+
+it.live("appends past the rows an earlier process of the same run id wrote", () =>
+  withRealJournal((journal) =>
+    Effect.gen(function* () {
+      const first = fixture({
+        journal,
+        attempts: [{ claim: true, blocked: true }],
+        config: restartConfig,
+      });
+      assert.equal((yield* first.run()).status, "failed");
+      const afterFirst = yield* journal.listIterations(EpicRunId.make("run"));
+
+      const second = fixture({
+        journal,
+        attempts: [{ commit: true, close: true }],
+        config: restartConfig,
+      });
+      const resumed = yield* second.run();
+
+      const rows = yield* journal.listIterations(EpicRunId.make("run"));
+      assert.deepEqual(
+        rows.map((row) => [row.iterationIndex, row.turnStatus]),
+        [
+          [0, "failed"],
+          [1, "completed"],
+        ],
+      );
+      // The prior row is evidence, not scratch space: the restart neither
+      // rewrote it nor reused its index.
+      assert.deepEqual(rows[0], afterFirst[0]);
+      assert.equal(resumed.status, "done");
+      // Budgets carry: the restart spends the run's remaining iterations, not
+      // a fresh five.
+      assert.equal(resumed.iterationsDispatched, 2);
+      assert.equal(resumed.iterationsCompleted, 2);
+      assert.equal(second.dispatches(), 1);
+    }),
+  ),
+);
+
+it.live("settles the row an interrupted process left running, and dispatches past it", () =>
+  withRealJournal((journal) =>
+    Effect.gen(function* () {
+      const runId = EpicRunId.make("run");
+      const first = fixture({
+        journal,
+        attempts: [{ claim: true, blocked: true }],
+        config: restartConfig,
+      });
+      yield* first.run();
+      // What a crash mid-dispatch leaves behind: an appended `running` row the
+      // run record's own counter never saw.
+      const settled = (yield* journal.listIterations(runId))[0]!;
+      yield* journal.appendIteration({
+        ...settled,
+        iterationIndex: NonNegativeInt.make(1),
+        threadId: ThreadId.make(epicRunIterationThreadId({ runId, iterationIndex: 1 })),
+        turnStatus: "running",
+        failureReason: null,
+        finishedAt: null,
+      });
+
+      const second = fixture({
+        journal,
+        attempts: [{ commit: true, close: true }],
+        config: restartConfig,
+      });
+      assert.equal((yield* second.run()).status, "done");
+
+      const rows = yield* journal.listIterations(runId);
+      assert.deepEqual(
+        rows.map((row) => [row.iterationIndex, row.turnStatus, row.failureReason]),
+        [
+          [0, "failed", "child:blocked"],
+          [1, "abandoned", "process-restart"],
+          [2, "completed", null],
+        ],
+      );
+      assert.deepEqual(
+        second.events
+          .filter((event) => event.type === "iteration-state-changed")
+          .map((event) => [event.iteration.iterationIndex, event.iteration.turnStatus]),
+        [
+          [1, "abandoned"],
+          [2, "running"],
+          [2, "completed"],
+        ],
+      );
+    }),
+  ),
+);
+
+it.live("refuses to restart a run id under another epic", () =>
+  withRealJournal((journal) =>
+    Effect.gen(function* () {
+      const first = fixture({
+        journal,
+        attempts: [{ claim: true, blocked: true }],
+        config: restartConfig,
+      });
+      assert.equal((yield* first.run()).status, "failed");
+
+      const other = fixture({
+        journal,
+        epicId: "other-epic",
+        attempts: [{ commit: true, close: true }],
+        config: restartConfig,
+      });
+      const refused = yield* Effect.result(other.run());
+
+      assert.equal(refused._tag, "Failure");
+      assert.equal(other.dispatches(), 0);
+      assert.lengthOf(yield* journal.listIterations(EpicRunId.make("run")), 1);
+    }),
+  ),
+);
+
+it.live("refuses to restart a finished run, and leaves its record alone", () =>
+  withRealJournal((journal) =>
+    Effect.gen(function* () {
+      const first = fixture({
+        journal,
+        attempts: [{ commit: true, close: true }],
+        config: restartConfig,
+      });
+      assert.equal((yield* first.run()).status, "done");
+
+      const second = fixture({
+        journal,
+        attempts: [{ commit: true, close: true }],
+        config: restartConfig,
+      });
+      const refused = yield* Effect.result(second.run());
+
+      assert.equal(refused._tag, "Failure");
+      assert.equal(refused._tag === "Failure" ? refused.failure.operation : null, "resume");
+      assert.equal(second.dispatches(), 0);
+      // A run this process was not allowed to adopt keeps its own verdict.
+      const record = yield* journal.getRun(EpicRunId.make("run"));
+      assert.equal(Option.isSome(record) ? record.value.status : null, "done");
+      assert.lengthOf(yield* journal.listIterations(EpicRunId.make("run")), 1);
+    }),
+  ),
 );
