@@ -328,6 +328,77 @@ it.live("escalates a TERM-resistant interrupt and verifies exit", () =>
   ),
 );
 
+const countSpawns = (directory: string): number => {
+  const path = NodePath.join(directory, "spawns");
+  if (!NodeFS.existsSync(path)) return 0;
+  return NodeFS.readFileSync(path, "utf8").split("\n").filter(Boolean).length;
+};
+
+const waitUntil = (ready: () => boolean, attempts = 1_000) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < attempts && !ready(); attempt += 1)
+      yield* Effect.sleep("10 millis");
+    assert.isTrue(ready());
+  });
+
+it.live("refuses a continuation while the iteration child is still running", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fixture = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          makeWorker(`echo spawned >> "$CAPTURE_DIR/spawns"
+printf '%s\\n' '{"type":"system","session_id":"s"}'
+sleep 30`),
+        ),
+        ({ directory }) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const workerActivity = makeTerminalWorkerActivity();
+      const dispatch = makeTerminalAgentDispatch({
+        harness: "claude",
+        artifactsDirectory: fixture.directory,
+        binary: fixture.worker,
+        environment: { CAPTURE_DIR: fixture.directory },
+        stopGraceSeconds: 0.05,
+        workerActivity,
+      });
+      const handle = yield* dispatch.startIteration({
+        runId: "continuation",
+        iterationIndex: 0,
+        cwd: fixture.directory,
+        worktreePath: null,
+        prompt: "cook child",
+        selection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
+        },
+      });
+      yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
+      // The streamed line carries the session id, so this is exactly the
+      // mid-turn state the old guard read as "continuation is available".
+      yield* waitUntil(() => (workerActivity.sample(handle.ref)?.outputBytes ?? 0) > 0);
+      const livePid = workerActivity.sample(handle.ref)?.pid ?? null;
+      assert.isNotNull(livePid);
+
+      const refusal = yield* Effect.flip(handle.continueTurn("nudge"));
+      assert.equal(refusal.operation, "continueTurn");
+      assert.include(refusal.detail, "while the turn is running");
+      assert.equal(countSpawns(fixture.directory), 1);
+      assert.equal(workerActivity.sample(handle.ref)?.pid ?? null, livePid);
+
+      // One settle promise, still bound to the child that was running.
+      yield* handle.interrupt;
+      assert.equal((yield* handle.awaitSettled).turnState, "interrupted");
+      assert.equal(countSpawns(fixture.directory), 1);
+
+      // The refusal is about liveness, not about a missing session id: the same
+      // continuation is accepted once that child is gone.
+      yield* handle.continueTurn("nudge");
+      yield* waitUntil(() => countSpawns(fixture.directory) === 2);
+    }),
+  ),
+);
+
 const startStructuredHarness = (
   body: string,
   maxArtifactBytes = 1024,

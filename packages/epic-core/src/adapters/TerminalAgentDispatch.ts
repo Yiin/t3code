@@ -746,6 +746,15 @@ export const makeTerminalAgentDispatch = (
           continueTurn: (prompt) =>
             Effect.tryPromise({
               try: async () => {
+                // `spawn` reassigns the child, the settle promise and the
+                // artifact, so a continuation sent mid-turn would run a second
+                // provider process in the same worktree, settle on the first
+                // exit, and leak the first process group past interrupt and
+                // release. `sessionId` is set from streamed lines, so it is
+                // already non-null mid-turn and cannot stand in for this check.
+                const runningPid = child?.pid;
+                if (runningPid !== undefined && ownedGroupExists(runningPid, childStartTicks))
+                  throw new Error("continuation is unavailable while the turn is running");
                 if (iterationHarness === "worker-cmd" || sessionId === null)
                   throw new Error("continuation is unavailable");
                 spawn(prompt);
