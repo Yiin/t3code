@@ -233,6 +233,21 @@ export interface PoolVcsShape {
     readonly base: string;
     readonly branch: string;
   }) => Effect.Effect<number | null>;
+  /**
+   * The paths a merge of `branch` into `base` would leave conflicted, read
+   * without a worktree, an index, or a trial commit (`git merge-tree
+   * --write-tree`, git >= 2.38).
+   *
+   * `[]` means the merge is clean as of this read. `null` is the port's usual
+   * "git told us nothing" — an unreadable repo, an unknown ref, a git too old,
+   * and also a conflict git refused to name, because a conflict list nobody
+   * can act on is not information.
+   */
+  readonly mergeTreeConflicts: (input: {
+    readonly cwd: string;
+    readonly base: string;
+    readonly branch: string;
+  }) => Effect.Effect<ReadonlyArray<string> | null>;
 }
 
 /**

@@ -650,6 +650,7 @@ const fixture = (input: {
         return input.worktreeEvidence ?? null;
       }),
     commitsAhead: () => Effect.succeed(0),
+    mergeTreeConflicts: () => Effect.succeed([]),
   };
 
   const ports: ParallelEpicLoopPorts = {
@@ -1589,6 +1590,7 @@ it.live(
         worktreeFingerprint: () => Effect.succeed(""),
         worktreeEvidence: () => Effect.succeed(null),
         commitsAhead: () => Effect.succeed(0),
+        mergeTreeConflicts: () => Effect.succeed([]),
       };
 
       const ports: ParallelEpicLoopPorts = {

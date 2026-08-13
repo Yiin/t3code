@@ -24,6 +24,26 @@ const section = (output: string | null): string => {
     : trimmed;
 };
 
+/**
+ * `git merge-tree --write-tree` prints the merged tree's OID, then one
+ * `<mode> <object> <stage>\t<path>` line per unmerged stage, then a blank line
+ * and its own informational messages. A conflicted path therefore repeats once
+ * per stage, so the parse dedupes it and keeps git's own path form — the same
+ * form `MergeGitShape.changedFiles` reports.
+ */
+const parseMergeTreeConflicts = (stdout: string): ReadonlyArray<string> => {
+  const paths: string[] = [];
+  for (const line of stdout.split("\n").slice(1)) {
+    // The blank line ends the conflicted-file section; messages follow it.
+    if (line.length === 0) break;
+    const tab = line.indexOf("\t");
+    if (tab === -1) continue;
+    const path = line.slice(tab + 1);
+    if (path.length > 0 && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+};
+
 export const makeProcessPoolVcs = (
   processRunner: ProcessRunner.ProcessRunner["Service"],
 ): PoolVcsShape => ({
@@ -113,6 +133,51 @@ export const makeProcessPoolVcs = (
         Effect.catchCause((cause) =>
           Effect.logDebug("epic.runner.branch-commit-read-failed", {
             cwd: input.cwd,
+            branch: input.branch,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      ),
+
+  /**
+   * A conflict probe that reads only objects: `git merge-tree --write-tree`
+   * merges the two commits in memory, so it needs no worktree, no index, and
+   * no trial commit, and it cannot disturb a worker still committing into the
+   * branch. Exit 0 is a clean merge, exit 1 names the conflicted paths, and
+   * every other exit is the port's `null`.
+   */
+  mergeTreeConflicts: (input) =>
+    processRunner
+      .run({
+        command: "git",
+        args: ["merge-tree", "--write-tree", input.base, input.branch],
+        cwd: input.cwd,
+        timeout: GIT_HEAD_TIMEOUT,
+      })
+      .pipe(
+        Effect.flatMap((output) => {
+          if (output.code === 0) return Effect.succeed<ReadonlyArray<string> | null>([]);
+          if (output.code === 1) {
+            const conflicts = parseMergeTreeConflicts(output.stdout);
+            if (conflicts.length > 0) return Effect.succeed(conflicts);
+            return Effect.logDebug("epic.runner.merge-tree-unnamed-conflict", {
+              cwd: input.cwd,
+              base: input.base,
+              branch: input.branch,
+            }).pipe(Effect.as(null));
+          }
+          return Effect.logDebug("epic.runner.merge-tree-probe-failed", {
+            cwd: input.cwd,
+            base: input.base,
+            branch: input.branch,
+            code: output.code,
+            stderr: output.stderr,
+          }).pipe(Effect.as(null));
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.merge-tree-probe-failed", {
+            cwd: input.cwd,
+            base: input.base,
             branch: input.branch,
             cause,
           }).pipe(Effect.as(null)),
