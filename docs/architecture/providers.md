@@ -13,7 +13,45 @@ Methods mirror the `NativeApi` interface defined in `@t3tools/contracts`:
 - `providers.respondToRequest`, `providers.stopSession`
 - `shell.openInEditor`, `server.getConfig`
 
-Codex is the only implemented provider. `claudeCode` is reserved in contracts/UI.
+## Drivers and instances
+
+The server ships a static set of drivers in
+[`builtInDrivers.ts`](../../apps/server/src/provider/builtInDrivers.ts): `codex`,
+`claudeAgent`, `cursor`, `grok`, `kimi`, `opencode`, and `primeAgent`. A driver
+says how to build a provider from settings. A **provider instance** is one
+configured copy of a driver, and its instance id is the routing identity. A
+`providerInstances` entry naming a driver that this build does not ship reads as
+an `"unavailable"` snapshot instead of failing the server.
+
+Each driver picks its own transport. Codex speaks JSON-RPC to `codex app-server`.
+Cursor, Grok, and Kimi speak ACP through
+`apps/server/src/provider/acp/AcpSessionRuntime.ts`. Prime Agent speaks Prime's
+own RPC mode over stdio, in
+[`PrimeRpcTransport.ts`](../../apps/server/src/provider/prime/PrimeRpcTransport.ts).
+Prime deliberately does not go through the shared ACP path, because T3 Code needs
+Prime's native permissions, model switching, resume, fork, and rollback.
+
+Whatever the transport, every driver normalizes its native events into
+`ProviderRuntimeEvent`, the canonical vocabulary shared by server and client. The
+mapper for Prime is
+[`PrimeEventMapper.ts`](../../apps/server/src/provider/prime/PrimeEventMapper.ts).
+
+### Permission bridge
+
+Approvals reach the app the same way for every driver, but each driver hooks its
+own agent. Codex and the ACP drivers ask through their protocol's approval
+request. Prime loads a T3-owned extension with `--no-extensions --extension`, so
+only T3 Code's bridge is active in that session. The bridge is fail-closed: no
+UI, a failed prompt, or a timeout blocks the tool call. The global runtime mode
+reaches Prime as `T3_PRIME_RUNTIME_MODE`.
+
+### Fallback
+
+Automatic provider fallback is a property of epic runs, not of interactive
+threads. The chain is Prime → Claude → Codex → Kimi, in
+[`providerFallback.ts`](../../packages/epic-core/src/providerFallback.ts). Prime
+is a source only; nothing falls back **to** Prime. Only a structured
+provider-attributed failure moves a run forward. Assistant prose never does.
 
 ## Session lifecycle
 

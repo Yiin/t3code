@@ -94,7 +94,17 @@ A launch from the Epics page sends no such flag and keeps the project default.
 The resolved selection is persisted on the run row, so a boot resume replays the
 same provider. After that, only a provider-attributed failure moves the run
 forward through the fallback chain in
-[`providerFallback.ts`](../packages/epic-core/src/providerFallback.ts).
+[`providerFallback.ts`](../packages/epic-core/src/providerFallback.ts). The chain
+is Prime → Claude → Codex → Kimi. Prime is a source only: nothing falls back
+**to** Prime. Evidence must be a structured provider failure record. Assistant
+prose never triggers a fallback.
+
+In a terminal, the harness is the CLI you launched from.
+[`skills/cook-epic/run.sh`](../skills/cook-epic/run.sh) detects `prime`, `kimi`,
+`claude`, `ccx`, `codex`, or `opencode` from the binary name, and
+`COOKEPIC_HARNESS` overrides that. A Prime worker takes its prompt as an argument
+after `--`, and reports no per-iteration cost, so a Prime run shows no spend.
+Provider-specific setup lives in the [Prime Agent guide](./providers/prime.md).
 
 ## Run lock
 
@@ -123,6 +133,26 @@ process that started at a different time, and its recorded process group is gone
 too. `NodeEpicRunLock` applies the death check before the 300-second window, so a
 hard-killed server can resume its own run at once. `run.sh` waits out the window
 first. Neither one reclaims a lock recorded on another host.
+
+## How a child counts as done
+
+Verification is by effects, never by what the worker says. The rule is the same
+in the terminal and on the server, and the same for every provider:
+
+- A normal child is done when Beads shows it closed **and** the base branch
+  gained commits.
+- A `Research:` child, or one carrying the `research` label, is done when it is
+  closed **and** its bead gained a comment since dispatch. A close with no new
+  comment blocks it as "closed without findings".
+- A normal child that produced no commits is accepted only when its bead gained
+  a comment since dispatch. That comment is the evidence. A bare close with no
+  commits and no comment fails.
+
+A worker's final message is never evidence. This is why a Prime worker, which
+reports no per-iteration cost, needs no special case: the loop reads Beads and
+Git, not the transcript. The full rule set lives in
+[`skills/cook-epic/SKILL.md`](../skills/cook-epic/SKILL.md) under **How it
+works**.
 
 ## Integration gate and host load
 

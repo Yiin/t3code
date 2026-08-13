@@ -53,6 +53,18 @@ three.
   A refused resume hands the worktree and the claim to a fresh pinned iteration
   and scores an `infra:resume-*` reason.
 - Client turn ingress does not block threads owned by an EpicRunner run.
+- A run resolves one model selection at launch, most specific first: the launch
+  input (`inheritOriginModelSelection`), then `provider.modelSelection` in
+  `.t3code/epic-run.json`, then the project default. Inheriting never falls back
+  to the default; it fails with `origin_thread_required`,
+  `origin_thread_not_found`, or `origin_thread_project_mismatch`.
+- The `EpicRunLaunchError` reason list is duplicated in
+  `packages/epic-core/src/Errors.ts` and `packages/contracts/src/epicRuns.ts`.
+  Adding a reason to one only makes `apps/server/src/ws.ts` fail typecheck.
+- Forward provider fallback is Prime → Claude → Codex → Kimi
+  (`packages/epic-core/src/providerFallback.ts`). Prime is a source only.
+- Verification is by effects: Beads status plus commits, or a new bead comment
+  for a `Research:` child. A worker's final message is never evidence.
 
 Never install dependencies or run `skills/install.sh` inside an epic worktree.
 Its linked `node_modules` can damage the source checkout.
@@ -100,6 +112,10 @@ before run completion. Provider fallback uses structured evidence only.
 
 ## Provider seams
 
+`apps/server/src/provider/builtInDrivers.ts` is the whole shipped driver set:
+`codex`, `claudeAgent`, `cursor`, `grok`, `kimi`, `opencode`, `primeAgent`.
+An instance id is the routing identity; a driver kind is not.
+
 Codex, OpenCode, Prime, and Claude can steer a running turn. Their adapters set
 `steeredIntoActiveTurn` only when the agent received a genuine steer.
 
@@ -123,6 +139,36 @@ Treat new SDK controls as optional. Check, catch, time out, and handle no result
 
 An instance's `homePath` becomes `CLAUDE_CONFIG_DIR`. A session only resumes
 inside the config directory that created it.
+
+### Prime
+
+- Prime uses its own RPC mode, not shared ACP. Transport, events, launch-arg
+  guard, and permission extension live in `apps/server/src/provider/prime/`.
+  `Layers/PrimeAdapter.ts`, `Layers/PrimeProvider.ts`, and
+  `Drivers/PrimeDriver.ts` hold the session, probe, and driver seams.
+- T3 Code owns these Prime flags: `--mode`, `--session`, `--session-id`,
+  `--session-dir`, `--fork`, `--continue`, `--resume`, `--no-session`,
+  `--provider`, `--model`, `--thinking`, `--extension` / `-e`,
+  `--no-extensions`. A user launch arg matching one turns the card red.
+- The resume cursor is `{ schemaVersion: 1, sessionId, ownerThreadId }`. The
+  owning thread reopens with `--session`; any other thread forks with
+  `--fork <id> --session-id <new>`.
+- Sessions live in `<stateDir>/prime/<instanceId>` at mode `0700`, unless the
+  instance sets `sessionRoot`.
+- `prime/extensions/t3-permission-extension.mjs` is fail-closed and only guards
+  `ipython`, `python`, and `python_cell`. The runtime mode reaches it as
+  `T3_PRIME_RUNTIME_MODE`.
+- `apps/server/scripts/prime-rpc-mock.ts` is the fake CLI. Select behavior with
+  `T3_PRIME_RPC_SCENARIO` (`health-ready`, `health-unauthenticated`,
+  `health-no-models`, `version-timeout`, `malformed`, `eof`, `exit`, `adapter*`,
+  `text*`). Never require a real Prime binary, credentials, or network in tests.
+- Prime is not installed on the dev host. Verify Prime UI by pointing an
+  instance's `binaryPath` at a shell wrapper that execs the mock.
+- `ProviderCommandReactor.ts` rewrites `/name` and `$name` to `/skill:<name>`
+  for Prime, but only when the provider reports that skill. Otherwise the
+  workspace skill body expands inline. `skills/install.sh` links the canonical
+  skills into `${PRIME_SKILLS_DIR:-~/.prime/skills}`.
+- User-facing setup, diagnostics, and troubleshooting: `docs/providers/prime.md`.
 
 ## Provider session lifecycle
 

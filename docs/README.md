@@ -13,7 +13,10 @@
   - [Keybindings](./user/keybindings.md)
 - [T3 Connect](./cloud/t3-connect-clerk.md)
 - [Integrations](./integrations/source-control-providers.md)
-- [Mobile](./mobile/app.md)
 - [Operations](./operations/ci.md)
-- [Providers](./providers/codex.md)
+- Providers
+  - [Codex](./providers/codex.md)
+  - [Claude](./providers/claude.md)
+  - [Prime Agent](./providers/prime.md)
+- [Epic runs](./epic-runs.md)
 - [Reference](./reference/encyclopedia.md)
