@@ -9,9 +9,9 @@ argument-hint: <issue id, epic id, or short task description>
 
 End-to-end execution of a well-scoped engineering task. You own the **result**, not a checklist. The fixed spine is plan → implement → verify → gate → commit; the variable part is how much independent scrutiny each stage gets, and you decide that from the task itself. A one-line fix and a multi-subsystem feature deserve different amounts of review — spending three agents on the former is waste, spending one on the latter is negligence. **The justification burden runs both ways**: name the criterion that let you scale a step down, and name the one that made you escalate past the baseline. Unjustified ceremony is as much a defect as unjustified confidence, and most tasks that reach this skill are small — the cheap path is the default, not the exception.
 
-**Model tiers (Claude-family harness only).** When you dispatch subagents, match the model to the stage: plan-composition and plan-critique agents get model `opus`, implementer agents get model `sonnet`, reviewer agents get model `fable`. Work done in your own session stays on the session model. If the user named a model explicitly, that pins every stage instead.
+**Model tiers (Claude-family harness only).** When the session was started with injected agent definitions (the Agent tool lists agents named for the stages, such as `planner`, `implementer`, `reviewer`), dispatch those by name and pass no model. The definition already carries the tier, and an injected agent replaces the `general-purpose` default wherever this skill names one. Work you do in your own session stays on the session model. A model the user named pins every stage instead. When the session has no such agents (a plain `claude` CLI run, or a non-Claude harness), fall back to the defaults the runner would otherwise inject: `opus` for plan composition and plan critique, `sonnet` for implementers, `fable` for reviewers. The tiers themselves live in the epic role policy in `ServerSettings` and reach a session as injected agent definitions, so don't copy model names back into this file.
 
-If a `fable` dispatch fails because the model is unavailable or its usage limit is exhausted, re-dispatch that same agent on model `opus` and carry on. Say in one clause that reviews ran on `opus`. Never drop the review stage over a model limit, and never downgrade it to the session thread while a fallback model is available.
+Never drop the review stage over a model limit, and never downgrade it to the session thread. Rotating off an exhausted account is the runner's job. The tier chain is ordered, and the runner skips a hop whose account sits over its threshold. Report which tier the review ran on.
 
 **Harness fallback (applies to every dispatch below).** When the harness provides subagents, use them. Otherwise invoke a fresh one-shot process of the same headless harness with a self-contained brief in a temporary file (following `ralph/run.sh`'s invocation pattern) — except for repository writes, which stay in the main thread. If the same harness cannot be invoked headlessly at all, do the step in the main thread and say plainly that independent review was unavailable.
 
@@ -188,11 +188,13 @@ then encode the chosen shape in the script: include a plan-critique stage only i
 routing said so, and build the review stage as a single agent, agent + design
 reviewer, or a `parallel()` fan-out to match the review shape. A workflow is
 itself an escalation — for an evidence-only or self-review change, skip it and
-work directly. Use a bounded `while` loop for the BLOCK→fix→re-review cycle
-(cap at two rounds, then surface to the user), `phase()` calls that mirror the
-numbered steps so the user can follow progress in `/workflows`, and `schema` on
-the critique agents to get back a structured verdict (`APPROVE` /
-`APPROVE-WITH-NITS` / `BLOCK` plus findings) rather than parsing prose.
+work directly. Name an injected agent as a stage's `agentType` when the session
+has one, and leave `model` off the `agent()` call either way. Use a bounded
+`while` loop for the BLOCK→fix→re-review cycle (cap at two rounds, then surface
+to the user), `phase()` calls that mirror the numbered steps so the user can
+follow progress in `/workflows`, and `schema` on the critique agents to get back
+a structured verdict (`APPROVE` / `APPROVE-WITH-NITS` / `BLOCK` plus findings)
+rather than parsing prose.
 
 Two parts stay in the main thread, outside the workflow:
 
