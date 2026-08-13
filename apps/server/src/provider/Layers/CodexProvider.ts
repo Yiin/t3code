@@ -19,6 +19,7 @@ import type {
   ServerProviderState,
   ModelCapabilities,
   ProviderOptionDescriptor,
+  ProviderUsageReading,
   ServerProviderModel,
   ServerProviderSkill,
 } from "@t3tools/contracts";
@@ -38,6 +39,13 @@ const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnErro
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
 
+/**
+ * Budget for `account/rateLimits/read`. It is a single round-trip on an
+ * app-server the probe already spawned, and usage is optional, so it gets a
+ * much shorter leash than the whole-probe `AUTH_PROBE_TIMEOUT_MS`.
+ */
+const CODEX_RATE_LIMITS_TIMEOUT_MS = 5_000;
+
 const CODEX_PRESENTATION = {
   displayName: "Codex",
   showInteractionModeToggle: true,
@@ -48,6 +56,7 @@ export interface CodexAppServerProviderSnapshot {
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  readonly usage: ReadonlyArray<ProviderUsageReading>;
 }
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
@@ -300,6 +309,73 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
   return models;
 });
 
+/**
+ * `resetsAt` is Unix **seconds**. The generated schema only says `int64`
+ * (`schema.gen.ts:4197`), so the unit was read off a live ChatGPT Pro account
+ * on 2026-08-13: `resetsAt: 1787207826` against a `1786603026` second-precision
+ * clock, exactly the `windowDurationMins: 10080` (seven day) window ahead. The
+ * converter stays defensive anyway — below 1e11 is seconds, the rest is
+ * milliseconds — and yields `null` for anything that is not a usable date.
+ */
+function normalizeCodexResetsAt(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  const milliseconds = value < 1e11 ? value * 1_000 : value;
+  return Option.match(DateTime.make(milliseconds), {
+    onNone: () => null,
+    onSome: DateTime.formatIso,
+  });
+}
+
+/**
+ * Maps the backward-compatible single-bucket `rateLimits` view onto usage
+ * readings. `rateLimitsByLimitId` is deliberately ignored: it is a multi-bucket
+ * view keyed by metered `limit_id`, and the settled window vocabulary has slots
+ * for `primary` and `secondary` only.
+ */
+export function mapCodexRateLimitsResponse(
+  response: CodexSchema.V2GetAccountRateLimitsResponse,
+): ReadonlyArray<ProviderUsageReading> {
+  const readings: Array<ProviderUsageReading> = [];
+  const addWindow = (
+    window: Extract<ProviderUsageReading["window"], "primary" | "secondary">,
+    value: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow | null | undefined,
+  ) => {
+    if (!value || typeof value.usedPercent !== "number" || !Number.isFinite(value.usedPercent)) {
+      return;
+    }
+    readings.push({
+      window,
+      utilization: value.usedPercent,
+      resetsAt: normalizeCodexResetsAt(value.resetsAt),
+      source: "codex.app_server.read",
+    });
+  };
+
+  addWindow("primary", response.rateLimits.primary);
+  addWindow("secondary", response.rateLimits.secondary);
+  return readings;
+}
+
+/**
+ * Never fails. Usage is optional decoration on the capability probe, so a slow
+ * read, a transport error, or a method-not-found from an older codex binary all
+ * degrade to no readings instead of failing the probe.
+ */
+const readCodexRateLimitsForProbe = Effect.fn("readCodexRateLimitsForProbe")(function* (
+  client: CodexClient.CodexAppServerClient["Service"],
+) {
+  const result = yield* client
+    .request("account/rateLimits/read", undefined)
+    .pipe(Effect.timeoutOption(Duration.millis(CODEX_RATE_LIMITS_TIMEOUT_MS)), Effect.result);
+
+  if (Result.isFailure(result) || Option.isNone(result.success)) {
+    return [] as ReadonlyArray<ProviderUsageReading>;
+  }
+  return mapCodexRateLimitsResponse(result.success.value);
+});
+
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   return {
     clientInfo: {
@@ -313,101 +389,106 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   };
 }
 
-const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
-  readonly binaryPath: string;
-  readonly homePath?: string;
-  readonly launchArgs?: string;
-  readonly cwd: string;
-  readonly customModels?: ReadonlyArray<string>;
-  readonly environment?: NodeJS.ProcessEnv;
-}) {
-  // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
-  // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
-  // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-  // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
-  const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const environment = {
-    ...input.environment,
-    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-  };
-  const spawnCommand = yield* resolveSpawnCommand(
-    input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
-    {
-      env: environment,
-      extendEnv: true,
-    },
-  );
-  const child = yield* spawner
-    .spawn(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: input.cwd,
+export const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(
+  function* (input: {
+    readonly binaryPath: string;
+    readonly homePath?: string;
+    readonly launchArgs?: string;
+    readonly cwd: string;
+    readonly customModels?: ReadonlyArray<string>;
+    readonly environment?: NodeJS.ProcessEnv;
+  }) {
+    // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
+    // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
+    // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
+    // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
+    const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const environment = {
+      ...input.environment,
+      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+    };
+    const spawnCommand = yield* resolveSpawnCommand(
+      input.binaryPath,
+      codexAppServerArgs(input.launchArgs),
+      {
         env: environment,
         extendEnv: true,
-        forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
-        shell: spawnCommand.shell,
-      }),
-    )
-    .pipe(
-      Effect.mapError(
-        (cause) =>
-          new CodexErrors.CodexAppServerSpawnError({
-            command: `${input.binaryPath} app-server`,
-            cause,
-          }),
-      ),
+      },
     );
-  const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
-  const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-    Effect.provide(clientContext),
-  );
+    const child = yield* spawner
+      .spawn(
+        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          cwd: input.cwd,
+          env: environment,
+          extendEnv: true,
+          forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
+          shell: spawnCommand.shell,
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new CodexErrors.CodexAppServerSpawnError({
+              command: `${input.binaryPath} app-server`,
+              cause,
+            }),
+        ),
+      );
+    const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+    const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+      Effect.provide(clientContext),
+    );
 
-  const initialize = yield* client.request("initialize", {
-    clientInfo: {
-      name: "t3code_desktop",
-      title: "T3 Code Desktop",
-      version: "0.1.0",
-    },
-    capabilities: {
-      experimentalApi: true,
-    },
-  });
-  yield* client.notify("initialized", undefined);
+    const initialize = yield* client.request("initialize", {
+      clientInfo: {
+        name: "t3code_desktop",
+        title: "T3 Code Desktop",
+        version: "0.1.0",
+      },
+      capabilities: {
+        experimentalApi: true,
+      },
+    });
+    yield* client.notify("initialized", undefined);
 
-  // Extract the version string after the first '/' in userAgent, up to the next space or the end
-  const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
-  const version = versionMatch ? versionMatch[1] : undefined;
+    // Extract the version string after the first '/' in userAgent, up to the next space or the end
+    const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
+    const version = versionMatch ? versionMatch[1] : undefined;
 
-  const accountResponse = yield* client.request("account/read", {});
-  if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
+    const accountResponse = yield* client.request("account/read", {});
+    if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
+      return {
+        account: accountResponse,
+        version,
+        models: appendCustomCodexModels([], input.customModels ?? []),
+        skills: [],
+        usage: [],
+      } satisfies CodexAppServerProviderSnapshot;
+    }
+
+    const [skillsResponse, models, usage] = yield* Effect.all(
+      [
+        client.request("skills/list", {
+          cwds: [input.cwd],
+        }),
+        requestAllCodexModels(client),
+        readCodexRateLimitsForProbe(client),
+      ],
+      { concurrency: "unbounded" },
+    );
+
     return {
       account: accountResponse,
       version,
-      models: appendCustomCodexModels([], input.customModels ?? []),
-      skills: [],
+      models: applyPreferredCodexDefaultModel(
+        appendCustomCodexModels(models, input.customModels ?? []),
+      ),
+      skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
+      usage,
     } satisfies CodexAppServerProviderSnapshot;
-  }
-
-  const [skillsResponse, models] = yield* Effect.all(
-    [
-      client.request("skills/list", {
-        cwds: [input.cwd],
-      }),
-      requestAllCodexModels(client),
-    ],
-    { concurrency: "unbounded" },
-  );
-
-  return {
-    account: accountResponse,
-    version,
-    models: applyPreferredCodexDefaultModel(
-      appendCustomCodexModels(models, input.customModels ?? []),
-    ),
-    skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
-  } satisfies CodexAppServerProviderSnapshot;
-});
+  },
+);
 
 const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] => {
   const models = new Set<string>();

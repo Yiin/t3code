@@ -21,12 +21,19 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  ProviderDriverKind,
+  type ProviderUsageReading,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -36,7 +43,11 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
-import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
+import {
+  checkCodexProviderStatus,
+  makePendingCodexProvider,
+  probeCodexAppServerProvider,
+} from "../Layers/CodexProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -166,7 +177,25 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // in as instance rebuilds from the registry rather than in-place
       // updates. Pre-provide `ChildProcessSpawner` so the check fits
       // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      const checkProvider = checkCodexProviderStatus(effectiveConfig, undefined, processEnv).pipe(
+      // The app-server probe reads `account/rateLimits/read` alongside the
+      // capability calls, so the usage port just tees off the snapshot refresh
+      // instead of spawning a second app-server on its own cadence. Any exit
+      // other than success clears the readings — the probe times out from the
+      // outside, and the poller stamps `observedAt` at poll time, so replaying
+      // a stale sample would claim a freshness it does not have.
+      const usageReadings = yield* Ref.make<ReadonlyArray<ProviderUsageReading>>([]);
+      const probeAndCaptureUsage: typeof probeCodexAppServerProvider = (input) =>
+        probeCodexAppServerProvider(input).pipe(
+          Effect.onExit((exit) =>
+            Ref.set(usageReadings, Exit.isSuccess(exit) ? exit.value.usage : []),
+          ),
+        );
+
+      const checkProvider = checkCodexProviderStatus(
+        effectiveConfig,
+        probeAndCaptureUsage,
+        processEnv,
+      ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
@@ -209,6 +238,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
+        usage: { readUsage: Ref.get(usageReadings) },
       } satisfies ProviderInstance;
     }),
 };

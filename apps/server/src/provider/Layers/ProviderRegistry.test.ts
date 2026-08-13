@@ -314,6 +314,7 @@ function makeCodexProbeSnapshot(
       },
     ],
     skills: [],
+    usage: [],
     ...input,
   };
 }
