@@ -75,6 +75,10 @@
       "types": "./src/ports/ProviderInventory.ts",
       "import": "./src/ports/ProviderInventory.ts"
     },
+    "./ports/RoleSelection": {
+      "types": "./src/ports/RoleSelection.ts",
+      "import": "./src/ports/RoleSelection.ts"
+    },
     "./ports/RunJournal": {
       "types": "./src/ports/RunJournal.ts",
       "import": "./src/ports/RunJournal.ts"

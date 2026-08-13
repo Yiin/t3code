@@ -554,6 +554,7 @@ export const cookCommand = Command.make("cook", {
               }),
               vcs: makeProcessPoolVcs(runner),
               providerInventory: terminalProviders.inventory,
+              roleSelection: null,
               /**
                * Liveness supervision is server-only for now. The terminal
                * dispatch adapter owns a real worker pid and its own kill path
@@ -742,6 +743,7 @@ export const cookCommand = Command.make("cook", {
                 backlog: makeProcessBacklog({ repositoryPath: cwd, processRunner: runner }),
                 journal,
                 providerInventory: terminalProviders.inventory,
+                roleSelection: null,
                 events: fileEvents,
                 dispatch: agentDispatch,
                 gate: makeProcessGate({

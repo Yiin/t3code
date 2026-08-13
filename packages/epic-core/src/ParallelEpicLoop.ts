@@ -48,6 +48,7 @@ import {
   type EpicIterationOutcome,
 } from "./ralphProtocol.ts";
 import type {
+  AgentSelection,
   DispatchError,
   FinalMessageRead,
   IterationHandle,
@@ -56,6 +57,7 @@ import type {
 } from "./ports/AgentDispatch.ts";
 import type { PoolDispatchShape } from "./ports/PoolDispatch.ts";
 import type { ProviderInventoryShape } from "./ports/ProviderInventory.ts";
+import type { EpicDispatchRole, RoleSelectionShape } from "./ports/RoleSelection.ts";
 import { CHILD_CLAIM_RELEASED_REASON, type RunEvent } from "./ports/RunEvents.ts";
 import type { RunJournalShape } from "./ports/RunJournal.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
@@ -394,7 +396,15 @@ const LOOP_STOP: LoopBoundary = { _tag: "stop" };
 
 interface ActiveIteration {
   charged: boolean;
-  readonly modelSelection: ModelSelection;
+  /**
+   * The selection this worker was actually dispatched on, which is the key
+   * every provider bookkeeping write uses when it settles.
+   *
+   * It starts as the run-level selection and is overwritten the moment
+   * `runIteration` resolves a per-role one (`onSelectionResolved`), so a role
+   * dispatched onto another account never degrades the run's account.
+   */
+  modelSelection: ModelSelection;
   /**
    * This worker is an integration-fix child (t3code-sha), dispatched directly
    * onto the run's own base branch. Set as soon as the title is known — before
@@ -472,6 +482,11 @@ export interface ParallelEpicLoopPorts {
   readonly vcs: PoolVcsShape;
   /** `null` disables provider fallback, mirroring an absent registry. */
   readonly providerInventory: ProviderInventoryShape | null;
+  /**
+   * `null` keeps every dispatch on the run-level selection, exactly as it was
+   * before per-role tiers existed.
+   */
+  readonly roleSelection: RoleSelectionShape | null;
   /**
    * `null` disables per-worker liveness supervision, mirroring a host with no
    * sampling target. A run with no evidence port behaves exactly as it did
@@ -737,6 +752,13 @@ export const runParallelEpicLoop = (
     readonly selection: ReadyChildSelection;
     readonly onDispatched: (threadId: ThreadId) => void;
     /**
+     * Fired once this iteration knows which selection it will dispatch on,
+     * before the dispatch itself. Never fired when no role resolver is wired,
+     * and never fired for a resumed worker, which is pinned to the session it
+     * is continuing.
+     */
+    readonly onSelectionResolved: (selection: AgentSelection) => void;
+    /**
      * Fired once the child's title is known — before the workspace is
      * acquired — when this iteration is an integration-fix child (t3code-sha).
      * Never fired for any other child.
@@ -865,6 +887,28 @@ export const runParallelEpicLoop = (
       if (parseIntegrationFixTitle(issueEvidenceBefore.title ?? "") !== null) {
         args.onIntegrationFixDetected();
       }
+
+      // One selection per dispatch, resolved from the child's own role. A
+      // merge-fix child is an ordinary ready child everywhere else in the
+      // loop, so its title is the only thing that names it.
+      //
+      // `null` means "use whatever the run row says at dispatch time", which
+      // is what every call site read before this port existed. A resumed
+      // worker stays on the run selection too: its session id belongs to the
+      // config directory that created it, so a resume cannot cross accounts.
+      const dispatchSelection: AgentSelection | null =
+        ports.roleSelection === null || resumedWorker !== null
+          ? null
+          : yield* ports.roleSelection.resolve({
+              role: (parseMergeFixTitle(issueEvidenceBefore.title ?? "") !== null
+                ? "merge-fix-child"
+                : "iteration-worker") satisfies EpicDispatchRole,
+              runId,
+              issueId,
+              issueTitle: issueEvidenceBefore.title,
+              fallbackSelection: run.modelSelection,
+            });
+      if (dispatchSelection !== null) args.onSelectionResolved(dispatchSelection);
 
       // A resume rebuilds the record of a worktree that already exists; it
       // never provisions. `acquire` would refuse the leftover worktree, and
@@ -1001,7 +1045,7 @@ export const runParallelEpicLoop = (
             threadId,
             projectId: current.projectId,
             title: `${input.epicId} · iteration ${iterationIndex + 1}`,
-            selection: current.modelSelection,
+            selection: dispatchSelection ?? current.modelSelection,
             runtimeMode: current.runtimeMode,
             branch: workspace.branch,
             worktreePath: workspace.worktreePath,
@@ -1159,7 +1203,7 @@ export const runParallelEpicLoop = (
             .beginTurn({
               threadId,
               prompt,
-              selection: next.modelSelection,
+              selection: dispatchSelection ?? next.modelSelection,
               runtimeMode: next.runtimeMode,
               policy,
               runId,
@@ -1687,7 +1731,12 @@ export const runParallelEpicLoop = (
         Effect.gen(function* () {
           const current = yield* requireRun(runId);
           if (current.status !== "running" && current.status !== "paused") return false;
-          if (current.modelSelection.instanceId !== pending.from.instanceId) return false;
+          // Guard against applying the same hop twice, not against the run row
+          // naming a different instance: a role-resolved worker fails on the
+          // account IT was dispatched on, which the run row need never have
+          // named. Keying on the target still refuses a stale duplicate,
+          // because the first application already moved the run row there.
+          if (current.modelSelection.instanceId === pending.to.instanceId) return false;
           const degradedAt = yield* nowIso;
           yield* ports.journal
             .upsertProviderDegradation({
@@ -1862,6 +1911,9 @@ export const runParallelEpicLoop = (
           selection,
           onDispatched: () => {
             activeIteration.charged = true;
+          },
+          onSelectionResolved: (selection) => {
+            activeIteration.modelSelection = selection;
           },
           onIntegrationFixDetected: () => {
             activeIteration.isIntegrationFix = true;

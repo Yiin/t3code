@@ -427,6 +427,7 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
         backlog: makeProcessBacklog({ repositoryPath: workspace.cwd, processRunner: runner }),
         journal,
         providerInventory: providerSupport.inventory,
+        roleSelection: null,
         events: {
           publish: (event) =>
             Effect.sync(() => {

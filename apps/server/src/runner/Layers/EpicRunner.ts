@@ -444,6 +444,9 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       providerInventory: Option.isNone(providerRegistry)
         ? null
         : { getProviders: providerRegistry.value.getProviders },
+      // The tier-walking adapter lands separately (t3code-pg7): until then
+      // every dispatch stays on the run-level selection.
+      roleSelection: null,
       workerEvidence: makeServerWorkerEvidence({ workerScopeRegistry, processRunner }),
     };
     const readOrientation = makeReadOrientation({ fileSystem, path });

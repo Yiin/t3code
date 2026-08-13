@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import { runSequentialEpicLoop, type SequentialEpicLoopPorts } from "./SequentialEpicLoop.ts";
+import type { RoleSelectionRequest } from "./ports/RoleSelection.ts";
 import {
   DispatchError,
   type AgentDispatchCapabilities,
@@ -99,6 +100,11 @@ const fixture = (input: {
   readonly releaseFailures?: number;
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly selection?: { readonly instanceId: ProviderInstanceId; readonly model: string };
+  /**
+   * Wire a stub role resolver handing back this selection. Absent means no
+   * resolver at all, which is today's run-level behaviour.
+   */
+  readonly roleSelection?: { readonly instanceId: ProviderInstanceId; readonly model: string };
   readonly siblings?: ReadonlyArray<{
     readonly repositoryPath: string;
     readonly baseBranch: string;
@@ -139,6 +145,7 @@ const fixture = (input: {
   const events: RunEvent[] = [];
   const ordering: string[] = [];
   const selections: Array<{ readonly instanceId: ProviderInstanceId; readonly model: string }> = [];
+  const roleRequests: RoleSelectionRequest[] = [];
   const attempts = input.attempts ?? [];
 
   const backlog = {
@@ -258,6 +265,16 @@ const fixture = (input: {
         }),
     },
     providerInventory: { getProviders: Effect.succeed(input.providers ?? []) },
+    roleSelection:
+      input.roleSelection === undefined
+        ? null
+        : {
+            resolve: (request) =>
+              Effect.sync(() => {
+                roleRequests.push(request);
+                return input.roleSelection ?? request.fallbackSelection;
+              }),
+          },
     dispatch: {
       capabilities: terminalLikeCapabilities,
       startIteration: ({ selection, prompt }) => {
@@ -389,8 +406,45 @@ const fixture = (input: {
     events,
     ordering,
     selections,
+    roleRequests,
   };
 };
+
+it.live(
+  "dispatches the iteration-worker role selection, and the run's own without a resolver",
+  () =>
+    Effect.gen(function* () {
+      const roleSelection = {
+        instanceId: ProviderInstanceId.make("cooker"),
+        model: "worker-model",
+      };
+      const resolved = fixture({
+        attempts: [{ commit: true, close: true }],
+        roleSelection,
+      });
+      yield* resolved.run();
+
+      assert.deepEqual(resolved.selections, [roleSelection]);
+      assert.deepEqual(
+        resolved.roleRequests.map((request) => [request.role, request.issueId]),
+        [["iteration-worker", "epic.1"]],
+      );
+      // The run-level selection travels as the fallback the adapter returns
+      // when a role has no tier of its own.
+      assert.deepEqual(resolved.roleRequests[0]?.fallbackSelection, {
+        instanceId: ProviderInstanceId.make("worker"),
+        model: "test",
+      });
+
+      const unresolved = fixture({ attempts: [{ commit: true, close: true }] });
+      yield* unresolved.run();
+
+      assert.deepEqual(unresolved.selections, [
+        { instanceId: ProviderInstanceId.make("worker"), model: "test" },
+      ]);
+      assert.deepEqual(unresolved.roleRequests, []);
+    }),
+);
 
 it.live("persists Prime to Claude to Codex to Kimi fallback across dispatches", () =>
   Effect.gen(function* () {

@@ -1,6 +1,7 @@
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  DEFAULT_MODEL_BY_PROVIDER,
   EpicRunId,
   ProjectId,
   ProviderDriverKind,
@@ -43,6 +44,7 @@ import type {
 } from "./ports/AgentDispatch.ts";
 import type { BacklogIssue } from "./ports/Backlog.ts";
 import type { RunEvent } from "./ports/RunEvents.ts";
+import type { EpicDispatchRole, RoleSelectionRequest } from "./ports/RoleSelection.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { SupervisionClock } from "./workerSupervision.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
@@ -187,6 +189,11 @@ const fixture = (input: {
   readonly worktreeEvidence?: string | null;
   /** Seed the persisted run's counters, e.g. the failure streaks. */
   readonly runSeed?: Partial<PersistedEpicRun>;
+  /**
+   * Wire a stub role resolver handing back one selection per role. Absent
+   * means no resolver at all, which is today's run-level behaviour.
+   */
+  readonly roleSelections?: Partial<Record<EpicDispatchRole, ModelSelection>>;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -272,6 +279,7 @@ const fixture = (input: {
     readonly failureReason: string;
   }> = [];
   const providerClears: string[] = [];
+  const roleRequests: RoleSelectionRequest[] = [];
   let interrupts = 0;
   let releases = 0;
   let workspaceReleases = 0;
@@ -625,6 +633,16 @@ const fixture = (input: {
     vcs,
     providerInventory:
       input.providers === undefined ? null : { getProviders: Effect.succeed(input.providers) },
+    roleSelection:
+      input.roleSelections === undefined
+        ? null
+        : {
+            resolve: (request) =>
+              Effect.sync(() => {
+                roleRequests.push(request);
+                return input.roleSelections?.[request.role] ?? request.fallbackSelection;
+              }),
+          },
     workerEvidence: input.workerEvidence ?? null,
     supervisionClock: input.supervisionClock,
   };
@@ -669,6 +687,7 @@ const fixture = (input: {
     parkedBranchReads,
     providerDegradations,
     providerClears,
+    roleRequests,
     interrupts: () => interrupts,
     releases: () => releases,
     workspaceReleases: () => workspaceReleases,
@@ -950,6 +969,132 @@ it.live("drains a Prime worker before one forward fallback", () =>
     assert.deepEqual(test.providerClears, ["claude"]);
     assert.equal(test.runRecord().modelSelection.instanceId, "claude");
     assert.equal(test.iterations[0]?.failureReason, "infra:provider-error:rate-limit");
+  }),
+);
+
+const MERGE_FIX_SELECTION: ModelSelection = {
+  instanceId: ProviderInstanceId.make("fixer"),
+  model: "merge-fix-model",
+};
+const WORKER_SELECTION: ModelSelection = {
+  instanceId: ProviderInstanceId.make("cooker"),
+  model: "worker-model",
+};
+
+it.live("dispatches a merge-fix child on the merge-fix role selection", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      childTitle: "Merge fix: land epic/xyz (conflict)",
+      attempts: [{ commit: true, close: true }],
+      roleSelections: {
+        "merge-fix-child": MERGE_FIX_SELECTION,
+        "iteration-worker": WORKER_SELECTION,
+      },
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(
+      test.roleRequests.map((request) => [request.role, request.issueId, request.issueTitle]),
+      [["merge-fix-child", "epic.1", "Merge fix: land epic/xyz (conflict)"]],
+    );
+    // Both halves of the two-phase dispatch see the same resolved selection.
+    assert.deepEqual(
+      test.createCalls.map((call) => call.selection),
+      [MERGE_FIX_SELECTION],
+    );
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection),
+      [MERGE_FIX_SELECTION],
+    );
+  }),
+);
+
+it.live("dispatches an ordinary child on the iteration-worker role selection", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      attempts: [{ commit: true, close: true }],
+      roleSelections: {
+        "merge-fix-child": MERGE_FIX_SELECTION,
+        "iteration-worker": WORKER_SELECTION,
+      },
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(
+      test.roleRequests.map((request) => request.role),
+      ["iteration-worker"],
+    );
+    // The run-level selection travels as the fallback the adapter returns
+    // when a role has no tier of its own.
+    assert.deepEqual(test.roleRequests[0]?.fallbackSelection, {
+      instanceId: ProviderInstanceId.make("worker"),
+      model: "test",
+    });
+    assert.deepEqual(
+      test.createCalls.map((call) => call.selection),
+      [WORKER_SELECTION],
+    );
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection),
+      [WORKER_SELECTION],
+    );
+  }),
+);
+
+it.live("keeps every dispatch on the run selection when no role resolver is wired", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      childTitle: "Merge fix: land epic/xyz (conflict)",
+      attempts: [{ commit: true, close: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(test.roleRequests, []);
+    const runSelection = { instanceId: ProviderInstanceId.make("worker"), model: "test" };
+    assert.deepEqual(
+      test.createCalls.map((call) => call.selection),
+      [runSelection],
+    );
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection),
+      [runSelection],
+    );
+  }),
+);
+
+it.live("degrades the account the role resolved to, not the run's own", () =>
+  Effect.gen(function* () {
+    const prime = provider("prime", "primeAgent", "prime/custom-model");
+    const claude = provider("claude", "claudeAgent", "claude-sonnet-5");
+    const codexModel = DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("codex")] ?? "";
+    const codex = provider("codex", "codex", codexModel);
+    const test = fixture({
+      sequential: false,
+      attempts: [{ providerError: "rate limit" }, { commit: true, close: true }],
+      providers: [prime, claude, codex],
+      selection: { instanceId: prime.instanceId, model: "prime/custom-model" },
+      roleSelections: {
+        "iteration-worker": { instanceId: claude.instanceId, model: "claude-sonnet-5" },
+      },
+      policy: policy({ maxAttemptsPerChild: 1 }),
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    // The failing turn ran on `claude`, so `claude` is what degraded — the
+    // run row still named `prime`, which never dispatched anything.
+    assert.deepEqual(test.providerDegradations, [
+      { providerInstanceId: "claude", failureReason: "provider-error:rate-limit" },
+    ]);
+    // Forward fallback walks on from the account that actually failed.
+    assert.equal(test.runRecord().modelSelection.instanceId, "codex");
+    assert.deepEqual(test.providerClears, ["claude"]);
   }),
 );
 
@@ -1257,6 +1402,7 @@ it.live(
         mergeDrain,
         vcs,
         providerInventory: null,
+        roleSelection: null,
         workerEvidence: null,
       };
 
