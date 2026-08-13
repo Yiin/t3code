@@ -1,6 +1,12 @@
-export const gitShim = `#!/usr/bin/env bun
-import { appendFileSync, mkdirSync, rmdirSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+// The shims must run on plain Node: CI runners do not provide bun, and an
+// unexecutable shim makes every `bd show` fail, which the core reports as
+// "epic not found" (t3code-66n). Keep them dependency-free CommonJS.
+const nodeSleep = `const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);`;
+
+export const gitShim = `#!/usr/bin/env node
+const { appendFileSync, mkdirSync, rmdirSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+${nodeSleep}
 const journal = process.env.CONFORMANCE_JOURNAL;
 const git = process.env.CONFORMANCE_REAL_GIT;
 const lock = process.env.CONFORMANCE_LOCK;
@@ -9,7 +15,7 @@ for (let attempt = 0; ; attempt += 1) {
   try { mkdirSync(lock); break; }
   catch (error) {
     if (error?.code !== "EEXIST" || attempt >= 2000) throw error;
-    await Bun.sleep(5);
+    sleep(5);
   }
 }
 try { appendFileSync(journal, JSON.stringify({ tool: "git", argv: process.argv.slice(2) }) + "\\n"); }
@@ -18,8 +24,9 @@ const result = spawnSync(git, process.argv.slice(2), { stdio: "inherit", env: pr
 process.exit(result.status ?? 1);
 `;
 
-export const bdShim = `#!/usr/bin/env bun
-import { appendFileSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+export const bdShim = `#!/usr/bin/env node
+const { appendFileSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } = require("node:fs");
+${nodeSleep}
 const statePath = process.env.CONFORMANCE_STATE;
 const journal = process.env.CONFORMANCE_JOURNAL;
 const lock = process.env.CONFORMANCE_LOCK;
@@ -28,7 +35,7 @@ for (let attempt = 0; ; attempt += 1) {
   try { mkdirSync(lock); break; }
   catch (error) {
     if (error?.code !== "EEXIST" || attempt >= 2000) throw error;
-    await Bun.sleep(5);
+    sleep(5);
   }
 }
 process.on("exit", () => { try { rmdirSync(lock); } catch {} });
@@ -137,10 +144,11 @@ switch (command) {
 }
 `;
 
-export const agentShim = `#!/usr/bin/env bun
-import { appendFileSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { spawnSync } from "node:child_process";
+export const agentShim = `#!/usr/bin/env node
+const { appendFileSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } = require("node:fs");
+const { basename, dirname, join, resolve, sep } = require("node:path");
+const { spawnSync } = require("node:child_process");
+${nodeSleep}
 const statePath = process.env.CONFORMANCE_STATE;
 const journal = process.env.CONFORMANCE_JOURNAL;
 const lock = process.env.CONFORMANCE_LOCK;
@@ -149,7 +157,7 @@ for (let attempt = 0; ; attempt += 1) {
   try { mkdirSync(lock); break; }
   catch (error) {
     if (error?.code !== "EEXIST" || attempt >= 2000) throw error;
-    await Bun.sleep(5);
+    sleep(5);
   }
 }
 let ownsLock = true;
@@ -162,7 +170,7 @@ writeFileSync(statePath, JSON.stringify(state, null, 2) + "\\n");
 appendFileSync(journal, JSON.stringify({ tool: "agent", harness: process.env.CONFORMANCE_HARNESS ?? basename(process.argv[1]), invocation: index, argv: process.argv.slice(2), step }) + "\\n");
 rmdirSync(lock);
 ownsLock = false;
-if (step.hangMs > 0) await Bun.sleep(step.hangMs);
+if (step.hangMs > 0) sleep(step.hangMs);
 const child = process.env.COOKEPIC_CHILD ?? process.env.CONFORMANCE_CHILD_ID ?? state.children[0]?.id;
 if (step.claimChild && child) {
   const result = spawnSync("bd", ["update", child, "--claim"], { stdio: "inherit", env: process.env });
