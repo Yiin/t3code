@@ -1,0 +1,39 @@
+name: Release NPM Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release spec. Empty = next beta. `patch|minor|major` or `x.y.z`
+          for a stable release. `beta` / `beta.N` / `alpha` / `alpha.N`
+          for a prerelease. Anything else = tag release on
+          `0.0.0-<name>`.
+        required: false
+        type: string
+        default: ""
+
+# Reusable workflows can't widen permissions — the caller must grant
+# `contents: write` (commit + tag) and `id-token: write` (npm OIDC).
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    uses: alchemy-run/actions/.github/workflows/release.yml@67b1515cf5774c16a0666f4480d21b03443e6091 # main
+    with:
+      version: ${{ inputs.version }}
+      repo: alchemy-run/alchemy-effect
+      current-version: "2.0.0"
+      # The alchemy package ships the repo-root README.md; copy it in
+      # before the build so `bun pm pack` picks it up. Same trick the
+      # legacy `publish:npm` script used.
+      build-command: "cp README.md packages/alchemy/ && bun run build:packages"
+      packages: |
+        [
+          { "dir": "packages/alchemy",     "name": "alchemy" },
+          { "dir": "packages/better-auth", "name": "@alchemy.run/better-auth" },
+          { "dir": "packages/pr-package",  "name": "@alchemy.run/pr-package" }
+        ]
+    secrets: inherit
