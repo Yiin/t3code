@@ -20,6 +20,7 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import * as Queue from "effect/Queue";
@@ -924,6 +925,32 @@ it.live("treats an empty frontier with open children as stuck, never done", () =
     assert.equal(test.runRecord().status, "failed");
     assert.include(test.runRecord().lastError ?? "", "infra:ready-frontier-stuck");
     assert.equal(test.dispatchCount(), 0);
+  }),
+);
+
+it.live("logs the open-child evidence when an empty frontier cannot finish the run", () =>
+  Effect.gen(function* () {
+    // t3code-8vn: a backlog-empty decision once landed with no record of what
+    // Beads said. The decision point now names the children that block `done`.
+    const messages: Array<unknown> = [];
+    const logger = Logger.make<unknown, void>(({ message }) => {
+      messages.push(message);
+    });
+    const test = fixture({ initialChildStatus: "in_progress" });
+    yield* test.run.pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+
+    assert.equal(test.runRecord().status, "failed");
+    const decision = messages
+      .filter(Array.isArray)
+      .find((message) => message[0] === "epic.runner.completion-unproven");
+    assert.exists(decision);
+    assert.deepEqual(decision?.[1], {
+      runId: RUN_ID,
+      check: "ready-frontier-empty",
+      proof: "incomplete",
+      openChildren: 1,
+      openChildIds: "epic.1",
+    });
   }),
 );
 

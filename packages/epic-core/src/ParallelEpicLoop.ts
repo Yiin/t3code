@@ -38,6 +38,7 @@ import {
 import {
   childAttemptsFromHistory,
   decideIterationBoundary,
+  describeOpenChildren,
   EPIC_RUN_RESTART_HANDOFF_PROMPT,
   EPIC_RUN_RESTART_RESUME_PROMPT,
   parseIntegrationFixTitle,
@@ -1711,11 +1712,17 @@ export const runParallelEpicLoop = (
             };
       const proof = proveEpicCompletion({ check, activeWorkers, openChildIds });
       if (proof._tag !== "complete") {
+        // The record a stuck-epic investigation starts from: which children
+        // Beads still shows open, and what the ready re-read said about them.
         yield* Effect.logInfo("epic.runner.completion-unproven", {
           runId,
           check: check._tag,
           proof: proof._tag,
           openChildren: openChildIds.length,
+          openChildIds: describeOpenChildren(openChildIds),
+          ...(check._tag === "backlog-empty"
+            ? { readyChildIds: describeOpenChildren(check.readyChildIds) }
+            : {}),
         });
       }
       return proof;

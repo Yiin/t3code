@@ -73,12 +73,20 @@ export const makeProcessPoolBacklog = (
         ),
         Effect.flatMap((output) => {
           if (output.code !== 0) {
-            return Effect.fail(
-              new BacklogError({
+            // The backlog-empty decision starts from this read, so its raw
+            // failure belongs on record, not only inside the raised error.
+            return Effect.gen(function* () {
+              yield* Effect.logWarning("epic.runner.bd-ready-failed", {
+                cwd,
+                epicId,
+                exitCode: output.code,
+                stderr: output.stderr.trim(),
+              });
+              return yield* new BacklogError({
                 operation: "bd.ready",
                 detail: output.stderr.trim() || `bd ready exited with code ${output.code}`,
-              }),
-            );
+              });
+            });
           }
           return decodeReadyChildren(output.stdout).pipe(
             Effect.mapError(
