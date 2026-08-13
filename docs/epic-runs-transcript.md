@@ -14,6 +14,8 @@ Two facts a pool row cannot carry are read from effects instead. Whether a child
 
 Every parallel scenario keys each agent step to a child (`childId`). Two workers share one fixture state file, so an unkeyed script would hand steps out by whoever won the lock.
 
+A parked branch is scripted the way a real one happens. Two workers change the same line, so the second branch conflicts at its trial merge, the drain parks it, and the drain opens a merge-fix child. That child's id is always `created-1`, so a step can key to it. Its step sets `mergeBaseBranch: true`, which merges the base repository's `HEAD` into the parked branch before the step's writes: only a merge commit carrying the base makes the next trial merge clean, and the writes are the resolution. The other way to make a branch conflict is `advanceBase`, which moves the base under a worker that already committed. A parallel scenario must not use it. The drain reads a base that moved under it as an external move and stops the run instead of parking the branch.
+
 ## Shared core records
 
 The contract also accepts the shared `run-state-changed` and `iteration-state-changed` records directly. An adapter expands them into the specific decision tags before comparison. This boundary avoids false differences caused by store writes that occur before policy decisions. The shared event stream also has `subagent-liveness-degraded` and `subagent-liveness-unavailable`. Terminal adapters synthesize these from harness capabilities. They are separate from worker-idle inspection events.

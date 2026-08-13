@@ -1,0 +1,106 @@
+{
+  "name": "parallel-merge-conflict-parked",
+  "description": "Two workers change the same line. The first branch lands, the second one conflicts and parks, and the merge-fix child the drain opens takes over the parked branch, resolves it, and lands it before the run completes.",
+  "repo": {
+    "files": [{ "path": "conflict.txt", "content": "shared\n" }],
+    "detachedHead": false,
+    "dirty": false,
+    "siblingRepos": []
+  },
+  "beads": {
+    "epicId": "epic",
+    "epicExists": true,
+    "runInProgress": false,
+    "children": [
+      {
+        "id": "epic.1",
+        "title": "First child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      },
+      {
+        "id": "epic.2",
+        "title": "Second child",
+        "status": "open",
+        "priority": 1,
+        "issueType": "task",
+        "commentCount": 0
+      }
+    ]
+  },
+  "execution": { "_tag": "parallel", "workers": 2 },
+  "agentScript": [
+    {
+      "childId": "epic.1",
+      "repoAction": "commit",
+      "writes": [{ "path": "conflict.txt", "content": "one\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built one", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    },
+    {
+      "childId": "epic.2",
+      "repoAction": "commit",
+      "writes": [{ "path": "conflict.txt", "content": "two\n" }],
+      "report": { "_tag": "ralph-msg", "summary": "built two", "why": "needed" },
+      "closeChild": true,
+      "hangMs": 0
+    },
+    {
+      "childId": "created-1",
+      "repoAction": "commit",
+      "mergeBaseBranch": true,
+      "writes": [{ "path": "conflict.txt", "content": "one\ntwo\n" }],
+      "report": {
+        "_tag": "ralph-msg",
+        "summary": "resolved the parked branch",
+        "why": "both edits belong"
+      },
+      "closeChild": true,
+      "hangMs": 0
+    }
+  ],
+  "expectedTranscript": [
+    {
+      "_tag": "dispatched",
+      "sequence": 0,
+      "epicId": "epic",
+      "issueId": "created-1",
+      "iterationIndex": 0
+    },
+    {
+      "_tag": "done",
+      "sequence": 1,
+      "epicId": "epic",
+      "issueId": "created-1",
+      "iterationIndex": 0
+    },
+    {
+      "_tag": "dispatched",
+      "sequence": 2,
+      "epicId": "epic",
+      "issueId": "epic.1",
+      "iterationIndex": 1
+    },
+    { "_tag": "done", "sequence": 3, "epicId": "epic", "issueId": "epic.1", "iterationIndex": 1 },
+    {
+      "_tag": "dispatched",
+      "sequence": 4,
+      "epicId": "epic",
+      "issueId": "epic.2",
+      "iterationIndex": 2
+    },
+    { "_tag": "done", "sequence": 5, "epicId": "epic", "issueId": "epic.2", "iterationIndex": 2 },
+    {
+      "_tag": "finished",
+      "sequence": 6,
+      "epicId": "epic",
+      "issueId": null,
+      "iterationIndex": null,
+      "status": "done"
+    }
+  ],
+  "appliesTo": ["core", "server", "terminal"]
+}

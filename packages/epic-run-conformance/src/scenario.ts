@@ -50,6 +50,36 @@ const AgentStep = Schema.Struct({
    * step to a child instead, and each child consumes its own steps in order.
    */
   childId: Schema.optional(Schema.String),
+  /**
+   * Merge the base repository's `HEAD` into this worker's branch before the
+   * step's writes, then commit the result.
+   *
+   * This is the one thing a merge-fix worker does that an ordinary worker never
+   * does, and it is not expressible as a write: a parked branch and the base
+   * both changed the same lines, so only a merge commit carrying the base can
+   * make the next trial merge clean. The merge is expected to conflict; the
+   * step's `writes` are the resolution, and the commit below records it.
+   *
+   * Reads the base repository's `HEAD` rather than a branch name, so it holds
+   * for any base branch the run resolved. Every driver runs on
+   * `vcs.runOwnedBaseBranch: false`, so that head IS the run's base branch.
+   */
+  mergeBaseBranch: Schema.optional(Schema.Boolean),
+  /**
+   * Advance the base repository past this worker's branch, so the branch's
+   * trial merge conflicts.
+   *
+   * Scripted rather than implied by `repo.mergeConflict` alone: an advance that
+   * fires on every commit made outside the base repo fires again on the
+   * merge-fix child's own commit, so the conflict it creates never converges,
+   * and it runs after the shim released `CONFORMANCE_LOCK`, so two workers race
+   * the same base. Keyed to a step, both are the scenario author's choice.
+   *
+   * A parallel run has no use for this: the drain reads a base that moved
+   * under it as an external move and stops the run, rather than parking the
+   * branch. Two workers writing the same file conflict without it.
+   */
+  advanceBase: Schema.optional(Schema.Boolean),
 });
 
 /**

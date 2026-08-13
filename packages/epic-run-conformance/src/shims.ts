@@ -187,6 +187,16 @@ appendFileSync(journal, JSON.stringify({ tool: "agent", harness: process.env.CON
 rmdirSync(lock);
 ownsLock = false;
 if (step.hangMs > 0) sleep(step.hangMs);
+const commitEnv = { ...process.env, GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z" };
+if (step.mergeBaseBranch) {
+  const baseCwd = process.env.CONFORMANCE_BASE_CWD;
+  if (!baseCwd) throw new Error("mergeBaseBranch needs CONFORMANCE_BASE_CWD");
+  const head = spawnSync("git", ["-C", baseCwd, "rev-parse", "HEAD"], { encoding: "utf8", env: process.env });
+  if (head.status !== 0) process.exit(head.status ?? 1);
+  // A conflict here is the expected outcome, so the exit code is not checked:
+  // the writes below resolve it and the commit below records the resolution.
+  spawnSync("git", ["merge", "--no-edit", head.stdout.trim()], { stdio: "inherit", env: commitEnv });
+}
 if (step.claimChild && child) {
   const result = spawnSync("bd", ["update", child, "--claim"], { stdio: "inherit", env: process.env });
   if (result.status !== 0) process.exit(result.status ?? 1);
@@ -201,19 +211,18 @@ if ((step.repoAction === "dirty-only" || step.repoAction === "commit" || step.re
   writeFileSync("agent-" + String(index) + ".txt", "agent " + String(index) + "\\n");
 }
 if (step.repoAction === "commit" || step.repoAction === "commit-with-siblings") {
-  const env = { ...process.env, GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z" };
   for (const args of [["add", "."], ["commit", "-qm", "fixture agent commit " + String(index) + " for " + String(child)]]) {
-    const result = spawnSync("git", args, { stdio: "inherit", env });
+    const result = spawnSync("git", args, { stdio: "inherit", env: commitEnv });
     if (result.status !== 0) process.exit(result.status ?? 1);
   }
   const baseCwd = process.env.CONFORMANCE_BASE_CWD;
-  if (state.mergeConflict && baseCwd && resolve(process.cwd()) !== resolve(baseCwd)) {
+  if (step.advanceBase && state.mergeConflict && baseCwd && resolve(process.cwd()) !== resolve(baseCwd)) {
     const baseTarget = resolve(baseCwd, state.mergeConflict.path);
     if (!baseTarget.startsWith(resolve(baseCwd) + sep)) throw new Error("merge conflict path escapes base repo");
     mkdirSync(dirname(baseTarget), { recursive: true });
     writeFileSync(baseTarget, state.mergeConflict.baseAdvanceContent);
     for (const args of [["-C", baseCwd, "add", "."], ["-C", baseCwd, "commit", "-qm", "fixture base advance " + String(index)]]) {
-      const result = spawnSync("git", args, { stdio: "inherit", env });
+      const result = spawnSync("git", args, { stdio: "inherit", env: commitEnv });
       if (result.status !== 0) process.exit(result.status ?? 1);
     }
   }
@@ -222,7 +231,7 @@ if (step.repoAction === "commit" || step.repoAction === "commit-with-siblings") 
       const siblingPath = resolve(process.cwd(), "..", basename(sibling));
       writeFileSync(join(siblingPath, "agent-" + String(index) + ".txt"), "agent " + String(index) + "\\n");
       for (const args of [["-C", siblingPath, "add", "."], ["-C", siblingPath, "commit", "-qm", "fixture sibling commit " + String(index)]]) {
-        const result = spawnSync("git", args, { stdio: "inherit", env });
+        const result = spawnSync("git", args, { stdio: "inherit", env: commitEnv });
         if (result.status !== 0) process.exit(result.status ?? 1);
       }
     }

@@ -532,6 +532,7 @@ describe("conformance workspace", () => {
         agentScript: [
           {
             repoAction: "commit",
+            advanceBase: true,
             writes: [{ path: "conflict.txt", content: "worker\n" }],
             report: { _tag: "ralph-msg", summary: "built", why: "conflicting change" },
             closeChild: true,
@@ -556,5 +557,114 @@ describe("conformance workspace", () => {
       "<<<<<<<",
     );
     assert.equal(run(workspace, "git", ["merge", "--abort"]).status, 0);
+  });
+
+  it("leaves the base branch alone when the step does not ask for the advance", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conformance-no-advance-"));
+    const base = loadScenario(NodePath.join(scenariosDirectory, "happy-path.json"));
+    const workspace = materializeConformanceWorkspace(
+      decodeConformanceScenario({
+        ...base,
+        name: "park-merge-conflict-unscripted",
+        repo: {
+          ...base.repo,
+          mergeConflict: {
+            path: "conflict.txt",
+            baseContent: "base\n",
+            workerContent: "worker\n",
+            baseAdvanceContent: "base advanced\n",
+          },
+        },
+        agentScript: [
+          {
+            repoAction: "commit",
+            writes: [{ path: "conflict.txt", content: "worker\n" }],
+            report: { _tag: "ralph-msg", summary: "built", why: "conflicting change" },
+            closeChild: true,
+            hangMs: 0,
+          },
+        ],
+      }),
+      root,
+    );
+    const headBefore = run(workspace, "git", ["rev-parse", "HEAD"]).stdout.trim();
+    const worker = NodePath.join(root, "worker");
+    assert.equal(run(workspace, "git", ["worktree", "add", "-b", "epic/epic.1", worker]).status, 0);
+    const agent = NodeChildProcess.spawnSync(NodePath.join(workspace.binDir, "agent"), ["prompt"], {
+      cwd: worker,
+      encoding: "utf8",
+      env: { ...process.env, ...workspace.env },
+    });
+    assert.equal(agent.status, 0, agent.stderr);
+    assert.equal(run(workspace, "git", ["rev-parse", "HEAD"]).stdout.trim(), headBefore);
+    assert.equal(run(workspace, "git", ["merge", "--no-commit", "epic/epic.1"]).status, 0);
+  });
+
+  it("merges the base branch into the worker's branch and records the resolution", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conformance-merge-base-"));
+    const base = loadScenario(NodePath.join(scenariosDirectory, "happy-path.json"));
+    const workspace = materializeConformanceWorkspace(
+      decodeConformanceScenario({
+        ...base,
+        name: "merge-base-branch",
+        repo: { ...base.repo, files: [{ path: "conflict.txt", content: "shared\n" }] },
+        agentScript: [
+          {
+            childId: "epic.1",
+            repoAction: "commit",
+            writes: [{ path: "conflict.txt", content: "two\n" }],
+            report: { _tag: "ralph-msg", summary: "built", why: "conflicting change" },
+            closeChild: false,
+            hangMs: 0,
+          },
+          {
+            childId: "created-1",
+            repoAction: "commit",
+            mergeBaseBranch: true,
+            writes: [{ path: "conflict.txt", content: "one\ntwo\n" }],
+            report: { _tag: "ralph-msg", summary: "resolved", why: "parked branch" },
+            closeChild: false,
+            hangMs: 0,
+          },
+        ],
+      }),
+      root,
+    );
+    const worker = NodePath.join(root, "worker");
+    assert.equal(run(workspace, "git", ["worktree", "add", "-b", "epic/epic.1", worker]).status, 0);
+    const commitOnBranch = NodeChildProcess.spawnSync(
+      NodePath.join(workspace.binDir, "agent"),
+      ["prompt"],
+      {
+        cwd: worker,
+        encoding: "utf8",
+        env: { ...process.env, ...workspace.env, COOKEPIC_CHILD: "epic.1" },
+      },
+    );
+    assert.equal(commitOnBranch.status, 0, commitOnBranch.stderr);
+    // The base moves the way a landed sibling branch moves it: on the base
+    // branch itself, over the same line the parked branch changed.
+    NodeFS.writeFileSync(NodePath.join(workspace.cwd, "conflict.txt"), "one\n");
+    assert.equal(run(workspace, "git", ["commit", "-aqm", "landed one"]).status, 0);
+    const resolve = NodeChildProcess.spawnSync(
+      NodePath.join(workspace.binDir, "agent"),
+      ["prompt"],
+      {
+        cwd: worker,
+        encoding: "utf8",
+        env: { ...process.env, ...workspace.env, COOKEPIC_CHILD: "created-1" },
+      },
+    );
+    assert.equal(resolve.status, 0, resolve.stderr);
+    assert.equal(
+      run(workspace, "git", ["-C", worker, "log", "-1", "--format=%s"]).stdout.trim(),
+      "fixture agent commit 0 for created-1",
+    );
+    // The point of the resolution: the branch now merges clean.
+    assert.equal(run(workspace, "git", ["merge", "--no-edit", "epic/epic.1"]).status, 0);
+    assert.equal(
+      NodeFS.readFileSync(NodePath.join(workspace.cwd, "conflict.txt"), "utf8"),
+      "one\ntwo\n",
+    );
   });
 });
