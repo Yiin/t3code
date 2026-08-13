@@ -5,11 +5,17 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { EpicSubagentMap, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import type { WorkerScopePreparation } from "../workerScope.ts";
-import { makeTerminalAgentDispatch, parseTerminalArtifact } from "./TerminalAgentDispatch.ts";
+import {
+  makeTerminalAgentDispatch,
+  parseTerminalArtifact,
+  type TerminalHarness,
+} from "./TerminalAgentDispatch.ts";
+import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
 
 describe("TerminalAgentDispatch final assistant selection", () => {
   it("ignores protocol text outside the Codex final agent message", () => {
@@ -525,6 +531,10 @@ const primeEvent = JSON.stringify({
 const startClaude = (input: {
   readonly model?: string;
   readonly useHarnessDefaultModel?: boolean;
+  readonly subagents?: EpicSubagentMap;
+  readonly harness?: TerminalHarness;
+  readonly instanceId?: string;
+  readonly routes?: (worker: string) => ReadonlyArray<TerminalProviderRoute>;
 }) =>
   Effect.gen(function* () {
     const fixture = yield* Effect.acquireRelease(
@@ -536,13 +546,15 @@ printf '%s\\n' '{"type":"result","result":"RALPH_DONE","session_id":"s"}'`),
         Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
     );
     const dispatch = makeTerminalAgentDispatch({
-      harness: "claude",
+      harness: input.harness ?? "claude",
       artifactsDirectory: fixture.directory,
       binary: fixture.worker,
       environment: { CAPTURE_DIR: fixture.directory },
       ...(input.useHarnessDefaultModel === undefined
         ? {}
         : { useHarnessDefaultModel: input.useHarnessDefaultModel }),
+      ...(input.subagents === undefined ? {} : { subagents: input.subagents }),
+      ...(input.routes === undefined ? {} : { providerRoutes: input.routes(fixture.worker) }),
     });
     const handle = yield* dispatch.startIteration({
       runId: "claude",
@@ -551,13 +563,23 @@ printf '%s\\n' '{"type":"result","result":"RALPH_DONE","session_id":"s"}'`),
       worktreePath: null,
       prompt: "cook child",
       selection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
+        instanceId: ProviderInstanceId.make(input.instanceId ?? "claudeAgent"),
         model: input.model ?? "claude-opus-4-6",
       },
     });
     yield* Effect.addFinalizer(() => handle.release.pipe(Effect.ignore));
     return { ...fixture, handle };
   });
+
+const readArgs = (directory: string): ReadonlyArray<string> =>
+  NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").trim().split("\n");
+
+const reviewerSubagents: EpicSubagentMap = {
+  reviewer: { description: "Reviews code", prompt: "You are a reviewer", model: "fable" },
+};
+
+/** The emitted flag must parse back into a valid subagent map, not just a blob. */
+const decodeSubagentsArg = Schema.decodeUnknownSync(Schema.fromJsonString(EpicSubagentMap));
 
 it.live("passes the configured Claude model to the harness", () =>
   Effect.scoped(
@@ -591,6 +613,80 @@ it.live("omits the Claude model when no model was configured", () =>
       yield* handle.awaitSettled;
       const args = NodeFS.readFileSync(NodePath.join(directory, "args"), "utf8").split("\n");
       assert.notInclude(args, "--model");
+    }),
+  ),
+);
+
+it.live("passes injected subagent definitions to the Claude harness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({ subagents: reviewerSubagents });
+      yield* handle.awaitSettled;
+      const args = readArgs(directory);
+      assert.equal(args.filter((token) => token === "--agents").length, 1);
+      const flagIndex = args.indexOf("--agents");
+      assert.deepEqual(decodeSubagentsArg(args[flagIndex + 1] ?? ""), reviewerSubagents);
+    }),
+  ),
+);
+
+it.live("omits --agents when no subagents are configured", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({});
+      yield* handle.awaitSettled;
+      assert.notInclude(readArgs(directory), "--agents");
+    }),
+  ),
+);
+
+it.live("omits --agents for an empty subagent map", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({ subagents: {} });
+      yield* handle.awaitSettled;
+      assert.notInclude(readArgs(directory), "--agents");
+    }),
+  ),
+);
+
+it.live("keeps injected subagents across a fallback route to another Claude instance", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({
+        subagents: reviewerSubagents,
+        instanceId: "claudeAgentSecondary",
+        routes: (worker) => [
+          {
+            instanceId: ProviderInstanceId.make("claudeAgentSecondary"),
+            driver: ProviderDriverKind.make("claudeAgent"),
+            harness: "claude",
+            binary: worker,
+            model: "claude-opus-4-6",
+            primary: false,
+          },
+        ],
+      });
+      yield* handle.awaitSettled;
+      const args = readArgs(directory);
+      const flagIndex = args.indexOf("--agents");
+      assert.isAtLeast(flagIndex, 0);
+      assert.deepEqual(decodeSubagentsArg(args[flagIndex + 1] ?? ""), reviewerSubagents);
+    }),
+  ),
+);
+
+it.live("does not pass --agents to a non-Claude harness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { directory, handle } = yield* startClaude({
+        subagents: reviewerSubagents,
+        harness: "codex",
+        instanceId: "codex",
+        model: "gpt-5.6-sol",
+      });
+      yield* handle.awaitSettled;
+      assert.notInclude(readArgs(directory), "--agents");
     }),
   ),
 );

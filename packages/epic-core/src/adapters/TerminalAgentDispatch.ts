@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
+import type { EpicSubagentMap } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import {
@@ -33,6 +34,12 @@ export interface TerminalAgentDispatchOptions {
   readonly workerCommand?: string;
   readonly permissionMode?: string;
   readonly useHarnessDefaultModel?: boolean;
+  /**
+   * Subagent definitions injected into the harness session. Claude-family
+   * harnesses receive them as `--agents <json>`; other harnesses ignore them.
+   * The runner owns the per-role model tier via each definition's `model`.
+   */
+  readonly subagents?: EpicSubagentMap | undefined;
   readonly timeoutSeconds?: number | null;
   readonly stopGraceSeconds?: number;
   readonly maxArtifactBytes?: number;
@@ -298,6 +305,18 @@ const primeInvocation = (input: {
   ],
 });
 
+/**
+ * The `--agents <json>` flag for an injected role map, or nothing.
+ *
+ * An absent or empty map emits no flag at all, so a harness with no policy
+ * keeps its own agents instead of being handed an empty set.
+ */
+const subagentsArgs = (subagents: EpicSubagentMap | undefined): ReadonlyArray<string> => {
+  if (subagents === undefined) return [];
+  if (Object.keys(subagents).length === 0) return [];
+  return ["--agents", JSON.stringify(subagents)];
+};
+
 const claudeInvocation = (input: {
   readonly options: TerminalAgentDispatchOptions;
   readonly prompt: string;
@@ -305,6 +324,11 @@ const claudeInvocation = (input: {
   readonly sessionId: string | null;
   readonly persistSession: boolean;
   readonly inspector: boolean;
+  /**
+   * Injected role definitions. Only an iteration worker carries them: a fold
+   * or inspector auxiliary is one prompt long and spawns nobody.
+   */
+  readonly subagents?: EpicSubagentMap | undefined;
 }): { readonly command: string; readonly args: ReadonlyArray<string> } => ({
   command: input.options.binary ?? "claude",
   args: [
@@ -314,6 +338,7 @@ const claudeInvocation = (input: {
     input.options.permissionMode ?? "auto",
     "--output-format",
     "json",
+    ...subagentsArgs(input.subagents),
     ...(input.selection.model.length === 0 || input.options.useHarnessDefaultModel
       ? []
       : ["--model", input.selection.model]),
@@ -370,6 +395,7 @@ const invocation = (input: {
         sessionId,
         persistSession: true,
         inspector: false,
+        subagents: options.subagents,
       });
     case "codex":
       return {
@@ -421,6 +447,8 @@ const routeOptions = (
   return {
     harness: route.harness,
     options: {
+      // The spread carries `subagents` to the routed options on purpose: a
+      // fallback to another Claude account keeps the same role definitions.
       ...options,
       harness: route.harness,
       binary: route.binary,
