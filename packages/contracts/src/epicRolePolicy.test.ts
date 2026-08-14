@@ -12,7 +12,7 @@ describe("EpicRolePolicy", () => {
       "epic-note-fold",
       "merge-fix",
     ]);
-    expect(DEFAULT_EPIC_ROLE_POLICY).toEqual({ tiers: {}, roles: {} });
+    expect(DEFAULT_EPIC_ROLE_POLICY).toEqual({ tiers: {}, roles: {}, inSessionRoles: {} });
   });
 
   it("allows empty, partial, and complete role assignments", () => {
