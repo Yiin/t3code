@@ -3869,9 +3869,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    * explicit `cwd` (the SDK would inherit the server's own working directory,
    * which this adapter never chose), a project directory that is not there, or
    * a filesystem that will not answer all mean "cannot tell" and the resume
-   * proceeds exactly as before. Only "the project directory is there and this
-   * session's file is not" counts as proof, and that is the case a restart
-   * resume actually hits.
+   * proceeds exactly as before.
+   *
+   * The transcript is also not bound to the cwd's own project directory:
+   * `EnterWorktree` mid-session refiles the whole transcript under the
+   * worktree's slug, and the SDK still resumes it from there. So "not under
+   * this cwd's slug" is not proof either — only a completed scan of every
+   * project directory that finds no copy of the session file is, and that is
+   * the case a restart resume actually hits.
    */
   const ensureResumeTranscriptExists = Effect.fn("ensureResumeTranscriptExists")(function* (input: {
     readonly threadId: ThreadId;
@@ -3889,23 +3894,44 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (!projectDirExists) {
       return;
     }
-    const transcriptPath = path.join(projectDir, `${input.resumeSessionId}.jsonl`);
+    const transcriptFileName = `${input.resumeSessionId}.jsonl`;
     const transcriptExists = yield* fileSystem
-      .exists(transcriptPath)
+      .exists(path.join(projectDir, transcriptFileName))
       .pipe(Effect.orElseSucceed(() => false));
     if (transcriptExists) {
       return;
     }
+    const projectsDir = path.join(configDir, "projects");
+    const projectDirNames = yield* fileSystem
+      .readDirectory(projectsDir)
+      .pipe(Effect.orElseSucceed(() => undefined));
+    if (projectDirNames === undefined) {
+      return;
+    }
+    for (const projectDirName of projectDirNames) {
+      const relocated = yield* fileSystem
+        .exists(path.join(projectsDir, projectDirName, transcriptFileName))
+        .pipe(Effect.orElseSucceed(() => false));
+      if (relocated) {
+        yield* Effect.logInfo("claude.session.resume.transcript-relocated", {
+          threadId: input.threadId,
+          resumeSessionId: input.resumeSessionId,
+          expectedProjectDir: projectDir,
+          foundProjectDir: path.join(projectsDir, projectDirName),
+        });
+        return;
+      }
+    }
     yield* Effect.logWarning("claude.session.resume.transcript-missing", {
       threadId: input.threadId,
       resumeSessionId: input.resumeSessionId,
-      transcriptPath,
+      projectsDir,
     });
     return yield* new ProviderAdapterResumeError({
       provider: PROVIDER,
       threadId: input.threadId,
       resumeSessionId: input.resumeSessionId,
-      detail: `Claude has no transcript for this session under ${projectDir}.`,
+      detail: `Claude has no transcript for this session anywhere under ${projectsDir}.`,
     });
   });
 
