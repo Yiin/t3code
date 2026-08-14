@@ -12,10 +12,12 @@ const PRIME_DRIVER = ProviderDriverKind.make("primeAgent");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const KIMI_DRIVER = ProviderDriverKind.make("kimi");
+const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
 
 const CLAUDE_MODEL = DEFAULT_MODEL_BY_PROVIDER[CLAUDE_DRIVER] ?? "claude-sonnet-5";
 const CODEX_MODEL = DEFAULT_MODEL_BY_PROVIDER[CODEX_DRIVER] ?? "gpt-5.6-sol";
 const KIMI_MODEL = DEFAULT_MODEL_BY_PROVIDER[KIMI_DRIVER] ?? "kimi-code/k3";
+const OPENCODE_MODEL = DEFAULT_MODEL_BY_PROVIDER[OPENCODE_DRIVER] ?? "openai/gpt-5";
 
 const FALLBACK_STAGES: ReadonlyArray<{
   readonly driver: ProviderDriverKind;
@@ -31,6 +33,7 @@ const FALLBACK_STAGES: ReadonlyArray<{
     options: [{ id: "reasoningEffort", value: "high" }],
   },
   { driver: KIMI_DRIVER, model: KIMI_MODEL },
+  { driver: OPENCODE_DRIVER, model: OPENCODE_MODEL },
 ];
 
 const isEligible = (provider: ServerProvider, model: string): boolean =>
@@ -139,34 +142,81 @@ export const resolveEpicProviderChainFallback = (input: {
 /**
  * Resolve the next configured provider after a provider-attributed failure.
  * Instance ids are routing keys. Driver order only controls forward fallback.
+ *
+ * The failing harness's other accounts come first: the walk rotates through
+ * the current driver's sibling instances in settings-author order, starting
+ * after the failing instance and wrapping, before it advances a stage. A
+ * sibling keeps the failing selection's model when it advertises the same
+ * slug, falls to the driver's stage model otherwise, and is skipped when it
+ * advertises neither. A driver outside the stage table (cursor, grok, forks)
+ * — and opencode, the table's tail — rotates siblings and then enters the
+ * stage walk at the head. Prime is never a target.
  */
 export const resolveEpicProviderFallback = (input: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly current: ModelSelection;
   readonly failureReason: string | undefined;
   readonly providerFallbackEligible: boolean;
+  readonly isBlocked?: (instanceId: ProviderInstanceId) => boolean;
 }): ModelSelection | null => {
   if (!input.providerFallbackEligible || !input.failureReason?.startsWith("provider-error")) {
     return null;
   }
 
-  const currentProvider = input.providers.find(
+  const currentIndex = input.providers.findIndex(
     (provider) => provider.instanceId === input.current.instanceId,
   );
+  const currentProvider = currentIndex === -1 ? undefined : input.providers[currentIndex];
   if (currentProvider === undefined) {
     return null;
   }
 
-  const currentStage = FALLBACK_STAGES.findIndex(
+  const isBlocked = input.isBlocked ?? (() => false);
+  const currentStageIndex = FALLBACK_STAGES.findIndex(
     (stage) => stage.driver === currentProvider.driver,
   );
-  if (currentStage === -1) {
-    return null;
+  const currentStage = currentStageIndex === -1 ? undefined : FALLBACK_STAGES[currentStageIndex];
+
+  if (currentProvider.driver !== PRIME_DRIVER) {
+    const rotated = [
+      ...input.providers.slice(currentIndex + 1),
+      ...input.providers.slice(0, currentIndex),
+    ];
+    for (const sibling of rotated) {
+      if (sibling.driver !== currentProvider.driver || isBlocked(sibling.instanceId)) {
+        continue;
+      }
+      if (isEligible(sibling, input.current.model)) {
+        return {
+          instanceId: sibling.instanceId,
+          model: input.current.model,
+          ...(input.current.options === undefined ? {} : { options: input.current.options }),
+        };
+      }
+      if (currentStage !== undefined && isEligible(sibling, currentStage.model)) {
+        return {
+          instanceId: sibling.instanceId,
+          model: currentStage.model,
+          ...(currentStage.options === undefined ? {} : { options: currentStage.options }),
+        };
+      }
+    }
   }
 
-  for (const stage of FALLBACK_STAGES.slice(currentStage + 1)) {
+  const stages =
+    currentStageIndex === -1 || currentProvider.driver === OPENCODE_DRIVER
+      ? FALLBACK_STAGES
+      : FALLBACK_STAGES.slice(currentStageIndex + 1);
+  for (const stage of stages) {
+    if (stage.driver === PRIME_DRIVER) {
+      continue;
+    }
     const provider = input.providers.find(
-      (candidate) => candidate.driver === stage.driver && isEligible(candidate, stage.model),
+      (candidate) =>
+        candidate.driver === stage.driver &&
+        candidate.instanceId !== input.current.instanceId &&
+        isEligible(candidate, stage.model) &&
+        !isBlocked(candidate.instanceId),
     );
     if (provider !== undefined) {
       return {

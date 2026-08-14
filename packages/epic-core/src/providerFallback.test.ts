@@ -399,3 +399,160 @@ describe("resolveEpicProviderFallback", () => {
     ).toBeNull();
   });
 });
+
+describe("resolveEpicProviderFallback sibling rotation", () => {
+  const claudePersonal = provider("claude-personal", "claudeAgent", "claude-sonnet-5");
+  const opencode = provider("opencode-team", "opencode", "openai/gpt-5");
+
+  const resolve = (overrides: Partial<Parameters<typeof resolveEpicProviderFallback>[0]> = {}) =>
+    resolveEpicProviderFallback({
+      providers: [claude, claudePersonal, codex, kimi],
+      current: selection("claude-work", "claude-sonnet-5"),
+      failureReason: "provider-error:rate-limit",
+      providerFallbackEligible: true,
+      ...overrides,
+    });
+
+  it("rotates to a same-harness sibling before leaving the harness", () => {
+    expect(resolve()).toEqual(selection("claude-personal", "claude-sonnet-5"));
+  });
+
+  it("wraps to a sibling listed before the failing instance", () => {
+    expect(resolve({ providers: [claudePersonal, claude, codex, kimi] })).toEqual(
+      selection("claude-personal", "claude-sonnet-5"),
+    );
+  });
+
+  it("keeps the failing selection's model and options on the sibling", () => {
+    const options: NonNullable<ModelSelection["options"]> = [
+      { id: "reasoningEffort", value: "high" },
+    ];
+    const codexA = provider("codex-a", "codex", "gpt-5.6-sol");
+    const codexB = provider("codex-b", "codex", "gpt-5.6-sol");
+    const result = resolveEpicProviderFallback({
+      providers: [codexA, codexB, kimi],
+      current: { instanceId: codexA.instanceId, model: "gpt-5.6-sol", options },
+      failureReason: "provider-error:spend-limit",
+      providerFallbackEligible: true,
+    });
+
+    expect(result).toEqual({
+      instanceId: codexB.instanceId,
+      model: "gpt-5.6-sol",
+      options,
+    });
+    expect(result?.options).toBe(options);
+  });
+
+  it("falls to the stage model when the sibling misses the failing model", () => {
+    const sonnetOnly = provider("claude-sonnet-only", "claudeAgent", "claude-sonnet-5");
+    expect(
+      resolve({
+        providers: [claude, sonnetOnly, codex],
+        current: selection("claude-work", "claude-opus-5"),
+      }),
+    ).toEqual(selection("claude-sonnet-only", "claude-sonnet-5"));
+  });
+
+  it("skips a sibling that advertises neither the failing nor the stage model", () => {
+    const haikuOnly = provider("claude-haiku-only", "claudeAgent", "claude-haiku-4-5");
+    expect(resolve({ providers: [claude, haikuOnly, codex, kimi] })).toEqual({
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+  });
+
+  it("skips an ineligible sibling and then leaves the harness", () => {
+    const loggedOut = provider("claude-personal", "claudeAgent", "claude-sonnet-5", {
+      auth: { status: "unauthenticated" },
+    });
+    expect(resolve({ providers: [claude, loggedOut, codex, kimi] })).toEqual({
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+  });
+
+  it("skips a blocked sibling and a blocked stage instance", () => {
+    const blocked = new Set(["claude-personal", "codex-personal"]);
+    expect(resolve({ isBlocked: (instanceId) => blocked.has(instanceId) })).toEqual(
+      selection("kimi-team", "kimi-code/k3"),
+    );
+  });
+
+  it("never re-selects the failing instance", () => {
+    expect(
+      resolveEpicProviderFallback({
+        providers: [opencode],
+        current: selection("opencode-team", "openai/gpt-5"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("moves from Kimi to OpenCode", () => {
+    expect(
+      resolveEpicProviderFallback({
+        providers: [kimi, opencode],
+        current: selection("kimi-team"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("opencode-team", "openai/gpt-5"));
+  });
+
+  it("rotates OpenCode siblings and then enters the stage walk from the head", () => {
+    const opencodeB = provider("opencode-b", "opencode", "openai/gpt-5");
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, claude, opencode, opencodeB],
+        current: selection("opencode-team", "openai/gpt-5"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("opencode-b", "openai/gpt-5"));
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, claude, opencode],
+        current: selection("opencode-team", "openai/gpt-5"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("claude-work", "claude-sonnet-5"));
+  });
+
+  it("rotates an off-table driver's siblings and then starts at the head", () => {
+    const cursorA = provider("cursor-a", "cursor", "auto");
+    const cursorB = provider("cursor-b", "cursor", "auto");
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, claude, cursorA, cursorB],
+        current: selection("cursor-a", "auto"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("cursor-b", "auto"));
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, claude, cursorA],
+        current: selection("cursor-a", "auto"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("claude-work", "claude-sonnet-5"));
+  });
+
+  it("never rotates into a Prime sibling", () => {
+    const primeSibling = provider("prime-personal", "primeAgent", "prime/custom-model");
+    expect(
+      resolveEpicProviderFallback({
+        providers: [prime, primeSibling, claude],
+        current: selection("prime-work", "prime/custom-model"),
+        failureReason: "provider-error:rate-limit",
+        providerFallbackEligible: true,
+      }),
+    ).toEqual(selection("claude-work", "claude-sonnet-5"));
+  });
+});

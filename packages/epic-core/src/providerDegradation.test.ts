@@ -204,19 +204,32 @@ describe("resolveDegradationAwareSelection", () => {
     expect(resolved.selection).toEqual(codex);
   });
 
-  it("walks driver order when the role has no chain", () => {
+  it("rotates to the same-harness sibling when the role has no chain", () => {
     const resolved = resolveDegradationAwareSelection({
       providers,
       chain: [],
       current: claudeWork,
       degradationOf: degraded("claude-work", "codex-personal"),
     });
+    expect(resolved.selection).toEqual(claudePersonal);
+    expect(resolved.hops).toEqual([
+      { from: claudeWork, to: claudePersonal, reason: "provider-error:rate-limit" },
+    ]);
+  });
+
+  it("walks driver order when every same-harness sibling is degraded too", () => {
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain: [],
+      current: claudeWork,
+      degradationOf: degraded("claude-work", "claude-personal", "codex-personal"),
+    });
     // Driver order is Claude then Codex then Kimi, and Codex is degraded too.
     expect(resolved.selection).toEqual({
       instanceId: ProviderInstanceId.make("kimi-work"),
       model: "kimi-code/k3",
     });
-    expect(resolved.hops.map((hop) => hop.to.instanceId)).toEqual(["codex-personal", "kimi-work"]);
+    expect(resolved.hops.map((hop) => hop.to.instanceId)).toEqual(["kimi-work"]);
   });
 
   it("stops on the last reachable instance when driver order runs out", () => {
@@ -224,7 +237,7 @@ describe("resolveDegradationAwareSelection", () => {
       providers,
       chain: [],
       current: claudeWork,
-      degradationOf: degraded("claude-work", "codex-personal", "kimi-work"),
+      degradationOf: degraded("claude-work", "claude-personal", "codex-personal", "kimi-work"),
     });
     expect(resolved.selection.instanceId).toBe("kimi-work");
   });
@@ -266,15 +279,30 @@ describe("resolveDegradationAwareSelection", () => {
     expect(resolved.hops).toEqual([{ from: claudeWork, to: codex, reason: "usage-exhausted" }]);
   });
 
-  it("walks driver order past an exhausted instance", () => {
+  it("rotates to the sibling when only the current instance is exhausted", () => {
     const resolved = resolveDegradationAwareSelection({
       providers,
       chain: [],
       current: claudeWork,
       degradationOf: () => null,
-      isExhausted: (instanceId) => instanceId === "claude-work" || instanceId === "codex-personal",
+      isExhausted: (instanceId) => instanceId === "claude-work",
+    });
+    expect(resolved.selection).toEqual(claudePersonal);
+    expect(resolved.hops).toEqual([
+      { from: claudeWork, to: claudePersonal, reason: "usage-exhausted" },
+    ]);
+  });
+
+  it("walks driver order past exhausted instances", () => {
+    const exhausted = new Set(["claude-work", "claude-personal", "codex-personal"]);
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain: [],
+      current: claudeWork,
+      degradationOf: () => null,
+      isExhausted: (instanceId) => exhausted.has(instanceId),
     });
     expect(resolved.selection.instanceId).toBe("kimi-work");
-    expect(resolved.hops.map((hop) => hop.reason)).toEqual(["usage-exhausted", "usage-exhausted"]);
+    expect(resolved.hops.map((hop) => hop.reason)).toEqual(["usage-exhausted"]);
   });
 });

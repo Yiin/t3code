@@ -139,17 +139,41 @@ export const resolveDegradationAwareSelection = (input: {
   const currentReason = degradation?.failureReason ?? USAGE_EXHAUSTED_REASON;
 
   if (input.chain.length === 0) {
+    // The walker rotates same-driver siblings before it advances a stage, so
+    // passing the known-blocked instances lets one call skip straight to the
+    // first healthy account anywhere in the walk.
+    const healthy = resolveEpicProviderFallback({
+      providers: input.providers,
+      current: input.current,
+      failureReason: "provider-error",
+      providerFallbackEligible: true,
+      isBlocked: (instanceId) =>
+        input.degradationOf(instanceId) !== null || isExhausted(instanceId),
+    });
+    if (healthy !== null) {
+      return {
+        selection: healthy,
+        hops: [{ from: input.current, to: healthy, reason: currentReason }],
+      };
+    }
+
+    // Every reachable instance is blocked, but a run has to start: walk hop
+    // by hop to the deepest one. The visited set bounds the walk, because
+    // sibling rotation wraps within a driver.
     const hops: ProviderDegradationHop[] = [];
     let selection = input.current;
     let reason = currentReason;
+    const visited = new Set<ProviderInstanceId>([input.current.instanceId]);
     while (true) {
       const next = resolveEpicProviderFallback({
         providers: input.providers,
         current: selection,
         failureReason: "provider-error",
         providerFallbackEligible: true,
+        isBlocked: (instanceId) => visited.has(instanceId),
       });
       if (next === null) break;
+      visited.add(next.instanceId);
       hops.push({ from: selection, to: next, reason });
       selection = next;
       const nextDegradation = input.degradationOf(selection.instanceId);
