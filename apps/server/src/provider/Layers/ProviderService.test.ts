@@ -23,6 +23,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
+  ServerSettingsError,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -75,6 +76,7 @@ import {
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { EpicSubagentRegistry } from "../epicSubagents.ts";
+import { makeSubagentChildThreadId } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../../auth/environmentAuthTestStub.ts";
@@ -334,7 +336,13 @@ const hasMetricSnapshot = (
       Object.entries(attributes).every(([key, value]) => snapshot.attributes?.[key] === value),
   );
 
-function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServiceLive>[0]) {
+function makeProviderServiceLayer(
+  options?: Parameters<typeof makeProviderServiceLive>[0],
+  settingsLayer: Layer.Layer<
+    ServerSettings.ServerSettingsService,
+    ServerSettingsError
+  > = defaultServerSettingsLayer,
+) {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
   const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
@@ -358,7 +366,7 @@ function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServic
       makeProviderServiceLiveForTest(options).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(settingsLayer),
         Layer.provideMerge(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -2512,6 +2520,191 @@ subagentAttachment.layer("ProviderServiceLive epic subagent attachment", (it) =>
     }),
   );
 });
+
+// The policy's in-session roles reach every session, not just an epic worker's.
+// These roles are tier-less, so they carry no model and the subagent inherits
+// the session's — which is also what the shipped defaults look like.
+const injectedRoles = {
+  tester: { description: "Runs the tests", prompt: "You are a tester" },
+};
+
+const subagentFallback = makeProviderServiceLayer(
+  undefined,
+  ServerSettings.layerTest({ epicRolePolicy: { inSessionRoles: injectedRoles } }),
+);
+subagentFallback.layer("ProviderServiceLive epic subagent policy fallback", (it) => {
+  it.effect("injects the policy's in-session roles into a session with no binding", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-subagent-fallback");
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = subagentFallback.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepEqual(startInput?.subagents, injectedRoles);
+    }),
+  );
+
+  it.effect("keeps the runner's binding when a thread has one", () =>
+    Effect.gen(function* () {
+      const subagentRegistry = yield* EpicSubagentRegistry;
+      const provider = yield* ProviderService.ProviderService;
+      const bound = {
+        reviewer: { description: "Reviews code", prompt: "You are a reviewer", model: "fable" },
+      };
+      const threadId = asThreadId("thread-subagent-fallback-bound");
+      yield* subagentRegistry.bindThread({
+        runId: EpicRunId.make("run-subagent-fallback"),
+        threadId,
+        subagents: bound,
+      });
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = subagentFallback.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepEqual(startInput?.subagents, bound);
+    }),
+  );
+
+  it.effect("skips a spawn_agent child thread", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId(
+        makeSubagentChildThreadId("thread-subagent-parent", "11111111-2222-3333-4444-555555555555"),
+      );
+
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const startInput = subagentFallback.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(startInput?.subagents, undefined);
+    }),
+  );
+});
+
+const subagentFallbackWithSpawn = makeProviderServiceLayer(
+  undefined,
+  ServerSettings.layerTest({
+    epicRolePolicy: { inSessionRoles: injectedRoles },
+    subagentSpawn: { enabled: true },
+  }),
+);
+subagentFallbackWithSpawn.layer(
+  "ProviderServiceLive epic subagent policy fallback with thread-backed spawning",
+  (it) => {
+    it.effect("leaves an explicit thread-backed spawning opt-in alone", () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("thread-subagent-spawn-enabled");
+
+        yield* provider.startSession(threadId, {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+
+        const startInput = subagentFallbackWithSpawn.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.equal(startInput?.subagents, undefined);
+      }),
+    );
+
+    it.effect("still honours a runner binding for an epic worker", () =>
+      Effect.gen(function* () {
+        const subagentRegistry = yield* EpicSubagentRegistry;
+        const provider = yield* ProviderService.ProviderService;
+        const bound = {
+          implementer: { description: "Writes code", prompt: "You are an implementer" },
+        };
+        const threadId = asThreadId("thread-subagent-spawn-enabled-worker");
+        yield* subagentRegistry.bindThread({
+          runId: EpicRunId.make("run-subagent-spawn-enabled"),
+          threadId,
+          subagents: bound,
+        });
+
+        yield* provider.startSession(threadId, {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+
+        const startInput = subagentFallbackWithSpawn.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.deepEqual(startInput?.subagents, bound);
+      }),
+    );
+  },
+);
+
+const unreadableSettingsLayer = Layer.succeed(ServerSettings.ServerSettingsService, {
+  start: Effect.void,
+  ready: Effect.void,
+  getSettings: Effect.fail(
+    new ServerSettingsError({
+      settingsPath: "/tmp/settings.json",
+      operation: "read-file",
+      cause: new Error("settings are unreadable"),
+    }),
+  ),
+  updateSettings: () =>
+    Effect.fail(
+      new ServerSettingsError({
+        settingsPath: "/tmp/settings.json",
+        operation: "write-file",
+        cause: new Error("settings are unreadable"),
+      }),
+    ),
+  streamChanges: Stream.empty,
+});
+
+const subagentFallbackWithoutSettings = makeProviderServiceLayer(
+  undefined,
+  unreadableSettingsLayer,
+);
+subagentFallbackWithoutSettings.layer(
+  "ProviderServiceLive epic subagent policy fallback without readable settings",
+  (it) => {
+    it.effect("starts the session with no injected subagents", () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("thread-subagent-settings-failed");
+
+        const session = yield* provider.startSession(threadId, {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+
+        assert.equal(session.threadId, threadId);
+        const startInput =
+          subagentFallbackWithoutSettings.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.equal(startInput?.subagents, undefined);
+      }),
+    );
+  },
+);
 
 const fanout = makeProviderServiceLayer();
 fanout.layer("ProviderServiceLive fanout", (it) => {

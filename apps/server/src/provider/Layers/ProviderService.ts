@@ -25,6 +25,7 @@ import {
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   type AuthSessionId,
+  type EpicSubagentMap,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -32,6 +33,10 @@ import {
   type ProviderSessionResumeVerdict,
   type T3SessionEnvironment,
 } from "@t3tools/contracts";
+import {
+  maxLiveUtilizationByInstance,
+  resolveEpicSubagents,
+} from "@t3tools/epic-core/epicSubagents";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -69,6 +74,13 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import {
+  isSubagentChildThreadId,
+  resolveSpawnPolicy,
+} from "../../mcp/toolkits/agents/spawnPolicy.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
+import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
 /**
@@ -392,8 +404,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
   const subagentRegistry = yield* EpicSubagentRegistry;
+  // Optional on purpose: several test layers build the provider service without
+  // settings, a provider snapshot registry, or a usage ledger, and none of the
+  // three is worth a hard requirement when losing one only costs a session its
+  // injected subagents.
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
+  const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+  /**
+   * The subagent definitions one session starts with.
+   *
+   * An epic worker gets its map from `EpicSubagentRegistry`. Every other
+   * session falls back to the same epic role policy, so a thread a user types
+   * `/plan-epic` or `/cook-it` in carries the stage agents a worker carries.
+   * Every failure is fail-soft: an unreadable setting costs a session its
+   * injected agents, never its start.
+   *
+   * Two sessions are left out of the fallback, and only the fallback — a
+   * runner binding always wins, because a worker needs its stage agents
+   * whatever else is configured:
+   *
+   * 1. A `spawn_agent` child thread. `resolveSubagentSpawnMode`
+   *    (`../subagentSpawn.ts`) answers "in-process" for any session that ships
+   *    definitions BEFORE it reaches the child-thread check, so injecting here
+   *    would hand a child back the built-in delegation tool and defeat the
+   *    depth cap.
+   * 2. A session whose user turned thread-backed spawning on. Definitions force
+   *    in-process mode by design (t3code-pg7.13), so injecting into every
+   *    session would silently switch that opt-in back off.
+   */
+  const resolveSessionSubagents = (input: {
+    readonly threadId: ThreadId;
+    readonly sessionInstanceId: ProviderInstanceId | undefined;
+  }): Effect.Effect<Option.Option<EpicSubagentMap>> =>
+    Effect.gen(function* () {
+      const bound = yield* subagentRegistry.resolve(input.threadId);
+      if (Option.isSome(bound)) return bound;
+      if (isSubagentChildThreadId(input.threadId)) return Option.none();
+      if (Option.isNone(serverSettings)) return Option.none();
+      const settings = yield* serverSettings.value.getSettings;
+      if (resolveSpawnPolicy(settings.subagentSpawn).enabled) return Option.none();
+      const policy = settings.epicRolePolicy;
+      if (Object.keys(policy.inSessionRoles).length === 0) return Option.none();
+      const providers = Option.isNone(providerRegistry)
+        ? []
+        : yield* providerRegistry.value.getProviders;
+      const samples = Option.isNone(providerUsageLedger)
+        ? []
+        : yield* providerUsageLedger.value.listAll;
+      const utilization = maxLiveUtilizationByInstance(samples, yield* nowIso);
+      const subagents = resolveEpicSubagents({
+        policy,
+        providers,
+        ...(input.sessionInstanceId === undefined
+          ? {}
+          : { sessionInstanceId: input.sessionInstanceId }),
+        utilization: (instanceId) => utilization.get(instanceId) ?? null,
+      });
+      return Object.keys(subagents).length === 0 ? Option.none() : Option.some(subagents);
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.subagent-resolution-failed", {
+          threadId: input.threadId,
+          cause,
+        }).pipe(Effect.as(Option.none<EpicSubagentMap>())),
+      ),
+    );
+
   // Auth sessions minted for `t3Environment` injection, keyed by thread so the
   // token is revoked when the thread's MCP session is cleared.
   const t3EnvironmentAuthSessions = new Map<ThreadId, AuthSessionId>();
@@ -1026,7 +1106,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         workspaceRoot: persistedT3EnvironmentContext?.workspaceRoot,
       });
       const workerScope = yield* workerScopeRegistry.resolve(input.binding.threadId);
-      const subagents = yield* subagentRegistry.resolve(input.binding.threadId);
+      const subagents = yield* resolveSessionSubagents({
+        threadId: input.binding.threadId,
+        sessionInstanceId: persistedModelSelection?.instanceId ?? bindingInstanceId,
+      });
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -1253,7 +1336,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           workspaceRoot: parsed.workspaceRoot,
         });
         const workerScope = yield* workerScopeRegistry.resolve(threadId);
-        const subagents = yield* subagentRegistry.resolve(threadId);
+        const subagents = yield* resolveSessionSubagents({
+          threadId,
+          sessionInstanceId: input.modelSelection?.instanceId ?? resolvedInstanceId,
+        });
         const session = yield* adapter
           .startSession({
             ...input,
