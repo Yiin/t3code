@@ -15,6 +15,7 @@ import {
   diffTranscripts,
   type EpicRunConfig,
   type EpicRunTranscriptEvent,
+  type ModelSelection,
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as EpicRunPreflight from "@t3tools/epic-core/EpicRunPreflight";
@@ -708,7 +709,7 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
       const journal = yield* FileRunJournal.makePool({ runDirectory });
       const mergeQueueStore = yield* makeFileMergeQueueStore({ runDirectory });
       const gateReceipts = yield* makeFileGateReceipts({ runDirectory });
-      const selection = {
+      const selection: ModelSelection = {
         instanceId: ProviderInstanceId.make("worker-cmd"),
         model: "fixture",
       };
@@ -962,6 +963,18 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
                   threadId: row.threadId,
                   branch: acquired?.branch ?? null,
                   worktreePath: acquired?.worktreePath ?? null,
+                  selection:
+                    row.providerInstanceId == null || row.model == null
+                      ? selection
+                      : {
+                          instanceId: row.providerInstanceId,
+                          model: row.model,
+                          ...(row.providerInstanceId === selection.instanceId &&
+                          row.model === selection.model &&
+                          selection.options !== undefined
+                            ? { options: selection.options }
+                            : {}),
+                        },
                   startedAt: row.startedAt,
                   resumeCount: row.resumeCount ?? 0,
                 };
