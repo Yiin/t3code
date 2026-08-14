@@ -97,9 +97,12 @@ invalid config value. It does not silently select a different engine.
 
 ## Which provider a run uses
 
-A run resolves one model selection at launch and dispatches every iteration
-thread with it. The order is most specific first: the launch input, then
-`provider.modelSelection` in `.t3code/epic-run.json`, then the project default.
+A run resolves one model selection at launch and stores it on the run row. The
+order is most specific first: the launch input, then `provider.modelSelection`
+in `.t3code/epic-run.json`, then the project default. Each fresh dispatch can
+resolve another selection through its role tier. The run row's selection is the
+fallback when that role has no eligible hop. Each iteration row records the
+account and model that the dispatch used.
 
 Cooking an epic from inside a conversation sends
 `inheritOriginModelSelection: true`, so the run keeps that thread's exact
@@ -109,12 +112,16 @@ same project; otherwise the launch fails with `origin_thread_required`,
 back to the project default, because the caller picked that provider on purpose.
 A launch from the Epics page sends no such flag and keeps the project default.
 
-The resolved selection is persisted on the run row, so a boot resume replays the
-same provider. After that, only a provider-attributed failure moves the run
-forward through the fallback chain in
-[`providerFallback.ts`](../packages/epic-core/src/providerFallback.ts). The chain
-is Prime → Claude → Codex → Kimi. Prime is a source only: nothing falls back
-**to** Prime. Evidence must be a structured provider failure record. Assistant
+A resumed iteration reuses the provider selection stored on its iteration row.
+Only legacy rows without that data use the run row's selection. A
+provider-attributed failure can move the run at an iteration boundary. It never
+moves a running turn. The fallback first rotates through the current harness's
+other accounts. A role chain sets their order; without one, settings order
+applies. The harness walk then follows `FALLBACK_STAGES`: Claude, Codex, Kimi,
+and OpenCode
+([`providerFallback.ts`](../packages/epic-core/src/providerFallback.ts)). Prime
+is a source only. A driver outside the table rotates its siblings, then starts
+at Claude. Evidence must be a structured provider failure record. Assistant
 prose never triggers a fallback.
 
 In a terminal, the harness is the CLI you launched from.

@@ -72,16 +72,19 @@ narrows it to one scenario. Editing one scenario means running all three.
 - The `EpicRunLaunchError` reason list is duplicated in
   `packages/epic-core/src/Errors.ts` and `packages/contracts/src/epicRuns.ts`.
   Adding a reason to one only makes `apps/server/src/ws.ts` fail typecheck.
-- Forward provider fallback is Prime → Claude → Codex → Kimi
-  (`packages/epic-core/src/providerFallback.ts`). Prime is a source only.
-  That table is DRIVER order: the walk never tries a second instance of the
-  same driver, `opencode`/`cursor`/`grok` are absent from it, and a run whose
-  driver is absent never falls back at all (epic t3code-4hh changes this).
-- A tier chain reaches only the launch selection and injected subagent models.
-  `roleSelection` is `null` on both surfaces (`EpicRunner.ts`, `epicCook.ts`),
-  so every iteration dispatches on the run row's selection. The terminal twin
-  of launch selection is `apps/server/src/cli/epicCookSelection.ts`, which reads
-  a workspace `provider-degradations.json` instead of SQLite.
+- Provider fallback rotates the current harness's other accounts first. A role
+  chain sets their order; without one, settings order applies. The harness walk
+  then follows `FALLBACK_STAGES`: Claude, Codex, Kimi, and OpenCode
+  (`packages/epic-core/src/providerFallback.ts`). Prime is a source only. A
+  driver outside the table rotates its siblings, then starts at Claude.
+- `resolveLaunchModelSelection` in
+  `apps/server/src/runner/Layers/EpicRunnerLaunch.ts` selects the launch account.
+  `apps/server/src/runner/Layers/EpicRunnerRoleSelection.ts` selects each fresh
+  server dispatch. Both epic loops apply fallback at the iteration boundary.
+  They never move a running turn. The run row's selection remains the fallback
+  when role selection finds no eligible hop.
+- `apps/server/src/cli/epicCookSelection.ts` is the terminal twin. It reads the
+  workspace `provider-degradations.json` file instead of the SQLite stores.
 - Verification is by effects: Beads status plus commits, or a new bead comment
   for a `Research:` child. A worker's final message is never evidence.
 
@@ -157,14 +160,17 @@ before run completion. Provider fallback uses structured evidence only.
 
 - The live database is `~/.t3/userdata/state.sqlite`. Read-only `sqlite3` selects
   against `epic_runs`, `epic_run_iterations`, `epic_run_merge_state`,
-  `epic_run_merge_entries`, `epic_run_gate_receipts`, and
-  `provider_session_runtime` are the fastest way to check a real run.
+  `epic_run_merge_entries`, `epic_run_gate_receipts`, `provider_session_runtime`,
+  `provider_usage_windows`, `epic_provider_degradations`, and
+  `provider_account_limits` are the fastest way to check a real run.
 - Per-account usage lives in `provider_usage_windows` (one row per instance and
   window, with `resets_at`), filled by `ProviderUsagePoller` every 5 minutes.
   Only the Claude and Codex drivers expose a usage reader; Kimi and OpenCode
-  report nothing. `epic_provider_degradations` marks an instance unusable after
-  a provider error and expires on a flat 1-hour TTL
-  (`packages/contracts/src/epicRunConfig.ts`), not on the provider's reset time.
+  report nothing. `provider_account_limits` stores structured account limit
+  signals. `epic_provider_degradations` stores provider failures. A degradation
+  with `resets_at` stays live until that time. A row without it uses
+  `DEFAULT_EPIC_RUN_CONFIG.server.providerDegradationTtlMs`, which is
+  `3_600_000` (`packages/contracts/src/epicRunConfig.ts`).
 - `epic_run_gate_receipts` holds one append-only row per gate run: input heads,
   command digest, outcome, exit code, lock wait, execution time, and bounded
   output. Nothing updates a row, and `outcome = 'passed'` requires exit code 0.
@@ -280,6 +286,13 @@ inside the config directory that created it.
   `apps/server/src/cli/epicPolicy.test.ts`, the `agents` cases in
   `apps/server/src/provider/Layers/ClaudeAdapter.test.ts`, and the `--agents`
   cases in `packages/epic-core/src/adapters/TerminalAgentDispatch.test.ts`.
+- Account rotation tests: `packages/epic-core/src/providerFallback.test.ts`,
+  `packages/epic-core/src/providerDegradation.test.ts`,
+  `packages/epic-core/src/SequentialEpicLoop.test.ts`,
+  `packages/epic-core/src/ParallelEpicLoop.test.ts`,
+  `apps/server/src/runner/Layers/EpicRunnerRoleSelection.test.ts`,
+  `apps/server/src/cli/epicCookSelection.test.ts`, and
+  `packages/epic-run-conformance/scenarios/account-rotation-exhausts-harness.json`.
 
 ### Prime
 
