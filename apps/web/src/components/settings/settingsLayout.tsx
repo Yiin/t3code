@@ -95,7 +95,20 @@ export function SettingsRow({
   );
 }
 
-export function SettingResetButton({ label, onClick }: { label: string; onClick: () => void }) {
+/**
+ * `tooltip` overrides the hover text. Pass it when the button restores more
+ * than the row it sits on, so a sighted user reads the same scope the
+ * `aria-label` gives a screen reader.
+ */
+export function SettingResetButton({
+  label,
+  tooltip,
+  onClick,
+}: {
+  label: string;
+  tooltip?: string;
+  onClick: () => void;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger
@@ -114,7 +127,7 @@ export function SettingResetButton({ label, onClick }: { label: string; onClick:
           </Button>
         }
       />
-      <TooltipPopup side="top">Reset to default</TooltipPopup>
+      <TooltipPopup side="top">{tooltip ?? "Reset to default"}</TooltipPopup>
     </Tooltip>
   );
 }

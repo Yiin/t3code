@@ -466,7 +466,17 @@ export function InSessionRoleEditor({
         description={
           row.tierId
             ? `Runs on tier ${row.tierId} (${row.hopCount} ${row.hopCount === 1 ? "hop" : "hops"}).`
-            : "Inherits the worker session's model."
+            : // A tier-less subagent is the shipped default, not a mistake, so
+              // this stays plain copy. Only a named-but-missing tier warns.
+              "Runs on the worker's session model. Assign a tier for a dedicated fallback chain."
+        }
+        status={
+          row.tierMissing ? (
+            <span className="text-destructive">
+              Tier &quot;{row.role.tier}&quot; no longer exists. This subagent falls back to the
+              worker&apos;s session model.
+            </span>
+          ) : null
         }
         control={
           <Button
@@ -625,7 +635,22 @@ export function EpicsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Roles">
+      {/*
+        One Reset restores the whole policy, subagents included, so it sits in
+        the first section header rather than inside one of the three sections.
+      */}
+      <SettingsSection
+        title="Roles"
+        headerAction={
+          isEpicRolePolicyDirty(policy) ? (
+            <SettingResetButton
+              label="roles, tiers, and subagents"
+              tooltip="Reset roles, tiers, and subagents to defaults"
+              onClick={() => updatePolicy(DEFAULT_EPIC_ROLE_POLICY)}
+            />
+          ) : null
+        }
+      >
         {roleRows.map((row) => (
           <SettingsRow
             key={row.roleId}
@@ -674,17 +699,7 @@ export function EpicsSettingsPanel() {
         ))}
       </SettingsSection>
 
-      <SettingsSection
-        title="Tiers"
-        headerAction={
-          isEpicRolePolicyDirty(policy) ? (
-            <SettingResetButton
-              label="epic role policy"
-              onClick={() => updatePolicy(DEFAULT_EPIC_ROLE_POLICY)}
-            />
-          ) : null
-        }
-      >
+      <SettingsSection title="Tiers">
         <SettingsRow
           title="Add tier"
           description="Create a named fallback chain for one or more epic roles."
@@ -747,7 +762,7 @@ export function EpicsSettingsPanel() {
       <SettingsSection title="In-session subagents">
         <SettingsRow
           title="Add subagent"
-          description="Injected into every epic worker session, on the tier you give it."
+          description="Injected into every epic worker session. Without a tier, it runs on the session model."
         >
           <div className="space-y-2 pb-4 pt-3">
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -785,9 +800,11 @@ export function EpicsSettingsPanel() {
         </SettingsRow>
 
         {inSessionRoleRows.length === 0 ? (
+          // Reachable only by deleting all six shipped subagents, so the copy
+          // points at the Reset that brings them back.
           <SettingsRow
             title="No subagents configured"
-            description="Workers keep whatever agents their harness ships with."
+            description="Workers keep whatever agents their harness ships with. Reset, above, restores the shipped subagents."
           />
         ) : null}
 

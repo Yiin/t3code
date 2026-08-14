@@ -43,7 +43,7 @@ describe("InSessionRoleEditor", () => {
     expect(markup).toContain("You plan.");
   });
 
-  it("says an untiered subagent inherits the session model", () => {
+  it("nudges an untiered subagent without warning about it", () => {
     const untiered: EpicRolePolicy = {
       ...policy,
       inSessionRoles: {
@@ -59,7 +59,25 @@ describe("InSessionRoleEditor", () => {
       />,
     );
 
-    expect(markup).toContain("Inherits the worker session&#x27;s model.");
+    expect(markup).toContain("Runs on the worker&#x27;s session model.");
+    expect(markup).toContain("Assign a tier for a dedicated fallback chain.");
+    // Tier-less is the shipped state, so it must not read as a problem.
+    expect(markup).not.toContain("no longer exists");
+  });
+
+  it("warns when a subagent names a tier the policy no longer has", () => {
+    const orphaned: EpicRolePolicy = { ...policy, tiers: {} };
+    const markup = renderToStaticMarkup(
+      <InSessionRoleEditor
+        row={buildInSessionRoleRows(orphaned)[0]!}
+        policy={orphaned}
+        tierIds={[]}
+        onPolicyChange={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('<span class="text-destructive">');
+    expect(markup).toContain("no longer exists");
   });
 
   it("renders every shipped stage subagent an untouched install starts with", () => {
@@ -84,8 +102,9 @@ describe("InSessionRoleEditor", () => {
       );
 
       expect(markup).toContain(row.name);
-      // Shipped roles carry no tier, so the editor offers the session model.
-      expect(markup).toContain("Inherits the worker session&#x27;s model.");
+      // Shipped roles carry no tier, so the editor nudges rather than warns.
+      expect(markup).toContain("Runs on the worker&#x27;s session model.");
+      expect(markup).not.toContain("no longer exists");
       expect(markup).toContain("Verification rules:");
     }
   });

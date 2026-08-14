@@ -1,5 +1,6 @@
 import {
   DEFAULT_EPIC_ROLE_POLICY,
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
   EPIC_ROLE_IDS,
   EpicInSessionRoleName,
   EpicTierId,
@@ -175,6 +176,25 @@ describe("EpicsSettings.logic", () => {
     expect(rows[0]?.role).not.toHaveProperty("tier");
   });
 
+  it("flags a subagent that still names a tier the policy dropped", () => {
+    const policy = makePolicy();
+    const orphaned: EpicRolePolicy = { ...policy, tiers: {} };
+    const rows = buildInSessionRoleRows(orphaned);
+
+    expect(rows[0]).toMatchObject({ tierId: null, hopCount: 0, tierMissing: true });
+    expect(rows[0]?.role.tier).toBe(primaryTierId);
+  });
+
+  it("builds a tier-less row for every shipped default subagent", () => {
+    const rows = buildInSessionRoleRows(DEFAULT_EPIC_ROLE_POLICY);
+
+    expect(rows.map((row) => row.name)).toEqual(Object.keys(DEFAULT_EPIC_STAGE_SUBAGENTS));
+    // Tier-less is the shipped state, so no row may render as a warning.
+    for (const row of rows) {
+      expect(row).toMatchObject({ tierId: null, hopCount: 0, tierMissing: false });
+    }
+  });
+
   it("repoints in-session subagents when their tier is renamed", () => {
     const result = renameTier(makePolicy(), primaryTierId, "premium");
 
@@ -236,6 +256,34 @@ describe("EpicsSettings.logic", () => {
     expect(isEpicRolePolicyDirty(DEFAULT_EPIC_ROLE_POLICY)).toBe(false);
     const result = createTier(DEFAULT_EPIC_ROLE_POLICY, "primary");
     expect("policy" in result && isEpicRolePolicyDirty(result.policy)).toBe(true);
+  });
+
+  it("marks the policy dirty once a shipped subagent is deleted, and Reset restores it", () => {
+    const trimmed = deleteInSessionRole(DEFAULT_EPIC_ROLE_POLICY, plannerName);
+
+    expect(trimmed.inSessionRoles[plannerName]).toBeUndefined();
+    expect(isEpicRolePolicyDirty(trimmed)).toBe(true);
+    // Reset writes DEFAULT_EPIC_ROLE_POLICY back, which is dirty-free again.
+    expect(isEpicRolePolicyDirty(DEFAULT_EPIC_ROLE_POLICY)).toBe(false);
+    expect(Object.keys(DEFAULT_EPIC_ROLE_POLICY.inSessionRoles)).toEqual(
+      Object.keys(DEFAULT_EPIC_STAGE_SUBAGENTS),
+    );
+  });
+
+  it("deleting every shipped subagent leaves an empty map that stays dirty", () => {
+    const emptied = Object.keys(DEFAULT_EPIC_ROLE_POLICY.inSessionRoles).reduce(
+      (policy, name) => deleteInSessionRole(policy, EpicInSessionRoleName.make(name)),
+      DEFAULT_EPIC_ROLE_POLICY,
+    );
+
+    expect(buildInSessionRoleRows(emptied)).toEqual([]);
+    expect(isEpicRolePolicyDirty(emptied)).toBe(true);
+  });
+
+  it("refuses to re-add a shipped subagent name", () => {
+    expect(createInSessionRole(DEFAULT_EPIC_ROLE_POLICY, "planner")).toEqual({
+      error: "A subagent with this name already exists.",
+    });
   });
 
   it("leaves all helper inputs unchanged", () => {
