@@ -114,6 +114,7 @@ import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { EpicRunner, type EpicRunnerShape } from "../Services/EpicRunner.ts";
 import { makeEpicRunnerLaunch } from "./EpicRunnerLaunch.ts";
 import { makeEpicRunnerLifecycle } from "./EpicRunnerLifecycle.ts";
+import { makeEpicRunnerRoleSelection } from "./EpicRunnerRoleSelection.ts";
 import { makeServerWorkerEvidence } from "./EpicRunnerWorkerEvidence.ts";
 import {
   makeAbandonRunningIterations,
@@ -224,6 +225,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const subagentRegistry = yield* EpicSubagentRegistry;
     const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
     const providerAccountLimits = yield* Effect.serviceOption(ProviderAccountLimitsStore);
+    const providerDegradationTtlMs = Math.max(
+      0,
+      options?.providerDegradationTtlMs ?? DEFAULT_PROVIDER_DEGRADATION_TTL_MS,
+    );
 
     /**
      * The epic role policy, or an empty one. A server without a settings
@@ -240,6 +245,25 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             ),
           ),
         );
+    const readUsageSamples = Option.isNone(providerUsageLedger)
+      ? Effect.succeed([])
+      : providerUsageLedger.value.listAll.pipe(Effect.orElseSucceed(() => []));
+    const readAccountLimits = Option.isNone(providerAccountLimits)
+      ? Effect.succeed([])
+      : providerAccountLimits.value.listAll.pipe(Effect.orElseSucceed(() => []));
+    const roleSelection = makeEpicRunnerRoleSelection({
+      readEpicRolePolicy,
+      inventory: {
+        getProviders: Option.isNone(providerRegistry)
+          ? Effect.succeed([])
+          : providerRegistry.value.getProviders,
+      },
+      readProviderDegradation: (providerInstanceId) =>
+        store.getProviderDegradation({ providerInstanceId }),
+      readUsageSamples,
+      readAccountLimits,
+      providerDegradationTtlMs,
+    });
 
     /**
      * The subagents an iteration worker session carries, resolved fresh per
@@ -559,9 +583,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
               Effect.orElseSucceed(() => []),
             ),
           },
-      // The tier-walking adapter lands separately (t3code-pg7): until then
-      // every dispatch stays on the run-level selection.
-      roleSelection: null,
+      roleSelection,
       workerEvidence:
         options?.workerEvidence ?? makeServerWorkerEvidence({ workerScopeRegistry, processRunner }),
       ...(options?.supervisionClock === undefined
@@ -806,19 +828,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       leases,
       forkLoop,
       releaseLeaseOnFailure,
-      providerDegradationTtlMs: Math.max(
-        0,
-        options?.providerDegradationTtlMs ?? DEFAULT_PROVIDER_DEGRADATION_TTL_MS,
-      ),
+      providerDegradationTtlMs,
       readEpicRolePolicy,
       // Fail-soft: an absent or unreadable store reads as no usage and no
       // limits, so exhaustion checks never block a launch.
-      readUsageSamples: Option.isNone(providerUsageLedger)
-        ? Effect.succeed([])
-        : providerUsageLedger.value.listAll.pipe(Effect.orElseSucceed(() => [])),
-      readAccountLimits: Option.isNone(providerAccountLimits)
-        ? Effect.succeed([])
-        : providerAccountLimits.value.listAll.pipe(Effect.orElseSucceed(() => [])),
+      readUsageSamples,
+      readAccountLimits,
     });
 
     const lifecycle = makeEpicRunnerLifecycle({
@@ -977,9 +992,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       readonly inFlight: ReadonlyArray<EpicRunIteration>;
       readonly missingWorktreePaths: ReadonlySet<string>;
       readonly sequential: boolean;
+      readonly fallbackSelection: ModelSelection;
     }) =>
       Effect.gen(function* () {
-        const { runId, inFlight, missingWorktreePaths, sequential } = input;
+        const { runId, inFlight, missingWorktreePaths, sequential, fallbackSelection } = input;
         // A row written before migration 056 cannot say how often it was
         // resumed, so count the restarts its child already survived. A read
         // that fails leaves the budget unknown, and an unknown budget is spent.
@@ -1043,6 +1059,18 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
             threadId: iteration.threadId,
             branch: iteration.branch ?? null,
             worktreePath,
+            selection:
+              iteration.providerInstanceId == null || iteration.model == null
+                ? fallbackSelection
+                : {
+                    instanceId: iteration.providerInstanceId,
+                    model: iteration.model,
+                    ...(iteration.providerInstanceId === fallbackSelection.instanceId &&
+                    iteration.model === fallbackSelection.model &&
+                    fallbackSelection.options !== undefined
+                      ? { options: fallbackSelection.options }
+                      : {}),
+                  },
             startedAt: iteration.startedAt,
             resumeCount: spent,
           });
@@ -1149,6 +1177,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
                 inFlight,
                 missingWorktreePaths: new Set(acquired.lease.missingResumeWorktreePaths),
                 sequential: configSnapshot.config.execution.sequential,
+                fallbackSelection: run.modelSelection,
               });
             yield* Effect.logInfo("epic.runner.restart-resume", {
               runId: run.runId,

@@ -48,6 +48,7 @@ export interface EpicFallbackHop {
   readonly instanceId: ProviderInstanceId;
   readonly model: string;
   readonly options?: ModelSelection["options"];
+  readonly skipAboveUtilization?: number;
 }
 
 /**
@@ -63,7 +64,14 @@ export const epicRoleFallbackChain = (
 ): ReadonlyArray<EpicFallbackHop> => {
   const tierId = policy.roles[roleId];
   if (tierId === undefined) return [];
-  return policy.tiers[tierId]?.hops.map((hop) => hop.selection) ?? [];
+  return (
+    policy.tiers[tierId]?.hops.map((hop) => ({
+      ...hop.selection,
+      ...(hop.skipAboveUtilization === undefined
+        ? {}
+        : { skipAboveUtilization: hop.skipAboveUtilization }),
+    })) ?? []
+  );
 };
 
 /** The first candidate whose provider can run its model right now. */

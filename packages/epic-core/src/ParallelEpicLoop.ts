@@ -289,6 +289,8 @@ export interface ResumedWorker {
   readonly threadId: ThreadId;
   readonly branch: string | null;
   readonly worktreePath: string | null;
+  /** The durable account and model that created this worker's session. */
+  readonly selection: ModelSelection;
   /** When the FIRST dispatch of this row started, not when the resume did. */
   readonly startedAt: string;
   /** How many times this row was already reopened. `0` on the first resume. */
@@ -879,9 +881,9 @@ export const runParallelEpicLoop = (
     readonly onDispatched: (threadId: ThreadId) => void;
     /**
      * Fired once this iteration knows which selection it will dispatch on,
-     * before the dispatch itself. Never fired when no role resolver is wired,
-     * and never fired for a resumed worker, which is pinned to the session it
-     * is continuing.
+     * before the dispatch itself. A fresh dispatch without a role resolver
+     * keeps the run selection and does not fire it. A resumed worker fires it
+     * with the durable selection of the session it is continuing.
      */
     readonly onSelectionResolved: (selection: AgentSelection) => void;
     /**
@@ -1043,8 +1045,9 @@ export const runParallelEpicLoop = (
       //
       // `null` means "use whatever the run row says at dispatch time", which
       // is what every call site read before this port existed. A resumed
-      // worker stays on the run selection too: its session id belongs to the
-      // config directory that created it, so a resume cannot cross accounts.
+      // worker bypasses role resolution and keeps the durable selection from
+      // its iteration row, because its session belongs to that account's
+      // config directory.
       const resolvedRole: ResolvedRoleSelection | null =
         ports.roleSelection === null || resumedWorker !== null
           ? null
@@ -1057,7 +1060,8 @@ export const runParallelEpicLoop = (
               issueTitle: issueEvidenceBefore.title,
               fallbackSelection: run.modelSelection,
             });
-      const dispatchSelection: AgentSelection | null = resolvedRole?.selection ?? null;
+      const dispatchSelection: AgentSelection | null =
+        resumedWorker?.selection ?? resolvedRole?.selection ?? null;
       if (dispatchSelection !== null) args.onSelectionResolved(dispatchSelection);
 
       // A resume rebuilds the record of a worktree that already exists; it
@@ -1315,7 +1319,7 @@ export const runParallelEpicLoop = (
                 iterationIndex,
                 issueId,
                 prompt,
-                selection: current.modelSelection,
+                selection: dispatchSelection ?? current.modelSelection,
                 runtimeMode: current.runtimeMode,
                 policy,
                 workspace,
@@ -2336,7 +2340,8 @@ export const runParallelEpicLoop = (
           // `iterationsDispatched` was paid before the restart, so leaving it
           // uncharged would let the frontier reserve a slot it already holds.
           charged: selection._tag === "resume",
-          modelSelection: run.modelSelection,
+          modelSelection:
+            selection._tag === "resume" ? selection.worker.selection : run.modelSelection,
           isIntegrationFix,
         };
         active.set(key, activeIteration);

@@ -302,6 +302,8 @@ const fixture = (input: {
       why: null,
       failureReason: null,
       resumeCount: worker.resumeCount,
+      providerInstanceId: worker.selection.instanceId,
+      model: worker.selection.model,
       startedAt: worker.startedAt,
       finishedAt: null,
     })),
@@ -2004,6 +2006,7 @@ const resumedWorker = (override: Partial<ResumedWorker> = {}): ResumedWorker => 
   threadId: ThreadId.make(epicRunIterationThreadId({ runId: RUN_ID, iterationIndex: 3 })),
   branch: "epic/epic.1",
   worktreePath: "/wt/epic.1",
+  selection: { instanceId: ProviderInstanceId.make("worker"), model: "test" },
   startedAt: "2026-01-01T00:00:00Z",
   resumeCount: 0,
   ...override,
@@ -2014,7 +2017,9 @@ const resumeDecisions = (events: ReadonlyArray<RunEvent>) =>
 
 it.live("continues an interrupted iteration on its own row, thread and worktree", () =>
   Effect.gen(function* () {
-    const worker = resumedWorker();
+    const worker = resumedWorker({
+      selection: { instanceId: ProviderInstanceId.make("rotated-worker"), model: "rotated-test" },
+    });
     const test = fixture({
       sequential: false,
       resumedWorkers: [worker],
@@ -2039,6 +2044,7 @@ it.live("continues an interrupted iteration on its own row, thread and worktree"
     assert.equal(test.resumeCalls[0]?.ref, worker.threadId);
     assert.equal(test.resumeCalls[0]?.iterationIndex, 3);
     assert.equal(test.resumeCalls[0]?.issueId, "epic.1");
+    assert.deepEqual(test.resumeCalls[0]?.selection, worker.selection);
     assert.deepEqual(test.createCalls, []);
     assert.deepEqual(test.beginTurnCalls, []);
     assert.notInclude(test.resumeCalls[0]?.prompt ?? "", "Cook exactly `epic.1` this iteration.");

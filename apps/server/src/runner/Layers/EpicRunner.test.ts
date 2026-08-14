@@ -4493,6 +4493,96 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.live("resolves the role chain again for each fresh dispatch", () => {
+    let degradationRecorded = false;
+    let harness: ReturnType<typeof createHarness>;
+    harness = createHarness({
+      script: [
+        {
+          text: 'RALPH_MSG: {"summary":"first child","why":"needed"}',
+          head: "head-1",
+        },
+        { text: "RALPH_DONE", head: "head-1" },
+      ],
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+      ],
+      epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+      onEpicRunPublish: (published) =>
+        Effect.sync(() => {
+          if (degradationRecorded || published.iterationsCompleted !== 1) return;
+          degradationRecorded = true;
+          harness.store.degradations.set(CLAUDE_WORK_SELECTION.instanceId, {
+            providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+            failureReason: "provider-error:rate-limit",
+            degradedAt: NOW,
+            resetsAt: "2099-01-01T00:00:00.000Z",
+          });
+        }),
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: CLAUDE_WORK_SELECTION,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start").map((command) => command.modelSelection),
+        [CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION],
+      );
+      assert.deepStrictEqual(
+        harness.store.runs.get(run.runId)?.modelSelection,
+        CLAUDE_WORK_SELECTION,
+      );
+      assert.deepStrictEqual(
+        harness.store.iterations.map((iteration) => [
+          iteration.tierId,
+          iteration.providerInstanceId,
+          iteration.model,
+        ]),
+        [
+          ["primary", CLAUDE_WORK_SELECTION.instanceId, CLAUDE_WORK_SELECTION.model],
+          ["primary", CLAUDE_PERSONAL_SELECTION.instanceId, CLAUDE_PERSONAL_SELECTION.model],
+        ],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("uses the run selection with no tier attribution when the role has no tier", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      providers: [provider("claude-work", "claudeAgent", "claude-sonnet-5")],
+      epicRolePolicy: decodeEpicRolePolicy({ tiers: {}, roles: {} }),
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.startRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+        prompt: "do one unit of work",
+        modelSelection: CLAUDE_WORK_SELECTION,
+        maxIterations: 10,
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_WORK_SELECTION,
+      );
+      assert.strictEqual(harness.store.iterations[0]?.tierId, null);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.live("launches on the second Claude account when the first is at 100 percent", () =>
     Effect.flatMap(DateTime.now, (checkedAt) => {
       const nowIso = DateTime.formatIso(checkedAt);
@@ -4861,7 +4951,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("keeps a caller-supplied startRun selection despite a chain and a degradation", () => {
+  it.live("keeps a caller-supplied selection on the run while dispatch resolves the chain", () => {
     const harness = createHarness({
       script: [{ text: "RALPH_DONE", head: "head-0" }],
       providers: [
@@ -4890,9 +4980,14 @@ describe("EpicRunner", () => {
       });
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
       assert.deepStrictEqual(
-        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        harness.store.runs.get(run.runId)?.modelSelection,
         CLAUDE_WORK_SELECTION,
       );
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_PERSONAL_SELECTION,
+      );
+      assert.strictEqual(harness.store.iterations[0]?.tierId, "primary");
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -4945,6 +5040,7 @@ describe("EpicRunner", () => {
         },
       ]);
       // The bindings are per run, and the loop owns their release.
+      yield* waitFor(() => harness.releasedSubagentRuns.includes(run.runId));
       assert.include(harness.releasedSubagentRuns, run.runId);
     }).pipe(Effect.provide(harness.layer));
   });
@@ -6622,10 +6718,28 @@ describe("EpicRunner", () => {
         ],
         readyOutput: "[]",
         registeredWorktrees: worktreePaths,
-        seedRuns: [interruptedRun({ runId, cwd: root, workers: 2 })],
-        seedIterations: worktreePaths.map((worktreePath, iterationIndex) =>
-          interruptedRow({ runId, iterationIndex, worktreePath, resumeCount: 0 }),
-        ),
+        seedRuns: [
+          interruptedRun({
+            runId,
+            cwd: root,
+            workers: 2,
+            overrides: { modelSelection: CLAUDE_WORK_SELECTION },
+          }),
+        ],
+        seedIterations: worktreePaths.map((worktreePath, iterationIndex) => ({
+          ...interruptedRow({ runId, iterationIndex, worktreePath, resumeCount: 0 }),
+          tierId: "original-tier",
+          providerInstanceId: CLAUDE_PERSONAL_SELECTION.instanceId,
+          model: CLAUDE_PERSONAL_SELECTION.model,
+        })),
+        providers: [
+          provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+          provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        ],
+        // The run row still names work, but these sessions were dispatched on
+        // personal. Resume must keep the account whose config directory owns
+        // each existing session.
+        epicRolePolicy: iterationWorkerPolicy([CLAUDE_PERSONAL_SELECTION, CLAUDE_WORK_SELECTION]),
         childStatuses: { "child-0": "in_progress", "child-1": "in_progress" },
       });
 
@@ -6654,6 +6768,7 @@ describe("EpicRunner", () => {
           const turn = harness
             .commandsOfType("thread.turn.start")
             .find((command) => command.threadId === threadId);
+          assert.deepStrictEqual(turn?.modelSelection, CLAUDE_PERSONAL_SELECTION);
           assert.isTrue(turn?.message.messageId.startsWith(`${threadId}-resume-`));
           // Never the id the interrupted iteration's own prompt already used.
           assert.notStrictEqual(turn?.message.messageId, `${threadId}-prompt`);
@@ -6668,10 +6783,27 @@ describe("EpicRunner", () => {
             row.iterationIndex,
             row.turnStatus,
             row.resumeCount,
+            row.tierId,
+            row.providerInstanceId,
+            row.model,
           ]),
           [
-            [0, "running", 1],
-            [1, "running", 1],
+            [
+              0,
+              "running",
+              1,
+              "original-tier",
+              CLAUDE_PERSONAL_SELECTION.instanceId,
+              CLAUDE_PERSONAL_SELECTION.model,
+            ],
+            [
+              1,
+              "running",
+              1,
+              "original-tier",
+              CLAUDE_PERSONAL_SELECTION.instanceId,
+              CLAUDE_PERSONAL_SELECTION.model,
+            ],
           ],
         );
         // A resume spends no dispatch budget: the iterations were charged

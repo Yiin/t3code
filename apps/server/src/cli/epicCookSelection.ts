@@ -19,6 +19,11 @@
  */
 import type { EpicRoleId, ModelSelection } from "@t3tools/contracts";
 import type { ProviderInventoryShape } from "@t3tools/epic-core/ports/ProviderInventory";
+import {
+  epicDispatchRoleId,
+  type ResolvedRoleSelection,
+  type RoleSelectionShape,
+} from "@t3tools/epic-core/ports/RoleSelection";
 import type { RunJournalError } from "@t3tools/epic-core/ports/RunJournal";
 import {
   isLiveProviderDegradation,
@@ -26,16 +31,71 @@ import {
   type DegradationAwareSelection,
   type ProviderDegradationRecord,
 } from "@t3tools/epic-core/providerDegradation";
-import { epicRoleFallbackChain } from "@t3tools/epic-core/providerFallback";
+import {
+  epicRoleFallbackChain,
+  resolveEpicProviderChainEntry,
+} from "@t3tools/epic-core/providerFallback";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import type * as FileSystem from "effect/FileSystem";
+import * as FileSystem from "effect/FileSystem";
 
-import { readEpicRolePolicy } from "./epicCookSubagents.ts";
+import { readEpicRolePolicy, widenInventoryWithPolicyModels } from "./epicCookSubagents.ts";
 
 /** The run-level selection is the iteration worker's, so cook resolves that role. */
 const ITERATION_WORKER_ROLE: EpicRoleId = "iteration-worker";
+
+export const makeTerminalRoleSelection = (input: {
+  readonly settingsPath: string;
+  readonly inventory: ProviderInventoryShape;
+  readonly readProviderDegradations: Effect.Effect<
+    Readonly<Record<string, ProviderDegradationRecord>>,
+    RunJournalError
+  >;
+  readonly providerDegradationTtlMs: number;
+}): Effect.Effect<RoleSelectionShape, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    return {
+      resolve: (request) => {
+        const fallback = (): ResolvedRoleSelection => ({
+          selection: request.fallbackSelection,
+          tierId: null,
+        });
+        return Effect.gen(function* () {
+          const checkedAt = yield* DateTime.now;
+          const now = DateTime.formatIso(checkedAt);
+          const cutoff = DateTime.formatIso(
+            DateTime.subtractDuration(checkedAt, Duration.millis(input.providerDegradationTtlMs)),
+          );
+          const policy = yield* readEpicRolePolicy(input.settingsPath).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+          );
+          const providers = widenInventoryWithPolicyModels(
+            yield* input.inventory.getProviders,
+            policy,
+          );
+          const recorded = yield* input.readProviderDegradations;
+          const roleId = epicDispatchRoleId(request.role);
+          const tierId = policy.roles[roleId];
+          if (tierId === undefined) return fallback();
+          const chain = epicRoleFallbackChain(policy, roleId);
+          if (chain.length === 0) return fallback();
+          const selection = resolveEpicProviderChainEntry({
+            providers,
+            chain,
+            isBlocked: (hop) => {
+              const degradation = recorded[hop.instanceId];
+              return (
+                degradation !== undefined && isLiveProviderDegradation(degradation, cutoff, now)
+              );
+            },
+          });
+          return selection === null ? fallback() : { selection, tierId };
+        }).pipe(Effect.catchCause(() => Effect.succeed(fallback())));
+      },
+    } satisfies RoleSelectionShape;
+  });
 
 export const resolveCookModelSelection = (input: {
   readonly settingsPath: string;

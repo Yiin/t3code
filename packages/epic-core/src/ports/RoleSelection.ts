@@ -1,5 +1,5 @@
 /** Per-role model selection, resolved once per epic dispatch. */
-import type { EpicTierId } from "@t3tools/contracts";
+import type { EpicRoleId, EpicTierId } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 
 import type { AgentSelection } from "./AgentDispatch.ts";
@@ -15,6 +15,24 @@ export type EpicDispatchRole =
   | "merge-fix-child"
   | "idle-inspector"
   | "note-fold";
+
+/** Map the loop's dispatch vocabulary onto the settings policy vocabulary. */
+export const epicDispatchRoleId = (role: EpicDispatchRole): EpicRoleId => {
+  switch (role) {
+    case "iteration-worker":
+      return "iteration-worker";
+    case "merge-fix-child":
+      return "merge-fix";
+    case "idle-inspector":
+      return "idle-inspection";
+    case "note-fold":
+      return "epic-note-fold";
+    default: {
+      const exhaustive: never = role;
+      return exhaustive;
+    }
+  }
+};
 
 export interface RoleSelectionRequest {
   readonly role: EpicDispatchRole;

@@ -86,7 +86,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { Command, Flag } from "effect/unstable/cli";
 
-import { resolveCookModelSelection } from "./epicCookSelection.ts";
+import { makeTerminalRoleSelection, resolveCookModelSelection } from "./epicCookSelection.ts";
 import { readCookSubagents, resolveCookSettingsPath } from "./epicCookSubagents.ts";
 
 class EpicCookCliError extends Schema.TaggedErrorClass<EpicCookCliError>()("EpicCookCliError", {
@@ -473,6 +473,12 @@ export const cookCommand = Command.make("cook", {
           providerDegradationTtlMs: snapshot.config.server.providerDegradationTtlMs,
         });
         const startSelection = start.selection;
+        const roleSelection = yield* makeTerminalRoleSelection({
+          settingsPath,
+          inventory: terminalProviders.inventory,
+          readProviderDegradations: degradations.readProviderDegradations,
+          providerDegradationTtlMs: snapshot.config.server.providerDegradationTtlMs,
+        });
         for (const hop of start.hops) {
           yield* Effect.logInfo("epic.cook.launch-provider-fallback", {
             fromInstanceId: hop.from.instanceId,
@@ -710,6 +716,18 @@ export const cookCommand = Command.make("cook", {
                       threadId: row.threadId,
                       branch: row.branch ?? null,
                       worktreePath: row.worktreePath ?? null,
+                      selection:
+                        row.providerInstanceId == null || row.model == null
+                          ? run.modelSelection
+                          : {
+                              instanceId: row.providerInstanceId,
+                              model: row.model,
+                              ...(row.providerInstanceId === run.modelSelection.instanceId &&
+                              row.model === run.modelSelection.model &&
+                              run.modelSelection.options !== undefined
+                                ? { options: run.modelSelection.options }
+                                : {}),
+                            },
                       startedAt: row.startedAt,
                       resumeCount,
                     },
@@ -787,7 +805,7 @@ export const cookCommand = Command.make("cook", {
               }),
               vcs: makeProcessPoolVcs(runner),
               providerInventory: terminalProviders.inventory,
-              roleSelection: null,
+              roleSelection,
               /**
                * The terminal worker key is the artifact path, so evidence is
                * resolved through `workerActivity` — the same map the dispatch
@@ -997,7 +1015,7 @@ export const cookCommand = Command.make("cook", {
                 journal,
                 providerDegradation: degradations,
                 providerInventory: terminalProviders.inventory,
-                roleSelection: null,
+                roleSelection,
                 events: fileEvents,
                 dispatch: agentDispatch,
                 gate: makeProcessGate({

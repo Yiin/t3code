@@ -9,7 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { resolveCookModelSelection } from "./epicCookSelection.ts";
+import { makeTerminalRoleSelection, resolveCookModelSelection } from "./epicCookSelection.ts";
 
 const encodeSettings = Schema.encodeEffect(Schema.UnknownFromJsonString);
 
@@ -76,6 +76,32 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("epic cook start sel
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+  const resolveRole = (input: {
+    readonly settings: unknown;
+    readonly role?: "iteration-worker" | "merge-fix-child";
+    readonly records?: Record<string, ProviderDegradationRecord>;
+    readonly providerInventory?: typeof inventory;
+    readonly degradationRead?: Effect.Effect<
+      Readonly<Record<string, ProviderDegradationRecord>>,
+      RunJournalError
+    >;
+  }) =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTerminalRoleSelection({
+        settingsPath: yield* writeSettings(input.settings),
+        inventory: input.providerInventory ?? inventory,
+        readProviderDegradations: input.degradationRead ?? degradations(input.records ?? {}),
+        providerDegradationTtlMs: 3_600_000,
+      });
+      return yield* adapter.resolve({
+        role: input.role ?? "iteration-worker",
+        runId: "run",
+        issueId: "child",
+        issueTitle: "Child",
+        fallbackSelection: selection,
+      });
+    });
+
   it.effect("keeps the configured selection when nothing is recorded", () =>
     Effect.gen(function* () {
       const resolved = yield* resolveCookModelSelection({
@@ -118,7 +144,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("epic cook start sel
         selection,
         providerDegradationTtlMs: 3_600_000,
       });
-      assert.equal(resolved.selection.instanceId, "codex");
+      assert.equal(resolved.selection.instanceId, "claude-personal");
     }),
   );
 
@@ -147,6 +173,82 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("epic cook start sel
         providerDegradationTtlMs: 3_600_000,
       });
       assert.deepEqual(resolved, { selection, hops: [] });
+    }),
+  );
+
+  it.effect("enters the role chain when there are no degradations", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveRole({ settings: chainPolicy });
+      assert.equal(resolved.selection.instanceId, "claude");
+      assert.equal(resolved.tierId, "worker");
+    }),
+  );
+
+  it.effect("uses a policy model that differs from the terminal route snapshot", () =>
+    Effect.gen(function* () {
+      const settings = {
+        epicRolePolicy: {
+          tiers: {
+            worker: {
+              hops: [{ selection: { instanceId: "claude", model: "claude-opus-5" } }],
+            },
+          },
+          roles: { "iteration-worker": "worker" },
+        },
+      };
+      const resolved = yield* resolveRole({ settings });
+      assert.deepEqual(resolved.selection, {
+        instanceId: ProviderInstanceId.make("claude"),
+        model: "claude-opus-5",
+      });
+      assert.equal(resolved.tierId, "worker");
+    }),
+  );
+
+  it.effect("maps merge-fix dispatches and skips a degraded hop", () =>
+    Effect.gen(function* () {
+      const settings = {
+        epicRolePolicy: {
+          ...chainPolicy.epicRolePolicy,
+          roles: { "merge-fix": "worker" },
+        },
+      };
+      const resolved = yield* resolveRole({
+        settings,
+        role: "merge-fix-child",
+        records: { claude: rateLimited(yield* nowIso) },
+      });
+      assert.equal(resolved.selection.instanceId, "claude-personal");
+      assert.equal(resolved.tierId, "worker");
+    }),
+  );
+
+  it.effect("falls back when the tier has no route in the terminal inventory", () =>
+    Effect.gen(function* () {
+      const settings = {
+        epicRolePolicy: {
+          tiers: {
+            worker: {
+              hops: [{ selection: { instanceId: "missing", model: "claude-sonnet-5" } }],
+            },
+          },
+          roles: { "iteration-worker": "worker" },
+        },
+      };
+      const resolved = yield* resolveRole({ settings });
+      assert.deepEqual(resolved, { selection, tierId: null });
+    }),
+  );
+
+  it.effect("falls back when a fresh degradation read fails", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveRole({
+        settings: chainPolicy,
+        degradationRead: Effect.fail(
+          new RunJournalError({ operation: "readProviderDegradations", detail: "unreadable" }),
+        ),
+      });
+      assert.deepEqual(resolved, { selection, tierId: null });
     }),
   );
 });

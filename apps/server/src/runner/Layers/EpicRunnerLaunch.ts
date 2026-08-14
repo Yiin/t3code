@@ -44,7 +44,6 @@ import {
   resolveDegradationAwareSelection,
   type ProviderDegradationRecord,
 } from "@t3tools/epic-core/providerDegradation";
-import { isAccountExhausted, maxLiveUtilizationByInstance } from "@t3tools/epic-core/epicSubagents";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -55,6 +54,7 @@ import type { ProjectionSnapshotQuery } from "../../orchestration/Services/Proje
 import { EpicRunStore, type EpicRun } from "../../persistence/Services/EpicRuns.ts";
 import type { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import type { StartEpicRunInput } from "../Services/EpicRunner.ts";
+import { providerAccountExhaustion } from "./EpicRunnerRoleSelection.ts";
 
 const ACTIVE_RUN_RETRY_ATTEMPTS = 20;
 const ACTIVE_RUN_RETRY_DELAY_MS = 5;
@@ -541,31 +541,19 @@ export const makeEpicRunnerLaunch = (deps: {
       // and credits-depleted rows are not exhaustion — the first two need
       // operator action, and credits-depleted can be org-wide, where rotating
       // to a sibling of the same org would burn a hop for nothing.
-      const utilization = maxLiveUtilizationByInstance(yield* readUsageSamples, now);
-      const limitBlocked = new Set<ModelSelection["instanceId"]>();
-      for (const limit of yield* readAccountLimits) {
-        if (limit.kind !== "usage-limit" && limit.kind !== "spend-limit") continue;
-        // A limit row lives by the exact rule a degradation row does: the
-        // provider's own reset time wins, and only a row without one falls
-        // back to the TTL cutoff. Reusing the predicate keeps them aligned.
-        const asRecord = {
-          failureReason: limit.kind,
-          degradedAt: limit.detectedAt,
-          resetsAt: limit.resetsAt,
-        };
-        if (isLiveProviderDegradation(asRecord, cutoff, now)) {
-          limitBlocked.add(limit.providerInstanceId);
-        }
-      }
+      const exhaustion = providerAccountExhaustion({
+        usageSamples: yield* readUsageSamples,
+        accountLimits: yield* readAccountLimits,
+        now,
+        cutoff,
+      });
 
       const resolved = resolveDegradationAwareSelection({
         providers,
         chain,
         current: defaultSelection,
         degradationOf: (instanceId) => degradations.get(instanceId) ?? null,
-        isExhausted: (instanceId) =>
-          isAccountExhausted({ utilization: utilization.get(instanceId) ?? null }) ||
-          limitBlocked.has(instanceId),
+        isExhausted: exhaustion.isExhausted,
       });
       for (const hop of resolved.hops) {
         yield* logLaunchFallback({ from: hop.from, to: hop.to, reason: hop.reason, chain });
