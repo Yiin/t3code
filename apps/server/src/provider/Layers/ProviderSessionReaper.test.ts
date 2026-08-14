@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { describe, expect, it } from "@effect/vitest";
 import {
   UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
   CommandId,
@@ -23,11 +24,10 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { vi } from "vite-plus/test";
 
 import { OrchestrationCommandInvariantError } from "../../orchestration/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -63,44 +63,42 @@ import {
   type ProviderSessionReaperLiveOptions,
 } from "./ProviderSessionReaper.ts";
 
-/**
- * Open the sequential scope and start the reaper inside it.
- *
- * Only for the cases that run on the default Effect runtime. The
- * `runtime!.runPromise` sites elsewhere in this file run on the test's own
- * ManagedRuntime and are not interchangeable with these.
- */
-const startReaperScope = async (reaper: {
+/** Open a fresh sequential scope and start the reaper inside it. */
+const startReaperScope = (reaper: {
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
-}) => {
-  const scope = await Effect.runPromise(Scope.make("sequential"));
-  await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
-  return scope;
-};
+}) =>
+  Effect.gen(function* () {
+    const scope = yield* Effect.acquireRelease(Scope.make("sequential"), (closeable) =>
+      Scope.close(closeable, Exit.void),
+    );
+    yield* reaper.start().pipe(Scope.provide(scope));
+  });
 
 const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5-codex",
 } as const;
 
-async function waitFor(
+const waitFor = (
   predicate: () => boolean | Promise<boolean>,
   timeoutMs = 2_000,
-): Promise<void> {
-  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
-  const poll = async (): Promise<void> => {
-    if (await predicate()) {
-      return;
-    }
-    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
-      throw new Error("Timed out waiting for expectation.");
-    }
-    await Effect.runPromise(Effect.yieldNow);
-    return poll();
-  };
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const deadline = (yield* Clock.currentTimeMillis) + timeoutMs;
+    const poll = (): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        if (yield* Effect.promise(() => Promise.resolve(predicate()))) {
+          return;
+        }
+        if ((yield* Clock.currentTimeMillis) >= deadline) {
+          return yield* Effect.die(new Error("Timed out waiting for expectation."));
+        }
+        yield* Effect.yieldNow;
+        yield* poll();
+      });
 
-  return poll();
-}
+    yield* poll();
+  });
 
 /** A `lastSeenAt` that is stale for a 1s threshold and fresh for a 60s one. */
 const idleForFiveSeconds = Effect.map(DateTime.now, (now) =>
@@ -181,24 +179,7 @@ function makeReadModel(
 }
 
 describe("ProviderSessionReaper", () => {
-  let runtime: ManagedRuntime.ManagedRuntime<
-    ProviderSessionReaper | ProviderSessionRuntime.ProviderSessionRuntimeRepository,
-    unknown
-  > | null = null;
-  let scope: Scope.Closeable | null = null;
-
-  afterEach(async () => {
-    if (scope) {
-      await Effect.runPromise(Scope.close(scope, Exit.void));
-    }
-    scope = null;
-    if (runtime) {
-      await runtime.dispose();
-    }
-    runtime = null;
-  });
-
-  async function createHarness(input: {
+  function createHarness(input: {
     readonly readModel: ReturnType<typeof makeReadModel>;
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
@@ -353,8 +334,8 @@ describe("ProviderSessionReaper", () => {
       Layer.provideMerge(NodeServices.layer),
     );
 
-    runtime = ManagedRuntime.make(layer);
     return {
+      layer,
       stopSession,
       stoppedThreadIds,
       hasLiveSession,
@@ -371,11 +352,11 @@ describe("ProviderSessionReaper", () => {
     );
   }
 
-  it("reconciles a dead binding before start returns without waiting for grace", async () => {
+  it.live("reconciles a dead binding before start returns without waiting for grace", () => {
     const threadId = ThreadId.make("thread-boot-reconcile-dead");
     const turnId = TurnId.make("turn-boot-reconcile-dead");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: threadId,
@@ -396,51 +377,50 @@ describe("ProviderSessionReaper", () => {
         deadSessionGraceMs: 60_000,
       },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
-    await runtime!.runPromise(
-      repository.upsert({
+
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const lastSeenAt = yield* idleForFiveSeconds;
+      yield* repository.upsert({
         threadId,
         providerName: "codex",
         providerInstanceId: null,
         adapterKey: "codex",
         runtimeMode: "full-access",
         status: "running",
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt,
         resumeCursor: { opaque: "resume-after-boot" },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    const stops = dispatchedSessionStops(harness);
-    expect(stops).toHaveLength(1);
-    expect(stops[0]?.threadId).toBe(threadId);
-    expect(String(stops[0]?.commandId)).toMatch(
-      new RegExp(`^session-stop-for-boot-reconcile:${threadId}:\\d+$`),
-    );
-    expect(stops[0]?.reason).toBe(
-      "session interrupted: server restarted while the session was running",
-    );
-    expect(harness.hasLiveSession).toHaveBeenCalledTimes(2);
-    expect(harness.stopSession).toHaveBeenCalledWith({ threadId });
+      const stops = dispatchedSessionStops(harness);
+      expect(stops).toHaveLength(1);
+      expect(stops[0]?.threadId).toBe(threadId);
+      expect(String(stops[0]?.commandId)).toMatch(
+        new RegExp(`^session-stop-for-boot-reconcile:${threadId}:\\d+$`),
+      );
+      expect(stops[0]?.reason).toBe(
+        "session interrupted: server restarted while the session was running",
+      );
+      expect(harness.hasLiveSession).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).toHaveBeenCalledWith({ threadId });
 
-    const binding = await runtime!.runPromise(repository.getByThreadId({ threadId }));
-    expect(Option.getOrUndefined(binding)?.resumeCursor).toEqual({
-      opaque: "resume-after-boot",
-    });
+      const binding = yield* repository.getByThreadId({ threadId });
+      expect(Option.getOrUndefined(binding)?.resumeCursor).toEqual({
+        opaque: "resume-after-boot",
+      });
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reconciles error bindings and skips live or stopped bindings during boot", async () => {
+  it.live("reconciles error bindings and skips live or stopped bindings during boot", () => {
     const liveThreadId = ThreadId.make("thread-boot-reconcile-live");
     const stoppedThreadId = ThreadId.make("thread-boot-reconcile-stopped");
     const errorThreadId = ThreadId.make("thread-boot-reconcile-error");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: liveThreadId,
@@ -482,17 +462,16 @@ describe("ProviderSessionReaper", () => {
       hasLiveSessionImplementation: (threadId) => Effect.succeed(threadId === liveThreadId),
       reaperOptions: { inactivityThresholdMs: 60_000 },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
-    const lastSeenAt = await runtime!.runPromise(idleForFiveSeconds);
-    for (const [threadId, status] of [
-      [liveThreadId, "running"],
-      [stoppedThreadId, "stopped"],
-      [errorThreadId, "error"],
-    ] as const) {
-      await runtime!.runPromise(
-        repository.upsert({
+
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const lastSeenAt = yield* idleForFiveSeconds;
+      for (const [threadId, status] of [
+        [liveThreadId, "running"],
+        [stoppedThreadId, "stopped"],
+        [errorThreadId, "error"],
+      ] as const) {
+        yield* repository.upsert({
           threadId,
           providerName: "codex",
           providerInstanceId: null,
@@ -502,30 +481,29 @@ describe("ProviderSessionReaper", () => {
           lastSeenAt,
           resumeCursor: null,
           runtimePayload: null,
-        }),
-      );
-    }
+        });
+      }
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
-    await runtime!.runPromise(drainFibers);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+      yield* drainFibers;
 
-    expect(harness.hasLiveSession).toHaveBeenCalledTimes(3);
-    expect(harness.hasLiveSession).toHaveBeenCalledWith(liveThreadId);
-    expect(harness.hasLiveSession).toHaveBeenCalledWith(errorThreadId);
-    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
-      errorThreadId,
-    ]);
-    expect(harness.stopSession).toHaveBeenCalledWith({ threadId: errorThreadId });
+      expect(harness.hasLiveSession).toHaveBeenCalledTimes(3);
+      expect(harness.hasLiveSession).toHaveBeenCalledWith(liveThreadId);
+      expect(harness.hasLiveSession).toHaveBeenCalledWith(errorThreadId);
+      expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
+        errorThreadId,
+      ]);
+      expect(harness.stopSession).toHaveBeenCalledWith({ threadId: errorThreadId });
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("abandons boot reconciliation when liveness replaces or stops the binding", async () => {
+  it.live("abandons boot reconciliation when liveness replaces or stops the binding", () => {
     const replacedThreadId = ThreadId.make("thread-boot-reconcile-replaced");
     const stoppedThreadId = ThreadId.make("thread-boot-reconcile-raced-stopped");
     const now = "2026-01-01T00:00:00.000Z";
     const livenessRaces = new Map<ThreadId, Effect.Effect<void>>();
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel(
         [replacedThreadId, stoppedThreadId].map((threadId) => ({
           id: threadId,
@@ -544,13 +522,12 @@ describe("ProviderSessionReaper", () => {
         (livenessRaces.get(threadId) ?? Effect.void).pipe(Effect.as(false)),
       reaperOptions: { inactivityThresholdMs: 60_000 },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
-    const lastSeenAt = await runtime!.runPromise(idleForFiveSeconds);
-    for (const threadId of [replacedThreadId, stoppedThreadId]) {
-      await runtime!.runPromise(
-        repository.upsert({
+
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const lastSeenAt = yield* idleForFiveSeconds;
+      for (const threadId of [replacedThreadId, stoppedThreadId]) {
+        yield* repository.upsert({
           threadId,
           providerName: "codex",
           providerInstanceId: defaultModelSelection.instanceId,
@@ -560,50 +537,49 @@ describe("ProviderSessionReaper", () => {
           lastSeenAt,
           resumeCursor: null,
           runtimePayload: null,
-        }),
+        });
+      }
+      livenessRaces.set(
+        replacedThreadId,
+        repository
+          .upsert({
+            threadId: replacedThreadId,
+            providerName: "claudeAgent",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            adapterKey: "claudeAgent",
+            runtimeMode: "full-access",
+            status: "running",
+            lastSeenAt,
+            resumeCursor: null,
+            runtimePayload: null,
+          })
+          .pipe(Effect.orDie),
       );
-    }
-    livenessRaces.set(
-      replacedThreadId,
-      repository
-        .upsert({
-          threadId: replacedThreadId,
-          providerName: "claudeAgent",
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-          adapterKey: "claudeAgent",
-          runtimeMode: "full-access",
-          status: "running",
-          lastSeenAt,
-          resumeCursor: null,
-          runtimePayload: null,
-        })
-        .pipe(Effect.orDie),
-    );
-    livenessRaces.set(
-      stoppedThreadId,
-      repository
-        .upsert({
-          threadId: stoppedThreadId,
-          providerName: "codex",
-          providerInstanceId: defaultModelSelection.instanceId,
-          adapterKey: "codex",
-          runtimeMode: "full-access",
-          status: "stopped",
-          lastSeenAt,
-          resumeCursor: null,
-          runtimePayload: null,
-        })
-        .pipe(Effect.orDie),
-    );
+      livenessRaces.set(
+        stoppedThreadId,
+        repository
+          .upsert({
+            threadId: stoppedThreadId,
+            providerName: "codex",
+            providerInstanceId: defaultModelSelection.instanceId,
+            adapterKey: "codex",
+            runtimeMode: "full-access",
+            status: "stopped",
+            lastSeenAt,
+            resumeCursor: null,
+            runtimePayload: null,
+          })
+          .pipe(Effect.orDie),
+      );
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    expect(dispatchedSessionStops(harness)).toEqual([]);
+      expect(dispatchedSessionStops(harness)).toEqual([]);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("settles projected boot state and clears pending turns before start returns", async () => {
+  it.live("settles projected boot state and clears pending turns before start returns", () => {
     const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reaper-boot-"));
     const persistenceLayer = SqlitePersistenceMemory;
     const serverConfigLayer = ServerConfig.layerTest(process.cwd(), baseDir);
@@ -722,32 +698,32 @@ describe("ProviderSessionReaper", () => {
       Layer.provide(NodeServices.layer),
     );
     const turnRepositoryLayer = ProjectionTurnRepositoryLive.pipe(Layer.provide(persistenceLayer));
-    const integratedRuntime = ManagedRuntime.make(
-      Layer.mergeAll(reactorLayer, reaperLayer, turnRepositoryLayer).pipe(
-        Layer.provide(serverConfigLayer),
-        Layer.provide(NodeServices.layer),
-      ),
+    const integratedLayer = Layer.mergeAll(reactorLayer, reaperLayer, turnRepositoryLayer).pipe(
+      Layer.provide(serverConfigLayer),
+      Layer.provide(NodeServices.layer),
     );
-    const integratedScope = await Effect.runPromise(Scope.make("sequential"));
 
-    try {
-      const engine = await integratedRuntime.runPromise(Effect.service(OrchestrationEngineService));
-      const reactor = await integratedRuntime.runPromise(Effect.service(ProviderCommandReactor));
-      const reaper = await integratedRuntime.runPromise(Effect.service(ProviderSessionReaper));
-      const snapshots = await integratedRuntime.runPromise(Effect.service(ProjectionSnapshotQuery));
-      const turns = await integratedRuntime.runPromise(Effect.service(ProjectionTurnRepository));
-      const repository = await integratedRuntime.runPromise(
-        Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-      );
-      const projectId = ProjectId.make("project-boot-reconcile-integration");
-      const threadId = ThreadId.make("thread-boot-reconcile-integration");
-      const mismatchedThreadId = ThreadId.make("thread-boot-reconcile-stopped-projection");
-      const turnId = TurnId.make("turn-boot-reconcile-integration");
-      const now = "2026-01-01T00:00:00.000Z";
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const integratedScope = yield* Effect.acquireRelease(
+          Scope.make("sequential"),
+          (closeable) => Scope.close(closeable, Exit.void),
+        );
 
-      await integratedRuntime.runPromise(reactor.start().pipe(Scope.provide(integratedScope)));
-      await integratedRuntime.runPromise(
-        engine.dispatch({
+        const engine = yield* OrchestrationEngineService;
+        const reactor = yield* ProviderCommandReactor;
+        const reaper = yield* ProviderSessionReaper;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const turns = yield* ProjectionTurnRepository;
+        const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        const projectId = ProjectId.make("project-boot-reconcile-integration");
+        const threadId = ThreadId.make("thread-boot-reconcile-integration");
+        const mismatchedThreadId = ThreadId.make("thread-boot-reconcile-stopped-projection");
+        const turnId = TurnId.make("turn-boot-reconcile-integration");
+        const now = "2026-01-01T00:00:00.000Z";
+
+        yield* reactor.start().pipe(Scope.provide(integratedScope));
+        yield* engine.dispatch({
           type: "project.create",
           commandId: CommandId.make("cmd-boot-reconcile-project"),
           projectId,
@@ -755,10 +731,8 @@ describe("ProviderSessionReaper", () => {
           workspaceRoot: "/tmp/provider-reaper-boot-project",
           defaultModelSelection,
           createdAt: now,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        engine.dispatch({
+        });
+        yield* engine.dispatch({
           type: "thread.create",
           commandId: CommandId.make("cmd-boot-reconcile-mismatched-thread"),
           threadId: mismatchedThreadId,
@@ -770,10 +744,8 @@ describe("ProviderSessionReaper", () => {
           branch: null,
           worktreePath: null,
           createdAt: now,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        engine.dispatch({
+        });
+        yield* engine.dispatch({
           type: "thread.create",
           commandId: CommandId.make("cmd-boot-reconcile-thread"),
           threadId,
@@ -785,10 +757,8 @@ describe("ProviderSessionReaper", () => {
           branch: null,
           worktreePath: null,
           createdAt: now,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        engine.dispatch({
+        });
+        yield* engine.dispatch({
           type: "thread.session.set",
           commandId: CommandId.make("cmd-boot-reconcile-stopped-projection"),
           threadId: mismatchedThreadId,
@@ -803,10 +773,8 @@ describe("ProviderSessionReaper", () => {
             updatedAt: now,
           },
           createdAt: now,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        engine.dispatch({
+        });
+        yield* engine.dispatch({
           type: "thread.session.set",
           commandId: CommandId.make("cmd-boot-reconcile-running-session"),
           threadId,
@@ -821,10 +789,8 @@ describe("ProviderSessionReaper", () => {
             updatedAt: now,
           },
           createdAt: now,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        turns.upsertByTurnId({
+        });
+        yield* turns.upsertByTurnId({
           threadId,
           turnId,
           pendingMessageId: null,
@@ -839,88 +805,71 @@ describe("ProviderSessionReaper", () => {
           checkpointRef: null,
           checkpointStatus: null,
           checkpointFiles: [],
-        }),
-      );
-      await integratedRuntime.runPromise(
-        turns.replacePendingTurnStart({
+        });
+        yield* turns.replacePendingTurnStart({
           threadId,
           messageId: MessageId.make("message-boot-reconcile-pending"),
           sourceProposedPlanThreadId: null,
           sourceProposedPlanId: null,
           requestedAt: now,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        repository.upsert({
+        });
+        yield* repository.upsert({
           threadId,
           providerName: "codex",
           providerInstanceId: defaultModelSelection.instanceId,
           adapterKey: "codex",
           runtimeMode: "full-access",
           status: "running",
-          lastSeenAt: await integratedRuntime.runPromise(idleForFiveSeconds),
+          lastSeenAt: yield* idleForFiveSeconds,
           resumeCursor: { opaque: "resume-after-integrated-boot" },
           runtimePayload: null,
-        }),
-      );
-      await integratedRuntime.runPromise(
-        repository.upsert({
+        });
+        yield* repository.upsert({
           threadId: mismatchedThreadId,
           providerName: "codex",
           providerInstanceId: defaultModelSelection.instanceId,
           adapterKey: "codex",
           runtimeMode: "full-access",
           status: "running",
-          lastSeenAt: await integratedRuntime.runPromise(idleForFiveSeconds),
+          lastSeenAt: yield* idleForFiveSeconds,
           resumeCursor: { opaque: "resume-after-mismatched-boot" },
           runtimePayload: null,
-        }),
-      );
+        });
 
-      await integratedRuntime.runPromise(reaper.start().pipe(Scope.provide(integratedScope)));
+        yield* reaper.start().pipe(Scope.provide(integratedScope));
 
-      const session = Option.getOrUndefined(
-        await integratedRuntime.runPromise(snapshots.getThreadSessionById(threadId)),
-      );
-      expect(session?.status).toBe("stopped");
-      expect(session?.activeTurnId).toBeNull();
-      expect(session?.lastError).toBe(
-        "session interrupted: server restarted while the session was running",
-      );
-      const projectedTurns = await integratedRuntime.runPromise(turns.listByThreadId({ threadId }));
-      expect(projectedTurns).toHaveLength(1);
-      expect(projectedTurns[0]?.turnId).toBe(turnId);
-      expect(projectedTurns[0]?.state).toBe("interrupted");
-      expect(
-        Option.isNone(
-          await integratedRuntime.runPromise(turns.getPendingTurnStartByThreadId({ threadId })),
-        ),
-      ).toBe(true);
-      const binding = Option.getOrUndefined(
-        await integratedRuntime.runPromise(repository.getByThreadId({ threadId })),
-      );
-      expect(binding?.status).toBe("stopped");
-      expect(binding?.resumeCursor).toEqual({ opaque: "resume-after-integrated-boot" });
-      const mismatchedBinding = Option.getOrUndefined(
-        await integratedRuntime.runPromise(
-          repository.getByThreadId({ threadId: mismatchedThreadId }),
-        ),
-      );
-      expect(mismatchedBinding?.status).toBe("stopped");
-      expect(mismatchedBinding?.resumeCursor).toEqual({
-        opaque: "resume-after-mismatched-boot",
-      });
-    } finally {
-      await Effect.runPromise(Scope.close(integratedScope, Exit.void));
-      await integratedRuntime.dispose();
-      NodeFS.rmSync(baseDir, { recursive: true, force: true });
-    }
+        const session = Option.getOrUndefined(yield* snapshots.getThreadSessionById(threadId));
+        expect(session?.status).toBe("stopped");
+        expect(session?.activeTurnId).toBeNull();
+        expect(session?.lastError).toBe(
+          "session interrupted: server restarted while the session was running",
+        );
+        const projectedTurns = yield* turns.listByThreadId({ threadId });
+        expect(projectedTurns).toHaveLength(1);
+        expect(projectedTurns[0]?.turnId).toBe(turnId);
+        expect(projectedTurns[0]?.state).toBe("interrupted");
+        expect(Option.isNone(yield* turns.getPendingTurnStartByThreadId({ threadId }))).toBe(true);
+        const binding = Option.getOrUndefined(yield* repository.getByThreadId({ threadId }));
+        expect(binding?.status).toBe("stopped");
+        expect(binding?.resumeCursor).toEqual({ opaque: "resume-after-integrated-boot" });
+        const mismatchedBinding = Option.getOrUndefined(
+          yield* repository.getByThreadId({ threadId: mismatchedThreadId }),
+        );
+        expect(mismatchedBinding?.status).toBe("stopped");
+        expect(mismatchedBinding?.resumeCursor).toEqual({
+          opaque: "resume-after-mismatched-boot",
+        });
+      }),
+    ).pipe(
+      Effect.provide(integratedLayer),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(baseDir, { recursive: true, force: true }))),
+    );
   });
 
-  it("reaps stale persisted sessions without active turns", async () => {
+  it.live("reaps stale persisted sessions without active turns", () => {
     const threadId = ThreadId.make("thread-reaper-stale");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: threadId,
@@ -936,12 +885,11 @@ describe("ProviderSessionReaper", () => {
         },
       ]),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -953,27 +901,27 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-stale",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await startReaperScope(reaper);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    const stop = dispatchedSessionStops(harness)[0]!;
-    expect(stop.threadId).toBe(threadId);
-    expect(String(stop.commandId).startsWith(`session-stop-for-reap:${threadId}:`)).toBe(true);
-    expect(stop.reason).toBe("session reaped: interactive session exceeded its idle limit");
-    // The command path owns the stop; the direct call is only a fallback.
-    expect(harness.stopSession).not.toHaveBeenCalled();
+      const stop = dispatchedSessionStops(harness)[0]!;
+      expect(stop.threadId).toBe(threadId);
+      expect(String(stop.commandId).startsWith(`session-stop-for-reap:${threadId}:`)).toBe(true);
+      expect(stop.reason).toBe("session reaped: interactive session exceeded its idle limit");
+      // The command path owns the stop; the direct call is only a fallback.
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("skips stale sessions when the thread still has an active turn", async () => {
+  it.live("skips stale sessions when the thread still has an active turn", () => {
     const threadId = ThreadId.make("thread-reaper-active-turn");
     const turnId = TurnId.make("turn-reaper-active");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: threadId,
@@ -989,12 +937,11 @@ describe("ProviderSessionReaper", () => {
         },
       ]),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -1002,29 +949,29 @@ describe("ProviderSessionReaper", () => {
         runtimeMode: "full-access",
         status: "running",
         // Stale for the 1s idle threshold, fresh for the 24h active-turn cap.
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: {
           opaque: "resume-active-turn",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await startReaperScope(reaper);
-    await Effect.runPromise(drainFibers);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+      yield* drainFibers;
 
-    expect(harness.dispatch).not.toHaveBeenCalled();
-    expect(harness.stopSession).not.toHaveBeenCalled();
-    const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
-    expect(Option.isSome(remaining)).toBe(true);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const remaining = yield* repository.getByThreadId({ threadId });
+      expect(Option.isSome(remaining)).toBe(true);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reaps a session whose active turn outlived the skip cap", async () => {
+  it.live("reaps a session whose active turn outlived the skip cap", () => {
     const threadId = ThreadId.make("thread-reaper-stale-active-turn");
     const turnId = TurnId.make("turn-reaper-that-died");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: threadId,
@@ -1042,92 +989,94 @@ describe("ProviderSessionReaper", () => {
       ]),
       reaperOptions: { activeTurnSkipCapMs: 1_000 },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
         adapterKey: "claudeAgent",
         runtimeMode: "full-access",
         status: "running",
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: {
           opaque: "resume-stale-active-turn",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(threadId);
-    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
-      "session reaped: active turn exceeded its inactivity limit",
-    );
-    expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(threadId);
+      expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+        "session reaped: active turn exceeded its inactivity limit",
+      );
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("does not reap sessions that are still within the inactivity threshold", async () => {
-    const threadId = ThreadId.make("thread-reaper-fresh");
-    const now = DateTime.formatIso(await Effect.runPromise(DateTime.now));
-    const harness = await createHarness({
-      readModel: makeReadModel([
-        {
-          id: threadId,
-          session: {
-            threadId,
-            status: "ready",
-            providerName: "claudeAgent",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: now,
+  it.live("does not reap sessions that are still within the inactivity threshold", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-reaper-fresh");
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const harness = createHarness({
+        readModel: makeReadModel([
+          {
+            id: threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "claudeAgent",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: now,
+            },
           },
-        },
-      ]),
-    });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
+        ]),
+      });
 
-    await runtime!.runPromise(
-      repository.upsert({
-        threadId,
-        providerName: "claudeAgent",
-        providerInstanceId: null,
-        adapterKey: "claudeAgent",
-        runtimeMode: "full-access",
-        status: "running",
-        lastSeenAt: now,
-        resumeCursor: {
-          opaque: "resume-fresh",
-        },
-        runtimePayload: null,
-      }),
-    );
+      yield* Effect.provide(
+        Effect.gen(function* () {
+          const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await startReaperScope(reaper);
-    await Effect.runPromise(drainFibers);
+          yield* repository.upsert({
+            threadId,
+            providerName: "claudeAgent",
+            providerInstanceId: null,
+            adapterKey: "claudeAgent",
+            runtimeMode: "full-access",
+            status: "running",
+            lastSeenAt: now,
+            resumeCursor: {
+              opaque: "resume-fresh",
+            },
+            runtimePayload: null,
+          });
 
-    expect(harness.dispatch).not.toHaveBeenCalled();
-    expect(harness.stopSession).not.toHaveBeenCalled();
-    const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
-    expect(Option.isSome(remaining)).toBe(true);
-  });
+          const reaper = yield* ProviderSessionReaper;
+          yield* startReaperScope(reaper);
+          yield* drainFibers;
 
-  it("skips persisted sessions that are already marked stopped", async () => {
+          expect(harness.dispatch).not.toHaveBeenCalled();
+          expect(harness.stopSession).not.toHaveBeenCalled();
+          const remaining = yield* repository.getByThreadId({ threadId });
+          expect(Option.isSome(remaining)).toBe(true);
+        }),
+        harness.layer,
+      );
+    }),
+  );
+
+  it.live("skips persisted sessions that are already marked stopped", () => {
     const threadId = ThreadId.make("thread-reaper-stopped");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: threadId,
@@ -1143,12 +1092,11 @@ describe("ProviderSessionReaper", () => {
         },
       ]),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -1160,24 +1108,24 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-stopped",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await startReaperScope(reaper);
-    await Effect.runPromise(drainFibers);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+      yield* drainFibers;
 
-    expect(harness.dispatch).not.toHaveBeenCalled();
-    expect(harness.stopSession).not.toHaveBeenCalled();
-    const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
-    expect(Option.isSome(remaining)).toBe(true);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const remaining = yield* repository.getByThreadId({ threadId });
+      expect(Option.isSome(remaining)).toBe(true);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("continues reaping other sessions when one stop attempt fails", async () => {
+  it.live("continues reaping other sessions when one stop attempt fails", () => {
     const failedThreadId = ThreadId.make("thread-reaper-stop-failure");
     const reapedThreadId = ThreadId.make("thread-reaper-stop-success");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: failedThreadId,
@@ -1225,12 +1173,11 @@ describe("ProviderSessionReaper", () => {
             )
           : Effect.void,
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: failedThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -1242,10 +1189,8 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-failure",
         },
         runtimePayload: null,
-      }),
-    );
-    await runtime!.runPromise(
-      repository.upsert({
+      });
+      yield* repository.upsert({
         threadId: reapedThreadId,
         providerName: "codex",
         providerInstanceId: null,
@@ -1257,30 +1202,30 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-success",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await startReaperScope(reaper);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 2);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 2);
 
-    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
-      failedThreadId,
-      reapedThreadId,
-    ]);
-    // Only the refused dispatch fell back to the direct stop, and that
-    // fallback's failure did not block the second thread's reap.
-    expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
-      failedThreadId,
-    ]);
+      expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
+        failedThreadId,
+        reapedThreadId,
+      ]);
+      // Only the refused dispatch fell back to the direct stop, and that
+      // fallback's failure did not block the second thread's reap.
+      expect(harness.stopSession.mock.calls.map(([request]) => request.threadId)).toEqual([
+        failedThreadId,
+      ]);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("continues reaping other sessions when one stop attempt defects", async () => {
+  it.live("continues reaping other sessions when one stop attempt defects", () => {
     const defectThreadId = ThreadId.make("thread-reaper-stop-defect");
     const reapedThreadId = ThreadId.make("thread-reaper-stop-after-defect");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: defectThreadId,
@@ -1314,12 +1259,11 @@ describe("ProviderSessionReaper", () => {
           ? Effect.die(new Error("simulated stop defect"))
           : Effect.succeed({ sequence: 1 }),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: defectThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -1331,10 +1275,8 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-defect",
         },
         runtimePayload: null,
-      }),
-    );
-    await runtime!.runPromise(
-      repository.upsert({
+      });
+      yield* repository.upsert({
         threadId: reapedThreadId,
         providerName: "codex",
         providerInstanceId: null,
@@ -1346,119 +1288,118 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-after-defect",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await startReaperScope(reaper);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 2);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 2);
 
-    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
-      defectThreadId,
-      reapedThreadId,
-    ]);
-    // A defect is a bug, not a refusal: it is logged, and the next sweep
-    // retries — no fallback direct stop fires.
-    expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
+        defectThreadId,
+        reapedThreadId,
+      ]);
+      // A defect is a bug, not a refusal: it is logged, and the next sweep
+      // retries — no fallback direct stop fires.
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reaps an epic-run iteration thread on the short threshold while sparing a plain thread", async () => {
-    const interactiveThreadId = ThreadId.make("thread-reaper-interactive-backstop");
-    const iterationThreadId = ThreadId.make(
-      epicRunIterationThreadId({
-        runId: "0f1c9a4e-6b21-4a2c-9f31-7d0c5b8e2a10",
-        iterationIndex: 2,
-      }),
-    );
-    const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
-      readModel: makeReadModel([
-        {
-          id: interactiveThreadId,
-          session: {
-            threadId: interactiveThreadId,
-            status: "ready",
-            providerName: "claudeAgent",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: now,
+  it.live(
+    "reaps an epic-run iteration thread on the short threshold while sparing a plain thread",
+    () => {
+      const interactiveThreadId = ThreadId.make("thread-reaper-interactive-backstop");
+      const iterationThreadId = ThreadId.make(
+        epicRunIterationThreadId({
+          runId: "0f1c9a4e-6b21-4a2c-9f31-7d0c5b8e2a10",
+          iterationIndex: 2,
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      const harness = createHarness({
+        readModel: makeReadModel([
+          {
+            id: interactiveThreadId,
+            session: {
+              threadId: interactiveThreadId,
+              status: "ready",
+              providerName: "claudeAgent",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: now,
+            },
           },
-        },
-        {
-          id: iterationThreadId,
-          session: {
-            threadId: iterationThreadId,
-            status: "ready",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: now,
+          {
+            id: iterationThreadId,
+            session: {
+              threadId: iterationThreadId,
+              status: "ready",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: now,
+            },
           },
+        ]),
+        reaperOptions: {
+          interactiveIdleThresholdMs: 60_000,
+          epicRunIterationIdleThresholdMs: 1_000,
+          settledIdleThresholdMs: 1_000,
+          sweepIntervalMs: 60_000,
         },
-      ]),
-      reaperOptions: {
-        interactiveIdleThresholdMs: 60_000,
-        epicRunIterationIdleThresholdMs: 1_000,
-        settledIdleThresholdMs: 1_000,
-        sweepIntervalMs: 60_000,
-      },
-    });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
-    const idleFiveSecondsAgo = await runtime!.runPromise(idleForFiveSeconds);
+      });
 
-    await runtime!.runPromise(
-      repository.upsert({
-        threadId: interactiveThreadId,
-        providerName: "claudeAgent",
-        providerInstanceId: null,
-        adapterKey: "claudeAgent",
-        runtimeMode: "full-access",
-        status: "running",
-        lastSeenAt: idleFiveSecondsAgo,
-        resumeCursor: {
-          opaque: "resume-interactive-backstop",
-        },
-        runtimePayload: null,
-      }),
-    );
-    await runtime!.runPromise(
-      repository.upsert({
-        threadId: iterationThreadId,
-        providerName: "codex",
-        providerInstanceId: null,
-        adapterKey: "codex",
-        runtimeMode: "full-access",
-        status: "running",
-        lastSeenAt: idleFiveSecondsAgo,
-        resumeCursor: {
-          opaque: "resume-iteration-thread",
-        },
-        runtimePayload: null,
-      }),
-    );
+      return Effect.gen(function* () {
+        const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        const idleFiveSecondsAgo = yield* idleForFiveSeconds;
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+        yield* repository.upsert({
+          threadId: interactiveThreadId,
+          providerName: "claudeAgent",
+          providerInstanceId: null,
+          adapterKey: "claudeAgent",
+          runtimeMode: "full-access",
+          status: "running",
+          lastSeenAt: idleFiveSecondsAgo,
+          resumeCursor: {
+            opaque: "resume-interactive-backstop",
+          },
+          runtimePayload: null,
+        });
+        yield* repository.upsert({
+          threadId: iterationThreadId,
+          providerName: "codex",
+          providerInstanceId: null,
+          adapterKey: "codex",
+          runtimeMode: "full-access",
+          status: "running",
+          lastSeenAt: idleFiveSecondsAgo,
+          resumeCursor: {
+            opaque: "resume-iteration-thread",
+          },
+          runtimePayload: null,
+        });
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
-    await runtime!.runPromise(drainFibers);
+        const reaper = yield* ProviderSessionReaper;
+        yield* startReaperScope(reaper);
 
-    expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
-      iterationThreadId,
-    ]);
-    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
-      "session reaped: epic run iteration exceeded its idle limit",
-    );
-    expect(harness.stopSession).not.toHaveBeenCalled();
-  });
+        yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
+        yield* drainFibers;
 
-  it("spares a quiet-main-stream session whose subagent is still fresh", async () => {
+        expect(dispatchedSessionStops(harness).map((command) => command.threadId)).toEqual([
+          iterationThreadId,
+        ]);
+        expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+          "session reaped: epic run iteration exceeded its idle limit",
+        );
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.live("spares a quiet-main-stream session whose subagent is still fresh", () => {
     const iterationThreadId = ThreadId.make(
       epicRunIterationThreadId({
         runId: "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d",
@@ -1466,7 +1407,7 @@ describe("ProviderSessionReaper", () => {
       }),
     );
     const now = DateTime.formatIso(DateTime.nowUnsafe());
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: iterationThreadId,
@@ -1486,12 +1427,11 @@ describe("ProviderSessionReaper", () => {
         },
       ]),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: iterationThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -1499,28 +1439,25 @@ describe("ProviderSessionReaper", () => {
         runtimeMode: "full-access",
         status: "running",
         // Stale for the 1s idle threshold; only the fresh subagent saves it.
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: {
           opaque: "resume-fresh-subagent",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
-    await runtime!.runPromise(drainFibers);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+      yield* drainFibers;
 
-    expect(harness.dispatch).not.toHaveBeenCalled();
-    expect(harness.stopSession).not.toHaveBeenCalled();
-    const remaining = await runtime!.runPromise(
-      repository.getByThreadId({ threadId: iterationThreadId }),
-    );
-    expect(Option.isSome(remaining)).toBe(true);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const remaining = yield* repository.getByThreadId({ threadId: iterationThreadId });
+      expect(Option.isSome(remaining)).toBe(true);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reaps a quiet session whose running subagent row went stale", async () => {
+  it.live("reaps a quiet session whose running subagent row went stale", () => {
     const iterationThreadId = ThreadId.make(
       epicRunIterationThreadId({
         runId: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f",
@@ -1531,7 +1468,7 @@ describe("ProviderSessionReaper", () => {
     const staleSubagentUpdatedAt = DateTime.formatIso(
       DateTime.subtractDuration(now, Duration.minutes(20)),
     );
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: iterationThreadId,
@@ -1549,39 +1486,37 @@ describe("ProviderSessionReaper", () => {
         },
       ]),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: iterationThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
         adapterKey: "claudeAgent",
         runtimeMode: "full-access",
         status: "running",
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: {
           opaque: "resume-stale-subagent",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(iterationThreadId);
+      expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(iterationThreadId);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reaps a settled thread on the short threshold", async () => {
+  it.live("reaps a settled thread on the short threshold", () => {
     const settledThreadId = ThreadId.make("thread-reaper-settled");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: settledThreadId,
@@ -1604,42 +1539,40 @@ describe("ProviderSessionReaper", () => {
         sweepIntervalMs: 60_000,
       },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: settledThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
         adapterKey: "claudeAgent",
         runtimeMode: "full-access",
         status: "running",
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: {
           opaque: "resume-settled",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(settledThreadId);
-    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
-      "session reaped: settled session exceeded its idle limit",
-    );
+      expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(settledThreadId);
+      expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+        "session reaped: settled session exceeded its idle limit",
+      );
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reports the keep-active backstop when it reaps a pinned session", async () => {
+  it.live("reports the keep-active backstop when it reaps a pinned session", () => {
     const pinnedThreadId = ThreadId.make("thread-reaper-active-pin");
     const now = "2026-01-01T00:00:00.000Z";
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: pinnedThreadId,
@@ -1660,42 +1593,40 @@ describe("ProviderSessionReaper", () => {
         sweepIntervalMs: 60_000,
       },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: pinnedThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
         adapterKey: "claudeAgent",
         runtimeMode: "full-access",
         status: "running",
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: { opaque: "resume-active-pin" },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
 
-    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(pinnedThreadId);
-    expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
-      "session reaped: keep-active session exceeded its idle limit",
-    );
+      expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(pinnedThreadId);
+      expect(dispatchedSessionStops(harness)[0]?.reason).toBe(
+        "session reaped: keep-active session exceeded its idle limit",
+      );
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("falls back to a direct stop when the thread is missing from the read model", async () => {
+  it.live("falls back to a direct stop when the thread is missing from the read model", () => {
     const orphanThreadId = ThreadId.make("thread-reaper-orphan-binding");
     // No thread in the read model at all: the binding outlived its thread, so
     // the stop dispatch is refused and only the direct call can stop the
     // adapter session.
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([]),
       dispatchImplementation: (command) =>
         Effect.fail(
@@ -1705,12 +1636,11 @@ describe("ProviderSessionReaper", () => {
           }),
         ),
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
 
-    await runtime!.runPromise(
-      repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId: orphanThreadId,
         providerName: "claudeAgent",
         providerInstanceId: null,
@@ -1722,27 +1652,26 @@ describe("ProviderSessionReaper", () => {
           opaque: "resume-orphan",
         },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
 
-    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      yield* waitFor(() => harness.stopSession.mock.calls.length === 1);
 
-    expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(orphanThreadId);
-    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: orphanThreadId });
-    expect(harness.stoppedThreadIds.has(orphanThreadId)).toBe(true);
+      expect(dispatchedSessionStops(harness)[0]?.threadId).toBe(orphanThreadId);
+      expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: orphanThreadId });
+      expect(harness.stoppedThreadIds.has(orphanThreadId)).toBe(true);
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("reaps a dead running binding after grace and spares a live one", async () => {
+  it.live("reaps a dead running binding after grace and spares a live one", () => {
     const deadThreadId = ThreadId.make("thread-reaper-dead-session");
     const liveThreadId = ThreadId.make("thread-reaper-live-session");
     const turnId = TurnId.make("turn-reaper-liveness");
     const now = "2026-01-01T00:00:00.000Z";
     const livenessReads = new Map<ThreadId, number>();
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: deadThreadId,
@@ -1780,14 +1709,13 @@ describe("ProviderSessionReaper", () => {
         deadSessionGraceMs: 1_000,
       },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
-    const lastSeenAt = await runtime!.runPromise(idleForFiveSeconds);
 
-    for (const threadId of [deadThreadId, liveThreadId]) {
-      await runtime!.runPromise(
-        repository.upsert({
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const lastSeenAt = yield* idleForFiveSeconds;
+
+      for (const threadId of [deadThreadId, liveThreadId]) {
+        yield* repository.upsert({
           threadId,
           providerName: "codex",
           providerInstanceId: null,
@@ -1797,39 +1725,36 @@ describe("ProviderSessionReaper", () => {
           lastSeenAt,
           resumeCursor: { opaque: `resume-${threadId}` },
           runtimePayload: null,
-        }),
+        });
+      }
+
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+
+      yield* waitFor(() => dispatchedSessionStops(harness).length === 1);
+      yield* drainFibers;
+
+      const stops = dispatchedSessionStops(harness);
+      expect(stops).toHaveLength(1);
+      expect(stops[0]?.threadId).toBe(deadThreadId);
+      expect(String(stops[0]?.commandId)).toMatch(
+        new RegExp(`^session-stop-for-reap:${deadThreadId}:\\d+$`),
       );
-    }
+      expect(stops[0]?.reason).toBe("session reaped: no live provider process");
+      expect(harness.stopSession).not.toHaveBeenCalled();
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
-
-    await waitFor(() => dispatchedSessionStops(harness).length === 1);
-    await runtime!.runPromise(drainFibers);
-
-    const stops = dispatchedSessionStops(harness);
-    expect(stops).toHaveLength(1);
-    expect(stops[0]?.threadId).toBe(deadThreadId);
-    expect(String(stops[0]?.commandId)).toMatch(
-      new RegExp(`^session-stop-for-reap:${deadThreadId}:\\d+$`),
-    );
-    expect(stops[0]?.reason).toBe("session reaped: no live provider process");
-    expect(harness.stopSession).not.toHaveBeenCalled();
-
-    const deadBinding = await runtime!.runPromise(
-      repository.getByThreadId({ threadId: deadThreadId }),
-    );
-    expect(Option.getOrUndefined(deadBinding)?.resumeCursor).toEqual({
-      opaque: `resume-${deadThreadId}`,
-    });
+      const deadBinding = yield* repository.getByThreadId({ threadId: deadThreadId });
+      expect(Option.getOrUndefined(deadBinding)?.resumeCursor).toEqual({
+        opaque: `resume-${deadThreadId}`,
+      });
+    }).pipe(Effect.provide(harness.layer));
   });
 
-  it("abandons a dead-session reap when the adapter session resumes", async () => {
+  it.live("abandons a dead-session reap when the adapter session resumes", () => {
     const threadId = ThreadId.make("thread-reaper-resumed-during-sweep");
     const now = "2026-01-01T00:00:00.000Z";
     let livenessReadCount = 0;
-    const harness = await createHarness({
+    const harness = createHarness({
       readModel: makeReadModel([
         {
           id: threadId,
@@ -1854,30 +1779,29 @@ describe("ProviderSessionReaper", () => {
         deadSessionGraceMs: 1_000,
       },
     });
-    const repository = await runtime!.runPromise(
-      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
-    );
-    await runtime!.runPromise(
-      repository.upsert({
+
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
         threadId,
         providerName: "codex",
         providerInstanceId: null,
         adapterKey: "codex",
         runtimeMode: "full-access",
         status: "running",
-        lastSeenAt: await runtime!.runPromise(idleForFiveSeconds),
+        lastSeenAt: yield* idleForFiveSeconds,
         resumeCursor: { opaque: "resume-raced" },
         runtimePayload: null,
-      }),
-    );
+      });
 
-    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await runtime!.runPromise(Scope.make("sequential"));
-    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
-    await runtime!.runPromise(drainFibers);
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+      yield* drainFibers;
 
-    expect(livenessReadCount).toBe(3);
-    expect(harness.dispatch).not.toHaveBeenCalled();
-    expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(livenessReadCount).toBe(3);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(harness.layer));
   });
 });

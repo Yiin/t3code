@@ -23,11 +23,8 @@ const EFFECT_RUNTIME_METHODS = new Set([
 // occurrences in these files, while unlisted test files must have zero.
 const LEGACY_BASELINE = new Map<string, number>([
   ["apps/server/src/orchestration/commandInvariants.test.ts", 6],
-  ["apps/server/src/orchestration/Layers/CheckpointReactor.test.ts", 42],
   ["apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts", 5],
   ["apps/server/src/orchestration/Layers/OrchestrationReactor.test.ts", 4],
-  ["apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts", 70],
-  ["apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts", 31],
   ["apps/server/src/orchestration/Layers/ThreadDeletionReactor.test.ts", 2],
   ["apps/server/src/orchestration/projector.test.ts", 20],
   ["apps/server/src/project/Layers/ProjectSetupScriptRunner.test.ts", 4],
@@ -38,7 +35,6 @@ const LEGACY_BASELINE = new Map<string, number>([
   ["apps/server/src/provider/Layers/CursorAdapter.test.ts", 1],
   ["apps/server/src/provider/Layers/CursorProvider.test.ts", 4],
   ["apps/server/src/provider/Layers/ProviderService.test.ts", 2],
-  ["apps/server/src/provider/Layers/ProviderSessionReaper.test.ts", 21],
   ["apps/server/src/relay/AgentAwarenessRelay.test.ts", 4],
   ["apps/server/src/server.test.ts", 1],
   ["apps/web/src/cloud/dpop.test.ts", 2],
