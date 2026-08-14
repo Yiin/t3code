@@ -173,9 +173,27 @@ export function ProviderAuthLoginDialog(props: ProviderAuthLoginDialogProps) {
   return (
     <Dialog
       open={props.open}
-      onOpenChange={(open) => {
-        if (open) props.onOpenChange(true);
-        else void requestClose();
+      // A running login must never be dismissed by a pointer press the
+      // dialog library attributes to the outside — a click into the code
+      // input has been observed to close the dialog and cancel the login
+      // (t3code-yin). Closing stays explicit: Cancel, the close button,
+      // or Escape.
+      disablePointerDismissal
+      onOpenChange={(open, eventDetails) => {
+        if (open) {
+          props.onOpenChange(true);
+          return;
+        }
+        const reason = eventDetails?.reason;
+        if (
+          state.status === "running" &&
+          reason !== "escape-key" &&
+          reason !== "close-press" &&
+          reason !== "imperative-action"
+        ) {
+          return;
+        }
+        void requestClose();
       }}
       onOpenChangeComplete={props.onOpenChangeComplete}
     >
