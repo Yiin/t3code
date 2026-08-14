@@ -4934,6 +4934,51 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("resumes a transcript EnterWorktree refiled under another project dir", () => {
+    const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-resume-cwd-"));
+    const staged = stageClaudeConfigDir({ cwd, sessionIds: [] });
+    // EnterWorktree mid-session refiles the transcript under the worktree's
+    // slug: the cwd's own project directory exists (another conversation could
+    // live there) but this session's file sits under a different one. The SDK
+    // still resumes it from there, so the guard must not refuse.
+    const worktreeProjectDir = NodePath.join(
+      staged.configDir,
+      "projects",
+      "/tmp/some-worktree".replace(/[^A-Za-z0-9]/g, "-"),
+    );
+    NodeFS.mkdirSync(worktreeProjectDir, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(worktreeProjectDir, `${STAGED_SESSION_ID}.jsonl`), "");
+    const harness = makeHarness({ claudeConfig: { homePath: staged.configDir } });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          staged.cleanup();
+          NodeFS.rmSync(cwd, { recursive: true, force: true });
+        }),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd,
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: STAGED_SESSION_ID,
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(session.sessionOrigin, "resumed");
+      assert.equal(harness.getLastCreateQueryInput()?.options.resume, STAGED_SESSION_ID);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("resumes anyway when it cannot see Claude's transcripts for the cwd", () => {
     const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-resume-cwd-"));
     // A config dir laid out for a different workspace: nothing here says this
