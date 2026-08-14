@@ -33,6 +33,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
+import { normalizeEpochResetsAt } from "../providerLimitSignal.ts";
 
 const KIMI_PRESENTATION = {
   displayName: "Kimi",
@@ -53,7 +54,7 @@ const decodeUnknownJsonString = Schema.decodeUnknownOption(Schema.UnknownFromJso
  * managed kimi-code provider refreshes its short-lived access token on
  * demand, so the presence of either token counts as authenticated.
  */
-export function kimiAuthFromCredentialsJson(raw: string): ServerProviderAuth {
+export function kimiAuthFromCredentialsJson(raw: string, label = "Kimi OAuth"): ServerProviderAuth {
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
     return { status: "unauthenticated" };
@@ -72,7 +73,17 @@ export function kimiAuthFromCredentialsJson(raw: string): ServerProviderAuth {
     return typeof value === "string" && value.trim().length > 0;
   };
   if (hasToken("refresh_token") || hasToken("access_token")) {
-    return { status: "authenticated", type: "oauth", label: "Kimi OAuth" };
+    const expiresAt = normalizeEpochResetsAt(
+      typeof record.expires_at === "string" || typeof record.expires_at === "number"
+        ? record.expires_at
+        : null,
+    );
+    return {
+      status: "authenticated",
+      type: "oauth",
+      label,
+      ...(expiresAt ? { expiresAt } : {}),
+    };
   }
   return { status: "unauthenticated" };
 }
@@ -84,6 +95,7 @@ export function kimiAuthFromCredentialsJson(raw: string): ServerProviderAuth {
  */
 const probeKimiAuth = Effect.fn("probeKimiAuth")(function* (
   environment: NodeJS.ProcessEnv,
+  accountLabel?: string,
 ): Effect.fn.Return<ServerProviderAuth, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -92,7 +104,8 @@ const probeKimiAuth = Effect.fn("probeKimiAuth")(function* (
   const raw = yield* fileSystem
     .readFileString(credentialsPath)
     .pipe(Effect.orElseSucceed(() => ""));
-  return kimiAuthFromCredentialsJson(raw);
+  const label = accountLabel?.trim() || path.basename(kimiHome) || "Kimi OAuth";
+  return kimiAuthFromCredentialsJson(raw, label);
 });
 
 const KIMI_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
@@ -183,6 +196,7 @@ const runKimiVersionCommand = (
 export const checkKimiProviderStatus = Effect.fn("checkKimiProviderStatus")(function* (
   kimiSettings: KimiSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  accountLabel?: string,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -273,7 +287,7 @@ export const checkKimiProviderStatus = Effect.fn("checkKimiProviderStatus")(func
     });
   }
 
-  const auth = yield* probeKimiAuth(environment);
+  const auth = yield* probeKimiAuth(environment, accountLabel);
   return buildServerProvider({
     presentation: KIMI_PRESENTATION,
     enabled: kimiSettings.enabled,

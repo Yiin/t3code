@@ -6,6 +6,8 @@ import {
   type ProviderUsageSource,
   type ProviderUsageWindow,
   type ServerProviderModel,
+  type ServerProviderAuth,
+  type ServerProviderState,
   type ServerProviderSkill,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
@@ -14,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
@@ -37,11 +40,13 @@ import {
   buildBooleanOptionDescriptor,
   buildSelectOptionDescriptor,
   buildServerProvider,
+  AUTH_PROBE_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
   spawnAndCollect,
+  type CommandResult,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
@@ -528,13 +533,123 @@ function claudeAuthMetadata(input: {
     };
   }
 
+  const authMethod = input.authMethod ? nonEmptyProbeString(input.authMethod) : undefined;
+  if (authMethod) {
+    const normalized = authMethod.toLowerCase().replace(/[\s_-]+/g, "");
+    return {
+      type: authMethod,
+      label:
+        normalized === "oauth" || normalized === "claude.ai" || normalized === "claudeai"
+          ? "Claude OAuth"
+          : toTitleCaseWords(authMethod),
+    };
+  }
+
   return undefined;
 }
 
 function apiProviderAuthMetadata(
   apiProvider: string | undefined,
 ): { readonly type: string; readonly label: string } | undefined {
-  return apiProvider === "bedrock" ? { type: "bedrock", label: "Amazon Bedrock" } : undefined;
+  const type = apiProvider ? nonEmptyProbeString(apiProvider) : undefined;
+  if (!type) return undefined;
+  const normalized = type.toLowerCase().replace(/[\s_-]+/g, "");
+  const labels: Readonly<Record<string, string>> = {
+    anthropicaws: "Anthropic on AWS",
+    bedrock: "Amazon Bedrock",
+    firstparty: "Anthropic",
+    foundry: "Azure AI Foundry",
+    gateway: "Anthropic Gateway",
+    mantle: "Mantle",
+    vertex: "Google Vertex AI",
+  };
+  return { type, label: labels[normalized] ?? toTitleCaseWords(type) };
+}
+
+function claudeAccountAuthMetadata(input: {
+  readonly subscriptionType: string | undefined;
+  readonly authMethod: string | undefined;
+  readonly apiProvider: string | undefined;
+}): { readonly type: string; readonly label: string } | undefined {
+  const apiProviderMetadata = apiProviderAuthMetadata(input.apiProvider);
+  const normalizedApiProvider = input.apiProvider?.toLowerCase().replace(/[\s_-]+/g, "");
+  if (apiProviderMetadata && normalizedApiProvider !== "firstparty") {
+    return apiProviderMetadata;
+  }
+  return (
+    claudeAuthMetadata({
+      subscriptionType: input.subscriptionType,
+      authMethod: input.authMethod,
+    }) ?? apiProviderMetadata
+  );
+}
+
+function hasClaudeAccountIdentity(capabilities: ClaudeCapabilitiesProbe): boolean {
+  return [
+    capabilities.email,
+    capabilities.subscriptionType,
+    capabilities.tokenSource,
+    capabilities.apiProvider,
+  ].some((value) => value !== undefined && value.trim().length > 0);
+}
+
+const ClaudeAuthStatusJson = Schema.fromJsonString(
+  Schema.Struct({
+    loggedIn: Schema.Boolean,
+    authMethod: Schema.optional(Schema.String),
+    apiProvider: Schema.optional(Schema.String),
+    email: Schema.optional(Schema.String),
+    orgId: Schema.optional(Schema.String),
+    orgName: Schema.optional(Schema.String),
+    subscriptionType: Schema.optional(Schema.String),
+  }),
+);
+const decodeClaudeAuthStatusJson = Schema.decodeUnknownOption(ClaudeAuthStatusJson);
+
+function parseClaudeAuthStatusFromOutput(result: CommandResult): {
+  readonly status: Exclude<ServerProviderState, "disabled">;
+  readonly auth: ServerProviderAuth;
+  readonly message?: string;
+} {
+  const parsedOption = decodeClaudeAuthStatusJson(result.stdout.trim());
+  if (Option.isNone(parsedOption)) {
+    return {
+      status: "warning",
+      auth: { status: "unknown" },
+      message: "Could not verify Claude authentication status.",
+    };
+  }
+
+  const parsed = parsedOption.value;
+  if (!parsed.loggedIn) {
+    return {
+      status: "error",
+      auth: { status: "unauthenticated" },
+      message: "Claude is not authenticated. Run `claude auth login` and try again.",
+    };
+  }
+
+  const email = parsed.email ? nonEmptyProbeString(parsed.email) : undefined;
+  const authMethod = parsed.authMethod ? nonEmptyProbeString(parsed.authMethod) : undefined;
+  const apiProvider = parsed.apiProvider ? nonEmptyProbeString(parsed.apiProvider) : undefined;
+  const subscriptionType = parsed.subscriptionType
+    ? nonEmptyProbeString(parsed.subscriptionType)
+    : undefined;
+  const orgName = parsed.orgName ? nonEmptyProbeString(parsed.orgName) : undefined;
+  const metadata = claudeAccountAuthMetadata({ subscriptionType, authMethod, apiProvider });
+  return {
+    status: "ready",
+    auth: {
+      status: "authenticated",
+      ...(email ? { email } : {}),
+      ...(metadata
+        ? metadata
+        : {
+            ...(authMethod ? { type: authMethod } : {}),
+            ...(orgName ? { label: orgName } : {}),
+          }),
+    },
+  };
 }
 
 // ── SDK capability probe ────────────────────────────────────────────
@@ -1043,28 +1158,61 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
-  if (!capabilities) {
+  if (!capabilities || !hasClaudeAccountIdentity(capabilities)) {
+    const authProbe = yield* runClaudeCommand(
+      claudeSettings,
+      ["auth", "status", "--json"],
+      resolvedEnvironment,
+    ).pipe(Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS), Effect.result);
+
+    if (Result.isSuccess(authProbe) && Option.isSome(authProbe.success)) {
+      const parsedAuth = parseClaudeAuthStatusFromOutput(authProbe.success.value);
+      return buildServerProvider({
+        presentation: CLAUDE_PRESENTATION,
+        enabled: claudeSettings.enabled,
+        checkedAt,
+        models,
+        slashCommands: dedupedSlashCommands,
+        skills: capabilities?.skills ?? [],
+        probe: {
+          installed: true,
+          version: parsedVersion,
+          status: parsedAuth.status,
+          auth: parsedAuth.auth,
+          ...(parsedAuth.message
+            ? { message: parsedAuth.message }
+            : versionUpgradeMessage
+              ? { message: versionUpgradeMessage }
+              : {}),
+        },
+      });
+    }
+
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
       checkedAt,
       models,
       slashCommands: dedupedSlashCommands,
+      skills: capabilities?.skills ?? [],
       probe: {
         installed: true,
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Could not verify Claude authentication status from initialization result.",
+        message:
+          Result.isSuccess(authProbe) && Option.isNone(authProbe.success)
+            ? "Could not verify Claude authentication status. Timed out while running command."
+            : "Could not verify Claude authentication status.",
       },
     });
   }
 
-  const authMetadata =
-    claudeAuthMetadata({
-      subscriptionType: capabilities.subscriptionType,
-      authMethod: capabilities.tokenSource,
-    }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
+  const authMetadata = claudeAccountAuthMetadata({
+    subscriptionType: capabilities.subscriptionType,
+    authMethod: capabilities.tokenSource,
+    apiProvider: capabilities.apiProvider,
+  });
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,

@@ -124,7 +124,7 @@ export const KimiDriver: ProviderDriver<KimiSettings, KimiDriverEnv> = {
       });
       const textGeneration = yield* makeKimiTextGeneration(effectiveConfig, processEnv);
 
-      const checkProvider = checkKimiProviderStatus(effectiveConfig, processEnv).pipe(
+      const checkProvider = checkKimiProviderStatus(effectiveConfig, processEnv, displayName).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),

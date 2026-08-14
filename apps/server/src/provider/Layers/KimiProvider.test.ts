@@ -12,8 +12,10 @@ import { makeKimiEnvironment } from "../Drivers/KimiHome.ts";
 import { checkKimiProviderStatus, kimiAuthFromCredentialsJson } from "./KimiProvider.ts";
 
 const decodeKimiSettings = Schema.decodeSync(KimiSettings);
+const encodeUnknownJson = Schema.encodeSync(Schema.UnknownFromJsonString);
 
-const CREDENTIALS_WITH_TOKENS_JSON = '{"access_token":"a","refresh_token":"r","expires_at":0}';
+const CREDENTIALS_WITH_TOKENS_JSON =
+  '{"access_token":"secret-access","refresh_token":"secret-refresh","expires_at":1800000000}';
 
 describe("kimiAuthFromCredentialsJson", () => {
   it("is unauthenticated when the file is missing or empty", () => {
@@ -39,6 +41,7 @@ describe("kimiAuthFromCredentialsJson", () => {
       status: "authenticated",
       type: "oauth",
       label: "Kimi OAuth",
+      expiresAt: "2027-01-15T08:00:00.000Z",
     });
   });
 
@@ -68,7 +71,7 @@ describe("checkKimiProviderStatus", () => {
     return binaryPath;
   });
 
-  const checkWithHome = (kimiHome: string | null) =>
+  const checkWithHome = (kimiHome: string | null, accountLabel?: string) =>
     Effect.gen(function* () {
       const binaryPath = yield* makeFakeKimiBinary();
       const settings = decodeKimiSettings({ binaryPath });
@@ -78,7 +81,7 @@ describe("checkKimiProviderStatus", () => {
       } else {
         delete environment.KIMI_CODE_HOME;
       }
-      return yield* checkKimiProviderStatus(settings, environment);
+      return yield* checkKimiProviderStatus(settings, environment, accountLabel);
     });
 
   it.effect("reports authenticated when KIMI_CODE_HOME holds OAuth credentials", () =>
@@ -101,8 +104,11 @@ describe("checkKimiProviderStatus", () => {
       expect(snapshot.auth).toEqual({
         status: "authenticated",
         type: "oauth",
-        label: "Kimi OAuth",
+        label: path.basename(home),
+        expiresAt: "2027-01-15T08:00:00.000Z",
       });
+      expect(encodeUnknownJson(snapshot)).not.toContain("secret-access");
+      expect(encodeUnknownJson(snapshot)).not.toContain("secret-refresh");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -117,6 +123,74 @@ describe("checkKimiProviderStatus", () => {
       expect(snapshot.status).toBe("ready");
       expect(snapshot.auth).toEqual({ status: "unauthenticated" });
       expect(snapshot.message).toContain("kimi login");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reports unauthenticated when the credential file is truncated", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fileSystem.makeTempDirectory({
+        directory: NodeOS.tmpdir(),
+        prefix: "kimi-corrupt-home-",
+      });
+      const credentialsDir = path.join(home, "credentials");
+      yield* fileSystem.makeDirectory(credentialsDir);
+      yield* fileSystem.writeFileString(
+        path.join(credentialsDir, "kimi-code.json"),
+        '{"access_token":"secret-access"',
+      );
+
+      const snapshot = yield* checkWithHome(home);
+      expect(snapshot.auth).toEqual({ status: "unauthenticated" });
+      expect(encodeUnknownJson(snapshot)).not.toContain("secret-access");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("uses the instance display name for the account label", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fileSystem.makeTempDirectory({
+        directory: NodeOS.tmpdir(),
+        prefix: "kimi-named-home-",
+      });
+      const credentialsDir = path.join(home, "credentials");
+      yield* fileSystem.makeDirectory(credentialsDir);
+      yield* fileSystem.writeFileString(
+        path.join(credentialsDir, "kimi-code.json"),
+        CREDENTIALS_WITH_TOKENS_JSON,
+      );
+
+      const snapshot = yield* checkWithHome(home, "Kimi Work");
+      expect(snapshot.auth.label).toBe("Kimi Work");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps identities separate across two Kimi homes", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const homes = yield* Effect.all(
+        ["kimi-personal-", "kimi-work-"].map((prefix) =>
+          fileSystem.makeTempDirectory({ directory: NodeOS.tmpdir(), prefix }),
+        ),
+      );
+      for (const home of homes) {
+        const credentialsDir = path.join(home, "credentials");
+        yield* fileSystem.makeDirectory(credentialsDir);
+        yield* fileSystem.writeFileString(
+          path.join(credentialsDir, "kimi-code.json"),
+          CREDENTIALS_WITH_TOKENS_JSON,
+        );
+      }
+
+      const snapshots = yield* Effect.all(homes.map((home) => checkWithHome(home)));
+      const personal = snapshots[0]!;
+      const work = snapshots[1]!;
+      expect(personal.auth.label).toBe(path.basename(homes[0]!));
+      expect(work.auth.label).toBe(path.basename(homes[1]!));
+      expect(personal.auth.label).not.toBe(work.auth.label);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

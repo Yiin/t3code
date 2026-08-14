@@ -8,6 +8,34 @@ const encodeServerProvider = Schema.encodeUnknownSync(ServerProvider);
 const decodeServerSlashCommands = Schema.decodeUnknownSync(ServerConfig.fields.serverSlashCommands);
 
 describe("ServerProvider", () => {
+  it("round-trips provider auth identity and expiry", () => {
+    const snapshot = decodeServerProvider({
+      instanceId: "kimi_personal",
+      driver: "kimi",
+      enabled: true,
+      installed: true,
+      version: "0.34.0",
+      status: "ready",
+      auth: {
+        status: "authenticated",
+        type: "oauth",
+        label: "Personal Kimi",
+        email: "person@example.com",
+        expiresAt: "2026-08-14T12:00:00.000Z",
+      },
+      checkedAt: "2026-08-14T10:00:00.000Z",
+      models: [],
+    });
+
+    expect(encodeServerProvider(snapshot).auth).toEqual({
+      status: "authenticated",
+      type: "oauth",
+      label: "Personal Kimi",
+      email: "person@example.com",
+      expiresAt: "2026-08-14T12:00:00.000Z",
+    });
+  });
+
   it("defaults capability arrays when decoding provider snapshots", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex",

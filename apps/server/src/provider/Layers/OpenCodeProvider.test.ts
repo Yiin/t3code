@@ -1,9 +1,12 @@
 import * as NodeAssert from "node:assert/strict";
+import * as NodeOS from "node:os";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { beforeEach } from "vite-plus/test";
 
@@ -14,9 +17,10 @@ import {
   OpenCodeRuntimeError,
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
-import { checkOpenCodeProviderStatus } from "./OpenCodeProvider.ts";
+import { checkOpenCodeProviderStatus, openCodeAuthFromJson } from "./OpenCodeProvider.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
+const encodeUnknownJson = Schema.encodeSync(Schema.UnknownFromJsonString);
 
 const DEFAULT_VERSION_STDOUT = "opencode 1.14.19\n";
 
@@ -126,6 +130,78 @@ const makeOpenCodeSettings = (overrides?: Partial<OpenCodeSettings>): OpenCodeSe
     ...overrides,
   });
 
+const makeOpenCodeAuthHome = Effect.fn("makeOpenCodeAuthHome")(function* (
+  prefix: string,
+  contents?: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const dataHome = yield* fileSystem.makeTempDirectory({
+    directory: NodeOS.tmpdir(),
+    prefix,
+  });
+  if (contents !== undefined) {
+    const authDirectory = path.join(dataHome, "opencode");
+    yield* fileSystem.makeDirectory(authDirectory);
+    yield* fileSystem.writeFileString(path.join(authDirectory, "auth.json"), contents);
+  }
+  return dataHome;
+});
+
+it("parses only safe OpenCode auth identity fields", () => {
+  const auth = openCodeAuthFromJson(
+    encodeUnknownJson({
+      openai: {
+        type: "oauth",
+        refresh: "secret-refresh",
+        access: "secret-access",
+        expires: 1_800_000_000_000,
+        accountId: "account-personal",
+      },
+      anthropic: { type: "api", key: "secret-api-key" },
+    }),
+    "OpenCode Personal",
+  );
+
+  NodeAssert.deepEqual(auth, {
+    status: "authenticated",
+    type: "api, oauth",
+    label: "anthropic, openai · account-personal",
+  });
+  NodeAssert.equal(encodeUnknownJson(auth).includes("secret-"), false);
+});
+
+it("rejects malformed OpenCode auth entries and matches accepted empty string fields", () => {
+  NodeAssert.deepEqual(openCodeAuthFromJson('{"openai":'), { status: "unauthenticated" });
+  NodeAssert.deepEqual(
+    openCodeAuthFromJson('{"openai":{"type":"oauth","refresh":"","access":"","expires":0}}'),
+    { status: "authenticated", type: "oauth", label: "openai" },
+  );
+});
+
+it("accepts OpenCode well-known credentials without exposing them", () => {
+  const auth = openCodeAuthFromJson(
+    '{"https://example.com":{"type":"wellknown","key":"AUTH_TOKEN","token":"secret"}}',
+  );
+  NodeAssert.deepEqual(auth, {
+    status: "authenticated",
+    type: "wellknown",
+    label: "https://example.com",
+  });
+  NodeAssert.equal(encodeUnknownJson(auth).includes("secret"), false);
+});
+
+it("rejects negative and fractional OpenCode OAuth expiry values", () => {
+  for (const expires of [-1, 1.5]) {
+    const auth = openCodeAuthFromJson(
+      encodeUnknownJson({
+        openai: { type: "oauth", refresh: "refresh", access: "access", expires },
+      }),
+    );
+    NodeAssert.deepEqual(auth, { status: "unauthenticated" });
+  }
+});
+
 it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
   it.effect("shows a codex-style missing binary message", () =>
     Effect.gen(function* () {
@@ -229,9 +305,142 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       );
     }),
   );
+
+  it.effect("reads signed-in identity from the effective OpenCode auth file", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      runtimeMock.state.inventory = {
+        providerList: { connected: ["openai"], all: [], default: {} },
+        agents: [],
+      };
+      const dataHome = yield* makeOpenCodeAuthHome(
+        "opencode-authenticated-",
+        encodeUnknownJson({ openai: { type: "api", key: "secret-api-key" } }),
+      );
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ dataHomePath: dataHome }),
+        process.cwd(),
+      );
+
+      NodeAssert.equal(snapshot.auth.status, "authenticated");
+      NodeAssert.equal(snapshot.auth.type, "api");
+      NodeAssert.equal(snapshot.auth.label, `openai · ${path.basename(dataHome)}`);
+      NodeAssert.equal(encodeUnknownJson(snapshot).includes("secret-api-key"), false);
+    }),
+  );
+
+  it.effect("reports signed out for missing and truncated OpenCode auth files", () =>
+    Effect.gen(function* () {
+      const missingHome = yield* makeOpenCodeAuthHome("opencode-missing-");
+      const corruptHome = yield* makeOpenCodeAuthHome(
+        "opencode-corrupt-",
+        '{"openai":{"type":"api","key":"secret-api-key"}',
+      );
+      const snapshots = yield* Effect.all(
+        [missingHome, corruptHome].map((dataHome) =>
+          checkOpenCodeProviderStatus(
+            makeOpenCodeSettings({ dataHomePath: dataHome }),
+            process.cwd(),
+          ),
+        ),
+      );
+
+      const missing = snapshots[0]!;
+      const corrupt = snapshots[1]!;
+      NodeAssert.deepEqual(missing.auth, { status: "unauthenticated" });
+      NodeAssert.deepEqual(corrupt.auth, { status: "unauthenticated" });
+      NodeAssert.equal(encodeUnknownJson(corrupt).includes("secret-api-key"), false);
+    }),
+  );
+
+  it.effect("prefers OPENCODE_AUTH_CONTENT over the auth file", () =>
+    Effect.gen(function* () {
+      const dataHome = yield* makeOpenCodeAuthHome(
+        "opencode-env-auth-",
+        encodeUnknownJson({ anthropic: { type: "api", key: "file-secret" } }),
+      );
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ dataHomePath: dataHome }),
+        process.cwd(),
+        {
+          ...process.env,
+          OPENCODE_AUTH_CONTENT: encodeUnknownJson({
+            openai: { type: "api", key: "environment-secret" },
+          }),
+        },
+      );
+
+      NodeAssert.equal(snapshot.auth.label?.startsWith("openai · "), true);
+      NodeAssert.equal(encodeUnknownJson(snapshot).includes("file-secret"), false);
+      NodeAssert.equal(encodeUnknownJson(snapshot).includes("environment-secret"), false);
+    }),
+  );
+
+  it.effect("falls back to the auth file when OPENCODE_AUTH_CONTENT is malformed", () =>
+    Effect.gen(function* () {
+      const dataHome = yield* makeOpenCodeAuthHome(
+        "opencode-invalid-env-auth-",
+        encodeUnknownJson({ anthropic: { type: "api", key: "file-secret" } }),
+      );
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ dataHomePath: dataHome }),
+        process.cwd(),
+        { ...process.env, OPENCODE_AUTH_CONTENT: '{"openai":' },
+      );
+
+      NodeAssert.equal(snapshot.auth.label?.startsWith("anthropic · "), true);
+      NodeAssert.equal(encodeUnknownJson(snapshot).includes("file-secret"), false);
+    }),
+  );
+
+  it.effect("keeps identities separate across two OpenCode data homes", () =>
+    Effect.gen(function* () {
+      const homes = yield* Effect.all(
+        ["opencode-personal-", "opencode-work-"].map((prefix) =>
+          makeOpenCodeAuthHome(
+            prefix,
+            encodeUnknownJson({ openai: { type: "api", key: `${prefix}secret` } }),
+          ),
+        ),
+      );
+      const snapshots = yield* Effect.all(
+        homes.map((dataHome) =>
+          checkOpenCodeProviderStatus(
+            makeOpenCodeSettings({ dataHomePath: dataHome }),
+            process.cwd(),
+          ),
+        ),
+      );
+
+      NodeAssert.notEqual(snapshots[0]!.auth.label, snapshots[1]!.auth.label);
+      NodeAssert.equal(encodeUnknownJson(snapshots).includes("secret"), false);
+    }),
+  );
 });
 
 it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (it) => {
+  it.effect("does not infer external-server authentication from connected providers", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventory = {
+        providerList: { connected: ["openai"], all: [], default: {} },
+        agents: [],
+      };
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ serverUrl: "http://127.0.0.1:9999" }),
+        process.cwd(),
+        {
+          ...process.env,
+          OPENCODE_AUTH_CONTENT: encodeUnknownJson({
+            openai: { type: "api", key: "local-secret" },
+          }),
+        },
+      );
+
+      NodeAssert.deepEqual(snapshot.auth, { status: "unknown" });
+      NodeAssert.equal(encodeUnknownJson(snapshot).includes("local-secret"), false);
+    }),
+  );
+
   it.effect("surfaces a friendly auth error for configured servers", () =>
     Effect.gen(function* () {
       runtimeMock.state.inventoryError = new Error("401 Unauthorized");

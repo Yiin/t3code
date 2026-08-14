@@ -1,12 +1,18 @@
 import {
   type ModelCapabilities,
+  NonNegativeInt,
   type OpenCodeSettings,
+  type ServerProviderAuth,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -23,12 +29,97 @@ import {
   type OpenCodeInventory,
 } from "../opencodeRuntime.ts";
 import type { Agent, ProviderListResponse } from "@opencode-ai/sdk/v2";
+import { openCodeAuthFilePath } from "../Drivers/OpenCodeHome.ts";
 
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
   showInteractionModeToggle: false,
 } as const;
 const MINIMUM_OPENCODE_VERSION = "1.14.19";
+
+const OpenCodeOAuthCredentials = Schema.Struct({
+  type: Schema.Literal("oauth"),
+  refresh: Schema.String,
+  access: Schema.String,
+  expires: NonNegativeInt,
+  accountId: Schema.optional(Schema.String),
+});
+const OpenCodeApiCredentials = Schema.Struct({
+  type: Schema.Literal("api"),
+  key: Schema.String,
+});
+const OpenCodeWellKnownCredentials = Schema.Struct({
+  type: Schema.Literal("wellknown"),
+  key: Schema.String,
+  token: Schema.String,
+});
+const decodeOpenCodeCredential = Schema.decodeUnknownOption(
+  Schema.Union([OpenCodeOAuthCredentials, OpenCodeApiCredentials, OpenCodeWellKnownCredentials]),
+);
+const decodeUnknownJsonString = Schema.decodeUnknownOption(Schema.UnknownFromJsonString);
+
+type SafeOpenCodeAuthEntry = {
+  readonly providerId: string;
+  readonly type: "api" | "oauth" | "wellknown";
+  readonly accountId?: string;
+};
+
+function safeOpenCodeAuthEntries(raw: string): ReadonlyArray<SafeOpenCodeAuthEntry> {
+  const parsedOption = decodeUnknownJsonString(raw.trim());
+  if (Option.isNone(parsedOption)) return [];
+  const parsed = parsedOption.value;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
+
+  const entries: Array<SafeOpenCodeAuthEntry> = [];
+  for (const [rawProviderId, value] of Object.entries(parsed)) {
+    const providerId = rawProviderId.trim();
+    if (!providerId) continue;
+    const decodedOption = decodeOpenCodeCredential(value);
+    if (Option.isNone(decodedOption)) continue;
+    const credential = decodedOption.value;
+    const accountId =
+      credential.type === "oauth" && credential.accountId?.trim()
+        ? credential.accountId.trim()
+        : undefined;
+    entries.push({ providerId, type: credential.type, ...(accountId ? { accountId } : {}) });
+  }
+  return entries.toSorted((left, right) => left.providerId.localeCompare(right.providerId));
+}
+
+export function openCodeAuthFromJson(raw: string, fallbackLabel?: string): ServerProviderAuth {
+  const entries = safeOpenCodeAuthEntries(raw);
+  if (entries.length === 0) return { status: "unauthenticated" };
+
+  const providerLabel = entries.map((entry) => entry.providerId).join(", ");
+  const accountIds = [
+    ...new Set(entries.flatMap((entry) => (entry.accountId ? [entry.accountId] : []))),
+  ].toSorted();
+  const identityLabel = accountIds.join(", ") || fallbackLabel?.trim();
+  const types = [...new Set(entries.map((entry) => entry.type))].toSorted();
+  return {
+    status: "authenticated",
+    type: types.join(", "),
+    label: identityLabel ? `${providerLabel} · ${identityLabel}` : providerLabel,
+  };
+}
+
+const probeOpenCodeAuth = Effect.fn("probeOpenCodeAuth")(function* (
+  openCodeSettings: OpenCodeSettings,
+  environment: NodeJS.ProcessEnv,
+  accountLabel?: string,
+): Effect.fn.Return<ServerProviderAuth, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const authPath = yield* openCodeAuthFilePath(openCodeSettings, environment);
+  const fallbackLabel =
+    accountLabel?.trim() || path.basename(path.dirname(path.dirname(authPath))) || undefined;
+  const authContent = environment.OPENCODE_AUTH_CONTENT?.trim();
+  if (authContent && Option.isSome(decodeUnknownJsonString(authContent))) {
+    return openCodeAuthFromJson(authContent, fallbackLabel);
+  }
+  const raw = yield* fileSystem.readFileString(authPath).pipe(Effect.orElseSucceed(() => ""));
+  return openCodeAuthFromJson(raw, fallbackLabel);
+});
 
 class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
   readonly cause: unknown;
@@ -299,7 +390,12 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
   openCodeSettings: OpenCodeSettings,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
-): Effect.fn.Return<ServerProviderDraft, never, OpenCodeRuntime> {
+  accountLabel?: string,
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  FileSystem.FileSystem | OpenCodeRuntime | Path.Path
+> {
   const openCodeRuntime = yield* OpenCodeRuntime;
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
@@ -430,6 +526,9 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
   const connectedCount = inventoryExit.value.providerList.connected.length;
+  const auth = isExternalServer
+    ? ({ status: "unknown" } as const)
+    : yield* probeOpenCodeAuth(openCodeSettings, resolvedEnvironment, accountLabel);
   return buildServerProvider({
     presentation: OPENCODE_PRESENTATION,
     enabled: true,
@@ -439,10 +538,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
       installed: true,
       version,
       status: connectedCount > 0 ? "ready" : "warning",
-      auth: {
-        status: connectedCount > 0 ? "authenticated" : "unknown",
-        type: "opencode",
-      },
+      auth,
       message:
         connectedCount > 0
           ? `${connectedCount} upstream provider${connectedCount === 1 ? "" : "s"} connected through ${isExternalServer ? "the configured OpenCode server" : "OpenCode"}.`
