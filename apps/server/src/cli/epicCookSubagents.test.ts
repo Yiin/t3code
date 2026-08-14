@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
+import { parsePersistedEpicRolePolicy } from "@t3tools/shared/serverSettings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -18,11 +19,16 @@ import {
   readCookSubagents,
   readEpicRolePolicy,
   resolveCookSettingsPath,
+  widenInventoryWithPolicyModels,
 } from "./epicCookSubagents.ts";
 
-const claude = (instanceId: string, models: ReadonlyArray<string>): ServerProvider => ({
+const providerOf = (
+  driver: string,
+  instanceId: string,
+  models: ReadonlyArray<string>,
+): ServerProvider => ({
   instanceId: ProviderInstanceId.make(instanceId),
-  driver: ProviderDriverKind.make("claudeAgent"),
+  driver: ProviderDriverKind.make(driver),
   enabled: true,
   installed: true,
   version: "1.0.0",
@@ -34,6 +40,12 @@ const claude = (instanceId: string, models: ReadonlyArray<string>): ServerProvid
   slashCommands: [],
   skills: [],
 });
+
+const claude = (instanceId: string, models: ReadonlyArray<string>): ServerProvider =>
+  providerOf("claudeAgent", instanceId, models);
+
+const codex = (instanceId: string, models: ReadonlyArray<string>): ServerProvider =>
+  providerOf("codex", instanceId, models);
 
 const settingsFile = (policy: unknown) => JSON.stringify({ epicRolePolicy: policy });
 
@@ -51,6 +63,30 @@ const tieredPolicy = {
   inSessionRoles: {
     planner: { tier: "high", description: "Plans the child.", prompt: "You plan." },
     reviewer: { description: "Reviews the diff.", prompt: "You review." },
+  },
+};
+
+/** Every hop names an account this terminal run does not have. */
+const absentAccountPolicy = {
+  tiers: {
+    high: {
+      hops: [{ selection: { instanceId: "claude-work", model: "claude-opus-5" } }],
+    },
+  },
+  inSessionRoles: {
+    planner: { tier: "high", description: "Plans the child.", prompt: "You plan." },
+  },
+};
+
+/** One hop, on the account the session itself runs on, at another model. */
+const sameAccountPolicy = {
+  tiers: {
+    high: {
+      hops: [{ selection: { instanceId: "claude", model: "claude-opus-5" } }],
+    },
+  },
+  inSessionRoles: {
+    planner: { tier: "high", description: "Plans the child.", prompt: "You plan." },
   },
 };
 
@@ -176,11 +212,14 @@ it.layer(NodeServices.layer)("epic cook subagents", (it) => {
     ),
   );
 
-  it.effect("ships a role without a model when no hop can run", () =>
+  it.effect("resolves a hop on the session's own account at another model", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const settingsPath = yield* writeSettings(settingsFile(tieredPolicy));
-        const providers = inventoryOf([claude("claude", ["claude-haiku-4-5"])]);
+        const settingsPath = yield* writeSettings(settingsFile(sameAccountPolicy));
+        // The terminal inventory gives each route one model slug, the session's
+        // own. The hop names the same account at a model the same binary serves,
+        // so widening lets it resolve instead of stripping the role's model.
+        const providers = inventoryOf([claude("claude", ["claude-sonnet-5"])]);
         const subagents = yield* readCookSubagents({
           settingsPath,
           inventory: providers.inventory,
@@ -190,9 +229,52 @@ it.layer(NodeServices.layer)("epic cook subagents", (it) => {
         assert.deepEqual(subagents.planner, {
           description: "Plans the child.",
           prompt: "You plan.",
+          model: "claude-opus-5",
         });
       }),
     ),
+  );
+
+  it.effect("ships a role without a model when every hop names an absent account", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const settingsPath = yield* writeSettings(settingsFile(absentAccountPolicy));
+        const providers = inventoryOf([claude("claude", ["claude-sonnet-5"])]);
+        const subagents = yield* readCookSubagents({
+          settingsPath,
+          inventory: providers.inventory,
+          sessionSelection: selection,
+        });
+
+        // Widening teaches an account its own hops' models. It never invents the
+        // account, so a hop this run cannot route to still costs the role its
+        // model.
+        assert.deepEqual(subagents.planner, {
+          description: "Plans the child.",
+          prompt: "You plan.",
+        });
+      }),
+    ),
+  );
+
+  it.effect("widens only the account a hop names", () =>
+    Effect.sync(() => {
+      const policy = parsePersistedEpicRolePolicy(settingsFile(sameAccountPolicy));
+      const widened = widenInventoryWithPolicyModels(
+        [claude("claude", ["claude-sonnet-5"]), codex("codex", ["gpt-5.6-sol"])],
+        policy,
+      );
+
+      assert.deepEqual(
+        widened.map((provider) => [provider.instanceId, provider.models.map((m) => m.slug)]),
+        [
+          ["claude", ["claude-sonnet-5", "claude-opus-5"]],
+          // An instance id is the routing identity, so a claude hop can never
+          // teach a codex route a model it cannot run.
+          ["codex", ["gpt-5.6-sol"]],
+        ],
+      );
+    }),
   );
 
   it.effect("resolves nothing, and probes nothing, without an in-session role", () =>

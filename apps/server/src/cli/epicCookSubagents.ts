@@ -20,6 +20,7 @@ import {
   type EpicRolePolicy,
   type EpicSubagentMap,
   type ModelSelection,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { resolveEpicSubagents } from "@t3tools/epic-core/epicSubagents";
 import type { ProviderInventoryShape } from "@t3tools/epic-core/ports/ProviderInventory";
@@ -73,6 +74,47 @@ export const readEpicRolePolicy = (
   }).pipe(Effect.orElseSucceed(() => DEFAULT_EPIC_ROLE_POLICY));
 
 /**
+ * Teach the terminal inventory the models the policy already names.
+ *
+ * The terminal inventory is not a probe result. `makeTerminalProviderSupport`
+ * builds one route per harness and gives each a single model slug — the
+ * session's own for the primary route, the driver default for the fallbacks.
+ * That single-model shape is deliberate: forward provider fallback reads the
+ * same snapshots and must hop by driver, not by menu. But subagent resolution
+ * reuses the same eligibility rule, which requires the hop's model to be listed,
+ * so on the CLI every hop whose model differs from the session's own is dropped
+ * and every stage agent ships model-less. A cook on `claude` at
+ * `claude-fable-5` loses a `claude-opus-5` hop the same binary serves.
+ *
+ * So widen a copy, here at the CLI read seam and nowhere else: a hop's model
+ * joins the models of the provider its own `instanceId` names. Matching on the
+ * instance id is what keeps this honest — an id is the routing identity, so a
+ * hop can only ever teach the one account it names, never a provider on another
+ * driver. Everything else about eligibility still holds: an uninstalled,
+ * disabled or unauthenticated provider stays ineligible, and a hop naming an
+ * account this run does not have is still dropped.
+ */
+export const widenInventoryWithPolicyModels = (
+  providers: ReadonlyArray<ServerProvider>,
+  policy: EpicRolePolicy,
+): ReadonlyArray<ServerProvider> => {
+  const hops = Object.values(policy.tiers).flatMap((tier) => tier.hops);
+  if (hops.length === 0) return providers;
+
+  return providers.map((provider) => {
+    const known = new Set(provider.models.map((model) => model.slug));
+    const added = hops.flatMap((hop) => {
+      const { instanceId, model } = hop.selection;
+      if (instanceId !== provider.instanceId || model === "" || known.has(model)) return [];
+      known.add(model);
+      return [{ slug: model, name: model, isCustom: false, capabilities: null }];
+    });
+    if (added.length === 0) return provider;
+    return { ...provider, models: [...provider.models, ...added] };
+  });
+};
+
+/**
  * The subagents a terminal worker session carries, resolved once per cook: the
  * CLI builds one dispatch for the whole run, so there is no later seam to
  * refresh at.
@@ -95,7 +137,7 @@ export const readCookSubagents = (input: {
     const providers = yield* input.inventory.getProviders;
     return resolveEpicSubagents({
       policy,
-      providers,
+      providers: widenInventoryWithPolicyModels(providers, policy),
       sessionInstanceId: input.sessionSelection.instanceId,
     });
   }).pipe(Effect.orElseSucceed((): EpicSubagentMap => ({})));
