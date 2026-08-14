@@ -133,6 +133,7 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
 const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSettings => ({
   enabled: false,
   binaryPath: "opencode",
+  dataHomePath: "",
   serverUrl: "",
   serverPassword: "",
   customModels: [],
@@ -499,6 +500,13 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           driver: openCodeDriverKind,
           displayName: "OpenCode",
           enabled: false,
+          environment: [
+            {
+              name: "XDG_DATA_HOME",
+              value: "/home/julius/.local/share",
+              sensitive: false,
+            },
+          ],
           config: makeOpenCodeConfig({}),
         },
         [primeId]: {
@@ -637,7 +645,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(openCodeSnapshot.driver).toBe(openCodeDriverKind);
       expect(openCodeSnapshot.enabled).toBe(false);
       expect(openCodeSnapshot.continuation?.groupKey).toBe(
-        `${openCodeDriverKind}:instance:${openCodeId}`,
+        "opencode:data-home:/home/julius/.local/share",
       );
 
       const primeSnapshot = yield* prime!.snapshot.getSnapshot;

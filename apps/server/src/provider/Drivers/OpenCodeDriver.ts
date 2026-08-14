@@ -52,6 +52,7 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
+import { makeOpenCodeContinuationGroupKey, makeOpenCodeEnvironment } from "./OpenCodeHome.ts";
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("opencode");
@@ -119,18 +120,29 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
+      const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
+      const instanceEnvironment = mergeProviderInstanceEnvironment(environment);
+      // A configured dataHomePath takes precedence over an instance environment
+      // XDG_DATA_HOME. A blank dataHomePath preserves that explicit variable.
+      const processEnv = yield* makeOpenCodeEnvironment(effectiveConfig, instanceEnvironment);
+      const continuationGroupKey = yield* makeOpenCodeContinuationGroupKey(
+        effectiveConfig,
+        processEnv,
+      );
+      const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
       });
+      const continuationIdentity = {
+        ...fallbackContinuationIdentity,
+        continuationKey: continuationGroupKey,
+      };
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
+        continuationGroupKey,
       });
-      const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,

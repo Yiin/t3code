@@ -46,6 +46,20 @@ const OPENCODE_EMPTY_CONFIG_CONTENT = "{}";
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
+
+export function makeOpenCodeServerSpawnEnvironment(environment?: NodeJS.ProcessEnv): {
+  readonly env: NodeJS.ProcessEnv;
+  readonly extendEnv: boolean;
+} {
+  return {
+    env: {
+      ...environment,
+      OPENCODE_CONFIG_CONTENT: OPENCODE_EMPTY_CONFIG_CONTENT,
+    },
+    extendEnv: environment === undefined,
+  };
+}
+
 export interface OpenCodeServerProcess {
   readonly url: string;
   readonly exitCode: Effect.Effect<number, never>;
@@ -419,7 +433,7 @@ function ensureRuntimeError(
     : new OpenCodeRuntimeError({ operation, detail, cause });
 }
 
-const makeOpenCodeRuntime = Effect.gen(function* () {
+export const makeOpenCodeRuntime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcessPlatform;
@@ -493,14 +507,12 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
       const child = yield* spawner
         .spawn(
+          // Passing an explicit environment disables extendEnv. The driver
+          // therefore supplies a full merge over process.env.
           ChildProcess.make(scopedSpawn.command, scopedSpawn.args, {
             detached: hostPlatform !== "win32",
             shell: spawnCommand.shell,
-            env: {
-              ...input.environment,
-              OPENCODE_CONFIG_CONTENT: OPENCODE_EMPTY_CONFIG_CONTENT,
-            },
-            extendEnv: input.environment === undefined,
+            ...makeOpenCodeServerSpawnEnvironment(input.environment),
           }),
         )
         .pipe(

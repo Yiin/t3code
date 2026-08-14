@@ -372,6 +372,17 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    dataHomePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "XDG_DATA_HOME path",
+        description: "OpenCode stores credentials at this path under opencode/auth.json.",
+        providerSettingsForm: {
+          placeholder: "~/.local/share",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     serverUrl: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -401,7 +412,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "serverUrl", "serverPassword"],
+    order: ["binaryPath", "dataHomePath", "serverUrl", "serverPassword"],
   },
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
@@ -602,6 +613,7 @@ const KimiSettingsPatch = Schema.Struct({
 const OpenCodeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  dataHomePath: Schema.optionalKey(TrimmedString),
   serverUrl: Schema.optionalKey(TrimmedString),
   serverPassword: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),

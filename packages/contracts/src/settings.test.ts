@@ -161,6 +161,24 @@ describe("ServerSettings Kimi home path", () => {
   });
 });
 
+describe("ServerSettings OpenCode data home path", () => {
+  it("decodes persisted OpenCode settings that predate dataHomePath", () => {
+    const decoded = decodeServerSettings({
+      providers: { opencode: { binaryPath: "opencode" } },
+    });
+
+    expect(decoded.providers.opencode.dataHomePath).toBe("");
+  });
+
+  it("accepts and normalizes dataHomePath in an OpenCode settings patch", () => {
+    const decoded = decodeServerSettingsPatch({
+      providers: { opencode: { dataHomePath: "  ~/.local/share-opencode-work  " } },
+    });
+
+    expect(decoded.providers?.opencode?.dataHomePath).toBe("~/.local/share-opencode-work");
+  });
+});
+
 describe("ServerSettings.epicRolePolicy", () => {
   it("defaults to empty tiers, empty role assignments, and the shipped stage subagents", () => {
     const expected = {

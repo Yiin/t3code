@@ -414,6 +414,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
           opencode: {
             binaryPath: "  /opt/homebrew/bin/opencode  ",
+            dataHomePath: "  ~/.local/share-opencode-work  ",
             serverUrl: "  http://127.0.0.1:4096  ",
             serverPassword: "  secret-password  ",
           },
@@ -438,6 +439,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.providers.opencode, {
         enabled: true,
         binaryPath: "/opt/homebrew/bin/opencode",
+        dataHomePath: "~/.local/share-opencode-work",
         serverUrl: "http://127.0.0.1:4096",
         serverPassword: "secret-password",
         customModels: [],
