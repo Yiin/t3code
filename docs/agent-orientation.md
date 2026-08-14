@@ -74,6 +74,14 @@ narrows it to one scenario. Editing one scenario means running all three.
   Adding a reason to one only makes `apps/server/src/ws.ts` fail typecheck.
 - Forward provider fallback is Prime → Claude → Codex → Kimi
   (`packages/epic-core/src/providerFallback.ts`). Prime is a source only.
+  That table is DRIVER order: the walk never tries a second instance of the
+  same driver, `opencode`/`cursor`/`grok` are absent from it, and a run whose
+  driver is absent never falls back at all (epic t3code-4hh changes this).
+- A tier chain reaches only the launch selection and injected subagent models.
+  `roleSelection` is `null` on both surfaces (`EpicRunner.ts`, `epicCook.ts`),
+  so every iteration dispatches on the run row's selection. The terminal twin
+  of launch selection is `apps/server/src/cli/epicCookSelection.ts`, which reads
+  a workspace `provider-degradations.json` instead of SQLite.
 - Verification is by effects: Beads status plus commits, or a new bead comment
   for a `Research:` child. A worker's final message is never evidence.
 
@@ -151,6 +159,12 @@ before run completion. Provider fallback uses structured evidence only.
   against `epic_runs`, `epic_run_iterations`, `epic_run_merge_state`,
   `epic_run_merge_entries`, `epic_run_gate_receipts`, and
   `provider_session_runtime` are the fastest way to check a real run.
+- Per-account usage lives in `provider_usage_windows` (one row per instance and
+  window, with `resets_at`), filled by `ProviderUsagePoller` every 5 minutes.
+  Only the Claude and Codex drivers expose a usage reader; Kimi and OpenCode
+  report nothing. `epic_provider_degradations` marks an instance unusable after
+  a provider error and expires on a flat 1-hour TTL
+  (`packages/contracts/src/epicRunConfig.ts`), not on the provider's reset time.
 - `epic_run_gate_receipts` holds one append-only row per gate run: input heads,
   command digest, outcome, exit code, lock wait, execution time, and bounded
   output. Nothing updates a row, and `outcome = 'passed'` requires exit code 0.
