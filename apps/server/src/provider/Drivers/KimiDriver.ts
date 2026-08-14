@@ -37,6 +37,7 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
+import { makeKimiContinuationGroupKey, makeKimiEnvironment } from "./KimiHome.ts";
 const decodeKimiSettings = Schema.decodeSync(KimiSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("kimi");
@@ -91,18 +92,26 @@ export const KimiDriver: ProviderDriver<KimiSettings, KimiDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
+      const effectiveConfig = { ...config, enabled } satisfies KimiSettings;
+      const instanceEnvironment = mergeProviderInstanceEnvironment(environment);
+      // A configured homePath takes precedence over an instance environment
+      // KIMI_CODE_HOME. A blank homePath preserves that explicit variable.
+      const processEnv = yield* makeKimiEnvironment(effectiveConfig, instanceEnvironment);
+      const continuationGroupKey = yield* makeKimiContinuationGroupKey(processEnv);
+      const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
       });
+      const continuationIdentity = {
+        ...fallbackContinuationIdentity,
+        continuationKey: continuationGroupKey,
+      };
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
-        continuationGroupKey: continuationIdentity.continuationKey,
+        continuationGroupKey,
       });
-      const effectiveConfig = { ...config, enabled } satisfies KimiSettings;
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,

@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { KimiSettings } from "@t3tools/contracts";
 
+import { makeKimiEnvironment } from "../Drivers/KimiHome.ts";
 import { checkKimiProviderStatus, kimiAuthFromCredentialsJson } from "./KimiProvider.ts";
 
 const decodeKimiSettings = Schema.decodeSync(KimiSettings);
@@ -116,6 +117,41 @@ describe("checkKimiProviderStatus", () => {
       expect(snapshot.status).toBe("ready");
       expect(snapshot.auth).toEqual({ status: "unauthenticated" });
       expect(snapshot.message).toContain("kimi login");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not read credentials from another Kimi home", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      // Use an isolated stand-in for the default home. The test must never
+      // read or write the developer's real ~/.kimi-code credentials.
+      const defaultHome = yield* fileSystem.makeTempDirectory({
+        directory: NodeOS.tmpdir(),
+        prefix: "kimi-default-home-",
+      });
+      const customHome = yield* fileSystem.makeTempDirectory({
+        directory: NodeOS.tmpdir(),
+        prefix: "kimi-custom-home-",
+      });
+      const credentialsDir = path.join(defaultHome, "credentials");
+      yield* fileSystem.makeDirectory(credentialsDir);
+      yield* fileSystem.writeFileString(
+        path.join(credentialsDir, "kimi-code.json"),
+        CREDENTIALS_WITH_TOKENS_JSON,
+      );
+
+      const binaryPath = yield* makeFakeKimiBinary();
+      const settings = decodeKimiSettings({ binaryPath, homePath: customHome });
+      const environment = yield* makeKimiEnvironment(settings, {
+        ...process.env,
+        KIMI_CODE_HOME: defaultHome,
+      });
+      const snapshot = yield* checkKimiProviderStatus(settings, environment);
+
+      expect(snapshot.status).toBe("ready");
+      expect(snapshot.auth).toEqual({ status: "unauthenticated" });
+      expect(environment.KIMI_CODE_HOME).toBe(customHome);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

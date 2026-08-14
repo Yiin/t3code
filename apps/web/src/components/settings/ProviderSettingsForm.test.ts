@@ -22,6 +22,16 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it("places the Kimi home path after its binary path", () => {
+    const kimi = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("kimi")];
+
+    expect(kimi).toBeDefined();
+    expect(deriveProviderSettingsFields(kimi!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "homePath",
+    ]);
+  });
+
   it("sources labels and descriptions from schema annotations", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();

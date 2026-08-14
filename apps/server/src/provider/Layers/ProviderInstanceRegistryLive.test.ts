@@ -142,6 +142,7 @@ const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSetti
 const makeKimiConfig = (overrides: Partial<KimiSettings>): KimiSettings => ({
   enabled: false,
   binaryPath: "kimi",
+  homePath: "",
   customModels: [],
   ...overrides,
 });
@@ -485,7 +486,14 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           driver: kimiDriverKind,
           displayName: "Kimi",
           enabled: false,
-          config: makeKimiConfig({}),
+          environment: [
+            {
+              name: "KIMI_CODE_HOME",
+              value: "/home/julius/.kimi-explicit",
+              sensitive: false,
+            },
+          ],
+          config: makeKimiConfig({ homePath: "/home/julius/.kimi-work" }),
         },
         [openCodeId]: {
           driver: openCodeDriverKind,
@@ -622,7 +630,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(kimiSnapshot.instanceId).toBe(kimiId);
       expect(kimiSnapshot.driver).toBe(kimiDriverKind);
       expect(kimiSnapshot.enabled).toBe(false);
-      expect(kimiSnapshot.continuation?.groupKey).toBe(`${kimiDriverKind}:instance:${kimiId}`);
+      expect(kimiSnapshot.continuation?.groupKey).toBe("kimi:home:/home/julius/.kimi-work");
 
       const openCodeSnapshot = yield* openCode!.snapshot.getSnapshot;
       expect(openCodeSnapshot.instanceId).toBe(openCodeId);

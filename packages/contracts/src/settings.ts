@@ -337,13 +337,21 @@ export const KimiSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "kimi", clearWhenEmpty: "omit" },
       }),
     ),
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "KIMI_CODE_HOME path",
+        description: "Custom Kimi data directory for credentials and account state.",
+        providerSettingsForm: { placeholder: "~/.kimi-code", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath"],
+    order: ["binaryPath", "homePath"],
   },
 );
 export type KimiSettings = typeof KimiSettings.Type;
@@ -587,6 +595,7 @@ const GrokSettingsPatch = Schema.Struct({
 const KimiSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 

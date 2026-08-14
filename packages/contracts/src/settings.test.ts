@@ -145,6 +145,22 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
+describe("ServerSettings Kimi home path", () => {
+  it("decodes persisted Kimi settings that predate homePath", () => {
+    const decoded = decodeServerSettings({ providers: { kimi: { binaryPath: "kimi" } } });
+
+    expect(decoded.providers.kimi.homePath).toBe("");
+  });
+
+  it("accepts and normalizes homePath in a Kimi settings patch", () => {
+    const decoded = decodeServerSettingsPatch({
+      providers: { kimi: { homePath: "  ~/.kimi-code-work  " } },
+    });
+
+    expect(decoded.providers?.kimi?.homePath).toBe("~/.kimi-code-work");
+  });
+});
+
 describe("ServerSettings.epicRolePolicy", () => {
   it("defaults to empty tiers, empty role assignments, and the shipped stage subagents", () => {
     const expected = {
