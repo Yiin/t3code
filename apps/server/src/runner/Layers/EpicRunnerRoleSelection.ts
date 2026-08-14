@@ -7,12 +7,15 @@ import type {
 import type { ProviderInventoryShape } from "@t3tools/epic-core/ports/ProviderInventory";
 import {
   epicDispatchRoleId,
+  type EpicDispatchRole,
+  type ResolvedRoleFallbackChain,
   type ResolvedRoleSelection,
   type RoleSelectionShape,
 } from "@t3tools/epic-core/ports/RoleSelection";
 import {
   epicFallbackCandidateInstanceIds,
   epicRoleFallbackChain,
+  expandEpicFallbackCandidates,
   resolveEpicProviderChainEntry,
 } from "@t3tools/epic-core/providerFallback";
 import {
@@ -74,13 +77,14 @@ export const makeEpicRunnerRoleSelection = (input: {
   readonly readUsageSamples: Effect.Effect<ReadonlyArray<ProviderUsageSample>, EpicRunStoreError>;
   readonly readAccountLimits: Effect.Effect<ReadonlyArray<ProviderAccountLimit>, EpicRunStoreError>;
   readonly providerDegradationTtlMs: number;
-}): RoleSelectionShape => ({
-  resolve: (request) => {
-    const fallback = (): ResolvedRoleSelection => ({
-      selection: request.fallbackSelection,
-      tierId: null,
-    });
-    return Effect.gen(function* () {
+}): RoleSelectionShape => {
+  const emptyChain = (): ResolvedRoleFallbackChain => ({
+    chain: [],
+    isBlocked: () => false,
+    isInstanceBlocked: () => false,
+  });
+  const readRoleState = (role: EpicDispatchRole, degradationScope: "chain" | "all") =>
+    Effect.gen(function* () {
       const checkedAt = yield* DateTime.now;
       const now = DateTime.formatIso(checkedAt);
       const cutoff = DateTime.formatIso(
@@ -90,14 +94,16 @@ export const makeEpicRunnerRoleSelection = (input: {
       const providers = yield* input.inventory.getProviders;
       const usageSamples = yield* input.readUsageSamples;
       const accountLimits = yield* input.readAccountLimits;
-      const roleId = epicDispatchRoleId(request.role);
+      const roleId = epicDispatchRoleId(role);
       const tierId = policy.roles[roleId];
-      if (tierId === undefined) return fallback();
       const chain = epicRoleFallbackChain(policy, roleId);
-      if (chain.length === 0) return fallback();
 
       const degradations = new Map<ProviderInstanceId, ProviderDegradationRecord>();
-      for (const instanceId of epicFallbackCandidateInstanceIds({ providers, chain })) {
+      const degradationInstanceIds =
+        degradationScope === "all"
+          ? providers.map((provider) => provider.instanceId)
+          : epicFallbackCandidateInstanceIds({ providers, chain });
+      for (const instanceId of degradationInstanceIds) {
         const raw = yield* input.readProviderDegradation(instanceId);
         // Launch owns expired-row cleanup. Dispatch selection stays read-only,
         // but applies the same liveness predicate, so both paths make the same
@@ -112,17 +118,51 @@ export const makeEpicRunnerRoleSelection = (input: {
         now,
         cutoff,
       });
-      const selection = resolveEpicProviderChainEntry({
-        providers,
-        chain,
-        isBlocked: (hop) =>
-          degradations.has(hop.instanceId) ||
-          exhaustion.isExhausted(hop.instanceId) ||
-          (hop.skipAboveUtilization !== undefined &&
-            exhaustion.utilizationOf(hop.instanceId) !== null &&
-            exhaustion.utilizationOf(hop.instanceId)! > hop.skipAboveUtilization),
+      const isBaseBlocked = (instanceId: ProviderInstanceId) =>
+        degradations.has(instanceId) || exhaustion.isExhausted(instanceId);
+      const isBlocked = (hop: (typeof chain)[number]) =>
+        isBaseBlocked(hop.instanceId) ||
+        (hop.skipAboveUtilization !== undefined &&
+          exhaustion.utilizationOf(hop.instanceId) !== null &&
+          exhaustion.utilizationOf(hop.instanceId)! > hop.skipAboveUtilization);
+      const blockedChainInstances = new Set(
+        expandEpicFallbackCandidates({ providers, chain })
+          .filter(isBlocked)
+          .map((hop) => hop.instanceId),
+      );
+      const isInstanceBlocked = (instanceId: ProviderInstanceId) =>
+        isBaseBlocked(instanceId) || blockedChainInstances.has(instanceId);
+      return { providers, tierId, chain, isBlocked, isInstanceBlocked };
+    });
+
+  return {
+    chain: (role) =>
+      readRoleState(role, "all").pipe(
+        Effect.map(({ chain, isBlocked, isInstanceBlocked }) => ({
+          chain,
+          isBlocked,
+          isInstanceBlocked,
+        })),
+        Effect.catchCause(() => Effect.succeed(emptyChain())),
+      ),
+    resolve: (request) => {
+      const fallback = (): ResolvedRoleSelection => ({
+        selection: request.fallbackSelection,
+        tierId: null,
       });
-      return selection === null ? fallback() : { selection, tierId };
-    }).pipe(Effect.catchCause(() => Effect.succeed(fallback())));
-  },
-});
+      return readRoleState(request.role, "chain").pipe(
+        Effect.map(({ providers, tierId, chain, isBlocked }) => {
+          if (tierId === undefined) return fallback();
+          if (chain.length === 0) return fallback();
+          const selection = resolveEpicProviderChainEntry({
+            providers,
+            chain,
+            isBlocked,
+          });
+          return selection === null ? fallback() : { selection, tierId };
+        }),
+        Effect.catchCause(() => Effect.succeed(fallback())),
+      );
+    },
+  };
+};

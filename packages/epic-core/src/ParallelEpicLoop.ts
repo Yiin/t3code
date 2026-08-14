@@ -75,7 +75,10 @@ import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { IterationWorkspace, PoolRunContext, WorkspaceShape } from "./ports/Workspace.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
 import { providerDegradationResetsAt, type ProviderUsageReadShape } from "./providerDegradation.ts";
-import { resolveEpicProviderFallback } from "./providerFallback.ts";
+import {
+  resolveEpicProviderChainFallback,
+  resolveEpicProviderFallback,
+} from "./providerFallback.ts";
 import { RUN_STALL_WARN_INTERVAL_MS, evaluateRunStall, type RunWait } from "./runStall.ts";
 import {
   makeDispatchSupervisionOptions,
@@ -470,6 +473,8 @@ interface ActiveIteration {
    * dispatched onto another account never degrades the run's account.
    */
   modelSelection: ModelSelection;
+  /** The policy role chosen from the child's title before dispatch. */
+  role: EpicDispatchRole;
   /**
    * This worker is an integration-fix child (t3code-sha), dispatched directly
    * onto the run's own base branch. Set as soon as the title is known — before
@@ -531,6 +536,7 @@ interface WorkerSettlement {
   readonly _tag: "settlement";
   readonly key: string;
   readonly modelSelection: ModelSelection;
+  readonly role: EpicDispatchRole;
   readonly exit: Exit.Exit<RunIterationResult, EpicRunnerError>;
 }
 
@@ -886,6 +892,8 @@ export const runParallelEpicLoop = (
      * with the durable selection of the session it is continuing.
      */
     readonly onSelectionResolved: (selection: AgentSelection) => void;
+    /** Fired with the role derived from the same title used for selection. */
+    readonly onRoleResolved: (role: EpicDispatchRole) => void;
     /**
      * Fired once the child's title is known — before the workspace is
      * acquired — when this iteration is an integration-fix child (t3code-sha).
@@ -1048,13 +1056,17 @@ export const runParallelEpicLoop = (
       // worker bypasses role resolution and keeps the durable selection from
       // its iteration row, because its session belongs to that account's
       // config directory.
+      const dispatchRole = (
+        parseMergeFixTitle(issueEvidenceBefore.title ?? "") !== null
+          ? "merge-fix-child"
+          : "iteration-worker"
+      ) satisfies EpicDispatchRole;
+      args.onRoleResolved(dispatchRole);
       const resolvedRole: ResolvedRoleSelection | null =
         ports.roleSelection === null || resumedWorker !== null
           ? null
           : yield* ports.roleSelection.resolve({
-              role: (parseMergeFixTitle(issueEvidenceBefore.title ?? "") !== null
-                ? "merge-fix-child"
-                : "iteration-worker") satisfies EpicDispatchRole,
+              role: dispatchRole,
               runId,
               issueId,
               issueTitle: issueEvidenceBefore.title,
@@ -2004,6 +2016,7 @@ export const runParallelEpicLoop = (
 
   const resolvePendingProviderFallback = (
     modelSelection: ModelSelection,
+    role: EpicDispatchRole,
     iterationResult: RunIterationResult,
   ): Effect.Effect<PendingProviderFallback | null, EpicRunnerError> =>
     Effect.gen(function* () {
@@ -2015,12 +2028,33 @@ export const runParallelEpicLoop = (
         return null;
       }
       const providers = yield* ports.providerInventory.getProviders;
-      const fallback = resolveEpicProviderFallback({
-        providers,
-        current: modelSelection,
-        failureReason: iterationResult.outcome.failureReason,
-        providerFallbackEligible: true,
-      });
+      const roleChain =
+        ports.roleSelection === null
+          ? { chain: [], isBlocked: () => false, isInstanceBlocked: () => false }
+          : yield* ports.roleSelection.chain(role);
+      const fallback =
+        roleChain.chain.length === 0
+          ? resolveEpicProviderFallback({
+              providers,
+              current: modelSelection,
+              failureReason: iterationResult.outcome.failureReason,
+              providerFallbackEligible: true,
+            })
+          : (resolveEpicProviderChainFallback({
+              providers,
+              current: modelSelection,
+              failureReason: iterationResult.outcome.failureReason,
+              providerFallbackEligible: true,
+              chain: roleChain.chain,
+              isBlocked: roleChain.isBlocked,
+            }) ??
+            resolveEpicProviderFallback({
+              providers,
+              current: modelSelection,
+              failureReason: iterationResult.outcome.failureReason,
+              providerFallbackEligible: true,
+              isBlocked: roleChain.isInstanceBlocked,
+            }));
       if (fallback === null) return null;
       const fromProvider = providers.find(
         (provider) => provider.instanceId === modelSelection.instanceId,
@@ -2342,6 +2376,7 @@ export const runParallelEpicLoop = (
           charged: selection._tag === "resume",
           modelSelection:
             selection._tag === "resume" ? selection.worker.selection : run.modelSelection,
+          role: "iteration-worker",
           isIntegrationFix,
         };
         active.set(key, activeIteration);
@@ -2354,6 +2389,9 @@ export const runParallelEpicLoop = (
           },
           onSelectionResolved: (selection) => {
             activeIteration.modelSelection = selection;
+          },
+          onRoleResolved: (role) => {
+            activeIteration.role = role;
           },
           onIntegrationFixDetected: () => {
             activeIteration.isIntegrationFix = true;
@@ -2391,6 +2429,7 @@ export const runParallelEpicLoop = (
               _tag: "settlement",
               key,
               modelSelection: activeIteration.modelSelection,
+              role: activeIteration.role,
               exit,
             }),
           ),
@@ -2594,6 +2633,7 @@ export const runParallelEpicLoop = (
       if (pendingFallback === null) {
         pendingFallback = yield* resolvePendingProviderFallback(
           settlement.modelSelection,
+          settlement.role,
           settlement.exit.value,
         );
         fallbackAppliesToBoundary = pendingFallback !== null;

@@ -102,6 +102,24 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("epic cook start sel
       });
     });
 
+  const resolveRoleChain = (input: {
+    readonly settings: unknown;
+    readonly records?: Record<string, ProviderDegradationRecord>;
+    readonly degradationRead?: Effect.Effect<
+      Readonly<Record<string, ProviderDegradationRecord>>,
+      RunJournalError
+    >;
+  }) =>
+    Effect.gen(function* () {
+      const adapter = yield* makeTerminalRoleSelection({
+        settingsPath: yield* writeSettings(input.settings),
+        inventory,
+        readProviderDegradations: input.degradationRead ?? degradations(input.records ?? {}),
+        providerDegradationTtlMs: 3_600_000,
+      });
+      return yield* adapter.chain("iteration-worker");
+    });
+
   it.effect("keeps the configured selection when nothing is recorded", () =>
     Effect.gen(function* () {
       const resolved = yield* resolveCookModelSelection({
@@ -181,6 +199,29 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("epic cook start sel
       const resolved = yield* resolveRole({ settings: chainPolicy });
       assert.equal(resolved.selection.instanceId, "claude");
       assert.equal(resolved.tierId, "worker");
+    }),
+  );
+
+  it.effect("returns a live fail-soft chain for mid-run fallback", () =>
+    Effect.gen(function* () {
+      const result = yield* resolveRoleChain({
+        settings: chainPolicy,
+        records: { claude: rateLimited(yield* nowIso) },
+      });
+      assert.deepEqual(
+        result.chain.map((hop) => hop.instanceId),
+        ["claude", "claude-personal"],
+      );
+      assert.isTrue(result.isInstanceBlocked(ProviderInstanceId.make("claude")));
+      assert.isFalse(result.isInstanceBlocked(ProviderInstanceId.make("claude-personal")));
+
+      const failed = yield* resolveRoleChain({
+        settings: chainPolicy,
+        degradationRead: Effect.fail(
+          new RunJournalError({ operation: "readProviderDegradations", detail: "unreadable" }),
+        ),
+      });
+      assert.deepEqual(failed.chain, []);
     }),
   );
 

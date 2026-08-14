@@ -21,6 +21,7 @@ import * as Option from "effect/Option";
 import { make as makeFileRunJournal } from "./adapters/FileRunJournal.ts";
 import { runSequentialEpicLoop, type SequentialEpicLoopPorts } from "./SequentialEpicLoop.ts";
 import type { RoleSelectionRequest } from "./ports/RoleSelection.ts";
+import type { EpicFallbackHop } from "./providerFallback.ts";
 import {
   DispatchError,
   type AgentDispatchCapabilities,
@@ -118,6 +119,10 @@ const fixture = (input: {
   readonly roleSelection?: { readonly instanceId: ProviderInstanceId; readonly model: string };
   /** The tier the stub resolver reports its selection came from. */
   readonly roleTier?: EpicTierId;
+  /** Live iteration-worker chain used by dispatch and fallback. */
+  readonly roleChain?: ReadonlyArray<EpicFallbackHop>;
+  /** Extra account blocks returned with role-chain state. */
+  readonly roleBlockedInstances?: ReadonlyArray<ProviderInstanceId>;
   readonly siblings?: ReadonlyArray<{
     readonly repositoryPath: string;
     readonly baseBranch: string;
@@ -329,14 +334,35 @@ const fixture = (input: {
     },
     providerInventory: { getProviders: Effect.succeed(input.providers ?? []) },
     roleSelection:
-      input.roleSelection === undefined
+      input.roleSelection === undefined && input.roleChain === undefined
         ? null
         : {
+            chain: () =>
+              Effect.sync(() => {
+                const chain = input.roleChain ?? [];
+                const isInstanceBlocked = (instanceId: ProviderInstanceId) =>
+                  input.roleBlockedInstances?.includes(instanceId) === true ||
+                  degradations.has(instanceId);
+                return {
+                  chain,
+                  isInstanceBlocked,
+                  isBlocked: (hop: EpicFallbackHop) => isInstanceBlocked(hop.instanceId),
+                };
+              }),
             resolve: (request) =>
               Effect.sync(() => {
                 roleRequests.push(request);
+                const chainHop = input.roleChain?.find((hop) => !degradations.has(hop.instanceId));
+                const chainSelection =
+                  chainHop === undefined
+                    ? undefined
+                    : {
+                        instanceId: chainHop.instanceId,
+                        model: chainHop.model,
+                        ...(chainHop.options === undefined ? {} : { options: chainHop.options }),
+                      };
                 return {
-                  selection: input.roleSelection ?? request.fallbackSelection,
+                  selection: input.roleSelection ?? chainSelection ?? request.fallbackSelection,
                   tierId: input.roleTier ?? null,
                 };
               }),
@@ -692,6 +718,128 @@ it.live("persists Prime to Claude to Codex to Kimi fallback across dispatches", 
     assert.isBelow(
       test.ordering.indexOf("run:saved:kimi"),
       test.ordering.indexOf("event:provider-fallback:kimi"),
+    );
+  }),
+);
+
+it.live("follows the worker role chain across provider errors", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const test = fixture({
+      attempts: [
+        { providerError: "rate limit" },
+        { providerError: "rate limit" },
+        { commit: true, close: true },
+      ],
+      providers: [claudeA, claudeB, codex],
+      selection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChain: [
+        { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+        { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+        { instanceId: codex.instanceId, model: "gpt-5.6-sol" },
+      ],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 3 },
+      }),
+    });
+
+    const result = yield* test.run();
+
+    assert.equal(result.status, "done");
+    assert.deepEqual(
+      test.selections.map((item) => item.instanceId),
+      ["claude-a", "claude-b", "codex"],
+    );
+    assert.deepEqual(
+      test.events
+        .filter((event) => event.type === "provider-fallback")
+        .map((event) => [event.fromInstanceId, event.toInstanceId]),
+      [
+        ["claude-a", "claude-b"],
+        ["claude-b", "codex"],
+      ],
+    );
+  }),
+);
+
+it.live("leaves an exhausted role chain without wrapping to a blocked sibling", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const test = fixture({
+      attempts: [
+        { providerError: "rate limit" },
+        { providerError: "rate limit" },
+        { commit: true, close: true },
+      ],
+      providers: [claudeA, claudeB, codex],
+      selection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChain: [
+        { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+        { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+      ],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 3 },
+      }),
+    });
+
+    yield* test.run();
+
+    assert.deepEqual(
+      test.selections.map((item) => item.instanceId),
+      ["claude-a", "claude-b", "codex"],
+    );
+  }),
+);
+
+it.live("refuses a role-chain hop that already matches the run row", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const test = fixture({
+      attempts: [{ providerError: "rate limit" }],
+      providers: [claudeA, claudeB],
+      selection: { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+      roleSelection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChain: [
+        { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+        { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+      ],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 1 },
+      }),
+    });
+
+    yield* test.run();
+
+    assert.equal(test.events.filter((event) => event.type === "provider-fallback").length, 0);
+    assert.equal(test.degradations.size, 0);
+  }),
+);
+
+it.live("keeps driver-order fallback unchanged when the role chain is empty", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const test = fixture({
+      attempts: [{ providerError: "rate limit" }, { commit: true, close: true }],
+      providers: [claudeA, claudeB],
+      selection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChain: [],
+      roleBlockedInstances: [claudeB.instanceId],
+      config: config({
+        limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 2 },
+      }),
+    });
+
+    yield* test.run();
+
+    assert.deepEqual(
+      test.selections.map((item) => item.instanceId),
+      ["claude-a", "claude-b"],
     );
   }),
 );

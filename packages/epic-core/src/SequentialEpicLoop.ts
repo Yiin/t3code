@@ -31,7 +31,10 @@ import type {
 } from "./ports/RunJournal.ts";
 import type { RepoRef, VcsShape } from "./ports/Vcs.ts";
 import { providerDegradationResetsAt, type ProviderUsageReadShape } from "./providerDegradation.ts";
-import { resolveEpicProviderFallback } from "./providerFallback.ts";
+import {
+  resolveEpicProviderChainFallback,
+  resolveEpicProviderFallback,
+} from "./providerFallback.ts";
 import { siblingRuleSequential } from "./siblings.ts";
 
 export class SequentialEpicLoopError extends Schema.TaggedErrorClass<SequentialEpicLoopError>()(
@@ -837,12 +840,36 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         const providers = yield* ports.providerInventory.getProviders;
         // Keyed on what this iteration was dispatched on, which is the run
         // selection unless a role resolved somewhere else.
-        fallbackSelection = resolveEpicProviderFallback({
-          providers,
-          current: dispatchSelection,
-          failureReason: outcome.failureReason,
-          providerFallbackEligible: true,
-        });
+        const roleChain =
+          ports.roleSelection === null
+            ? { chain: [], isBlocked: () => false, isInstanceBlocked: () => false }
+            : yield* ports.roleSelection.chain("iteration-worker");
+        fallbackSelection =
+          roleChain.chain.length === 0
+            ? resolveEpicProviderFallback({
+                providers,
+                current: dispatchSelection,
+                failureReason: outcome.failureReason,
+                providerFallbackEligible: true,
+              })
+            : (resolveEpicProviderChainFallback({
+                providers,
+                current: dispatchSelection,
+                failureReason: outcome.failureReason,
+                providerFallbackEligible: true,
+                chain: roleChain.chain,
+                isBlocked: roleChain.isBlocked,
+              }) ??
+              resolveEpicProviderFallback({
+                providers,
+                current: dispatchSelection,
+                failureReason: outcome.failureReason,
+                providerFallbackEligible: true,
+                isBlocked: roleChain.isInstanceBlocked,
+              }));
+        if (fallbackSelection?.instanceId === run.modelSelection.instanceId) {
+          fallbackSelection = null;
+        }
         if (fallbackSelection !== null) {
           const fromProvider = providers.find(
             (provider) => provider.instanceId === dispatchSelection.instanceId,

@@ -50,6 +50,7 @@ import type {
 import type { BacklogIssue } from "./ports/Backlog.ts";
 import type { RunEvent } from "./ports/RunEvents.ts";
 import type { EpicDispatchRole, RoleSelectionRequest } from "./ports/RoleSelection.ts";
+import type { EpicFallbackHop } from "./providerFallback.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { SupervisionClock } from "./workerSupervision.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
@@ -215,6 +216,10 @@ const fixture = (input: {
   readonly roleSelections?: Partial<Record<EpicDispatchRole, ModelSelection>>;
   /** The tier each role's selection came from, for attribution assertions. */
   readonly roleTiers?: Partial<Record<EpicDispatchRole, EpicTierId>>;
+  /** Live fallback chains returned for each dispatch role. */
+  readonly roleChains?: Partial<Record<EpicDispatchRole, ReadonlyArray<EpicFallbackHop>>>;
+  /** Extra account blocks returned with role-chain state. */
+  readonly roleBlockedInstances?: ReadonlyArray<ProviderInstanceId>;
   /** Where the run integrates, as the conflict radar reads it. */
   readonly integrationTarget?: {
     readonly repositoryPath: string;
@@ -733,14 +738,43 @@ const fixture = (input: {
     providerInventory:
       input.providers === undefined ? null : { getProviders: Effect.succeed(input.providers) },
     roleSelection:
-      input.roleSelections === undefined
+      input.roleSelections === undefined && input.roleChains === undefined
         ? null
         : {
+            chain: (role) =>
+              Effect.sync(() => {
+                const chain = input.roleChains?.[role] ?? [];
+                const isInstanceBlocked = (instanceId: ProviderInstanceId) =>
+                  input.roleBlockedInstances?.includes(instanceId) === true ||
+                  providerDegradations.some((record) => record.providerInstanceId === instanceId);
+                return {
+                  chain,
+                  isInstanceBlocked,
+                  isBlocked: (hop: EpicFallbackHop) => isInstanceBlocked(hop.instanceId),
+                };
+              }),
             resolve: (request) =>
               Effect.sync(() => {
                 roleRequests.push(request);
+                const chainHop = input.roleChains?.[request.role]?.find(
+                  (hop) =>
+                    !providerDegradations.some(
+                      (record) => record.providerInstanceId === hop.instanceId,
+                    ),
+                );
+                const chainSelection =
+                  chainHop === undefined
+                    ? undefined
+                    : {
+                        instanceId: chainHop.instanceId,
+                        model: chainHop.model,
+                        ...(chainHop.options === undefined ? {} : { options: chainHop.options }),
+                      };
                 return {
-                  selection: input.roleSelections?.[request.role] ?? request.fallbackSelection,
+                  selection:
+                    input.roleSelections?.[request.role] ??
+                    chainSelection ??
+                    request.fallbackSelection,
                   tierId: input.roleTiers?.[request.role] ?? null,
                 };
               }),
@@ -1356,6 +1390,161 @@ it.live("degrades the account the role resolved to, not the run's own", () =>
     // Forward fallback walks on from the account that actually failed.
     assert.equal(test.runRecord().modelSelection.instanceId, "codex");
     assert.deepEqual(test.providerClears, ["claude"]);
+  }),
+);
+
+it.live("follows the worker role chain across provider errors before driver fallback", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const chain = [
+      { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+      { instanceId: codex.instanceId, model: "gpt-5.6-sol" },
+    ];
+    const test = fixture({
+      sequential: false,
+      attempts: [
+        { providerError: "rate limit" },
+        { providerError: "rate limit" },
+        { commit: true, close: true },
+      ],
+      providers: [claudeA, claudeB, codex],
+      selection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChains: { "iteration-worker": chain },
+    });
+
+    yield* test.run;
+
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection.instanceId),
+      ["claude-a", "claude-b", "codex"],
+    );
+    assert.deepEqual(
+      test.events
+        .filter((event) => event.type === "provider-fallback")
+        .map((event) => [event.fromInstanceId, event.toInstanceId]),
+      [
+        ["claude-a", "claude-b"],
+        ["claude-b", "codex"],
+      ],
+    );
+  }),
+);
+
+it.live("keeps the merge-fix role through settlement and fallback", () =>
+  Effect.gen(function* () {
+    const fixerA = provider("fixer-a", "claudeAgent", "claude-sonnet-5");
+    const fixerB = provider("fixer-b", "claudeAgent", "claude-sonnet-5");
+    const test = fixture({
+      sequential: false,
+      childTitle: "Merge fix: land epic/xyz (conflict)",
+      attempts: [{ providerError: "rate limit" }, { commit: true, close: true }],
+      providers: [fixerA, fixerB],
+      selection: { instanceId: fixerA.instanceId, model: "claude-sonnet-5" },
+      roleChains: {
+        "merge-fix-child": [
+          { instanceId: fixerA.instanceId, model: "claude-sonnet-5" },
+          { instanceId: fixerB.instanceId, model: "claude-sonnet-5" },
+        ],
+      },
+    });
+
+    yield* test.run;
+
+    assert.deepEqual(
+      test.roleRequests.map((request) => request.role),
+      ["merge-fix-child", "merge-fix-child"],
+    );
+    assert.deepEqual(
+      test.events
+        .filter((event) => event.type === "provider-fallback")
+        .map((event) => event.toInstanceId),
+      ["fixer-b"],
+    );
+  }),
+);
+
+it.live("keeps driver-order fallback unchanged when the role chain is empty", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const test = fixture({
+      sequential: false,
+      attempts: [{ providerError: "rate limit" }, { commit: true, close: true }],
+      providers: [claudeA, claudeB],
+      selection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChains: { "iteration-worker": [] },
+      roleBlockedInstances: [claudeB.instanceId],
+    });
+
+    yield* test.run;
+
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection.instanceId),
+      ["claude-a", "claude-b"],
+    );
+  }),
+);
+
+it.live("leaves an exhausted role chain without returning to a blocked sibling", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const codex = provider("codex", "codex", "gpt-5.6-sol");
+    const test = fixture({
+      sequential: false,
+      attempts: [
+        { providerError: "rate limit" },
+        { providerError: "rate limit" },
+        { commit: true, close: true },
+      ],
+      providers: [claudeA, claudeB, codex],
+      selection: { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      roleChains: {
+        "iteration-worker": [
+          { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+          { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+        ],
+      },
+    });
+
+    yield* test.run;
+
+    assert.deepEqual(
+      test.beginTurnCalls.map((call) => call.selection.instanceId),
+      ["claude-a", "claude-b", "codex"],
+    );
+  }),
+);
+
+it.live("refuses a role-chain hop that already matches the run row", () =>
+  Effect.gen(function* () {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const test = fixture({
+      sequential: false,
+      attempts: [{ providerError: "rate limit" }],
+      providers: [claudeA, claudeB],
+      selection: { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+      roleSelections: {
+        "iteration-worker": { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+      },
+      roleChains: {
+        "iteration-worker": [
+          { instanceId: claudeA.instanceId, model: "claude-sonnet-5" },
+          { instanceId: claudeB.instanceId, model: "claude-sonnet-5" },
+        ],
+      },
+      policy: policy({ maxIterations: 1 }),
+    });
+
+    yield* test.run;
+
+    assert.equal(test.runRecord().modelSelection.instanceId, "claude-b");
+    assert.equal(test.events.filter((event) => event.type === "provider-fallback").length, 0);
+    assert.deepEqual(test.providerDegradations, []);
   }),
 );
 

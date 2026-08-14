@@ -17,10 +17,12 @@
  * live in SQLite and a terminal cook has no database. This twin stays on
  * degradations alone.
  */
-import type { EpicRoleId, ModelSelection } from "@t3tools/contracts";
+import type { EpicRoleId, ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
 import type { ProviderInventoryShape } from "@t3tools/epic-core/ports/ProviderInventory";
 import {
   epicDispatchRoleId,
+  type EpicDispatchRole,
+  type ResolvedRoleFallbackChain,
   type ResolvedRoleSelection,
   type RoleSelectionShape,
 } from "@t3tools/epic-core/ports/RoleSelection";
@@ -56,43 +58,64 @@ export const makeTerminalRoleSelection = (input: {
 }): Effect.Effect<RoleSelectionShape, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
+    const emptyChain = (): ResolvedRoleFallbackChain => ({
+      chain: [],
+      isBlocked: () => false,
+      isInstanceBlocked: () => false,
+    });
+    const readRoleState = (role: EpicDispatchRole) =>
+      Effect.gen(function* () {
+        const checkedAt = yield* DateTime.now;
+        const now = DateTime.formatIso(checkedAt);
+        const cutoff = DateTime.formatIso(
+          DateTime.subtractDuration(checkedAt, Duration.millis(input.providerDegradationTtlMs)),
+        );
+        const policy = yield* readEpicRolePolicy(input.settingsPath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        );
+        const providers = widenInventoryWithPolicyModels(
+          yield* input.inventory.getProviders,
+          policy,
+        );
+        const recorded = yield* input.readProviderDegradations;
+        const roleId = epicDispatchRoleId(role);
+        const tierId = policy.roles[roleId];
+        const chain = epicRoleFallbackChain(policy, roleId);
+        const isInstanceBlocked = (instanceId: ProviderInstanceId) => {
+          const degradation = recorded[instanceId];
+          return degradation !== undefined && isLiveProviderDegradation(degradation, cutoff, now);
+        };
+        const isBlocked = (hop: (typeof chain)[number]) => isInstanceBlocked(hop.instanceId);
+        return { providers, tierId, chain, isBlocked, isInstanceBlocked };
+      });
     return {
+      chain: (role) =>
+        readRoleState(role).pipe(
+          Effect.map(({ chain, isBlocked, isInstanceBlocked }) => ({
+            chain,
+            isBlocked,
+            isInstanceBlocked,
+          })),
+          Effect.catchCause(() => Effect.succeed(emptyChain())),
+        ),
       resolve: (request) => {
         const fallback = (): ResolvedRoleSelection => ({
           selection: request.fallbackSelection,
           tierId: null,
         });
-        return Effect.gen(function* () {
-          const checkedAt = yield* DateTime.now;
-          const now = DateTime.formatIso(checkedAt);
-          const cutoff = DateTime.formatIso(
-            DateTime.subtractDuration(checkedAt, Duration.millis(input.providerDegradationTtlMs)),
-          );
-          const policy = yield* readEpicRolePolicy(input.settingsPath).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-          );
-          const providers = widenInventoryWithPolicyModels(
-            yield* input.inventory.getProviders,
-            policy,
-          );
-          const recorded = yield* input.readProviderDegradations;
-          const roleId = epicDispatchRoleId(request.role);
-          const tierId = policy.roles[roleId];
-          if (tierId === undefined) return fallback();
-          const chain = epicRoleFallbackChain(policy, roleId);
-          if (chain.length === 0) return fallback();
-          const selection = resolveEpicProviderChainEntry({
-            providers,
-            chain,
-            isBlocked: (hop) => {
-              const degradation = recorded[hop.instanceId];
-              return (
-                degradation !== undefined && isLiveProviderDegradation(degradation, cutoff, now)
-              );
-            },
-          });
-          return selection === null ? fallback() : { selection, tierId };
-        }).pipe(Effect.catchCause(() => Effect.succeed(fallback())));
+        return readRoleState(request.role).pipe(
+          Effect.map(({ providers, tierId, chain, isBlocked }) => {
+            if (tierId === undefined) return fallback();
+            if (chain.length === 0) return fallback();
+            const selection = resolveEpicProviderChainEntry({
+              providers,
+              chain,
+              isBlocked,
+            });
+            return selection === null ? fallback() : { selection, tierId };
+          }),
+          Effect.catchCause(() => Effect.succeed(fallback())),
+        );
       },
     } satisfies RoleSelectionShape;
   });

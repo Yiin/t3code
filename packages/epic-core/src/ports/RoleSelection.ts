@@ -1,8 +1,9 @@
 /** Per-role model selection, resolved once per epic dispatch. */
-import type { EpicRoleId, EpicTierId } from "@t3tools/contracts";
+import type { EpicRoleId, EpicTierId, ProviderInstanceId } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 
 import type { AgentSelection } from "./AgentDispatch.ts";
+import type { EpicFallbackHop } from "../providerFallback.ts";
 
 /**
  * One dispatch the runner controls.
@@ -56,10 +57,19 @@ export interface ResolvedRoleSelection {
   readonly tierId: EpicTierId | null;
 }
 
+/** The live chain and account blocks that apply to one dispatch role. */
+export interface ResolvedRoleFallbackChain {
+  readonly chain: ReadonlyArray<EpicFallbackHop>;
+  readonly isBlocked: (hop: EpicFallbackHop) => boolean;
+  readonly isInstanceBlocked: (instanceId: ProviderInstanceId) => boolean;
+}
+
 export interface RoleSelectionShape {
   /**
    * Never fails. On any error the adapter returns `request.fallbackSelection`
    * with a `null` tier, because nothing was actually resolved.
    */
   readonly resolve: (request: RoleSelectionRequest) => Effect.Effect<ResolvedRoleSelection>;
+  /** Never fails. Missing policy or state returns an empty chain. */
+  readonly chain: (role: EpicDispatchRole) => Effect.Effect<ResolvedRoleFallbackChain>;
 }

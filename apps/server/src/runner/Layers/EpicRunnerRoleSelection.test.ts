@@ -121,6 +121,27 @@ const resolve = (input?: {
     fallbackSelection: fallback,
   });
 
+const resolveChain = (input?: Parameters<typeof resolve>[0]) => {
+  const adapter = makeEpicRunnerRoleSelection({
+    readEpicRolePolicy: input?.policyEffect ?? Effect.succeed(input?.policy ?? policy()),
+    inventory: {
+      getProviders: Effect.succeed(input?.providers ?? [provider("one"), provider("two")]),
+    },
+    readProviderDegradation: (id) =>
+      input?.degradationDefect || input?.degradationDefectFor === id
+        ? Effect.die("boom")
+        : Effect.succeed(
+            input?.degradations?.[id] === undefined
+              ? Option.none()
+              : Option.some(input.degradations[id]),
+          ),
+    readUsageSamples: Effect.succeed(input?.usage ?? []),
+    readAccountLimits: Effect.succeed(input?.limits ?? []),
+    providerDegradationTtlMs: 3_600_000,
+  });
+  return adapter.chain(input?.role ?? "iteration-worker");
+};
+
 describe("EpicRunnerRoleSelection", () => {
   it.effect("maps every dispatch role to its policy role", () =>
     Effect.gen(function* () {
@@ -231,6 +252,61 @@ describe("EpicRunnerRoleSelection", () => {
         providers: [provider("fallback")],
       });
       expect(result).toEqual({ selection: fallback, tierId: "tier" });
+    }),
+  );
+
+  it.effect("returns the live chain with fail-soft account blockers", () =>
+    Effect.gen(function* () {
+      const live = {
+        failureReason: "provider-error:rate-limit",
+        degradedAt: "2026-08-14T00:00:00.000Z",
+        resetsAt: "2099-01-01T00:00:00.000Z",
+      };
+      const result = yield* resolveChain({ degradations: { one: live } });
+      expect(result.chain.map((hop) => hop.instanceId)).toEqual(["one", "two"]);
+      expect(result.isBlocked(result.chain[0]!)).toBe(true);
+      expect(result.isInstanceBlocked(instance("one"))).toBe(true);
+      expect(result.isInstanceBlocked(instance("two"))).toBe(false);
+
+      const failed = yield* resolveChain({
+        policyEffect: Effect.fail(new PersistenceSqlError({ operation: "settings" })),
+      });
+      expect(failed.chain).toEqual([]);
+      expect(failed.isInstanceBlocked(instance("one"))).toBe(false);
+    }),
+  );
+
+  it.effect("carries usage and hop-threshold blocks into driver fallback", () =>
+    Effect.gen(function* () {
+      const configured = policy({
+        hops: [{ id: "one", skipAboveUtilization: 80 }, { id: "two" }],
+      });
+      const threshold = yield* resolveChain({
+        policy: configured,
+        usage: [usage("one", 81)],
+      });
+      expect(threshold.isBlocked(threshold.chain[0]!)).toBe(true);
+      expect(threshold.isInstanceBlocked(instance("one"))).toBe(true);
+
+      const exhausted = yield* resolveChain({ usage: [usage("one", 100)] });
+      expect(exhausted.isInstanceBlocked(instance("one"))).toBe(true);
+    }),
+  );
+
+  it.effect("loads degradation state for providers outside the role chain", () =>
+    Effect.gen(function* () {
+      const live = {
+        failureReason: "provider-error:rate-limit",
+        degradedAt: "2026-08-14T00:00:00.000Z",
+        resetsAt: "2099-01-01T00:00:00.000Z",
+      };
+      const result = yield* resolveChain({
+        policy: policy({ hops: [{ id: "one" }], expandSameDriverAccounts: false }),
+        providers: [provider("one"), provider("outside")],
+        degradations: { outside: live },
+      });
+
+      expect(result.isInstanceBlocked(instance("outside"))).toBe(true);
     }),
   );
 });

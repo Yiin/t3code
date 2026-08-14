@@ -86,7 +86,7 @@ export const epicRoleFallbackChain = (
  * but only when they advertise that hop's exact model. Instance ids keep their
  * first position across the full expansion.
  */
-const expandEpicFallbackCandidates = (input: {
+export const expandEpicFallbackCandidates = (input: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly chain: ReadonlyArray<EpicFallbackHop>;
 }): ReadonlyArray<EpicFallbackHop> => {
