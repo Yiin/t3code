@@ -9,7 +9,7 @@ argument-hint: <issue id, epic id, or short task description>
 
 End-to-end execution of a well-scoped engineering task. You own the **result**, not a checklist. The fixed spine is plan → implement → verify → gate → commit; the variable part is how much independent scrutiny each stage gets, and you decide that from the task itself. A one-line fix and a multi-subsystem feature deserve different amounts of review — spending three agents on the former is waste, spending one on the latter is negligence. **The justification burden runs both ways**: name the criterion that let you scale a step down, and name the one that made you escalate past the baseline. Unjustified ceremony is as much a defect as unjustified confidence, and most tasks that reach this skill are small — the cheap path is the default, not the exception.
 
-**Model tiers (Claude-family harness only).** When the session was started with injected agent definitions (the Agent tool lists agents named for the stages, such as `planner`, `implementer`, `reviewer`), dispatch those by name and pass no model. The definition already carries the tier, and an injected agent replaces the `general-purpose` default wherever this skill names one. Work you do in your own session stays on the session model. A model the user named pins every stage instead. When the session has no such agents (a plain `claude` CLI run, or a non-Claude harness), fall back to the defaults the runner would otherwise inject: `opus` for plan composition and plan critique, `sonnet` for implementers, `fable` for reviewers. The tiers themselves live in the epic role policy in `ServerSettings` and reach a session as injected agent definitions, so don't copy model names back into this file.
+**Model tiers (Claude-family harness only).** When the session was started with injected agent definitions (the Agent tool lists agents named for the stages, such as `planner`, `implementer`, `reviewer`, `tester`, `cleanup`), dispatch those by name and pass no model. The definition already carries the tier, and an injected agent replaces the `general-purpose` default wherever this skill names one. Work you do in your own session stays on the session model. A model the user named pins every stage instead. When the session has no such agents (a plain `claude` CLI run, or a non-Claude harness), fall back to the defaults the runner would otherwise inject: `opus` for plan composition and plan critique, `sonnet` for implementers, `fable` for reviewers, `opus` for testers and cleanup agents. The tiers themselves live in the epic role policy in `ServerSettings` and reach a session as injected agent definitions, so don't copy model names back into this file.
 
 Never drop the review stage over a model limit, and never downgrade it to the session thread. Rotating off an exhausted account is the runner's job. The tier chain is ordered, and the runner skips a hop whose account sits over its threshold. Report which tier the review ran on.
 
@@ -36,9 +36,9 @@ Everywhere the skill says to ask, resolve it yourself instead: work out what the
 
 Two things this does not license. Never silently bypass a check — scaling verification still goes through the routing criteria, and skipping it because nobody is watching is not one of them. And do not guess at a decision that is genuinely the user's: an irreversible or outward-facing action, or a product, security, or policy call with real consequences either way and no clearly better option. Those you park — do the work that does not depend on the answer, leave the rest, file the issue naming the exact decision needed, and say so in your report. The test is not "is this ambiguous?" but "would a reasonable person reading the goal land somewhere obvious?" If yes, land there.
 
-## Three routing decisions
+## Four routing decisions
 
-Make all three explicitly, before dispatching anything, and state them to the user alongside the plan (or the adopted instructions).
+Make all four explicitly, before dispatching anything, and state them to the user alongside the plan (or the adopted instructions).
 
 **1. Does the task need a composed plan?** Skip planning when the instructions already tell you what to do:
 
@@ -63,6 +63,15 @@ If none hold — single-file fix, mechanical change, behavior fully pinned down 
 - **Baseline** — one reviewer agent over the diff. Right for small, single-concern changes that miss any self-review condition.
 - **+ Design review** — the diff touches UI (components, styles, layout, user-facing pages): add a reviewer that loads the `ui-ux-pro-max` skill first and audits the implementation against it — visual hierarchy, spacing, interaction states, accessibility, responsiveness, consistency with the product's existing style.
 - **Fan-out** — the implementation is big (many files, several distinct concerns, new subsystem): partition it by its actual structure — core logic, error/edge paths, data layer, tests, UI — and dispatch one skeptical reviewer per part, in parallel. Each owns its part fully; at least one must run the omission/parity pass described in step 4.
+
+**4. Does the change need integrated QA?** Reading a diff proves the code says what you meant. It does not prove the app still works. Run integrated QA (step 4.5) when both of these hold:
+
+- The diff changes user-visible runtime behavior — web components, routes, layout, navigation, or a server change that alters what a user sees in a flow.
+- The repo defines an integrated-verification rule. In t3code that rule is the Task Completion Requirements in `CLAUDE.md` plus the `test-t3-app` skill.
+
+Skip QA for research and evidence-only work, backend logic fully pinned by tests, contracts or schema-only changes, docs, config, mechanical renames, and test-only changes. Say which of those criteria applied: _"Schema-only change, no user-visible surface — skipping integrated QA."_
+
+When the repo defines no integrated-verification rule and the change has no user-visible surface, QA is structurally unavailable. State that plainly and move on. Never dress up a build or a test run as integrated QA.
 
 ## The flow
 
@@ -98,7 +107,7 @@ Otherwise, read enough context to write a self-contained plan:
 
 Investigate until the plan is defensible, then stop — don't keep gathering context to re-derive what project context already establishes.
 
-Share the plan with the user as a short markdown block before dispatching agents, ending with the three routing decisions and their one-line justifications. Don't ask for approval — the act of `/cook-it` is the approval. The plan and routing are shown so the user can interrupt if they spot something off.
+Share the plan with the user as a short markdown block before dispatching agents, ending with the four routing decisions and their one-line justifications. Don't ask for approval — the act of `/cook-it` is the approval. The plan and routing are shown so the user can interrupt if they spot something off.
 
 ### 2. Critique the plan (when it warrants it)
 
@@ -123,7 +132,7 @@ Implement the governing plan — refined by critique when it ran, otherwise as c
 - Run, in order: any new or changed tests alone (sanity), then typecheck, then lint on changed files — using the commands `dev-commands` gives, never guessed.
 - Report files changed and any unexpected output. Not commit — that's a later step.
 
-If the implementation turned out substantially bigger or different in kind than the plan predicted (e.g. it grew a UI surface, or spilled into a subsystem the plan didn't name), revisit routing decision 3 now — the review shape follows what was actually built, not what was planned.
+If the implementation turned out substantially bigger or different in kind than the plan predicted (e.g. it grew a UI surface, or spilled into a subsystem the plan didn't name), revisit routing decisions 3 and 4 now — the review shape and the QA call follow what was actually built, not what was planned.
 
 ### 4. Review the implementation
 
@@ -148,13 +157,36 @@ Merge the verdicts: dedupe overlapping findings, drop nits you can defend ignori
 
 If BLOCK, describe exactly what to fix and send that brief back to the implementer (`SendMessage` or the harness's equivalent). Re-run only the reviewer(s) whose scope the fix touched, always with fresh context — never reuse the first reviewer's. Cap at two BLOCK rounds; if the second produces conflicting feedback, surface it to the user, or file it and stop when unattended.
 
+### 4.5. Integrated QA (when routing decision 4 said so)
+
+QA sits here for two reasons. The implementer already ran focused checks, so the app is runnable. And any cleanup fix lands before the gate, so the gate runs once, on the final state.
+
+Dispatch the injected `tester` agent by name. If the session has no injected agents, take the harness fallback above: a fresh agent on `opus`, briefed with the same content.
+
+The tester brief carries:
+
+- The exact flow to drive, as steps a stranger could follow.
+- Whether the phone viewport applies. In t3code it applies whenever the change touches layout, touch targets, or navigation.
+- The repo's integrated-verification rule and the skill that implements it — in t3code, `test-t3-app`.
+
+The tester reports **PASS** or **FAIL**, with the steps it drove and the evidence it saw. On FAIL it gives an exact reproduction. The tester never edits files. It stops dev servers, watchers, and any other long-running process before it ends.
+
+**The cleanup loop.** On FAIL, dispatch the injected `cleanup` agent (fallback: a fresh agent on `opus`) with the tester's report and the plan's non-goals. Cleanup reproduces the failure first, makes the minimal fix, and runs focused checks. It never commits, and it never re-runs QA on its own work. Then a **fresh** tester re-QAs the failed flow. Cap at two cleanup rounds.
+
+This loop is serial after step 4's BLOCK loop and independent of it. **A QA FAIL never reopens review.** The cleanup delta gets step 4's self-review checklist, the re-QA, and the gate. It does not get a fresh reviewer round.
+
+When the cap runs out:
+
+- **Attended:** surface the failure with the reproduction and stop.
+- **Unattended:** do not commit a change that demonstrably breaks a user-visible flow. File a bd issue carrying the reproduction and the tester's evidence, name it in your report, and stop.
+
 ### 5. Run the quality gate
 
 If the task changed no code (research findings, a verification run), skip the gate and commit steps — the deliverable is the step-4 evidence and the issue closure in step 7.
 
 Invoke the project's `dev-commands` skill to learn the exact gate commands — never guess them. The full gate in vangrd, for example, is `bun run typecheck:server && bun run typecheck:web && bun run lint && npm test`.
 
-**Scale the gate to the change.** When the change stays inside one area, run the proportional gate: the typecheck for that area, lint on the changed files, and the tests that cover the change. Say which commands you ran. Run the full gate when the change crosses areas, touches shared types, config, or generated output, or when nothing downstream will run it. A downstream integration gate counts — cook-epic's `COOKEPIC_GATE`, a CI pipeline, a batching loop that gates once before pushing — so when one exists, the proportional gate is enough here.
+**Scale the gate to the change.** When the change stays inside one area, run the proportional gate: the typecheck for that area, lint on the changed files, and the tests that cover the change. Say which commands you ran. Run the full gate when the change crosses areas, touches shared types, config, or generated output, or when nothing downstream will run it. A downstream integration gate counts — cook-epic's `COOKEPIC_GATE`, a CI pipeline, a batching loop that gates once before pushing — so when one exists, the proportional gate is enough here. That exemption covers the scripted gate only. `COOKEPIC_GATE` cannot drive a browser, so it never substitutes for step 4.5. Integrated QA runs in this iteration or not at all.
 
 **Pre-existing red.** First prove the red is pre-existing and unrelated: the failing files sit outside your diff, and the failure reproduces without your change (re-run that one target at the base commit in a scratch worktree — never `git stash`, the tree may hold another agent's work). If you can't prove it, treat the failure as yours and fix it. Once proven:
 
@@ -250,4 +282,10 @@ Each agent prompt must be self-contained: it doesn't see the prior conversation.
 /cook-it add the export button to the reports page
 ```
 
-→ Plan is simple → skip plan critique. Diff touches UI → baseline reviewer plus a design reviewer briefed on `ui-ux-pro-max`. Gate, commit, push.
+→ Plan is simple → skip plan critique. Diff touches UI → baseline reviewer plus a design reviewer briefed on `ui-ux-pro-max`. User-visible surface plus a repo QA rule → run integrated QA: a tester drives "open the reports page, click Export, confirm the file downloads" on desktop and at a phone viewport, and reports PASS. Gate, commit, push.
+
+```
+/cook-it add the `archivedAt` field to the order schema
+```
+
+→ Contracts-only change with no user-visible surface → skip integrated QA and say which criterion applied. Typecheck plus the schema tests carry it. Baseline reviewer, proportional gate, commit, push.
