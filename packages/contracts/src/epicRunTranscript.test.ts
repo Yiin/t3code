@@ -81,6 +81,17 @@ describe("EpicRunTranscriptEvent", () => {
     assert.isDefined(events[0]?.meta);
   });
 
+  it("preserves provider instance ids", () => {
+    const value = decode({
+      ...event(0, "provider-fallback"),
+      fromProvider: "claude",
+      toProvider: "codex",
+      fromProviderInstanceId: "claude-work",
+      toProviderInstanceId: "codex-personal",
+    });
+    assert.deepEqual(decode(encode(value)), value);
+  });
+
   it("drops nondeterministic top-level fields during decoding", () => {
     const decoded = decode({
       ...event(0),

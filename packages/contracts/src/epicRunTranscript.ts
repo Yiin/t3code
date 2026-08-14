@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 
 export const EPIC_RUN_TRANSCRIPT_TAGS = [
   "blocked",
@@ -56,6 +57,8 @@ const TranscriptFields = {
   verified: Schema.optional(Schema.Boolean),
   fromProvider: Schema.optional(TrimmedNonEmptyString),
   toProvider: Schema.optional(TrimmedNonEmptyString),
+  fromProviderInstanceId: Schema.optional(ProviderInstanceId),
+  toProviderInstanceId: Schema.optional(ProviderInstanceId),
   model: Schema.optional(TrimmedNonEmptyString),
   workerLimit: Schema.optional(NonNegativeInt),
   idleSeconds: Schema.optional(NonNegativeInt),

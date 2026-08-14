@@ -128,6 +128,29 @@ const conformanceProviders = [
   provider("kimi", "kimi", "kimi-code/k3"),
 ] as const;
 
+const accountRotationProviders = [
+  provider("claude-a", "claudeAgent", "sonnet"),
+  provider("claude-b", "claudeAgent", "sonnet"),
+  provider("codex", "codex", "gpt-5.6-sol"),
+] as const;
+
+const PROVIDER_SCENARIOS = new Set([
+  "account-rotation-exhausts-harness",
+  "provider-fallback-persists",
+]);
+
+const providersForScenario = (scenario: ConformanceScenario): ReadonlyArray<ServerProvider> =>
+  scenario.name === "account-rotation-exhausts-harness"
+    ? accountRotationProviders
+    : conformanceProviders;
+
+const initialSelectionForScenario = (scenario: ConformanceScenario) =>
+  scenario.name === "account-rotation-exhausts-harness"
+    ? { instanceId: ProviderInstanceId.make("claude-a"), model: "sonnet" }
+    : scenario.name === "provider-fallback-persists"
+      ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
+      : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
+
 const transcriptProvider = (driver: string): string =>
   driver === "claudeAgent" ? "claude" : driver;
 
@@ -267,7 +290,9 @@ const translateCoreEvents = (input: {
         _tag: "provider-fallback",
         ...common,
         fromProvider: transcriptProvider(providerFallback.fromDriver),
+        fromProviderInstanceId: providerFallback.fromInstanceId,
         toProvider: transcriptProvider(providerFallback.toDriver),
+        toProviderInstanceId: providerFallback.toInstanceId,
       });
       continue;
     }
@@ -281,7 +306,7 @@ const translateCoreEvents = (input: {
       } else {
         if (dispatched.has(iteration.iterationIndex)) {
           const selection = input.dispatchSelections.get(iteration.iterationIndex);
-          const selectedProvider = conformanceProviders.find(
+          const selectedProvider = providersForScenario(input.scenario).find(
             (provider) => provider.instanceId === selection,
           );
           output.push({
@@ -461,17 +486,44 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
       const lock = yield* EpicRunLock;
       const preflight = yield* EpicRunPreflight.EpicRunPreflight;
       const journal = yield* FileRunJournal.make({ runDirectory });
-      const providerScenario = scenario.name === "provider-fallback-persists";
-      const initialSelection = providerScenario
-        ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
-        : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
+      const providerScenario = PROVIDER_SCENARIOS.has(scenario.name);
+      const initialSelection = initialSelectionForScenario(scenario);
       const harness = providerScenario ? ("claude" as const) : ("worker-cmd" as const);
-      const providerSupport = makeTerminalProviderSupport({
+      const defaultProviderSupport = makeTerminalProviderSupport({
         harness,
         selection: initialSelection,
         workerCommand: NodePath.join(workspace.binDir, "agent"),
         environment: workspace.env,
       });
+      let accountRotationInventoryReads = 0;
+      const providerSupport =
+        scenario.name === "account-rotation-exhausts-harness"
+          ? {
+              routes: [
+                defaultProviderSupport.routes[0]!,
+                {
+                  ...defaultProviderSupport.routes[0]!,
+                  instanceId: ProviderInstanceId.make("claude-b"),
+                  primary: false,
+                },
+                defaultProviderSupport.routes.find(
+                  (route) => route.instanceId === ProviderInstanceId.make("codex"),
+                )!,
+              ],
+              inventory: {
+                getProviders: Effect.sync(() => {
+                  accountRotationInventoryReads += 1;
+                  return accountRotationInventoryReads === 1
+                    ? accountRotationProviders
+                    : accountRotationProviders.map((provider) =>
+                        provider.instanceId === ProviderInstanceId.make("claude-a")
+                          ? { ...provider, availability: "unavailable" as const }
+                          : provider,
+                      );
+                }),
+              },
+            }
+          : defaultProviderSupport;
       const terminalDispatch = makeTerminalAgentDispatch({
         harness,
         artifactsDirectory: runDirectory,
@@ -563,6 +615,9 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
   }
   if (scenario.name === "provider-fallback-persists") {
     assert.deepEqual(executed.harnesses, ["claude", "codex", "kimi"]);
+  }
+  if (scenario.name === "account-rotation-exhausts-harness") {
+    assert.deepEqual(executed.harnesses, ["claude", "claude", "codex"]);
   }
   return translateCoreEvents({
     scenario,

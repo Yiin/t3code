@@ -26,6 +26,7 @@ const scenarioFiles = (): string[] =>
 const loadScenario = (path: string): ConformanceScenario =>
   decodeConformanceScenario(JSON.parse(NodeFS.readFileSync(path, "utf8")));
 const requiredScenarioNames = [
+  "account-rotation-exhausts-harness",
   "happy-path",
   "no-commit-gutter",
   "no-commit-child-closed",

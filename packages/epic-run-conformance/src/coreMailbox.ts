@@ -29,6 +29,18 @@ export const parseCoreMailbox = (contents: string): ReadonlyArray<unknown> =>
 const transcriptProvider = (driver: string): string =>
   driver === "claudeAgent" ? "claude" : driver;
 
+const terminalDriverForInstance = (instanceId: string): string | undefined => {
+  switch (instanceId) {
+    case "claude":
+      return "claudeAgent";
+    case "codex":
+    case "kimi":
+      return instanceId;
+    default:
+      return undefined;
+  }
+};
+
 /**
  * The pool view of a mailbox: the last state each iteration row reached, plus
  * the run's own last row.
@@ -124,10 +136,15 @@ export const normalizeCoreMailbox = (
   }
   const iterations: IterationRecord[] = [];
   const releasedClaims = new Map<string, string>();
-  const providerFallbacks = new Map<
-    number,
-    { readonly fromDriver: string; readonly toDriver: string }
-  >();
+  interface ProviderFallbackRecord {
+    readonly iterationIndex: number;
+    readonly fromDriver: string;
+    readonly fromInstanceId: string;
+    readonly toDriver: string;
+    readonly toInstanceId: string;
+  }
+  const explicitProviderFallbacks: ProviderFallbackRecord[] = [];
+  let inferredLaunchFallback: ProviderFallbackRecord | null = null;
   const selectionAtDispatch = new Map<number, string>();
   let finalRun: {
     readonly status: string;
@@ -136,6 +153,7 @@ export const normalizeCoreMailbox = (
     readonly consecutiveFailures: number;
   } | null = null;
   let currentInstanceId: string | null = null;
+  let sawDispatch = false;
 
   for (const value of values) {
     const input = record(value);
@@ -146,8 +164,30 @@ export const normalizeCoreMailbox = (
       const turnStatus = string(item?.turnStatus);
       const iterationIndex = number(item?.iterationIndex);
       if (item === null || turnStatus === undefined || iterationIndex === undefined) continue;
-      if (turnStatus === "running" && currentInstanceId !== null) {
-        selectionAtDispatch.set(iterationIndex, currentInstanceId);
+      if (turnStatus === "running") {
+        const dispatchedInstanceId = string(item.providerInstanceId) ?? currentInstanceId;
+        if (
+          !sawDispatch &&
+          currentInstanceId !== null &&
+          dispatchedInstanceId !== null &&
+          dispatchedInstanceId !== currentInstanceId
+        ) {
+          const fromDriver = terminalDriverForInstance(currentInstanceId);
+          const toDriver = terminalDriverForInstance(dispatchedInstanceId);
+          if (fromDriver !== undefined && toDriver !== undefined) {
+            inferredLaunchFallback = {
+              iterationIndex,
+              fromDriver,
+              fromInstanceId: currentInstanceId,
+              toDriver,
+              toInstanceId: dispatchedInstanceId,
+            };
+          }
+        }
+        sawDispatch = true;
+        if (dispatchedInstanceId !== null) {
+          selectionAtDispatch.set(iterationIndex, dispatchedInstanceId);
+        }
       }
       iterations.push({
         issueId: string(item.issueId) ?? null,
@@ -184,11 +224,25 @@ export const normalizeCoreMailbox = (
     if (type === "provider-fallback") {
       const iterationIndex = number(input.iterationIndex);
       const fromDriver = string(input.fromDriver);
+      const fromInstanceId = string(input.fromInstanceId);
       const toDriver = string(input.toDriver);
-      if (iterationIndex === undefined || fromDriver === undefined || toDriver === undefined) {
+      const toInstanceId = string(input.toInstanceId);
+      if (
+        iterationIndex === undefined ||
+        fromDriver === undefined ||
+        fromInstanceId === undefined ||
+        toDriver === undefined ||
+        toInstanceId === undefined
+      ) {
         continue;
       }
-      providerFallbacks.set(iterationIndex, { fromDriver, toDriver });
+      explicitProviderFallbacks.push({
+        iterationIndex,
+        fromDriver,
+        fromInstanceId,
+        toDriver,
+        toInstanceId,
+      });
     }
   }
 
@@ -203,6 +257,23 @@ export const normalizeCoreMailbox = (
   let infraAttempts = 0;
   let recoveredExhaustion = false;
   const output: TranscriptEvent[] = [];
+  const providerFallbacks =
+    inferredLaunchFallback === null ||
+    explicitProviderFallbacks.some(
+      (providerFallback) =>
+        providerFallback.fromInstanceId === inferredLaunchFallback?.fromInstanceId &&
+        providerFallback.toInstanceId === inferredLaunchFallback.toInstanceId,
+    )
+      ? explicitProviderFallbacks
+      : [inferredLaunchFallback, ...explicitProviderFallbacks];
+  const providerFallbacksByAttempt = new Map<number, ProviderFallbackRecord>();
+  let nextFallbackAttempt = 0;
+  for (const providerFallback of providerFallbacks) {
+    let attempt = Math.max(providerFallback.iterationIndex, nextFallbackAttempt);
+    while (providerFallbacksByAttempt.has(attempt)) attempt += 1;
+    providerFallbacksByAttempt.set(attempt, providerFallback);
+    nextFallbackAttempt = attempt + 1;
+  }
 
   for (const [index, iteration] of settled.entries()) {
     const common = {
@@ -213,14 +284,16 @@ export const normalizeCoreMailbox = (
       pushed: false,
       verified: true,
     };
-    const providerFallback = providerFallbacks.get(iteration.iterationIndex);
+    const providerFallback = providerFallbacksByAttempt.get(iteration.iterationIndex);
     if (providerFallback !== undefined) {
       output.push(
         decodeEvent({
           _tag: "provider-fallback",
           ...common,
           fromProvider: transcriptProvider(providerFallback.fromDriver),
+          fromProviderInstanceId: providerFallback.fromInstanceId,
           toProvider: transcriptProvider(providerFallback.toDriver),
+          toProviderInstanceId: providerFallback.toInstanceId,
         }),
       );
       continue;
@@ -249,7 +322,7 @@ export const normalizeCoreMailbox = (
             }),
           );
         }
-        if (providerFallbacks.size > 0) continue;
+        if (providerFallbacks.length > 0) continue;
         output.push(decodeEvent({ _tag: "done", ...common, sequence: output.length }));
       }
       continue;

@@ -72,7 +72,8 @@ import { ServerConfig } from "../src/config.ts";
 import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
 import { GitVcsDriver } from "../src/vcs/GitVcsDriver.ts";
-import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
+import { ProviderRegistry } from "../src/provider/Services/ProviderRegistry.ts";
+import { makeProviderRegistryMock } from "../src/provider/testUtils/providerRegistryMock.ts";
 import { EpicSubagentRegistry } from "../src/provider/epicSubagents.ts";
 import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
@@ -126,7 +127,26 @@ const conformanceProviders = [
   provider("kimi", "kimi", "kimi-code/k3"),
 ] as const;
 
-const conformanceInstanceIds = new Set(conformanceProviders.map((entry) => entry.instanceId));
+const accountRotationProviders = [
+  provider("claude-a", "claudeAgent", "sonnet"),
+  provider("claude-b", "claudeAgent", "sonnet"),
+  provider("codex", "codex", "gpt-5.6-sol"),
+] as const;
+
+const providersForScenario = (scenario: ConformanceScenario): ReadonlyArray<ServerProvider> =>
+  scenario.name === "account-rotation-exhausts-harness"
+    ? accountRotationProviders
+    : conformanceProviders;
+
+const initialSelectionForScenario = (scenario: ConformanceScenario) =>
+  scenario.name === "account-rotation-exhausts-harness"
+    ? { instanceId: ProviderInstanceId.make("claude-a"), model: "sonnet" }
+    : scenario.name === "provider-fallback-persists"
+      ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
+      : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
+
+const transcriptProvider = (driver: string): string =>
+  driver === "claudeAgent" ? "claude" : driver;
 
 const projectId = ProjectId.make("project-epic-runner-conformance");
 
@@ -248,6 +268,7 @@ const translateStartFailure = (input: {
 
 const translateServerRun = (input: {
   readonly scenario: ConformanceScenario;
+  readonly providers: ReadonlyArray<ServerProvider>;
   readonly workspace: ConformanceWorkspace;
   readonly history: ReadonlyArray<{ readonly run: EpicRun; readonly head: string | null }>;
   readonly iterations: ReadonlyArray<{
@@ -279,7 +300,10 @@ const translateServerRun = (input: {
 
   // Provider fallbacks: every persisted model-selection change, attributed to
   // the iteration whose boundary preceded it.
-  const providerFallbacks = new Map<number, { readonly from: string; readonly to: string }>();
+  const providerFallbacks = new Map<
+    number,
+    { readonly from: ProviderInstanceId; readonly to: ProviderInstanceId }
+  >();
   for (let index = 1; index < input.history.length; index += 1) {
     const previous = input.history[index - 1]!.run.modelSelection;
     const current = input.history[index]!.run.modelSelection;
@@ -315,11 +339,19 @@ const translateServerRun = (input: {
     } as const;
     const fallback = providerFallbacks.get(iteration.iterationIndex);
     if (fallback !== undefined) {
+      const fromProvider = input.providers.find(
+        (provider) => provider.instanceId === fallback.from,
+      );
+      const toProvider = input.providers.find((provider) => provider.instanceId === fallback.to);
       output.push({
         _tag: "provider-fallback",
         ...common,
-        fromProvider: fallback.from,
-        toProvider: fallback.to,
+        ...(fromProvider === undefined
+          ? {}
+          : { fromProvider: transcriptProvider(fromProvider.driver) }),
+        fromProviderInstanceId: fallback.from,
+        ...(toProvider === undefined ? {} : { toProvider: transcriptProvider(toProvider.driver) }),
+        toProviderInstanceId: fallback.to,
       });
       continue;
     }
@@ -335,12 +367,15 @@ const translateServerRun = (input: {
         });
       } else {
         const selection = selectionAtDispatch.get(iteration.iterationIndex);
+        const selectedProvider = input.providers.find(
+          (provider) => provider.instanceId === selection?.instanceId,
+        );
         output.push({
           _tag: "dispatched",
           ...common,
           sequence: output.length,
-          ...(selection !== undefined && conformanceInstanceIds.has(selection.instanceId)
-            ? { toProvider: selection.instanceId }
+          ...(selectedProvider !== undefined
+            ? { toProvider: transcriptProvider(selectedProvider.driver) }
             : {}),
         });
         if (providerFallbacks.size > 0) continue;
@@ -463,6 +498,25 @@ const translateServerRun = (input: {
 
 const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: ConformanceScenario) {
   const workspace = makeConformanceWorkspace(scenario);
+  const scenarioProviders = providersForScenario(scenario);
+  const baseProviderRegistry = makeProviderRegistryMock(scenarioProviders);
+  let accountRotationInventoryReads = 0;
+  const providerRegistry =
+    scenario.name === "account-rotation-exhausts-harness"
+      ? {
+          ...baseProviderRegistry,
+          getProviders: Effect.sync(() => {
+            accountRotationInventoryReads += 1;
+            return accountRotationInventoryReads === 1
+              ? scenarioProviders
+              : scenarioProviders.map((provider) =>
+                  provider.instanceId === ProviderInstanceId.make("claude-a")
+                    ? { ...provider, availability: "unavailable" as const }
+                    : provider,
+                );
+          }),
+        }
+      : baseProviderRegistry;
   const baseRunner = yield* ProcessRunner.ProcessRunner;
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input: ProcessRunner.ProcessRunInput) =>
@@ -888,7 +942,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
       }),
     ),
     Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
-    Layer.provide(makeProviderRegistryLayer(conformanceProviders)),
+    Layer.provide(Layer.succeed(ProviderRegistry, providerRegistry)),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
     Layer.provide(
       Layer.succeed(AgentAwarenessRelay, {
@@ -900,10 +954,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     Layer.provide(NodeServices.layer),
   );
 
-  const providerScenario = scenario.name === "provider-fallback-persists";
-  const initialSelection = providerScenario
-    ? { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" }
-    : { instanceId: ProviderInstanceId.make("worker-cmd"), model: "fixture" };
+  const initialSelection = initialSelectionForScenario(scenario);
 
   const awaitTerminalRun = (runId: EpicRunId) =>
     Effect.gen(function* () {
@@ -1049,8 +1100,22 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
       releasedClaims: releasedClaimIds(workspace),
     });
   }
+  const dispatchHarnesses = dispatched.flatMap((command) => {
+    if (command.type !== "thread.create") return [];
+    const selectedProvider = scenarioProviders.find(
+      (provider) => provider.instanceId === command.modelSelection.instanceId,
+    );
+    return selectedProvider === undefined ? [] : [transcriptProvider(selectedProvider.driver)];
+  });
+  if (scenario.name === "provider-fallback-persists") {
+    assert.deepEqual(dispatchHarnesses, ["claude", "codex", "kimi"]);
+  }
+  if (scenario.name === "account-rotation-exhausts-harness") {
+    assert.deepEqual(dispatchHarnesses, ["claude", "claude", "codex"]);
+  }
   return translateServerRun({
     scenario,
+    providers: scenarioProviders,
     workspace,
     history,
     iterations: store.iterations,

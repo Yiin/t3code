@@ -170,7 +170,9 @@ describe("normalizeCoreMailbox", () => {
           issueId: "epic.1",
           iterationIndex: 0,
           fromDriver: "claudeAgent",
+          fromInstanceId: "claude",
           toDriver: "codex",
+          toInstanceId: "codex",
         },
         running(1),
         failed(1, "provider-error: rate limit"),
@@ -180,7 +182,9 @@ describe("normalizeCoreMailbox", () => {
           issueId: "epic.1",
           iterationIndex: 1,
           fromDriver: "codex",
+          fromInstanceId: "codex",
           toDriver: "kimi",
+          toInstanceId: "kimi",
         },
         running(2),
         completed(2),
@@ -193,14 +197,157 @@ describe("normalizeCoreMailbox", () => {
     expect(events[0]).toMatchObject({
       _tag: "provider-fallback",
       fromProvider: "claude",
+      fromProviderInstanceId: "claude",
       toProvider: "codex",
+      toProviderInstanceId: "codex",
     });
     expect(events[1]).toMatchObject({
       _tag: "provider-fallback",
       fromProvider: "codex",
+      fromProviderInstanceId: "codex",
       toProvider: "kimi",
+      toProviderInstanceId: "kimi",
     });
     expect(events[2]).toMatchObject({ _tag: "dispatched", toProvider: "kimi" });
+  });
+
+  it("preserves a launch fallback and a boundary fallback with the same source index", () => {
+    const codexDispatch = running(0);
+    const events = normalizeCoreMailbox(
+      [
+        runState("running", {}, "claude"),
+        {
+          ...codexDispatch,
+          iteration: { ...codexDispatch.iteration, providerInstanceId: "codex" },
+        },
+        failed(0, "provider-error: rate limit"),
+        runState("running", {}, "kimi"),
+        {
+          type: "provider-fallback",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          fromDriver: "codex",
+          fromInstanceId: "codex",
+          toDriver: "kimi",
+          toInstanceId: "kimi",
+        },
+        running(1),
+        failed(1, "provider-error: rate limit"),
+        runState("running", {}, "kimi"),
+        running(2),
+        completed(2),
+        runState("done", {}, "kimi"),
+      ],
+      "epic",
+      { maxIterations: 3 },
+    );
+    expect(events).toMatchObject([
+      {
+        _tag: "provider-fallback",
+        iterationIndex: 0,
+        fromProvider: "claude",
+        fromProviderInstanceId: "claude",
+        toProvider: "codex",
+        toProviderInstanceId: "codex",
+      },
+      {
+        _tag: "provider-fallback",
+        iterationIndex: 1,
+        fromProvider: "codex",
+        fromProviderInstanceId: "codex",
+        toProvider: "kimi",
+        toProviderInstanceId: "kimi",
+      },
+      { _tag: "dispatched", iterationIndex: 2, toProvider: "kimi" },
+    ]);
+  });
+
+  it("deduplicates an inferred launch fallback when an identical explicit hop follows", () => {
+    const codexDispatch = running(0);
+    const events = normalizeCoreMailbox(
+      [
+        runState("running", {}, "claude"),
+        {
+          ...codexDispatch,
+          iteration: { ...codexDispatch.iteration, providerInstanceId: "codex" },
+        },
+        failed(0, "provider-error: rate limit"),
+        {
+          type: "provider-fallback",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          fromDriver: "claudeAgent",
+          fromInstanceId: "claude",
+          toDriver: "codex",
+          toInstanceId: "codex",
+        },
+        runState("running", {}, "codex"),
+        running(1),
+        completed(1),
+        runState("done", {}, "codex"),
+      ],
+      "epic",
+      { maxIterations: 2 },
+    );
+    expect(events.filter((event) => event._tag === "provider-fallback")).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      iterationIndex: 0,
+      fromProviderInstanceId: "claude",
+      toProviderInstanceId: "codex",
+    });
+  });
+
+  it("deduplicates an explicit launch fallback that arrives before the running row", () => {
+    const codexDispatch = running(0);
+    const events = normalizeCoreMailbox(
+      [
+        runState("running", {}, "claude"),
+        {
+          type: "provider-fallback",
+          issueId: "epic.1",
+          iterationIndex: 0,
+          fromDriver: "claudeAgent",
+          fromInstanceId: "claude",
+          toDriver: "codex",
+          toInstanceId: "codex",
+        },
+        {
+          ...codexDispatch,
+          iteration: { ...codexDispatch.iteration, providerInstanceId: "codex" },
+        },
+        failed(0, "provider-error: rate limit"),
+        runState("running", {}, "codex"),
+        running(1),
+        completed(1),
+        runState("done", {}, "codex"),
+      ],
+      "epic",
+      { maxIterations: 2 },
+    );
+    expect(events.filter((event) => event._tag === "provider-fallback")).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      iterationIndex: 0,
+      fromProvider: "claude",
+      toProvider: "codex",
+    });
+  });
+
+  it("does not infer a launch fallback from an unknown provider instance", () => {
+    const codexDispatch = running(0);
+    const events = normalizeCoreMailbox(
+      [
+        runState("running", {}, "claude-a"),
+        {
+          ...codexDispatch,
+          iteration: { ...codexDispatch.iteration, providerInstanceId: "codex" },
+        },
+        completed(0),
+        runState("done", {}, "codex"),
+      ],
+      "epic",
+      { maxIterations: 1 },
+    );
+    expect(events.some((event) => event._tag === "provider-fallback")).toBe(false);
   });
 
   it("keeps a single timed-out iteration as the raw iteration record", () => {

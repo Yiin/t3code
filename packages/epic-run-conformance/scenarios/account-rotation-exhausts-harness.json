@@ -1,6 +1,6 @@
 {
-  "name": "provider-fallback-persists",
-  "description": "A provider error falls back from Claude to Codex to Kimi and persists the next selection.",
+  "name": "account-rotation-exhausts-harness",
+  "description": "Two Claude account failures rotate within Claude before falling back to Codex. The terminal driver is excluded because TerminalProviderSupport exposes one account per harness.",
   "repo": { "files": [], "detachedHead": false, "dirty": false, "siblingRepos": [] },
   "beads": {
     "epicId": "epic",
@@ -45,9 +45,9 @@
       "issueId": "epic.1",
       "iterationIndex": 0,
       "fromProvider": "claude",
-      "toProvider": "codex",
-      "fromProviderInstanceId": "claude",
-      "toProviderInstanceId": "codex"
+      "toProvider": "claude",
+      "fromProviderInstanceId": "claude-a",
+      "toProviderInstanceId": "claude-b"
     },
     {
       "_tag": "provider-fallback",
@@ -55,10 +55,10 @@
       "epicId": "epic",
       "issueId": "epic.1",
       "iterationIndex": 1,
-      "fromProvider": "codex",
-      "toProvider": "kimi",
-      "fromProviderInstanceId": "codex",
-      "toProviderInstanceId": "kimi"
+      "fromProvider": "claude",
+      "toProvider": "codex",
+      "fromProviderInstanceId": "claude-b",
+      "toProviderInstanceId": "codex"
     },
     {
       "_tag": "dispatched",
@@ -66,8 +66,8 @@
       "epicId": "epic",
       "issueId": "epic.1",
       "iterationIndex": 2,
-      "toProvider": "kimi"
+      "toProvider": "codex"
     }
   ],
-  "appliesTo": ["core", "terminal", "server"]
+  "appliesTo": ["core", "server"]
 }
