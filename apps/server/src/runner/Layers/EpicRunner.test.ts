@@ -2749,14 +2749,13 @@ describe("EpicRunner", () => {
         originThreadId,
       });
       yield* waitFor(() => completionHarness.store.runs.get(completed.runId)?.status === "done");
-      yield* waitFor(() => statusTurns(completionHarness).length === 3);
+      yield* waitFor(() => statusTurns(completionHarness).length === 2);
 
       const completedTurns = statusTurns(completionHarness);
       assert.deepStrictEqual(
         completedTurns.map((command) => command.message.text),
         [
           `EpicRunner run ${completed.runId} for epic-origin-completed: started. Iterations 0/50.`,
-          `EpicRunner run ${completed.runId} for epic-origin-completed: iteration settled. Iterations 1/50.`,
           `EpicRunner run ${completed.runId} for epic-origin-completed: completed. Iterations 1/50. Landed: child-1.`,
         ],
       );
@@ -2785,12 +2784,11 @@ describe("EpicRunner", () => {
         originThreadId,
       });
       yield* waitFor(() => failedHarness.store.runs.get(failed.runId)?.status === "failed");
-      yield* waitFor(() => statusTurns(failedHarness).length === 3);
+      yield* waitFor(() => statusTurns(failedHarness).length === 2);
       assert.deepStrictEqual(
         statusTurns(failedHarness).map((command) => command.message.text),
         [
           `EpicRunner run ${failed.runId} for epic-origin-failed: started. Iterations 0/50.`,
-          `EpicRunner run ${failed.runId} for epic-origin-failed: iteration settled. Iterations 1/50.`,
           `EpicRunner run ${failed.runId} for epic-origin-failed: failed. Iterations 1/50. Error: gutter: 1 iterations without a commit.`,
         ],
       );
@@ -2816,8 +2814,8 @@ describe("EpicRunner", () => {
         originThreadId,
       });
       yield* waitFor(() => refusedHarness.store.runs.get(refused.runId)?.status === "done");
-      yield* waitFor(() => statusTurns(refusedHarness).length === 3);
-      assert.strictEqual(statusTurns(refusedHarness).length, 3);
+      yield* waitFor(() => statusTurns(refusedHarness).length === 2);
+      assert.strictEqual(statusTurns(refusedHarness).length, 2);
     }).pipe(Effect.provide(refusedHarness.layer));
 
     return Effect.gen(function* () {

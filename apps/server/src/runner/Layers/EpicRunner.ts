@@ -409,11 +409,12 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       if (previous === null || run.originThreadId === null) return Effect.void;
       const originThreadId = run.originThreadId;
 
+      // Only lifecycle edges post here. Per-iteration settles stay off the
+      // origin thread: each post starts a full agent turn there, and a long
+      // run would flood the launching conversation. The Epics page carries
+      // live iteration progress instead.
       const transitions: Array<string> = [];
       if (Option.isNone(previous) && run.status === "running") transitions.push("started");
-      if (Option.isSome(previous) && run.iterationsCompleted > previous.value.iterationsCompleted) {
-        transitions.push("iteration settled");
-      }
       const terminalTransition =
         isEpicRunTerminal(run.status) &&
         (Option.isNone(previous) || previous.value.status !== run.status);
