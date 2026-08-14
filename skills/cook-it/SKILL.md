@@ -217,16 +217,33 @@ Claude Code may provide the `Workflow` tool. When it is available, drive steps
 must use their subagent tools or the fallback above; they must not assume the
 Workflow API exists. Make the routing decisions in the main thread first,
 then encode the chosen shape in the script: include a plan-critique stage only if
-routing said so, and build the review stage as a single agent, agent + design
-reviewer, or a `parallel()` fan-out to match the review shape. A workflow is
-itself an escalation — for an evidence-only or self-review change, skip it and
-work directly. Name an injected agent as a stage's `agentType` when the session
-has one, and leave `model` off the `agent()` call either way. Use a bounded
-`while` loop for the BLOCK→fix→re-review cycle (cap at two rounds, then surface
-to the user), `phase()` calls that mirror the numbered steps so the user can
-follow progress in `/workflows`, and `schema` on the critique agents to get back
-a structured verdict (`APPROVE` / `APPROVE-WITH-NITS` / `BLOCK` plus findings)
-rather than parsing prose.
+routing said so, build the review stage as a single agent, agent + design
+reviewer, or a `parallel()` fan-out to match the review shape, and include a
+tester stage only if routing decision 4 said so, placed after the review loop and
+before the gate stage. A workflow is itself an escalation — for an evidence-only
+or self-review change, skip it and work directly. Name an injected agent as a
+stage's `agentType` when the session has one, and leave `model` off the `agent()`
+call either way. That rule covers the `tester` and `cleanup` stages like every
+other stage.
+
+**Two bounded loops, never nested.** Use a bounded `while` loop for the
+BLOCK→fix→re-review cycle (cap at two rounds, then surface to the user). QA is a
+second `while` loop that starts only after the review loop has finished: while
+the tester verdict is `FAIL` and its own round count is under two, run the
+`cleanup` stage, then a fresh `tester` stage. Each loop carries its own counter, and neither runs
+inside the other. Step 4.5 owns what these stages do and when the loop ends; the
+script only schedules them. When the QA cap runs out, let the workflow return the
+failure and take step 4.5's attended or unattended path in the main thread.
+
+Use `phase()` calls that mirror the numbered steps so the user can follow
+progress in `/workflows`, and `schema` on every judging stage so you read a
+verdict instead of parsing prose: `APPROVE` / `APPROVE-WITH-NITS` / `BLOCK` plus
+findings from the critique and review agents, and `PASS` / `FAIL` plus findings
+and an exact reproduction from the tester.
+
+A workflow stage does not relax the tester's duties. It still never edits files,
+and it still stops dev servers, watchers, and any other long-running process
+before its stage returns. The workflow will not clean up after it.
 
 Two parts stay in the main thread, outside the workflow:
 
