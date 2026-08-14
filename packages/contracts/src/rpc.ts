@@ -79,6 +79,17 @@ import {
 } from "./orchestration.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
+  ProviderAuthError,
+  ProviderAuthLoginCancelInput,
+  ProviderAuthLoginCancelResult,
+  ProviderAuthLoginStartInput,
+  ProviderAuthLoginStartResult,
+  ProviderAuthLoginStatusInput,
+  ProviderAuthLogoutInput,
+  ProviderAuthLogoutResult,
+  ProviderAuthRunState,
+} from "./providerAuth.ts";
+import {
   RelayClientInstallFailedError,
   RelayClientInstallProgressEventSchema,
   RelayClientStatusSchema,
@@ -246,6 +257,10 @@ export const WS_METHODS = {
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverAllocateManagedAccountHome: "server.allocateManagedAccountHome",
+  providerAuthLoginStart: "providerAuth.loginStart",
+  providerAuthLoginCancel: "providerAuth.loginCancel",
+  providerAuthLoginStatus: "providerAuth.loginStatus",
+  providerAuthLogout: "providerAuth.logout",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -346,6 +361,31 @@ export const WsServerAllocateManagedAccountHomeRpc = Rpc.make(
     error: Schema.Union([ManagedAccountHomeAllocationError, EnvironmentAuthorizationError]),
   },
 );
+
+export const WsProviderAuthLoginStartRpc = Rpc.make(WS_METHODS.providerAuthLoginStart, {
+  payload: ProviderAuthLoginStartInput,
+  success: ProviderAuthLoginStartResult,
+  error: Schema.Union([ProviderAuthError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderAuthLoginCancelRpc = Rpc.make(WS_METHODS.providerAuthLoginCancel, {
+  payload: ProviderAuthLoginCancelInput,
+  success: ProviderAuthLoginCancelResult,
+  error: Schema.Union([ProviderAuthError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderAuthLoginStatusRpc = Rpc.make(WS_METHODS.providerAuthLoginStatus, {
+  payload: ProviderAuthLoginStatusInput,
+  success: ProviderAuthRunState,
+  error: Schema.Union([ProviderAuthError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsProviderAuthLogoutRpc = Rpc.make(WS_METHODS.providerAuthLogout, {
+  payload: ProviderAuthLogoutInput,
+  success: ProviderAuthLogoutResult,
+  error: Schema.Union([ProviderAuthError, EnvironmentAuthorizationError]),
+});
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
   payload: Schema.Struct({}),
@@ -827,6 +867,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerAllocateManagedAccountHomeRpc,
+  WsProviderAuthLoginStartRpc,
+  WsProviderAuthLoginCancelRpc,
+  WsProviderAuthLoginStatusRpc,
+  WsProviderAuthLogoutRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

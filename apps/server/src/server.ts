@@ -100,6 +100,7 @@ import * as CloudCliState from "./cloud/CliState.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
+import * as ProviderAuthManager from "./provider/ProviderAuthManager.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
@@ -408,7 +409,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // other, so they share one `provideMerge` slot — `pipe` tops out at 20 args.
   Layer.provideMerge(Layer.mergeAll(VcsLayerLive, BeadsLayerLive)),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      TerminalLayerLive,
+      PreviewLayerLive,
+      ProviderAuthManager.layer.pipe(Layer.provide(PtyAdapterLive)),
+    ),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),
   // The registry joins per-account usage windows and limit blocks onto each

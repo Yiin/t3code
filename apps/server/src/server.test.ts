@@ -91,6 +91,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderAuthManager from "./provider/ProviderAuthManager.ts";
 import * as ProviderServiceModule from "./provider/Services/ProviderService.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -346,6 +347,7 @@ const buildAppUnderTest = (options?: {
   layers?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
+    providerAuthManager?: Partial<ProviderAuthManager.ProviderAuthManager["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
@@ -612,14 +614,23 @@ const buildAppUnderTest = (options?: {
         ),
       ),
       Layer.provide(
-        Layer.mock(ServerSettings.ServerSettingsService)({
-          start: Effect.void,
-          ready: Effect.void,
-          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          streamChanges: Stream.empty,
-          ...options?.layers?.serverSettings,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            start: Effect.void,
+            ready: Effect.void,
+            getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            streamChanges: Stream.empty,
+            ...options?.layers?.serverSettings,
+          }),
+          Layer.mock(ProviderAuthManager.ProviderAuthManager)({
+            loginStart: () => Effect.die("ProviderAuthManager not stubbed in this test"),
+            loginCancel: () => Effect.die("ProviderAuthManager not stubbed in this test"),
+            loginStatus: () => Stream.die("ProviderAuthManager not stubbed in this test"),
+            logout: () => Effect.die("ProviderAuthManager not stubbed in this test"),
+            ...options?.layers?.providerAuthManager,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ExternalLauncher.ExternalLauncher)({
@@ -4321,6 +4332,156 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.notInclude(error.message, expected);
       assert.notInclude(error.message, "AlreadyExists");
       assert.notInclude(error.message, "EEXIST");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes all provider authentication RPC methods", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const state = {
+        status: "running" as const,
+        startedAt: TEST_EPOCH.toString(),
+        finishedAt: null,
+        message: "Waiting.",
+        output: "Open the provider login page.",
+        verificationUrl: "https://example.test/login",
+        userCode: "ABCD-1234",
+      };
+      yield* buildAppUnderTest({
+        layers: {
+          providerAuthManager: {
+            loginStart: () =>
+              Effect.sync(() => {
+                calls.push("start");
+                return { terminalId: "provider-auth-1", state };
+              }),
+            loginCancel: () =>
+              Effect.sync(() => {
+                calls.push("cancel");
+                return { state: { ...state, status: "cancelled" as const } };
+              }),
+            loginStatus: () =>
+              Stream.fromEffect(
+                Effect.sync(() => {
+                  calls.push("status");
+                  return state;
+                }),
+              ),
+            logout: () =>
+              Effect.sync(() => {
+                calls.push("logout");
+                return { providers: [] };
+              }),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const instanceId = ProviderInstanceId.make("codex-work");
+      const results = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all(
+            [
+              client[WS_METHODS.providerAuthLoginStart]({ instanceId }),
+              client[WS_METHODS.providerAuthLoginCancel]({ terminalId: "provider-auth-1" }),
+              client[WS_METHODS.providerAuthLoginStatus]({ terminalId: "provider-auth-1" }).pipe(
+                Stream.runHead,
+              ),
+              client[WS_METHODS.providerAuthLogout]({ instanceId }),
+            ],
+            { concurrency: 1 },
+          ),
+        ),
+      );
+      assert.equal(results[0].terminalId, "provider-auth-1");
+      assert.equal(results[1].state.status, "cancelled");
+      assert.equal(Option.getOrThrow(results[2]).userCode, "ABCD-1234");
+      assert.deepEqual(results[3].providers, []);
+      assert.deepEqual(calls, ["start", "cancel", "status", "logout"]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("uses exact scopes for provider authentication RPC methods", () =>
+    Effect.gen(function* () {
+      const state = {
+        status: "running" as const,
+        startedAt: TEST_EPOCH.toString(),
+        finishedAt: null,
+        message: null,
+        output: "",
+        verificationUrl: null,
+        userCode: null,
+      };
+      yield* buildAppUnderTest({
+        layers: {
+          providerAuthManager: {
+            loginStart: () => Effect.succeed({ terminalId: "provider-auth-1", state }),
+            loginCancel: () => Effect.succeed({ state }),
+            loginStatus: () => Stream.make(state),
+            logout: () => Effect.succeed({ providers: [] }),
+          },
+        },
+      });
+
+      const wsUrlForScope = (scope: string) =>
+        Effect.gen(function* () {
+          const { body } = yield* exchangeAccessToken(defaultDesktopBootstrapToken, { scope });
+          const ticketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+            headers: { authorization: `Bearer ${body.access_token ?? ""}` },
+          });
+          const ticketBody = (yield* ticketResponse.json) as { readonly ticket: string };
+          return `${yield* getWsServerUrl("/ws", {
+            authenticated: false,
+          })}?wsTicket=${encodeURIComponent(ticketBody.ticket)}`;
+        });
+
+      const instanceId = ProviderInstanceId.make("codex-work");
+      const readResults = yield* Effect.scoped(
+        wsUrlForScope("orchestration:read").pipe(
+          Effect.flatMap((wsUrl) =>
+            withWsRpcClient(wsUrl, (client) =>
+              Effect.all([
+                client[WS_METHODS.providerAuthLoginStatus]({
+                  terminalId: "provider-auth-1",
+                }).pipe(Stream.runHead, Effect.result),
+                client[WS_METHODS.providerAuthLoginStart]({ instanceId }).pipe(Effect.result),
+                client[WS_METHODS.providerAuthLoginCancel]({
+                  terminalId: "provider-auth-1",
+                }).pipe(Effect.result),
+                client[WS_METHODS.providerAuthLogout]({ instanceId }).pipe(Effect.result),
+              ]),
+            ),
+          ),
+        ),
+      );
+      assert.equal(readResults[0]._tag, "Success");
+      for (const result of readResults.slice(1)) {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "EnvironmentAuthorizationError");
+          if (result.failure._tag === "EnvironmentAuthorizationError") {
+            assert.equal(result.failure.requiredScope, "orchestration:operate");
+          }
+        }
+      }
+
+      const operateResult = yield* Effect.scoped(
+        wsUrlForScope("orchestration:operate").pipe(
+          Effect.flatMap((wsUrl) =>
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.providerAuthLoginStatus]({
+                terminalId: "provider-auth-1",
+              }).pipe(Stream.runHead, Effect.result),
+            ),
+          ),
+        ),
+      );
+      assert.equal(operateResult._tag, "Failure");
+      if (operateResult._tag === "Failure") {
+        assert.equal(operateResult.failure._tag, "EnvironmentAuthorizationError");
+        if (operateResult.failure._tag === "EnvironmentAuthorizationError") {
+          assert.equal(operateResult.failure.requiredScope, "orchestration:read");
+        }
+      }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -53,6 +53,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.subscribeVcsStatus
   | typeof WS_METHODS.subscribeBeadsStatus
   | typeof WS_METHODS.subscribeEpicRuns
+  | typeof WS_METHODS.providerAuthLoginStatus
   | typeof WS_METHODS.terminalAttach;
 
 export type EnvironmentStreamCommandRpcTag =

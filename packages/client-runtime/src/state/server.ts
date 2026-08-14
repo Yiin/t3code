@@ -351,6 +351,22 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    providerAuthLoginStart: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:provider-auth-login-start",
+      tag: WS_METHODS.providerAuthLoginStart,
+    }),
+    providerAuthLoginCancel: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:provider-auth-login-cancel",
+      tag: WS_METHODS.providerAuthLoginCancel,
+    }),
+    providerAuthLoginStatus: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:provider-auth-login-status",
+      tag: WS_METHODS.providerAuthLoginStatus,
+    }),
+    providerAuthLogout: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:provider-auth-logout",
+      tag: WS_METHODS.providerAuthLogout,
+    }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,

@@ -90,6 +90,7 @@ import {
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import * as ProviderAuthManager from "./provider/ProviderAuthManager.ts";
 import {
   ensureManagedAccountHome,
   managedAccountHomePath,
@@ -334,6 +335,10 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverGetSettings, AuthOrchestrationReadScope],
   [WS_METHODS.serverUpdateSettings, AuthOrchestrationOperateScope],
   [WS_METHODS.serverAllocateManagedAccountHome, AuthOrchestrationOperateScope],
+  [WS_METHODS.providerAuthLoginStart, AuthOrchestrationOperateScope],
+  [WS_METHODS.providerAuthLoginCancel, AuthOrchestrationOperateScope],
+  [WS_METHODS.providerAuthLoginStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.providerAuthLogout, AuthOrchestrationOperateScope],
   [WS_METHODS.serverDiscoverSourceControl, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetTraceDiagnostics, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetProcessDiagnostics, AuthOrchestrationReadScope],
@@ -468,6 +473,7 @@ const makeWsRpcLayer = (
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
+      const providerAuthManager = yield* ProviderAuthManager.ProviderAuthManager;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
@@ -1632,6 +1638,30 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.providerAuthLoginStart]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerAuthLoginStart,
+            providerAuthManager.loginStart(input),
+            {
+              "rpc.aggregate": "provider-auth",
+            },
+          ),
+        [WS_METHODS.providerAuthLoginCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerAuthLoginCancel,
+            providerAuthManager.loginCancel(input),
+            { "rpc.aggregate": "provider-auth" },
+          ),
+        [WS_METHODS.providerAuthLoginStatus]: (input) =>
+          observeRpcStream(
+            WS_METHODS.providerAuthLoginStatus,
+            providerAuthManager.loginStatus(input.terminalId),
+            { "rpc.aggregate": "provider-auth" },
+          ),
+        [WS_METHODS.providerAuthLogout]: (input) =>
+          observeRpcEffect(WS_METHODS.providerAuthLogout, providerAuthManager.logout(input), {
+            "rpc.aggregate": "provider-auth",
+          }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverDiscoverSourceControl,
