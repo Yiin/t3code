@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckIcon, CopyIcon, ExternalLinkIcon, LoaderIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, ExternalLinkIcon, LoaderIcon, SendIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { EnvironmentId, ProviderAuthLoginStartResult } from "@t3tools/contracts";
 import {
@@ -14,6 +14,7 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import {
   Dialog,
   DialogDescription,
@@ -50,7 +51,12 @@ export function ProviderAuthLoginDialog(props: ProviderAuthLoginDialogProps) {
   const mountedRef = useRef(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [inputValue, setInputValue] = useState("");
+  const [isSending, setIsSending] = useState(false);
   const cancelLogin = useAtomCommand(serverEnvironment.providerAuthLoginCancel, {
+    reportFailure: false,
+  });
+  const respondLogin = useAtomCommand(serverEnvironment.providerAuthLoginRespond, {
     reportFailure: false,
   });
   // This component mounts only after loginStart returns a terminal id. The
@@ -136,6 +142,32 @@ export function ProviderAuthLoginDialog(props: ProviderAuthLoginDialogProps) {
     );
   };
 
+  const submitInput = async () => {
+    const data = inputValue.trim();
+    if (data.length === 0 || isSending || state.status !== "running") return;
+    setIsSending(true);
+    const result = await respondLogin({
+      environmentId: props.environmentId,
+      input: { terminalId: props.start.terminalId, data },
+    });
+    setIsSending(false);
+    if (result._tag === "Success") {
+      // The value can be a one-time code; drop it from React state right away.
+      setInputValue("");
+      return;
+    }
+    const error = isAtomCommandInterrupted(result)
+      ? new Error("The request was interrupted.")
+      : squashAtomCommandFailure(result);
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Could not send the code",
+        description: error instanceof Error ? error.message : "The request failed.",
+      }),
+    );
+  };
+
   const presentation = statusPresentation[state.status];
 
   return (
@@ -179,7 +211,9 @@ export function ProviderAuthLoginDialog(props: ProviderAuthLoginDialogProps) {
 
           {state.userCode ? (
             <div className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-medium text-foreground">Authentication code</span>
+              <span className="text-xs font-medium text-foreground">
+                Device code — enter it on the verification page
+              </span>
               <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/35 p-2">
                 <code className="min-w-0 flex-1 break-all px-1 font-mono text-sm font-semibold tracking-wide select-all">
                   {state.userCode}
@@ -199,6 +233,44 @@ export function ProviderAuthLoginDialog(props: ProviderAuthLoginDialogProps) {
                 </Button>
               </div>
             </div>
+          ) : null}
+
+          {state.status === "running" ? (
+            <form
+              className="grid min-w-0 gap-1.5"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitInput();
+              }}
+            >
+              <label
+                htmlFor="provider-auth-login-input"
+                className="text-xs font-medium text-foreground"
+              >
+                Send input to the command
+              </label>
+              <div className="flex min-w-0 items-center gap-2">
+                <Input
+                  id="provider-auth-login-input"
+                  value={inputValue}
+                  onChange={(event) => setInputValue(event.target.value)}
+                  placeholder="Paste the code from your browser and press Enter"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="min-w-0 flex-1 font-mono"
+                />
+                <Button
+                  type="submit"
+                  size="sm"
+                  variant="outline"
+                  className="min-h-8 shrink-0"
+                  disabled={inputValue.trim().length === 0 || isSending}
+                >
+                  {isSending ? <LoaderIcon className="animate-spin" /> : <SendIcon />}
+                  Send
+                </Button>
+              </div>
+            </form>
           ) : null}
 
           <div className="grid min-w-0 gap-1.5">

@@ -363,6 +363,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:provider-auth-login-cancel",
       tag: WS_METHODS.providerAuthLoginCancel,
     }),
+    providerAuthLoginRespond: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:provider-auth-login-respond",
+      tag: WS_METHODS.providerAuthLoginRespond,
+    }),
     providerAuthLoginStatus: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:provider-auth-login-status",
       tag: WS_METHODS.providerAuthLoginStatus,

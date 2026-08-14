@@ -588,8 +588,14 @@ function hasClaudeAccountIdentity(capabilities: ClaudeCapabilitiesProbe): boolea
   return [
     capabilities.email,
     capabilities.subscriptionType,
-    capabilities.tokenSource,
-    capabilities.apiProvider,
+    // A logged-out CLI still reports { tokenSource: "none", apiProvider:
+    // "firstParty" }, so those two sentinels are not evidence of an account —
+    // treating them as identity made an empty CLAUDE_CONFIG_DIR report
+    // "authenticated" (t3code-mjd). External backends (bedrock, vertex, …)
+    // authenticate outside the CLI and legitimately surface only apiProvider,
+    // so any other apiProvider still counts.
+    capabilities.tokenSource === "none" ? undefined : capabilities.tokenSource,
+    capabilities.apiProvider === "firstParty" ? undefined : capabilities.apiProvider,
   ].some((value) => value !== undefined && value.trim().length > 0);
 }
 

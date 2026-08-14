@@ -16,6 +16,8 @@ import {
   ProviderAuthError,
   type ProviderAuthLoginCancelInput,
   type ProviderAuthLoginCancelResult,
+  type ProviderAuthLoginRespondInput,
+  type ProviderAuthLoginRespondResult,
   type ProviderAuthLoginStartInput,
   type ProviderAuthLoginStartResult,
   type ProviderAuthLogoutInput,
@@ -101,6 +103,9 @@ export interface ProviderAuthManagerShape {
   readonly loginCancel: (
     input: ProviderAuthLoginCancelInput,
   ) => Effect.Effect<ProviderAuthLoginCancelResult, ProviderAuthError>;
+  readonly loginRespond: (
+    input: ProviderAuthLoginRespondInput,
+  ) => Effect.Effect<ProviderAuthLoginRespondResult, ProviderAuthError>;
   readonly loginStatus: (
     terminalId: string,
   ) => Stream.Stream<ProviderAuthRunState, ProviderAuthError>;
@@ -145,7 +150,12 @@ function trimOutputTail(value: string): string {
 
 function stripAnsiForParsing(output: string): string {
   const escape = String.fromCharCode(27);
-  return output
+  // OSC sequences first (e.g. the OSC 8 hyperlink wrapper ESC]8;;URL ESC\ or
+  // BEL): they carry a URL payload that would otherwise duplicate the visible
+  // link text in the parsed output.
+  // oxlint-disable-next-line no-control-regex
+  const withoutOsc = output.replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/gu, "");
+  return withoutOsc
     .split(escape)
     .map((part, index) => (index === 0 ? part : part.replace(/^\[[0-?]*[ -/]*[@-~]/u, "")))
     .join("");
@@ -164,7 +174,15 @@ function extractUserCode(output: string): string | null {
     ...output.matchAll(/\benter\b(?:\s+the)?(?:\s+code)?\s*[:=]?\s*([a-z0-9][a-z0-9-]{3,19})/giu),
   ];
   const candidate = matches.at(-1)?.[1] ?? null;
-  if (!candidate || /^(?:code|enter|this|that|your)$/iu.test(candidate)) return null;
+  if (
+    !candidate ||
+    /^(?:code|enter|this|that|your|here|there|below|above|now|again|it)$/iu.test(candidate)
+  ) {
+    return null;
+  }
+  // A device code contains a digit, a dash, or uppercase letters. A bare
+  // lowercase word is prose — e.g. "Paste code here if prompted" — not a code.
+  if (!/[A-Z0-9-]/u.test(candidate)) return null;
   return candidate;
 }
 
@@ -573,6 +591,26 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
     return { state };
   });
 
+  const loginRespond: ProviderAuthManagerShape["loginRespond"] = Effect.fn(
+    "ProviderAuthManager.loginRespond",
+  )(function* (input) {
+    const run = yield* findRun(input.terminalId);
+    const current = yield* SubscriptionRef.get(run.state);
+    if (current.status !== "running") {
+      return yield* authError("The provider login is not waiting for input.");
+    }
+    const process = yield* Ref.get(run.process);
+    if (!process) {
+      return yield* authError("The provider login command is not running.");
+    }
+    // The value can be a one-time OAuth code. Write it to the PTY and forget
+    // it; never log it or store it outside the PTY's own echo in the tail.
+    yield* Effect.sync(() => {
+      process.write(`${input.data}\r`);
+    });
+    return { state: current };
+  });
+
   const loginStatus: ProviderAuthManagerShape["loginStatus"] = (terminalId) =>
     Stream.unwrap(
       findRun(terminalId).pipe(Effect.map((run) => SubscriptionRef.changes(run.state))),
@@ -787,7 +825,7 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
     }),
   );
 
-  return ProviderAuthManager.of({ loginStart, loginCancel, loginStatus, logout });
+  return ProviderAuthManager.of({ loginStart, loginCancel, loginRespond, loginStatus, logout });
 });
 
 export const layer = Layer.effect(ProviderAuthManager, make());

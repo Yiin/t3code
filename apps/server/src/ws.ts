@@ -337,6 +337,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverAllocateManagedAccountHome, AuthOrchestrationOperateScope],
   [WS_METHODS.providerAuthLoginStart, AuthOrchestrationOperateScope],
   [WS_METHODS.providerAuthLoginCancel, AuthOrchestrationOperateScope],
+  [WS_METHODS.providerAuthLoginRespond, AuthOrchestrationOperateScope],
   [WS_METHODS.providerAuthLoginStatus, AuthOrchestrationReadScope],
   [WS_METHODS.providerAuthLogout, AuthOrchestrationOperateScope],
   [WS_METHODS.serverDiscoverSourceControl, AuthOrchestrationReadScope],
@@ -1651,6 +1652,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.providerAuthLoginCancel,
             providerAuthManager.loginCancel(input),
+            { "rpc.aggregate": "provider-auth" },
+          ),
+        [WS_METHODS.providerAuthLoginRespond]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerAuthLoginRespond,
+            providerAuthManager.loginRespond(input),
             { "rpc.aggregate": "provider-auth" },
           ),
         [WS_METHODS.providerAuthLoginStatus]: (input) =>

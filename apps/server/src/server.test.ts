@@ -626,6 +626,7 @@ const buildAppUnderTest = (options?: {
           Layer.mock(ProviderAuthManager.ProviderAuthManager)({
             loginStart: () => Effect.die("ProviderAuthManager not stubbed in this test"),
             loginCancel: () => Effect.die("ProviderAuthManager not stubbed in this test"),
+            loginRespond: () => Effect.die("ProviderAuthManager not stubbed in this test"),
             loginStatus: () => Stream.die("ProviderAuthManager not stubbed in this test"),
             logout: () => Effect.die("ProviderAuthManager not stubbed in this test"),
             ...options?.layers?.providerAuthManager,

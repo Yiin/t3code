@@ -82,6 +82,8 @@ import {
   ProviderAuthError,
   ProviderAuthLoginCancelInput,
   ProviderAuthLoginCancelResult,
+  ProviderAuthLoginRespondInput,
+  ProviderAuthLoginRespondResult,
   ProviderAuthLoginStartInput,
   ProviderAuthLoginStartResult,
   ProviderAuthLoginStatusInput,
@@ -259,6 +261,7 @@ export const WS_METHODS = {
   serverAllocateManagedAccountHome: "server.allocateManagedAccountHome",
   providerAuthLoginStart: "providerAuth.loginStart",
   providerAuthLoginCancel: "providerAuth.loginCancel",
+  providerAuthLoginRespond: "providerAuth.loginRespond",
   providerAuthLoginStatus: "providerAuth.loginStatus",
   providerAuthLogout: "providerAuth.logout",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -371,6 +374,12 @@ export const WsProviderAuthLoginStartRpc = Rpc.make(WS_METHODS.providerAuthLogin
 export const WsProviderAuthLoginCancelRpc = Rpc.make(WS_METHODS.providerAuthLoginCancel, {
   payload: ProviderAuthLoginCancelInput,
   success: ProviderAuthLoginCancelResult,
+  error: Schema.Union([ProviderAuthError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderAuthLoginRespondRpc = Rpc.make(WS_METHODS.providerAuthLoginRespond, {
+  payload: ProviderAuthLoginRespondInput,
+  success: ProviderAuthLoginRespondResult,
   error: Schema.Union([ProviderAuthError, EnvironmentAuthorizationError]),
 });
 
@@ -869,6 +878,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerAllocateManagedAccountHomeRpc,
   WsProviderAuthLoginStartRpc,
   WsProviderAuthLoginCancelRpc,
+  WsProviderAuthLoginRespondRpc,
   WsProviderAuthLoginStatusRpc,
   WsProviderAuthLogoutRpc,
   WsServerDiscoverSourceControlRpc,

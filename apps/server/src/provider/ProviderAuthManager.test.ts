@@ -28,6 +28,7 @@ import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 class FakePtyProcess implements PtyAdapter.PtyProcess {
   readonly pid: number;
   readonly killSignals: Array<string | undefined> = [];
+  readonly writes: Array<string> = [];
   private readonly dataListeners = new Set<(data: string) => void>();
   private readonly exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
   throwOnKill = false;
@@ -37,7 +38,9 @@ class FakePtyProcess implements PtyAdapter.PtyProcess {
     this.pid = pid;
   }
 
-  write(): void {}
+  write(data: string): void {
+    this.writes.push(data);
+  }
   resize(): void {}
 
   kill(signal?: string): void {
@@ -290,6 +293,78 @@ describe("ProviderAuthManager", () => {
         }),
     ),
   );
+
+  it.layer(NodeServices.layer)("forwards interactive input to the login PTY", (it) => {
+    it.effect("writes the submitted code plus a carriage return", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const start = yield* harness.manager.loginStart({
+          instanceId: harness.instanceIds.claudeAgent,
+        });
+        const result = yield* harness.manager.loginRespond({
+          terminalId: start.terminalId,
+          data: "sk-ant-oat-code-1234",
+        });
+        assert.equal(result.state.status, "running");
+        assert.deepEqual(harness.pty.processes[0]!.writes, ["sk-ant-oat-code-1234\r"]);
+        yield* harness.manager.loginCancel({ terminalId: start.terminalId });
+      }),
+    );
+
+    it.effect("rejects input once the login is no longer running", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const start = yield* harness.manager.loginStart({
+          instanceId: harness.instanceIds.claudeAgent,
+        });
+        yield* harness.manager.loginCancel({ terminalId: start.terminalId });
+        const rejected = yield* Effect.result(
+          harness.manager.loginRespond({ terminalId: start.terminalId, data: "late" }),
+        );
+        assert.equal(rejected._tag, "Failure");
+        assert.deepEqual(harness.pty.processes[0]!.writes, []);
+      }),
+    );
+
+    it.effect("unwraps an OSC 8 hyperlink to a single clean URL", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const start = yield* harness.manager.loginStart({
+          instanceId: harness.instanceIds.claudeAgent,
+        });
+        const esc = String.fromCharCode(27);
+        const url = "https://example.test/oauth/authorize?code=true&state=abc";
+        harness.pty.processes[0]!.emitData(
+          `visit: ${esc}]8;;${url}${esc}\\${url}${esc}]8;;${esc}\\\n`,
+        );
+        const state = yield* waitFor(
+          currentState(harness.manager, start.terminalId),
+          (value) => value.verificationUrl !== null,
+        );
+        assert.equal(state.verificationUrl, url);
+        yield* harness.manager.loginCancel({ terminalId: start.terminalId });
+      }),
+    );
+
+    it.effect("never reports Claude's paste prompt as a device code", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const start = yield* harness.manager.loginStart({
+          instanceId: harness.instanceIds.claudeAgent,
+        });
+        const process = harness.pty.processes[0]!;
+        process.emitData(
+          "Opening browser to sign in…\nIf the browser didn't open, visit: https://claude.com/oauth/authorize\nPaste code here if prompted >\n",
+        );
+        const state = yield* waitFor(
+          currentState(harness.manager, start.terminalId),
+          (value) => value.verificationUrl !== null,
+        );
+        assert.equal(state.userCode, null);
+        yield* harness.manager.loginCancel({ terminalId: start.terminalId });
+      }),
+    );
+  });
 
   it.layer(NodeServices.layer)("orders login events and cleans processes", (it) => {
     it.effect("applies the last raw output before a synchronous exit", () =>

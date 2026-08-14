@@ -2089,6 +2089,38 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ),
       );
 
+      it.effect("does not treat a firstParty apiProvider alone as an account", () =>
+        Effect.gen(function* () {
+          // The CLI reports apiProvider "firstParty" even when nobody is
+          // logged in, so this probe must fall through to `auth status`,
+          // which reports the truth (t3code-mjd).
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities({
+              email: undefined,
+              tokenSource: "none",
+              apiProvider: "firstParty",
+            }),
+          );
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              if (joined === "auth status --json")
+                return {
+                  stdout: '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}\n',
+                  stderr: "",
+                  code: 0,
+                };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
       it.effect("labels every external Claude API provider", () =>
         Effect.gen(function* () {
           const cases = [
