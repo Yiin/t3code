@@ -86,6 +86,7 @@ function TierEditor({
   const [renameInput, setRenameInput] = useState<string>(tierId);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const hopKeyPrefix = useId();
   const nextHopKeyNumber = useRef(tier.hops.length);
   const [hopKeys, setHopKeys] = useState(() =>
@@ -146,6 +147,17 @@ function TierEditor({
     setHopKeys((currentKeys) => [...currentKeys, `${hopKeyPrefix}-${nextHopKeyNumber.current++}`]);
     onPolicyChange(addTierHop(policy, tierId, { selection: firstSelection }));
   };
+  /**
+   * The confirmation dialog outlives its target: it keeps rendering through a
+   * ~200 ms exit transition. So opening drives `deleteOpen`, and the target
+   * only clears once that transition finishes. Clearing it on close instead
+   * would flip the copy to the tier variant while a hop dialog fades out.
+   */
+  const openDelete = (target: DeleteTarget) => {
+    setDeleteTarget(target);
+    setDeleteOpen(true);
+  };
+
   const hopRows = tier.hops.map((hop, index) => ({
     hop,
     index,
@@ -162,7 +174,7 @@ function TierEditor({
             size="xs"
             variant="destructive-outline"
             aria-label={`Delete tier ${tierId}`}
-            onClick={() => setDeleteTarget({ kind: "tier" })}
+            onClick={() => openDelete({ kind: "tier" })}
           >
             <Trash2Icon />
             Delete
@@ -304,7 +316,7 @@ function TierEditor({
                           variant="ghost"
                           className="pointer-coarse:size-11"
                           aria-label={`Remove hop ${index + 1}`}
-                          onClick={() => setDeleteTarget({ kind: "hop", index })}
+                          onClick={() => openDelete({ kind: "hop", index })}
                         >
                           <Trash2Icon />
                         </Button>
@@ -387,8 +399,11 @@ function TierEditor({
       </SettingsRow>
 
       <AlertDialog
-        open={deleteTarget !== null}
+        open={deleteOpen}
         onOpenChange={(open) => {
+          if (!open) setDeleteOpen(false);
+        }}
+        onOpenChangeComplete={(open) => {
           if (!open) setDeleteTarget(null);
         }}
       >
@@ -414,7 +429,7 @@ function TierEditor({
                 else if (deleteTarget?.kind === "tier") {
                   onPolicyChange(deleteTier(policy, tierId));
                 }
-                setDeleteTarget(null);
+                setDeleteOpen(false);
               }}
             >
               {deleteTarget?.kind === "hop" ? "Delete hop" : "Delete tier"}
