@@ -108,6 +108,51 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
   return { ...settings, providerInstances };
 }
 
+// Values under these keys are compared and written as a whole — never merged or
+// stripped field-by-field.
+const ATOMIC_SETTINGS_KEY_LIST = [
+  "automaticGitFetchInterval",
+  "epicRolePolicy",
+  "subagentSpawn",
+  "textGenerationModelSelection",
+] as const satisfies ReadonlyArray<keyof ServerSettings>;
+
+type AtomicSettingsKey = (typeof ATOMIC_SETTINGS_KEY_LIST)[number];
+
+const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set(ATOMIC_SETTINGS_KEY_LIST);
+
+/**
+ * What a test may override. A plain key takes a deep partial, because that is
+ * how a real patch merges it. An atomic key takes its whole value, because that
+ * is how a real patch writes it: a partial there would merge with a shipped
+ * default the patch would have replaced, and no test could clear one.
+ */
+export type ServerSettingsTestOverrides = DeepPartial<Omit<ServerSettings, AtomicSettingsKey>> & {
+  readonly [K in AtomicSettingsKey]?: ServerSettings[K];
+};
+
+/**
+ * Build settings from the defaults the way `applyServerSettingsPatch` builds
+ * them: deep-merge every plain key, then replace each atomic key whole.
+ */
+function applyServerSettingsTestOverrides(overrides: ServerSettingsTestOverrides): ServerSettings {
+  const mergeable: Record<string, unknown> = {};
+  const atomic: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) continue;
+    if (ATOMIC_SETTINGS_KEYS.has(key)) {
+      atomic[key] = value;
+    } else {
+      mergeable[key] = value;
+    }
+  }
+
+  return {
+    ...deepMerge(DEFAULT_SERVER_SETTINGS, mergeable as DeepPartial<ServerSettings>),
+    ...atomic,
+  } as ServerSettings;
+}
+
 export class ServerSettingsService extends Context.Service<
   ServerSettingsService,
   {
@@ -130,19 +175,14 @@ export class ServerSettingsService extends Context.Service<
   }
 >()("t3/serverSettings/ServerSettingsService") {
   /** @deprecated Import and use `layerTest` from this module. */
-  static readonly layerTest = (overrides: DeepPartial<ServerSettings> = {}) => layerTest(overrides);
+  static readonly layerTest = (overrides: ServerSettingsTestOverrides = {}) => layerTest(overrides);
 }
 
-const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
+const makeTest = (overrides: ServerSettingsTestOverrides = {}) =>
   Effect.gen(function* () {
-    const { automaticGitFetchInterval, ...overridesForMerge } = overrides;
-    const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
-    const initialSettings = yield* normalizeServerSettings({
-      ...merged,
-      ...(automaticGitFetchInterval !== undefined
-        ? { automaticGitFetchInterval: automaticGitFetchInterval as Duration.Duration }
-        : {}),
-    });
+    const initialSettings = yield* normalizeServerSettings(
+      applyServerSettingsTestOverrides(overrides),
+    );
     const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
 
     return {
@@ -159,7 +199,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
     } satisfies ServerSettingsService["Service"];
   });
 
-export const layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
+export const layerTest = (overrides: ServerSettingsTestOverrides = {}) =>
   Layer.effect(ServerSettingsService, makeTest(overrides));
 
 const ServerSettingsJson = fromLenientJson(ServerSettings);
@@ -214,14 +254,6 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
     } satisfies ModelSelection,
   };
 }
-
-// Values under these keys are compared as a whole — never stripped field-by-field.
-const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
-  "automaticGitFetchInterval",
-  "epicRolePolicy",
-  "subagentSpawn",
-  "textGenerationModelSelection",
-]);
 
 function stripDefaultServerSettings(current: unknown, defaults: unknown): unknown | undefined {
   if (Array.isArray(current) || Array.isArray(defaults)) {

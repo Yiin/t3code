@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 
 import { UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY } from "@t3tools/contracts";
 import type {
+  EpicRolePolicy,
   ProviderApprovalDecision,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -2531,9 +2532,17 @@ const injectedRoles = {
   auditor: { description: "Audits the change", prompt: "You are an auditor" },
 };
 
+// The test settings layer replaces `epicRolePolicy` whole, like a real patch
+// does, so the policy a test writes names every role it expects to see.
+const injectedRolePolicy: EpicRolePolicy = {
+  tiers: {},
+  roles: {},
+  inSessionRoles: { ...DEFAULT_EPIC_STAGE_SUBAGENTS, ...injectedRoles },
+};
+
 const subagentFallback = makeProviderServiceLayer(
   undefined,
-  ServerSettings.layerTest({ epicRolePolicy: { inSessionRoles: injectedRoles } }),
+  ServerSettings.layerTest({ epicRolePolicy: injectedRolePolicy }),
 );
 subagentFallback.layer("ProviderServiceLive epic subagent policy fallback", (it) => {
   it.effect("injects the policy's in-session roles into a session with no binding", () =>
@@ -2549,8 +2558,7 @@ subagentFallback.layer("ProviderServiceLive epic subagent policy fallback", (it)
         runtimeMode: "full-access",
       });
 
-      // A user-added role joins the shipped stage subagents; the test settings
-      // layer merges its override into the default policy.
+      // A user-added role joins the shipped stage subagents.
       const startInput = subagentFallback.codex.startSession.mock.calls.at(-1)?.[0];
       assert.deepEqual(startInput?.subagents, {
         ...DEFAULT_EPIC_STAGE_SUBAGENTS,
@@ -2610,7 +2618,7 @@ subagentFallback.layer("ProviderServiceLive epic subagent policy fallback", (it)
 const subagentFallbackWithSpawn = makeProviderServiceLayer(
   undefined,
   ServerSettings.layerTest({
-    epicRolePolicy: { inSessionRoles: injectedRoles },
+    epicRolePolicy: injectedRolePolicy,
     subagentSpawn: { enabled: true },
   }),
 );

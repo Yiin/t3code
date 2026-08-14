@@ -1,5 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { EpicRolePolicy } from "@t3tools/contracts";
 import {
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
   DEFAULT_SERVER_SETTINGS,
   EpicInSessionRoleName,
   EpicTierId,
@@ -599,6 +601,49 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.equal(storedAfterClear.subagentSpawn, undefined);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
+
+  it.effect("ships the default stage subagents through the test settings layer", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const settings = yield* serverSettings.getSettings;
+
+      assert.deepEqual(settings.epicRolePolicy.inSessionRoles, DEFAULT_EPIC_STAGE_SUBAGENTS);
+    }).pipe(Effect.provide(ServerSettingsModule.layerTest())),
+  );
+
+  it.effect("replaces an atomic key override instead of merging it into the defaults", () => {
+    // An empty `inSessionRoles` is the case that proves replacement: deep-merging
+    // this override against the shipped defaults could never clear them, so a
+    // test would silently run with six subagents a real patch had removed.
+    const policy: EpicRolePolicy = { tiers: {}, roles: {}, inSessionRoles: {} };
+    const selection = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4-mini");
+
+    return Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const settings = yield* serverSettings.getSettings;
+
+      assert.deepEqual(settings.epicRolePolicy, policy);
+      assert.deepEqual(settings.subagentSpawn, { enabled: true });
+      assert.deepEqual(settings.textGenerationModelSelection, selection);
+      // A plain key still deep-merges, so the sibling defaults survive.
+      assert.equal(settings.providers.codex.binaryPath, "/tmp/codex");
+      assert.equal(
+        settings.providers.codex.enabled,
+        DEFAULT_SERVER_SETTINGS.providers.codex.enabled,
+      );
+    }).pipe(
+      Effect.provide(
+        ServerSettingsModule.layerTest({
+          epicRolePolicy: policy,
+          // The default block is empty, so only the type proves this one is
+          // whole: a partial `allowedAgentTypes` could not shorten a real one.
+          subagentSpawn: { enabled: true },
+          textGenerationModelSelection: selection,
+          providers: { codex: { binaryPath: "/tmp/codex" } },
+        }),
+      ),
+    );
+  });
 
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>
     Effect.gen(function* () {
