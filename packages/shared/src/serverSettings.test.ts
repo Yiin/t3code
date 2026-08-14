@@ -1,4 +1,6 @@
 import {
+  DEFAULT_EPIC_ROLE_POLICY,
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
   DEFAULT_SERVER_SETTINGS,
   EpicTierId,
   ProviderDriverKind,
@@ -247,18 +249,21 @@ describe("serverSettings helpers", () => {
     expect(Object.keys(policy.inSessionRoles)).toEqual(["reviewer"]);
   });
 
-  it("falls back to the empty epic role policy on missing or invalid input", () => {
-    expect(parsePersistedEpicRolePolicy("{")).toEqual({ tiers: {}, roles: {}, inSessionRoles: {} });
-    expect(parsePersistedEpicRolePolicy("{}")).toEqual({
-      tiers: {},
-      roles: {},
-      inSessionRoles: {},
-    });
-    expect(parsePersistedEpicRolePolicy(JSON.stringify({ epicRolePolicy: { tiers: 7 } }))).toEqual({
-      tiers: {},
-      roles: {},
-      inSessionRoles: {},
-    });
+  it("falls back to the default epic role policy on missing or invalid input", () => {
+    // The fallback is DEFAULT_EPIC_ROLE_POLICY, so a fresh install with no
+    // settings file still gets the shipped stage subagents.
+    expect(DEFAULT_EPIC_ROLE_POLICY.inSessionRoles).toEqual(DEFAULT_EPIC_STAGE_SUBAGENTS);
+    for (const raw of ["{", "{}", JSON.stringify({ epicRolePolicy: { tiers: 7 } })]) {
+      expect(parsePersistedEpicRolePolicy(raw)).toEqual(DEFAULT_EPIC_ROLE_POLICY);
+    }
+  });
+
+  it("keeps a persisted empty in-session role map empty", () => {
+    const policy = parsePersistedEpicRolePolicy(
+      JSON.stringify({ epicRolePolicy: { inSessionRoles: {} } }),
+    );
+
+    expect(policy.inSessionRoles).toEqual({});
   });
 
   it("replaces epic role policies so omitted tiers and hops are cleared", () => {

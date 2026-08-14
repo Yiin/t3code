@@ -53,12 +53,13 @@ export function parsePersistedServerObservabilitySettings(
 }
 
 /**
- * The epic role policy inside a persisted settings file, or the empty policy.
+ * The epic role policy inside a persisted settings file, or the default policy.
  *
  * Only `epicRolePolicy` is decoded, not the whole settings document: a reader
  * that has no settings service — the `t3 epic cook` CLI — must not lose the
  * policy because some unrelated key in the file fails to decode. An unreadable
- * or absent policy yields the empty one, which injects no subagents at all.
+ * or absent policy yields `DEFAULT_EPIC_ROLE_POLICY`, which carries the shipped
+ * stage subagents, so a fresh install behaves like a decoded empty document.
  */
 export function parsePersistedEpicRolePolicy(raw: string): EpicRolePolicy {
   const decoded = decodeEpicRolePolicySettingsJson(raw);

@@ -490,12 +490,29 @@ it("hands a claude worker the in-session roles from the persisted policy", () =>
   });
 });
 
-it("emits no --agents when no policy is persisted", () => {
+it("hands a claude worker the shipped stage subagents when no policy is persisted", () => {
   const fixture = makeFixture(1);
   const { capture } = writeFakeClaude(fixture);
   run("node", cookArgs(fixture), fixture.repo, claudeEnvironment(fixture));
   const args = NodeFS.readFileSync(capture, "utf8").trim().split("\n");
-  assert.notInclude(args, "--agents");
+  const agentsIndex = args.indexOf("--agents");
+  assert.isAtLeast(agentsIndex, 0, args.join(" "));
+
+  // A fresh install has no settings file, so the policy default supplies the
+  // six stage subagents. Every one ships tier-less and reaches the worker
+  // without a model, so it inherits the session's.
+  const agents = JSON.parse(args[agentsIndex + 1]!) as Record<string, { readonly model?: string }>;
+  assert.deepEqual(Object.keys(agents), [
+    "planner",
+    "implementer",
+    "reviewer",
+    "tester",
+    "cleanup",
+    "investigator",
+  ]);
+  for (const definition of Object.values(agents)) {
+    assert.isUndefined(definition.model);
+  }
 });
 
 it("lets the typed engine flag override the deprecated environment shim", () => {

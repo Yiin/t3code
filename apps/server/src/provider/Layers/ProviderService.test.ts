@@ -15,6 +15,7 @@ import type {
 import {
   ApprovalRequestId,
   AuthSessionId,
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
   EnvironmentId,
   EpicRunId,
   EventId,
@@ -2502,7 +2503,7 @@ subagentAttachment.layer("ProviderServiceLive epic subagent attachment", (it) =>
     }),
   );
 
-  it.effect("omits the subagents for a thread with no binding", () =>
+  it.effect("falls back to the shipped stage subagents for a thread with no binding", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
       const threadId = asThreadId("thread-subagent-unbound");
@@ -2515,8 +2516,10 @@ subagentAttachment.layer("ProviderServiceLive epic subagent attachment", (it) =>
         runtimeMode: "full-access",
       });
 
+      // Default settings ship the stage subagents, so an unbound thread gets
+      // them instead of nothing.
       const startInput = subagentAttachment.codex.startSession.mock.calls.at(-1)?.[0];
-      assert.equal(startInput?.subagents, undefined);
+      assert.deepEqual(startInput?.subagents, DEFAULT_EPIC_STAGE_SUBAGENTS);
     }),
   );
 });
@@ -2525,7 +2528,7 @@ subagentAttachment.layer("ProviderServiceLive epic subagent attachment", (it) =>
 // These roles are tier-less, so they carry no model and the subagent inherits
 // the session's — which is also what the shipped defaults look like.
 const injectedRoles = {
-  tester: { description: "Runs the tests", prompt: "You are a tester" },
+  auditor: { description: "Audits the change", prompt: "You are an auditor" },
 };
 
 const subagentFallback = makeProviderServiceLayer(
@@ -2546,8 +2549,13 @@ subagentFallback.layer("ProviderServiceLive epic subagent policy fallback", (it)
         runtimeMode: "full-access",
       });
 
+      // A user-added role joins the shipped stage subagents; the test settings
+      // layer merges its override into the default policy.
       const startInput = subagentFallback.codex.startSession.mock.calls.at(-1)?.[0];
-      assert.deepEqual(startInput?.subagents, injectedRoles);
+      assert.deepEqual(startInput?.subagents, {
+        ...DEFAULT_EPIC_STAGE_SUBAGENTS,
+        ...injectedRoles,
+      });
     }),
   );
 

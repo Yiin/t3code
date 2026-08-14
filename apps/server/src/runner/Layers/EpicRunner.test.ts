@@ -3,6 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
   EpicRolePolicy as EpicRolePolicySchema,
   EpicRunConfig as EpicRunConfigSchema,
   EpicRunId,
@@ -4638,10 +4639,13 @@ describe("EpicRunner", () => {
 
       const threadId = harness.commandsOfType("thread.create")[0]?.threadId;
       assert.isDefined(threadId);
+      // The policy's own planner replaces the shipped one; the other five
+      // stage subagents ride along tier-less, so they carry no model.
       assert.deepStrictEqual(harness.subagentBindings, [
         {
           threadId,
           subagents: {
+            ...DEFAULT_EPIC_STAGE_SUBAGENTS,
             planner: {
               description: "Plans one child.",
               prompt: "You plan.",
@@ -4655,7 +4659,7 @@ describe("EpicRunner", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.live("binds no subagents when the policy configures no in-session role", () => {
+  it.live("binds the shipped stage subagents when the policy adds none of its own", () => {
     const harness = createHarness({
       script: [{ text: "RALPH_DONE", head: "head-0" }],
       projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
@@ -4671,7 +4675,14 @@ describe("EpicRunner", () => {
         cwd: "/tmp/epic-runner-repo",
       });
       yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
-      assert.deepStrictEqual(harness.subagentBindings, []);
+
+      // A policy that only assigns runner tiers still decodes the six shipped
+      // stage subagents, so a fresh install's worker carries them.
+      const threadId = harness.commandsOfType("thread.create")[0]?.threadId;
+      assert.isDefined(threadId);
+      assert.deepStrictEqual(harness.subagentBindings, [
+        { threadId, subagents: DEFAULT_EPIC_STAGE_SUBAGENTS },
+      ]);
     }).pipe(Effect.provide(harness.layer));
   });
 

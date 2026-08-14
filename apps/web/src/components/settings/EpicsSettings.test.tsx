@@ -1,4 +1,9 @@
-import { EpicInSessionRoleName, EpicTierId, type EpicRolePolicy } from "@t3tools/contracts";
+import {
+  DEFAULT_EPIC_ROLE_POLICY,
+  EpicInSessionRoleName,
+  EpicTierId,
+  type EpicRolePolicy,
+} from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -55,5 +60,33 @@ describe("InSessionRoleEditor", () => {
     );
 
     expect(markup).toContain("Inherits the worker session&#x27;s model.");
+  });
+
+  it("renders every shipped stage subagent an untouched install starts with", () => {
+    const rows = buildInSessionRoleRows(DEFAULT_EPIC_ROLE_POLICY);
+
+    expect(rows.map((row) => row.name)).toEqual([
+      "planner",
+      "implementer",
+      "reviewer",
+      "tester",
+      "cleanup",
+      "investigator",
+    ]);
+    for (const row of rows) {
+      const markup = renderToStaticMarkup(
+        <InSessionRoleEditor
+          row={row}
+          policy={DEFAULT_EPIC_ROLE_POLICY}
+          tierIds={[]}
+          onPolicyChange={() => {}}
+        />,
+      );
+
+      expect(markup).toContain(row.name);
+      // Shipped roles carry no tier, so the editor offers the session model.
+      expect(markup).toContain("Inherits the worker session&#x27;s model.");
+      expect(markup).toContain("Verification rules:");
+    }
   });
 });

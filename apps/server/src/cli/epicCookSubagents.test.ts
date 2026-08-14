@@ -1,6 +1,12 @@
 import * as NodeOS from "node:os";
 
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  DEFAULT_EPIC_ROLE_POLICY,
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -30,6 +36,8 @@ const claude = (instanceId: string, models: ReadonlyArray<string>): ServerProvid
 });
 
 const settingsFile = (policy: unknown) => JSON.stringify({ epicRolePolicy: policy });
+
+const DEFAULT_STAGE_SUBAGENT_NAMES = Object.keys(DEFAULT_EPIC_STAGE_SUBAGENTS);
 
 const tieredPolicy = {
   tiers: {
@@ -124,10 +132,11 @@ it.layer(NodeServices.layer)("epic cook subagents", (it) => {
     }),
   );
 
-  it.effect("reads the empty policy when the settings file is missing", () =>
+  it.effect("reads the default policy when the settings file is missing", () =>
     Effect.gen(function* () {
       const policy = yield* readEpicRolePolicy("/nonexistent/t3-cook/settings.json");
-      assert.deepEqual(policy, { tiers: {}, roles: {}, inSessionRoles: {} });
+      assert.deepEqual(policy, DEFAULT_EPIC_ROLE_POLICY);
+      assert.deepEqual(Object.keys(policy.inSessionRoles), DEFAULT_STAGE_SUBAGENT_NAMES);
     }),
   );
 
@@ -203,7 +212,7 @@ it.layer(NodeServices.layer)("epic cook subagents", (it) => {
     ),
   );
 
-  it.effect("resolves nothing when the settings file is unreadable", () =>
+  it.effect("falls back to the shipped stage subagents when the settings file is unreadable", () =>
     Effect.gen(function* () {
       const providers = inventoryOf([claude("claude", ["claude-sonnet-5"])]);
       const subagents = yield* readCookSubagents({
@@ -212,8 +221,13 @@ it.layer(NodeServices.layer)("epic cook subagents", (it) => {
         sessionSelection: selection,
       });
 
-      assert.deepEqual(subagents, {});
-      assert.equal(providers.probeCount(), 0);
+      // A fresh install has no settings file, so the cook CLI resolves the same
+      // six stage subagents the server injects. They ship tier-less, so every
+      // one arrives without a model and inherits the session's.
+      assert.deepEqual(Object.keys(subagents), DEFAULT_STAGE_SUBAGENT_NAMES);
+      for (const definition of Object.values(subagents)) {
+        assert.equal(definition.model, undefined);
+      }
     }),
   );
 });

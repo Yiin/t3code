@@ -58,7 +58,11 @@ export const resolveCookSettingsPath = (input: {
   return NodePath.join(stateDir, "settings.json");
 };
 
-/** The persisted epic role policy, or the empty one when nothing is readable. */
+/**
+ * The persisted epic role policy, or the default one when nothing is readable.
+ * The default ships the stage subagents, so a fresh install with no settings
+ * file still cooks with them.
+ */
 export const readEpicRolePolicy = (
   settingsPath: string,
 ): Effect.Effect<EpicRolePolicy, never, FileSystem.FileSystem> =>

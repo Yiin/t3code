@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { EpicTierId } from "./epicRolePolicy.ts";
+import {
+  DEFAULT_EPIC_ROLE_POLICY,
+  DEFAULT_EPIC_STAGE_SUBAGENTS,
+  EpicTierId,
+} from "./epicRolePolicy.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -142,10 +146,15 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
 });
 
 describe("ServerSettings.epicRolePolicy", () => {
-  it("defaults to empty tiers, role assignments, and in-session subagents", () => {
-    const empty = { tiers: {}, roles: {}, inSessionRoles: {} };
-    expect(DEFAULT_SERVER_SETTINGS.epicRolePolicy).toEqual(empty);
-    expect(decodeServerSettings({}).epicRolePolicy).toEqual(empty);
+  it("defaults to empty tiers, empty role assignments, and the shipped stage subagents", () => {
+    const expected = {
+      tiers: {},
+      roles: {},
+      inSessionRoles: DEFAULT_EPIC_STAGE_SUBAGENTS,
+    };
+    expect(DEFAULT_SERVER_SETTINGS.epicRolePolicy).toEqual(expected);
+    expect(decodeServerSettings({}).epicRolePolicy).toEqual(expected);
+    expect(DEFAULT_SERVER_SETTINGS.epicRolePolicy).toEqual(DEFAULT_EPIC_ROLE_POLICY);
   });
 
   it("round-trips in-session subagent definitions", () => {
@@ -269,6 +278,9 @@ describe("ServerSettings.epicRolePolicy", () => {
     ).toThrow();
   });
 
+  // A patch carries the whole policy or nothing, so a patch that names the
+  // policy but omits inSessionRoles decodes through the same field default and
+  // comes back with the shipped stage subagents.
   it("decodes patches with and without the whole policy value", () => {
     expect(decodeServerSettingsPatch({})).not.toHaveProperty("epicRolePolicy");
     expect(
@@ -281,7 +293,7 @@ describe("ServerSettings.epicRolePolicy", () => {
     ).toEqual({
       tiers: { primary: { hops: [] } },
       roles: { "merge-fix": "primary" },
-      inSessionRoles: {},
+      inSessionRoles: DEFAULT_EPIC_STAGE_SUBAGENTS,
     });
   });
 });
