@@ -19,6 +19,7 @@ import {
 import { EditorId } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderAccountLimit, ProviderUsageSample } from "./providerUsage.ts";
 import { ServerSettings } from "./settings.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
@@ -193,6 +194,14 @@ export const ServerProvider = Schema.Struct({
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
+  // This account's live usage windows, joined from the usage ledger at
+  // aggregation time. Absent when the driver exposes no usage reader or no
+  // live window is recorded — an empty-but-present array would read as
+  // "zero usage", which is a claim no reader ever made.
+  usage: Schema.optionalKey(Schema.Array(ProviderUsageSample)),
+  // This account's current block. Null means the limits store answered and
+  // found no live block; absent means the store was unavailable.
+  limit: Schema.optionalKey(Schema.NullOr(ProviderAccountLimit)),
 });
 export type ServerProvider = typeof ServerProvider.Type;
 

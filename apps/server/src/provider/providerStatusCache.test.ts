@@ -121,6 +121,47 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     }),
   );
 
+  it.effect("never caches per-account usage or limit state", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-provider-cache-usage-" });
+      const instanceId = defaultInstanceIdForDriver(CLAUDE_AGENT_DRIVER);
+      const provider = makeProvider(CLAUDE_AGENT_DRIVER, {
+        usage: [
+          {
+            providerInstanceId: instanceId,
+            window: "five_hour",
+            utilization: 62,
+            resetsAt: "2026-04-11T05:00:00.000Z",
+            source: "claude.sdk.get_usage",
+            observedAt: "2026-04-11T00:00:00.000Z",
+          },
+        ],
+        limit: {
+          providerInstanceId: instanceId,
+          driver: CLAUDE_AGENT_DRIVER,
+          kind: "usage-limit",
+          detectedAt: "2026-04-11T00:00:00.000Z",
+          resetsAt: "2026-04-11T05:00:00.000Z",
+          resetsAtEstimated: false,
+          source: "claude.sdk.rate_limit_event",
+          detail: null,
+        },
+      });
+      const filePath = yield* resolveProviderStatusCachePath({
+        cacheDir: tempDir,
+        instanceId,
+      });
+
+      yield* writeProviderStatusCache({ filePath, provider });
+
+      const cachedProvider = yield* readProviderStatusCache(filePath);
+      assert.exists(cachedProvider);
+      assert.ok(!("usage" in cachedProvider));
+      assert.ok(!("limit" in cachedProvider));
+    }),
+  );
+
   it("hydrates cached provider status while preserving current settings-derived models", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",

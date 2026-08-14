@@ -145,7 +145,15 @@ export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
 }) => {
-  const { updateState: _updateState, ...cacheableProvider } = input.provider;
+  // `usage` and `limit` never enter the cache: a replayed sample would claim
+  // a freshness it does not have. Their durable stores rejoin them onto the
+  // snapshot at the next aggregation pass.
+  const {
+    updateState: _updateState,
+    usage: _usage,
+    limit: _limit,
+    ...cacheableProvider
+  } = input.provider;
   return writeFileStringAtomically({
     filePath: input.filePath,
     contents: `${JSON.stringify(cacheableProvider, null, 2)}\n`,

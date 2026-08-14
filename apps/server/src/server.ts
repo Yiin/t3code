@@ -411,7 +411,15 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),
-  Layer.provideMerge(ProviderRegistryLive),
+  // The registry joins per-account usage windows and limit blocks onto each
+  // snapshot, so it needs the same memoized store instances the poller and
+  // runner use.
+  Layer.provideMerge(
+    ProviderRegistryLive.pipe(
+      Layer.provide(ProviderUsageLedgerStoreLive),
+      Layer.provide(ProviderAccountLimitsStoreLive),
+    ),
+  ),
   // The instance registry is the new routing keystone — text generation,
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;

@@ -25,15 +25,19 @@
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
+  type ProviderAccountLimit,
   type ProviderInstanceId,
+  type ProviderUsageSample,
   type ServerProvider,
   type ServerProviderUpdateState,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -41,6 +45,8 @@ import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
 import {
@@ -51,6 +57,7 @@ import {
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
 } from "../providerStatusCache.ts";
+import { stampProviderAccountState } from "../providerAccountState.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
@@ -213,6 +220,11 @@ export const ProviderRegistryLive = Layer.effect(
     const config = yield* ServerConfig;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    // Optional on purpose: test layers build the registry without the durable
+    // stores, and losing a store only costs snapshots their usage/limit
+    // fields, never the snapshot itself.
+    const usageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
+    const accountLimits = yield* Effect.serviceOption(ProviderAccountLimitsStore);
 
     // Aggregator PubSub — consumers (WS gateway, etc.) subscribe here for
     // coalesced updates across every instance.
@@ -344,6 +356,35 @@ export const ProviderRegistryLive = Layer.effect(
       };
     });
 
+    // Join the account's live usage windows and current limit block onto the
+    // snapshot at aggregation time. Every read is fail-soft: a failed or
+    // missing store leaves the field off this pass, and the next upsert
+    // retries.
+    const applyProviderAccountState = Effect.fn("applyProviderAccountState")(function* (
+      provider: ServerProvider,
+    ) {
+      const nowIso = DateTime.formatIso(yield* DateTime.now);
+      const samples = Option.isSome(usageLedger)
+        ? yield* usageLedger.value
+            .listForInstance({ providerInstanceId: provider.instanceId })
+            .pipe(
+              Effect.orElseSucceed(
+                () => undefined as ReadonlyArray<ProviderUsageSample> | undefined,
+              ),
+            )
+        : undefined;
+      const limits = Option.isSome(accountLimits)
+        ? yield* accountLimits.value
+            .listForInstance({ providerInstanceId: provider.instanceId })
+            .pipe(
+              Effect.orElseSucceed(
+                () => undefined as ReadonlyArray<ProviderAccountLimit> | undefined,
+              ),
+            )
+        : undefined;
+      return stampProviderAccountState({ provider, samples, limits, nowIso });
+    });
+
     const upsertProviders = Effect.fn("upsertProviders")(function* (
       nextProviders: ReadonlyArray<ServerProvider>,
       options?: {
@@ -354,7 +395,8 @@ export const ProviderRegistryLive = Layer.effect(
     ) {
       const nextProvidersWithUpdateState = yield* Effect.forEach(
         nextProviders,
-        applyProviderUpdateState,
+        (provider) =>
+          applyProviderUpdateState(provider).pipe(Effect.flatMap(applyProviderAccountState)),
         {
           concurrency: "unbounded",
         },
