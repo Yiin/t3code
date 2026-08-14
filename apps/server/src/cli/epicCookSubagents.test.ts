@@ -310,6 +310,28 @@ it.layer(NodeServices.layer)("epic cook subagents", (it) => {
       for (const definition of Object.values(subagents)) {
         assert.equal(definition.model, undefined);
       }
+      // The default roles are roles, so they cost the one probe the guard
+      // skips for a policy that persists none.
+      assert.equal(providers.probeCount(), 1);
+    }),
+  );
+
+  it.effect("resolves nothing when the provider probe dies", () =>
+    Effect.gen(function* () {
+      const subagents = yield* readCookSubagents({
+        settingsPath: "/nonexistent/t3-cook/settings.json",
+        // The real inventory shells out once per candidate binary inside
+        // `Effect.sync`, so a probe that dies arrives as a defect.
+        inventory: {
+          getProviders: Effect.sync((): ReadonlyArray<ServerProvider> => {
+            throw new Error("spawnSync: EMFILE");
+          }),
+        },
+        sessionSelection: selection,
+      });
+
+      // A cook still runs; it just runs without stage agents.
+      assert.deepEqual(subagents, {});
     }),
   );
 });

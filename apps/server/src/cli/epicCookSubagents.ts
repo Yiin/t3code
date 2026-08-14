@@ -9,9 +9,12 @@
  * asserts that). So it reads the same settings file directly, and resolves the
  * same roles against the terminal provider inventory it already builds.
  *
- * Every step is fail-soft. A missing file, an unreadable one, or a policy with
- * no in-session roles yields an empty map, and an empty map emits no `--agents`
- * flag at all — the harness then keeps its own agents, exactly as before.
+ * Every step is fail-soft, but a missing file is no longer the empty case. An
+ * unreadable settings file falls back to the shipped default policy, which
+ * carries the six stage subagents, so a fresh install cooks with them. Only a
+ * policy that persists no in-session role, or an inventory that fails or throws,
+ * yields an empty map — and an empty map emits no `--agents` flag at all, so the
+ * harness keeps its own agents.
  */
 import * as NodePath from "node:path";
 
@@ -140,4 +143,11 @@ export const readCookSubagents = (input: {
       providers: widenInventoryWithPolicyModels(providers, policy),
       sessionInstanceId: input.sessionSelection.instanceId,
     });
-  }).pipe(Effect.orElseSucceed((): EpicSubagentMap => ({})));
+  }).pipe(
+    // The port declares an inventory that cannot fail, and the real one is a
+    // `spawnSync` per candidate binary wrapped in `Effect.sync` — so a probe
+    // that dies arrives as a defect, not a failure. Catch both: no stage agent
+    // is worth crashing a cook over.
+    Effect.catchDefect(() => Effect.succeed<EpicSubagentMap>({})),
+    Effect.orElseSucceed((): EpicSubagentMap => ({})),
+  );
