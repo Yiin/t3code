@@ -99,8 +99,9 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    card in this repo)".
 
    `COOKEPIC_GATE` is required: workers only run cheap checks (typecheck,
-   lint, targeted unit tests), so the gate is the only full verification. If
-   the user names no gate, derive it yourself from the project (CI config,
+   lint, targeted unit tests), so the gate is the only full scripted
+   verification. If the user names no gate, derive it yourself from the
+   project (CI config,
    `package.json` scripts, `AGENTS.md`) and state your choice in the launch
    report. Pass `COOKEPIC_NO_GATE=1` only when the user explicitly accepts
    unverified merges. Reports and every mailbox event expose `verified: false`
@@ -109,6 +110,28 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    by default. Set
    `COOKEPIC_WORKER_TIMEOUT` only when an operator needs a fixed positive
    limit. Zero and other invalid values fail preflight.
+
+   The gate is a scripted command, run once per merge set in the integration
+   worktree. It cannot drive a browser, so it never stands in for integrated
+   QA of a user-visible change. That QA belongs to the worker, through
+   cook-it's tester stage. `skills/cook-it/SKILL.md` routing decision 4 and
+   step 4.5 own when QA runs and when the cleanup loop ends. A worker is the
+   primary agent for its own child, so this repo's rule against
+   subagents starting dev servers does not bar its tester dispatch: integrated
+   verification is the delegated task. One limit comes with the parallel pool
+   and is accepted. A worker QAs its own worktree before the merge, and a
+   `Merge fix:` child is re-gated but never re-QA'd.
+
+   A worker's QA pass depends on three measured facts (t3code-8rl.3). State
+   isolates per worktree: `vp run dev --home-dir <worktree>/.t3` sets
+   `T3CODE_HOME`, and every server path derives from it, so the pass never
+   touches the main checkout's `~/.t3`. Ports do not isolate on their own. The
+   dev runner probes a free offset and then binds it, so two workers starting
+   at the same moment can pick one offset and the loser exits 1 with no retry;
+   set `T3CODE_DEV_INSTANCE=<child-id>` before `vp run dev` to seed distinct
+   offsets. And a headless worker may have no browser-automation host. A
+   worker that cannot reach one says so and leaves the pass to an attended
+   session. It never reports QA it did not run.
 
 2. **Execution shape.** The parallel pool loop at three workers is the default:
    each child cooks in its own worktree on an `epic/<child>` branch, a
@@ -372,7 +395,12 @@ worker, with two shape differences called out where they matter.
   dirty tree blocks the child and retries it within its budget; in the parallel
   shape a red gate parks the branch for a `Merge fix:` child instead. Workers
   run only cheap checks (typecheck, lint, unit tests for touched files); the
-  gate is the only full verification.
+  gate is the only full scripted verification.
+- **Integrated QA**: the gate is scripted and cannot drive a browser, so it
+  never covers a user-visible change. That QA runs inside the worker, through
+  cook-it's tester stage, pre-merge in the worker's own worktree. A merge-fix
+  child is re-gated but not re-QA'd. See the gate paragraphs in step 1 for the
+  state-isolation, port-seed, and headless-browser caveats.
 - **Push**: after a green gate the loop pushes `origin HEAD:<base-branch>`
   unless `COOKEPIC_NO_PUSH=1`. A rejected push fails the run for operator
   reconciliation; local commits are preserved.
