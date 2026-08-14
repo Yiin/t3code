@@ -46,6 +46,7 @@ import {
 } from "../providerSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { normalizeEpochResetsAt } from "../providerLimitSignal.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -608,20 +609,6 @@ type ClaudeUsageReadingInput = {
   readonly resetsAt: string | number | null | undefined;
 };
 
-function normalizeClaudeResetsAt(value: string | number | null | undefined): string | null {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-  const milliseconds = value < 1e11 ? value * 1_000 : value;
-  return Option.match(DateTime.make(milliseconds), {
-    onNone: () => null,
-    onSome: DateTime.formatIso,
-  });
-}
-
 function normalizeClaudeUsageReading(
   input: ClaudeUsageReadingInput,
   source: ProviderUsageSource,
@@ -632,7 +619,7 @@ function normalizeClaudeUsageReading(
   return {
     window: input.window,
     utilization: input.utilization,
-    resetsAt: normalizeClaudeResetsAt(input.resetsAt),
+    resetsAt: normalizeEpochResetsAt(input.resetsAt),
     source,
   };
 }

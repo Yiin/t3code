@@ -33,6 +33,7 @@ import {
   buildServerProvider,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
+import { normalizeEpochResetsAt } from "../providerLimitSignal.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
@@ -310,25 +311,6 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
 });
 
 /**
- * `resetsAt` is Unix **seconds**. The generated schema only says `int64`
- * (`schema.gen.ts:4197`), so the unit was read off a live ChatGPT Pro account
- * on 2026-08-13: `resetsAt: 1787207826` against a `1786603026` second-precision
- * clock, exactly the `windowDurationMins: 10080` (seven day) window ahead. The
- * converter stays defensive anyway — below 1e11 is seconds, the rest is
- * milliseconds — and yields `null` for anything that is not a usable date.
- */
-function normalizeCodexResetsAt(value: number | null | undefined): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-  const milliseconds = value < 1e11 ? value * 1_000 : value;
-  return Option.match(DateTime.make(milliseconds), {
-    onNone: () => null,
-    onSome: DateTime.formatIso,
-  });
-}
-
-/**
  * Maps the backward-compatible single-bucket `rateLimits` view onto usage
  * readings. `rateLimitsByLimitId` is deliberately ignored: it is a multi-bucket
  * view keyed by metered `limit_id`, and the settled window vocabulary has slots
@@ -348,7 +330,7 @@ export function mapCodexRateLimitsResponse(
     readings.push({
       window,
       utilization: value.usedPercent,
-      resetsAt: normalizeCodexResetsAt(value.resetsAt),
+      resetsAt: normalizeEpochResetsAt(value.resetsAt),
       source: "codex.app_server.read",
     });
   };
