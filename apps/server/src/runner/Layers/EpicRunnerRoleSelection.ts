@@ -11,6 +11,7 @@ import {
   type RoleSelectionShape,
 } from "@t3tools/epic-core/ports/RoleSelection";
 import {
+  epicFallbackCandidateInstanceIds,
   epicRoleFallbackChain,
   resolveEpicProviderChainEntry,
 } from "@t3tools/epic-core/providerFallback";
@@ -96,7 +97,7 @@ export const makeEpicRunnerRoleSelection = (input: {
       if (chain.length === 0) return fallback();
 
       const degradations = new Map<ProviderInstanceId, ProviderDegradationRecord>();
-      for (const instanceId of new Set(chain.map((hop) => hop.instanceId))) {
+      for (const instanceId of epicFallbackCandidateInstanceIds({ providers, chain })) {
         const raw = yield* input.readProviderDegradation(instanceId);
         // Launch owns expired-row cleanup. Dispatch selection stays read-only,
         // but applies the same liveness predicate, so both paths make the same

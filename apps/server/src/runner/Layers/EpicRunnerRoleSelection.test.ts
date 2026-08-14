@@ -41,11 +41,13 @@ const policy = (input?: {
     readonly id: string;
     readonly skipAboveUtilization?: number;
   }>;
+  readonly expandSameDriverAccounts?: boolean;
 }): EpicRolePolicy => {
   const tier = EpicTierId.make("tier");
   return {
     tiers: {
       [tier]: {
+        expandSameDriverAccounts: input?.expandSameDriverAccounts ?? true,
         hops: (input?.hops ?? [{ id: "one" }, { id: "two" }]).map((hop) => ({
           selection: { instanceId: instance(hop.id), model },
           ...(hop.skipAboveUtilization === undefined
@@ -88,6 +90,8 @@ const resolve = (input?: {
   readonly limits?: ReadonlyArray<ProviderAccountLimit>;
   readonly policyEffect?: Effect.Effect<EpicRolePolicy, PersistenceSqlError>;
   readonly degradationDefect?: boolean;
+  readonly degradationDefectFor?: string;
+  readonly degradationReads?: string[];
 }) =>
   makeEpicRunnerRoleSelection({
     readEpicRolePolicy: input?.policyEffect ?? Effect.succeed(input?.policy ?? policy()),
@@ -95,13 +99,17 @@ const resolve = (input?: {
       getProviders: Effect.succeed(input?.providers ?? [provider("one"), provider("two")]),
     },
     readProviderDegradation: (id) =>
-      input?.degradationDefect
-        ? Effect.die("boom")
-        : Effect.succeed(
-            input?.degradations?.[id] === undefined
-              ? Option.none()
-              : Option.some(input.degradations[id]),
-          ),
+      Effect.sync(() => input?.degradationReads?.push(id)).pipe(
+        Effect.flatMap(() =>
+          input?.degradationDefect || input?.degradationDefectFor === id
+            ? Effect.die("boom")
+            : Effect.succeed(
+                input?.degradations?.[id] === undefined
+                  ? Option.none()
+                  : Option.some(input.degradations[id]),
+              ),
+        ),
+      ),
     readUsageSamples: Effect.succeed(input?.usage ?? []),
     readAccountLimits: Effect.succeed(input?.limits ?? []),
     providerDegradationTtlMs: 3_600_000,
@@ -152,6 +160,38 @@ describe("EpicRunnerRoleSelection", () => {
     }),
   );
 
+  it.effect("loads degradation state for expanded same-driver siblings", () =>
+    Effect.gen(function* () {
+      const live = {
+        failureReason: "provider-error:rate-limit",
+        degradedAt: "2026-08-14T00:00:00.000Z",
+        resetsAt: "2099-01-01T00:00:00.000Z",
+      };
+      const result = yield* resolve({
+        policy: policy({ hops: [{ id: "one" }] }),
+        providers: [provider("one"), provider("two"), provider("three")],
+        degradations: { one: live, two: live },
+      });
+
+      expect(result.selection.instanceId).toBe("three");
+    }),
+  );
+
+  it.effect("does not read degradation state for unrelated providers", () =>
+    Effect.gen(function* () {
+      const reads: string[] = [];
+      const result = yield* resolve({
+        policy: policy({ hops: [{ id: "one" }], expandSameDriverAccounts: false }),
+        providers: [provider("one"), provider("unrelated")],
+        degradationDefectFor: "unrelated",
+        degradationReads: reads,
+      });
+
+      expect(result.selection.instanceId).toBe("one");
+      expect(reads).toEqual(["one"]);
+    }),
+  );
+
   it.effect("uses strict threshold comparison", () =>
     Effect.gen(function* () {
       const configured = policy({ hops: [{ id: "one", skipAboveUtilization: 80 }, { id: "two" }] });
@@ -168,7 +208,7 @@ describe("EpicRunnerRoleSelection", () => {
     Effect.gen(function* () {
       const missing: EpicRolePolicy = { tiers: {}, roles: {}, inSessionRoles: {} };
       const empty = policy({ hops: [] });
-      const blocked = policy({ hops: [{ id: "one" }] });
+      const blocked = policy({ hops: [{ id: "one" }], expandSameDriverAccounts: false });
       const liveLimit = limit("one", "usage-limit");
       const failed = Effect.fail(new PersistenceSqlError({ operation: "settings" }));
       const results = [

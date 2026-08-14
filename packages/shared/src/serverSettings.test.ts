@@ -2,6 +2,7 @@ import {
   DEFAULT_EPIC_ROLE_POLICY,
   DEFAULT_EPIC_STAGE_SUBAGENTS,
   DEFAULT_SERVER_SETTINGS,
+  EpicInSessionRoleName,
   EpicTierId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -217,6 +218,8 @@ describe("serverSettings helpers", () => {
   });
 
   it("parses the epic role policy out of a persisted settings file", () => {
+    const primary = EpicTierId.make("primary");
+    const planner = EpicInSessionRoleName.make("planner");
     const policy = parsePersistedEpicRolePolicy(
       JSON.stringify({
         epicRolePolicy: {
@@ -230,8 +233,8 @@ describe("serverSettings helpers", () => {
       }),
     );
 
-    expect(policy.inSessionRoles.planner?.tier).toBe("primary");
-    expect(policy.tiers.primary?.hops[0]?.selection.model).toBe("opus");
+    expect(policy.inSessionRoles[planner]?.tier).toBe("primary");
+    expect(policy.tiers[primary]?.hops[0]?.selection.model).toBe("opus");
   });
 
   it("keeps the epic role policy when an unrelated settings key is invalid", () => {
@@ -275,6 +278,7 @@ describe("serverSettings helpers", () => {
       epicRolePolicy: {
         tiers: {
           [primaryId]: {
+            expandSameDriverAccounts: true,
             hops: [
               { selection: { instanceId: claudeId, model: "opus" } },
               { selection: { instanceId: claudeId, model: "sonnet" } },
@@ -282,6 +286,7 @@ describe("serverSettings helpers", () => {
             ],
           },
           [backgroundId]: {
+            expandSameDriverAccounts: true,
             hops: [{ selection: { instanceId: claudeId, model: "haiku" } }],
           },
         },
@@ -289,6 +294,7 @@ describe("serverSettings helpers", () => {
           "iteration-worker": primaryId,
           "idle-inspection": backgroundId,
         },
+        inSessionRoles: {},
       },
     };
 
@@ -296,10 +302,12 @@ describe("serverSettings helpers", () => {
       epicRolePolicy: {
         tiers: {
           [primaryId]: {
+            expandSameDriverAccounts: true,
             hops: [{ selection: { instanceId: claudeId, model: "opus" } }],
           },
         },
         roles: { "iteration-worker": primaryId },
+        inSessionRoles: {},
       },
     }).epicRolePolicy;
 

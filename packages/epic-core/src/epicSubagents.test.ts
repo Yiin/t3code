@@ -39,6 +39,7 @@ const provider = (
 
 const claudeWork = provider("claude-work", "claude-opus-5");
 const claudePersonal = provider("claude-personal", "claude-sonnet-5");
+const claudeTeam = provider("claude-team", "claude-opus-5");
 
 const HIGH = EpicTierId.make("high");
 const PLANNER = EpicInSessionRoleName.make("planner");
@@ -46,6 +47,7 @@ const PLANNER = EpicInSessionRoleName.make("planner");
 const policy = (overrides: Partial<EpicRolePolicy> = {}): EpicRolePolicy => ({
   tiers: {
     [HIGH]: {
+      expandSameDriverAccounts: true,
       hops: [
         { selection: { instanceId: claudeWork.instanceId, model: "claude-opus-5" } },
         { selection: { instanceId: claudePersonal.instanceId, model: "claude-sonnet-5" } },
@@ -97,6 +99,7 @@ describe("resolveEpicSubagents", () => {
         ...withThreshold,
         tiers: {
           [HIGH]: {
+            expandSameDriverAccounts: true,
             hops: [{ ...tier.hops[0]!, skipAboveUtilization: 80 }, tier.hops[1]!],
           },
         },
@@ -115,7 +118,10 @@ describe("resolveEpicSubagents", () => {
       policy: {
         ...withThreshold,
         tiers: {
-          [HIGH]: { hops: [{ ...tier.hops[0]!, skipAboveUtilization: 80 }, tier.hops[1]!] },
+          [HIGH]: {
+            expandSameDriverAccounts: true,
+            hops: [{ ...tier.hops[0]!, skipAboveUtilization: 80 }, tier.hops[1]!],
+          },
         },
       },
       providers: [claudeWork, claudePersonal],
@@ -129,6 +135,37 @@ describe("resolveEpicSubagents", () => {
     expect(
       resolveEpicSubagents({ policy: policy(), providers: [claudePersonal] }).planner?.model,
     ).toBe("claude-sonnet-5");
+  });
+
+  it("measures each expanded sibling against its own utilization", () => {
+    const expanded = policy({
+      tiers: {
+        [HIGH]: {
+          expandSameDriverAccounts: true,
+          hops: [
+            {
+              selection: { instanceId: claudeWork.instanceId, model: "claude-opus-5" },
+              skipAboveUtilization: 80,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(
+      resolveEpicSubagents({
+        policy: expanded,
+        providers: [claudeWork, claudeTeam],
+        utilization: (instanceId) => (instanceId === claudeWork.instanceId ? 95 : 10),
+      }).planner?.model,
+    ).toBe("claude-opus-5");
+    expect(
+      resolveEpicSubagents({
+        policy: expanded,
+        providers: [claudeWork, claudeTeam],
+        utilization: () => 95,
+      }).planner?.model,
+    ).toBeUndefined();
   });
 
   it("ships the definition without a model when no hop can run", () => {
@@ -180,6 +217,7 @@ describe("resolveEpicSubagents", () => {
     const codexFirst = policy({
       tiers: {
         [HIGH]: {
+          expandSameDriverAccounts: true,
           hops: [
             { selection: { instanceId: codex.instanceId, model: "gpt-5.6-sol" } },
             { selection: { instanceId: claudePersonal.instanceId, model: "claude-sonnet-5" } },

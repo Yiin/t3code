@@ -5,6 +5,7 @@ import {
   DEFAULT_EPIC_STAGE_SUBAGENTS,
   EPIC_ROLE_IDS,
   EpicRolePolicy,
+  EpicTierId,
 } from "./epicRolePolicy.ts";
 
 const decodeEpicRolePolicy = Schema.decodeUnknownSync(EpicRolePolicy);
@@ -73,5 +74,18 @@ describe("EpicRolePolicy", () => {
       "epic-note-fold": "background",
       "merge-fix": "primary",
     });
+  });
+
+  it("expands same-driver accounts by default and preserves an explicit false", () => {
+    const primary = EpicTierId.make("primary");
+    expect(
+      decodeEpicRolePolicy({ tiers: { primary: { hops: [] } } }).tiers[primary]
+        ?.expandSameDriverAccounts,
+    ).toBe(true);
+    expect(
+      decodeEpicRolePolicy({
+        tiers: { primary: { expandSameDriverAccounts: false, hops: [] } },
+      }).tiers[primary]?.expandSameDriverAccounts,
+    ).toBe(false);
   });
 });

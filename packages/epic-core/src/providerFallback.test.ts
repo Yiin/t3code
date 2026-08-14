@@ -1,12 +1,16 @@
 import {
+  EpicTierId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type EpicRolePolicy,
   type ModelSelection,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  epicFallbackCandidateInstanceIds,
+  epicRoleFallbackChain,
   resolveEpicProviderChainEntry,
   resolveEpicProviderChainFallback,
   resolveEpicProviderFallback,
@@ -126,19 +130,39 @@ describe("resolveEpicProviderChainFallback", () => {
     expect(resolve({ current: selection("claude-c", "claude-sonnet-5") })).toBeNull();
   });
 
-  it("starts at the first eligible hop when the current instance is absent", () => {
-    expect(resolve({ current: selection("claude-outside", "claude-sonnet-5") })).toEqual(
-      selection("claude-a", "claude-sonnet-5"),
-    );
+  it("continues forward when the current hop has no provider snapshot", () => {
+    const codexCurrent = selection("codex-missing", "gpt-5.6-sol");
+    expect(
+      resolve({
+        providers: [claudeA, claudeC],
+        chain: [
+          { ...selection("claude-a", "claude-sonnet-5"), expandSameDriverAccounts: false },
+          { ...codexCurrent, expandSameDriverAccounts: false },
+          { ...selection("claude-c", "claude-sonnet-5"), expandSameDriverAccounts: false },
+        ],
+        current: codexCurrent,
+      }),
+    ).toEqual(selection("claude-c", "claude-sonnet-5"));
+  });
+
+  it("continues forward when the current hop is ineligible", () => {
+    const unavailableClaudeB = { ...claudeB, availability: "unavailable" as const };
+    expect(
+      resolve({
+        providers: [claudeA, unavailableClaudeB, claudeC],
+        chain: claudeChain.map((hop) => ({ ...hop, expandSameDriverAccounts: false })),
+        current: selection("claude-b", "claude-sonnet-5"),
+      }),
+    ).toEqual(selection("claude-c", "claude-sonnet-5"));
   });
 
   it("never returns a duplicate of the current instance later in the chain", () => {
     expect(
       resolve({
         chain: [
-          selection("claude-a", "claude-sonnet-5"),
-          selection("claude-a", "claude-sonnet-5"),
-          selection("claude-c", "claude-sonnet-5"),
+          { ...selection("claude-a", "claude-sonnet-5"), expandSameDriverAccounts: false },
+          { ...selection("claude-a", "claude-sonnet-5"), expandSameDriverAccounts: false },
+          { ...selection("claude-c", "claude-sonnet-5"), expandSameDriverAccounts: false },
         ],
       }),
     ).toEqual(selection("claude-c", "claude-sonnet-5"));
@@ -175,6 +199,85 @@ describe("resolveEpicProviderChainFallback", () => {
     expect(resolve({ providers: [claudeA, claudeC] })).toEqual(
       selection("claude-c", "claude-sonnet-5"),
     );
+  });
+
+  it("expands one hop to a same-driver sibling", () => {
+    expect(resolve({ chain: [selection("claude-a", "claude-sonnet-5")] })).toEqual(
+      selection("claude-b", "claude-sonnet-5"),
+    );
+  });
+
+  it("requires an expanded sibling to advertise the exact hop model", () => {
+    const wrongModel = provider("claude-b", "claudeAgent", "claude-opus-5");
+    expect(
+      resolve({
+        providers: [claudeA, wrongModel],
+        chain: [selection("claude-a", "claude-sonnet-5")],
+      }),
+    ).toBeNull();
+  });
+
+  it("skips a blocked expanded sibling", () => {
+    expect(
+      resolve({
+        chain: [selection("claude-a", "claude-sonnet-5")],
+        isBlocked: (hop) => hop.instanceId === claudeB.instanceId,
+      }),
+    ).toEqual(selection("claude-c", "claude-sonnet-5"));
+  });
+
+  it("does not expand a hop whose anchor snapshot is missing", () => {
+    expect(
+      resolve({
+        providers: [claudeB],
+        chain: [selection("removed", "claude-sonnet-5")],
+      }),
+    ).toBeNull();
+  });
+
+  it("does not duplicate explicitly named same-driver accounts", () => {
+    const chain = [
+      selection("claude-a", "claude-sonnet-5"),
+      selection("claude-b", "claude-sonnet-5"),
+    ];
+    expect(resolve({ chain })).toEqual(selection("claude-b", "claude-sonnet-5"));
+    expect(resolve({ chain, current: selection("claude-b", "claude-sonnet-5") })).toEqual(
+      selection("claude-c", "claude-sonnet-5"),
+    );
+  });
+
+  it("restores the exact authored chain when expansion is disabled", () => {
+    const tier = EpicTierId.make("exact");
+    const policy: EpicRolePolicy = {
+      tiers: {
+        [tier]: {
+          expandSameDriverAccounts: false,
+          hops: [{ selection: selection("claude-a", "claude-sonnet-5") }],
+        },
+      },
+      roles: { "iteration-worker": tier },
+      inSessionRoles: {},
+    };
+    expect(
+      resolve({
+        chain: epicRoleFallbackChain(policy, "iteration-worker"),
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("epicFallbackCandidateInstanceIds", () => {
+  it("reports explicit and exact-model expanded accounts in boundary order", () => {
+    const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+    const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+    const wrongModel = provider("claude-opus", "claudeAgent", "claude-opus-5");
+
+    expect(
+      epicFallbackCandidateInstanceIds({
+        providers: [claudeB, wrongModel, claudeA],
+        chain: [selection("missing", "claude-sonnet-5"), selection("claude-a", "claude-sonnet-5")],
+      }),
+    ).toEqual(["missing", "claude-a", "claude-b"]);
   });
 });
 

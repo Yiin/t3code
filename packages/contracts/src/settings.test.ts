@@ -325,7 +325,7 @@ describe("ServerSettings.epicRolePolicy", () => {
         },
       }).epicRolePolicy,
     ).toEqual({
-      tiers: { primary: { hops: [] } },
+      tiers: { primary: { expandSameDriverAccounts: true, hops: [] } },
       roles: { "merge-fix": "primary" },
       inSessionRoles: DEFAULT_EPIC_STAGE_SUBAGENTS,
     });

@@ -14,7 +14,7 @@ const primaryTierId = EpicTierId.make("primary");
 const plannerName = EpicInSessionRoleName.make("planner");
 
 const policy: EpicRolePolicy = {
-  tiers: { [primaryTierId]: { hops: [] } },
+  tiers: { [primaryTierId]: { expandSameDriverAccounts: true, hops: [] } },
   roles: {},
   inSessionRoles: {
     [plannerName]: {

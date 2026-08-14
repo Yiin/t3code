@@ -38,7 +38,11 @@ import {
   type EpicRunLockHeldError,
   type EpicRunLockLease,
 } from "@t3tools/epic-core/ports/EpicRunLock";
-import { epicRoleFallbackChain, type EpicFallbackHop } from "@t3tools/epic-core/providerFallback";
+import {
+  epicFallbackCandidateInstanceIds,
+  epicRoleFallbackChain,
+  type EpicFallbackHop,
+} from "@t3tools/epic-core/providerFallback";
 import {
   isLiveProviderDegradation,
   resolveDegradationAwareSelection,
@@ -520,16 +524,16 @@ export const makeEpicRunnerLaunch = (deps: {
       );
       const chain = yield* iterationWorkerChain;
 
-      // Probe every instance the walk could reach, once, so the pure resolver
-      // can answer without further reads. Probing also retires an expired row,
-      // so a stale degradation never blocks a launch. A chain bounds the
-      // candidates to its own hops; without one the walk follows driver order
-      // and any configured instance is reachable.
+      // Probe only instances that can affect this walk. The legacy driver-order
+      // path can reach the full inventory. A configured chain can reach only
+      // its authored and expanded accounts. The current selection remains
+      // necessary because its state decides whether the walk starts.
       const candidates = new Set<ModelSelection["instanceId"]>([defaultSelection.instanceId]);
-      for (const hop of chain) candidates.add(hop.instanceId);
-      if (chain.length === 0) {
-        for (const provider of providers) candidates.add(provider.instanceId);
-      }
+      const reachableInstanceIds =
+        chain.length === 0
+          ? providers.map((provider) => provider.instanceId)
+          : epicFallbackCandidateInstanceIds({ providers, chain });
+      for (const providerInstanceId of reachableInstanceIds) candidates.add(providerInstanceId);
       const degradations = new Map<ModelSelection["instanceId"], ProviderDegradationRecord>();
       for (const providerInstanceId of candidates) {
         const record = yield* liveProviderDegradation({ providerInstanceId, cutoff, now });

@@ -98,14 +98,28 @@ const resolveRoleModel = (
     if (sessionDriver !== undefined && driverOf(hop.selection.instanceId) !== sessionDriver) {
       return [];
     }
-    if (hop.skipAboveUtilization !== undefined) {
-      const observed = input.utilization?.(hop.selection.instanceId) ?? null;
-      if (observed !== null && observed > hop.skipAboveUtilization) return [];
-    }
-    return [hop.selection];
+    return [
+      {
+        ...hop.selection,
+        ...(hop.skipAboveUtilization === undefined
+          ? {}
+          : { skipAboveUtilization: hop.skipAboveUtilization }),
+        expandSameDriverAccounts: tier.expandSameDriverAccounts,
+      },
+    ];
   });
 
-  return resolveEpicProviderChainEntry({ providers: input.providers, chain })?.model ?? null;
+  return (
+    resolveEpicProviderChainEntry({
+      providers: input.providers,
+      chain,
+      isBlocked: (hop) => {
+        if (hop.skipAboveUtilization === undefined) return false;
+        const observed = input.utilization?.(hop.instanceId) ?? null;
+        return observed !== null && observed > hop.skipAboveUtilization;
+      },
+    })?.model ?? null
+  );
 };
 
 /**

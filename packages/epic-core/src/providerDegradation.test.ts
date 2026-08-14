@@ -267,6 +267,17 @@ describe("resolveDegradationAwareSelection", () => {
     expect(resolved.selection).toEqual(codex);
   });
 
+  it("skips a degraded sibling expanded from an earlier chain hop", () => {
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain: [claudeWork, codex],
+      current: claudeWork,
+      degradationOf: degraded("claude-work", "claude-personal"),
+    });
+
+    expect(resolved.selection).toEqual(codex);
+  });
+
   it("keeps the deepest-hop last resort when every hop is exhausted", () => {
     const resolved = resolveDegradationAwareSelection({
       providers,

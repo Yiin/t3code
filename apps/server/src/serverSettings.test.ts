@@ -546,6 +546,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         tiers: {
           [primaryId]: {
             label: "Primary",
+            expandSameDriverAccounts: true,
             hops: [
               {
                 selection: { instanceId: claudeId, model: "opus" },

@@ -49,6 +49,8 @@ export interface EpicFallbackHop {
   readonly model: string;
   readonly options?: ModelSelection["options"];
   readonly skipAboveUtilization?: number;
+  /** Missing means enabled for callers that build hops without a tier. */
+  readonly expandSameDriverAccounts?: boolean;
 }
 
 /**
@@ -64,34 +66,96 @@ export const epicRoleFallbackChain = (
 ): ReadonlyArray<EpicFallbackHop> => {
   const tierId = policy.roles[roleId];
   if (tierId === undefined) return [];
+  const tier = policy.tiers[tierId];
   return (
-    policy.tiers[tierId]?.hops.map((hop) => ({
+    tier?.hops.map((hop) => ({
       ...hop.selection,
       ...(hop.skipAboveUtilization === undefined
         ? {}
         : { skipAboveUtilization: hop.skipAboveUtilization }),
+      expandSameDriverAccounts: tier.expandSameDriverAccounts,
     })) ?? []
   );
 };
+
+/**
+ * Expand a configured chain into its ordered account boundary.
+ *
+ * An authored hop always keeps a position, even when its provider snapshot is
+ * missing. A present anchor can add same-driver accounts in inventory order,
+ * but only when they advertise that hop's exact model. Instance ids keep their
+ * first position across the full expansion.
+ */
+const expandEpicFallbackCandidates = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly chain: ReadonlyArray<EpicFallbackHop>;
+}): ReadonlyArray<EpicFallbackHop> => {
+  const providerByInstance = new Map(
+    input.providers.map((provider) => [provider.instanceId, provider] as const),
+  );
+  const expanded: EpicFallbackHop[] = [];
+  const visited = new Set<ProviderInstanceId>();
+  const append = (hop: EpicFallbackHop) => {
+    if (visited.has(hop.instanceId)) return;
+    visited.add(hop.instanceId);
+    expanded.push(hop);
+  };
+
+  for (const hop of input.chain) {
+    append(hop);
+    const anchor = providerByInstance.get(hop.instanceId);
+    if (anchor === undefined || hop.expandSameDriverAccounts === false) continue;
+    for (const provider of input.providers) {
+      if (
+        provider.driver === anchor.driver &&
+        provider.models.some((candidate) => candidate.slug === hop.model)
+      ) {
+        append({ ...hop, instanceId: provider.instanceId });
+      }
+    }
+  }
+
+  return expanded;
+};
+
+/** Instance ids whose degradation state can affect this chain. */
+export const epicFallbackCandidateInstanceIds = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly chain: ReadonlyArray<EpicFallbackHop>;
+}): ReadonlyArray<ProviderInstanceId> =>
+  expandEpicFallbackCandidates(input).map((hop) => hop.instanceId);
 
 /** The first candidate whose provider can run its model right now. */
 const firstEligibleHop = (input: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly candidates: ReadonlyArray<EpicFallbackHop>;
+  readonly startAfter?: ProviderInstanceId;
   readonly skip?: (hop: EpicFallbackHop) => boolean;
   readonly isBlocked?: (hop: EpicFallbackHop) => boolean;
 }): ModelSelection | null => {
-  for (const hop of input.candidates) {
+  const expanded = expandEpicFallbackCandidates({
+    providers: input.providers,
+    chain: input.candidates,
+  });
+  const providerByInstance = new Map(
+    input.providers.map((provider) => [provider.instanceId, provider] as const),
+  );
+
+  const currentIndex =
+    input.startAfter === undefined
+      ? -1
+      : expanded.findIndex((hop) => hop.instanceId === input.startAfter);
+  for (const hop of expanded.slice(currentIndex + 1)) {
+    const provider = providerByInstance.get(hop.instanceId);
+    if (provider === undefined || !isEligible(provider, hop.model)) {
+      continue;
+    }
+
     if (input.skip?.(hop) === true) {
       continue;
     }
 
-    const provider = input.providers.find((candidate) => candidate.instanceId === hop.instanceId);
-    if (
-      provider === undefined ||
-      !isEligible(provider, hop.model) ||
-      input.isBlocked?.(hop) === true
-    ) {
+    if (input.isBlocked?.(hop) === true) {
       continue;
     }
 
@@ -136,12 +200,10 @@ export const resolveEpicProviderChainFallback = (input: {
     return null;
   }
 
-  const currentIndex = input.chain.findIndex((hop) => hop.instanceId === input.current.instanceId);
-  const candidates = currentIndex === -1 ? input.chain : input.chain.slice(currentIndex + 1);
-
   return firstEligibleHop({
     providers: input.providers,
-    candidates,
+    candidates: input.chain,
+    startAfter: input.current.instanceId,
     skip: (hop) => hop.instanceId === input.current.instanceId,
     ...(input.isBlocked === undefined ? {} : { isBlocked: input.isBlocked }),
   });

@@ -183,20 +183,13 @@ export const resolveDegradationAwareSelection = (input: {
     return { selection, hops };
   }
 
-  const blocked = new Set<ProviderInstanceId>([input.current.instanceId]);
-  for (const hop of input.chain) {
-    if (input.degradationOf(hop.instanceId) !== null || isExhausted(hop.instanceId)) {
-      blocked.add(hop.instanceId);
-    }
-  }
-
   const healthyHop = resolveEpicProviderChainFallback({
     providers: input.providers,
     chain: input.chain,
     current: input.current,
     failureReason: "provider-error",
     providerFallbackEligible: true,
-    isBlocked: (hop) => blocked.has(hop.instanceId),
+    isBlocked: (hop) => input.degradationOf(hop.instanceId) !== null || isExhausted(hop.instanceId),
   });
   if (healthyHop !== null) {
     return {

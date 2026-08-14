@@ -114,7 +114,7 @@ export function createTier(
       ...copyPolicy(policy),
       tiers: {
         ...policy.tiers,
-        [parsed.tierId]: { hops: [] },
+        [parsed.tierId]: { expandSameDriverAccounts: true, hops: [] },
       },
     },
   };

@@ -47,13 +47,14 @@ function makePolicy(): EpicRolePolicy {
     tiers: {
       [primaryTierId]: {
         label: "Primary",
+        expandSameDriverAccounts: true,
         hops: [
           { selection: selection(claudeInstanceId, "first") },
           { selection: selection(codexInstanceId, "second") },
           { selection: selection(claudeInstanceId, "third") },
         ],
       },
-      [backupTierId]: { hops: [] },
+      [backupTierId]: { expandSameDriverAccounts: true, hops: [] },
     },
     roles: {
       "iteration-worker": primaryTierId,

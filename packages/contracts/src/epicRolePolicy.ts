@@ -37,6 +37,7 @@ export type EpicTierHop = typeof EpicTierHop.Type;
 
 export const EpicTier = Schema.Struct({
   label: Schema.optionalKey(TrimmedNonEmptyString),
+  expandSameDriverAccounts: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   hops: Schema.Array(EpicTierHop).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type EpicTier = typeof EpicTier.Type;
