@@ -100,6 +100,7 @@ import {
   type EpicRun,
   type EpicRunIteration,
 } from "../../persistence/Services/EpicRuns.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
@@ -222,6 +223,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
     const subagentRegistry = yield* EpicSubagentRegistry;
     const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
+    const providerAccountLimits = yield* Effect.serviceOption(ProviderAccountLimitsStore);
 
     /**
      * The epic role policy, or an empty one. A server without a settings
@@ -809,6 +811,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         options?.providerDegradationTtlMs ?? DEFAULT_PROVIDER_DEGRADATION_TTL_MS,
       ),
       readEpicRolePolicy,
+      // Fail-soft: an absent or unreadable store reads as no usage and no
+      // limits, so exhaustion checks never block a launch.
+      readUsageSamples: Option.isNone(providerUsageLedger)
+        ? Effect.succeed([])
+        : providerUsageLedger.value.listAll.pipe(Effect.orElseSucceed(() => [])),
+      readAccountLimits: Option.isNone(providerAccountLimits)
+        ? Effect.succeed([])
+        : providerAccountLimits.value.listAll.pipe(Effect.orElseSucceed(() => [])),
     });
 
     const lifecycle = makeEpicRunnerLifecycle({

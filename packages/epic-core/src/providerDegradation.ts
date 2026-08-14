@@ -88,6 +88,13 @@ export const providerDegradationResetsAt = (input: {
   return worst?.resetsAt ?? null;
 };
 
+/**
+ * The hop reason recorded when usage or limit state, not a degradation
+ * record, forced the reroute. A degraded instance keeps its own
+ * `failureReason`; this only names the block that has no record behind it.
+ */
+export const USAGE_EXHAUSTED_REASON = "usage-exhausted";
+
 /** One rerouting step, carrying the failure that caused it. */
 export interface ProviderDegradationHop {
   readonly from: ModelSelection;
@@ -110,20 +117,31 @@ export interface DegradationAwareSelection {
  * candidate is degraded it still returns something, because a run has to
  * start; the deepest hop is the policy's own last resort and the one furthest
  * from the account that just failed.
+ *
+ * `isExhausted` merges live usage and limit state into the same walk: an
+ * exhausted instance is skipped exactly like a degraded one, and an exhausted
+ * `current` reroutes even without a degradation record. The last-resort rule
+ * above is unchanged, so an exhaustion verdict can move the selection but
+ * never turn it into nothing.
  */
 export const resolveDegradationAwareSelection = (input: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly chain: ReadonlyArray<EpicFallbackHop>;
   readonly current: ModelSelection;
   readonly degradationOf: (instanceId: ProviderInstanceId) => ProviderDegradationRecord | null;
+  readonly isExhausted?: (instanceId: ProviderInstanceId) => boolean;
 }): DegradationAwareSelection => {
+  const isExhausted = input.isExhausted ?? (() => false);
   const degradation = input.degradationOf(input.current.instanceId);
-  if (degradation === null) return { selection: input.current, hops: [] };
+  if (degradation === null && !isExhausted(input.current.instanceId)) {
+    return { selection: input.current, hops: [] };
+  }
+  const currentReason = degradation?.failureReason ?? USAGE_EXHAUSTED_REASON;
 
   if (input.chain.length === 0) {
     const hops: ProviderDegradationHop[] = [];
     let selection = input.current;
-    let reason = degradation.failureReason;
+    let reason = currentReason;
     while (true) {
       const next = resolveEpicProviderFallback({
         providers: input.providers,
@@ -135,15 +153,17 @@ export const resolveDegradationAwareSelection = (input: {
       hops.push({ from: selection, to: next, reason });
       selection = next;
       const nextDegradation = input.degradationOf(selection.instanceId);
-      if (nextDegradation === null) break;
-      reason = nextDegradation.failureReason;
+      if (nextDegradation === null && !isExhausted(selection.instanceId)) break;
+      reason = nextDegradation?.failureReason ?? USAGE_EXHAUSTED_REASON;
     }
     return { selection, hops };
   }
 
   const blocked = new Set<ProviderInstanceId>([input.current.instanceId]);
   for (const hop of input.chain) {
-    if (input.degradationOf(hop.instanceId) !== null) blocked.add(hop.instanceId);
+    if (input.degradationOf(hop.instanceId) !== null || isExhausted(hop.instanceId)) {
+      blocked.add(hop.instanceId);
+    }
   }
 
   const healthyHop = resolveEpicProviderChainFallback({
@@ -157,7 +177,7 @@ export const resolveDegradationAwareSelection = (input: {
   if (healthyHop !== null) {
     return {
       selection: healthyHop,
-      hops: [{ from: input.current, to: healthyHop, reason: degradation.failureReason }],
+      hops: [{ from: input.current, to: healthyHop, reason: currentReason }],
     };
   }
 
@@ -183,6 +203,6 @@ export const resolveDegradationAwareSelection = (input: {
   if (lastResort === null) return { selection: input.current, hops: [] };
   return {
     selection: lastResort,
-    hops: [{ from: input.current, to: lastResort, reason: degradation.failureReason }],
+    hops: [{ from: input.current, to: lastResort, reason: currentReason }],
   };
 };

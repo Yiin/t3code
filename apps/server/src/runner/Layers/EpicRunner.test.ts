@@ -26,7 +26,9 @@ import {
   type EpicRunPreflightResult,
   type EpicSubagentMap,
   type ModelSelection,
+  type ProviderAccountLimit,
   type ProviderSessionResumeOutcome,
+  type ProviderUsageSample,
   type ServerProvider,
 } from "@t3tools/contracts";
 import {
@@ -51,6 +53,7 @@ import {
 } from "@t3tools/epic-core/ports/EpicRunLock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -74,6 +77,8 @@ import {
   type EpicRun,
   type EpicRunIteration,
 } from "../../persistence/Services/EpicRuns.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
 import { layerTest as serverSettingsLayerTest } from "../../serverSettings.ts";
@@ -384,6 +389,10 @@ function createHarness(input: {
   >;
   /** The global epic role policy; absent means no policy, the legacy path. */
   readonly epicRolePolicy?: EpicRolePolicy;
+  /** Live usage windows the harness ledger store serves; absent means none. */
+  readonly usageSamples?: ReadonlyArray<ProviderUsageSample>;
+  /** Account limit rows the harness limits store serves; absent means none. */
+  readonly accountLimits?: ReadonlyArray<ProviderAccountLimit>;
 }) {
   const store = makeMemoryStore(input.upsertDelayMs, input.appendIterationDelayMs);
   if (input.failAllocationFor !== undefined) {
@@ -1283,6 +1292,33 @@ function createHarness(input: {
       ),
     ),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
+    Layer.provide(
+      Layer.succeed(ProviderUsageLedgerStore, {
+        recordSamples: () => Effect.void,
+        listForInstance: ({ providerInstanceId }) =>
+          Effect.succeed(
+            (input.usageSamples ?? []).filter(
+              (sample) => sample.providerInstanceId === providerInstanceId,
+            ),
+          ),
+        listAll: Effect.succeed(input.usageSamples ?? []),
+        pruneObservedBefore: () => Effect.void,
+      }),
+    ),
+    Layer.provide(
+      Layer.succeed(ProviderAccountLimitsStore, {
+        recordLimit: () => Effect.void,
+        listAll: Effect.succeed(input.accountLimits ?? []),
+        listForInstance: ({ providerInstanceId }) =>
+          Effect.succeed(
+            (input.accountLimits ?? []).filter(
+              (limit) => limit.providerInstanceId === providerInstanceId,
+            ),
+          ),
+        clearForInstance: () => Effect.void,
+        clearExpired: () => Effect.void,
+      }),
+    ),
     Layer.provide(EpicWorkerScopeRegistry.layer),
     // A recording stand-in for the real registry: the binding is the only
     // evidence a worker session would carry the role subagents, because the
@@ -4456,6 +4492,217 @@ describe("EpicRunner", () => {
       );
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live("launches on the second Claude account when the first is at 100 percent", () =>
+    Effect.flatMap(DateTime.now, (checkedAt) => {
+      const nowIso = DateTime.formatIso(checkedAt);
+      const inTwoHours = DateTime.formatIso(DateTime.addDuration(checkedAt, Duration.hours(2)));
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+        providers: [
+          provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+          provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+          provider("codex-personal", "codex", "gpt-5.6-sol"),
+        ],
+        epicRolePolicy: iterationWorkerPolicy([
+          CLAUDE_WORK_SELECTION,
+          CLAUDE_PERSONAL_SELECTION,
+          CHAIN_CODEX_SELECTION,
+        ]),
+        usageSamples: [
+          {
+            providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+            window: "five_hour",
+            utilization: 100,
+            resetsAt: inTwoHours,
+            source: "claude.sdk.get_usage",
+            observedAt: nowIso,
+          },
+        ],
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.launchRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        assert.deepStrictEqual(
+          harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+          CLAUDE_PERSONAL_SELECTION,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.live("keeps the first account when its exhausted window has already reset", () =>
+    Effect.flatMap(DateTime.now, (checkedAt) => {
+      const oneHourAgo = DateTime.formatIso(
+        DateTime.subtractDuration(checkedAt, Duration.hours(1)),
+      );
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+        providers: [
+          provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+          provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        ],
+        epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+        usageSamples: [
+          {
+            providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+            window: "five_hour",
+            utilization: 100,
+            resetsAt: oneHourAgo,
+            source: "claude.sdk.get_usage",
+            observedAt: oneHourAgo,
+          },
+        ],
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.launchRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        assert.deepStrictEqual(
+          harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+          CLAUDE_WORK_SELECTION,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.live("launches past an account with a live usage-limit row", () =>
+    Effect.flatMap(DateTime.now, (checkedAt) => {
+      const nowIso = DateTime.formatIso(checkedAt);
+      const inTwoHours = DateTime.formatIso(DateTime.addDuration(checkedAt, Duration.hours(2)));
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+        providers: [
+          provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+          provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        ],
+        epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+        accountLimits: [
+          {
+            providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            kind: "usage-limit",
+            detectedAt: nowIso,
+            resetsAt: inTwoHours,
+            resetsAtEstimated: false,
+            source: "claude.sdk.rate_limit_event",
+            detail: null,
+          },
+        ],
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.launchRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        assert.deepStrictEqual(
+          harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+          CLAUDE_PERSONAL_SELECTION,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.live("blocks on a limit row without a reset time while it is inside the TTL", () =>
+    Effect.flatMap(DateTime.now, (checkedAt) => {
+      const nowIso = DateTime.formatIso(checkedAt);
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+        providers: [
+          provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+          provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        ],
+        epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+        accountLimits: [
+          {
+            providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            kind: "spend-limit",
+            detectedAt: nowIso,
+            resetsAt: null,
+            resetsAtEstimated: false,
+            source: "claude.assistant_text",
+            detail: null,
+          },
+        ],
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.launchRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        assert.deepStrictEqual(
+          harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+          CLAUDE_PERSONAL_SELECTION,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.live("does not treat an auth limit row as exhaustion", () =>
+    Effect.flatMap(DateTime.now, (checkedAt) => {
+      const nowIso = DateTime.formatIso(checkedAt);
+      const inTwoHours = DateTime.formatIso(DateTime.addDuration(checkedAt, Duration.hours(2)));
+      const harness = createHarness({
+        script: [{ text: "RALPH_DONE", head: "head-0" }],
+        projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+        providers: [
+          provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+          provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+        ],
+        epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+        accountLimits: [
+          {
+            providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            kind: "auth",
+            detectedAt: nowIso,
+            resetsAt: inTwoHours,
+            resetsAtEstimated: false,
+            source: "claude.sdk.rate_limit_event",
+            detail: null,
+          },
+        ],
+      });
+
+      return Effect.gen(function* () {
+        const runner = yield* EpicRunner;
+        const run = yield* runner.launchRun({
+          epicId: "epic-1",
+          projectId,
+          cwd: "/tmp/epic-runner-repo",
+        });
+        yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+        assert.deepStrictEqual(
+          harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+          CLAUDE_WORK_SELECTION,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
 
   it.live("launches on the last chain hop when every hop is degraded", () => {
     const harness = createHarness({

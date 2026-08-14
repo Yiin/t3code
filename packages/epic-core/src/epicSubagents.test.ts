@@ -9,7 +9,11 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { maxLiveUtilizationByInstance, resolveEpicSubagents } from "./epicSubagents.ts";
+import {
+  isAccountExhausted,
+  maxLiveUtilizationByInstance,
+  resolveEpicSubagents,
+} from "./epicSubagents.ts";
 
 const NOW = "2026-08-13T12:00:00.000Z";
 
@@ -235,5 +239,23 @@ describe("maxLiveUtilizationByInstance", () => {
     );
 
     expect(worst.get(ProviderInstanceId.make("claude-work"))).toBe(20);
+  });
+});
+
+describe("isAccountExhausted", () => {
+  it("exhausts at the default threshold of 100", () => {
+    expect(isAccountExhausted({ utilization: 100 })).toBe(true);
+    expect(isAccountExhausted({ utilization: 130 })).toBe(true);
+    expect(isAccountExhausted({ utilization: 99.9 })).toBe(false);
+  });
+
+  it("never exhausts an unknown utilization", () => {
+    expect(isAccountExhausted({ utilization: null })).toBe(false);
+    expect(isAccountExhausted({ utilization: null, threshold: 0 })).toBe(false);
+  });
+
+  it("honors a caller threshold", () => {
+    expect(isAccountExhausted({ utilization: 80, threshold: 80 })).toBe(true);
+    expect(isAccountExhausted({ utilization: 79, threshold: 80 })).toBe(false);
   });
 });

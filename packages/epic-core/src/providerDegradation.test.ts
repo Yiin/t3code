@@ -228,4 +228,53 @@ describe("resolveDegradationAwareSelection", () => {
     });
     expect(resolved.selection.instanceId).toBe("kimi-work");
   });
+
+  it("reroutes an exhausted current without any degradation record", () => {
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain,
+      current: claudeWork,
+      degradationOf: () => null,
+      isExhausted: (instanceId) => instanceId === "claude-work",
+    });
+    expect(resolved.selection).toEqual(claudePersonal);
+    expect(resolved.hops).toEqual([
+      { from: claudeWork, to: claudePersonal, reason: "usage-exhausted" },
+    ]);
+  });
+
+  it("skips an exhausted chain hop the way it skips a degraded one", () => {
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain,
+      current: claudeWork,
+      degradationOf: degraded("claude-work"),
+      isExhausted: (instanceId) => instanceId === "claude-personal",
+    });
+    expect(resolved.selection).toEqual(codex);
+  });
+
+  it("keeps the deepest-hop last resort when every hop is exhausted", () => {
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain,
+      current: claudeWork,
+      degradationOf: () => null,
+      isExhausted: () => true,
+    });
+    expect(resolved.selection).toEqual(codex);
+    expect(resolved.hops).toEqual([{ from: claudeWork, to: codex, reason: "usage-exhausted" }]);
+  });
+
+  it("walks driver order past an exhausted instance", () => {
+    const resolved = resolveDegradationAwareSelection({
+      providers,
+      chain: [],
+      current: claudeWork,
+      degradationOf: () => null,
+      isExhausted: (instanceId) => instanceId === "claude-work" || instanceId === "codex-personal",
+    });
+    expect(resolved.selection.instanceId).toBe("kimi-work");
+    expect(resolved.hops.map((hop) => hop.reason)).toEqual(["usage-exhausted", "usage-exhausted"]);
+  });
 });

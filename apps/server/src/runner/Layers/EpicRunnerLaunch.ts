@@ -16,6 +16,8 @@ import {
   EpicRunId,
   type LaunchEpicRunInput,
   type ModelSelection,
+  type ProviderAccountLimit,
+  type ProviderUsageSample,
 } from "@t3tools/contracts";
 import {
   EpicRunLaunchError,
@@ -42,6 +44,7 @@ import {
   resolveDegradationAwareSelection,
   type ProviderDegradationRecord,
 } from "@t3tools/epic-core/providerDegradation";
+import { isAccountExhausted, maxLiveUtilizationByInstance } from "@t3tools/epic-core/epicSubagents";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -145,6 +148,14 @@ export const makeEpicRunnerLaunch = (deps: {
    * settings runtime reads as an empty policy, which is the legacy path.
    */
   readonly readEpicRolePolicy: Effect.Effect<EpicRolePolicy>;
+  /**
+   * Fail-soft reads of live usage and limit state, for skipping an exhausted
+   * account at launch. Both never fail and answer `[]` when their store is
+   * absent or unreadable, so a broken read keeps today's selection instead of
+   * blocking a launch.
+   */
+  readonly readUsageSamples: Effect.Effect<ReadonlyArray<ProviderUsageSample>>;
+  readonly readAccountLimits: Effect.Effect<ReadonlyArray<ProviderAccountLimit>>;
 }) => {
   const {
     store,
@@ -161,6 +172,8 @@ export const makeEpicRunnerLaunch = (deps: {
     releaseLeaseOnFailure,
     providerDegradationTtlMs,
     readEpicRolePolicy,
+    readUsageSamples,
+    readAccountLimits,
   } = deps;
 
   const storeError = (operation: string) => (cause: unknown) =>
@@ -523,11 +536,36 @@ export const makeEpicRunnerLaunch = (deps: {
         if (record !== null) degradations.set(providerInstanceId, record);
       }
 
+      // Exhaustion joins the walk beside degradations: a live max utilization
+      // at or above 100, or a live usage/spend limit row. Auth, unavailable
+      // and credits-depleted rows are not exhaustion — the first two need
+      // operator action, and credits-depleted can be org-wide, where rotating
+      // to a sibling of the same org would burn a hop for nothing.
+      const utilization = maxLiveUtilizationByInstance(yield* readUsageSamples, now);
+      const limitBlocked = new Set<ModelSelection["instanceId"]>();
+      for (const limit of yield* readAccountLimits) {
+        if (limit.kind !== "usage-limit" && limit.kind !== "spend-limit") continue;
+        // A limit row lives by the exact rule a degradation row does: the
+        // provider's own reset time wins, and only a row without one falls
+        // back to the TTL cutoff. Reusing the predicate keeps them aligned.
+        const asRecord = {
+          failureReason: limit.kind,
+          degradedAt: limit.detectedAt,
+          resetsAt: limit.resetsAt,
+        };
+        if (isLiveProviderDegradation(asRecord, cutoff, now)) {
+          limitBlocked.add(limit.providerInstanceId);
+        }
+      }
+
       const resolved = resolveDegradationAwareSelection({
         providers,
         chain,
         current: defaultSelection,
         degradationOf: (instanceId) => degradations.get(instanceId) ?? null,
+        isExhausted: (instanceId) =>
+          isAccountExhausted({ utilization: utilization.get(instanceId) ?? null }) ||
+          limitBlocked.has(instanceId),
       });
       for (const hop of resolved.hops) {
         yield* logLaunchFallback({ from: hop.from, to: hop.to, reason: hop.reason, chain });

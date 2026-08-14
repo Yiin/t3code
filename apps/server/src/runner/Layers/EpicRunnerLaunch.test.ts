@@ -89,6 +89,8 @@ const makeLaunch = (input: {
     releaseLeaseOnFailure: undefined as never,
     providerDegradationTtlMs: 0,
     readEpicRolePolicy: Effect.succeed(DEFAULT_EPIC_ROLE_POLICY),
+    readUsageSamples: Effect.succeed([]),
+    readAccountLimits: Effect.succeed([]),
   });
 };
 
@@ -232,6 +234,8 @@ const makeLaunchHarness = (
     releaseLeaseOnFailure: () => (effect) => effect,
     providerDegradationTtlMs: 60_000,
     readEpicRolePolicy: Effect.succeed(DEFAULT_EPIC_ROLE_POLICY),
+    readUsageSamples: Effect.succeed([]),
+    readAccountLimits: Effect.succeed([]),
   });
   const input = (overrides: Partial<LaunchEpicRunInput>): LaunchEpicRunInput => ({
     epicId: "epic-1",

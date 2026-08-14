@@ -11,6 +11,11 @@
  * Fail-soft throughout. An unreadable policy or degradation file keeps the
  * configured selection, because refusing to start a run is worse than starting
  * it on an account that may still be rate limited.
+ *
+ * Deliberately narrower than the server (t3code-4hh.10): the server also
+ * blocks exhausted accounts from live usage windows and limit rows, but those
+ * live in SQLite and a terminal cook has no database. This twin stays on
+ * degradations alone.
  */
 import type { EpicRoleId, ModelSelection } from "@t3tools/contracts";
 import type { ProviderInventoryShape } from "@t3tools/epic-core/ports/ProviderInventory";

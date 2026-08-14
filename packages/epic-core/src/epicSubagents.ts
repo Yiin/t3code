@@ -66,6 +66,18 @@ export const maxLiveUtilizationByInstance = (
 };
 
 /**
+ * Whether one account's observed utilization rules out new work.
+ *
+ * An unknown (`null`) utilization is never exhausted: a missing sample is not
+ * evidence against an account, the same rule
+ * {@link EpicSubagentResolutionInput.utilization} states for hop skipping.
+ */
+export const isAccountExhausted = (input: {
+  readonly utilization: number | null;
+  readonly threshold?: number;
+}): boolean => input.utilization !== null && input.utilization >= (input.threshold ?? 100);
+
+/**
  * The model a role's tier resolves to right now, or `null` when the role names
  * no tier, the tier is gone or empty, or no hop in it can run.
  */
