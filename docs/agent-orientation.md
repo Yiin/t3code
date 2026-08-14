@@ -218,6 +218,45 @@ Treat new SDK controls as optional. Check, catch, time out, and handle no result
 An instance's `homePath` becomes `CLAUDE_CONFIG_DIR`. A session only resumes
 inside the config directory that created it.
 
+### Epic role policy and injected subagents
+
+- `packages/contracts/src/epicRolePolicy.ts` holds the schema. A tier is an
+  ordered chain of account-and-model hops, each with an optional
+  `skipAboveUtilization`. `roles` maps the four runner roles to a tier.
+  `inSessionRoles` is a different thing: subagent definitions injected into a
+  session. `DEFAULT_EPIC_STAGE_SUBAGENTS` ships six of them, all tier-less:
+  `planner`, `implementer`, `reviewer`, `tester`, `cleanup`, `investigator`.
+  Dispatch them by name and pass no model. A tier-less role inherits the
+  session model.
+- `packages/epic-core/src/epicSubagents.ts` resolves a role's model. It drops a
+  hop whose provider runs a different driver than the session, and an unknown
+  utilization never skips a hop. A dead tier costs a role its model, never its
+  existence.
+- Server delivery is five files: `readIterationSubagents` in `EpicRunner.ts`,
+  `bindIterationSubagents` in `EpicRunnerPoolPorts.ts`, the in-memory
+  `EpicSubagentRegistry` in `apps/server/src/provider/epicSubagents.ts`,
+  `resolveSessionSubagents` at session start in `ProviderService.ts`, and the
+  `agents` option in `ClaudeAdapter.ts`. A session with no registry binding
+  falls back to the policy itself, so every session carries the stage agents.
+  That fallback skips a `spawn_agent` child thread and a session with
+  thread-backed spawning on; a registry binding is exempt. The registry is
+  in-memory, so `resumeIteration` rebinds after a restart.
+- CLI delivery is separate. `apps/server/src/cli/epicCookSubagents.ts` reads the
+  same `settings.json` directly, because the cook binary may not import server
+  config or the database. Only the `claude` and `ccx` arms emit `--agents`
+  (`TerminalAgentDispatch.ts`). Every other harness drops the field silently.
+- A session that carries definitions stays in in-process Task mode
+  (`subagentSpawn.ts`, reason `subagent-definitions`).
+- `epicRolePolicy` is an atomic settings key. A patch replaces the whole policy,
+  and a pristine policy is stripped from `settings.json`, so an untouched
+  install tracks upgraded defaults. One edit freezes a full snapshot.
+- A user-visible frontend change needs one integrated verification pass with
+  `test-t3-app`, run by the worker itself. The run gate never replaces it.
+- Tests: `packages/epic-core/src/epicSubagents.test.ts`,
+  `apps/server/src/cli/epicCookSubagents.test.ts`, the `agents` cases in
+  `apps/server/src/provider/Layers/ClaudeAdapter.test.ts`, and the `--agents`
+  cases in `packages/epic-core/src/adapters/TerminalAgentDispatch.test.ts`.
+
 ### Prime
 
 - Prime uses its own RPC mode, not shared ACP. Transport, events, launch-arg
