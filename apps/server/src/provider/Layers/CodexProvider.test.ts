@@ -11,6 +11,7 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 import {
   applyPreferredCodexDefaultModel,
   mapCodexModelCapabilities,
+  mapCodexRateLimitsLimit,
   mapCodexRateLimitsResponse,
   probeCodexAppServerProvider,
 } from "./CodexProvider.ts";
@@ -250,6 +251,68 @@ describe("mapCodexRateLimitsResponse", () => {
     );
 
     assert.deepStrictEqual(readings[0]?.resetsAt, null);
+  });
+});
+
+describe("mapCodexRateLimitsLimit", () => {
+  const DETECTED_AT = "2026-08-14T10:00:00.000Z";
+
+  it("classifies a healthy snapshot to null", () => {
+    assert.isNull(
+      mapCodexRateLimitsLimit(
+        makeRateLimitsResponse({
+          primary: { usedPercent: 12, resetsAt: 1787207826 },
+          secondary: { usedPercent: 87, resetsAt: 1787207826 },
+        }),
+        DETECTED_AT,
+      ),
+    );
+  });
+
+  it("classifies rate_limit_reached as a usage limit with the worst window's reset", () => {
+    const limit = mapCodexRateLimitsLimit(
+      makeRateLimitsResponse({
+        primary: { usedPercent: 40, resetsAt: 1787000000 },
+        secondary: { usedPercent: 100, resetsAt: 1787207826 },
+        rateLimitReachedType: "rate_limit_reached",
+      }),
+      DETECTED_AT,
+    );
+
+    assert.deepStrictEqual(limit, {
+      kind: "usage-limit",
+      detectedAt: DETECTED_AT,
+      resetsAt: "2026-08-20T06:37:06.000Z",
+      resetsAtEstimated: false,
+      source: "codex.app_server.read",
+      detail: "rateLimitReachedType=rate_limit_reached",
+    });
+  });
+
+  it("classifies workspace_owner_credits_depleted as depleted credits", () => {
+    const limit = mapCodexRateLimitsLimit(
+      makeRateLimitsResponse({
+        primary: { usedPercent: 55 },
+        rateLimitReachedType: "workspace_owner_credits_depleted",
+      }),
+      DETECTED_AT,
+    );
+
+    assert.strictEqual(limit?.kind, "credits-depleted");
+    assert.strictEqual(limit?.source, "codex.app_server.read");
+  });
+
+  it("classifies spendControlReached as a spend limit", () => {
+    const limit = mapCodexRateLimitsLimit(
+      makeRateLimitsResponse({
+        primary: { usedPercent: 30 },
+        spendControlReached: true,
+      }),
+      DETECTED_AT,
+    );
+
+    assert.strictEqual(limit?.kind, "spend-limit");
+    assert.strictEqual(limit?.detail, "spendControlReached=true");
   });
 });
 

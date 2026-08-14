@@ -51,6 +51,7 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -85,6 +86,14 @@ const NoOpProviderUsageLedgerStoreLive = Layer.succeed(ProviderUsageLedgerStore,
   listForInstance: () => Effect.succeed([]),
   listAll: Effect.succeed([]),
   pruneObservedBefore: () => Effect.void,
+});
+
+const NoOpProviderAccountLimitsStoreLive = Layer.succeed(ProviderAccountLimitsStore, {
+  recordLimit: () => Effect.void,
+  listAll: Effect.succeed([]),
+  listForInstance: () => Effect.succeed([]),
+  clearForInstance: () => Effect.void,
+  clearExpired: () => Effect.void,
 });
 
 const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
@@ -157,6 +166,8 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(NoOpProviderUsageLedgerStoreLive),
+    Layer.provideMerge(NoOpProviderAccountLimitsStoreLive),
     Layer.provideMerge(NoOpProviderInstanceTeardownLive),
   );
 
@@ -420,6 +431,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(NoOpProviderUsageLedgerStoreLive),
+    Layer.provideMerge(NoOpProviderAccountLimitsStoreLive),
     Layer.provideMerge(NoOpProviderInstanceTeardownLive),
   );
 

@@ -27,6 +27,7 @@ import { readSpawnPolicyFrom } from "../../mcp/toolkits/agents/spawnPolicySource
 import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
@@ -89,6 +90,7 @@ export type ClaudeDriverEnv =
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | Path.Path
+  | ProviderAccountLimitsStore
   | ProviderEventLoggers
   | ProviderUsageLedgerStore
   | ServerConfig
@@ -127,6 +129,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
       const usageLedger = yield* ProviderUsageLedgerStore;
+      const accountLimits = yield* ProviderAccountLimitsStore;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
@@ -153,6 +156,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         subagentSpawnPolicy: readSpawnPolicyFrom(serverSettings),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         recordUsageSamples: usageLedger.recordSamples,
+        recordAccountLimit: accountLimits.recordLimit,
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv);

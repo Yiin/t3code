@@ -74,6 +74,7 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { CLAUDE_MCP_TOOL_CALL_TIMEOUT_MS } from "../../mcp/mcpToolCallCeiling.ts";
+import type { ProviderAccountLimitsStoreShape } from "../../persistence/Services/ProviderAccountLimits.ts";
 import type { ProviderUsageLedgerStoreShape } from "../../persistence/Services/ProviderUsageLedger.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveSpawnPolicy, type SpawnPolicy } from "../../mcp/toolkits/agents/spawnPolicy.ts";
@@ -101,6 +102,7 @@ import {
   resolveClaudeEffort,
   mapClaudeRateLimitInfo,
 } from "./ClaudeProvider.ts";
+import { classifyClaudeRateLimitInfo, classifyProviderErrorText } from "../providerLimitSignal.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -336,6 +338,7 @@ export interface ClaudeAdapterLiveOptions {
    */
   readonly subagentSpawnPolicy?: Effect.Effect<SpawnPolicy>;
   readonly recordUsageSamples?: ProviderUsageLedgerStoreShape["recordSamples"];
+  readonly recordAccountLimit?: ProviderAccountLimitsStoreShape["recordLimit"];
 }
 
 function isUuid(value: string): boolean {
@@ -3060,6 +3063,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         errorTag: tag,
         ...(isApiErrorMessage ? { isApiErrorMessage: true } : {}),
       });
+      // An older CLI without rate_limit_event reports limits only as untagged
+      // assistant text, so the pattern match is the one chance to mark the
+      // account. Text never carries a reset time.
+      const recordAccountLimit = options?.recordAccountLimit;
+      if (matchesErrorPattern && recordAccountLimit) {
+        const limitSignal = classifyProviderErrorText(assistantText, yield* nowIso);
+        if (limitSignal) {
+          yield* recordAccountLimit({
+            ...limitSignal,
+            providerInstanceId: boundInstanceId,
+            driver: PROVIDER,
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("claude.account-limit.record-failed", { cause }),
+            ),
+          );
+        }
+      }
       if (isApiErrorMessage) {
         // Synthetic error prose is not model output: surface it only as the
         // runtime.error above, never as assistant text.
@@ -3573,6 +3594,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             Effect.logWarning("claude.usage-ledger.record-failed", { cause }),
           ),
         );
+      }
+      const recordAccountLimit = options?.recordAccountLimit;
+      if (recordAccountLimit) {
+        const limitSignal = classifyClaudeRateLimitInfo(message.rate_limit_info, base.createdAt);
+        if (limitSignal) {
+          yield* recordAccountLimit({
+            ...limitSignal,
+            providerInstanceId: boundInstanceId,
+            driver: PROVIDER,
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("claude.account-limit.record-failed", { cause }),
+            ),
+          );
+        }
       }
       const rateLimitInfo = (
         message as { rate_limit_info?: { status?: string; overageDisabledReason?: string } }

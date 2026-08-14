@@ -86,8 +86,17 @@ const NoOpProviderUsageLedgerStoreLive = Layer.succeed(ProviderUsageLedgerStore,
   pruneObservedBefore: () => Effect.void,
 });
 
+const NoOpProviderAccountLimitsStoreLive = Layer.succeed(ProviderAccountLimitsStore, {
+  recordLimit: () => Effect.void,
+  listAll: Effect.succeed([]),
+  listForInstance: () => Effect.succeed([]),
+  clearForInstance: () => Effect.void,
+  clearExpired: () => Effect.void,
+});
+
 const TestProviderInstanceRegistryHydrationLive = ProviderInstanceRegistryHydrationLive.pipe(
   Layer.provide(NoOpProviderUsageLedgerStoreLive),
+  Layer.provide(NoOpProviderAccountLimitsStoreLive),
 );
 
 function selectDescriptor(
@@ -316,6 +325,7 @@ function makeCodexProbeSnapshot(
     ],
     skills: [],
     usage: [],
+    limit: null,
     ...input,
   };
 }

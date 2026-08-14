@@ -18,6 +18,7 @@ import type {
   ServerProvider,
   ServerProviderState,
   ModelCapabilities,
+  ProviderAccountLimitSignal,
   ProviderOptionDescriptor,
   ProviderUsageReading,
   ServerProviderModel,
@@ -33,7 +34,7 @@ import {
   buildServerProvider,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
-import { normalizeEpochResetsAt } from "../providerLimitSignal.ts";
+import { classifyCodexRateLimits, normalizeEpochResetsAt } from "../providerLimitSignal.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
@@ -58,6 +59,15 @@ export interface CodexAppServerProviderSnapshot {
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
   readonly usage: ReadonlyArray<ProviderUsageReading>;
+  /**
+   * The account-limit fact in the same rate-limits read the usage came from.
+   * `null` is a healthy answer, not an unknown: the probe reached the account
+   * and it reported no reached limit. A failed or timed-out read yields
+   * `usage: []` with `limit: null` because the never-fails probe contract has
+   * no error channel to say "unknown"; consumers must not clear stored limits
+   * from a snapshot whose probe did not succeed.
+   */
+  readonly limit: ProviderAccountLimitSignal | null;
 }
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
@@ -341,9 +351,22 @@ export function mapCodexRateLimitsResponse(
 }
 
 /**
+ * The limit half of a rate-limits read: `rateLimitReachedType` and
+ * `spendControlReached`, which `mapCodexRateLimitsResponse` deliberately
+ * ignores. Split out so tests can drive the classifier through the exact
+ * response shape the probe reads.
+ */
+export function mapCodexRateLimitsLimit(
+  response: CodexSchema.V2GetAccountRateLimitsResponse,
+  detectedAt: string,
+): ProviderAccountLimitSignal | null {
+  return classifyCodexRateLimits(response.rateLimits, detectedAt, "codex.app_server.read");
+}
+
+/**
  * Never fails. Usage is optional decoration on the capability probe, so a slow
  * read, a transport error, or a method-not-found from an older codex binary all
- * degrade to no readings instead of failing the probe.
+ * degrade to no readings and a null limit instead of failing the probe.
  */
 const readCodexRateLimitsForProbe = Effect.fn("readCodexRateLimitsForProbe")(function* (
   client: CodexClient.CodexAppServerClient["Service"],
@@ -353,9 +376,13 @@ const readCodexRateLimitsForProbe = Effect.fn("readCodexRateLimitsForProbe")(fun
     .pipe(Effect.timeoutOption(Duration.millis(CODEX_RATE_LIMITS_TIMEOUT_MS)), Effect.result);
 
   if (Result.isFailure(result) || Option.isNone(result.success)) {
-    return [] as ReadonlyArray<ProviderUsageReading>;
+    return { usage: [] as ReadonlyArray<ProviderUsageReading>, limit: null };
   }
-  return mapCodexRateLimitsResponse(result.success.value);
+  const detectedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+  return {
+    usage: mapCodexRateLimitsResponse(result.success.value),
+    limit: mapCodexRateLimitsLimit(result.success.value, detectedAt),
+  };
 });
 
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
@@ -446,10 +473,11 @@ export const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvide
         models: appendCustomCodexModels([], input.customModels ?? []),
         skills: [],
         usage: [],
+        limit: null,
       } satisfies CodexAppServerProviderSnapshot;
     }
 
-    const [skillsResponse, models, usage] = yield* Effect.all(
+    const [skillsResponse, models, rateLimits] = yield* Effect.all(
       [
         client.request("skills/list", {
           cwds: [input.cwd],
@@ -467,7 +495,8 @@ export const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvide
         appendCustomCodexModels(models, input.customModels ?? []),
       ),
       skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
-      usage,
+      usage: rateLimits.usage,
+      limit: rateLimits.limit,
     } satisfies CodexAppServerProviderSnapshot;
   },
 );

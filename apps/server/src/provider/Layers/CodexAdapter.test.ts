@@ -13,9 +13,11 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
+  type ProviderAccountLimit,
   type ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderSession,
+  type ProviderUsageSample,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   ThreadId,
@@ -2175,4 +2177,141 @@ lifecycleConformanceLayer("CodexAdapterLive session lifecycle", (it) => {
         });
       }),
   });
+});
+
+const rateLimitTelemetryRuntimeFactory = makeRuntimeFactory();
+const recordedRateLimitSamples: Array<ProviderUsageSample> = [];
+const recordedRateLimitLimits: Array<ProviderAccountLimit> = [];
+const rateLimitTelemetryInstanceId = ProviderInstanceId.make("codex_work");
+const rateLimitTelemetryLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        instanceId: rateLimitTelemetryInstanceId,
+        makeRuntime: rateLimitTelemetryRuntimeFactory.factory,
+        recordUsageSamples: ({ samples }) =>
+          Effect.sync(() => {
+            recordedRateLimitSamples.push(...samples);
+          }),
+        recordAccountLimit: (limit) =>
+          Effect.sync(() => {
+            recordedRateLimitLimits.push(limit);
+          }),
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+rateLimitTelemetryLayer("CodexAdapterLive rate-limit telemetry", (it) => {
+  const emitRateLimitsUpdated = (input: {
+    readonly uuid: string;
+    readonly rateLimits: EffectCodexSchema.V2AccountRateLimitsUpdatedNotification["rateLimits"];
+  }) =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = rateLimitTelemetryRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId(input.uuid),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-08-14T10:00:00.000Z",
+        method: "account/rateLimits/updated",
+        threadId: asThreadId("thread-1"),
+        payload: { rateLimits: input.rateLimits },
+      });
+      // The runtime event surfaces only after the same handler ran the
+      // telemetry writes, so awaiting it orders the assertions safely.
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag === "Some") {
+        NodeAssert.equal(firstEvent.value.type, "account.rate-limits.updated");
+      }
+    });
+
+  it.effect("writes usage samples and a limit row for a reached notification", () =>
+    Effect.gen(function* () {
+      recordedRateLimitSamples.length = 0;
+      recordedRateLimitLimits.length = 0;
+
+      yield* emitRateLimitsUpdated({
+        uuid: "evt-rate-limits-reached",
+        rateLimits: {
+          primary: { usedPercent: 40, resetsAt: 1787000000 },
+          secondary: { usedPercent: 100, resetsAt: 1787207826 },
+          rateLimitReachedType: "rate_limit_reached",
+        },
+      });
+
+      NodeAssert.deepEqual(recordedRateLimitSamples, [
+        {
+          providerInstanceId: rateLimitTelemetryInstanceId,
+          window: "primary",
+          utilization: 40,
+          resetsAt: "2026-08-17T20:53:20.000Z",
+          source: "codex.app_server.notification",
+          observedAt: "2026-08-14T10:00:00.000Z",
+        },
+        {
+          providerInstanceId: rateLimitTelemetryInstanceId,
+          window: "secondary",
+          utilization: 100,
+          resetsAt: "2026-08-20T06:37:06.000Z",
+          source: "codex.app_server.notification",
+          observedAt: "2026-08-14T10:00:00.000Z",
+        },
+      ]);
+      NodeAssert.deepEqual(recordedRateLimitLimits, [
+        {
+          providerInstanceId: rateLimitTelemetryInstanceId,
+          driver: ProviderDriverKind.make("codex"),
+          kind: "usage-limit",
+          detectedAt: "2026-08-14T10:00:00.000Z",
+          resetsAt: "2026-08-20T06:37:06.000Z",
+          resetsAtEstimated: false,
+          source: "codex.app_server.notification",
+          detail: "rateLimitReachedType=rate_limit_reached",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("writes only the carried window for a sparse healthy notification", () =>
+    Effect.gen(function* () {
+      recordedRateLimitSamples.length = 0;
+      recordedRateLimitLimits.length = 0;
+
+      yield* emitRateLimitsUpdated({
+        uuid: "evt-rate-limits-sparse",
+        rateLimits: {
+          primary: { usedPercent: 7 },
+        },
+      });
+
+      NodeAssert.deepEqual(recordedRateLimitSamples, [
+        {
+          providerInstanceId: rateLimitTelemetryInstanceId,
+          window: "primary",
+          utilization: 7,
+          resetsAt: null,
+          source: "codex.app_server.notification",
+          observedAt: "2026-08-14T10:00:00.000Z",
+        },
+      ]);
+      NodeAssert.deepEqual(recordedRateLimitLimits, []);
+    }),
+  );
 });

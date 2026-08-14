@@ -23,6 +23,7 @@ import {
   type RuntimeMode,
   ThreadId,
   ProviderInstanceId,
+  type ProviderAccountLimit,
   type ProviderUsageSample,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -185,6 +186,7 @@ function makeHarness(config?: {
   /** For the one test that changes the policy between two sessions. */
   readonly readSubagentSpawnPolicy?: Effect.Effect<SpawnPolicy>;
   readonly recordUsageSamples?: ClaudeAdapterLiveOptions["recordUsageSamples"];
+  readonly recordAccountLimit?: ClaudeAdapterLiveOptions["recordAccountLimit"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -207,6 +209,7 @@ function makeHarness(config?: {
         ? { subagentSpawnPolicy: Effect.succeed(config.subagentSpawnPolicy) }
         : {}),
     ...(config?.recordUsageSamples ? { recordUsageSamples: config.recordUsageSamples } : {}),
+    ...(config?.recordAccountLimit ? { recordAccountLimit: config.recordAccountLimit } : {}),
     createQuery: (input) => {
       createInput = input;
       createInputs.push(input);
@@ -2389,6 +2392,205 @@ describe("ClaudeAdapterLive", () => {
 
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
       assert.equal(runtimeEvents.at(-1)?.type, "turn.completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("records a durable account limit for a rejected rate-limit event", () => {
+    const recordedLimits: Array<ProviderAccountLimit> = [];
+    const instanceId = ProviderInstanceId.make("claude-work");
+    const harness = makeHarness({
+      instanceId,
+      recordAccountLimit: (limit) =>
+        Effect.sync(() => {
+          recordedLimits.push(limit);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          utilization: 100,
+          resetsAt: 1_700_000_000,
+        },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-limit",
+        uuid: "result-limit",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.deepEqual(
+        recordedLimits.map(({ detectedAt: _, ...limit }) => limit),
+        [
+          {
+            providerInstanceId: instanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            kind: "usage-limit",
+            resetsAt: "2023-11-14T22:13:20.000Z",
+            resetsAtEstimated: false,
+            source: "claude.sdk.rate_limit_event",
+            detail: "rateLimitType=five_hour",
+          },
+        ],
+      );
+      const rateLimitEvent = runtimeEvents.find(
+        (event) => event.type === "account.rate-limits.updated",
+      );
+      assert.equal(recordedLimits[0]?.detectedAt, rateLimitEvent?.createdAt);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("records no account limit for an allowed rate-limit event", () => {
+    const recordedLimits: Array<ProviderAccountLimit> = [];
+    const harness = makeHarness({
+      recordAccountLimit: (limit) =>
+        Effect.sync(() => {
+          recordedLimits.push(limit);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed",
+          rateLimitType: "five_hour",
+          utilization: 50,
+          resetsAt: 1_700_000_000,
+        },
+        session_id: "sdk-session-allowed",
+        uuid: "rate-limit-allowed",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-allowed",
+        uuid: "result-allowed",
+      } as unknown as SDKMessage);
+
+      yield* Fiber.join(runtimeEventsFiber);
+      assert.deepEqual(recordedLimits, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("continues the turn when the account-limit write fails", () => {
+    const harness = makeHarness({
+      recordAccountLimit: () =>
+        Effect.fail(
+          new PersistenceSqlError({ operation: "ClaudeAdapter.test", cause: "write failed" }),
+        ),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+        },
+        session_id: "sdk-session-limit-failure",
+        uuid: "rate-limit-write-failure",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-limit-failure",
+        uuid: "result-limit-failure",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.equal(runtimeEvents.at(-1)?.type, "turn.completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("records a text-sourced account limit for untagged usage-limit text", () => {
+    const recordedLimits: Array<ProviderAccountLimit> = [];
+    const instanceId = ProviderInstanceId.make("claude-work");
+    const harness = makeHarness({
+      instanceId,
+      recordAccountLimit: (limit) =>
+        Effect.sync(() => {
+          recordedLimits.push(limit);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEventsFiber } = yield* startFailureScoringTurn(adapter);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-text-limit",
+        uuid: "assistant-text-limit-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-text-limit-1",
+          model: "",
+          content: [{ type: "text", text: "Claude AI usage limit reached|1787207826" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "",
+        num_turns: 1,
+        stop_reason: null,
+        session_id: "sdk-session-text-limit",
+        uuid: "result-text-limit",
+      } as unknown as SDKMessage);
+
+      yield* Fiber.join(runtimeEventsFiber);
+      assert.deepEqual(
+        recordedLimits.map(({ detectedAt: _, ...limit }) => limit),
+        [
+          {
+            providerInstanceId: instanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            kind: "spend-limit",
+            resetsAt: null,
+            resetsAtEstimated: false,
+            source: "assistant_text",
+            detail: "Claude AI usage limit reached|1787207826",
+          },
+        ],
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

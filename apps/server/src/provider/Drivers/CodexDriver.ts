@@ -41,10 +41,13 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
   checkCodexProviderStatus,
+  type CodexAppServerProviderSnapshot,
   makePendingCodexProvider,
   probeCodexAppServerProvider,
 } from "../Layers/CodexProvider.ts";
@@ -90,7 +93,9 @@ export type CodexDriverEnv =
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | Path.Path
+  | ProviderAccountLimitsStore
   | ProviderEventLoggers
+  | ProviderUsageLedgerStore
   | ServerConfig
   | ServerSettingsService;
 
@@ -130,6 +135,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const usageLedger = yield* ProviderUsageLedgerStore;
+      const accountLimits = yield* ProviderAccountLimitsStore;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(config);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
@@ -170,6 +177,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         instanceId,
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        recordUsageSamples: usageLedger.recordSamples,
+        recordAccountLimit: accountLimits.recordLimit,
       });
       const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
 
@@ -184,10 +193,33 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // outside, and the poller stamps `observedAt` at poll time, so replaying
       // a stale sample would claim a freshness it does not have.
       const usageReadings = yield* Ref.make<ReadonlyArray<ProviderUsageReading>>([]);
+      // The same successful probe also settles the durable limit state: a
+      // non-null limit is recorded, a null limit clears the instance's rows
+      // because a clean probe proves the account answers again. Non-success
+      // exits leave the store untouched — an unreachable app-server says
+      // nothing about the account. Both writes are fail-soft; limit
+      // persistence must never fail the snapshot refresh.
+      const settleAccountLimit = (limit: CodexAppServerProviderSnapshot["limit"]) =>
+        (limit !== null
+          ? accountLimits.recordLimit({
+              ...limit,
+              providerInstanceId: instanceId,
+              driver: DRIVER_KIND,
+            })
+          : accountLimits.clearForInstance({ providerInstanceId: instanceId })
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("codex.account-limit.record-failed", { cause }),
+          ),
+        );
       const probeAndCaptureUsage: typeof probeCodexAppServerProvider = (input) =>
         probeCodexAppServerProvider(input).pipe(
           Effect.onExit((exit) =>
-            Ref.set(usageReadings, Exit.isSuccess(exit) ? exit.value.usage : []),
+            Exit.isSuccess(exit)
+              ? Ref.set(usageReadings, exit.value.usage).pipe(
+                  Effect.andThen(settleAccountLimit(exit.value.limit)),
+                )
+              : Ref.set(usageReadings, []),
           ),
         );
 

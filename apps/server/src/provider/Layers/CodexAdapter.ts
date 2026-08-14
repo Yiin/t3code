@@ -17,6 +17,7 @@ import {
   ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderRequestKind,
+  type ProviderUsageSample,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   RuntimeItemId,
@@ -54,6 +55,9 @@ import {
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
+import type { ProviderAccountLimitsStoreShape } from "../../persistence/Services/ProviderAccountLimits.ts";
+import type { ProviderUsageLedgerStoreShape } from "../../persistence/Services/ProviderUsageLedger.ts";
+import { classifyCodexRateLimits, normalizeEpochResetsAt } from "../providerLimitSignal.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -104,6 +108,14 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /**
+   * Optional persistence ports for `account/rateLimits/updated` push
+   * notifications, mirroring the Claude adapter's ports. Optional on purpose:
+   * test layers build the adapter without persistence, and a missing port
+   * only skips the write, never the runtime event.
+   */
+  readonly recordUsageSamples?: ProviderUsageLedgerStoreShape["recordSamples"];
+  readonly recordAccountLimit?: ProviderAccountLimitsStoreShape["recordLimit"];
 }
 
 interface CodexAdapterSessionContext {
@@ -1823,6 +1835,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
+            yield* recordRateLimitNotification(event);
             const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
@@ -2055,6 +2068,86 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return;
     }
     yield* nativeEventLogger.write(event, event.threadId);
+  });
+
+  /**
+   * `account/rateLimits/updated` is a sparse rolling update, so only the
+   * windows the payload actually carries become usage samples, and the same
+   * snapshot is classified for a durable account-limit row. Both writes are
+   * fail-soft: telemetry persistence must never stall the event stream, and
+   * the runtime event mapping stays untouched either way.
+   */
+  const recordRateLimitNotification = Effect.fn("recordCodexRateLimitNotification")(function* (
+    event: ProviderEvent,
+  ) {
+    const recordUsageSamples = options?.recordUsageSamples;
+    const recordAccountLimit = options?.recordAccountLimit;
+    if (
+      event.method !== "account/rateLimits/updated" ||
+      (recordUsageSamples === undefined && recordAccountLimit === undefined)
+    ) {
+      return;
+    }
+    const payload = readPayload(
+      EffectCodexSchema.V2AccountRateLimitsUpdatedNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return;
+    }
+
+    if (recordUsageSamples) {
+      const samples: Array<ProviderUsageSample> = [];
+      const addWindow = (
+        window: Extract<ProviderUsageSample["window"], "primary" | "secondary">,
+        value:
+          | EffectCodexSchema.V2AccountRateLimitsUpdatedNotification__RateLimitWindow
+          | null
+          | undefined,
+      ) => {
+        if (
+          !value ||
+          typeof value.usedPercent !== "number" ||
+          !Number.isFinite(value.usedPercent)
+        ) {
+          return;
+        }
+        samples.push({
+          providerInstanceId: boundInstanceId,
+          window,
+          utilization: value.usedPercent,
+          resetsAt: normalizeEpochResetsAt(value.resetsAt),
+          source: "codex.app_server.notification",
+          observedAt: event.createdAt,
+        });
+      };
+      addWindow("primary", payload.rateLimits.primary);
+      addWindow("secondary", payload.rateLimits.secondary);
+      if (samples.length > 0) {
+        yield* recordUsageSamples({ samples }).pipe(
+          Effect.catch((cause) => Effect.logWarning("codex.usage-ledger.record-failed", { cause })),
+        );
+      }
+    }
+
+    if (recordAccountLimit) {
+      const limitSignal = classifyCodexRateLimits(
+        payload.rateLimits,
+        event.createdAt,
+        "codex.app_server.notification",
+      );
+      if (limitSignal) {
+        yield* recordAccountLimit({
+          ...limitSignal,
+          providerInstanceId: boundInstanceId,
+          driver: PROVIDER,
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("codex.account-limit.record-failed", { cause }),
+          ),
+        );
+      }
+    }
   });
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
