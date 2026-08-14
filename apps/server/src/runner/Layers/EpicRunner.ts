@@ -548,6 +548,15 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       providerInventory: Option.isNone(providerRegistry)
         ? null
         : { getProviders: providerRegistry.value.getProviders },
+      // Fail-soft: an unreadable ledger only costs a degradation its reset
+      // time, so the record falls back to the flat TTL.
+      providerUsage: Option.isNone(providerUsageLedger)
+        ? null
+        : {
+            listUsageSamples: providerUsageLedger.value.listAll.pipe(
+              Effect.orElseSucceed(() => []),
+            ),
+          },
       // The tier-walking adapter lands separately (t3code-pg7): until then
       // every dispatch stays on the run-level selection.
       roleSelection: null,

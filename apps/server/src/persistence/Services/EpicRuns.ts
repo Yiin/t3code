@@ -259,6 +259,8 @@ export const EpicProviderDegradation = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   failureReason: Schema.String,
   degradedAt: IsoDateTime,
+  /** The provider's own reset time; NULL leaves liveness to the flat TTL. */
+  resetsAt: Schema.NullOr(IsoDateTime),
 });
 export type EpicProviderDegradation = typeof EpicProviderDegradation.Type;
 
@@ -270,6 +272,8 @@ export type GetEpicProviderDegradationInput = typeof GetEpicProviderDegradationI
 export const ClearExpiredEpicProviderDegradationInput = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   cutoff: IsoDateTime,
+  /** For a row with a reset time; a row without one expires by `cutoff`. */
+  now: IsoDateTime,
 });
 export type ClearExpiredEpicProviderDegradationInput =
   typeof ClearExpiredEpicProviderDegradationInput.Type;

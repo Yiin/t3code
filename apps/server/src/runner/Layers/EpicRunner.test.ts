@@ -4270,11 +4270,13 @@ describe("EpicRunner", () => {
       providerInstanceId: claudeSelection.instanceId,
       failureReason: "provider-error:spend-limit",
       degradedAt: NOW,
+      resetsAt: null,
     });
     harness.store.degradations.set(codexInstanceId, {
       providerInstanceId: codexInstanceId,
       failureReason: "provider-error:auth",
       degradedAt: NOW,
+      resetsAt: null,
     });
 
     return Effect.gen(function* () {
@@ -4306,6 +4308,7 @@ describe("EpicRunner", () => {
       providerInstanceId: claudeSelection.instanceId,
       failureReason: "provider-error:spend-limit",
       degradedAt: NOW,
+      resetsAt: null,
     });
 
     return Effect.gen(function* () {
@@ -4348,6 +4351,7 @@ describe("EpicRunner", () => {
       providerInstanceId: claudeSelection.instanceId,
       failureReason: "provider-error:spend-limit",
       degradedAt: "2020-01-01T00:00:00.000Z",
+      resetsAt: null,
     });
 
     return Effect.gen(function* () {
@@ -4392,11 +4396,13 @@ describe("EpicRunner", () => {
         providerInstanceId: claudeSelection.instanceId,
         failureReason: "provider-error:spend-limit",
         degradedAt,
+        resetsAt: null,
       });
       harness.store.degradations.set(codexInstanceId, {
         providerInstanceId: codexInstanceId,
         failureReason: "provider-error:rate-limit",
         degradedAt,
+        resetsAt: null,
       });
       const runner = yield* EpicRunner;
       const run = yield* runner.launchRun({
@@ -4435,6 +4441,7 @@ describe("EpicRunner", () => {
         providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
         failureReason: "provider-error:spend-limit",
         degradedAt,
+        resetsAt: null,
       });
       const runner = yield* EpicRunner;
       const run = yield* runner.launchRun({
@@ -4479,6 +4486,7 @@ describe("EpicRunner", () => {
           providerInstanceId: instanceId,
           failureReason: "provider-error:rate-limit",
           degradedAt,
+          resetsAt: null,
         });
       }
       const runner = yield* EpicRunner;
@@ -4520,6 +4528,7 @@ describe("EpicRunner", () => {
           providerInstanceId: instanceId,
           failureReason: "provider-error:rate-limit",
           degradedAt,
+          resetsAt: null,
         });
       }
       const runner = yield* EpicRunner;
@@ -4551,9 +4560,45 @@ describe("EpicRunner", () => {
       providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
       failureReason: "provider-error:spend-limit",
       degradedAt: "2020-01-01T00:00:00.000Z",
+      resetsAt: null,
     });
 
     return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      assert.deepStrictEqual(
+        harness.commandsOfType("thread.turn.start")[0]?.modelSelection,
+        CLAUDE_WORK_SELECTION,
+      );
+      assert.isFalse(harness.store.degradations.has(CLAUDE_WORK_SELECTION.instanceId));
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("clears a degradation whose resetsAt passed and launches on the first chain hop", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [
+        provider("claude-work", "claudeAgent", "claude-sonnet-5"),
+        provider("claude-personal", "claudeAgent", "claude-sonnet-5"),
+      ],
+      epicRolePolicy: iterationWorkerPolicy([CLAUDE_WORK_SELECTION, CLAUDE_PERSONAL_SELECTION]),
+    });
+
+    return Effect.gen(function* () {
+      // Still inside the default one-hour TTL, so only the passed reset time
+      // can retire the row. A short window reopens before the TTL does.
+      harness.store.degradations.set(CLAUDE_WORK_SELECTION.instanceId, {
+        providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
+        failureReason: "provider-error:rate-limit",
+        degradedAt: DateTime.formatIso(yield* DateTime.now),
+        resetsAt: "2020-01-01T00:00:00.000Z",
+      });
       const runner = yield* EpicRunner;
       const run = yield* runner.launchRun({
         epicId: "epic-1",
@@ -4585,6 +4630,7 @@ describe("EpicRunner", () => {
         providerInstanceId: CLAUDE_WORK_SELECTION.instanceId,
         failureReason: "provider-error:spend-limit",
         degradedAt,
+        resetsAt: null,
       });
       const runner = yield* EpicRunner;
       const run = yield* runner.startRun({

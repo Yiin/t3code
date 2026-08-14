@@ -74,6 +74,7 @@ import type { ProviderDegradationJournalShape, RunJournalShape } from "./ports/R
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
 import type { IterationWorkspace, PoolRunContext, WorkspaceShape } from "./ports/Workspace.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
+import { providerDegradationResetsAt, type ProviderUsageReadShape } from "./providerDegradation.ts";
 import { resolveEpicProviderFallback } from "./providerFallback.ts";
 import { RUN_STALL_WARN_INTERVAL_MS, evaluateRunStall, type RunWait } from "./runStall.ts";
 import {
@@ -584,6 +585,11 @@ export interface ParallelEpicLoopPorts {
   readonly vcs: PoolVcsShape;
   /** `null` disables provider fallback, mirroring an absent registry. */
   readonly providerInventory: ProviderInventoryShape | null;
+  /**
+   * Absent or `null` means no usage ledger: a degradation then carries no
+   * reset time and lives by the TTL alone.
+   */
+  readonly providerUsage?: ProviderUsageReadShape | null;
   /**
    * `null` keeps every dispatch on the run-level selection, exactly as it was
    * before per-role tiers existed.
@@ -2044,11 +2050,21 @@ export const runParallelEpicLoop = (
           // because the first application already moved the run row there.
           if (current.modelSelection.instanceId === pending.to.instanceId) return false;
           const degradedAt = yield* nowIso;
+          // Fail-soft by construction: the port never fails, and its absence
+          // only costs the record its reset time, never the fallback itself.
+          const samples =
+            ports.providerUsage == null ? [] : yield* ports.providerUsage.listUsageSamples;
           yield* ports.journal
             .upsertProviderDegradation({
               providerInstanceId: pending.from.instanceId,
               failureReason: pending.failureReason,
               degradedAt,
+              resetsAt: providerDegradationResetsAt({
+                failureReason: pending.failureReason,
+                samples,
+                providerInstanceId: pending.from.instanceId,
+                now: degradedAt,
+              }),
             })
             .pipe(Effect.mapError(journalError("upsertProviderDegradation")));
           yield* saveRun({

@@ -259,6 +259,7 @@ describe("FileRunJournal", () => {
           providerInstanceId: ProviderInstanceId.make("claude-work"),
           failureReason: "provider-error:rate-limit",
           degradedAt: "2026-08-07T10:00:00.000Z",
+          resetsAt: "2026-08-07T15:00:00.000Z",
         });
 
         // A later run of the same epic reads what the first one recorded.
@@ -267,6 +268,7 @@ describe("FileRunJournal", () => {
           "claude-work": {
             failureReason: "provider-error:rate-limit",
             degradedAt: "2026-08-07T10:00:00.000Z",
+            resetsAt: "2026-08-07T15:00:00.000Z",
           },
         });
 

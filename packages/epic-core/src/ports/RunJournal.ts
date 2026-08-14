@@ -227,6 +227,8 @@ export interface ProviderDegradationJournalShape {
     readonly providerInstanceId: ProviderInstanceId;
     readonly failureReason: string;
     readonly degradedAt: string;
+    /** The provider's own reset time; `null` leaves liveness to the TTL. */
+    readonly resetsAt: string | null;
   }) => Effect.Effect<void, RunJournalError>;
   readonly clearProviderDegradation: (input: {
     readonly providerInstanceId: ProviderInstanceId;

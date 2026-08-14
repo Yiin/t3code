@@ -8,7 +8,13 @@
  * SQLite store at launch, the terminal cook CLI against a workspace-scoped
  * file. Keeping the walk here keeps the two verdicts identical.
  */
-import type { ModelSelection, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
+import type {
+  ModelSelection,
+  ProviderInstanceId,
+  ProviderUsageSample,
+  ServerProvider,
+} from "@t3tools/contracts";
+import type * as Effect from "effect/Effect";
 
 import {
   resolveEpicProviderChainFallback,
@@ -21,17 +27,66 @@ export interface ProviderDegradationRecord {
   readonly failureReason: string;
   /** ISO-8601, when the failure was recorded. */
   readonly degradedAt: string;
+  /**
+   * ISO-8601, when the provider said the exhausted window reopens. Optional
+   * because a record written by an older build has no value, and `null`
+   * because the harness may report no reset time even for a limit failure.
+   */
+  readonly resetsAt?: string | null | undefined;
 }
 
 /**
  * Whether a record still counts, given `cutoff` = now minus the TTL.
  *
- * Both sides are ISO-8601 in UTC, so a string compare is a time compare.
+ * A record carrying the provider's own reset time lives exactly until that
+ * time: a five-hour window stays blocked past the TTL, and a short window
+ * reopens before it. Only a record without one falls back to the TTL rule.
+ * All sides are ISO-8601 in UTC, so a string compare is a time compare.
  */
 export const isLiveProviderDegradation = (
   record: ProviderDegradationRecord,
   cutoff: string,
-): boolean => record.degradedAt > cutoff;
+  now: string,
+): boolean => (record.resetsAt != null ? record.resetsAt > now : record.degradedAt > cutoff);
+
+/**
+ * Fail-soft read of the recorded usage windows, for stamping a degradation
+ * with the provider's own reset time. Never fails: an unreadable ledger must
+ * cost the record its reset time, not the run its fallback.
+ */
+export interface ProviderUsageReadShape {
+  readonly listUsageSamples: Effect.Effect<ReadonlyArray<ProviderUsageSample>>;
+}
+
+/** Failures that heal on a clock. Auth and unavailable do not. */
+const RESET_ELIGIBLE_FAILURES: ReadonlySet<string> = new Set([
+  "provider-error:spend-limit",
+  "provider-error:rate-limit",
+]);
+
+/**
+ * The reset time to persist on a degradation record, or `null` for the TTL.
+ *
+ * Only a limit failure gets one, because only a limit heals on a clock. The
+ * window that decides is the failing instance's worst live one — the same
+ * rule `maxLiveUtilizationByInstance` applies — and a worst window without a
+ * reset time means the TTL, never an invented timestamp.
+ */
+export const providerDegradationResetsAt = (input: {
+  readonly failureReason: string;
+  readonly samples: ReadonlyArray<ProviderUsageSample>;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly now: string;
+}): string | null => {
+  if (!RESET_ELIGIBLE_FAILURES.has(input.failureReason)) return null;
+  let worst: ProviderUsageSample | null = null;
+  for (const sample of input.samples) {
+    if (sample.providerInstanceId !== input.providerInstanceId) continue;
+    if (sample.resetsAt !== null && sample.resetsAt <= input.now) continue;
+    if (worst === null || sample.utilization > worst.utilization) worst = sample;
+  }
+  return worst?.resetsAt ?? null;
+};
 
 /** One rerouting step, carrying the failure that caused it. */
 export interface ProviderDegradationHop {

@@ -53,7 +53,12 @@ const encodeIterationJson = Schema.encodeEffect(Schema.fromJsonString(PersistedE
 /** One provider the pool loop parked, keyed by provider instance id. */
 const ProviderDegradations = Schema.Record(
   Schema.String,
-  Schema.Struct({ failureReason: Schema.String, degradedAt: Schema.String }),
+  Schema.Struct({
+    failureReason: Schema.String,
+    degradedAt: Schema.String,
+    // Optional so a file written by an older build still decodes.
+    resetsAt: Schema.optional(Schema.NullOr(Schema.String)),
+  }),
 );
 const decodeProviderDegradations = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ProviderDegradations),
@@ -394,6 +399,7 @@ export const makeProviderDegradations = (options: { readonly directory: string }
             [input.providerInstanceId]: {
               failureReason: input.failureReason,
               degradedAt: input.degradedAt,
+              resetsAt: input.resetsAt,
             },
           });
         }).pipe(Effect.mapError(journalError("upsertProviderDegradation")));

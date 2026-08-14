@@ -45,14 +45,15 @@ export const resolveCookModelSelection = (input: {
 }): Effect.Effect<DegradationAwareSelection, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const recorded = yield* input.readProviderDegradations;
+    const checkedAt = yield* DateTime.now;
+    const now = DateTime.formatIso(checkedAt);
     const cutoff = DateTime.formatIso(
-      DateTime.subtractDuration(
-        yield* DateTime.now,
-        Duration.millis(input.providerDegradationTtlMs),
-      ),
+      DateTime.subtractDuration(checkedAt, Duration.millis(input.providerDegradationTtlMs)),
     );
     const live = new Map<string, ProviderDegradationRecord>(
-      Object.entries(recorded).filter(([, record]) => isLiveProviderDegradation(record, cutoff)),
+      Object.entries(recorded).filter(([, record]) =>
+        isLiveProviderDegradation(record, cutoff, now),
+      ),
     );
     // No live record means nothing to route around, and `getProviders` shells
     // out once per candidate binary, so skip the probe entirely.

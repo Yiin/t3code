@@ -38,6 +38,7 @@ import {
 } from "@t3tools/epic-core/ports/EpicRunLock";
 import { epicRoleFallbackChain, type EpicFallbackHop } from "@t3tools/epic-core/providerFallback";
 import {
+  isLiveProviderDegradation,
   resolveDegradationAwareSelection,
   type ProviderDegradationRecord,
 } from "@t3tools/epic-core/providerDegradation";
@@ -443,24 +444,29 @@ export const makeEpicRunnerLaunch = (deps: {
    * The live degradation row for one instance, clearing an expired one first.
    *
    * `null` means "usable": either nothing is recorded, or what was recorded
-   * has aged past the TTL and has just been deleted.
+   * has passed its own reset time or aged past the TTL and has just been
+   * deleted.
    */
   const liveProviderDegradation = (input: {
     readonly providerInstanceId: ModelSelection["instanceId"];
     readonly cutoff: string;
+    readonly now: string;
   }) =>
     Effect.gen(function* () {
       const degradation = yield* store
         .getProviderDegradation({ providerInstanceId: input.providerInstanceId })
         .pipe(Effect.mapError(storeError("getProviderDegradation")));
       if (Option.isNone(degradation)) return null;
-      if (degradation.value.degradedAt > input.cutoff) return degradation.value;
+      if (isLiveProviderDegradation(degradation.value, input.cutoff, input.now)) {
+        return degradation.value;
+      }
       // The predicate is repeated by SQL. A newer replacement written
       // after this read is therefore safe from this cleanup.
       yield* store
         .clearExpiredProviderDegradation({
           providerInstanceId: input.providerInstanceId,
           cutoff: input.cutoff,
+          now: input.now,
         })
         .pipe(Effect.mapError(storeError("clearExpiredProviderDegradation")));
       return null;
@@ -495,6 +501,7 @@ export const makeEpicRunnerLaunch = (deps: {
       if (Option.isNone(providerRegistry)) return defaultSelection;
       const providers = yield* providerRegistry.value.getProviders;
       const checkedAt = yield* DateTime.now;
+      const now = DateTime.formatIso(checkedAt);
       const cutoff = DateTime.formatIso(
         DateTime.subtractDuration(checkedAt, Duration.millis(providerDegradationTtlMs)),
       );
@@ -512,7 +519,7 @@ export const makeEpicRunnerLaunch = (deps: {
       }
       const degradations = new Map<ModelSelection["instanceId"], ProviderDegradationRecord>();
       for (const providerInstanceId of candidates) {
-        const record = yield* liveProviderDegradation({ providerInstanceId, cutoff });
+        const record = yield* liveProviderDegradation({ providerInstanceId, cutoff, now });
         if (record !== null) degradations.set(providerInstanceId, record);
       }
 

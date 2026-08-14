@@ -254,11 +254,15 @@ export const makeMemoryStore = (upsertDelayMs = 0, appendIterationDelayMs = 0) =
       }),
     clearProviderDegradation: ({ providerInstanceId }) =>
       Effect.sync(() => void degradations.delete(providerInstanceId)),
-    clearExpiredProviderDegradation: ({ providerInstanceId, cutoff }) =>
+    clearExpiredProviderDegradation: ({ providerInstanceId, cutoff, now }) =>
       Effect.sync(() => {
         const value = degradations.get(providerInstanceId);
-        if (value !== undefined && value.degradedAt <= cutoff)
-          degradations.delete(providerInstanceId);
+        if (value === undefined) return;
+        // Mirrors the store's SQL: a reset time decides on its own clock,
+        // and only a row without one expires by the TTL cutoff.
+        const expired =
+          value.resetsAt !== null ? value.resetsAt <= now : value.degradedAt <= cutoff;
+        if (expired) degradations.delete(providerInstanceId);
       }),
     initializeMergeState: (input) =>
       Effect.sync(() => {

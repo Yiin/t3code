@@ -30,6 +30,7 @@ import type {
   RunJournalShape,
 } from "./ports/RunJournal.ts";
 import type { RepoRef, VcsShape } from "./ports/Vcs.ts";
+import { providerDegradationResetsAt, type ProviderUsageReadShape } from "./providerDegradation.ts";
 import { resolveEpicProviderFallback } from "./providerFallback.ts";
 import { siblingRuleSequential } from "./siblings.ts";
 
@@ -68,6 +69,11 @@ export interface SequentialEpicLoopPorts {
    * itself, which is how this loop behaved before the record existed.
    */
   readonly providerDegradation?: ProviderDegradationJournalShape | null;
+  /**
+   * Absent or `null` means no usage ledger: a degradation then carries no
+   * reset time and lives by the TTL alone.
+   */
+  readonly providerUsage?: ProviderUsageReadShape | null;
   readonly events: RunEventsShape;
   readonly providerInventory: ProviderInventoryShape;
   /**
@@ -865,10 +871,19 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         if (fallbackSelection !== null && ports.providerDegradation != null) {
           // Recorded against the instance that failed, not the run, so the
           // next run of this epic enters the chain past it.
+          const degradedAt = now();
+          const samples =
+            ports.providerUsage == null ? [] : yield* ports.providerUsage.listUsageSamples;
           yield* ports.providerDegradation.upsertProviderDegradation({
             providerInstanceId: dispatchSelection.instanceId,
             failureReason: outcome.failureReason,
-            degradedAt: now(),
+            degradedAt,
+            resetsAt: providerDegradationResetsAt({
+              failureReason: outcome.failureReason,
+              samples,
+              providerInstanceId: dispatchSelection.instanceId,
+              now: degradedAt,
+            }),
           });
         }
       }

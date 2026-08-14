@@ -155,11 +155,13 @@ describe("EpicRunStore", () => {
         providerInstanceId,
         failureReason: "provider-error:spend-limit",
         degradedAt: "2026-07-27T00:00:00.000Z",
+        resetsAt: null,
       });
       yield* store.upsertProviderDegradation({
         providerInstanceId,
         failureReason: "provider-error:rate-limit",
         degradedAt: "2026-07-27T02:00:00.000Z",
+        resetsAt: "2026-07-27T05:00:00.000Z",
       });
 
       const replaced = yield* store.getProviderDegradation({ providerInstanceId });
@@ -167,12 +169,37 @@ describe("EpicRunStore", () => {
         providerInstanceId,
         failureReason: "provider-error:rate-limit",
         degradedAt: "2026-07-27T02:00:00.000Z",
+        resetsAt: "2026-07-27T05:00:00.000Z",
+      });
+
+      // A reset time in the future keeps the row past the TTL cutoff.
+      yield* store.clearExpiredProviderDegradation({
+        providerInstanceId,
+        cutoff: "2026-07-27T03:00:00.000Z",
+        now: "2026-07-27T04:00:00.000Z",
+      });
+      assert.isTrue(Option.isSome(yield* store.getProviderDegradation({ providerInstanceId })));
+
+      // At the reset time the row is dead even though degraded_at outlives the cutoff.
+      yield* store.clearExpiredProviderDegradation({
+        providerInstanceId,
+        cutoff: "2026-07-27T01:00:00.000Z",
+        now: "2026-07-27T05:00:00.000Z",
+      });
+      assert.isTrue(Option.isNone(yield* store.getProviderDegradation({ providerInstanceId })));
+
+      yield* store.upsertProviderDegradation({
+        providerInstanceId,
+        failureReason: "provider-error:rate-limit",
+        degradedAt: "2026-07-27T02:00:00.000Z",
+        resetsAt: null,
       });
 
       // Cleanup based on an older observation must preserve the replacement.
       yield* store.clearExpiredProviderDegradation({
         providerInstanceId,
         cutoff: "2026-07-27T01:00:00.000Z",
+        now: "2026-07-27T05:00:00.000Z",
       });
       assert.isTrue(Option.isSome(yield* store.getProviderDegradation({ providerInstanceId })));
 
@@ -180,6 +207,7 @@ describe("EpicRunStore", () => {
       yield* store.clearExpiredProviderDegradation({
         providerInstanceId,
         cutoff: "2026-07-27T02:00:00.000Z",
+        now: "2026-07-27T05:00:00.000Z",
       });
       assert.isTrue(Option.isNone(yield* store.getProviderDegradation({ providerInstanceId })));
 
@@ -187,6 +215,7 @@ describe("EpicRunStore", () => {
         providerInstanceId,
         failureReason: "provider-error:auth",
         degradedAt: "2026-07-27T03:00:00.000Z",
+        resetsAt: null,
       });
       yield* store.clearProviderDegradation({ providerInstanceId });
       assert.isTrue(Option.isNone(yield* store.getProviderDegradation({ providerInstanceId })));

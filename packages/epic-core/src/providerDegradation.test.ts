@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   isLiveProviderDegradation,
+  providerDegradationResetsAt,
   resolveDegradationAwareSelection,
 } from "./providerDegradation.ts";
 
@@ -51,14 +52,118 @@ const degraded = (...instanceIds: ReadonlyArray<string>) => {
 
 describe("isLiveProviderDegradation", () => {
   const record = { failureReason: "provider-error:rate-limit", degradedAt: "2026-08-13T10:00:00Z" };
+  const now = "2026-08-13T12:00:00Z";
 
   it("counts a record newer than the cutoff", () => {
-    expect(isLiveProviderDegradation(record, "2026-08-13T09:00:00Z")).toBe(true);
+    expect(isLiveProviderDegradation(record, "2026-08-13T09:00:00Z", now)).toBe(true);
   });
 
   it("retires a record at or older than the cutoff", () => {
-    expect(isLiveProviderDegradation(record, "2026-08-13T10:00:00Z")).toBe(false);
-    expect(isLiveProviderDegradation(record, "2026-08-13T11:00:00Z")).toBe(false);
+    expect(isLiveProviderDegradation(record, "2026-08-13T10:00:00Z", now)).toBe(false);
+    expect(isLiveProviderDegradation(record, "2026-08-13T11:00:00Z", now)).toBe(false);
+  });
+
+  it("keeps a record live by resetsAt even when degradedAt is past the cutoff", () => {
+    const fiveHourWindow = { ...record, resetsAt: "2026-08-13T15:00:00Z" };
+    expect(isLiveProviderDegradation(fiveHourWindow, "2026-08-13T11:00:00Z", now)).toBe(true);
+  });
+
+  it("retires a record by resetsAt even while degradedAt is still inside the TTL", () => {
+    const shortWindow = { ...record, resetsAt: "2026-08-13T11:00:00Z" };
+    expect(isLiveProviderDegradation(shortWindow, "2026-08-13T09:00:00Z", now)).toBe(false);
+    expect(isLiveProviderDegradation({ ...record, resetsAt: now }, "2026-08-13T09:00:00Z", now)) //
+      .toBe(false);
+  });
+
+  it("keeps exact TTL behaviour for a null resetsAt", () => {
+    const noReset = { ...record, resetsAt: null };
+    expect(isLiveProviderDegradation(noReset, "2026-08-13T09:00:00Z", now)).toBe(true);
+    expect(isLiveProviderDegradation(noReset, "2026-08-13T10:00:00Z", now)).toBe(false);
+  });
+});
+
+describe("providerDegradationResetsAt", () => {
+  const now = "2026-08-13T12:00:00Z";
+  const sample = (
+    instanceId: string,
+    utilization: number,
+    resetsAt: string | null,
+  ): import("@t3tools/contracts").ProviderUsageSample => ({
+    providerInstanceId: ProviderInstanceId.make(instanceId),
+    window: "five_hour",
+    utilization,
+    resetsAt,
+    source: "claude.sdk.get_usage",
+    observedAt: now,
+  });
+  const failing = ProviderInstanceId.make("claude-work");
+
+  it("stores the worst live window's reset time for a limit failure", () => {
+    expect(
+      providerDegradationResetsAt({
+        failureReason: "provider-error:rate-limit",
+        samples: [
+          sample("claude-work", 60, "2026-08-13T13:00:00Z"),
+          sample("claude-work", 100, "2026-08-13T17:00:00Z"),
+          sample("codex-personal", 100, "2026-08-13T23:00:00Z"),
+        ],
+        providerInstanceId: failing,
+        now,
+      }),
+    ).toBe("2026-08-13T17:00:00Z");
+  });
+
+  it("drops a window whose reset time has passed", () => {
+    expect(
+      providerDegradationResetsAt({
+        failureReason: "provider-error:spend-limit",
+        samples: [
+          sample("claude-work", 100, "2026-08-13T11:00:00Z"),
+          sample("claude-work", 80, "2026-08-13T16:00:00Z"),
+        ],
+        providerInstanceId: failing,
+        now,
+      }),
+    ).toBe("2026-08-13T16:00:00Z");
+  });
+
+  it("never invents a reset time: a worst window without one means null", () => {
+    expect(
+      providerDegradationResetsAt({
+        failureReason: "provider-error:spend-limit",
+        samples: [
+          sample("claude-work", 100, null),
+          sample("claude-work", 50, "2026-08-13T16:00:00Z"),
+        ],
+        providerInstanceId: failing,
+        now,
+      }),
+    ).toBeNull();
+    expect(
+      providerDegradationResetsAt({
+        failureReason: "provider-error:rate-limit",
+        samples: [],
+        providerInstanceId: failing,
+        now,
+      }),
+    ).toBeNull();
+  });
+
+  it("gives auth and unavailable failures no reset time", () => {
+    for (const failureReason of [
+      "provider-error:auth",
+      "provider-error:unavailable",
+      "provider-error",
+    ]) {
+      expect(
+        providerDegradationResetsAt({
+          failureReason,
+          samples: [sample("claude-work", 100, "2026-08-13T17:00:00Z")],
+          providerInstanceId: failing,
+          now,
+        }),
+      ).toBeNull();
+    }
   });
 });
 

@@ -539,18 +539,20 @@ const makeEpicRunStore = Effect.gen(function* () {
   const upsertProviderDegradationRow = SqlSchema.void({
     Request: EpicProviderDegradation,
     execute: (row) => sql`
-      INSERT INTO epic_provider_degradations (provider_instance_id, failure_reason, degraded_at)
-      VALUES (${row.providerInstanceId}, ${row.failureReason}, ${row.degradedAt})
+      INSERT INTO epic_provider_degradations (provider_instance_id, failure_reason, degraded_at, resets_at)
+      VALUES (${row.providerInstanceId}, ${row.failureReason}, ${row.degradedAt}, ${row.resetsAt})
       ON CONFLICT (provider_instance_id) DO UPDATE SET
         failure_reason = excluded.failure_reason,
-        degraded_at = excluded.degraded_at
+        degraded_at = excluded.degraded_at,
+        resets_at = excluded.resets_at
     `,
   });
 
   const providerDegradationColumns = sql.literal(`
     provider_instance_id AS "providerInstanceId",
     failure_reason AS "failureReason",
-    degraded_at AS "degradedAt"
+    degraded_at AS "degradedAt",
+    resets_at AS "resetsAt"
   `);
 
   const getProviderDegradationRow = SqlSchema.findOneOption({
@@ -572,9 +574,15 @@ const makeEpicRunStore = Effect.gen(function* () {
 
   const clearExpiredProviderDegradationRow = SqlSchema.void({
     Request: ClearExpiredEpicProviderDegradationInput,
-    execute: ({ providerInstanceId, cutoff }) => sql`
+    // SQL twin of isLiveProviderDegradation: a reset time decides on its own
+    // clock; only a row without one expires by the TTL cutoff.
+    execute: ({ providerInstanceId, cutoff, now }) => sql`
       DELETE FROM epic_provider_degradations
-      WHERE provider_instance_id = ${providerInstanceId} AND degraded_at <= ${cutoff}
+      WHERE provider_instance_id = ${providerInstanceId}
+        AND CASE
+          WHEN resets_at IS NOT NULL THEN resets_at <= ${now}
+          ELSE degraded_at <= ${cutoff}
+        END
     `,
   });
 
