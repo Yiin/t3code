@@ -245,6 +245,11 @@ inside the config directory that created it.
   same `settings.json` directly, because the cook binary may not import server
   config or the database. Only the `claude` and `ccx` arms emit `--agents`
   (`TerminalAgentDispatch.ts`). Every other harness drops the field silently.
+- `t3 epic policy [--tier <id>] [--json]` prints the policy read-only, for
+  skills and scripts (`apps/server/src/cli/epicPolicy.ts`). It reads the same
+  settings file through the same two functions, and prints the shipped defaults
+  with exit 0 when the file is absent. `--tier` narrows every section to that
+  chain. There is no write surface; the Epics settings page owns editing.
 - A session that carries definitions stays in in-process Task mode
   (`subagentSpawn.ts`, reason `subagent-definitions`).
 - `epicRolePolicy` is an atomic settings key. A patch replaces the whole policy,
@@ -253,7 +258,8 @@ inside the config directory that created it.
 - A user-visible frontend change needs one integrated verification pass with
   `test-t3-app`, run by the worker itself. The run gate never replaces it.
 - Tests: `packages/epic-core/src/epicSubagents.test.ts`,
-  `apps/server/src/cli/epicCookSubagents.test.ts`, the `agents` cases in
+  `apps/server/src/cli/epicCookSubagents.test.ts`,
+  `apps/server/src/cli/epicPolicy.test.ts`, the `agents` cases in
   `apps/server/src/provider/Layers/ClaudeAdapter.test.ts`, and the `--agents`
   cases in `packages/epic-core/src/adapters/TerminalAgentDispatch.test.ts`.
 

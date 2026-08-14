@@ -36,6 +36,7 @@ import {
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import { cookCommand } from "./epicCook.ts";
+import { policyCommand } from "./epicPolicy.ts";
 
 const EPIC_CLI_PROBE_TIMEOUT = Duration.seconds(10);
 export const EPIC_CLI_WATCH_INTERVAL = Duration.seconds(1);
@@ -493,5 +494,6 @@ export const epicCommand = Command.make("epic").pipe(
     mutationCommand("resume"),
     mutationCommand("cancel"),
     watchCommand,
+    policyCommand,
   ]),
 );
