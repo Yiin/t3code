@@ -1,5 +1,5 @@
 import type { SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
-import type { ApiError, ProviderAuthError } from "@opencode-ai/sdk/v2";
+import type { ApiError, MessageAbortedError, ProviderAuthError } from "@opencode-ai/sdk/v2";
 import { assert, describe, it } from "@effect/vitest";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
@@ -289,6 +289,14 @@ describe("classifyOpenCodeMessageError", () => {
   it("returns null for a 500 ApiError and for a missing status code", () => {
     assert.isNull(classifyOpenCodeMessageError(apiError({ statusCode: 500 }), DETECTED_AT));
     assert.isNull(classifyOpenCodeMessageError(apiError({}), DETECTED_AT));
+  });
+
+  it("returns null for a MessageAbortedError", () => {
+    const error: MessageAbortedError = {
+      name: "MessageAbortedError",
+      data: { message: "request aborted" },
+    };
+    assert.isNull(classifyOpenCodeMessageError(error, DETECTED_AT));
   });
 });
 

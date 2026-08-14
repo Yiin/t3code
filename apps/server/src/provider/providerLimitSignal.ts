@@ -1,5 +1,5 @@
 import type { SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
-import type { ApiError, ProviderAuthError } from "@opencode-ai/sdk/v2";
+import type { AssistantMessage } from "@opencode-ai/sdk/v2";
 import type { ProviderAccountLimitSignal, ProviderLimitKind } from "@t3tools/contracts";
 import { detectProviderError } from "@t3tools/epic-core/ralphProtocol";
 import type { V2GetAccountRateLimitsResponse__RateLimitReachedType } from "effect-codex-app-server/schema";
@@ -229,7 +229,7 @@ const resetsAtFromHeaders = (
  * status is a request failure, not an account-level block.
  */
 export function classifyOpenCodeMessageError(
-  error: ApiError | ProviderAuthError,
+  error: NonNullable<AssistantMessage["error"]>,
   detectedAt: string,
 ): ProviderAccountLimitSignal | null {
   if (error.name === "ProviderAuthError") {
@@ -241,6 +241,9 @@ export function classifyOpenCodeMessageError(
       source: "opencode.api_error",
       detail: boundDetail(error.data.message),
     };
+  }
+  if (error.name !== "APIError") {
+    return null;
   }
   if (error.data.statusCode !== 429) {
     return null;

@@ -30,6 +30,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import type { ProviderAccountLimitsStoreShape } from "../../persistence/Services/ProviderAccountLimits.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { isSameDirectory } from "../../workspace/directoryPaths.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
@@ -57,6 +58,7 @@ import {
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
 import * as Option from "effect/Option";
+import { classifyOpenCodeMessageError } from "../providerLimitSignal.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 
@@ -264,6 +266,7 @@ export interface OpenCodeAdapterLiveOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly recordAccountLimit?: ProviderAccountLimitsStoreShape["recordLimit"];
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -608,6 +611,28 @@ export function makeOpenCodeAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const recordAccountLimit = Effect.fn("recordOpenCodeAccountLimit")(function* (
+      error: NonNullable<
+        Extract<OpenCodeSubscribedEvent, { type: "session.error" }>["properties"]["error"]
+      >,
+      detectedAt: string,
+    ) {
+      const signal = classifyOpenCodeMessageError(error, detectedAt);
+      if (!signal || !options?.recordAccountLimit) {
+        return;
+      }
+      yield* options
+        .recordAccountLimit({
+          ...signal,
+          providerInstanceId: boundInstanceId,
+          driver: PROVIDER,
+        })
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("opencode.account-limit.record-failed", { cause }),
+          ),
+        );
+    });
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) =>
@@ -850,6 +875,10 @@ export function makeOpenCodeAdapter(
         case "message.updated": {
           context.messageRoleById.set(event.properties.info.id, event.properties.info.role);
           if (event.properties.info.role === "assistant") {
+            const error = event.properties.info.error;
+            if (error) {
+              yield* recordAccountLimit(error, yield* nowIso);
+            }
             for (const part of context.partById.values()) {
               if (part.messageID !== event.properties.info.id) {
                 continue;
@@ -1147,7 +1176,12 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.error": {
-          const message = sessionErrorMessage(event.properties.error);
+          const detectedAt = yield* nowIso;
+          const error = event.properties.error;
+          if (error) {
+            yield* recordAccountLimit(error, detectedAt);
+          }
+          const message = sessionErrorMessage(error);
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
           yield* updateProviderSession(

@@ -1,5 +1,6 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { AssistantMessage } from "@opencode-ai/sdk/v2";
 import { it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -17,12 +18,14 @@ import { beforeEach } from "vite-plus/test";
 
 import {
   OpenCodeSettings,
+  type ProviderAccountLimit,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { ServerConfig } from "../../config.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
@@ -38,6 +41,7 @@ import {
   isSameOpenCodeDirectory,
   makeOpenCodeAdapter,
   mergeOpenCodeAssistantText,
+  type OpenCodeAdapterLiveOptions,
   OPENCODE_ADAPTER_CAPABILITIES,
 } from "./OpenCodeAdapter.ts";
 
@@ -70,6 +74,7 @@ const runtimeMock = {
     closeError: null as Error | null,
     messages: [] as MessageEntry[],
     subscribedEvents: [] as unknown[],
+    subscribedEventsReady: null as Promise<void> | null,
     sessionGetIds: [] as string[],
     missingSessionIds: new Set<string>(),
     transientErrorSessionIds: new Set<string>(),
@@ -90,6 +95,7 @@ const runtimeMock = {
     this.state.closeError = null;
     this.state.messages = [];
     this.state.subscribedEvents = [];
+    this.state.subscribedEventsReady = null;
     this.state.sessionGetIds.length = 0;
     this.state.missingSessionIds.clear();
     this.state.transientErrorSessionIds.clear();
@@ -208,6 +214,9 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       event: {
         subscribe: async () => ({
           stream: (async function* () {
+            if (runtimeMock.state.subscribedEventsReady) {
+              await runtimeMock.state.subscribedEventsReady;
+            }
             for (const event of runtimeMock.state.subscribedEvents) {
               yield event;
             }
@@ -255,26 +264,43 @@ const openCodeAdapterTestSettings = Schema.decodeSync(OpenCodeSettings)({
   serverPassword: "secret-password",
 });
 
-const OpenCodeAdapterTestLayer = Layer.effect(
-  OpenCodeAdapter,
-  makeOpenCodeAdapter(openCodeAdapterTestSettings),
-).pipe(
-  Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
-  Layer.provideMerge(
-    ServerSettingsService.layerTest({
-      providers: {
-        opencode: {
-          binaryPath: "fake-opencode",
-          serverUrl: "http://127.0.0.1:9999",
-          serverPassword: "secret-password",
-        },
-      },
+const makeOpenCodeAdapterTestLayer = (options: OpenCodeAdapterLiveOptions) =>
+  Layer.effect(OpenCodeAdapter, makeOpenCodeAdapter(openCodeAdapterTestSettings, options)).pipe(
+    Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+const makeRecordingAdapterTestLayer = (
+  instanceId = ProviderInstanceId.make("opencode"),
+): {
+  readonly layer: ReturnType<typeof makeOpenCodeAdapterTestLayer>;
+  readonly recordedLimits: Array<ProviderAccountLimit>;
+} => {
+  const recordedLimits: Array<ProviderAccountLimit> = [];
+  return {
+    recordedLimits,
+    layer: makeOpenCodeAdapterTestLayer({
+      instanceId,
+      recordAccountLimit: (limit) =>
+        Effect.sync(() => {
+          recordedLimits.push(limit);
+        }),
     }),
-  ),
-  Layer.provideMerge(providerSessionDirectoryTestLayer),
-  Layer.provideMerge(NodeServices.layer),
-);
+  };
+};
+
+const holdSubscribedEvents = (): (() => void) => {
+  let release = () => {};
+  runtimeMock.state.subscribedEventsReady = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return release;
+};
+
+const OpenCodeAdapterTestLayer = makeOpenCodeAdapterTestLayer({});
 
 beforeEach(() => {
   runtimeMock.reset();
@@ -282,6 +308,111 @@ beforeEach(() => {
 
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
+type OpenCodeMessageError = NonNullable<AssistantMessage["error"]>;
+
+const captureMessageUpdatedError = Effect.fn("captureMessageUpdatedError")(function* (input: {
+  readonly error: OpenCodeMessageError;
+  readonly threadId: ThreadId;
+}) {
+  runtimeMock.state.subscribedEvents = [
+    {
+      type: "message.updated",
+      properties: {
+        sessionID: "http://127.0.0.1:9999/session",
+        info: {
+          id: "msg-account-limit",
+          sessionID: "http://127.0.0.1:9999/session",
+          role: "assistant",
+          error: input.error,
+        },
+      },
+    },
+    {
+      type: "session.updated",
+      properties: {
+        info: {
+          id: "http://127.0.0.1:9999/session",
+          title: "Account limit sentinel",
+        },
+      },
+    },
+  ];
+  const adapter = yield* OpenCodeAdapter;
+  const firstTargetEventFiber = yield* adapter.streamEvents.pipe(
+    Stream.filter(
+      (event) =>
+        event.threadId === input.threadId &&
+        (event.type === "runtime.error" || event.type === "thread.metadata.updated"),
+    ),
+    Stream.take(1),
+    Stream.runCollect,
+    Effect.forkChild,
+  );
+  yield* adapter.startSession({
+    provider: ProviderDriverKind.make("opencode"),
+    threadId: input.threadId,
+    runtimeMode: "full-access",
+  });
+  return Array.from(yield* Fiber.join(firstTargetEventFiber).pipe(Effect.timeout("1 second")))[0];
+});
+
+const captureSessionError = Effect.fn("captureSessionError")(function* (input: {
+  readonly error: OpenCodeMessageError;
+  readonly instanceId: ProviderInstanceId;
+  readonly threadId: ThreadId;
+}) {
+  const releaseEvents = holdSubscribedEvents();
+  runtimeMock.state.subscribedEvents = [
+    {
+      type: "session.error",
+      properties: {
+        sessionID: "http://127.0.0.1:9999/session",
+        error: input.error,
+      },
+    },
+  ];
+  const adapter = yield* OpenCodeAdapter;
+  const errorEventsFiber = yield* adapter.streamEvents.pipe(
+    Stream.filter(
+      (event) =>
+        event.threadId === input.threadId &&
+        (event.type === "turn.completed" || event.type === "runtime.error"),
+    ),
+    Stream.take(2),
+    Stream.runCollect,
+    Effect.forkChild,
+  );
+  yield* adapter.startSession({
+    provider: ProviderDriverKind.make("opencode"),
+    threadId: input.threadId,
+    runtimeMode: "full-access",
+  });
+  yield* adapter.sendTurn({
+    threadId: input.threadId,
+    input: "Continue",
+    modelSelection: { instanceId: input.instanceId, model: "openai/gpt-5" },
+  });
+  releaseEvents();
+  return {
+    errorEvents: Array.from(yield* Fiber.join(errorEventsFiber).pipe(Effect.timeout("1 second"))),
+    sessions: yield* adapter.listSessions(),
+  };
+});
+
+const assertSessionErrorEvents = (
+  events: ReadonlyArray<{ readonly type: string; readonly payload: unknown }>,
+  message: string,
+  error: OpenCodeMessageError,
+): void => {
+  NodeAssert.deepEqual(
+    events.map((event) => [event.type, event.payload]),
+    [
+      ["turn.completed", { state: "failed", errorMessage: message }],
+      ["runtime.error", { message, class: "provider_error", detail: error }],
+    ],
+  );
+};
 
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
   it.effect("reuses a configured OpenCode server URL instead of spawning a local server", () =>
@@ -638,6 +769,256 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       );
     }),
   );
+
+  it.effect("records assistant message limits without adding runtime errors", () => {
+    const instanceId = ProviderInstanceId.make("opencode_work");
+    const detectedAt = "2026-08-14T10:00:00.000Z";
+    const cases: ReadonlyArray<{
+      readonly error: OpenCodeMessageError;
+      readonly expectedLimit: ProviderAccountLimit | null;
+      readonly name: string;
+    }> = [
+      {
+        name: "api-429",
+        error: {
+          name: "APIError",
+          data: {
+            message: "OpenCode usage limit reached.",
+            statusCode: 429,
+            isRetryable: true,
+            responseHeaders: { "retry-after": "300" },
+          },
+        },
+        expectedLimit: {
+          providerInstanceId: instanceId,
+          driver: ProviderDriverKind.make("opencode"),
+          kind: "usage-limit",
+          detectedAt,
+          resetsAt: "2026-08-14T10:05:00.000Z",
+          resetsAtEstimated: true,
+          source: "opencode.api_error",
+          detail: "OpenCode usage limit reached.",
+        },
+      },
+      {
+        name: "provider-auth",
+        error: {
+          name: "ProviderAuthError",
+          data: { providerID: "anthropic", message: "OpenCode login expired." },
+        },
+        expectedLimit: {
+          providerInstanceId: instanceId,
+          driver: ProviderDriverKind.make("opencode"),
+          kind: "auth",
+          detectedAt,
+          resetsAt: null,
+          resetsAtEstimated: false,
+          source: "opencode.api_error",
+          detail: "OpenCode login expired.",
+        },
+      },
+      {
+        name: "message-aborted",
+        error: {
+          name: "MessageAbortedError",
+          data: { message: "OpenCode request was aborted." },
+        },
+        expectedLimit: null,
+      },
+    ];
+
+    return Effect.forEach(
+      cases,
+      (testCase) => {
+        runtimeMock.reset();
+        const { layer, recordedLimits } = makeRecordingAdapterTestLayer(instanceId);
+        return Effect.gen(function* () {
+          yield* TestClock.setTime(Date.parse(detectedAt));
+          const firstTargetEvent = yield* captureMessageUpdatedError({
+            threadId: asThreadId(`thread-message-${testCase.name}`),
+            error: testCase.error,
+          });
+
+          NodeAssert.deepEqual(
+            recordedLimits,
+            testCase.expectedLimit ? [testCase.expectedLimit] : [],
+          );
+          NodeAssert.equal(firstTargetEvent?.type, "thread.metadata.updated");
+          if (firstTargetEvent?.type === "thread.metadata.updated") {
+            NodeAssert.equal(firstTargetEvent.payload.name, "Account limit sentinel");
+          }
+        }).pipe(Effect.provide(layer));
+      },
+      { discard: true },
+    );
+  });
+
+  it.effect("records session API 429 limits and preserves turn failure text", () => {
+    const instanceId = ProviderInstanceId.make("opencode_work");
+    const { layer, recordedLimits } = makeRecordingAdapterTestLayer(instanceId);
+    const error = {
+      name: "APIError",
+      data: {
+        message: "OpenCode usage limit reached.",
+        statusCode: 429,
+        isRetryable: true,
+        responseHeaders: { "retry-after": "300" },
+      },
+    } as const;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-08-14T10:00:00.000Z"));
+      const { errorEvents, sessions } = yield* captureSessionError({
+        error,
+        instanceId,
+        threadId: asThreadId("thread-session-api-limit"),
+      });
+      NodeAssert.deepEqual(recordedLimits, [
+        {
+          providerInstanceId: instanceId,
+          driver: ProviderDriverKind.make("opencode"),
+          kind: "usage-limit",
+          detectedAt: "2026-08-14T10:00:00.000Z",
+          resetsAt: "2026-08-14T10:05:00.000Z",
+          resetsAtEstimated: true,
+          source: "opencode.api_error",
+          detail: "OpenCode usage limit reached.",
+        },
+      ]);
+      assertSessionErrorEvents(errorEvents, "OpenCode usage limit reached.", error);
+      NodeAssert.equal(sessions[0]?.lastError, "OpenCode usage limit reached.");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("ignores aborted session errors as limits and preserves their text", () => {
+    const { layer, recordedLimits } = makeRecordingAdapterTestLayer();
+    const error = {
+      name: "MessageAbortedError",
+      data: { message: "OpenCode request was aborted." },
+    } as const;
+    return Effect.gen(function* () {
+      const { errorEvents, sessions } = yield* captureSessionError({
+        error,
+        instanceId: ProviderInstanceId.make("opencode"),
+        threadId: asThreadId("thread-session-aborted"),
+      });
+      NodeAssert.deepEqual(recordedLimits, []);
+      assertSessionErrorEvents(errorEvents, "OpenCode request was aborted.", error);
+      NodeAssert.equal(sessions[0]?.lastError, "OpenCode request was aborted.");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("records session auth limits and preserves turn failure text", () => {
+    const instanceId = ProviderInstanceId.make("opencode_work");
+    const { layer, recordedLimits } = makeRecordingAdapterTestLayer(instanceId);
+    const error = {
+      name: "ProviderAuthError",
+      data: { providerID: "anthropic", message: "OpenCode login expired." },
+    } as const;
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-08-14T10:00:00.000Z"));
+      const { errorEvents, sessions } = yield* captureSessionError({
+        error,
+        instanceId,
+        threadId: asThreadId("thread-session-auth-limit"),
+      });
+
+      NodeAssert.deepEqual(recordedLimits, [
+        {
+          providerInstanceId: instanceId,
+          driver: ProviderDriverKind.make("opencode"),
+          kind: "auth",
+          detectedAt: "2026-08-14T10:00:00.000Z",
+          resetsAt: null,
+          resetsAtEstimated: false,
+          source: "opencode.api_error",
+          detail: "OpenCode login expired.",
+        },
+      ]);
+      assertSessionErrorEvents(errorEvents, "OpenCode login expired.", error);
+      NodeAssert.equal(sessions[0]?.lastError, "OpenCode login expired.");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps the event pump alive after an account-limit write fails", () => {
+    let recordAttempts = 0;
+    const error = {
+      name: "ProviderAuthError",
+      data: { providerID: "anthropic", message: "OpenCode authentication failed." },
+    } as const;
+    runtimeMock.state.subscribedEvents = [
+      {
+        type: "session.error",
+        properties: {
+          sessionID: "http://127.0.0.1:9999/session",
+          error,
+        },
+      },
+      {
+        type: "session.updated",
+        properties: {
+          info: {
+            id: "http://127.0.0.1:9999/session",
+            title: "Pump remained active",
+          },
+        },
+      },
+    ];
+    const adapterLayer = makeOpenCodeAdapterTestLayer({
+      recordAccountLimit: () => {
+        recordAttempts += 1;
+        return Effect.fail(
+          new PersistenceSqlError({
+            operation: "provider_account_limits.recordLimit",
+            detail: "test write failed",
+          }),
+        );
+      },
+    });
+
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-limit-write-failure");
+      const observedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "runtime.error" || event.type === "thread.metadata.updated"),
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const observed = Array.from(
+        yield* Fiber.join(observedFiber).pipe(Effect.timeout("1 second")),
+      );
+      NodeAssert.equal(recordAttempts, 1);
+      NodeAssert.deepEqual(
+        observed.map((event) => event.type),
+        ["runtime.error", "thread.metadata.updated"],
+      );
+      const runtimeError = observed[0];
+      NodeAssert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error") {
+        NodeAssert.deepEqual(runtimeError.payload, {
+          message: "OpenCode authentication failed.",
+          class: "provider_error",
+          detail: error,
+        });
+      }
+      const metadata = observed[1];
+      NodeAssert.equal(metadata?.type, "thread.metadata.updated");
+      if (metadata?.type === "thread.metadata.updated") {
+        NodeAssert.equal(metadata.payload.name, "Pump remained active");
+      }
+    }).pipe(Effect.provide(adapterLayer));
+  });
 
   it.effect("clears session state even when cleanup finalizers throw", () =>
     Effect.gen(function* () {

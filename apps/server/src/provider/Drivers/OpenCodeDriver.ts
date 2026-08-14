@@ -24,6 +24,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
@@ -85,6 +86,7 @@ export type OpenCodeDriverEnv =
   | HttpClient.HttpClient
   | OpenCodeRuntime
   | Path.Path
+  | ProviderAccountLimitsStore
   | ProviderEventLoggers
   | ServerConfig
   | ServerSettingsService;
@@ -122,6 +124,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const accountLimits = yield* ProviderAccountLimitsStore;
       const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
       const instanceEnvironment = mergeProviderInstanceEnvironment(environment);
       // A configured dataHomePath takes precedence over an instance environment
@@ -154,6 +157,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         instanceId,
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        recordAccountLimit: accountLimits.recordLimit,
       });
       const textGeneration = yield* makeOpenCodeTextGeneration(effectiveConfig, processEnv);
 
