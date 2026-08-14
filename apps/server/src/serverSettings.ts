@@ -113,6 +113,7 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
 const ATOMIC_SETTINGS_KEY_LIST = [
   "automaticGitFetchInterval",
   "epicRolePolicy",
+  "providerInstances",
   "subagentSpawn",
   "textGenerationModelSelection",
 ] as const satisfies ReadonlyArray<keyof ServerSettings>;

@@ -645,6 +645,57 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     );
   });
 
+  it.effect("persists provider instance removals and key order as a whole map", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workId = ProviderInstanceId.make("claude_work");
+      const personalId = ProviderInstanceId.make("claude_personal");
+      const work = {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        enabled: true,
+        config: {},
+      } as const;
+      const personal = {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        enabled: true,
+        config: {},
+      } as const;
+
+      yield* serverSettings.updateSettings({
+        providerInstances: { [workId]: work, [personalId]: personal },
+      });
+
+      // A reorder is a whole-map write; the persisted key order is the
+      // rotation order, so it must survive the round trip byte-for-byte.
+      yield* serverSettings.updateSettings({
+        providerInstances: { [personalId]: personal, [workId]: work },
+      });
+      const rawReordered = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      assert.deepEqual(Object.keys(JSON.parse(rawReordered).providerInstances), [
+        personalId,
+        workId,
+      ]);
+
+      // Shrinking the map must persist the removal: the surviving file may
+      // not keep the dropped instance under any merge rule.
+      const next = yield* serverSettings.updateSettings({
+        providerInstances: { [workId]: work },
+      });
+      assert.deepEqual(Object.keys(next.providerInstances), [workId]);
+
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const stored = JSON.parse(raw);
+      assert.deepEqual(Object.keys(stored.providerInstances), [workId]);
+      assert.deepEqual((yield* decodeServerSettings(stored)).providerInstances, {
+        [workId]: work,
+      });
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

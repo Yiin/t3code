@@ -105,7 +105,12 @@ function humanizeInstanceId(instanceId: ProviderInstanceId): string {
   return words.join(" ");
 }
 
-function driverKindLabel(driverKind: ProviderDriverKind): string {
+/**
+ * Canonical brand label for a driver kind: the shipped display name when the
+ * driver is built in, otherwise a title-cased rendering of the raw slug. The
+ * Providers settings page uses this as the per-harness group heading.
+ */
+export function driverKindLabel(driverKind: ProviderDriverKind): string {
   return PROVIDER_DISPLAY_NAMES[driverKind] ?? formatProviderDriverKindLabel(driverKind);
 }
 

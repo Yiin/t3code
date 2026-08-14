@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  ArrowDownIcon,
   ArrowUpCircleIcon,
+  ArrowUpIcon,
   ChevronDownIcon,
   CopyIcon,
   DownloadIcon,
@@ -38,6 +40,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
+import { deriveProviderAccountLimitState, formatResetCountdown } from "./providerAccounts.logic";
+import { useRelativeTimeTick } from "./settingsLayout";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -349,6 +353,18 @@ interface ProviderInstanceCardProps {
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  /**
+   * Present only when this card sits in a multi-account harness group; the
+   * displayed order is the rotation order, and these move the account one
+   * step. A handler is undefined at its end of the group, which renders that
+   * button disabled. Single-account groups pass nothing and show no controls.
+   */
+  readonly reorder?:
+    | {
+        readonly onMoveUp: (() => void) | undefined;
+        readonly onMoveDown: (() => void) | undefined;
+      }
+    | undefined;
 }
 
 /**
@@ -393,6 +409,7 @@ export function ProviderInstanceCard({
   onModelOrderChange,
   onRunUpdate,
   isUpdating = false,
+  reorder,
 }: ProviderInstanceCardProps) {
   const enabled = instance.enabled ?? true;
   // The server-reported status wins when present; otherwise fall back to
@@ -409,6 +426,20 @@ export function ProviderInstanceCard({
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
   const summary = rawSummary;
+  const nowMs = useRelativeTimeTick(30_000);
+  const limitState = deriveProviderAccountLimitState({
+    usage: liveProvider?.usage,
+    limit: liveProvider?.limit ?? null,
+    nowMs,
+  });
+  const blockedCountdown =
+    limitState?.blocked?.resetsAt != null
+      ? formatResetCountdown(limitState.blocked.resetsAt, nowMs)
+      : null;
+  const usageCountdown =
+    limitState?.utilization?.resetsAt != null
+      ? formatResetCountdown(limitState.utilization.resetsAt, nowMs)
+      : null;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
   const updateCommand = versionAdvisory?.updateCommand ?? null;
@@ -595,6 +626,27 @@ export function ProviderInstanceCard({
     </p>
   );
 
+  // Live limit state joined onto the snapshot by the server: worst live
+  // usage window, plus the account's current block with a reset countdown.
+  // Drivers that report no usage and no block render nothing here.
+  const limitStateNode = limitState ? (
+    <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs">
+      {limitState.blocked ? (
+        <span className="font-medium text-warning">
+          {limitState.blocked.label}
+          {blockedCountdown ? ` · resets in ${blockedCountdown}` : ""}
+        </span>
+      ) : null}
+      {limitState.utilization ? (
+        <span className="text-muted-foreground/80">
+          {limitState.blocked ? "· " : ""}
+          Usage {limitState.utilization.percent}% · {limitState.utilization.windowLabel}
+          {!limitState.blocked && usageCountdown ? ` · resets in ${usageCountdown}` : ""}
+        </span>
+      ) : null}
+    </p>
+  ) : null;
+
   const versionCodeNode = versionLabel ? (
     <code className="text-xs text-muted-foreground">{versionLabel}</code>
   ) : null;
@@ -705,8 +757,33 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {limitStateNode}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+            {reorder ? (
+              <div className="flex items-center">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-1.5 text-muted-foreground hover:text-foreground"
+                  disabled={reorder.onMoveUp === undefined}
+                  onClick={reorder.onMoveUp}
+                  aria-label={`Move ${displayName} up in rotation order`}
+                >
+                  <ArrowUpIcon className="size-3.5" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-1.5 text-muted-foreground hover:text-foreground"
+                  disabled={reorder.onMoveDown === undefined}
+                  onClick={reorder.onMoveDown}
+                  aria-label={`Move ${displayName} down in rotation order`}
+                >
+                  <ArrowDownIcon className="size-3.5" />
+                </Button>
+              </div>
+            ) : null}
             <Button
               size="sm"
               variant="ghost"
