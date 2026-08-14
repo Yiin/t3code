@@ -345,6 +345,12 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    allocateManagedAccountHome: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:allocate-managed-account-home",
+      tag: WS_METHODS.serverAllocateManagedAccountHome,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,

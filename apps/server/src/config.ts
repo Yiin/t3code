@@ -27,6 +27,7 @@ export type StartupPresentation = typeof StartupPresentation.Type;
  */
 export interface ServerDerivedPaths {
   readonly stateDir: string;
+  readonly accountsDir: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
@@ -114,6 +115,7 @@ export const deriveServerPaths = Effect.fn(function* (
   const providerStatusCacheDir = join(baseDir, "caches");
   return {
     stateDir,
+    accountsDir: join(baseDir, "accounts"),
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
@@ -140,6 +142,9 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   yield* Effect.all(
     [
       fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
+      fs
+        .makeDirectory(derivedPaths.accountsDir, { recursive: true, mode: 0o700 })
+        .pipe(Effect.andThen(fs.chmod(derivedPaths.accountsDir, 0o700))),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),

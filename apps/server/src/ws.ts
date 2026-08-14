@@ -59,6 +59,7 @@ import {
   EpicRunnerStoreError as EpicRunnerStoreTransportError,
   EpicRunStateError as EpicRunStateTransportError,
   EnvironmentAuthorizationError,
+  ManagedAccountHomeAllocationError,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -89,6 +90,10 @@ import {
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import {
+  ensureManagedAccountHome,
+  managedAccountHomePath,
+} from "./provider/Drivers/managedAccountHome.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -328,6 +333,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverRemoveKeybinding, AuthOrchestrationOperateScope],
   [WS_METHODS.serverGetSettings, AuthOrchestrationReadScope],
   [WS_METHODS.serverUpdateSettings, AuthOrchestrationOperateScope],
+  [WS_METHODS.serverAllocateManagedAccountHome, AuthOrchestrationOperateScope],
   [WS_METHODS.serverDiscoverSourceControl, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetTraceDiagnostics, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetProcessDiagnostics, AuthOrchestrationReadScope],
@@ -1599,6 +1605,32 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.serverAllocateManagedAccountHome]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverAllocateManagedAccountHome,
+            Effect.gen(function* () {
+              const allocationInput = { accountsDir: config.accountsDir, ...input };
+              const homePath = yield* managedAccountHomePath(allocationInput);
+              return yield* ensureManagedAccountHome(allocationInput).pipe(
+                Effect.map((allocatedPath) => ({ homePath: allocatedPath })),
+                Effect.catch((cause) =>
+                  Effect.logError("Managed account home allocation failed.", {
+                    path: homePath,
+                    cause,
+                  }).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new ManagedAccountHomeAllocationError({
+                          message: "Could not allocate the managed account home.",
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+            { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(

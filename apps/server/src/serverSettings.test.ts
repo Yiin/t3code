@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfig from "./config.ts";
 import * as ServerSettingsModule from "./serverSettings.ts";
+import { ensureManagedAccountHome } from "./provider/Drivers/managedAccountHome.ts";
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
@@ -696,6 +697,54 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         [workId]: work,
       });
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("round-trips a managed account home through settings.json", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-managed-settings-test-",
+      });
+      const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, undefined);
+      yield* ServerConfig.ensureServerDirectories(derivedPaths);
+      const instanceId = ProviderInstanceId.make("codex_work");
+      const driverKind = ProviderDriverKind.make("codex");
+      const homePath = yield* ensureManagedAccountHome({
+        accountsDir: derivedPaths.accountsDir,
+        driverKind,
+        instanceId,
+      });
+      const settingsLayer = () =>
+        ServerSettingsModule.layer.pipe(
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+        );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+          yield* serverSettings.updateSettings({
+            providerInstances: {
+              [instanceId]: {
+                driver: driverKind,
+                config: { shadowHomePath: homePath },
+              },
+            },
+          });
+        }).pipe(Effect.provide(settingsLayer())),
+      );
+
+      const reloaded = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+          return yield* serverSettings.getSettings;
+        }).pipe(Effect.provide(settingsLayer())),
+      );
+
+      assert.deepEqual(reloaded.providerInstances[instanceId]?.config, {
+        shadowHomePath: homePath,
+      });
+    }),
   );
 
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>

@@ -77,7 +77,7 @@ import {
   OrchestrationReplayEventsInput,
   OrchestrationRpcSchemas,
 } from "./orchestration.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   RelayClientInstallFailedError,
   RelayClientInstallProgressEventSchema,
@@ -135,6 +135,7 @@ import {
 import {
   ServerConfigStreamEvent,
   ServerConfig,
+  ManagedAccountHomeAllocationError,
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
   ServerLifecycleStreamEvent,
@@ -244,6 +245,7 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverAllocateManagedAccountHome: "server.allocateManagedAccountHome",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -332,6 +334,18 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
 });
+
+export const WsServerAllocateManagedAccountHomeRpc = Rpc.make(
+  WS_METHODS.serverAllocateManagedAccountHome,
+  {
+    payload: Schema.Struct({
+      driverKind: ProviderDriverKind,
+      instanceId: ProviderInstanceId,
+    }),
+    success: Schema.Struct({ homePath: Schema.String }),
+    error: Schema.Union([ManagedAccountHomeAllocationError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
   payload: Schema.Struct({}),
@@ -812,6 +826,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerAllocateManagedAccountHomeRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

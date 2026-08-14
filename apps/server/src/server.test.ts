@@ -4231,6 +4231,99 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("allocates a private managed account home", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* buildAppUnderTest();
+      const input = {
+        driverKind: ProviderDriverKind.make("codex"),
+        instanceId: ProviderInstanceId.make("codex_work"),
+      };
+      const expected = path.join(config.accountsDir, input.driverKind, input.instanceId);
+      const wsUrl = yield* getWsServerUrl("/ws");
+
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.serverAllocateManagedAccountHome](input),
+        ),
+      );
+
+      assert.equal(response.homePath, expected);
+      assert.isTrue(path.isAbsolute(response.homePath));
+      assert.equal((yield* fileSystem.stat(expected)).type, "Directory");
+      assert.equal((yield* fileSystem.stat(expected)).mode & 0o777, 0o700);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects managed account allocation without the operate scope", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* buildAppUnderTest();
+      const input = {
+        driverKind: ProviderDriverKind.make("codex"),
+        instanceId: ProviderInstanceId.make("codex_read_only"),
+      };
+      const expected = path.join(config.accountsDir, input.driverKind, input.instanceId);
+      const { response: exchangeResponse, body: tokenBody } = yield* exchangeAccessToken(
+        defaultDesktopBootstrapToken,
+        { scope: "orchestration:read" },
+      );
+      assert.equal(exchangeResponse.status, 200);
+      assert.isDefined(tokenBody.access_token);
+
+      const wsTicketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+        headers: { authorization: `Bearer ${tokenBody.access_token ?? ""}` },
+      });
+      const wsTicketBody = (yield* wsTicketResponse.json) as { readonly ticket: string };
+      const wsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(wsTicketBody.ticket)}`;
+      const error = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverAllocateManagedAccountHome](input),
+          ),
+        ),
+      );
+
+      assert.equal(error._tag, "EnvironmentAuthorizationError");
+      if (error._tag === "EnvironmentAuthorizationError") {
+        assert.equal(error.requiredScope, "orchestration:operate");
+      }
+      assert.isFalse(yield* fileSystem.exists(expected));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("redacts filesystem details from managed account allocation errors", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* buildAppUnderTest();
+      const input = {
+        driverKind: ProviderDriverKind.make("codex"),
+        instanceId: ProviderInstanceId.make("codex_collision"),
+      };
+      const driverDir = path.join(config.accountsDir, input.driverKind);
+      const expected = path.join(driverDir, input.instanceId);
+      yield* fileSystem.makeDirectory(driverDir, { recursive: true });
+      yield* fileSystem.writeFileString(expected, "collision");
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverAllocateManagedAccountHome](input),
+          ),
+        ),
+      );
+
+      assert.equal(error._tag, "ManagedAccountHomeAllocationError");
+      assert.notInclude(error.message, expected);
+      assert.notInclude(error.message, "AlreadyExists");
+      assert.notInclude(error.message, "EEXIST");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("shares one preview automation broker across websocket sessions", () =>
     Effect.scoped(
       Effect.gen(function* () {
