@@ -4,6 +4,7 @@ import {
   ProviderInstanceId,
   type ProviderAccountLimit,
   type ProviderInstanceConfig,
+  type ProviderAuthRunState,
   type ProviderUsageSample,
   type ServerSettings,
 } from "@t3tools/contracts";
@@ -12,13 +13,25 @@ import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import {
   buildProviderGroupReorderPatch,
   deriveProviderAccountLimitState,
+  deriveProviderInstanceId,
   formatResetCountdown,
+  isManagedProviderAccountHomeForDisplay,
   moveProviderAccount,
+  nextManagedProviderAccountIdentity,
   orderProviderGroupRows,
+  readProviderCredentialHome,
+  reduceProviderAuthRunState,
+  resolveProviderAccountAuthAction,
+  slugifyProviderInstanceLabel,
+  validateProviderInstanceId,
+  withProviderCredentialHome,
 } from "./providerAccounts.logic";
 
 const id = (value: string) => ProviderInstanceId.make(value);
 const claude = ProviderDriverKind.make("claudeAgent");
+const codex = ProviderDriverKind.make("codex");
+const kimi = ProviderDriverKind.make("kimi");
+const opencode = ProviderDriverKind.make("opencode");
 
 const instance = (overrides?: Partial<ProviderInstanceConfig>): ProviderInstanceConfig =>
   ({ driver: claude, enabled: true, config: {}, ...overrides }) as ProviderInstanceConfig;
@@ -55,6 +68,140 @@ const accountLimit = (overrides: Partial<ProviderAccountLimit>): ProviderAccount
     detail: null,
     ...overrides,
   }) as ProviderAccountLimit;
+
+const authRunState = (overrides: Partial<ProviderAuthRunState>): ProviderAuthRunState => ({
+  status: "running",
+  startedAt: "2026-08-14T12:00:00.000Z",
+  finishedAt: null,
+  message: "Waiting for provider authentication.",
+  output: "",
+  verificationUrl: null,
+  userCode: null,
+  ...overrides,
+});
+
+describe("provider instance identity", () => {
+  it("shares the wizard slug, validation, and collision rules", () => {
+    expect(slugifyProviderInstanceLabel("  Work / Personal  ")).toBe("work_personal");
+    expect(deriveProviderInstanceId(codex, "Work / Personal")).toBe("codex_work_personal");
+    expect(validateProviderInstanceId("1bad", new Set())).toContain("start with a letter");
+    expect(validateProviderInstanceId("codex_work", new Set(["codex_work"]))).toContain(
+      "already exists",
+    );
+    expect(validateProviderInstanceId("codex_work", new Set())).toBeNull();
+  });
+
+  it("allocates a stable next account id around explicit and synthesized rows", () => {
+    const occupied = new Set(["codex", "codex_account_2", "codex_account_4"]);
+    expect(nextManagedProviderAccountIdentity(codex, occupied)).toEqual({
+      instanceId: id("codex_account_3"),
+      displayName: "Account 3",
+    });
+  });
+});
+
+describe("provider credential homes", () => {
+  it.each([
+    [claude, "homePath"],
+    [codex, "shadowHomePath"],
+    [kimi, "homePath"],
+    [opencode, "dataHomePath"],
+  ] as const)("maps %s to %s", (driver, field) => {
+    const original = instance({ driver, config: { binaryPath: "provider" } });
+    const next = withProviderCredentialHome(original, "/state/accounts/driver/account");
+    expect(next?.config).toEqual({
+      binaryPath: "provider",
+      [field]: "/state/accounts/driver/account",
+    });
+    expect(next && readProviderCredentialHome(next)).toBe("/state/accounts/driver/account");
+  });
+
+  it("shows home deletion only for the exact managed path", () => {
+    const input = {
+      accountsDir: "/var/lib/t3/accounts",
+      driver: codex,
+      instanceId: id("codex_account_2"),
+    };
+    expect(
+      isManagedProviderAccountHomeForDisplay({
+        ...input,
+        homePath: "/var/lib/t3/accounts/codex/codex_account_2",
+      }),
+    ).toBe(true);
+    expect(
+      isManagedProviderAccountHomeForDisplay({
+        ...input,
+        homePath: "/var/lib/t3/accounts/codex/another_account",
+      }),
+    ).toBe(false);
+    expect(
+      isManagedProviderAccountHomeForDisplay({
+        ...input,
+        homePath: "/other/accounts/codex/codex_account_2",
+      }),
+    ).toBe(false);
+    expect(
+      isManagedProviderAccountHomeForDisplay({
+        ...input,
+        accountsDir: undefined,
+        homePath: "/var/lib/t3/accounts/codex/codex_account_2",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("provider authentication actions", () => {
+  it("offers scriptable sign-in and sign-out by live auth status", () => {
+    expect(
+      resolveProviderAccountAuthAction({ driver: codex, authStatus: "unauthenticated" }),
+    ).toEqual({ kind: "sign-in" });
+    expect(resolveProviderAccountAuthAction({ driver: codex, authStatus: "unknown" })).toEqual({
+      kind: "none",
+    });
+    expect(
+      resolveProviderAccountAuthAction({ driver: codex, authStatus: "authenticated" }),
+    ).toEqual({ kind: "sign-out" });
+  });
+
+  it("uses exact manual commands for unsupported harnesses", () => {
+    expect(
+      resolveProviderAccountAuthAction({
+        driver: ProviderDriverKind.make("cursor"),
+        authStatus: "unauthenticated",
+        serverMessage: "Cursor is not authenticated. Run `agent login` and try again.",
+      }),
+    ).toEqual({ kind: "manual", command: "agent login" });
+    expect(
+      resolveProviderAccountAuthAction({
+        driver: ProviderDriverKind.make("primeAgent"),
+        authStatus: "authenticated",
+      }),
+    ).toEqual({ kind: "none" });
+  });
+});
+
+describe("reduceProviderAuthRunState", () => {
+  it("keeps the start response while streamed state fills in login details", () => {
+    const start = authRunState({});
+    const streamed = authRunState({
+      message: null,
+      output: "Open https://example.test/device and enter ABCD-1234",
+      verificationUrl: "https://example.test/device",
+      userCode: "ABCD-1234",
+    });
+    expect(reduceProviderAuthRunState(start, streamed)).toEqual({
+      ...streamed,
+      message: start.message,
+    });
+  });
+
+  it("does not let a late idle or running snapshot regress active or terminal state", () => {
+    const running = authRunState({ output: "ready" });
+    expect(reduceProviderAuthRunState(running, authRunState({ status: "idle" }))).toBe(running);
+    const succeeded = authRunState({ status: "succeeded", finishedAt: inOneHour });
+    expect(reduceProviderAuthRunState(succeeded, running)).toBe(succeeded);
+  });
+});
 
 describe("orderProviderGroupRows", () => {
   it("orders by explicit key order with synthesized entries last", () => {

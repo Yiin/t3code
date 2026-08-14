@@ -339,6 +339,10 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    getSettings: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:get-settings",
+      tag: WS_METHODS.serverGetSettings,
+    }),
     updateSettings: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:update-settings",
       tag: WS_METHODS.serverUpdateSettings,

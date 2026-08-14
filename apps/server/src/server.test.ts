@@ -3811,7 +3811,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("accepts websocket rpc handshake with a bootstrapped browser session cookie", () =>
     Effect.gen(function* () {
-      yield* buildAppUnderTest();
+      const config = yield* buildAppUnderTest();
 
       const { response: bootstrapResponse, cookie } = yield* bootstrapBrowserSession();
 
@@ -3828,6 +3828,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
       assert.equal(response.auth.policy, "desktop-managed-local");
+      assert.equal(response.accountsDir, config.accountsDir);
       assert.equal(response.shellResumeCompletionMarker, true);
       assert.equal(response.threadResumeCompletionMarker, true);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

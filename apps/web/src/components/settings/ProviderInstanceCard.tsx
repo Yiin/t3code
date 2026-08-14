@@ -8,6 +8,8 @@ import {
   CopyIcon,
   DownloadIcon,
   LoaderIcon,
+  LogInIcon,
+  LogOutIcon,
   PlusIcon,
   Trash2Icon,
   XIcon,
@@ -40,7 +42,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
-import { deriveProviderAccountLimitState, formatResetCountdown } from "./providerAccounts.logic";
+import {
+  deriveProviderAccountLimitState,
+  formatResetCountdown,
+  readProviderCredentialHome,
+  resolveProviderAccountAuthAction,
+} from "./providerAccounts.logic";
 import { useRelativeTimeTick } from "./settingsLayout";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
@@ -353,6 +360,10 @@ interface ProviderInstanceCardProps {
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  readonly isSettingsDisabled?: boolean | undefined;
+  readonly authActionBusy?: "sign-in" | "sign-out" | null | undefined;
+  readonly onSignIn?: (() => void) | undefined;
+  readonly onSignOut?: (() => void) | undefined;
   /**
    * Present only when this card sits in a multi-account harness group; the
    * displayed order is the rotation order, and these move the account one
@@ -409,6 +420,10 @@ export function ProviderInstanceCard({
   onModelOrderChange,
   onRunUpdate,
   isUpdating = false,
+  isSettingsDisabled = false,
+  authActionBusy = null,
+  onSignIn,
+  onSignOut,
   reorder,
 }: ProviderInstanceCardProps) {
   const enabled = instance.enabled ?? true;
@@ -420,10 +435,13 @@ export function ProviderInstanceCard({
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
   const rawSummary = getProviderSummary(liveProvider);
   const authEmail = liveProvider?.auth.email;
-  const hasAuthenticatedEmail =
-    liveProvider?.auth.status === "authenticated" && Boolean(authEmail?.trim());
+  const authLabel = liveProvider?.auth.label;
+  const authStatus = liveProvider?.auth.status ?? "unknown";
+  const hasAuthenticatedEmail = authStatus === "authenticated" && Boolean(authEmail?.trim());
+  const hasAuthenticatedLabel =
+    authStatus === "authenticated" && !hasAuthenticatedEmail && Boolean(authLabel?.trim());
   const authenticatedDetail = hasAuthenticatedEmail
-    ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
+    ? (authLabel ?? liveProvider?.auth.type ?? null)
     : null;
   const summary = rawSummary;
   const nowMs = useRelativeTimeTick(30_000);
@@ -446,6 +464,18 @@ export function ProviderInstanceCard({
   const FallbackIconComponent = driverOption?.icon;
   const displayName =
     instance.displayName?.trim() || driverOption?.label || String(instance.driver);
+  const credentialHome = readProviderCredentialHome(instance);
+  const authAction = resolveProviderAccountAuthAction({
+    driver: instance.driver,
+    authStatus,
+    ...(liveProvider?.message !== undefined ? { serverMessage: liveProvider.message } : {}),
+  });
+  const authBadge =
+    authStatus === "authenticated"
+      ? { label: "Authenticated", variant: "success" as const }
+      : authStatus === "unauthenticated"
+        ? { label: "Sign-in needed", variant: "warning" as const }
+        : { label: "Auth unknown", variant: "secondary" as const };
   const accentColor = normalizeProviderAccentColor(instance.accentColor);
   const { copyToClipboard } = useCopyToClipboard<{ providerName: string }>({
     onCopy: ({ providerName }) => {
@@ -595,6 +625,7 @@ export function ProviderInstanceCard({
                   variant="ghost"
                   className="size-5 rounded-sm p-0 text-muted-foreground hover:text-destructive"
                   onClick={onDelete}
+                  disabled={isSettingsDisabled}
                   aria-label={`Delete provider instance ${instanceId}`}
                 >
                   <Trash2Icon className="size-3" />
@@ -615,6 +646,11 @@ export function ProviderInstanceCard({
           <span>Authenticated as</span>
           <ProviderAuthEmail email={authEmail} />
           {authenticatedDetail ? <span>· {authenticatedDetail}</span> : null}
+        </>
+      ) : hasAuthenticatedLabel ? (
+        <>
+          <span>Authenticated as</span>
+          <span className="font-medium text-foreground/80">{authLabel}</span>
         </>
       ) : (
         <>
@@ -651,13 +687,43 @@ export function ProviderInstanceCard({
     <code className="text-xs text-muted-foreground">{versionLabel}</code>
   ) : null;
 
+  const credentialHomeNode = credentialHome ? (
+    <p className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+      <span className="shrink-0">Credential home</span>
+      <code className="truncate" title={credentialHome}>
+        {credentialHome}
+      </code>
+    </p>
+  ) : null;
+
+  const manualAuthNode =
+    authAction.kind === "manual" ? (
+      <p className="min-w-0 text-xs text-muted-foreground">
+        {authAction.command ? (
+          <>
+            Run <code className="break-all text-foreground/80">{authAction.command}</code> on the
+            server to sign in.
+          </>
+        ) : (
+          "Use this provider's CLI on the server to sign in."
+        )}
+      </p>
+    ) : null;
+
   return (
-    <div className="border-t border-border/60 first:border-t-0">
+    <div
+      className="border-t border-border/60 first:border-t-0"
+      aria-busy={isSettingsDisabled || authActionBusy !== null || undefined}
+      inert={isSettingsDisabled || authActionBusy !== null || undefined}
+    >
       <div className="px-4 py-3.5 sm:px-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               {titleHeadNode}
+              <Badge variant={authBadge.variant} size="sm">
+                {authBadge.label}
+              </Badge>
               {versionCodeNode}
               {versionAdvisory ? (
                 <Popover>
@@ -757,9 +823,45 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {credentialHomeNode}
+            {manualAuthNode}
             {limitStateNode}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+            {authAction.kind === "sign-in" && onSignIn ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 min-h-7 px-2 text-xs"
+                onClick={onSignIn}
+                disabled={isSettingsDisabled || authActionBusy === "sign-in"}
+              >
+                {authActionBusy === "sign-in" ? (
+                  <LoaderIcon className="size-3.5 animate-spin" />
+                ) : (
+                  <LogInIcon className="size-3.5" />
+                )}
+                {authActionBusy === "sign-in" ? "Signing in" : "Sign in"}
+              </Button>
+            ) : null}
+            {authAction.kind === "sign-out" && onSignOut ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 min-h-7 px-2 text-xs"
+                onClick={onSignOut}
+                disabled={isSettingsDisabled || authActionBusy === "sign-out"}
+              >
+                {authActionBusy === "sign-out" ? (
+                  <LoaderIcon className="size-3.5 animate-spin" />
+                ) : (
+                  <LogOutIcon className="size-3.5" />
+                )}
+                {authActionBusy === "sign-out" ? "Signing out" : "Sign out"}
+              </Button>
+            ) : null}
             {reorder ? (
               <div className="flex items-center">
                 <Button
@@ -797,6 +899,7 @@ export function ProviderInstanceCard({
             </Button>
             <Switch
               checked={enabled}
+              disabled={isSettingsDisabled}
               onCheckedChange={(checked) => updateEnabled(Boolean(checked))}
               aria-label={`Enable ${displayName}`}
             />

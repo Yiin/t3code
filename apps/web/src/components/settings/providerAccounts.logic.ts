@@ -13,17 +13,200 @@
  *
  * @module providerAccounts.logic
  */
-import type {
-  ProviderAccountLimit,
-  ProviderInstanceConfig,
+import {
   ProviderInstanceId,
-  ProviderLimitKind,
-  ProviderUsageSample,
-  ProviderUsageWindow,
-  ServerSettings,
-  UnifiedSettings,
+  type ProviderAccountLimit,
+  type ProviderAuthRunState,
+  type ProviderDriverKind,
+  type ProviderInstanceConfig,
+  type ProviderLimitKind,
+  type ServerProviderAuthStatus,
+  type ProviderUsageSample,
+  type ProviderUsageWindow,
+  type ServerSettings,
+  type UnifiedSettings,
 } from "@t3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+
+const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+const SCRIPTABLE_AUTH_DRIVERS = new Set(["claudeAgent", "codex", "kimi", "opencode"]);
+const MANUAL_LOGIN_COMMANDS: Readonly<Record<string, string>> = {
+  cursor: "agent login",
+  grok: "grok login",
+};
+
+/** Normalize a display label into the suffix used by provider instance ids. */
+export function slugifyProviderInstanceLabel(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+}
+
+/** Build an instance id from a driver and display label. */
+export function deriveProviderInstanceId(driver: ProviderDriverKind, label: string): string {
+  const slug = slugifyProviderInstanceLabel(label);
+  return slug ? `${driver}_${slug}` : "";
+}
+
+/** Return a user-facing validation error for a provider instance id. */
+export function validateProviderInstanceId(
+  id: string,
+  existing: ReadonlySet<string>,
+): string | null {
+  if (id.length === 0) return "Instance ID is required.";
+  if (id.length > 64) return "Instance ID must be 64 characters or fewer.";
+  if (!INSTANCE_ID_PATTERN.test(id)) {
+    return "Instance ID must start with a letter and use only letters, digits, '-', or '_'.";
+  }
+  if (existing.has(id)) return `An instance named '${id}' already exists.`;
+  return null;
+}
+
+export interface ManagedProviderAccountIdentity {
+  readonly instanceId: ProviderInstanceId;
+  readonly displayName: string;
+}
+
+/** Pick the next stable quick-add identity without colliding with any visible or stored row. */
+export function nextManagedProviderAccountIdentity(
+  driver: ProviderDriverKind,
+  occupiedIds: ReadonlySet<string>,
+): ManagedProviderAccountIdentity {
+  for (let accountNumber = 2; ; accountNumber += 1) {
+    const displayName = `Account ${accountNumber}`;
+    const candidate = deriveProviderInstanceId(driver, displayName);
+    if (!occupiedIds.has(candidate)) {
+      return {
+        instanceId: ProviderInstanceId.make(candidate),
+        displayName,
+      };
+    }
+  }
+}
+
+type CredentialHomeField = "homePath" | "shadowHomePath" | "dataHomePath";
+
+function credentialHomeField(driver: ProviderDriverKind): CredentialHomeField | null {
+  switch (driver) {
+    case "claudeAgent":
+    case "kimi":
+      return "homePath";
+    case "codex":
+      return "shadowHomePath";
+    case "opencode":
+      return "dataHomePath";
+    default:
+      return null;
+  }
+}
+
+/** Read the credential home used by a scriptable account driver. */
+export function readProviderCredentialHome(instance: ProviderInstanceConfig): string | null {
+  const field = credentialHomeField(instance.driver);
+  if (field === null || instance.config === null || typeof instance.config !== "object") {
+    return null;
+  }
+  const value = (instance.config as Record<string, unknown>)[field];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/** Store a server-allocated credential home in the field owned by the selected driver. */
+export function withProviderCredentialHome(
+  instance: ProviderInstanceConfig,
+  homePath: string,
+): ProviderInstanceConfig | null {
+  const field = credentialHomeField(instance.driver);
+  if (field === null) return null;
+  const config =
+    instance.config !== null &&
+    typeof instance.config === "object" &&
+    !Array.isArray(instance.config)
+      ? { ...(instance.config as Record<string, unknown>) }
+      : {};
+  config[field] = homePath;
+  return { ...instance, config };
+}
+
+/**
+ * Client-only display gate for the destructive home checkbox.
+ *
+ * The server still validates the real path. This helper only shows the option
+ * when the configured path equals the exact account path under `accountsDir`.
+ */
+export function isManagedProviderAccountHomeForDisplay(input: {
+  readonly homePath: string | null;
+  readonly accountsDir: string | null | undefined;
+  readonly driver: ProviderDriverKind;
+  readonly instanceId: ProviderInstanceId;
+}): boolean {
+  if (input.homePath === null || !input.accountsDir?.trim()) return false;
+  const normalizePath = (value: string) =>
+    value
+      .trim()
+      .replaceAll("\\", "/")
+      .replace(/\/{2,}/g, "/")
+      .replace(/\/+$/g, "");
+  const managedPath = `${normalizePath(input.accountsDir)}/${input.driver}/${input.instanceId}`;
+  return normalizePath(input.homePath) === managedPath;
+}
+
+export type ProviderAccountAuthAction =
+  | { readonly kind: "sign-in" }
+  | { readonly kind: "sign-out" }
+  | { readonly kind: "manual"; readonly command: string | null }
+  | { readonly kind: "none" };
+
+function commandFromServerGuidance(message: string | null | undefined): string | null {
+  if (!message) return null;
+  return message.match(/\bRun `([^`]+)`/u)?.[1] ?? null;
+}
+
+/** Choose the account action from driver capability and live authentication state. */
+export function resolveProviderAccountAuthAction(input: {
+  readonly driver: ProviderDriverKind;
+  readonly authStatus: ServerProviderAuthStatus;
+  readonly serverMessage?: string | null;
+}): ProviderAccountAuthAction {
+  if (SCRIPTABLE_AUTH_DRIVERS.has(String(input.driver))) {
+    if (input.authStatus === "authenticated") return { kind: "sign-out" };
+    if (input.authStatus === "unauthenticated") return { kind: "sign-in" };
+    return { kind: "none" };
+  }
+  if (input.authStatus === "authenticated") return { kind: "none" };
+  return {
+    kind: "manual",
+    command:
+      commandFromServerGuidance(input.serverMessage) ??
+      MANUAL_LOGIN_COMMANDS[String(input.driver)] ??
+      null,
+  };
+}
+
+const TERMINAL_AUTH_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+
+/** Merge the direct login-start state before applying later streamed snapshots. */
+export function reduceProviderAuthRunState(
+  current: ProviderAuthRunState | null,
+  incoming: ProviderAuthRunState,
+): ProviderAuthRunState {
+  if (current === null) return incoming;
+  if (TERMINAL_AUTH_STATUSES.has(current.status) && !TERMINAL_AUTH_STATUSES.has(incoming.status)) {
+    return current;
+  }
+  if (incoming.status === "idle" && current.status !== "idle") return current;
+  return {
+    ...incoming,
+    startedAt: incoming.startedAt ?? current.startedAt,
+    finishedAt: incoming.finishedAt ?? current.finishedAt,
+    message: incoming.message ?? current.message,
+    output: incoming.output || current.output,
+    verificationUrl: incoming.verificationUrl ?? current.verificationUrl,
+    userCode: incoming.userCode ?? current.userCode,
+  };
+}
 
 export interface ProviderAccountRowLike {
   readonly instanceId: ProviderInstanceId;

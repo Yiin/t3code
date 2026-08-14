@@ -6,6 +6,7 @@ import {
   defaultInstanceIdForDriver,
   type DesktopUpdateChannel,
   PROVIDER_DISPLAY_NAMES,
+  type ProviderAuthLoginStartResult,
   ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
@@ -52,6 +53,7 @@ import {
 } from "../../providerInstances";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import {
+  primaryServerConfigAtom,
   primaryServerObservabilityAtom,
   primaryServerProvidersAtom,
   serverEnvironment,
@@ -61,11 +63,20 @@ import { useProjects } from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel, getRelativeTimeState } from "../../timestampFormat";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { DraftInput } from "../ui/draft-input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import {
   canOneClickUpdateProviderCandidate,
@@ -75,10 +86,15 @@ import {
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { ProviderAuthLoginDialog } from "./ProviderAuthLoginDialog";
 import {
   buildProviderGroupReorderPatch,
+  isManagedProviderAccountHomeForDisplay,
   moveProviderAccount,
+  nextManagedProviderAccountIdentity,
   orderProviderGroupRows,
+  readProviderCredentialHome,
+  withProviderCredentialHome,
 } from "./providerAccounts.logic";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
@@ -117,6 +133,18 @@ const TIMESTAMP_FORMAT_LABELS = {
 } as const;
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+const QUICK_ACCOUNT_DRIVER_KINDS = new Set(["claudeAgent", "codex", "kimi", "opencode"]);
+
+interface ProviderLoginDialogTarget {
+  readonly displayName: string;
+  readonly start: ProviderAuthLoginStartResult;
+}
+
+interface ProviderSignOutTarget {
+  readonly instanceId: ProviderInstanceId;
+  readonly displayName: string;
+  readonly canDeleteAccountHome: boolean;
+}
 
 function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
@@ -994,6 +1022,7 @@ export function GeneralSettingsPanel() {
 export function ProviderSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
+  const serverConfig = useAtomValue(primaryServerConfigAtom);
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const primaryEnvironment = usePrimaryEnvironment();
   const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
@@ -1002,8 +1031,33 @@ export function ProviderSettingsPanel() {
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider, {
     reportFailure: false,
   });
+  const allocateManagedAccountHome = useAtomCommand(serverEnvironment.allocateManagedAccountHome, {
+    reportFailure: false,
+  });
+  const persistServerSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    reportFailure: false,
+  });
+  const getServerSettings = useAtomCommand(serverEnvironment.getSettings, {
+    reportFailure: false,
+  });
+  const startProviderLogin = useAtomCommand(serverEnvironment.providerAuthLoginStart, {
+    reportFailure: false,
+  });
+  const logoutProvider = useAtomCommand(serverEnvironment.providerAuthLogout, {
+    reportFailure: false,
+  });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [accountMutations, setAccountMutations] = useState<ReadonlySet<string>>(() => new Set());
+  const accountMutationRef = useRef<ReadonlySet<string>>(new Set());
+  const isAddingAccount = [...accountMutations].some((key) => key.startsWith("add:"));
+  const [loginDialogTarget, setLoginDialogTarget] = useState<ProviderLoginDialogTarget | null>(
+    null,
+  );
+  const [loginDialogOpen, setLoginDialogOpen] = useState(false);
+  const [signOutTarget, setSignOutTarget] = useState<ProviderSignOutTarget | null>(null);
+  const [signOutOpen, setSignOutOpen] = useState(false);
+  const [deleteAccountHome, setDeleteAccountHome] = useState(false);
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
@@ -1218,6 +1272,251 @@ export function ProviderSettingsPanel() {
     rows: orderProviderGroupRows(groupRows, explicitInstanceKeyOrder),
   }));
 
+  const beginAccountMutation = (key: string): boolean => {
+    if (accountMutationRef.current.has(key)) return false;
+    if (
+      key.startsWith("add:") &&
+      [...accountMutationRef.current].some((active) => active.startsWith("add:"))
+    ) {
+      return false;
+    }
+    const next = new Set(accountMutationRef.current);
+    next.add(key);
+    accountMutationRef.current = next;
+    setAccountMutations(next);
+    return true;
+  };
+
+  const endAccountMutation = (key: string) => {
+    const next = new Set(accountMutationRef.current);
+    next.delete(key);
+    accountMutationRef.current = next;
+    setAccountMutations(next);
+  };
+
+  const showAccountError = (title: string, error: unknown, fallback: string) => {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title,
+        description: error instanceof Error ? error.message : fallback,
+      }),
+    );
+  };
+
+  const openLoginDialog = (displayName: string, start: ProviderAuthLoginStartResult) => {
+    setLoginDialogTarget({ displayName, start });
+    setLoginDialogOpen(true);
+  };
+
+  const signInToAccount = async (row: InstanceRow) => {
+    const mutationKey = `sign-in:${row.instanceId}`;
+    if (!primaryEnvironment || !beginAccountMutation(mutationKey)) return;
+    const displayName =
+      row.instance.displayName?.trim() || getDriverOption(row.driver)?.label || String(row.driver);
+    try {
+      if (
+        isManagedProviderAccountHomeForDisplay({
+          accountsDir: serverConfig?.accountsDir,
+          homePath: readProviderCredentialHome(row.instance),
+          driver: row.driver,
+          instanceId: row.instanceId,
+        })
+      ) {
+        const allocation = await allocateManagedAccountHome({
+          environmentId: primaryEnvironment.environmentId,
+          input: { driverKind: row.driver, instanceId: row.instanceId },
+        });
+        if (allocation._tag === "Failure") {
+          if (!isAtomCommandInterrupted(allocation)) {
+            showAccountError(
+              `Could not prepare ${displayName}`,
+              squashAtomCommandFailure(allocation),
+              "The managed account home could not be created.",
+            );
+          }
+          return;
+        }
+      }
+      const result = await startProviderLogin({
+        environmentId: primaryEnvironment.environmentId,
+        input: { instanceId: row.instanceId },
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          showAccountError(
+            `Could not sign in to ${displayName}`,
+            squashAtomCommandFailure(result),
+            "The provider login command could not start.",
+          );
+        }
+        return;
+      }
+      openLoginDialog(displayName, result.value);
+    } finally {
+      endAccountMutation(mutationKey);
+    }
+  };
+
+  const addManagedAccount = async (driver: ProviderDriverKind) => {
+    const mutationKey = `add:${driver}`;
+    if (!primaryEnvironment || !beginAccountMutation(mutationKey)) return;
+    const occupiedIds = new Set([
+      ...Object.keys(settings.providerInstances ?? {}),
+      ...rows.map((row) => String(row.instanceId)),
+      ...serverProviders.map((provider) => String(provider.instanceId)),
+    ]);
+    const identity = nextManagedProviderAccountIdentity(driver, occupiedIds);
+    const driverLabel = driverKindLabel(driver);
+    const displayName = `${driverLabel} ${identity.displayName}`;
+
+    try {
+      const allocation = await allocateManagedAccountHome({
+        environmentId: primaryEnvironment.environmentId,
+        input: { driverKind: driver, instanceId: identity.instanceId },
+      });
+      if (allocation._tag === "Failure") {
+        if (!isAtomCommandInterrupted(allocation)) {
+          showAccountError(
+            `Could not add ${displayName}`,
+            squashAtomCommandFailure(allocation),
+            "The server could not allocate an account home.",
+          );
+        }
+        return;
+      }
+
+      const instance = withProviderCredentialHome(
+        {
+          driver,
+          displayName,
+          enabled: true,
+          config: {},
+        },
+        allocation.value.homePath,
+      );
+      if (instance === null) {
+        showAccountError(
+          `Could not add ${displayName}`,
+          null,
+          "This driver has no managed credential home.",
+        );
+        return;
+      }
+      const freshSettings = await getServerSettings({
+        environmentId: primaryEnvironment.environmentId,
+        input: {},
+      });
+      if (freshSettings._tag === "Failure") {
+        if (!isAtomCommandInterrupted(freshSettings)) {
+          showAccountError(
+            `Could not read current provider settings`,
+            squashAtomCommandFailure(freshSettings),
+            "The latest account list could not be read.",
+          );
+        }
+        return;
+      }
+      if (freshSettings.value.providerInstances?.[identity.instanceId] !== undefined) {
+        showAccountError(
+          `Could not save ${displayName}`,
+          null,
+          "Another account used this instance ID. Try Add account again.",
+        );
+        return;
+      }
+      const providerInstances = {
+        ...freshSettings.value.providerInstances,
+        [identity.instanceId]: instance,
+      };
+      const persisted = await persistServerSettings({
+        environmentId: primaryEnvironment.environmentId,
+        input: { patch: { providerInstances } },
+      });
+      if (persisted._tag === "Failure") {
+        if (!isAtomCommandInterrupted(persisted)) {
+          showAccountError(
+            `Could not save ${displayName}`,
+            squashAtomCommandFailure(persisted),
+            "The account settings could not be saved.",
+          );
+        }
+        return;
+      }
+
+      const login = await startProviderLogin({
+        environmentId: primaryEnvironment.environmentId,
+        input: { instanceId: identity.instanceId },
+      });
+      if (login._tag === "Failure") {
+        if (!isAtomCommandInterrupted(login)) {
+          showAccountError(
+            `${displayName} was added, but sign-in did not start`,
+            squashAtomCommandFailure(login),
+            "Open the account card and try Sign in again.",
+          );
+        }
+        return;
+      }
+      openLoginDialog(displayName, login.value);
+    } finally {
+      endAccountMutation(mutationKey);
+    }
+  };
+
+  const requestSignOut = (row: InstanceRow) => {
+    const displayName =
+      row.instance.displayName?.trim() || getDriverOption(row.driver)?.label || String(row.driver);
+    const homePath = readProviderCredentialHome(row.instance);
+    setDeleteAccountHome(false);
+    setSignOutTarget({
+      instanceId: row.instanceId,
+      displayName,
+      canDeleteAccountHome: isManagedProviderAccountHomeForDisplay({
+        accountsDir: serverConfig?.accountsDir,
+        homePath,
+        driver: row.driver,
+        instanceId: row.instanceId,
+      }),
+    });
+    setSignOutOpen(true);
+  };
+
+  const confirmSignOut = async () => {
+    if (!primaryEnvironment || !signOutTarget) return;
+    const mutationKey = `sign-out:${signOutTarget.instanceId}`;
+    if (!beginAccountMutation(mutationKey)) return;
+    try {
+      const result = await logoutProvider({
+        environmentId: primaryEnvironment.environmentId,
+        input: {
+          instanceId: signOutTarget.instanceId,
+          ...(deleteAccountHome ? { deleteAccountHome: true } : {}),
+        },
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          showAccountError(
+            `Could not sign out of ${signOutTarget.displayName}`,
+            squashAtomCommandFailure(result),
+            "The provider logout command failed.",
+          );
+        }
+        return;
+      }
+      toastManager.add({
+        type: "success",
+        title: `Signed out of ${signOutTarget.displayName}`,
+        description: deleteAccountHome
+          ? "The managed credential home was also deleted."
+          : "The provider instance remains in your settings.",
+      });
+      setSignOutOpen(false);
+    } finally {
+      endAccountMutation(mutationKey);
+    }
+  };
+
   const reorderGroupAccount = (
     groupRows: ReadonlyArray<InstanceRow>,
     instanceId: ProviderInstanceId,
@@ -1348,6 +1647,7 @@ export function ProviderSettingsPanel() {
                   size="icon-xs"
                   variant="ghost"
                   className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                  disabled={isAddingAccount}
                   onClick={() => setIsAddInstanceDialogOpen(true)}
                   aria-label="Add provider instance"
                 >
@@ -1381,7 +1681,29 @@ export function ProviderSettingsPanel() {
         </div>
       </div>
       {instanceGroups.map((group) => (
-        <SettingsSection key={group.driver} title={group.label}>
+        <SettingsSection
+          key={group.driver}
+          title={group.label}
+          headerAction={
+            QUICK_ACCOUNT_DRIVER_KINDS.has(String(group.driver)) ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-7 min-h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                disabled={isAddingAccount}
+                onClick={() => void addManagedAccount(group.driver)}
+              >
+                {accountMutations.has(`add:${group.driver}`) ? (
+                  <LoaderIcon className="animate-spin" />
+                ) : (
+                  <PlusIcon />
+                )}
+                Add account
+              </Button>
+            ) : null
+          }
+        >
           {group.rows.map((row, rowIndex) => {
             const driverOption = getDriverOption(row.driver);
             const liveProvider = serverProviders.find(
@@ -1479,6 +1801,16 @@ export function ProviderSettingsPanel() {
                     : undefined
                 }
                 isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+                isSettingsDisabled={isAddingAccount}
+                authActionBusy={
+                  accountMutations.has(`sign-in:${row.instanceId}`)
+                    ? "sign-in"
+                    : accountMutations.has(`sign-out:${row.instanceId}`)
+                      ? "sign-out"
+                      : null
+                }
+                onSignIn={() => void signInToAccount(row)}
+                onSignOut={() => requestSignOut(row)}
                 reorder={
                   group.rows.length > 1
                     ? {
@@ -1501,6 +1833,84 @@ export function ProviderSettingsPanel() {
 
       {isAddInstanceDialogOpen ? (
         <AddProviderInstanceDialog open onOpenChange={setIsAddInstanceDialogOpen} />
+      ) : null}
+
+      {loginDialogTarget && primaryEnvironment ? (
+        <ProviderAuthLoginDialog
+          key={loginDialogTarget.start.terminalId}
+          environmentId={primaryEnvironment.environmentId}
+          displayName={loginDialogTarget.displayName}
+          start={loginDialogTarget.start}
+          open={loginDialogOpen}
+          onOpenChange={setLoginDialogOpen}
+          onOpenChangeComplete={(open) => {
+            if (!open) setLoginDialogTarget(null);
+          }}
+        />
+      ) : null}
+
+      {signOutTarget ? (
+        <AlertDialog
+          open={signOutOpen}
+          onOpenChange={(open) => {
+            if (!open && !accountMutations.has(`sign-out:${signOutTarget.instanceId}`)) {
+              setSignOutOpen(false);
+            }
+          }}
+          onOpenChangeComplete={(open) => {
+            if (!open) setSignOutTarget(null);
+          }}
+        >
+          <AlertDialogPopup>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Sign out of {signOutTarget.displayName}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This removes the provider credentials. The account stays in your provider list.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {signOutTarget.canDeleteAccountHome ? (
+              <label className="mx-6 mb-5 flex min-h-8 items-start gap-2 rounded-lg border border-border/70 bg-muted/30 p-3 text-sm">
+                <Checkbox
+                  checked={deleteAccountHome}
+                  onCheckedChange={(checked) => setDeleteAccountHome(Boolean(checked))}
+                  disabled={accountMutations.has(`sign-out:${signOutTarget.instanceId}`)}
+                  aria-label="Also delete the managed credential home"
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-foreground">
+                    Delete managed credential home
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    Remove this account&apos;s credential directory from the server.
+                  </span>
+                </span>
+              </label>
+            ) : null}
+            <AlertDialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={accountMutations.has(`sign-out:${signOutTarget.instanceId}`)}
+                onClick={() => setSignOutOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={accountMutations.has(`sign-out:${signOutTarget.instanceId}`)}
+                onClick={() => void confirmSignOut()}
+              >
+                {accountMutations.has(`sign-out:${signOutTarget.instanceId}`) ? (
+                  <LoaderIcon className="animate-spin" />
+                ) : null}
+                {accountMutations.has(`sign-out:${signOutTarget.instanceId}`)
+                  ? "Signing out"
+                  : "Sign out"}
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogPopup>
+        </AlertDialog>
       ) : null}
     </SettingsPageContainer>
   );
