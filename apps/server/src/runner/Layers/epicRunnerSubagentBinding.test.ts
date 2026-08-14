@@ -8,9 +8,16 @@
  * configures one, and it must be bound before the thread exists — the session
  * starts lazily on the first turn.
  */
-import { EpicRunId, ProjectId, ThreadId, type EpicSubagentMap } from "@t3tools/contracts";
+import {
+  EpicRunId,
+  ProjectId,
+  ProviderDriverKind,
+  ThreadId,
+  type EpicSubagentMap,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 
 import type { OrchestrationCommand } from "@t3tools/contracts";
@@ -30,7 +37,7 @@ const planner: EpicSubagentMap = {
   },
 };
 
-function harness(subagents: EpicSubagentMap) {
+function harness(subagents: EpicSubagentMap, sessionDriver?: string) {
   const dispatched: OrchestrationCommand[] = [];
   const bindings: Array<{
     readonly runId: EpicRunId;
@@ -72,6 +79,8 @@ function harness(subagents: EpicSubagentMap) {
     } as never,
     subagentRegistry,
     readIterationSubagents: () => Effect.succeed(subagents),
+    readSessionDriverKind: () =>
+      Effect.succeed(sessionDriver === undefined ? null : ProviderDriverKind.make(sessionDriver)),
   });
 
   const createInput = {
@@ -112,6 +121,62 @@ describe("epic runner subagent binding", () => {
       // The worker scope still binds: an empty subagent map is not a reason to
       // change anything else about the iteration.
       expect(boundWorkers).toEqual([threadId]);
+    }),
+  );
+
+  /**
+   * Only the Claude adapter reads the bound map. Every other adapter drops it
+   * without a word, so a run on Codex or Kimi silently loses its stage agents
+   * and looks exactly like a run that kept them. One log line is the only
+   * evidence, and it must not fire on the harness that does honour the map.
+   */
+  it.effect("says so when the worker's harness will drop the bound map", () =>
+    Effect.gen(function* () {
+      const messages: unknown[] = [];
+      const logger = Logger.make<unknown, void>(({ message }) => {
+        messages.push(message);
+      });
+      const { dispatch, bindings, createInput } = harness(planner, "codex");
+
+      yield* dispatch
+        .createIteration(createInput)
+        .pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+
+      // The binding still happens: the drop belongs to the adapter, not here.
+      expect(bindings).toHaveLength(1);
+      expect(
+        messages.filter(
+          (message) =>
+            Array.isArray(message) && message[0] === "epic.runner.subagents-unsupported-harness",
+        ),
+      ).toHaveLength(1);
+    }),
+  );
+
+  it.effect("stays quiet on a Claude worker and on an unknown account", () =>
+    Effect.gen(function* () {
+      const messages: unknown[] = [];
+      const logger = Logger.make<unknown, void>(({ message }) => {
+        messages.push(message);
+      });
+      const claude = harness(planner, "claudeAgent");
+      const unknown = harness(planner);
+
+      yield* claude.dispatch
+        .createIteration(claude.createInput)
+        .pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+      yield* unknown.dispatch
+        .createIteration(unknown.createInput)
+        .pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+
+      expect(claude.bindings).toHaveLength(1);
+      expect(unknown.bindings).toHaveLength(1);
+      expect(
+        messages.filter(
+          (message) =>
+            Array.isArray(message) && message[0] === "epic.runner.subagents-unsupported-harness",
+        ),
+      ).toEqual([]);
     }),
   );
 });

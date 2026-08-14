@@ -25,6 +25,7 @@ import {
   type EpicSubagentMap,
   MessageId,
   type ModelSelection,
+  type ProviderDriverKind,
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
@@ -277,6 +278,26 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    /**
+     * The driver a worker session's own account runs, or `null` when the
+     * registry is absent, the read fails, or nothing matches the instance id.
+     * The bind site uses it to say when a harness will drop the injected
+     * agents, so an unknown answer has to stay quiet rather than guess.
+     */
+    const readSessionDriverKind = (
+      sessionSelection: ModelSelection,
+    ): Effect.Effect<ProviderDriverKind | null> =>
+      Option.isNone(providerRegistry)
+        ? Effect.succeed(null)
+        : providerRegistry.value.getProviders.pipe(
+            Effect.map(
+              (providers) =>
+                providers.find((provider) => provider.instanceId === sessionSelection.instanceId)
+                  ?.driver ?? null,
+            ),
+            Effect.catchCause(() => Effect.succeed(null)),
+          );
+
     const leases = new Map<EpicRunId, EpicRunLockLease>();
 
     const seedRetryBaseDelayMs = Math.max(
@@ -519,6 +540,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         workerScopeRegistry,
         subagentRegistry,
         readIterationSubagents,
+        readSessionDriverKind,
         ownedIterationTurnIds,
       }),
       mergeDrain: makeServerMergeDrain({ store, processRunner, fileSystem, path, gitVcsDriver }),

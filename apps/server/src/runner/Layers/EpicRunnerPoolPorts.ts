@@ -18,6 +18,7 @@ import {
   MessageId,
   PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
+  ProviderDriverKind,
   ProviderSessionResumeSettledActivityPayload,
   ThreadId,
   decodeProviderTurnSteerAttributedActivityPayload,
@@ -160,6 +161,9 @@ const decodeResumeSettledActivity = Schema.decodeUnknownOption(
  */
 const NUDGE_ABSORPTION_READS = 10;
 const RECENT_ITERATIONS_LIMIT = 25;
+
+/** The one driver whose adapter passes injected subagent definitions through. */
+const CLAUDE_SUBAGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -2126,6 +2130,14 @@ export const makeServerPoolDispatch = (deps: {
   readonly readIterationSubagents: (
     sessionSelection: AgentSelection,
   ) => Effect.Effect<EpicSubagentMap>;
+  /**
+   * The driver the session's own account runs, or `null` when the account is
+   * unknown. Only used to say so when a bound map cannot reach the harness.
+   * Never fails, and an absent reader simply logs nothing.
+   */
+  readonly readSessionDriverKind?: (
+    sessionSelection: AgentSelection,
+  ) => Effect.Effect<ProviderDriverKind | null>;
   readonly ownedIterationTurnIds?: Map<ThreadId, TurnId>;
 }): PoolDispatchShape => {
   const {
@@ -2138,6 +2150,7 @@ export const makeServerPoolDispatch = (deps: {
     subagentRegistry,
     readIterationSubagents,
   } = deps;
+  const readSessionDriverKind = deps.readSessionDriverKind ?? (() => Effect.succeed(null));
   const ownedIterationTurnIds = deps.ownedIterationTurnIds ?? new Map<ThreadId, TurnId>();
   const vcs = makeProcessPoolVcs(processRunner);
 
@@ -2177,6 +2190,12 @@ export const makeServerPoolDispatch = (deps: {
    * the provider session starts lazily on the first turn and resolves the
    * binding then. An empty map binds nothing, so a server with no in-session
    * roles configured leaves the harness's own agents untouched.
+   *
+   * The binding still happens on every driver, but only the Claude adapter
+   * reads `ProviderSessionStartInput.subagents`; every other adapter drops the
+   * map without a word. That silence is the whole reason for the log below: a
+   * worker on Codex or Kimi runs with the harness's own agents, and the run
+   * looks identical from the outside.
    */
   const bindIterationSubagents = (
     runId: EpicRunId,
@@ -2186,6 +2205,18 @@ export const makeServerPoolDispatch = (deps: {
     Effect.gen(function* () {
       const subagents = yield* readIterationSubagents(sessionSelection);
       if (Object.keys(subagents).length === 0) return;
+      const driver = yield* readSessionDriverKind(sessionSelection);
+      // An unknown account says nothing either way, so it stays quiet.
+      if (driver !== null && driver !== CLAUDE_SUBAGENT_DRIVER) {
+        yield* Effect.logInfo("epic.runner.subagents-unsupported-harness", {
+          threadId,
+          driver,
+          instanceId: sessionSelection.instanceId,
+          subagents: Object.keys(subagents),
+          detail:
+            "Injected stage agents reach Claude sessions only; this worker keeps the harness's own agents.",
+        });
+      }
       yield* subagentRegistry.bindThread({ runId, threadId, subagents });
     });
 

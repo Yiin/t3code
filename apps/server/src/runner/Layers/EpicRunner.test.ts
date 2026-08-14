@@ -4637,13 +4637,12 @@ describe("EpicRunner", () => {
 
       const threadId = harness.commandsOfType("thread.create")[0]?.threadId;
       assert.isDefined(threadId);
-      // The policy's own planner replaces the shipped one; the other five
-      // stage subagents ride along tier-less, so they carry no model.
+      // A policy that states `inSessionRoles` replaces the shipped six whole:
+      // the default fills an absent key only, so this run carries one agent.
       assert.deepStrictEqual(harness.subagentBindings, [
         {
           threadId,
           subagents: {
-            ...DEFAULT_EPIC_STAGE_SUBAGENTS,
             planner: {
               description: "Plans one child.",
               prompt: "You plan.",
@@ -4681,6 +4680,44 @@ describe("EpicRunner", () => {
       assert.deepStrictEqual(harness.subagentBindings, [
         { threadId, subagents: DEFAULT_EPIC_STAGE_SUBAGENTS },
       ]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  /**
+   * The fresh-install case: no settings file, so no policy at all. It is the
+   * one the shipped defaults exist for, and the only one that proves the six
+   * roles ship tier-less — a model on any of them would pin a worker to an
+   * account the install never named.
+   */
+  it.live("binds six tier-less stage subagents on a server with no policy configured", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      projectDefaultModelSelection: CLAUDE_WORK_SELECTION,
+      providers: [provider("claude-work", "claudeAgent", "claude-sonnet-5")],
+    });
+
+    return Effect.gen(function* () {
+      const runner = yield* EpicRunner;
+      const run = yield* runner.launchRun({
+        epicId: "epic-1",
+        projectId,
+        cwd: "/tmp/epic-runner-repo",
+      });
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+
+      const binding = harness.subagentBindings[0];
+      assert.isDefined(binding);
+      assert.deepStrictEqual(Object.keys(binding.subagents).sort(), [
+        "cleanup",
+        "implementer",
+        "investigator",
+        "planner",
+        "reviewer",
+        "tester",
+      ]);
+      for (const [name, definition] of Object.entries(binding.subagents)) {
+        assert.isFalse("model" in definition, `${name} must inherit the session model`);
+      }
     }).pipe(Effect.provide(harness.layer));
   });
 

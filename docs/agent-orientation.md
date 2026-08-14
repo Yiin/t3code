@@ -241,6 +241,10 @@ inside the config directory that created it.
   That fallback skips a `spawn_agent` child thread and a session with
   thread-backed spawning on; a registry binding is exempt. The registry is
   in-memory, so `resumeIteration` rebinds after a restart.
+- A worker on any other driver binds its map and then loses it, because only
+  the Claude adapter reads it. `bindIterationSubagents` logs
+  `epic.runner.subagents-unsupported-harness` once in that case. An account the
+  provider registry cannot name stays quiet instead of guessing.
 - CLI delivery is separate. `apps/server/src/cli/epicCookSubagents.ts` reads the
   same `settings.json` directly, because the cook binary may not import server
   config or the database. Only the `claude` and `ccx` arms emit `--agents`
