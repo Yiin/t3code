@@ -20,6 +20,7 @@ import { OrchestrationRetentionLive } from "./persistence/Layers/OrchestrationRe
 import { OrchestrationRetentionSweeperLive } from "./persistence/Layers/OrchestrationRetentionSweeper.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
+import { ProviderAccountLimitsStoreLive } from "./persistence/Layers/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStoreLive } from "./persistence/Layers/ProviderUsageLedger.ts";
 import { EpicRunnerLive } from "./runner/Layers/EpicRunner.ts";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
@@ -241,6 +242,7 @@ const ProviderInstanceTeardownLayerLive = ProviderInstanceTeardownLive.pipe(
 const ProviderInstanceRegistryLayerLive = ProviderInstanceRegistryHydrationLive.pipe(
   Layer.provide(ProviderInstanceTeardownLayerLive),
   Layer.provide(ProviderUsageLedgerStoreLive),
+  Layer.provide(ProviderAccountLimitsStoreLive),
 );
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
@@ -381,11 +383,13 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   // Read-only here: the runner reads account usage to pick each role's tier
   // hop. The poller owns the writes.
   Layer.provide(ProviderUsageLedgerStoreLive),
+  Layer.provide(ProviderAccountLimitsStoreLive),
   Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 
 const ProviderUsagePollerLayerLive = ProviderUsagePollerLive.pipe(
   Layer.provide(ProviderUsageLedgerStoreLive),
+  Layer.provide(ProviderAccountLimitsStoreLive),
   Layer.provide(ProviderInstanceRegistryLayerLive),
 );
 

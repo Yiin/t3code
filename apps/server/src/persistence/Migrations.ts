@@ -72,6 +72,7 @@ import Migration0056 from "./Migrations/056_EpicRunIterationResume.ts";
 import Migration0057 from "./Migrations/057_EpicRunIterationTierAttribution.ts";
 import Migration0058 from "./Migrations/058_EpicRunGateReceipts.ts";
 import Migration0059 from "./Migrations/059_EpicProviderDegradationResetsAt.ts";
+import Migration0060 from "./Migrations/060_ProviderAccountLimits.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -143,6 +144,7 @@ export const migrationEntries = [
   [57, "EpicRunIterationTierAttribution", Migration0057],
   [58, "EpicRunGateReceipts", Migration0058],
   [59, "EpicProviderDegradationResetsAt", Migration0059],
+  [60, "ProviderAccountLimits", Migration0060],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

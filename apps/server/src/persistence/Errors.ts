@@ -137,5 +137,6 @@ export type AuthPairingLinkRepositoryError = PersistenceSqlError | PersistenceDe
 export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type EpicRunStoreError = PersistenceSqlError | PersistenceDecodeError;
 export type ProviderUsageLedgerStoreError = PersistenceSqlError | PersistenceDecodeError;
+export type ProviderAccountLimitsStoreError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
