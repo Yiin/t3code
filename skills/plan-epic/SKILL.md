@@ -73,6 +73,18 @@ synthesize — spot-check only a concrete conflict that affects decomposition.
 These dispatch rules apply only when investigators are available; in
 main-thread-only mode, fill a missing facet directly before synthesis.
 
+**Injected investigators (Claude-family harness only).** When the session was
+started with injected agent definitions (the `Agent` or `Workflow` tool lists an
+agent named `investigator`, or `planner` as the fallback name), dispatch each
+investigation area with that `agentType` and pass no model. The definition
+already carries the tier, and an injected agent replaces the `general-purpose` /
+`Explore` default wherever this skill names one. Work you do in your own session
+stays on the session model. A model the user named pins every dispatch instead.
+When the session lists no such agent, which is any plain `claude` CLI run or any
+non-Claude harness, the modes below stand unchanged. The tiers live in the epic
+role policy in `ServerSettings` and reach a session as injected agent
+definitions, so never copy a model name back into this file.
+
 Choose the strongest investigation mode the harness provides:
 
 1. Prefer the `Workflow` tool when available (the sketch below).
@@ -106,8 +118,19 @@ in the session, or as a file the admitted agent wrote. Plan for that:
 
 Always try harness-native agent dispatch first. If an investigator fails due
 to a provider limit, usage or spend limit, authentication failure, or provider
-unavailability, retry only that failed area with the next harness. Use this
-one-way order:
+unavailability, retry only that failed area with the next harness.
+
+Read the chain at run time before you fall back on the shipped one. From the
+project root, run `t3 epic policy --json` and look for a reasoning tier, taking
+the strongest id the policy offers (`extreme` over `good`). That tier's `hops`
+are already in fallback order: take the order from them, and take each model
+flag from a hop's `model` field. A hop's `instanceId` names the account, which
+tells you which headless command shape below to use. Skip a hop whose harness you
+cannot name, and skip one whose binary is missing. Never copy a model name out of
+that output into this file. Reading the policy at run time is the whole point.
+
+Use this one-way order when `t3` is absent, the policy has no tiers, or no hop
+resolves to an installed harness:
 
 1. The harness you are running in stays primary, with its configured model.
    From Prime Agent, the next stage is Claude.
@@ -189,7 +212,13 @@ const results = await parallel(
     (a) => () =>
       agent(
         `Investigate for epic ${EPIC}. ${a.brief}\nReturn findings (cite file:line) and self-contained child-issue specs.`,
-        { label: `investigate:${a.key}`, phase: "Investigate", schema: ISSUE },
+        {
+          label: `investigate:${a.key}`,
+          phase: "Investigate",
+          schema: ISSUE,
+          // Only when the session lists the injected agent. Leave `model` off either way.
+          agentType: "investigator",
+        },
       ),
   ),
 );
