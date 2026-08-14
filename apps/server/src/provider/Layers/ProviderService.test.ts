@@ -3878,6 +3878,135 @@ it.effect("keeps the continuation identity across a session stop", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("inherits a sibling account cursor from the same continuation group", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/shared" });
+    const threadId = asThreadId("thread-continuation-sibling-shared");
+    const resumeCursor = { opaque: "from-codex-work" };
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex-work"),
+        resumeCursor,
+        runtimePayload: {
+          cwd: "/tmp/project-continuation",
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: "codex:home:/shared",
+          },
+        },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.deepEqual(startInput?.resumeCursor, resumeCursor);
+    assert.equal(startInput?.cwd, "/tmp/project-continuation");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("starts fresh when a sibling account has a different continuation group", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/personal" });
+    const threadId = asThreadId("thread-continuation-sibling-isolated");
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex-work"),
+        resumeCursor: { opaque: "from-another-home" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: "codex:home:/work",
+          },
+        },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.resumeCursor, undefined);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("starts fresh when a sibling cursor names another driver", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "shared-home" });
+    const threadId = asThreadId("thread-continuation-sibling-other-driver");
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex-work"),
+        resumeCursor: { opaque: "from-another-driver" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CLAUDE_AGENT_DRIVER,
+            continuationKey: "shared-home",
+          },
+        },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.resumeCursor, undefined);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("starts fresh when the same instance has a recorded identity mismatch", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/new" });
+    const threadId = asThreadId("thread-continuation-same-instance-reconfigured");
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "from-old-config" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: "codex:home:/old",
+          },
+        },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.resumeCursor, undefined);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("reads a legacy binding that carries no continuation identity", () =>
   Effect.gen(function* () {
     const stack = makeContinuationIdentityStack();
@@ -3899,6 +4028,59 @@ it.effect("reads a legacy binding that carries no continuation identity", () =>
     // existed reads this way.
     assert.equal(verdict.resumable, "cursor");
     assert.equal(verdict.reason, "persisted-cursor");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("inherits a legacy cursor only for the same instance", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-legacy-start");
+    const resumeCursor = { opaque: "legacy-same-instance" };
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor,
+        runtimePayload: { cwd: "/tmp/project-legacy" },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.deepEqual(startInput?.resumeCursor, resumeCursor);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("does not give a legacy cursor to a sibling instance", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack();
+    const threadId = asThreadId("thread-continuation-legacy-sibling");
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex-work"),
+        resumeCursor: { opaque: "legacy-other-instance" },
+        runtimePayload: { cwd: "/tmp/project-legacy" },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.resumeCursor, undefined);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
@@ -4046,6 +4228,31 @@ it.effect("describeSessionResume refuses a cursor from another continuation doma
           continuationIdentity: {
             driverKind: CODEX_DRIVER,
             continuationKey: "codex:home:/old-home",
+          },
+        },
+      });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "no");
+    assert.equal(verdict.reason, "continuation-identity-changed");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("describeSessionResume refuses a matching key from another driver", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "shared-home" });
+    const threadId = asThreadId("thread-verdict-driver-changed");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "from-another-driver" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CLAUDE_AGENT_DRIVER,
+            continuationKey: "shared-home",
           },
         },
       });

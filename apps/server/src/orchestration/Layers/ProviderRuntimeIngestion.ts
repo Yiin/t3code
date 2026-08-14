@@ -19,7 +19,12 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type OrchestrationThreadShell,
   type ProviderRuntimeEvent,
+  DEFAULT_EPIC_RUN_CONFIG,
+  parseEpicRunIterationThreadId,
+  PROVIDER_ACCOUNT_ROTATION_REFUSED_ACTIVITY_KIND,
+  PROVIDER_ACCOUNT_ROTATED_ACTIVITY_KIND,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -34,6 +39,16 @@ import { type DrainableWorker, makeDrainableWorker } from "@t3tools/shared/Drain
 import { parseTerminalEpicPlanMarker } from "@t3tools/shared/epicPlanMarker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
+import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
+import {
+  accountRotationRefusedSummary,
+  accountRotationSummary,
+  buildExhaustedAccountBlocklist,
+  classifyAccountRotationReason,
+  resolveAccountRotationTarget,
+} from "../providerAccountRotation.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -937,6 +952,11 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  // Optional seams for account rotation on usage-limit failures. Absent in
+  // minimal harnesses (most tests); rotation simply stays off then.
+  const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
+  const providerAccountLimits = yield* Effect.serviceOption(ProviderAccountLimitsStore);
+  const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
   // Assigned once, near the bottom of this generator, once processInputSafely
   // exists. dispatchOrCoalesceToolUpdate below only reads it from inside a
   // forked, sleeping fiber -- by the time that fiber wakes, start() has
@@ -945,6 +965,179 @@ const make = Effect.gen(function* () {
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
+    );
+
+  // A provider can emit both runtime.error and turn.completed for one failed
+  // turn. Remember that turn, not the account, so a later turn can rotate if
+  // the user selected the account again after its limit reset.
+  const handledRotationTurns = yield* Cache.make<string, boolean>({
+    capacity: 4096,
+    timeToLive: Duration.minutes(30),
+    lookup: () => Effect.succeed(false),
+  });
+
+  const maybeRotateAccountOnProviderLimit = Effect.fn("maybeRotateAccountOnProviderLimit")(
+    function* (input: {
+      readonly thread: OrchestrationThreadShell;
+      readonly event: ProviderRuntimeEvent;
+      readonly message: string;
+    }) {
+      const { thread, event } = input;
+      const failingInstanceId = event.providerInstanceId;
+      if (failingInstanceId === undefined) return;
+      // Epic iteration threads rotate through the runner's own selection
+      // between iterations; a thread-level rebind would fight the run row.
+      if (parseEpicRunIterationThreadId(thread.id) !== null) return;
+      // Only rotate the account the thread is actually bound to. A mismatch
+      // means the thread already rebound (this turn or by the user).
+      if (thread.modelSelection.instanceId !== failingInstanceId) return;
+      const reason = classifyAccountRotationReason(input.message);
+      if (reason === null) return;
+      if (Option.isNone(providerRegistry)) return;
+      const turnKey = `${thread.id}:${event.turnId ?? event.eventId}:${failingInstanceId}`;
+      if (yield* Cache.get(handledRotationTurns, turnKey)) return;
+
+      const providers = yield* providerRegistry.value.getProviders;
+      const now = event.createdAt;
+      const limits = Option.isNone(providerAccountLimits)
+        ? []
+        : yield* providerAccountLimits.value.listAll.pipe(Effect.orElseSucceed(() => []));
+      const samples = Option.isNone(providerUsageLedger)
+        ? []
+        : yield* providerUsageLedger.value.listAll.pipe(Effect.orElseSucceed(() => []));
+      const blocked = new Set(
+        buildExhaustedAccountBlocklist({
+          limits,
+          samples,
+          now,
+          degradationTtlMs: DEFAULT_EPIC_RUN_CONFIG.server.providerDegradationTtlMs,
+        }),
+      );
+      const failingInfo = yield* providerService.getInstanceInfo(failingInstanceId);
+      let refusedTarget: ReturnType<typeof resolveAccountRotationTarget> = null;
+      let target = resolveAccountRotationTarget({
+        providers,
+        current: thread.modelSelection,
+        failingInstanceId,
+        blocked,
+      });
+      while (target !== null) {
+        const targetInfo = yield* providerService.getInstanceInfo(target.instanceId);
+        if (
+          targetInfo.continuationIdentity.driverKind ===
+            failingInfo.continuationIdentity.driverKind &&
+          targetInfo.continuationIdentity.continuationKey ===
+            failingInfo.continuationIdentity.continuationKey
+        ) {
+          break;
+        }
+        refusedTarget ??= target;
+        blocked.add(target.instanceId);
+        target = resolveAccountRotationTarget({
+          providers,
+          current: thread.modelSelection,
+          failingInstanceId,
+          blocked,
+        });
+      }
+
+      const labelOf = (instanceId: typeof failingInstanceId) => {
+        const snapshot = providers.find((provider) => provider.instanceId === instanceId);
+        return snapshot?.displayName ?? String(instanceId);
+      };
+      if (target === null) {
+        if (refusedTarget !== null) {
+          yield* Cache.set(handledRotationTurns, turnKey, true);
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "account-rotation-refused"),
+            threadId: thread.id,
+            activity: {
+              id: EventId.make(`${event.eventId}:account-rotation-refused`),
+              tone: "info",
+              kind: PROVIDER_ACCOUNT_ROTATION_REFUSED_ACTIVITY_KIND,
+              summary: accountRotationRefusedSummary({
+                fromLabel: labelOf(failingInstanceId),
+                toLabel: labelOf(refusedTarget.instanceId),
+                reason,
+              }),
+              payload: {
+                fromInstanceId: failingInstanceId,
+                toInstanceId: refusedTarget.instanceId,
+                reason,
+                refusal: "continuation-group-mismatch",
+              },
+              turnId: toTurnId(event.turnId) ?? null,
+              createdAt: now,
+            },
+            createdAt: now,
+          });
+        }
+        // The original error remains the thread's lastError.
+        return;
+      }
+
+      yield* Cache.set(handledRotationTurns, turnKey, true);
+
+      // Do not rebind if the old session cannot stop. The outer fail-soft
+      // wrapper preserves ingestion of the original provider error.
+      yield* providerService.stopSession({ threadId: thread.id });
+      yield* orchestrationEngine.dispatch({
+        type: "thread.meta.update",
+        commandId: yield* providerCommandId(event, "account-rotation-rebind"),
+        threadId: thread.id,
+        modelSelection: target,
+      });
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: yield* providerCommandId(event, "account-rotation-activity"),
+        threadId: thread.id,
+        activity: {
+          id: EventId.make(`${event.eventId}:account-rotation`),
+          tone: "info",
+          kind: PROVIDER_ACCOUNT_ROTATED_ACTIVITY_KIND,
+          summary: accountRotationSummary({
+            fromLabel: labelOf(failingInstanceId),
+            toLabel: labelOf(target.instanceId),
+            reason,
+            fromModel: thread.modelSelection.model,
+            toModel: target.model,
+          }),
+          payload: {
+            fromInstanceId: failingInstanceId,
+            toInstanceId: target.instanceId,
+            model: target.model,
+            reason,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          createdAt: now,
+        },
+        createdAt: now,
+      });
+      yield* Effect.logInfo("provider account rotated after usage-limit failure", {
+        threadId: thread.id,
+        fromInstanceId: failingInstanceId,
+        toInstanceId: target.instanceId,
+        reason,
+      });
+    },
+  );
+
+  // Never let a rotation attempt break ingestion of the event that carried
+  // the failure. The user must still see the original error.
+  const tryRotateAccountOnProviderLimit = (input: {
+    readonly thread: OrchestrationThreadShell;
+    readonly event: ProviderRuntimeEvent;
+    readonly message: string;
+  }) =>
+    maybeRotateAccountOnProviderLimit(input).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider account rotation failed", {
+          threadId: input.thread.id,
+          eventId: input.event.eventId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
     );
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
@@ -2150,6 +2343,18 @@ const make = Effect.gen(function* () {
             createdAt: now,
           });
         }
+
+        if (
+          event.type === "turn.completed" &&
+          normalizeRuntimeTurnState(event.payload.state) === "failed" &&
+          shouldApplyThreadLifecycle
+        ) {
+          yield* tryRotateAccountOnProviderLimit({
+            thread,
+            event,
+            message: event.payload.errorMessage ?? thread.session?.lastError ?? "",
+          });
+        }
       }
 
       const assistantDelta =
@@ -2404,6 +2609,12 @@ const make = Effect.gen(function* () {
               updatedAt: now,
             },
             createdAt: now,
+          });
+
+          yield* tryRotateAccountOnProviderLimit({
+            thread,
+            event,
+            message: runtimeErrorMessage,
           });
         }
       }

@@ -690,6 +690,18 @@ export type SubagentStopFailedActivityPayload = typeof SubagentStopFailedActivit
 export const PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND = "provider.session.resume.settled";
 
 /**
+ * A usage-limit failure moved the thread to a sibling account of the same
+ * driver. The payload names both accounts and the limit reason; the summary
+ * is the user-facing sentence. This activity is the visible record of the
+ * switch. A rebind without it would silently override the user's account
+ * selection.
+ */
+export const PROVIDER_ACCOUNT_ROTATED_ACTIVITY_KIND = "provider.account.rotated";
+
+/** A sibling account could not continue the failing account's provider session. */
+export const PROVIDER_ACCOUNT_ROTATION_REFUSED_ACTIVITY_KIND = "provider.account.rotation.refused";
+
+/**
  * What a resume request settled on.
  *
  * `resumed` is the only arm that means the conversation continued. The three

@@ -10,6 +10,7 @@ import {
   resolveEpicProviderChainEntry,
   resolveEpicProviderChainFallback,
   resolveEpicProviderFallback,
+  resolveSameDriverSiblingRotation,
 } from "./providerFallback.ts";
 import { classifyIteration } from "./ralphProtocol.ts";
 
@@ -554,5 +555,71 @@ describe("resolveEpicProviderFallback sibling rotation", () => {
         providerFallbackEligible: true,
       }),
     ).toEqual(selection("claude-work", "claude-sonnet-5"));
+  });
+});
+
+describe("resolveSameDriverSiblingRotation", () => {
+  const claudeA = provider("claude-a", "claudeAgent", "claude-sonnet-5");
+  const claudeB = provider("claude-b", "claudeAgent", "claude-sonnet-5");
+  const claudeC = provider("claude-c", "claudeAgent", "claude-sonnet-5");
+
+  it("rotates to the next sibling after the current instance, wrapping", () => {
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [claudeA, claudeB, claudeC],
+        current: selection("claude-b", "claude-sonnet-5"),
+      }),
+    ).toEqual(selection("claude-c", "claude-sonnet-5"));
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [claudeA, claudeB, claudeC],
+        current: selection("claude-c", "claude-sonnet-5"),
+      }),
+    ).toEqual(selection("claude-a", "claude-sonnet-5"));
+  });
+
+  it("never crosses to another driver", () => {
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [claudeA, codex, kimi],
+        current: selection("claude-a", "claude-sonnet-5"),
+      }),
+    ).toBeNull();
+  });
+
+  it("skips blocked siblings", () => {
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [claudeA, claudeB, claudeC],
+        current: selection("claude-a", "claude-sonnet-5"),
+        isBlocked: (instanceId) => instanceId === claudeB.instanceId,
+      }),
+    ).toEqual(selection("claude-c", "claude-sonnet-5"));
+  });
+
+  it("falls to the driver's stage model when a sibling lacks the current slug", () => {
+    const claudeStage = provider("claude-stage", "claudeAgent", "claude-sonnet-5");
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [claudeA, claudeStage],
+        current: selection("claude-a", "claude-custom-model"),
+      }),
+    ).toEqual(selection("claude-stage", "claude-sonnet-5"));
+  });
+
+  it("returns null for prime and for an unknown current instance", () => {
+    const primeSibling = provider("prime-personal", "primeAgent", "prime/custom-model");
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [prime, primeSibling],
+        current: selection("prime-work", "prime/custom-model"),
+      }),
+    ).toBeNull();
+    expect(
+      resolveSameDriverSiblingRotation({
+        providers: [claudeA, claudeB],
+        current: selection("claude-missing", "claude-sonnet-5"),
+      }),
+    ).toBeNull();
   });
 });

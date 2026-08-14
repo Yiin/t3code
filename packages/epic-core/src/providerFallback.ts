@@ -140,6 +140,59 @@ export const resolveEpicProviderChainFallback = (input: {
 };
 
 /**
+ * Rotate to the next sibling account of the same driver, or null.
+ *
+ * The walk starts after the current instance in provider-list order and
+ * wraps. A sibling keeps the current selection's model when it advertises
+ * the same slug, falls to the driver's stage model otherwise, and is
+ * skipped when it advertises neither. Prime is never a target, and an
+ * unknown current instance rotates nowhere. The walk never leaves the
+ * current driver: interactive threads use it alone, because a different
+ * harness cannot continue their conversation.
+ */
+export const resolveSameDriverSiblingRotation = (input: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly current: ModelSelection;
+  readonly isBlocked?: (instanceId: ProviderInstanceId) => boolean;
+}): ModelSelection | null => {
+  const currentIndex = input.providers.findIndex(
+    (provider) => provider.instanceId === input.current.instanceId,
+  );
+  const currentProvider = currentIndex === -1 ? undefined : input.providers[currentIndex];
+  if (currentProvider === undefined || currentProvider.driver === PRIME_DRIVER) {
+    return null;
+  }
+
+  const isBlocked = input.isBlocked ?? (() => false);
+  const currentStage = FALLBACK_STAGES.find((stage) => stage.driver === currentProvider.driver);
+  const rotated = [
+    ...input.providers.slice(currentIndex + 1),
+    ...input.providers.slice(0, currentIndex),
+  ];
+  for (const sibling of rotated) {
+    if (sibling.driver !== currentProvider.driver || isBlocked(sibling.instanceId)) {
+      continue;
+    }
+    if (isEligible(sibling, input.current.model)) {
+      return {
+        instanceId: sibling.instanceId,
+        model: input.current.model,
+        ...(input.current.options === undefined ? {} : { options: input.current.options }),
+      };
+    }
+    if (currentStage !== undefined && isEligible(sibling, currentStage.model)) {
+      return {
+        instanceId: sibling.instanceId,
+        model: currentStage.model,
+        ...(currentStage.options === undefined ? {} : { options: currentStage.options }),
+      };
+    }
+  }
+
+  return null;
+};
+
+/**
  * Resolve the next configured provider after a provider-attributed failure.
  * Instance ids are routing keys. Driver order only controls forward fallback.
  *
@@ -175,32 +228,14 @@ export const resolveEpicProviderFallback = (input: {
   const currentStageIndex = FALLBACK_STAGES.findIndex(
     (stage) => stage.driver === currentProvider.driver,
   );
-  const currentStage = currentStageIndex === -1 ? undefined : FALLBACK_STAGES[currentStageIndex];
 
-  if (currentProvider.driver !== PRIME_DRIVER) {
-    const rotated = [
-      ...input.providers.slice(currentIndex + 1),
-      ...input.providers.slice(0, currentIndex),
-    ];
-    for (const sibling of rotated) {
-      if (sibling.driver !== currentProvider.driver || isBlocked(sibling.instanceId)) {
-        continue;
-      }
-      if (isEligible(sibling, input.current.model)) {
-        return {
-          instanceId: sibling.instanceId,
-          model: input.current.model,
-          ...(input.current.options === undefined ? {} : { options: input.current.options }),
-        };
-      }
-      if (currentStage !== undefined && isEligible(sibling, currentStage.model)) {
-        return {
-          instanceId: sibling.instanceId,
-          model: currentStage.model,
-          ...(currentStage.options === undefined ? {} : { options: currentStage.options }),
-        };
-      }
-    }
+  const rotatedSibling = resolveSameDriverSiblingRotation({
+    providers: input.providers,
+    current: input.current,
+    isBlocked,
+  });
+  if (rotatedSibling !== null) {
+    return rotatedSibling;
   }
 
   const stages =

@@ -1286,13 +1286,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        // A binding continues this conversation when it belongs to the same
+        // instance, or to a sibling instance in the same continuation group.
+        // Drivers that key continuation on a shared home (Codex,
+        // CodexHomeLayout.ts) make their accounts resumable across an account
+        // rotation this way. A persisted identity is required for the
+        // cross-instance arm: an unknown identity means unknown, and an
+        // unknown cursor handed to a stranger loses the conversation
+        // silently.
+        const persistedIdentity =
+          persistedBinding === undefined
+            ? undefined
+            : readPersistedContinuationIdentity(persistedBinding.runtimePayload);
+        const bindingContinuesConversation =
+          persistedBinding !== undefined &&
+          (persistedIdentity === undefined
+            ? persistedBinding.providerInstanceId === resolvedInstanceId
+            : persistedIdentity.driverKind === instanceInfo.continuationIdentity.driverKind &&
+              persistedIdentity.continuationKey ===
+                instanceInfo.continuationIdentity.continuationKey);
         const effectiveResumeCursor =
           input.resumeCursor ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
+          (persistedBinding !== undefined && bindingContinuesConversation
             ? persistedBinding.resumeCursor
             : undefined);
         const persistedCwdCandidate =
-          persistedBinding?.providerInstanceId === resolvedInstanceId
+          persistedBinding !== undefined && bindingContinuesConversation
             ? readPersistedCwd(persistedBinding.runtimePayload)
             : undefined;
         const effectiveCwd =
@@ -1314,16 +1333,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.resume_cursor.source":
             input.resumeCursor !== undefined
               ? "request"
-              : effectiveResumeCursor !== undefined &&
-                  persistedBinding?.providerInstanceId === resolvedInstanceId
+              : effectiveResumeCursor !== undefined && bindingContinuesConversation
                 ? "persisted"
                 : "none",
           "provider.resume_cursor.present": effectiveResumeCursor !== undefined,
           "provider.cwd.source":
             input.cwd !== undefined
               ? "request"
-              : effectiveCwd !== undefined &&
-                  persistedBinding?.providerInstanceId === resolvedInstanceId
+              : effectiveCwd !== undefined && bindingContinuesConversation
                 ? "persisted"
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
@@ -1845,7 +1862,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const persistedIdentity = readPersistedContinuationIdentity(binding.runtimePayload);
     if (
       persistedIdentity !== undefined &&
-      persistedIdentity.continuationKey !== instanceInfo.continuationIdentity.continuationKey
+      (persistedIdentity.driverKind !== instanceInfo.continuationIdentity.driverKind ||
+        persistedIdentity.continuationKey !== instanceInfo.continuationIdentity.continuationKey)
     ) {
       return yield* annotate({
         ...base,

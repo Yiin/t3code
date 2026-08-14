@@ -11,11 +11,16 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  type ModelSelection,
+  type ProviderAccountLimit,
+  type ProviderUsageSample,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  epicRunIterationThreadId,
   EventId,
   MessageId,
   ProjectId,
@@ -43,6 +48,18 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderRegistry,
+  type ProviderRegistryShape,
+} from "../../provider/Services/ProviderRegistry.ts";
+import {
+  ProviderAccountLimitsStore,
+  type ProviderAccountLimitsStoreShape,
+} from "../../persistence/Services/ProviderAccountLimits.ts";
+import {
+  ProviderUsageLedgerStore,
+  type ProviderUsageLedgerStoreShape,
+} from "../../persistence/Services/ProviderUsageLedger.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -76,6 +93,27 @@ const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 
+const testProvider = (input: {
+  readonly instanceId: string;
+  readonly driver: string;
+  readonly model: string;
+  readonly displayName?: string;
+}): ServerProvider => ({
+  instanceId: ProviderInstanceId.make(input.instanceId),
+  driver: ProviderDriverKind.make(input.driver),
+  ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-01-01T00:00:00.000Z",
+  availability: "available",
+  models: [{ slug: input.model, name: input.model, isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+});
+
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
   readonly eventId: EventId;
@@ -106,9 +144,14 @@ function isLegacyTurnCompletedEvent(
   );
 }
 
-function createProviderServiceHarness() {
+function createProviderServiceHarness(options: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly continuationKeys?: Readonly<Record<string, string>>;
+  readonly stopSessionFails?: boolean;
+}) {
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const runtimeSessions: ProviderSession[] = [];
+  const stoppedThreadIds: ThreadId[] = [];
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
@@ -117,7 +160,16 @@ function createProviderServiceHarness() {
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
-    stopSession: () => unsupported(),
+    stopSession: ({ threadId }) => {
+      if (options.stopSessionFails === true) {
+        return Effect.die(new Error("provider refused to stop"));
+      }
+      return Effect.sync(() => {
+        stoppedThreadIds.push(threadId);
+        const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
+        if (index >= 0) runtimeSessions.splice(index, 1);
+      });
+    },
     listSessions: () => Effect.succeed([...runtimeSessions]),
     hasLiveSession: (threadId) =>
       Effect.succeed(runtimeSessions.some((session) => session.threadId === threadId)),
@@ -129,15 +181,18 @@ function createProviderServiceHarness() {
         attachments: UNKNOWN_DRIVER_ATTACHMENT_CAPABILITY,
       }),
     getInstanceInfo: (instanceId) => {
-      const driverKind = ProviderDriverKind.make(String(instanceId));
+      const snapshot = options.providers.find((provider) => provider.instanceId === instanceId);
+      if (snapshot === undefined) return unsupported();
+      const driverKind = snapshot.driver;
       return Effect.succeed({
         instanceId,
         driverKind,
-        displayName: undefined,
-        enabled: true,
+        displayName: snapshot.displayName,
+        enabled: snapshot.enabled,
         continuationIdentity: {
           driverKind,
-          continuationKey: `${driverKind}:instance:${instanceId}`,
+          continuationKey:
+            options.continuationKeys?.[String(instanceId)] ?? `${driverKind}:shared-test-home`,
         },
       });
     },
@@ -179,6 +234,7 @@ function createProviderServiceHarness() {
     service,
     emit,
     setSession,
+    stoppedThreadIds,
   };
 }
 
@@ -239,10 +295,57 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    readonly serverSettings?: Partial<ServerSettings>;
+    readonly modelSelection?: ModelSelection;
+    readonly providers?: ReadonlyArray<ServerProvider>;
+    readonly accountLimits?: ReadonlyArray<ProviderAccountLimit>;
+    readonly usageSamples?: ReadonlyArray<ProviderUsageSample>;
+    readonly continuationKeys?: Readonly<Record<string, string>>;
+    readonly stopSessionFails?: boolean;
+    readonly threadId?: ThreadId;
+  }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
-    const provider = createProviderServiceHarness();
+    const modelSelection = options?.modelSelection ?? {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex",
+    };
+    const providers = options?.providers ?? [
+      testProvider({ instanceId: "codex", driver: "codex", model: "gpt-5-codex" }),
+    ];
+    const threadId = options?.threadId ?? ThreadId.make("thread-1");
+    const provider = createProviderServiceHarness({
+      providers,
+      ...(options?.continuationKeys === undefined
+        ? {}
+        : { continuationKeys: options.continuationKeys }),
+      ...(options?.stopSessionFails === undefined
+        ? {}
+        : { stopSessionFails: options.stopSessionFails }),
+    });
+    const unsupported = () => Effect.die(new Error("Unsupported store call in test")) as never;
+    const providerRegistry: ProviderRegistryShape = {
+      getProviders: Effect.succeed(providers),
+      refresh: () => Effect.succeed(providers),
+      refreshInstance: () => Effect.succeed(providers),
+      getProviderMaintenanceCapabilitiesForInstance: () => unsupported(),
+      setProviderMaintenanceActionState: () => Effect.succeed(providers),
+      streamChanges: Stream.empty,
+    };
+    const accountLimitsStore: ProviderAccountLimitsStoreShape = {
+      recordLimit: () => unsupported(),
+      listAll: Effect.succeed(options?.accountLimits ?? []),
+      listForInstance: () => unsupported(),
+      clearForInstance: () => unsupported(),
+      clearExpired: () => unsupported(),
+    };
+    const usageLedgerStore: ProviderUsageLedgerStoreShape = {
+      recordSamples: () => unsupported(),
+      listAll: Effect.succeed(options?.usageSamples ?? []),
+      listForInstance: () => unsupported(),
+      pruneObservedBefore: () => unsupported(),
+    };
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -260,6 +363,9 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(Layer.succeed(ProviderRegistry, providerRegistry)),
+      Layer.provideMerge(Layer.succeed(ProviderAccountLimitsStore, accountLimitsStore)),
+      Layer.provideMerge(Layer.succeed(ProviderUsageLedgerStore, usageLedgerStore)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
@@ -280,10 +386,7 @@ describe("ProviderRuntimeIngestion", () => {
         projectId: asProjectId("project-1"),
         title: "Provider Project",
         workspaceRoot,
-        defaultModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
+        defaultModelSelection: modelSelection,
         createdAt,
       }),
     );
@@ -291,13 +394,10 @@ describe("ProviderRuntimeIngestion", () => {
       engine.dispatch({
         type: "thread.create",
         commandId: CommandId.make("cmd-thread-create"),
-        threadId: ThreadId.make("thread-1"),
+        threadId,
         projectId: asProjectId("project-1"),
         title: "Thread",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
+        modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
         branch: null,
@@ -309,9 +409,9 @@ describe("ProviderRuntimeIngestion", () => {
       engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-seed"),
-        threadId: ThreadId.make("thread-1"),
+        threadId,
         session: {
-          threadId: ThreadId.make("thread-1"),
+          threadId,
           status: "ready",
           providerName: "codex",
           runtimeMode: "approval-required",
@@ -326,7 +426,7 @@ describe("ProviderRuntimeIngestion", () => {
       provider: ProviderDriverKind.make("codex"),
       status: "ready",
       runtimeMode: "approval-required",
-      threadId: ThreadId.make("thread-1"),
+      threadId,
       createdAt,
       updatedAt: createdAt,
     });
@@ -336,6 +436,8 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      stoppedThreadIds: provider.stoppedThreadIds,
+      threadId,
       drain,
     };
   }
@@ -380,6 +482,410 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("rotates a failed turn completion and records the visible switch", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-custom",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({
+          instanceId: "codex-work",
+          driver: "codex",
+          model: "gpt-custom",
+          displayName: "Work",
+        }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5.6-sol",
+          displayName: "Personal",
+        }),
+        testProvider({ instanceId: "claude-work", driver: "claudeAgent", model: "opus" }),
+      ],
+    });
+    const turnId = asTurnId("turn-limit-rotation");
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-limit-turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "You've hit your usage limit for today.",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.modelSelection.instanceId === ProviderInstanceId.make("codex-personal") &&
+        entry.activities.some((activity) => activity.kind === "provider.account.rotated"),
+    );
+    const rotations = thread.activities.filter(
+      (activity) => activity.kind === "provider.account.rotated",
+    );
+    expect(thread.modelSelection).toEqual({
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(rotations).toHaveLength(1);
+    expect(rotations[0]?.summary).toBe(
+      "Account 'Work' hit its usage limit. This thread now uses account 'Personal'. The model also changed from 'gpt-custom' to 'gpt-5.6-sol'.",
+    );
+    expect(rotations[0]?.payload).toMatchObject({
+      fromInstanceId: "codex-work",
+      toInstanceId: "codex-personal",
+      reason: "spend-limit",
+    });
+    expect(harness.stoppedThreadIds).toEqual([asThreadId("thread-1")]);
+  });
+
+  it("rotates a runtime error once per turn and permits a later turn", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({ instanceId: "codex-work", driver: "codex", model: "gpt-5-codex" }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5-codex",
+        }),
+      ],
+    });
+    const threadId = asThreadId("thread-1");
+    const firstTurnId = asTurnId("turn-limit-runtime-error");
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-limit-runtime-error"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId,
+      turnId: firstTurnId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { message: "You've hit your usage limit for today." },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-limit-paired-completion"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId,
+      turnId: firstTurnId,
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "You've hit your usage limit for today.",
+      },
+    });
+
+    let thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.modelSelection.instanceId === ProviderInstanceId.make("codex-personal"),
+    );
+    expect(
+      thread.activities.filter((activity) => activity.kind === "provider.account.rotated"),
+    ).toHaveLength(1);
+
+    await dispatch(harness.engine, {
+      type: "thread.meta.update",
+      commandId: CommandId.make("cmd-reselect-codex-work"),
+      threadId,
+      modelSelection: current,
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-limit-runtime-error-later-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId,
+      turnId: asTurnId("turn-limit-runtime-error-later"),
+      createdAt: "2026-01-01T00:01:00.000Z",
+      payload: { message: "You've hit your usage limit for today." },
+    });
+
+    thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.activities.filter((activity) => activity.kind === "provider.account.rotated")
+          .length === 2,
+    );
+    expect(thread.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex-personal"));
+    expect(harness.stoppedThreadIds).toEqual([threadId, threadId]);
+  });
+
+  it("skips an exhausted sibling using the persisted account-limit store", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({ instanceId: "codex-work", driver: "codex", model: "gpt-5-codex" }),
+        testProvider({
+          instanceId: "codex-exhausted",
+          driver: "codex",
+          model: "gpt-5-codex",
+        }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5-codex",
+        }),
+      ],
+      accountLimits: [
+        {
+          providerInstanceId: ProviderInstanceId.make("codex-exhausted"),
+          driver: ProviderDriverKind.make("codex"),
+          kind: "usage-limit",
+          detectedAt: "2026-01-01T00:00:00.000Z",
+          resetsAt: "2026-01-01T02:00:00.000Z",
+          resetsAtEstimated: false,
+          source: "codex.app_server.read",
+          detail: null,
+        },
+      ],
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-limit-skip-exhausted-sibling"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId: harness.threadId,
+      turnId: asTurnId("turn-limit-skip-exhausted-sibling"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "Rate limit exceeded. Try again later.",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.modelSelection.instanceId === ProviderInstanceId.make("codex-personal"),
+    );
+    expect(thread.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex-personal"));
+  });
+
+  it("keeps the original failure when no same-driver sibling is eligible", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({ instanceId: "codex-work", driver: "codex", model: "gpt-5-codex" }),
+        testProvider({ instanceId: "claude-work", driver: "claudeAgent", model: "opus" }),
+      ],
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-limit-no-sibling"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-limit-no-sibling"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "Rate limit exceeded. Try again later.",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastError === "Rate limit exceeded. Try again later.",
+    );
+    expect(thread.modelSelection).toEqual(current);
+    expect(thread.activities.some((activity) => activity.kind === "provider.account.rotated")).toBe(
+      false,
+    );
+    expect(harness.stoppedThreadIds).toEqual([]);
+  });
+
+  it("refuses a sibling that cannot continue the provider conversation", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({
+          instanceId: "codex-work",
+          driver: "codex",
+          model: "gpt-5-codex",
+          displayName: "Work",
+        }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5-codex",
+          displayName: "Personal",
+        }),
+      ],
+      continuationKeys: {
+        "codex-work": "codex:home:/work",
+        "codex-personal": "codex:home:/personal",
+      },
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-limit-incompatible-sibling"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-limit-incompatible-sibling"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "You've hit your usage limit for today.",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "provider.account.rotation.refused"),
+    );
+    expect(thread.modelSelection).toEqual(current);
+    expect(thread.activities.at(-1)?.summary).toBe(
+      "Account 'Work' hit its usage limit. T3 Code kept this account because 'Personal' cannot continue its provider session.",
+    );
+    expect(harness.stoppedThreadIds).toEqual([]);
+  });
+
+  it("does not rebind when the failing provider session cannot stop", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({ instanceId: "codex-work", driver: "codex", model: "gpt-5-codex" }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5-codex",
+        }),
+      ],
+      stopSessionFails: true,
+    });
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-limit-stop-failed"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-limit-stop-failed"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { message: "Rate limit exceeded. Try again later." },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastError === "Rate limit exceeded. Try again later.",
+    );
+    await harness.drain();
+    expect(thread.modelSelection).toEqual(current);
+    expect(thread.activities.some((activity) => activity.kind === "provider.account.rotated")).toBe(
+      false,
+    );
+    expect(harness.stoppedThreadIds).toEqual([]);
+  });
+
+  it("does not rotate a limit event without an instance id", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness({
+      modelSelection: current,
+      providers: [
+        testProvider({ instanceId: "codex-work", driver: "codex", model: "gpt-5-codex" }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5-codex",
+        }),
+      ],
+    });
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-limit-missing-instance"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: harness.threadId,
+      turnId: asTurnId("turn-limit-missing-instance"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { message: "Rate limit exceeded. Try again later." },
+    });
+
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === harness.threadId,
+    );
+    expect(thread?.modelSelection).toEqual(current);
+    expect(harness.stoppedThreadIds).toEqual([]);
+  });
+
+  it("leaves epic iteration account rotation to EpicRunner", async () => {
+    const current = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5-codex",
+    };
+    const threadId = ThreadId.make(
+      epicRunIterationThreadId({ runId: "rotation", iterationIndex: 1 }),
+    );
+    const harness = await createHarness({
+      threadId,
+      modelSelection: current,
+      providers: [
+        testProvider({ instanceId: "codex-work", driver: "codex", model: "gpt-5-codex" }),
+        testProvider({
+          instanceId: "codex-personal",
+          driver: "codex",
+          model: "gpt-5-codex",
+        }),
+      ],
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-limit-epic-thread"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: current.instanceId,
+      threadId,
+      turnId: asTurnId("turn-limit-epic-thread"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "Rate limit exceeded. Try again later.",
+      },
+    });
+
+    await harness.drain();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.modelSelection).toEqual(current);
+    expect(harness.stoppedThreadIds).toEqual([]);
   });
 
   // Teardown regression net (t3code-f90.8): a dead provider must tear the
