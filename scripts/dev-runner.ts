@@ -26,7 +26,6 @@ const BASE_SERVER_PORT = 13773;
 const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
-const DESKTOP_DEV_LOOPBACK_HOST = "127.0.0.1";
 const DEV_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::1", "::"] as const;
 
 export const DEFAULT_T3_HOME = Effect.map(Effect.service(Path.Path), (path) =>
@@ -44,7 +43,6 @@ const MODE_ARGS = {
   ],
   "dev:server": ["run", "--filter=t3", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
-  "dev:desktop": ["run", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "dev"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
 type DevMode = keyof typeof MODE_ARGS;
@@ -101,7 +99,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
   "DevRunnerProcessError",
   {
     operation: Schema.Literals(["spawn", "wait-for-exit"]),
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -116,7 +114,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
 export class DevRunnerProcessExitError extends Schema.TaggedErrorClass<DevRunnerProcessExitError>()(
   "DevRunnerProcessExitError",
   {
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -216,7 +214,6 @@ function resolveBaseDir(baseDir: string | undefined): Effect.Effect<string, neve
 }
 
 interface CreateDevRunnerEnvInput {
-  readonly mode: DevMode;
   readonly baseEnv: NodeJS.ProcessEnv;
   readonly serverOffset: number;
   readonly webOffset: number;
@@ -230,7 +227,6 @@ interface CreateDevRunnerEnvInput {
 }
 
 export function createDevRunnerEnv({
-  mode,
   baseEnv,
   serverOffset,
   webOffset,
@@ -247,14 +243,11 @@ export function createDevRunnerEnv({
     const webPort = BASE_WEB_PORT + webOffset;
     const configuredBaseDir = t3Home?.trim() || baseEnv.T3CODE_HOME?.trim() || undefined;
     const resolvedBaseDir = yield* resolveBaseDir(configuredBaseDir);
-    const isDesktopMode = mode === "dev:desktop";
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
       PORT: String(webPort),
-      VITE_DEV_SERVER_URL:
-        devUrl?.toString() ??
-        `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
+      VITE_DEV_SERVER_URL: devUrl?.toString() ?? `http://localhost:${webPort}`,
     };
 
     if (configuredBaseDir !== undefined) {
@@ -263,26 +256,15 @@ export function createDevRunnerEnv({
       delete output.T3CODE_HOME;
     }
 
-    if (!isDesktopMode) {
-      output.T3CODE_PORT = String(serverPort);
-      output.VITE_HTTP_URL = `http://localhost:${serverPort}`;
-      output.VITE_WS_URL = `ws://localhost:${serverPort}`;
-    } else {
-      output.T3CODE_PORT = String(serverPort);
-      output.VITE_HTTP_URL = `http://${DESKTOP_DEV_LOOPBACK_HOST}:${serverPort}`;
-      output.VITE_WS_URL = `ws://${DESKTOP_DEV_LOOPBACK_HOST}:${serverPort}`;
-      delete output.T3CODE_MODE;
-      delete output.T3CODE_NO_BROWSER;
-      delete output.T3CODE_HOST;
-    }
+    output.T3CODE_PORT = String(serverPort);
+    output.VITE_HTTP_URL = `http://localhost:${serverPort}`;
+    output.VITE_WS_URL = `ws://localhost:${serverPort}`;
 
-    if (!isDesktopMode && host !== undefined) {
+    if (host !== undefined) {
       output.T3CODE_HOST = host;
     }
 
-    if (!isDesktopMode) {
-      output.T3CODE_NO_BROWSER = browser === true ? "0" : "1";
-    }
+    output.T3CODE_NO_BROWSER = browser === true ? "0" : "1";
 
     if (autoBootstrapProjectFromCwd !== undefined) {
       output.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD = autoBootstrapProjectFromCwd ? "1" : "0";
@@ -296,20 +278,8 @@ export function createDevRunnerEnv({
       delete output.T3CODE_LOG_WS_EVENTS;
     }
 
-    if (mode === "dev") {
-      output.T3CODE_MODE = "web";
-      delete output.T3CODE_DESKTOP_WS_URL;
-    }
-
-    if (mode === "dev:server" || mode === "dev:web") {
-      output.T3CODE_MODE = "web";
-      delete output.T3CODE_DESKTOP_WS_URL;
-    }
-
-    if (isDesktopMode) {
-      output.HOST = DESKTOP_DEV_LOOPBACK_HOST;
-      delete output.T3CODE_DESKTOP_WS_URL;
-    }
+    output.T3CODE_MODE = "web";
+    delete output.T3CODE_DESKTOP_WS_URL;
 
     return output;
   });
@@ -506,7 +476,6 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
 
     const hostEnvironment = yield* HostProcessEnvironment;
     const env = yield* createDevRunnerEnv({
-      mode: input.mode,
       baseEnv: hostEnvironment,
       serverOffset,
       webOffset,

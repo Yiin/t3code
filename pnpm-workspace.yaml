@@ -13,8 +13,6 @@ allowBuilds:
   browser-tabs-lock: false
   bufferutil: false
   core-js: false
-  electron: true
-  electron-winstaller: false
   esbuild: true
   msgpackr-extract: true
   msw: false
@@ -26,8 +24,6 @@ allowBuilds:
 catalog:
   "@clerk/backend": 3.11.2
   "@clerk/clerk-js": 6.25.1
-  "@clerk/electron": 0.0.11
-  "@clerk/electron-passkeys": 0.0.3
   "@clerk/expo": 3.7.2
   "@clerk/react": 6.12.1
   "@clerk/shared": 4.25.1
@@ -55,7 +51,6 @@ catalog:
 minimumReleaseAgeExclude:
   - "@clerk/backend@3.11.2"
   - "@clerk/clerk-js@6.25.1"
-  - "@clerk/electron@0.0.11"
   - "@clerk/expo@3.7.2"
   - "@clerk/react@6.12.1"
   - "@clerk/shared@4.25.1"
@@ -69,8 +64,6 @@ overrides:
   "@clerk/clerk-js>@solana/wallet-adapter-react": "-"
   "@clerk/clerk-js>@solana/wallet-standard": "-"
   "@clerk/clerk-js>@wallet-standard/core": "-"
-  "@clerk/electron": "catalog:"
-  "@clerk/electron-passkeys": "catalog:"
   "@clerk/expo": "catalog:"
   "@clerk/react": "catalog:"
   "@clerk/shared": "catalog:"

@@ -29,7 +29,6 @@ body:
       options:
         - apps/web
         - apps/server
-        - apps/desktop
         - packages/contracts or packages/shared
         - Build, CI, or release tooling
         - Docs

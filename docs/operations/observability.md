@@ -72,10 +72,6 @@ npx t3
 node --run dev
 ```
 
-```bash
-node --run dev:desktop
-```
-
 ### Option 2: Run With A Local LGTM Stack
 
 #### 1. Start Grafana LGTM
@@ -124,36 +120,6 @@ Monorepo web/server dev:
 ```bash
 node --run dev
 ```
-
-Monorepo desktop dev:
-
-```bash
-node --run dev:desktop
-```
-
-Packaged desktop app:
-
-Launch the actual app executable from the same shell so the desktop app and embedded backend inherit `T3CODE_OTLP_*`.
-
-macOS app bundle example:
-
-```bash
-T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
-T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
-T3CODE_OTLP_SERVICE_NAME=t3-desktop \
-"/Applications/T3 Code.app/Contents/MacOS/T3 Code"
-```
-
-Direct binary example:
-
-```bash
-T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
-T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
-T3CODE_OTLP_SERVICE_NAME=t3-desktop \
-./path/to/your/desktop-app-binary
-```
-
-Do not rely on launching from Finder, Spotlight, the dock, or the Start menu after setting shell env vars. Those launches usually will not pick them up.
 
 #### 4. Fully restart after changing env
 
@@ -280,7 +246,7 @@ Recommended flow in Grafana:
 
 Good first searches:
 
-- service name such as `t3-local`, `t3-dev`, or `t3-desktop`
+- service name such as `t3-local` or `t3-dev`
 - span names like `sql.execute`, `git.runCommand`, `provider.sendTurn`
 - orchestration spans with attributes like `orchestration.command_type`
 

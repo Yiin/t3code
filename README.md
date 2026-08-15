@@ -22,28 +22,6 @@ npx t3@latest
 
 Tip: Use `npx t3@latest --help` for the full CLI reference.
 
-### Desktop app
-
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
-
-```bash
-winget install T3Tools.T3Code
-```
-
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Arch Linux (AUR)
-
-```bash
-yay -S t3code-bin
-```
-
 ## Some notes
 
 We are very very early in this project. Expect bugs.

@@ -2,7 +2,7 @@
 
 `.github/workflows/ci.yml` runs on pull requests and on pushes to `main` or `mine`.
 
-- The `check` job runs `vp check` (lint plus typecheck), `vpr typecheck`, and the desktop build.
+- The `check` job runs `vp check` (lint plus typecheck) and `vpr typecheck`.
 - The `test` job runs `vp run test` across the workspace. It installs no Beads, so the cook-epic shell suite skips itself there with a stated reason.
 - The `epic_runs` job installs Beads `v1.1.2`, verifies `bd --version`, runs `skills/cook-epic/tests/all.sh` with `COOKEPIC_REQUIRE_BD=1` (it is the suite's mandatory owner, so a missing `bd` fails the job instead of skipping green), then runs the terminal conformance driver with `T3CODE_CONFORMANCE_TERMINAL=1`.
 
@@ -69,9 +69,3 @@ The `epic_runs` job gets 25 minutes. The arithmetic:
 - Total: 25 minutes.
 
 Real work is 80 s, so the cap only bites when a suite hangs. Recompute it when either internal ceiling changes.
-
-## Release workflow
-
-- `.github/workflows/release.yml` builds macOS (`arm64` and `x64`), Linux (`x64`), and Windows (`x64`) desktop artifacts from a single `v*.*.*` tag and publishes one GitHub release.
-- The release workflow auto-enables signing only when platform credentials are present. macOS passkey builds also need `APPLE_TEAM_ID` and the `MACOS_PROVISIONING_PROFILE` secret. Windows uses Azure Trusted Signing. Without the core signing credentials, it still releases unsigned artifacts.
-- See [Release Checklist](./release.md) for the full release and signing setup checklist.

@@ -23,23 +23,11 @@ jobs:
           cache: true
           run-install: true
 
-      - name: Ensure Electron runtime is installed
-        run: vp run --filter @t3tools/desktop ensure:electron
-
       - name: Check
         run: vp check
 
       - name: Typecheck
         run: vpr typecheck
-
-      - name: Build desktop pipeline
-        run: vp run build:desktop
-
-      - name: Verify preload bundle output
-        run: |
-          test -f apps/desktop/dist-electron/preload.cjs
-          grep -nE "desktopBridge|getLocalEnvironmentBootstrap|PICK_FOLDER_CHANNEL|wsUrl" apps/desktop/dist-electron/preload.cjs
-          grep -n "__clerk_internal_electron_passkeys" apps/desktop/dist-electron/preload.cjs
 
   test:
     name: Test
@@ -55,9 +43,6 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
-
-      - name: Ensure Electron runtime is installed
-        run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -108,21 +93,3 @@ jobs:
         run: vp run --filter @t3tools/epic-run-conformance test
         env:
           T3CODE_CONFORMANCE_TERMINAL: "1"
-
-  release_smoke:
-    name: Release Smoke
-    runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: true
-
-      - name: Exercise release-only workflow steps
-        run: node scripts/release-smoke.ts

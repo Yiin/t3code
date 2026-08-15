@@ -47,10 +47,10 @@ describe("workflow runner labels", () => {
 
       // Guards against the whole scan silently matching nothing. The floor is
       // deliberately well under the real count: workflows get deleted (the
-      // mobile and contributor-hygiene ones were, on 2026-08-12) and a floor
-      // pinned just below the current total fails on every such removal
-      // without catching a single real regression.
-      expect(runners.length).toBeGreaterThan(10);
+      // mobile and contributor-hygiene ones on 2026-08-12, the desktop release
+      // one on 2026-08-15) and a floor pinned just below the current total
+      // fails on every such removal without catching a single real regression.
+      expect(runners.length).toBeGreaterThan(2);
 
       const pinned = runners
         .filter((runner) => runner.value.includes("blacksmith-"))
