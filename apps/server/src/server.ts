@@ -22,6 +22,7 @@ import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/
 import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
 import { ProviderAccountLimitsStoreLive } from "./persistence/Layers/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStoreLive } from "./persistence/Layers/ProviderUsageLedger.ts";
+import { ProjectionProjectRepositoryLive } from "./persistence/Layers/ProjectionProjects.ts";
 import { EpicRunnerLive } from "./runner/Layers/EpicRunner.ts";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -213,6 +214,12 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   // binds every iteration thread to its run id, `ProviderService` resolves
   // the identity at session start.
   Layer.provideMerge(EpicCommitterRegistry.layer),
+  // Lets `resolvePersistedCwd` fall back to a project's live workspace root
+  // when a renamed/moved project directory leaves the persisted cwd snapshot
+  // pointing at the same dead path (t3code-2cm). Effect memoizes a layer by
+  // reference, so this is the same `ProjectionProjectRepository` instance
+  // `ProjectionPipeline` provides (ProjectionPipeline.ts).
+  Layer.provide(ProjectionProjectRepositoryLive),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));

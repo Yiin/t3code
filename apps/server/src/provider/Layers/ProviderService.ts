@@ -81,6 +81,7 @@ import {
   resolveSpawnPolicy,
 } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
@@ -414,6 +415,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
   const providerRegistry = yield* Effect.serviceOption(ProviderRegistry);
   const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
+  // Optional on purpose, same as the three above: several test layers build
+  // the provider service without a projection project repository. Losing it
+  // only costs a restarting session the live-record workspace-root fallback
+  // in `resolvePersistedCwd`.
+  const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -994,7 +1000,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
    * worktree that the runner deletes once the child lands. Restarting into that
    * deleted path makes the provider spawn fail with a bare ENOENT, which the
    * adapter reports as an opaque "runtime stream failed". Check the path first
-   * and fall back to the workspace root so the thread stays usable.
+   * and fall back to the persisted workspace-root snapshot so the thread stays
+   * usable.
+   *
+   * The snapshot itself can go stale: renaming or moving a project's workspace
+   * root on disk leaves the snapshot pointing at the same dead path as the
+   * session cwd. When that happens, fall back further to the project's live
+   * `workspaceRoot` record, so a renamed project folder doesn't strand every
+   * thread that ran in it.
    */
   const resolvePersistedCwd = Effect.fn("ProviderService.resolvePersistedCwd")(function* (input: {
     readonly operation: string;
@@ -1003,50 +1016,88 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly providerInstanceId: ProviderInstanceId;
     readonly persistedCwd: string | undefined;
     readonly fallbackCwd: string | undefined;
+    readonly projectId: ProjectId | undefined;
   }) {
-    const { persistedCwd, fallbackCwd } = input;
+    const { persistedCwd, fallbackCwd, projectId } = input;
     if (persistedCwd === undefined || (yield* pathExists(persistedCwd))) {
       return persistedCwd;
     }
-    if (
-      fallbackCwd === undefined ||
-      fallbackCwd === persistedCwd ||
-      !(yield* pathExists(fallbackCwd))
+
+    const useFallback = Effect.fn("ProviderService.resolvePersistedCwd.useFallback")(function* (
+      chosenFallbackCwd: string,
     ) {
-      return yield* toValidationError(
-        input.operation,
-        `Cannot restart thread '${String(input.threadId)}': its working directory '${persistedCwd}' no longer exists and no workspace root is available to fall back to.`,
+      const message = `Working directory '${persistedCwd}' no longer exists; continuing in '${chosenFallbackCwd}'.`;
+      const createdAt = yield* nowIso;
+      yield* publishRuntimeEvent({
+        type: "runtime.warning",
+        // Timestamped: one thread can fall back on every restart, and a
+        // repeated event id would let a consumer dedupe the later warnings
+        // away.
+        eventId: EventId.make(`provider-cwd-fallback:${String(input.threadId)}:${createdAt}`),
+        provider: input.provider,
+        providerInstanceId: input.providerInstanceId,
+        threadId: input.threadId,
+        createdAt,
+        payload: {
+          message,
+          detail: { missingCwd: persistedCwd, fallbackCwd: chosenFallbackCwd },
+        },
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider.session.cwd-fallback-publish-failed", {
+            threadId: input.threadId,
+            cause,
+          }),
+        ),
       );
-    }
-    const message = `Working directory '${persistedCwd}' no longer exists; continuing in '${fallbackCwd}'.`;
-    const createdAt = yield* nowIso;
-    yield* publishRuntimeEvent({
-      type: "runtime.warning",
-      // Timestamped: one thread can fall back on every restart, and a repeated
-      // event id would let a consumer dedupe the later warnings away.
-      eventId: EventId.make(`provider-cwd-fallback:${String(input.threadId)}:${createdAt}`),
-      provider: input.provider,
-      providerInstanceId: input.providerInstanceId,
-      threadId: input.threadId,
-      createdAt,
-      payload: {
-        message,
-        detail: { missingCwd: persistedCwd, fallbackCwd },
-      },
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("provider.session.cwd-fallback-publish-failed", {
-          threadId: input.threadId,
-          cause,
-        }),
-      ),
-    );
-    yield* Effect.logWarning("provider.session.cwd-fallback", {
-      threadId: input.threadId,
-      missingCwd: persistedCwd,
-      fallbackCwd,
+      yield* Effect.logWarning("provider.session.cwd-fallback", {
+        threadId: input.threadId,
+        missingCwd: persistedCwd,
+        fallbackCwd: chosenFallbackCwd,
+      });
+      return chosenFallbackCwd;
     });
-    return fallbackCwd;
+
+    if (
+      fallbackCwd !== undefined &&
+      fallbackCwd !== persistedCwd &&
+      (yield* pathExists(fallbackCwd))
+    ) {
+      return yield* useFallback(fallbackCwd);
+    }
+
+    // The snapshot fallback failed too. Only now consult the live project
+    // record — a DB read the healthy restart path never pays.
+    const liveWorkspaceRoot =
+      projectId === undefined || Option.isNone(projectionProjects)
+        ? undefined
+        : yield* projectionProjects.value.getById({ projectId }).pipe(
+            Effect.map((record) =>
+              Option.isSome(record) && record.value.deletedAt === null
+                ? record.value.workspaceRoot
+                : undefined,
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning("provider.session.cwd-fallback-project-lookup-failed", {
+                threadId: input.threadId,
+                projectId,
+                error,
+              }).pipe(Effect.as(undefined)),
+            ),
+          );
+
+    if (
+      liveWorkspaceRoot !== undefined &&
+      liveWorkspaceRoot !== persistedCwd &&
+      (yield* pathExists(liveWorkspaceRoot))
+    ) {
+      return yield* useFallback(liveWorkspaceRoot);
+    }
+
+    return yield* toValidationError(
+      input.operation,
+      `Cannot restart thread '${String(input.threadId)}': its working directory '${persistedCwd}' no longer exists and no workspace root is available to fall back to. If the project folder moved, update the project's workspace root in project settings and retry.`,
+    );
   });
 
   const recoverSessionForThread = Effect.fn("recoverSessionForThread")(function* (input: {
@@ -1118,6 +1169,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         providerInstanceId: bindingInstanceId,
         persistedCwd: readPersistedCwd(input.binding.runtimePayload),
         fallbackCwd: persistedT3EnvironmentContext?.workspaceRoot,
+        projectId: persistedT3EnvironmentContext?.projectId,
       });
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId, input.binding.provider);
@@ -1339,6 +1391,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           persistedBinding !== undefined && bindingContinuesConversation
             ? readPersistedCwd(persistedBinding.runtimePayload)
             : undefined;
+        const persistedEnvironmentContext = persistedBinding
+          ? readPersistedT3EnvironmentContext(persistedBinding.runtimePayload)
+          : undefined;
         const effectiveCwd =
           input.cwd ??
           (yield* resolvePersistedCwd({
@@ -1347,11 +1402,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             provider: resolvedProvider,
             providerInstanceId: resolvedInstanceId,
             persistedCwd: persistedCwdCandidate,
-            fallbackCwd:
-              parsed.workspaceRoot ??
-              (persistedBinding
-                ? readPersistedT3EnvironmentContext(persistedBinding.runtimePayload)?.workspaceRoot
-                : undefined),
+            fallbackCwd: parsed.workspaceRoot ?? persistedEnvironmentContext?.workspaceRoot,
+            projectId: parsed.projectId ?? persistedEnvironmentContext?.projectId,
           }));
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,

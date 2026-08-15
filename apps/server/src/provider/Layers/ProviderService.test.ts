@@ -76,6 +76,10 @@ import {
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import {
+  ProjectionProjectRepository,
+  type ProjectionProject,
+} from "../../persistence/Services/ProjectionProjects.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { EpicSubagentRegistry } from "../epicSubagents.ts";
 import { EpicCommitterRegistry } from "../epicCommitter.ts";
@@ -3587,7 +3591,41 @@ lastSeenRefresh.layer("ProviderServiceLive lastSeenAt refresh", (it) => {
 const VANISHED_CWD = "/tmp/epic-worker-worktree";
 const WORKSPACE_ROOT = "/tmp/workspace-root";
 
-function makeVanishedCwdFixture(presentPaths: ReadonlyArray<string>) {
+// A project's workspace root itself can move: the persisted cwd snapshot and
+// the live cwd are the same dead path in that case, so the snapshot fallback
+// can't help. `MOVED_PROJECT_ROOT_NEW` is where the live project record now
+// points.
+const MOVED_PROJECT_ROOT_DEAD = "/tmp/dashboard-health";
+const MOVED_PROJECT_ROOT_NEW = "/tmp/health";
+const MOVED_PROJECT_ID = ProjectId.make("project-1");
+
+const liveProjectRecordAt = (workspaceRoot: string): ProjectionProject => ({
+  projectId: MOVED_PROJECT_ID,
+  title: "Moved project",
+  workspaceRoot,
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  deletedAt: null,
+});
+
+// Stub repository for the moved-workspace-root tests: only `getById` is
+// exercised, so the other members die loudly if `resolvePersistedCwd` ever
+// starts calling them.
+const makeLiveProjectRepositoryLayer = (record: ProjectionProject | undefined) =>
+  Layer.succeed(ProjectionProjectRepository, {
+    getById: () => Effect.succeed(Option.fromNullishOr(record)),
+    upsert: () => Effect.die("ProjectionProjectRepository.upsert: not stubbed for this test"),
+    listAll: () => Effect.die("ProjectionProjectRepository.listAll: not stubbed for this test"),
+    deleteById: () =>
+      Effect.die("ProjectionProjectRepository.deleteById: not stubbed for this test"),
+  });
+
+function makeVanishedCwdFixture(
+  presentPaths: ReadonlyArray<string>,
+  liveProjectRecord?: ProjectionProject,
+) {
   const codex = makeFakeCodexAdapter();
   const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
   const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
@@ -3614,6 +3652,7 @@ function makeVanishedCwdFixture(presentPaths: ReadonlyArray<string>) {
     Layer.provide(directoryLayer),
     Layer.provide(defaultServerSettingsLayer),
     Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(makeLiveProjectRepositoryLayer(liveProjectRecord)),
     Layer.provide(
       Layer.succeed(
         ProviderEventLoggers.ProviderEventLoggers,
@@ -3624,16 +3663,19 @@ function makeVanishedCwdFixture(presentPaths: ReadonlyArray<string>) {
   return { codex, layer, canonicalEvents };
 }
 
-const startAndStopVanishedCwdSession = (threadId: ThreadId) =>
+const startAndStopVanishedCwdSession = (
+  threadId: ThreadId,
+  overrides?: { readonly cwd?: string; readonly workspaceRoot?: string },
+) =>
   Effect.gen(function* () {
     const provider = yield* ProviderService.ProviderService;
     yield* provider.startSession(threadId, {
       provider: CODEX_DRIVER,
       providerInstanceId: codexInstanceId,
       threadId,
-      cwd: VANISHED_CWD,
+      cwd: overrides?.cwd ?? VANISHED_CWD,
       projectId: ProjectId.make("project-1"),
-      workspaceRoot: WORKSPACE_ROOT,
+      workspaceRoot: overrides?.workspaceRoot ?? WORKSPACE_ROOT,
       runtimeMode: "full-access",
     });
     yield* provider.stopSession({ threadId });
@@ -3708,6 +3750,67 @@ it.effect("fails with the missing path when no fallback directory exists", () =>
       String((error as { readonly message?: string }).message).includes(VANISHED_CWD),
       true,
     );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("restarts a thread in the moved workspace root when the persisted root is gone", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("thread-moved-workspace-root");
+    // The snapshot fallback is dead too: cwd and workspaceRoot were the same
+    // path, and that path is the one that got renamed/moved on disk.
+    const fixture = makeVanishedCwdFixture(
+      [MOVED_PROJECT_ROOT_NEW],
+      liveProjectRecordAt(MOVED_PROJECT_ROOT_NEW),
+    );
+
+    yield* Effect.gen(function* () {
+      const provider = yield* startAndStopVanishedCwdSession(threadId, {
+        cwd: MOVED_PROJECT_ROOT_DEAD,
+        workspaceRoot: MOVED_PROJECT_ROOT_DEAD,
+      });
+      fixture.codex.startSession.mockClear();
+      yield* provider.sendTurn({ threadId, input: "after-project-rename", attachments: [] });
+    }).pipe(Effect.provide(fixture.layer));
+
+    assert.equal(fixture.codex.startSession.mock.calls.length, 1);
+    assert.equal(resumedCwd(fixture.codex), MOVED_PROJECT_ROOT_NEW);
+
+    const warning = fixture.canonicalEvents.find((event) => event.type === "runtime.warning");
+    assert.equal(warning !== undefined, true);
+    const warningMessage =
+      typeof warning?.payload === "object" && warning.payload !== null
+        ? String((warning.payload as { message?: unknown }).message)
+        : "";
+    assert.equal(warningMessage.includes(MOVED_PROJECT_ROOT_DEAD), true);
+    assert.equal(warningMessage.includes(MOVED_PROJECT_ROOT_NEW), true);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fails with an actionable message when the live project record is also unreachable", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("thread-moved-workspace-root-no-live-record");
+    // The live record itself still points at the dead path (e.g. the
+    // project's workspace root was never updated after the rename).
+    const fixture = makeVanishedCwdFixture([], liveProjectRecordAt(MOVED_PROJECT_ROOT_DEAD));
+
+    const error = yield* Effect.gen(function* () {
+      const provider = yield* startAndStopVanishedCwdSession(threadId, {
+        cwd: MOVED_PROJECT_ROOT_DEAD,
+        workspaceRoot: MOVED_PROJECT_ROOT_DEAD,
+      });
+      fixture.codex.startSession.mockClear();
+      return yield* provider.sendTurn({
+        threadId,
+        input: "still-nowhere-to-go",
+        attachments: [],
+      });
+    }).pipe(Effect.provide(fixture.layer), Effect.flip);
+
+    assert.equal(fixture.codex.startSession.mock.calls.length, 0);
+    assert.equal(error._tag, "ProviderValidationError");
+    const message = String((error as { readonly message?: string }).message);
+    assert.equal(message.includes(MOVED_PROJECT_ROOT_DEAD), true);
+    assert.equal(message.includes("update the project's workspace root"), true);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
