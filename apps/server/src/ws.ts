@@ -136,7 +136,11 @@ import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
-import { makeSkillCommandRegistry } from "./skills/SkillCommandRegistry.ts";
+import {
+  listAcrossSkillRoots,
+  makeSkillCommandRegistry,
+  projectSkillRoots,
+} from "./skills/SkillCommandRegistry.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
@@ -357,6 +361,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
+  [WS_METHODS.skillsListForThread, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeBeadsStatus, AuthOrchestrationReadScope],
   [WS_METHODS.beadsRefreshStatus, AuthOrchestrationReadScope],
@@ -1889,6 +1894,38 @@ const makeWsRpcLayer = (
                 resource: input.resource,
                 workspaceRoot: thread.value.worktreePath ?? project.value.workspaceRoot,
               });
+            }),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.skillsListForThread]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.skillsListForThread,
+            Effect.gen(function* () {
+              const liveSettings = yield* serverSettings.getSettings;
+              const thread = yield* projectionSnapshotQuery
+                .getThreadShellById(input.threadId)
+                .pipe(Effect.catchCause(() => Effect.succeed(Option.none())));
+              // A composer draft asks with a pre-allocated thread id the
+              // projection has never seen, so fall back to the project the
+              // client named. Answering with the global list instead would
+              // stick: the draft keeps that id once it becomes a real thread,
+              // and the client caches the answer under it.
+              const threadShell = Option.getOrUndefined(thread);
+              const projectId = threadShell?.projectId ?? input.projectId;
+              const project =
+                projectId === undefined
+                  ? Option.none()
+                  : yield* projectionSnapshotQuery
+                      .getProjectShellById(projectId)
+                      .pipe(Effect.catchCause(() => Effect.succeed(Option.none())));
+              const workspaceRoot =
+                threadShell?.worktreePath ?? Option.getOrUndefined(project)?.workspaceRoot;
+              const roots =
+                workspaceRoot !== undefined
+                  ? [...projectSkillRoots(workspaceRoot), liveSettings.skillsRoot]
+                  : [liveSettings.skillsRoot];
+              const commands = yield* listAcrossSkillRoots(skillCommandRegistry, roots);
+              return commands.map((command) => ({ ...command, source: "workspace" as const }));
             }),
             { "rpc.aggregate": "workspace" },
           ),

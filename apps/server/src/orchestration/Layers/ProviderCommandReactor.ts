@@ -60,9 +60,11 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import {
   expandSkillCommand,
+  findAcrossSkillRoots,
   makeSkillCommandRegistry,
   parseSkillCommand,
   parseSkillInvocation,
+  projectSkillRoots,
 } from "../../skills/SkillCommandRegistry.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
@@ -828,9 +830,16 @@ const make = Effect.gen(function* () {
     return startedSession.threadId;
   });
 
-  const findWorkspaceSkill = Effect.fnUntraced(function* (name: string) {
+  const findWorkspaceSkill = Effect.fnUntraced(function* (
+    name: string,
+    workspaceRoot: string | undefined,
+  ) {
     const { skillsRoot } = yield* serverSettingsService.getSettings;
-    return yield* skillCommandRegistry.find(skillsRoot, name);
+    const roots =
+      workspaceRoot !== undefined
+        ? [...projectSkillRoots(workspaceRoot), skillsRoot]
+        : [skillsRoot];
+    return yield* findAcrossSkillRoots(skillCommandRegistry, roots, name);
   });
 
   const reportsNativeSkill = Effect.fnUntraced(function* (input: {
@@ -863,6 +872,7 @@ const make = Effect.gen(function* () {
     readonly providerInstanceId: ProviderSession["providerInstanceId"];
     readonly messageText: string;
     readonly providerInput: string;
+    readonly workspaceRoot: string | undefined;
   }) {
     const skillInvocation = parseSkillInvocation(input.messageText);
     if (skillInvocation !== undefined && input.provider !== CODEX_DRIVER) {
@@ -877,7 +887,7 @@ const make = Effect.gen(function* () {
             : `/${input.providerInput.slice(1)}`;
         }
       }
-      const workspaceSkill = yield* findWorkspaceSkill(skillInvocation.name);
+      const workspaceSkill = yield* findWorkspaceSkill(skillInvocation.name, input.workspaceRoot);
       if (workspaceSkill !== undefined) {
         return expandSkillCommand(workspaceSkill, skillInvocation.arguments);
       }
@@ -895,7 +905,7 @@ const make = Effect.gen(function* () {
             return primeSkillProviderInput(input.providerInput);
           }
         }
-        const workspaceSkill = yield* findWorkspaceSkill(parsedCommand.name);
+        const workspaceSkill = yield* findWorkspaceSkill(parsedCommand.name, input.workspaceRoot);
         if (workspaceSkill !== undefined) {
           return expandSkillCommand(workspaceSkill, parsedCommand.arguments);
         }
@@ -944,11 +954,13 @@ const make = Effect.gen(function* () {
     }
     let providerInput = normalizedInput;
     if (providerInput !== undefined && activeSession !== undefined) {
+      const project = yield* resolveProject(thread.projectId);
       providerInput = yield* resolveSkillProviderInput({
         provider: activeSession.provider,
         providerInstanceId: activeSession.providerInstanceId,
         messageText: input.messageText,
         providerInput,
+        workspaceRoot: thread.worktreePath ?? project?.workspaceRoot,
       });
     }
     const sessionModelSwitch =

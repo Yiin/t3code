@@ -8,9 +8,12 @@ import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  findAcrossSkillRoots,
+  listAcrossSkillRoots,
   makeSkillCommandRegistry,
   parseSkillCommand,
   parseSkillInvocation,
+  projectSkillRoots,
 } from "./SkillCommandRegistry.ts";
 
 describe("SkillCommandRegistry", () => {
@@ -45,6 +48,30 @@ describe("SkillCommandRegistry", () => {
         description: "Cook a task",
         content,
       });
+    }),
+  );
+
+  effectIt.effect("reads folded and literal block scalar descriptions", () =>
+    Effect.gen(function* () {
+      const root = makeRoot();
+      writeSkill(
+        root,
+        "folded",
+        "---\nname: folded\ndescription: >\n  Folded line one.\n  Folded line two.\n---\nBody\n",
+      );
+      writeSkill(
+        root,
+        "literal",
+        "---\nname: literal\ndescription: |-\n  Literal line one.\n  Literal line two.\nother: after\n---\nBody\n",
+      );
+      const registry = yield* makeSkillCommandRegistry();
+
+      expect((yield* registry.find(root, "folded"))?.description).toBe(
+        "Folded line one. Folded line two.",
+      );
+      expect((yield* registry.find(root, "literal"))?.description).toBe(
+        "Literal line one.\nLiteral line two.",
+      );
     }),
   );
 
@@ -131,6 +158,84 @@ describe("SkillCommandRegistry", () => {
       const registry = yield* makeSkillCommandRegistry();
       expect(yield* registry.find(root, "anything")).toBeUndefined();
       expect(yield* registry.list(root)).toEqual([]);
+    }),
+  );
+});
+
+describe("projectSkillRoots", () => {
+  it("orders .claude/skills before .agents/skills", () => {
+    expect(projectSkillRoots("/workspace")).toEqual([
+      NodePath.join("/workspace", ".claude", "skills"),
+      NodePath.join("/workspace", ".agents", "skills"),
+    ]);
+  });
+});
+
+describe("findAcrossSkillRoots / listAcrossSkillRoots", () => {
+  const roots = new Set<string>();
+
+  afterEach(() => {
+    for (const root of roots) NodeFS.rmSync(root, { recursive: true, force: true });
+    roots.clear();
+  });
+
+  const makeRoot = () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-skills-multi-"));
+    roots.add(root);
+    return root;
+  };
+
+  const writeSkill = (root: string, directory: string, content: string) => {
+    const dir = NodePath.join(root, directory);
+    NodeFS.mkdirSync(dir, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(dir, "SKILL.md"), content);
+  };
+
+  effectIt.effect("earlier roots win name collisions and later roots fill in the rest", () =>
+    Effect.gen(function* () {
+      const projectRoot = makeRoot();
+      const globalRoot = makeRoot();
+      writeSkill(projectRoot, "cook-it", "---\nname: cook-it\ndescription: Project\n---\nproject");
+      writeSkill(globalRoot, "cook-it", "---\nname: cook-it\ndescription: Global\n---\nglobal");
+      writeSkill(globalRoot, "other", "---\nname: other\n---\nother");
+      const registry = yield* makeSkillCommandRegistry();
+      const search = [projectRoot, globalRoot];
+
+      const found = yield* findAcrossSkillRoots(registry, search, "cook-it");
+      expect(found?.content).toContain("project");
+
+      expect(yield* listAcrossSkillRoots(registry, search)).toEqual([
+        { name: "cook-it", description: "Project" },
+        { name: "other" },
+      ]);
+    }),
+  );
+
+  effectIt.effect("skips missing roots without failing", () =>
+    Effect.gen(function* () {
+      const missingRoot = NodePath.join(makeRoot(), "missing");
+      const globalRoot = makeRoot();
+      writeSkill(globalRoot, "cook-it", "---\nname: cook-it\n---\nglobal");
+      const registry = yield* makeSkillCommandRegistry();
+      const search = [missingRoot, globalRoot];
+
+      expect((yield* findAcrossSkillRoots(registry, search, "cook-it"))?.content).toContain(
+        "global",
+      );
+      expect(yield* listAcrossSkillRoots(registry, search)).toEqual([{ name: "cook-it" }]);
+    }),
+  );
+
+  effectIt.effect("falls back to a later root when the name is not in an earlier one", () =>
+    Effect.gen(function* () {
+      const projectRoot = makeRoot();
+      const globalRoot = makeRoot();
+      writeSkill(globalRoot, "cook-it", "---\nname: cook-it\n---\nglobal");
+      const registry = yield* makeSkillCommandRegistry();
+
+      expect(
+        (yield* findAcrossSkillRoots(registry, [projectRoot, globalRoot], "cook-it"))?.content,
+      ).toContain("global");
     }),
   );
 });

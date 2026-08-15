@@ -5062,6 +5062,134 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc skills.listForThread with project-first precedence", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-skills-project-" });
+      const projectSkillDir = path.join(workspaceRoot, ".claude", "skills", "cook-it");
+      yield* fs.makeDirectory(projectSkillDir, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(projectSkillDir, "SKILL.md"),
+        "---\nname: cook-it\ndescription: Project skill\n---\nProject instructions.\n",
+      );
+      // Isolated from the host's real global skills root so this test does
+      // not pick up whatever skills happen to be installed on the machine.
+      const globalSkillsRoot = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-skills-global-",
+      });
+
+      const projectId = ProjectId.make("project-skills-list");
+      const threadId = ThreadId.make("thread-skills-list");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* buildAppUnderTest({
+        layers: {
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              skillsRoot: globalSkillsRoot,
+            }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (id) =>
+              Effect.succeed(
+                id === threadId
+                  ? Option.some(makeDefaultOrchestrationThreadShell({ id: threadId, projectId }))
+                  : Option.none(),
+              ),
+            getProjectShellById: (id) =>
+              Effect.succeed(
+                id === projectId
+                  ? Option.some({
+                      id: projectId,
+                      title: "Skills Project",
+                      workspaceRoot,
+                      defaultModelSelection,
+                      scripts: [],
+                      createdAt: now,
+                      updatedAt: now,
+                    })
+                  : Option.none(),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const commands = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.skillsListForThread]({ threadId })),
+      );
+
+      assert.deepEqual(commands, [
+        { name: "cook-it", description: "Project skill", source: "workspace" },
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc skills.listForThread for an unpersisted draft thread", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-skills-draft-" });
+      const projectSkillDir = path.join(workspaceRoot, ".agents", "skills", "cook-it");
+      yield* fs.makeDirectory(projectSkillDir, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(projectSkillDir, "SKILL.md"),
+        "---\nname: cook-it\ndescription: Project skill\n---\nProject instructions.\n",
+      );
+      const globalSkillsRoot = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-skills-draft-global-",
+      });
+
+      const projectId = ProjectId.make("project-skills-draft");
+      // A composer draft holds a pre-allocated thread id the projection has
+      // never seen. The project id in the payload is the only way to reach
+      // the workspace root.
+      const threadId = ThreadId.make("thread-skills-draft");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* buildAppUnderTest({
+        layers: {
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              skillsRoot: globalSkillsRoot,
+            }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: () => Effect.succeed(Option.none()),
+            getProjectShellById: (id) =>
+              Effect.succeed(
+                id === projectId
+                  ? Option.some({
+                      id: projectId,
+                      title: "Skills Project",
+                      workspaceRoot,
+                      defaultModelSelection,
+                      scripts: [],
+                      createdAt: now,
+                      updatedAt: now,
+                    })
+                  : Option.none(),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const commands = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.skillsListForThread]({ threadId, projectId }),
+        ),
+      );
+
+      assert.deepEqual(commands, [
+        { name: "cook-it", description: "Project skill", source: "workspace" },
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc projects.writeFile errors", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -169,6 +169,7 @@ describe("ProviderCommandReactor", () => {
     readonly sessionResume?: "cursor" | "unsupported";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly skillsRoot?: string;
+    readonly projectWorkspaceRoot?: string;
     readonly providerSkills?: ReadonlyArray<{ readonly name: string; readonly enabled: boolean }>;
     readonly startSessionEffect?: (
       session: ProviderSession,
@@ -469,7 +470,7 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("cmd-project-create"),
         projectId: asProjectId("project-1"),
         title: "Provider Project",
-        workspaceRoot: "/tmp/provider-project",
+        workspaceRoot: input?.projectWorkspaceRoot ?? "/tmp/provider-project",
         defaultModelSelection: modelSelection,
         createdAt: now,
       });
@@ -1898,6 +1899,67 @@ describe("ProviderCommandReactor", () => {
       expect(sent.input).toContain(
         "The user invoked the /cook-it skill. Follow its instructions below.",
       );
+    }),
+  );
+
+  it.live("prefers a project workspace skill over a global skill with the same name", () =>
+    Effect.gen(function* () {
+      const skillsRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3code-reactor-skills-global-"),
+      );
+      createdBaseDirs.add(skillsRoot);
+      const globalSkillDirectory = NodePath.join(skillsRoot, "cook-it");
+      NodeFS.mkdirSync(globalSkillDirectory);
+      NodeFS.writeFileSync(
+        NodePath.join(globalSkillDirectory, "SKILL.md"),
+        "---\nname: cook-it\n---\nGlobal instructions.\n",
+      );
+
+      const projectWorkspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3code-reactor-project-"),
+      );
+      createdBaseDirs.add(projectWorkspaceRoot);
+      const projectSkillDirectory = NodePath.join(
+        projectWorkspaceRoot,
+        ".claude",
+        "skills",
+        "cook-it",
+      );
+      NodeFS.mkdirSync(projectSkillDirectory, { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(projectSkillDirectory, "SKILL.md"),
+        "---\nname: cook-it\n---\nProject instructions.\n",
+      );
+
+      const harness = yield* createHarness({
+        threadModelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-sonnet-5",
+        ),
+        skillsRoot,
+        projectWorkspaceRoot,
+        providerSkills: [],
+      });
+
+      yield* harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-project-skill-precedence"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-project-skill-precedence"),
+          role: "user",
+          text: "$cook-it task",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+      expect(sent.input).toContain("Project instructions.");
+      expect(sent.input).not.toContain("Global instructions.");
     }),
   );
 

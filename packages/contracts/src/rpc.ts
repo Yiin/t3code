@@ -14,6 +14,7 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
+import { SkillsListForThreadInput } from "./skills.ts";
 import {
   BeadsStatusInput,
   BeadsStatusResult,
@@ -166,6 +167,7 @@ import {
   ServerSignalProcessResult,
   ServerUpsertKeybindingInput,
   ServerUpsertKeybindingResult,
+  ServerWorkspaceSlashCommand,
 } from "./server.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
@@ -196,6 +198,9 @@ export const WS_METHODS = {
   // Filesystem methods
   filesystemBrowse: "filesystem.browse",
   assetsCreateUrl: "assets.createUrl",
+
+  // Skill methods
+  skillsListForThread: "skills.listForThread",
 
   // VCS methods
   vcsPull: "vcs.pull",
@@ -505,6 +510,12 @@ export const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
   error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
+});
+
+export const WsSkillsListForThreadRpc = Rpc.make(WS_METHODS.skillsListForThread, {
+  payload: SkillsListForThreadInput,
+  success: Schema.Array(ServerWorkspaceSlashCommand),
+  error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
 });
 
 export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
@@ -898,6 +909,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsAssetsCreateUrlRpc,
+  WsSkillsListForThreadRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeBeadsStatusRpc,
   WsBeadsRefreshStatusRpc,

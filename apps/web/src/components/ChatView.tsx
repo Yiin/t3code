@@ -282,6 +282,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { previewEnvironment } from "../state/preview";
+import { skillsEnvironment } from "../state/skills";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
 import { ServerUpdateAction } from "./ServerUpdateAction";
@@ -2547,13 +2548,32 @@ function ChatViewContent(props: ChatViewProps) {
     const defaultInstanceId = defaultInstanceIdForDriver(selectedProvider);
     return providerStatuses.find((status) => status.instanceId === defaultInstanceId) ?? null;
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
+  // Project skills (a thread's workspace `.claude/skills` and
+  // `.agents/skills`) shadow global ones with the same name. Falls back to
+  // the global list until the per-thread list loads or if it errors.
+  // A draft's thread id is pre-allocated and unknown to the server, so send
+  // the project id too. The draft keeps that id once it starts, and the query
+  // is cached per input, so a global-only draft answer would never be refetched.
+  const activeThreadProjectId = activeThread?.projectId ?? null;
+  const skillsListForThreadQuery = useEnvironmentQuery(
+    activeThreadId === null
+      ? null
+      : skillsEnvironment.listForThread({
+          environmentId,
+          input:
+            activeThreadProjectId === null
+              ? { threadId: activeThreadId }
+              : { threadId: activeThreadId, projectId: activeThreadProjectId },
+        }),
+  );
+  const workspaceSkillCommands = skillsListForThreadQuery.data ?? serverSlashCommands;
   const timelineSkills = useMemo(
     () =>
       mergeComposerSkills({
         providerSkills: activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS,
-        workspaceCommands: serverSlashCommands,
+        workspaceCommands: workspaceSkillCommands,
       }),
-    [activeProviderStatus, serverSlashCommands],
+    [activeProviderStatus, workspaceSkillCommands],
   );
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
@@ -6010,7 +6030,7 @@ function ChatViewContent(props: ChatViewProps) {
                         interactionMode={interactionMode}
                         lockedProvider={lockedProvider}
                         providerStatuses={providerStatuses as ServerProvider[]}
-                        serverSlashCommands={serverSlashCommands}
+                        serverSlashCommands={workspaceSkillCommands}
                         activeProjectDefaultModelSelection={activeProject?.defaultModelSelection}
                         activeThreadModelSelection={activeThread?.modelSelection}
                         activeThreadActivities={activeThread?.activities}
