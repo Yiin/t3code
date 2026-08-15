@@ -284,29 +284,43 @@ export const makeFileMergeQueueStore = (options: { readonly runDirectory: string
           },
           result: undefined,
         })),
+      // `complete` and `drop` both delete every entry sharing the landed
+      // sequence's branch, not just that one row — parity with the SQL
+      // store's `deleteEpicRunMergeRow` (`EpicRuns.ts`), which the completion
+      // proof (t3code-xig) depends on. A merge-fix child re-enqueues its
+      // branch under a NEW sequence and leaves the ORIGINAL sequence parked
+      // with `fixIssueId` set; a sequence-only filter left that original row
+      // behind forever once the new one landed, so a raw queue read would
+      // see a "parked" entry for a branch that had already landed.
       complete: ({ runId, sequence, lastAcceptedHead, siblingHeads }) =>
-        mutate("complete", runId, (current) => ({
-          state: {
-            ...current,
-            lastAcceptedHead,
-            siblings: current.siblings.map((sibling) => ({
-              ...sibling,
-              lastAcceptedHead:
-                siblingHeads?.find((head) => head.repositoryPath === sibling.repositoryPath)
-                  ?.lastAcceptedHead ?? sibling.lastAcceptedHead,
-            })),
-            entries: current.entries.filter((entry) => entry.sequence !== sequence),
-          },
-          result: undefined,
-        })),
+        mutate("complete", runId, (current) => {
+          const branch = current.entries.find((entry) => entry.sequence === sequence)?.branch;
+          return {
+            state: {
+              ...current,
+              lastAcceptedHead,
+              siblings: current.siblings.map((sibling) => ({
+                ...sibling,
+                lastAcceptedHead:
+                  siblingHeads?.find((head) => head.repositoryPath === sibling.repositoryPath)
+                    ?.lastAcceptedHead ?? sibling.lastAcceptedHead,
+              })),
+              entries: current.entries.filter((entry) => entry.branch !== branch),
+            },
+            result: undefined,
+          };
+        }),
       drop: ({ runId, sequence }) =>
-        mutate("drop", runId, (current) => ({
-          state: {
-            ...current,
-            entries: current.entries.filter((entry) => entry.sequence !== sequence),
-          },
-          result: undefined,
-        })),
+        mutate("drop", runId, (current) => {
+          const branch = current.entries.find((entry) => entry.sequence === sequence)?.branch;
+          return {
+            state: {
+              ...current,
+              entries: current.entries.filter((entry) => entry.branch !== branch),
+            },
+            result: undefined,
+          };
+        }),
       parkedOriginalChild: (runId, branch) =>
         Effect.map(readState(runId), (state) =>
           Option.fromUndefinedOr(

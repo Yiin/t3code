@@ -48,6 +48,7 @@ import {
   proveEpicCompletion,
   type EpicCompletionCheck,
   type EpicCompletionProof,
+  type UnlandedMergeEntry,
 } from "./policy.ts";
 import {
   classifyIteration,
@@ -227,6 +228,22 @@ export interface MergeDrainShape {
     readonly repositoryPath: string;
     readonly baseBranch: string;
   } | null>;
+  /**
+   * Every queue entry not yet landed on the base branch, read straight from
+   * persisted state: no drain, no slot, no mutation. This is completion
+   * honesty's (t3code-xig) only read of the queue — Beads can show a child
+   * closed while its branch still sits `queued`, `draining`, or `parked`
+   * behind a merge-fix child, because closing the child and landing its
+   * branch are two different writes.
+   *
+   * Never fails, the same "nothing to report" convention as
+   * {@link MergeDrainShape.integrationTarget}: `[]` for a sequential run,
+   * which never provisions merge state, and for a run whose merge state is
+   * unreadable.
+   */
+  readonly unlandedEntries: (
+    run: PoolRunContext,
+  ) => Effect.Effect<ReadonlyArray<UnlandedMergeEntry>>;
 }
 
 /** Never-failing git probes; `null` never counts as progress. */
@@ -1794,9 +1811,10 @@ export const runParallelEpicLoop = (
 
   /**
    * The run's only path to a terminal status. It re-reads the epic's open
-   * children from Beads and hands that evidence to `proveEpicCompletion`, so
-   * `done` is always written against the backlog and never against a worker's
-   * claim.
+   * children from Beads and, when Beads alone would call the run complete,
+   * the merge queue's still-unlanded entries too, and hands both to
+   * `proveEpicCompletion`, so `done` is always written against the backlog
+   * and the queue and never against a worker's claim (t3code-xig).
    *
    * Runs outside the transition semaphore: it is a read, and the caller takes
    * the semaphore to write the status the proof allows.
@@ -1804,6 +1822,8 @@ export const runParallelEpicLoop = (
   const proveCompletion = (
     trigger: CompletionTrigger,
     activeWorkers: number,
+    runCtx: PoolRunContext,
+    sequential: boolean,
   ): Effect.Effect<EpicCompletionProof, EpicRunnerError> =>
     Effect.gen(function* () {
       // A live sibling can still close the last child, so there is nothing to
@@ -1834,7 +1854,21 @@ export const runParallelEpicLoop = (
                       ),
                     ),
             };
-      const proof = proveEpicCompletion({ check, activeWorkers, openChildIds });
+      // The merge queue's answer only changes anything when Beads alone
+      // would already call this complete — an epic that is incomplete or
+      // unproven from `openChildIds` stays that way regardless of the
+      // queue, so a sequential run (which never enqueues) and a run with
+      // open or unready children alike skip this read entirely.
+      const unlandedMergeEntries: ReadonlyArray<UnlandedMergeEntry> =
+        openChildIds.length === 0 && !sequential
+          ? yield* ports.mergeDrain.unlandedEntries(runCtx)
+          : [];
+      const proof = proveEpicCompletion({
+        check,
+        activeWorkers,
+        openChildIds,
+        unlandedMergeEntries,
+      });
       if (proof._tag !== "complete") {
         // The record a stuck-epic investigation starts from: which children
         // Beads still shows open, and what the ready re-read said about them.
@@ -1844,6 +1878,7 @@ export const runParallelEpicLoop = (
           proof: proof._tag,
           openChildren: openChildIds.length,
           openChildIds: describeOpenChildren(openChildIds),
+          unlandedMergeEntries: unlandedMergeEntries.length,
           ...(check._tag === "backlog-empty"
             ? { readyChildIds: describeOpenChildren(check.readyChildIds) }
             : {}),
@@ -2324,11 +2359,13 @@ export const runParallelEpicLoop = (
     let syntheticSequence = 0;
     // The most recent drain's `blocked` count (t3code-sha): entries this run
     // left untouched because an operator-base integration conflict stopped
-    // the drain before the per-entry loop ran. Completion honesty (D2) is
-    // deferred — `done` below is still decided from the open-child count
-    // alone, not from this — so logging it here is the only place the value
-    // becomes observable at all; see the `done` transitions further down.
-    // Follow-up filed: t3code-xig.
+    // the drain before the per-entry loop ran. `done` below no longer trusts
+    // the open-child count alone (t3code-xig): `proveCompletion` re-reads the
+    // queue itself, so a blocked entry surviving past this drain is caught
+    // there regardless of whether this value is ever read again. Kept purely
+    // for the `epic.runner.merge-drain-blocked` log below, which is the
+    // earliest a stuck drain becomes observable — before the run even asks
+    // whether it may finish.
     let lastDrainBlocked = 0;
 
     const launch = (
@@ -2545,13 +2582,17 @@ export const runParallelEpicLoop = (
             .pipe(Effect.mapError(backlogError));
           if (frontier._tag === "empty") {
             if (active.size === 0) {
-              // Completion honesty (D2, t3code-sha) is deferred: the proof
-              // below reads Beads alone, not whether the merge queue still
-              // holds entries this run never landed (`lastDrainBlocked`, logged
-              // as `epic.runner.merge-drain-blocked` above). A run can report
-              // `done` with parked or blocked work still sitting in the queue.
-              // Follow-up filed: t3code-xig.
-              const proof = yield* proveCompletion({ _tag: "ready-frontier-empty" }, active.size);
+              // Completion honesty (t3code-xig): the proof reads Beads AND
+              // the merge queue, so a `done` here never leaves entries this
+              // run never landed sitting parked or queued (`lastDrainBlocked`
+              // above logs the same fact as it is seen mid-drain, not at
+              // completion).
+              const proof = yield* proveCompletion(
+                { _tag: "ready-frontier-empty" },
+                active.size,
+                runCtx,
+                run.config.execution.sequential,
+              );
               if (proof._tag !== "unproven") {
                 yield* writeProvenTerminalStatus(proof);
                 return;
@@ -2577,12 +2618,14 @@ export const runParallelEpicLoop = (
             if (launched.length > 0) yield* noteProgress;
           }
         } else if (active.size === 0 && run.iterationsDispatched >= policy.maxIterations) {
-          // Same deferred gap as above: the cap consults Beads, not the merge
-          // queue. A cap that leaves an open child fails rather than reporting
-          // work the run never did.
+          // Same completion honesty as above: the cap consults the merge
+          // queue too, so it fails rather than reporting work the run never
+          // landed.
           const proof = yield* proveCompletion(
             { _tag: "dispatch-cap", maxIterations: policy.maxIterations },
             active.size,
+            runCtx,
+            run.config.execution.sequential,
           );
           if (proof._tag !== "unproven") {
             yield* writeProvenTerminalStatus(proof);
@@ -2644,7 +2687,12 @@ export const runParallelEpicLoop = (
       const completionProof =
         settlement.exit.value._tag === "classified" &&
         settlement.exit.value.outcome.kind === "backlog-empty"
-          ? yield* proveCompletion({ _tag: "backlog-empty" }, active.size)
+          ? yield* proveCompletion(
+              { _tag: "backlog-empty" },
+              active.size,
+              runCtx,
+              run.config.execution.sequential,
+            )
           : null;
       const boundary = yield* applyIterationBoundary({
         iterationResult: settlement.exit.value,

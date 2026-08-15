@@ -37,7 +37,7 @@ import {
   type ReadyFrontierSelection,
   type ResumedWorker,
 } from "./ParallelEpicLoop.ts";
-import { parseMergeFixTitle } from "./policy.ts";
+import { parseMergeFixTitle, type UnlandedMergeEntry } from "./policy.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
 import type {
   AgentDispatchCapabilities,
@@ -239,6 +239,8 @@ const fixture = (input: {
   readonly onNudge?: (count: number) => void;
   /** Hand out a workspace with no branch of its own, as an in-place worker has. */
   readonly inPlaceWorkspace?: boolean;
+  /** What `mergeDrain.unlandedEntries` answers; absent means an empty queue. */
+  readonly unlandedMergeEntries?: ReadonlyArray<UnlandedMergeEntry>;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -688,6 +690,7 @@ const fixture = (input: {
           ? { repositoryPath: "/repo", baseBranch: "epic/base" }
           : input.integrationTarget,
       ),
+    unlandedEntries: () => Effect.succeed(input.unlandedMergeEntries ?? []),
   };
 
   const vcs: PoolVcsShape = {
@@ -1048,6 +1051,7 @@ it.live("logs the open-child evidence when an empty frontier cannot finish the r
       proof: "incomplete",
       openChildren: 1,
       openChildIds: "epic.1",
+      unlandedMergeEntries: 0,
     });
   }),
 );
@@ -1081,6 +1085,47 @@ it.live("fails a RALPH_DONE that leaves an open child nothing can pick up", () =
     assert.equal(test.runRecord().status, "failed");
     assert.include(test.runRecord().lastError ?? "", "infra:ready-frontier-stuck");
     assert.include(test.runRecord().lastError ?? "", "epic.1");
+  }),
+);
+
+it.live("fails a run whose merge queue still holds a parked entry after every child closes", () =>
+  Effect.gen(function* () {
+    // The residual window t3code-xig closes: a merge-fix child can close
+    // with accepted no-commit evidence and never re-enqueue the branch it
+    // was meant to land, leaving the original entry parked with
+    // `fixIssueId` set. Beads shows nothing open; the queue does not.
+    const test = fixture({
+      attempts: [{ commit: true, close: true, comment: true }],
+      unlandedMergeEntries: [{ childId: "epic.1", branch: "epic/epic.1", status: "parked" }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "failed");
+    const error = test.runRecord().lastError ?? "";
+    assert.include(error, "infra:merge-queue-unlanded");
+    assert.include(error, "epic.1");
+    assert.include(error, "epic/epic.1");
+    assert.include(error, "parked");
+  }),
+);
+
+it.live("fails a RALPH_DONE whose merge queue still holds a queued entry", () =>
+  Effect.gen(function* () {
+    // The other residual window t3code-xig closes: an integration-fix child
+    // can close without committing a resolution, leaving the entry the drain
+    // never got to still `queued` behind the operator-base conflict it
+    // stopped for.
+    const test = fixture({
+      attempts: [{ backlogEmpty: true, close: true }],
+      unlandedMergeEntries: [{ childId: "epic.2", branch: "epic/epic.2", status: "queued" }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "failed");
+    const error = test.runRecord().lastError ?? "";
+    assert.include(error, "infra:merge-queue-unlanded");
+    assert.include(error, "epic.2");
+    assert.include(error, "queued");
   }),
 );
 
@@ -1837,6 +1882,7 @@ it.live(
         findParkedOriginalChild: () => Effect.succeed(Option.some("orig.child")),
         recordIntegratedHead: () => Effect.sync(() => void (recordIntegratedHeadCalls += 1)),
         integrationTarget: () => Effect.succeed(null),
+        unlandedEntries: () => Effect.succeed([]),
       };
 
       const vcs: PoolVcsShape = {

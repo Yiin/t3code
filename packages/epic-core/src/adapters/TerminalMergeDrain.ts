@@ -263,6 +263,17 @@ export const makeTerminalMergeDrain = (deps: {
         })),
         Effect.catchCause(() => Effect.succeed(null)),
       ),
+    unlandedEntries: (runCtx) =>
+      mergeQueueStore.read(runCtx.runId).pipe(
+        Effect.map((state) =>
+          state.entries.map((entry) => ({
+            childId: entry.childId,
+            branch: entry.branch,
+            status: entry.status,
+          })),
+        ),
+        Effect.catchCause(() => Effect.succeed([])),
+      ),
     recordIntegratedHead: (runCtx) =>
       Effect.gen(function* () {
         const state = yield* mergeQueueStore

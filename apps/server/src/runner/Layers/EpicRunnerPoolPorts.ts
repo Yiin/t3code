@@ -2045,6 +2045,21 @@ export const makeServerMergeDrain = (deps: {
         ),
         Effect.catchCause(() => Effect.succeed(null)),
       ),
+    unlandedEntries: (runCtx) =>
+      store.getMergeState({ runId: runCtx.runId }).pipe(
+        Effect.map((state) =>
+          Option.match(state, {
+            onNone: () => [],
+            onSome: (merge) =>
+              merge.entries.map((entry) => ({
+                childId: entry.childId,
+                branch: entry.branch,
+                status: entry.status,
+              })),
+          }),
+        ),
+        Effect.catchCause(() => Effect.succeed([])),
+      ),
     recordIntegratedHead: (runCtx) =>
       Effect.gen(function* () {
         const state = Option.getOrThrow(

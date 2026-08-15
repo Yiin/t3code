@@ -22,8 +22,10 @@ import {
   persistedFailureReason,
   proveEpicCompletion,
   MAX_OPEN_CHILD_EVIDENCE,
+  MAX_UNLANDED_MERGE_EVIDENCE,
   type IterationBoundaryDecision,
   type IterationBoundaryInput,
+  type UnlandedMergeEntry,
   mergeSlotHolder,
   parseMergeSlotHolder,
   runBaseBranch,
@@ -1019,6 +1021,7 @@ describe("proveEpicCompletion", () => {
         check: { _tag: "ready-frontier-empty" },
         activeWorkers: 1,
         openChildIds,
+        unlandedMergeEntries: [],
       }),
     ).toEqual({ _tag: "unproven" });
   });
@@ -1029,6 +1032,7 @@ describe("proveEpicCompletion", () => {
         check: { _tag: "backlog-empty", readyChildIds: [] },
         activeWorkers: 0,
         openChildIds: [],
+        unlandedMergeEntries: [],
       }),
     ).toEqual({ _tag: "complete", lastError: null });
     expect(
@@ -1036,6 +1040,7 @@ describe("proveEpicCompletion", () => {
         check: { _tag: "ready-frontier-empty" },
         activeWorkers: 0,
         openChildIds: [],
+        unlandedMergeEntries: [],
       }),
     ).toEqual({ _tag: "complete", lastError: null });
     expect(
@@ -1043,6 +1048,7 @@ describe("proveEpicCompletion", () => {
         check: { _tag: "dispatch-cap", maxIterations: 4 },
         activeWorkers: 0,
         openChildIds: [],
+        unlandedMergeEntries: [],
       }),
     ).toEqual({ _tag: "complete", lastError: "max iterations (4) reached" });
   });
@@ -1053,6 +1059,7 @@ describe("proveEpicCompletion", () => {
         check: { _tag: "backlog-empty", readyChildIds: ["epic.2"] },
         activeWorkers: 0,
         openChildIds,
+        unlandedMergeEntries: [],
       }),
     ).toEqual({ _tag: "unproven" });
   });
@@ -1062,6 +1069,7 @@ describe("proveEpicCompletion", () => {
       check: { _tag: "backlog-empty", readyChildIds: [] },
       activeWorkers: 0,
       openChildIds,
+      unlandedMergeEntries: [],
     });
     expect(proof._tag).toBe("incomplete");
     expect(proof._tag === "incomplete" && proof.lastError).toBe(
@@ -1074,6 +1082,7 @@ describe("proveEpicCompletion", () => {
       check: { _tag: "dispatch-cap", maxIterations: 4 },
       activeWorkers: 0,
       openChildIds,
+      unlandedMergeEntries: [],
     });
     expect(proof._tag).toBe("incomplete");
     expect(proof._tag === "incomplete" && proof.lastError).toBe(
@@ -1087,6 +1096,7 @@ describe("proveEpicCompletion", () => {
       check: { _tag: "dispatch-cap", maxIterations: 9 },
       activeWorkers: 0,
       openChildIds: many,
+      unlandedMergeEntries: [],
     });
     expect(proof._tag === "incomplete" && proof.lastError).toContain(
       `${many.slice(0, MAX_OPEN_CHILD_EVIDENCE).join(", ")}, +3 more`,
@@ -1094,5 +1104,113 @@ describe("proveEpicCompletion", () => {
     expect(proof._tag === "incomplete" && proof.lastError).not.toContain(
       many[MAX_OPEN_CHILD_EVIDENCE],
     );
+  });
+
+  describe("with unlanded merge entries", () => {
+    // Beads can be clean — every child closed, `openChildIds` empty — while
+    // the merge queue still holds the branch a merge-fix or integration-fix
+    // child never actually landed. This is the residual window t3code-xig
+    // closes: `unlandedMergeEntries` gets the same veto over `complete` that
+    // `openChildIds` does.
+    it.each<{ readonly name: string; readonly entries: ReadonlyArray<UnlandedMergeEntry> }>([
+      {
+        // A merge-fix child closed with accepted no-commit evidence
+        // (never re-enqueues its branch), leaving the original entry
+        // parked with `fixIssueId` set. `reconcile` skips a parked entry
+        // whose fix child is closed, so this never self-heals.
+        name: "a parked entry whose merge-fix child closed without landing it",
+        entries: [{ childId: "epic.1", branch: "epic/epic.1", status: "parked" }],
+      },
+      {
+        // An integration-fix child closed without committing a resolution,
+        // so the operator-base integration conflict that blocked the
+        // drain is still unresolved and the entry it never got to is still
+        // `queued`.
+        name: "a queued entry left behind by an integration-fix child that never committed",
+        entries: [{ childId: "epic.2", branch: "epic/epic.2", status: "queued" }],
+      },
+      {
+        name: "a draining entry the drain never finished",
+        entries: [{ childId: "epic.3", branch: "epic/epic.3", status: "draining" }],
+      },
+    ])("turns an otherwise-complete proof into incomplete: $name", ({ entries }) => {
+      const proof = proveEpicCompletion({
+        check: { _tag: "ready-frontier-empty" },
+        activeWorkers: 0,
+        openChildIds: [],
+        unlandedMergeEntries: entries,
+      });
+      expect(proof._tag).toBe("incomplete");
+      const [entry] = entries;
+      expect(proof._tag === "incomplete" && proof.lastError).toBe(
+        `infra:merge-queue-unlanded: 1 merge-queue entry has not landed: ${entry?.childId} (${entry?.branch}, ${entry?.status})`,
+      );
+    });
+
+    it("names every child, branch, and status when several entries are unlanded", () => {
+      const proof = proveEpicCompletion({
+        check: { _tag: "backlog-empty", readyChildIds: [] },
+        activeWorkers: 0,
+        openChildIds: [],
+        unlandedMergeEntries: [
+          { childId: "epic.1", branch: "epic/epic.1", status: "parked" },
+          { childId: "epic.2", branch: "epic/epic.2", status: "queued" },
+        ],
+      });
+      expect(proof._tag).toBe("incomplete");
+      expect(proof._tag === "incomplete" && proof.lastError).toBe(
+        "infra:merge-queue-unlanded: 2 merge-queue entries have not landed: " +
+          "epic.1 (epic/epic.1, parked), epic.2 (epic/epic.2, queued)",
+      );
+    });
+
+    it("bounds the unlanded-entry evidence a single row can carry", () => {
+      const many: ReadonlyArray<UnlandedMergeEntry> = Array.from(
+        { length: MAX_UNLANDED_MERGE_EVIDENCE + 2 },
+        (_, index) => ({
+          childId: `epic.${index}`,
+          branch: `epic/epic.${index}`,
+          status: "parked" as const,
+        }),
+      );
+      const proof = proveEpicCompletion({
+        check: { _tag: "ready-frontier-empty" },
+        activeWorkers: 0,
+        openChildIds: [],
+        unlandedMergeEntries: many,
+      });
+      expect(proof._tag === "incomplete" && proof.lastError).toContain("+2 more");
+      expect(proof._tag === "incomplete" && proof.lastError).not.toContain(
+        `epic.${MAX_UNLANDED_MERGE_EVIDENCE}`,
+      );
+    });
+
+    it("never overrides an already-incomplete proof's own evidence", () => {
+      // `openChildIds` is non-empty, so the merge-queue check never even
+      // runs — the loop only reads it when Beads alone would call the run
+      // complete (see ParallelEpicLoop.proveCompletion).
+      const proof = proveEpicCompletion({
+        check: { _tag: "dispatch-cap", maxIterations: 4 },
+        activeWorkers: 0,
+        openChildIds,
+        unlandedMergeEntries: [{ childId: "epic.1", branch: "epic/epic.1", status: "parked" }],
+      });
+      expect(proof._tag === "incomplete" && proof.lastError).toBe(
+        "limit:max-iterations: dispatch cap (4) reached with 2 open children: epic.1, epic.2",
+      );
+    });
+
+    it("leaves a RALPH_DONE over a ready child unproven regardless of the queue", () => {
+      // Reported early: the next dispatch pass corrects the wrong claim
+      // before completion honesty is even worth asking.
+      expect(
+        proveEpicCompletion({
+          check: { _tag: "backlog-empty", readyChildIds: ["epic.2"] },
+          activeWorkers: 0,
+          openChildIds,
+          unlandedMergeEntries: [{ childId: "epic.1", branch: "epic/epic.1", status: "parked" }],
+        }),
+      ).toEqual({ _tag: "unproven" });
+    });
   });
 });

@@ -156,6 +156,68 @@ describe("FileMergeQueueStore", () => {
     ),
   );
 
+  it.effect(
+    "completes a re-enqueued branch and deletes its original parked entry too (SQL store parity)",
+    () =>
+      // Mirrors `EpicRuns.test.ts`'s "replays ordered draining and parked
+      // merge work after a restart boundary": a normal park -> merge-fix ->
+      // land cycle must leave the queue empty on THIS store exactly as it
+      // does on the SQL-backed one, or a completion proof reading raw queue
+      // state (t3code-xig) would see a landed branch as still parked.
+      withStore((store) =>
+        Effect.gen(function* () {
+          yield* store.initialize(snapshot);
+          yield* store.enqueue({ runId: "run-1", childId: "epic.1", branch: "epic/epic.1" });
+          yield* store.beginDrain("run-1");
+          yield* store.beginPark({ runId: "run-1", sequence: 0, reason: "conflict" });
+          yield* store.finalizePark({ runId: "run-1", sequence: 0, fixIssueId: "fix-a" });
+
+          // The repair re-enqueues the SAME branch under a new sequence; the
+          // original parked row stays behind, still naming `fix-a`.
+          yield* store.enqueue({ runId: "run-1", childId: "fix-a", branch: "epic/epic.1" });
+          assert.deepEqual(
+            (yield* store.read("run-1")).entries.map(
+              (entry) => [entry.sequence, entry.childId, entry.status] as const,
+            ),
+            [
+              [0, "epic.1", "parked"],
+              [1, "fix-a", "queued"],
+            ] as const,
+          );
+          yield* store.beginDrain("run-1");
+
+          // Landing the repair's sequence must delete BOTH rows: its own and
+          // the original parked one it repaired, because they share a branch.
+          yield* store.complete({ runId: "run-1", sequence: 1, lastAcceptedHead: "landed-head" });
+          assert.deepEqual((yield* store.read("run-1")).entries, []);
+        }),
+      ),
+  );
+
+  it.effect("drops a re-enqueued branch and its original parked entry too (SQL store parity)", () =>
+    // `drop` shares the SQL store's branch-scoped delete with `complete`
+    // (`EpicRuns.ts`'s `deleteEpicRunMergeRow` backs both `completeMerge` and
+    // `dropMerge`), so a no-commit repair must clear the same stale parked
+    // row a landed one does.
+    withStore((store) =>
+      Effect.gen(function* () {
+        yield* store.initialize(snapshot);
+        yield* store.enqueue({ runId: "run-1", childId: "epic.1", branch: "epic/epic.1" });
+        yield* store.beginDrain("run-1");
+        yield* store.beginPark({ runId: "run-1", sequence: 0, reason: "conflict" });
+        yield* store.finalizePark({ runId: "run-1", sequence: 0, fixIssueId: "fix-a" });
+
+        yield* store.enqueue({ runId: "run-1", childId: "fix-a", branch: "epic/epic.1" });
+        yield* store.beginDrain("run-1");
+
+        // The repair carried no commits, so the drain drops its entry
+        // instead of completing it.
+        yield* store.drop({ runId: "run-1", sequence: 1 });
+        assert.deepEqual((yield* store.read("run-1")).entries, []);
+      }),
+    ),
+  );
+
   it.effect("advances the accepted head without touching any entry", () =>
     withStore((store) =>
       Effect.gen(function* () {

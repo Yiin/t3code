@@ -823,6 +823,34 @@ export const describeOpenChildren = (openChildIds: ReadonlyArray<string>): strin
 };
 
 /**
+ * A merge-queue entry that has not landed on the base branch, as the
+ * completion proof (t3code-xig) reads it back from persisted queue state:
+ * `queued` and `draining` are still on their way through the drain, and
+ * `parked` sits behind a merge-fix child. A landed entry is deleted by the
+ * store's `complete`, so it never appears here.
+ */
+export interface UnlandedMergeEntry {
+  readonly childId: string;
+  readonly branch: string;
+  readonly status: "queued" | "draining" | "parked";
+}
+
+/** How many unlanded merge entries a completion failure names before it summarises. */
+export const MAX_UNLANDED_MERGE_EVIDENCE = 5;
+
+/** Bound the unlanded-entry list the same way {@link describeOpenChildren} bounds children. */
+export const describeUnlandedMergeEntries = (
+  entries: ReadonlyArray<UnlandedMergeEntry>,
+): string => {
+  const named = entries.slice(0, MAX_UNLANDED_MERGE_EVIDENCE);
+  const remaining = entries.length - named.length;
+  const rendered = named
+    .map((entry) => `${entry.childId} (${entry.branch}, ${entry.status})`)
+    .join(", ");
+  return remaining > 0 ? `${rendered}, +${remaining} more` : rendered;
+};
+
+/**
  * The question the pool loop is asking when it is about to write a terminal
  * status. Each case carries exactly the evidence its answer needs.
  */
@@ -840,6 +868,16 @@ export interface EpicCompletionProofInput {
   readonly activeWorkers: number;
   /** Every still-open child of the epic, re-read for this decision. */
   readonly openChildIds: ReadonlyArray<string>;
+  /**
+   * Merge-queue entries not yet landed, re-read for this decision the same
+   * way `openChildIds` is. Beads and the merge queue are two different
+   * ledgers: closing a child and landing its branch are two different
+   * writes, and a merge-fix child can close its own issue — with Beads
+   * showing nothing open — while the branch it was meant to land stays
+   * parked or queued. Always empty for a sequential run, which never
+   * enqueues.
+   */
+  readonly unlandedMergeEntries: ReadonlyArray<UnlandedMergeEntry>;
 }
 
 export type EpicCompletionProof =
@@ -851,12 +889,15 @@ export type EpicCompletionProof =
   | { readonly _tag: "unproven" };
 
 /**
- * Prove a run may write `done`, from Beads alone.
+ * Prove a run may write `done`, from Beads and the merge queue together.
  *
  * Every terminal write of the pool loop comes through here, so no path can
  * report `done` over an open child: not a worker's `RALPH_DONE`, not an empty
  * frontier, not the dispatch cap. A worker's claim is never the proof — the
- * re-read open-child list is.
+ * re-read open-child list is. Beads alone is not enough either (t3code-xig):
+ * a merge-fix child can close with Beads clean while the branch it was meant
+ * to land still sits parked or queued, so `unlandedMergeEntries` gets the
+ * same veto over `complete` that `openChildIds` does.
  */
 export const proveEpicCompletion = (input: EpicCompletionProofInput): EpicCompletionProof => {
   // A live sibling can still close the last child, so nothing is decided while
@@ -864,6 +905,13 @@ export const proveEpicCompletion = (input: EpicCompletionProofInput): EpicComple
   if (input.activeWorkers > 0) return { _tag: "unproven" };
 
   if (input.openChildIds.length === 0) {
+    if (input.unlandedMergeEntries.length > 0) {
+      const count = input.unlandedMergeEntries.length;
+      return {
+        _tag: "incomplete",
+        lastError: `infra:merge-queue-unlanded: ${count} merge-queue ${count === 1 ? "entry has" : "entries have"} not landed: ${describeUnlandedMergeEntries(input.unlandedMergeEntries)}`,
+      };
+    }
     return {
       _tag: "complete",
       lastError:
