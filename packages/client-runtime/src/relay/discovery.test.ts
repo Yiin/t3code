@@ -104,7 +104,6 @@ const makeHarness = Effect.fn("RelayDiscoveryTest.makeHarness")(function* () {
       Ref.get(statusRequests).pipe(
         Effect.flatMap((requests) => Deferred.await(requests.get(environmentId)!)),
       ),
-    listDevices: () => Effect.die("unused"),
     createEnvironmentLinkChallenge: () => Effect.die("unused"),
     linkEnvironment: () => Effect.die("unused"),
     unlinkEnvironment: () => Effect.die("unused"),
@@ -262,7 +261,6 @@ describe("RelayEnvironmentDiscovery", () => {
             }),
           ),
         getEnvironmentStatus: () => Effect.die("unused"),
-        listDevices: () => Effect.die("unused"),
         createEnvironmentLinkChallenge: () => Effect.die("unused"),
         linkEnvironment: () => Effect.die("unused"),
         unlinkEnvironment: () => Effect.die("unused"),

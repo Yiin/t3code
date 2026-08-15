@@ -67,7 +67,6 @@ import { OrchestrationEngineService } from "../src/orchestration/Services/Orches
 import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import { EpicRunStore, type EpicRun } from "../src/persistence/Services/EpicRuns.ts";
-import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../src/config.ts";
 import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
@@ -946,13 +945,6 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
     Layer.provide(Layer.succeed(ServerConfig, { worktreesDir } as ServerConfig["Service"])),
     Layer.provide(Layer.succeed(ProviderRegistry, providerRegistry)),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
-    Layer.provide(
-      Layer.succeed(AgentAwarenessRelay, {
-        publishThread: () => Effect.void,
-        publishEpicRun: () => Effect.void,
-        start: () => Effect.void,
-      }),
-    ),
     Layer.provide(NodeServices.layer),
   );
 

@@ -124,7 +124,6 @@ import {
   type EpicRun,
   type EpicRunIteration as EpicRunIterationRow,
 } from "../../persistence/Services/EpicRuns.ts";
-import type { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import type { ServerConfig } from "../../config.ts";
 import type { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import type { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
@@ -378,12 +377,9 @@ const buildTransportRun = (
  */
 export const makeEpicRunReadModel = (deps: {
   readonly store: EpicRunStore["Service"];
-  readonly processRunner: ProcessRunner.ProcessRunner["Service"];
-  readonly agentAwarenessRelay: AgentAwarenessRelay["Service"];
   readonly changes: PubSub.PubSub<TransportEpicRun>;
 }) => {
-  const { store, processRunner, agentAwarenessRelay, changes } = deps;
-  const issueTitleCache = new Map<string, string>();
+  const { store, changes } = deps;
 
   const enrichRun = Effect.fn("EpicRunner.enrichRun")(function* (run: EpicRun) {
     const iterations = yield* store
@@ -416,52 +412,9 @@ export const makeEpicRunReadModel = (deps: {
     return runs.map((run) => buildTransportRun(run, byRunId.get(run.runId) ?? []));
   });
 
-  const readIssueTitle = (cwd: string, issueId: string) => {
-    const cached = issueTitleCache.get(issueId);
-    if (cached) return Effect.succeed(cached);
-    return processRunner.run({ command: "bd", args: ["show", issueId, "--json"], cwd }).pipe(
-      Effect.flatMap((output) =>
-        Effect.try({
-          try: () => {
-            const decoded = decodeIssueEvidence(output.stdout);
-            if (Option.isNone(decoded)) return issueId;
-            const value = Array.isArray(decoded.value) ? decoded.value[0] : decoded.value;
-            const title = value?.title.trim() ?? "";
-            return title.length > 0 ? title : issueId;
-          },
-          catch: () => issueId,
-        }),
-      ),
-      Effect.orElseSucceed(() => issueId),
-      Effect.tap((title) => Effect.sync(() => issueTitleCache.set(issueId, title))),
-    );
-  };
-
-  const publishRunBestEffort = (run: TransportEpicRun) =>
-    Effect.gen(function* () {
-      const latestIssueId = run.recentIterations.at(-1)?.issueId ?? null;
-      const epicTitle = yield* readIssueTitle(run.cwd, run.epicId);
-      const childTitle =
-        latestIssueId === null ? undefined : yield* readIssueTitle(run.cwd, latestIssueId);
-      yield* agentAwarenessRelay.publishEpicRun({
-        ...run,
-        epicTitle,
-        ...(childTitle ? { childTitle } : {}),
-      });
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("epic runner activity publish failed", {
-          runId: run.runId,
-          epicId: run.epicId,
-          cause,
-        }),
-      ),
-    );
-
   /** Enrich and fan out a persisted run row. Never re-writes the store. */
   const publishRunChange = (run: EpicRun) =>
     enrichRun(run).pipe(
-      Effect.tap((enriched) => publishRunBestEffort(enriched)),
       Effect.flatMap((enriched) => PubSub.publish(changes, enriched)),
       Effect.asVoid,
     );
@@ -475,15 +428,6 @@ export const makeEpicRunReadModel = (deps: {
 
   return { enrichRun, enrichRuns, publishRunChange, events };
 };
-
-const IssueEvidence = Schema.Struct({
-  status: Schema.optional(Schema.String),
-  title: Schema.optional(Schema.String),
-  comment_count: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
-});
-const decodeIssueEvidence = Schema.decodeUnknownOption(
-  Schema.fromJsonString(Schema.Union([IssueEvidence, Schema.Array(IssueEvidence)])),
-);
 
 /**
  * The durable run store behind the loop's journal port. The crash-safe

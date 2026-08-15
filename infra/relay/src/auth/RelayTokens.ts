@@ -2,8 +2,6 @@ import {
   RelayDpopAccessTokenScope,
   RelayEnvironmentConnectScope,
   RelayEnvironmentStatusScope,
-  RelayMobileClientId,
-  RelayMobileRegistrationScope,
   RelayWebClientId,
   type RelayPublicClientId,
   type RelayEnvironmentLinkChallengeRequest,
@@ -49,7 +47,7 @@ const RelayDpopAccessTokenClaims = Schema.Struct({
   jti: Schema.String,
   iat: Schema.Int,
   exp: Schema.Int,
-  client_id: Schema.Literals([RelayMobileClientId, RelayWebClientId]),
+  client_id: Schema.Literal(RelayWebClientId),
   scope: Schema.String,
   cnf: Schema.Struct({ jkt: Schema.String }),
 });
@@ -64,11 +62,6 @@ const allowedScopesByClientId: Record<
   RelayPublicClientId,
   ReadonlySet<RelayDpopAccessTokenScope>
 > = {
-  [RelayMobileClientId]: new Set([
-    RelayEnvironmentConnectScope,
-    RelayEnvironmentStatusScope,
-    RelayMobileRegistrationScope,
-  ]),
   [RelayWebClientId]: new Set([RelayEnvironmentConnectScope, RelayEnvironmentStatusScope]),
 };
 

@@ -13,24 +13,18 @@ import { useAtomCommand } from "../state/use-atom-command";
 import {
   linkPrimaryEnvironment as linkPrimaryEnvironmentAtom,
   unlinkPrimaryEnvironment as unlinkPrimaryEnvironmentAtom,
-  updatePrimaryEnvironmentPreferences as updatePrimaryEnvironmentPreferencesAtom,
 } from "./linkEnvironmentAtoms";
 import { usePrimaryCloudLinkState } from "./primaryCloudLinkState";
 import { resolveRelayClerkTokenOptions } from "./publicConfig";
 
 export interface CloudLinkDesiredState {
   readonly managedTunnel: boolean;
-  readonly publish: boolean;
 }
 
 /**
- * Drives the primary environment's T3 Connect link. T3 Connect (managed
- * tunnel) and agent-activity publishing are independent capabilities backed by
- * a single relay link, so consumers express the full desired state and
- * `reconcileCloudState` applies it: unlink when neither is wanted, otherwise
- * (re)link with the mode the managed-tunnel bit implies and set the publish
- * preference. Re-linking only happens when the managed-tunnel mode actually
- * changes, so flipping publish alone is cheap.
+ * Drives the primary environment's T3 Connect link: unlink when the managed
+ * tunnel is not wanted, otherwise (re)link. Re-linking only happens when the
+ * managed-tunnel mode actually changes.
  */
 export function useCloudLinkController() {
   const { getToken, isSignedIn } = useAuth();
@@ -43,10 +37,6 @@ export function useCloudLinkController() {
   const unlinkPrimaryEnvironment = useAtomCommand(unlinkPrimaryEnvironmentAtom, {
     reportFailure: false,
   });
-  const updatePrimaryEnvironmentPreferences = useAtomCommand(
-    updatePrimaryEnvironmentPreferencesAtom,
-    { reportFailure: false },
-  );
   const primaryCloudLinkState = usePrimaryCloudLinkState();
   const [operationError, setOperationError] = useState<string | null>(null);
 
@@ -74,7 +64,6 @@ export function useCloudLinkController() {
   // link always implies a managed tunnel, so fall back to `linked`.
   const managedTunnelActive =
     primaryCloudLinkState.data?.managedTunnelActive ?? primaryCloudLinkState.data?.linked ?? false;
-  const publishAgentActivity = primaryCloudLinkState.data?.publishAgentActivity ?? false;
   const linked = primaryCloudLinkState.data?.linked ?? false;
 
   const reconcileCloudState = async (desired: CloudLinkDesiredState): Promise<boolean> => {
@@ -85,13 +74,11 @@ export function useCloudLinkController() {
       return false;
     }
     const tokenResult = await settlePromise(() => getToken(resolveRelayClerkTokenOptions()));
-    const wantsLink = desired.managedTunnel || desired.publish;
 
-    // A failure after this point may follow a partially applied mutation (e.g.
-    // the link succeeded but the preference update did not), so every exit —
-    // success or failure — refreshes the rendered state to whatever the server
-    // actually holds now.
-    if (!wantsLink) {
+    // A failure after this point may follow a partially applied mutation, so
+    // every exit — success or failure — refreshes the rendered state to
+    // whatever the server actually holds now.
+    if (!desired.managedTunnel) {
       // Unlink works without a relay token — a failed token read must not
       // leave the user unable to turn T3 Connect off.
       const unlinkResult = await unlinkPrimaryEnvironment({
@@ -119,7 +106,7 @@ export function useCloudLinkController() {
         const linkResult = await linkPrimaryEnvironment({
           target,
           clerkToken,
-          mode: desired.managedTunnel ? "managed" : "publish_only",
+          mode: "managed",
         });
         if (linkResult._tag === "Failure") {
           if (!isAtomCommandInterrupted(linkResult)) {
@@ -128,17 +115,6 @@ export function useCloudLinkController() {
           primaryCloudLinkState.refresh();
           return false;
         }
-      }
-      const prefResult = await updatePrimaryEnvironmentPreferences({
-        target,
-        publishAgentActivity: desired.publish,
-      });
-      if (prefResult._tag === "Failure") {
-        if (!isAtomCommandInterrupted(prefResult)) {
-          reportUpdateFailure(squashAtomCommandFailure(prefResult));
-        }
-        primaryCloudLinkState.refresh();
-        return false;
       }
     }
 
@@ -156,7 +132,6 @@ export function useCloudLinkController() {
     linkState: primaryCloudLinkState,
     linked,
     managedTunnelActive,
-    publishAgentActivity,
     operationError,
     reconcileCloudState,
   };

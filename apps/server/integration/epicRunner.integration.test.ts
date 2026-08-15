@@ -35,7 +35,6 @@ import {
   type EpicRunIteration,
 } from "../src/persistence/Services/EpicRuns.ts";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import { AgentAwarenessRelay } from "../src/relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../src/config.ts";
 import { ProjectSetupScriptRunner } from "../src/project/ProjectSetupScriptRunner.ts";
 import { WorktreeProvisioner } from "../src/vcs/WorktreeProvisioner.ts";
@@ -372,13 +371,6 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     ),
     Layer.provide(makeProviderRegistryLayer()),
     Layer.provide(Layer.succeed(EpicRunStore, store.shape)),
-    Layer.provide(
-      Layer.succeed(AgentAwarenessRelay, {
-        publishThread: () => Effect.void,
-        publishEpicRun: () => Effect.void,
-        start: () => Effect.void,
-      }),
-    ),
     Layer.provide(NodeServices.layer),
   );
   return { store, layer, commands };
@@ -433,7 +425,6 @@ const resumedIterationBdInvocations = [
   "update child-1 --status in_progress",
   "show epic-1 --json",
   "label list child-1",
-  "show epic-1 --json",
   "show child-1 --json",
 ] as const;
 
@@ -526,7 +517,6 @@ describe("EpicRunner real process boundaries", () => {
         assert.equal(harness.store.iterations[0]?.turnStatus, "completed");
         assert.deepEqual(readBdInvocations(fixture), [
           ...preflightBdInvocations,
-          "show epic-1 --json",
           ...iterationBdInvocations,
           "ready --parent epic-1 --json",
           "list --parent epic-1 --all --flat --json",
@@ -652,7 +642,7 @@ describe("EpicRunner real process boundaries", () => {
             );
             yield* waitFor(
               () => readBdInvocations(fixture).length,
-              (count) => count >= preflightBdInvocations.length + iterationBdInvocations.length + 4,
+              (count) => count >= preflightBdInvocations.length + iterationBdInvocations.length + 2,
             );
           }).pipe(Effect.provide(harness.layer)),
         );
@@ -660,9 +650,7 @@ describe("EpicRunner real process boundaries", () => {
         assert.match(harness.store.iterations[0]?.failureReason ?? "", /no-commit/);
         assert.deepEqual(readBdInvocations(fixture), [
           ...preflightBdInvocations,
-          "show epic-1 --json",
           ...iterationBdInvocations,
-          "show child-1 --json",
           "show child-1 --json",
           "show child-1 --json",
         ]);

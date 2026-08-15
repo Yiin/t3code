@@ -79,7 +79,6 @@ import {
 } from "../../persistence/Services/EpicRuns.ts";
 import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
-import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
 import { layerTest as serverSettingsLayerTest } from "../../serverSettings.ts";
 import {
@@ -338,7 +337,12 @@ function createHarness(input: {
   /** Epic descriptions returned in order by per-iteration `bd show`. */
   readonly epicDescriptions?: ReadonlyArray<string>;
   readonly epicDescriptionExitCode?: number;
-  readonly onEpicRunPublish?: (run: import("@t3tools/contracts").EpicRun) => Effect.Effect<void>;
+  /**
+   * Fires synchronously every time the loop persists a run row (on the same
+   * `store.upsertRun` write the loop itself awaits before dispatching the
+   * next iteration), for tests that need a deterministic per-transition hook.
+   */
+  readonly onEpicRunPublish?: (run: EpicRun) => Effect.Effect<void>;
   /**
    * Seeds `bd show <id> --json`'s status for specific issue ids, and lets
    * `releaseClaimedChild`'s `bd update <id> --status open` calls be observed
@@ -413,6 +417,13 @@ function createHarness(input: {
   if (input.failListIterations === true) {
     Object.assign(store.shape, {
       listIterations: () => Effect.die(new Error("injected list-iterations failure")),
+    });
+  }
+  if (input.onEpicRunPublish !== undefined) {
+    const onEpicRunPublish = input.onEpicRunPublish;
+    const upsertRun = store.shape.upsertRun;
+    Object.assign(store.shape, {
+      upsertRun: (run: EpicRun) => upsertRun(run).pipe(Effect.tap(() => onEpicRunPublish(run))),
     });
   }
   const repositoryRoot = input.workspaceRoot ?? "/tmp/epic-runner-repo";
@@ -1353,13 +1364,6 @@ function createHarness(input: {
       }),
     ),
     Layer.provide(EpicCommitterRegistry.layer),
-    Layer.provide(
-      Layer.succeed(AgentAwarenessRelay, {
-        publishThread: () => Effect.void,
-        publishEpicRun: input.onEpicRunPublish ?? (() => Effect.void),
-        start: () => Effect.void,
-      }),
-    ),
     Layer.provide(NodeServices.layer),
   );
 
@@ -1757,37 +1761,6 @@ describe("EpicRunner", () => {
       }).pipe(Effect.provide(harness.layer));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
-
-  it.live("publishes each persisted run transition", () => {
-    const publishedStatuses: string[] = [];
-    const harness = createHarness({
-      script: [],
-      readyOutput: "[]",
-      onEpicRunPublish: (run) =>
-        Effect.sync(() => {
-          publishedStatuses.push(run.status);
-        }),
-    });
-    return Effect.gen(function* () {
-      const run = yield* startRun();
-      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
-      yield* waitFor(() => publishedStatuses.includes("done"));
-      assert.deepStrictEqual(publishedStatuses, ["running", "done"]);
-    }).pipe(Effect.provide(harness.layer));
-  });
-
-  it.live("keeps running when epic activity publication fails", () => {
-    const harness = createHarness({
-      script: [],
-      readyOutput: "[]",
-      onEpicRunPublish: () => Effect.die("relay unavailable"),
-    });
-    return Effect.gen(function* () {
-      const run = yield* startRun();
-      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
-      assert.strictEqual(harness.store.runs.get(run.runId)?.status, "done");
-    }).pipe(Effect.provide(harness.layer));
-  });
 
   it.live("chooses the first direct-ready child and ignores an earlier grandchild", () => {
     const harness = createHarness({

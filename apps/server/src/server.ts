@@ -64,7 +64,6 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { QueuedTurnDeliveryReactorLive } from "./orchestration/Layers/QueuedTurnDeliveryReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ThreadTeardownReactorLive } from "./orchestration/Layers/ThreadTeardownReactor.ts";
-import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -186,7 +185,6 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(QueuedTurnDeliveryReactorLive),
   Layer.provideMerge(ThreadTeardownReactorLive),
-  Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
@@ -391,7 +389,6 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   // hop. The poller owns the writes.
   Layer.provide(ProviderUsageLedgerStoreLive),
   Layer.provide(ProviderAccountLimitsStoreLive),
-  Layer.provide(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
 );
 
 const ProviderUsagePollerLayerLive = ProviderUsagePollerLive.pipe(

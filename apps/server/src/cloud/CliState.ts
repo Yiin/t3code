@@ -6,7 +6,6 @@ import {
   CLOUD_ENDPOINT_RUNTIME_CONFIG,
   CLOUD_LINKED_USER_ID,
   CLOUD_MINT_PUBLIC_KEY,
-  PUBLISH_AGENT_ACTIVITY_SECRET,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
   RELAY_URL_SECRET,
@@ -67,7 +66,6 @@ export const clearPersistedCloudLink = Effect.gen(function* () {
       secrets.remove(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
       secrets.remove(CLOUD_MINT_PUBLIC_KEY),
       secrets.remove(CLOUD_ENDPOINT_RUNTIME_CONFIG),
-      secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
     ],
     { concurrency: "unbounded" },
   );

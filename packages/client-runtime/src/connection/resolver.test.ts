@@ -75,7 +75,6 @@ function relayClient(
   return ManagedRelay.ManagedRelayClient.of({
     relayUrl: "https://relay.example.test",
     listEnvironments: () => unsupported("listEnvironments"),
-    listDevices: () => unsupported("listDevices"),
     createEnvironmentLinkChallenge: () => unsupported("createEnvironmentLinkChallenge"),
     linkEnvironment: () => unsupported("linkEnvironment"),
     unlinkEnvironment: () => unsupported("unlinkEnvironment"),

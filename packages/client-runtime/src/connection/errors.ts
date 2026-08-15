@@ -36,8 +36,6 @@ function relayProtectedError(error: RelayProtectedError): ConnectionAttemptError
   switch (error._tag) {
     case "RelayAuthInvalidError":
     case "RelayEnvironmentLinkProofExpiredError":
-    case "RelayAgentActivityPublishProofExpiredError":
-    case "RelayAgentActivityPublishProofInvalidError":
       return new ConnectionBlockedError({
         reason: "authentication",
         detail: error.message,

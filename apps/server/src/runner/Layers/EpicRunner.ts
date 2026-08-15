@@ -106,7 +106,6 @@ import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
 import { EpicCommitterRegistry } from "../../provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
-import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
@@ -215,7 +214,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const preflight = yield* EpicRunPreflight;
     const configSource = yield* EpicRunConfigSource;
     const runLock = yield* EpicRunLock;
-    const agentAwarenessRelay = yield* AgentAwarenessRelay;
     const serverConfig = yield* ServerConfig;
     const worktreeProvisioner = yield* WorktreeProvisioner;
     const gitVcsDriver = yield* GitVcsDriver;
@@ -388,8 +386,6 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const backlog = makeProcessPoolBacklog(processRunner);
     const readModel = makeEpicRunReadModel({
       store,
-      processRunner,
-      agentAwarenessRelay,
       changes,
     });
     const { enrichRun, enrichRuns } = readModel;

@@ -11,7 +11,6 @@ import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeInge
 import { QueuedTurnDeliveryReactor } from "../Services/QueuedTurnDeliveryReactor.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { ThreadTeardownReactor } from "../Services/ThreadTeardownReactor.ts";
-import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -20,7 +19,6 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const threadDeletionReactor = yield* ThreadDeletionReactor;
   const threadTeardownReactor = yield* ThreadTeardownReactor;
   const queuedTurnDeliveryReactor = yield* QueuedTurnDeliveryReactor;
-  const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* providerRuntimeIngestion.start();
@@ -29,7 +27,6 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* threadDeletionReactor.start();
     yield* threadTeardownReactor.start();
     yield* queuedTurnDeliveryReactor.start();
-    yield* agentAwarenessRelay.start();
   });
 
   return {

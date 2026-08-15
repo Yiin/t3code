@@ -1584,91 +1584,50 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
     isSignedIn,
     linkState: primaryCloudLinkState,
     managedTunnelActive,
-    publishAgentActivity,
     operationError,
     reconcileCloudState,
   } = useCloudLinkController();
   const [isUpdating, setIsUpdating] = useState(false);
-  const [isUpdatingPreference, setIsUpdatingPreference] = useState(false);
 
   const disabledReason = !isSignedIn
     ? "Sign in to T3 Connect to manage this environment."
     : !canManageRelay
       ? "Your session does not have permission to manage T3 Connect access."
       : null;
-  const isBusy = isUpdating || isUpdatingPreference;
 
   const updateManagedTunnel = async (enabled: boolean) => {
     setIsUpdating(true);
-    const ok = await reconcileCloudState({ managedTunnel: enabled, publish: publishAgentActivity });
+    const ok = await reconcileCloudState({ managedTunnel: enabled });
     if (ok) {
-      // Turning the tunnel off while publishing stays on downgrades the link
-      // rather than removing it — say so instead of claiming an unlink.
       toastManager.add({
         type: "success",
-        title: enabled
-          ? "T3 Connect linked"
-          : publishAgentActivity
-            ? "T3 Connect tunnel disabled"
-            : "T3 Connect unlinked",
+        title: enabled ? "T3 Connect linked" : "T3 Connect unlinked",
         description: enabled
           ? "This environment is available through T3 Connect."
-          : publishAgentActivity
-            ? "The managed tunnel was removed. Agent activity publishing stays on."
-            : "This environment is no longer available through T3 Connect.",
+          : "This environment is no longer available through T3 Connect.",
       });
     }
     setIsUpdating(false);
   };
 
-  const updatePublishAgentActivity = async (enabled: boolean) => {
-    setIsUpdatingPreference(true);
-    const ok = await reconcileCloudState({ managedTunnel: managedTunnelActive, publish: enabled });
-    if (ok) {
-      toastManager.add({
-        type: "success",
-        title: enabled ? "Agent activity enabled" : "Agent activity disabled",
-        description: enabled
-          ? "This environment publishes agent activity to your mobile clients."
-          : "This environment will stop publishing agent activity.",
-      });
-    }
-    setIsUpdatingPreference(false);
-  };
-
   return (
-    <>
-      <SettingsRow
-        title="T3 Connect"
-        description={
-          managedTunnelActive
-            ? "This environment is available to your other devices through T3 Connect."
-            : "Make this environment available to your other devices through T3 Connect."
-        }
-        status={operationError ?? primaryCloudLinkState.error}
-        control={
-          <CloudLinkSwitch
-            checked={managedTunnelActive}
-            disabled={!canManageRelay || !isSignedIn || primaryCloudLinkState.isPending || isBusy}
-            disabledReason={disabledReason}
-            onCheckedChange={(enabled) => void updateManagedTunnel(enabled)}
-          />
-        }
-      />
-      <SettingsRow
-        title="Publish agent activity"
-        description="Send activity from this environment to your mobile clients for push notifications and Live Activities. Works without a T3 Connect tunnel."
-        control={
-          <CloudLinkSwitch
-            ariaLabel="Publish agent activity to mobile clients"
-            checked={publishAgentActivity}
-            disabled={!canManageRelay || !isSignedIn || primaryCloudLinkState.isPending || isBusy}
-            disabledReason={disabledReason}
-            onCheckedChange={(enabled) => void updatePublishAgentActivity(enabled)}
-          />
-        }
-      />
-    </>
+    <SettingsRow
+      title="T3 Connect"
+      description={
+        managedTunnelActive
+          ? "This environment is available to your other devices through T3 Connect."
+          : "Make this environment available to your other devices through T3 Connect."
+      }
+      status={operationError ?? primaryCloudLinkState.error}
+      control={
+        <CloudLinkSwitch
+          checked={managedTunnelActive}
+          disabled={!canManageRelay || !isSignedIn || primaryCloudLinkState.isPending || isUpdating}
+          disabledReason={disabledReason}
+          onCheckedChange={(enabled) => void updateManagedTunnel(enabled)}
+        />
+      }
+    />
   );
 }
 

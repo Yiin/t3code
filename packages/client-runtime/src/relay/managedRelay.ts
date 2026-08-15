@@ -2,7 +2,6 @@ import {
   RelayAccessTokenType,
   RelayApi,
   type RelayClientEnvironmentRecord,
-  type RelayClientDeviceRecord,
   RelayConnectEnvironmentEndpoint,
   RelayDpopAccessTokenScope,
   RelayDpopTokenExchangeGrantType,
@@ -77,7 +76,6 @@ export type ManagedRelayDpopSignerError = typeof ManagedRelayDpopSignerError.Typ
 export const ManagedRelayRequestAction = Schema.Literals([
   "exchange relay DPoP access token",
   "list relay-managed environments",
-  "list relay client devices",
   "create relay environment link challenge",
   "link relay environment",
   "unlink relay environment",
@@ -89,7 +87,6 @@ export type ManagedRelayRequestAction = typeof ManagedRelayRequestAction.Type;
 export const ManagedRelayRequestActivity = Schema.Literals([
   "Relay DPoP access token exchange",
   "Relay environment listing",
-  "Relay client device listing",
   "Relay environment link challenge",
   "Relay environment linking",
   "Relay environment unlinking",
@@ -240,9 +237,6 @@ export class ManagedRelayClient extends Context.Service<
     readonly listEnvironments: (input: {
       readonly clerkToken: string;
     }) => Effect.Effect<ReadonlyArray<RelayClientEnvironmentRecord>, ManagedRelayClientError>;
-    readonly listDevices: (input: {
-      readonly clerkToken: string;
-    }) => Effect.Effect<ReadonlyArray<RelayClientDeviceRecord>, ManagedRelayClientError>;
     readonly createEnvironmentLinkChallenge: (input: {
       readonly clerkToken: string;
       readonly payload: RelayEnvironmentLinkChallengeRequest;
@@ -375,7 +369,6 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
   return ManagedRelayClient.of({
     relayUrl,
     listEnvironments: unavailable("clientRuntime.managedRelay.listEnvironments"),
-    listDevices: unavailable("clientRuntime.managedRelay.listDevices"),
     createEnvironmentLinkChallenge: unavailable(
       "clientRuntime.managedRelay.createEnvironmentLinkChallenge",
     ),
@@ -636,21 +629,6 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
           );
       },
       Effect.withSpan("clientRuntime.managedRelay.listEnvironments"),
-      withRelayClientTracing,
-    ),
-    listDevices: Effect.fnUntraced(
-      function* (input) {
-        return yield* client.client
-          .listDevices({
-            headers: bearerHeaders(input.clerkToken),
-          })
-          .pipe(
-            Effect.map((response) => response.devices),
-            Effect.mapError(relayRequestError("list relay client devices")),
-            timeoutRelayRequest("Relay client device listing"),
-          );
-      },
-      Effect.withSpan("clientRuntime.managedRelay.listDevices"),
       withRelayClientTracing,
     ),
     createEnvironmentLinkChallenge: Effect.fnUntraced(

@@ -4,8 +4,7 @@
 > T3 Connect is currently in private beta. Join the waitlist in the app under Settings > T3 Connect.
 
 The relay is the hosted control plane for T3 Connect. It helps clients discover and connect to
-remote environments, manages the cloud-side records needed for those connections, and delivers
-optional mobile notifications and Live Activities.
+remote environments and manages the cloud-side records needed for those connections.
 
 The relay is intentionally not in the hot path for normal T3 Code traffic. After a client connects,
 regular API and WebSocket traffic goes directly between that client and the selected environment.
@@ -19,9 +18,7 @@ The relay currently owns:
 - Linking T3 Code environments to a cloud account.
 - Provisioning and tracking managed environment endpoints.
 - Issuing short-lived credentials used to connect clients to linked environments.
-- Listing linked environments and registered mobile devices for an account.
-- Registering mobile notification preferences and APNs tokens.
-- Receiving published agent activity and delivering notifications or Live Activity updates.
+- Listing linked environments for an account.
 - Persisting relay state and exposing relay-specific traces for diagnostics.
 
 The environment server and relay have separate credentials and trust boundaries. Read
@@ -31,13 +28,11 @@ credential, or authorization behavior.
 ## Code Map
 
 - [`alchemy.run.ts`](./alchemy.run.ts) defines the deployed Alchemy stack.
-- [`src/worker.ts`](./src/worker.ts) wires Cloudflare bindings, runtime layers, queues, and HTTP APIs.
+- [`src/worker.ts`](./src/worker.ts) wires Cloudflare bindings, runtime layers, and HTTP APIs.
 - [`src/http/Api.ts`](./src/http/Api.ts) contains the relay HTTP handlers and authentication
   boundaries.
 - [`src/environments`](./src/environments) contains environment linking, credentials, endpoint
   provisioning, and connection flows.
-- [`src/agentActivity`](./src/agentActivity) contains mobile device registration, activity state,
-  APNs delivery, and queue processing.
 - [`src/auth`](./src/auth) contains relay token and DPoP proof handling.
 - [`src/persistence/schema.ts`](./src/persistence/schema.ts) defines persisted relay state. Keep
   schema and migration changes together.
@@ -82,10 +77,10 @@ The relay deploys through Alchemy:
 vp run --filter t3code-relay deploy
 ```
 
-The stack provisions the Cloudflare Worker and queues, managed endpoint resources, database
+The stack provisions the Cloudflare Worker, managed endpoint resources, database
 connectivity, and relay tracing resources. Copy [`infra/relay/.env.example`](./.env.example) to
 `infra/relay/.env` and fill in the deployment-specific values before deploying. Alchemy loads that
-file from the relay directory. Runtime secrets include Clerk and APNs credentials. Production adopts
+file from the relay directory. Runtime secrets include Clerk credentials. Production adopts
 the configured API and tunnel DNS zones as retained Cloudflare resources. Personal stages reference
 the production-owned zones.
 

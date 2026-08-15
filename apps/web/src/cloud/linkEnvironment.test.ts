@@ -33,7 +33,6 @@ import {
   readPrimaryCloudLinkState,
   type CloudLinkTarget,
   unlinkPrimaryEnvironmentFromCloud,
-  updatePrimaryCloudPreferences,
 } from "./linkEnvironment";
 
 const TARGET: CloudLinkTarget = {
@@ -205,7 +204,6 @@ describe("web cloud link environment client", () => {
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
           managedTunnelActive: true,
-          publishAgentActivity: false,
         }),
       );
       vi.stubGlobal("fetch", fetchMock);
@@ -219,7 +217,6 @@ describe("web cloud link environment client", () => {
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
           managedTunnelActive: true,
-          publishAgentActivity: false,
         }),
       );
       expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
@@ -237,7 +234,6 @@ describe("web cloud link environment client", () => {
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
           managedTunnelActive: true,
-          publishAgentActivity: false,
         }),
       );
       vi.stubGlobal("fetch", fetchMock);
@@ -253,39 +249,6 @@ describe("web cloud link environment client", () => {
       const request = new Request(fetchMock.mock.calls[0]?.[0], fetchMock.mock.calls[0]?.[1]);
       expect(request.credentials).not.toBe("include");
       expect(request.headers.get("authorization")).toBe("Bearer desktop-bearer-token");
-    }),
-  );
-
-  it.effect("updates agent activity publishing for the explicit primary target", () =>
-    Effect.gen(function* () {
-      const fetchMock = vi.fn().mockResolvedValue(
-        Response.json({
-          linked: true,
-          cloudUserId: "user-1",
-          relayUrl: "https://relay.example.test",
-          relayIssuer: "https://relay.example.test",
-          managedTunnelActive: true,
-          publishAgentActivity: true,
-        }),
-      );
-      vi.stubGlobal("fetch", fetchMock);
-
-      const state = yield* withServices(
-        updatePrimaryCloudPreferences({
-          target: TARGET,
-          publishAgentActivity: true,
-        }),
-      );
-
-      expect(state.publishAgentActivity).toBe(true);
-      expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-        "http://127.0.0.1:3000/api/connect/preferences",
-      );
-      expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
-      // @effect-diagnostics-next-line preferSchemaOverJson:off
-      expect(JSON.parse(bodyText(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-        publishAgentActivity: true,
-      });
     }),
   );
 

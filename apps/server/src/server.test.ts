@@ -2035,12 +2035,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
       const body = yield* responseJsonEffect<{
         readonly linked?: boolean;
-        readonly publishAgentActivity?: boolean;
       }>(response);
 
       assert.equal(response.status, 200);
       assert.equal(body.linked, false);
-      assert.equal(body.publishAgentActivity, false);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -2088,50 +2086,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           { type: "complete", status: installedRelayClient },
         ]);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
-
-  it.effect("requires relay write scope to update agent activity publication", () =>
-    Effect.gen(function* () {
-      yield* buildAppUnderTest();
-
-      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
-      const preferencesUrl = yield* getHttpServerUrl("/api/connect/preferences");
-      const ownerResponse = yield* fetchEffect(preferencesUrl, {
-        method: "POST",
-        headers: {
-          cookie: ownerCookie,
-          "content-type": "application/json",
-        },
-        body: jsonRequestBody({ publishAgentActivity: true }),
-      });
-      const ownerBody = yield* responseJsonEffect<{
-        readonly publishAgentActivity?: boolean;
-      }>(ownerResponse);
-      assert.equal(ownerResponse.status, 200);
-      assert.equal(ownerBody.publishAgentActivity, true);
-
-      const credentialResponse = yield* HttpClient.post("/api/auth/pairing-token", {
-        headers: { cookie: ownerCookie },
-        body: yield* HttpBody.json({}),
-      });
-      const credential = (yield* credentialResponse.json) as { readonly credential: string };
-      const pairedCookie = yield* getAuthenticatedSessionCookieHeader(credential.credential);
-      const pairedResponse = yield* fetchEffect(preferencesUrl, {
-        method: "POST",
-        headers: {
-          cookie: pairedCookie,
-          "content-type": "application/json",
-        },
-        body: jsonRequestBody({ publishAgentActivity: false }),
-      });
-      const pairedBody = yield* responseJsonEffect<{
-        readonly _tag?: string;
-        readonly requiredScope?: string;
-      }>(pairedResponse);
-      assert.equal(pairedResponse.status, 403);
-      assert.equal(pairedBody._tag, "EnvironmentScopeRequiredError");
-      assert.equal(pairedBody.requiredScope, "relay:write");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("rejects relay config with an invalid cloud mint public key", () =>

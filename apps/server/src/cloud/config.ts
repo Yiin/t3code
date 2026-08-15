@@ -7,7 +7,6 @@ export const CLOUD_LINKED_USER_ID = "cloud-linked-user-id";
 export const RELAY_URL_SECRET = "cloud-relay-url";
 export const RELAY_ISSUER_SECRET = "cloud-relay-issuer";
 export const RELAY_ENVIRONMENT_CREDENTIAL_SECRET = "cloud-relay-environment-credential";
-export const PUBLISH_AGENT_ACTIVITY_SECRET = "cloud-publish-agent-activity";
 
 export const encodeEndpointRuntimeConfigJson = Schema.encodeEffect(
   Schema.fromJsonString(RelayManagedEndpointRuntimeConfig),
