@@ -20,7 +20,6 @@ import {
   dpopClientApi,
   healthApi,
   metadataApi,
-  mobileApi,
   relayClientAuthLayer,
   relayDpopClientAuthLayer,
   relayCors,
@@ -55,7 +54,6 @@ import * as EnvironmentConnector from "./environments/EnvironmentConnector.ts";
 import * as EnvironmentLinker from "./environments/EnvironmentLinker.ts";
 import * as EnvironmentPublishSignatures from "./environments/EnvironmentPublishSignatures.ts";
 import * as ManagedEndpointProvider from "./environments/ManagedEndpointProvider.ts";
-import * as MobileRegistrations from "./agentActivity/MobileRegistrations.ts";
 
 const webcryptoLayer = Layer.succeed(
   Crypto.Crypto,
@@ -78,7 +76,6 @@ const httpPlatformNotSupportedLayer = Layer.succeed(HttpPlatform.HttpPlatform, {
 const relayApiLayer = Layer.mergeAll(
   healthApi,
   metadataApi,
-  mobileApi,
   clientApi,
   tokenApi,
   dpopClientApi,
@@ -184,7 +181,6 @@ export default class Api extends Cloudflare.Worker<Api>()(
     );
 
     const runtimeLayer = Layer.empty.pipe(
-      Layer.provideMerge(MobileRegistrations.layer),
       Layer.provideMerge(AgentActivityPublisher.layer),
       Layer.provideMerge(EnvironmentConnector.layer),
       Layer.provideMerge(EnvironmentLinker.layer),

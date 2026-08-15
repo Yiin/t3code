@@ -65,7 +65,6 @@ import * as EnvironmentLinker from "../environments/EnvironmentLinker.ts";
 import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvider.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublishSignatures.ts";
-import * as MobileRegistrations from "../agentActivity/MobileRegistrations.ts";
 import { withSpanAttributes } from "../observability.ts";
 import * as RelayDb from "../db.ts";
 
@@ -399,63 +398,6 @@ export const healthApi = HttpApiBuilder.group(
         Effect.catch(() => relayInternalErrorResponse("database_unavailable")),
       ),
     );
-  }),
-);
-
-export const mobileApi = HttpApiBuilder.group(
-  RelayApi,
-  "mobile",
-  Effect.fnUntraced(function* (handlers) {
-    const registrations = yield* MobileRegistrations.MobileRegistrations;
-    const dpopProofs = yield* DpopProofs.DpopProofReplay;
-    return handlers
-      .handle(
-        "registerDevice",
-        Effect.fn("relay.api.mobile.registerDevice")(function* (args) {
-          const { payload } = args;
-          const { userId, token } = yield* RelayClientPrincipal;
-          const proofKeyThumbprint = yield* requireDpopPrincipalScope("mobile:registration");
-          yield* requireDpopThumbprint(proofKeyThumbprint, {
-            expectedAccessToken: token,
-          }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
-          return yield* registrations.registerDevice({ userId, payload });
-        }, mapRelayCommonApiErrors("invalid_dpop")),
-      )
-      .handle(
-        "registerLiveActivity",
-        Effect.fn("relay.api.mobile.registerLiveActivity")(function* (args) {
-          const { payload } = args;
-          const { userId, token } = yield* RelayClientPrincipal;
-          const proofKeyThumbprint = yield* requireDpopPrincipalScope("mobile:registration");
-          yield* requireDpopThumbprint(proofKeyThumbprint, {
-            expectedAccessToken: token,
-          }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
-          return yield* registrations.registerLiveActivity({ userId, payload });
-        }, mapRelayCommonApiErrors("invalid_dpop")),
-      )
-      .handle(
-        "getAgentActivitySnapshot",
-        Effect.fn("relay.api.mobile.getAgentActivitySnapshot")(function* () {
-          const { userId, token } = yield* RelayClientPrincipal;
-          const proofKeyThumbprint = yield* requireDpopPrincipalScope("mobile:registration");
-          yield* requireDpopThumbprint(proofKeyThumbprint, {
-            expectedAccessToken: token,
-          }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
-          return yield* registrations.getAgentActivitySnapshot({ userId });
-        }, mapRelayCommonApiErrors("invalid_dpop")),
-      )
-      .handle(
-        "unregisterDevice",
-        Effect.fn("relay.api.mobile.unregisterDevice")(function* (args) {
-          const { params } = args;
-          const { userId, token } = yield* RelayClientPrincipal;
-          const proofKeyThumbprint = yield* requireDpopPrincipalScope("mobile:registration");
-          yield* requireDpopThumbprint(proofKeyThumbprint, {
-            expectedAccessToken: token,
-          }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
-          return yield* registrations.unregisterDevice({ userId, deviceId: params.deviceId });
-        }, mapRelayCommonApiErrors("invalid_dpop")),
-      );
   }),
 );
 

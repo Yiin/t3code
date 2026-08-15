@@ -81,10 +81,6 @@ function relayClient(
     unlinkEnvironment: () => unsupported("unlinkEnvironment"),
     getEnvironmentStatus: () => unsupported("getEnvironmentStatus"),
     connectEnvironment,
-    registerDevice: () => unsupported("registerDevice"),
-    unregisterDevice: () => unsupported("unregisterDevice"),
-    registerLiveActivity: () => unsupported("registerLiveActivity"),
-    getAgentActivitySnapshot: () => unsupported("getAgentActivitySnapshot"),
     resetTokenCache: Effect.void,
   });
 }

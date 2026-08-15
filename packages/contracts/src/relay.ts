@@ -89,11 +89,6 @@ export const RelayLiveActivityRegistrationRequest = Schema.Struct({
 });
 export type RelayLiveActivityRegistrationRequest = typeof RelayLiveActivityRegistrationRequest.Type;
 
-export const RelayDeviceUnregistrationParams = Schema.Struct({
-  deviceId: TrimmedNonEmptyString,
-});
-export type RelayDeviceUnregistrationParams = typeof RelayDeviceUnregistrationParams.Type;
-
 export const RelayAgentActivityState = Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
@@ -933,67 +928,6 @@ export const RelayMetadataGroup = HttpApiGroup.make("metadata")
   )
   .annotate(OpenApi.Description, "OAuth and DPoP discovery metadata.");
 
-export const RelayRegisterDeviceEndpoint = HttpApiEndpoint.post(
-  "registerDevice",
-  "/v1/mobile/devices",
-  {
-    headers: RelayDpopRequestHeaders,
-    payload: RelayDeviceRegistrationRequest,
-    success: RelayOkResponse,
-    error: RelayAuthAndInternalErrors,
-  },
-).annotate(OpenApi.Summary, "Register or update a mobile device");
-
-export const RelayRegisterLiveActivityEndpoint = HttpApiEndpoint.post(
-  "registerLiveActivity",
-  "/v1/mobile/live-activities",
-  {
-    headers: RelayDpopRequestHeaders,
-    payload: RelayLiveActivityRegistrationRequest,
-    success: RelayOkResponse,
-    error: RelayAuthAndInternalErrors,
-  },
-).annotate(OpenApi.Summary, "Register a Live Activity push token");
-
-export const RelayAgentActivitySnapshotResponse = Schema.Struct({
-  aggregate: Schema.NullOr(RelayAgentActivityAggregateState),
-});
-export type RelayAgentActivitySnapshotResponse = typeof RelayAgentActivitySnapshotResponse.Type;
-
-// Lets the app decide whether arming a Live Activity is worthwhile before
-// creating one (no empty lock-screen card when nothing is running) and seed
-// the card with the real aggregate instead of a placeholder.
-export const RelayAgentActivitySnapshotEndpoint = HttpApiEndpoint.get(
-  "getAgentActivitySnapshot",
-  "/v1/mobile/agent-activity",
-  {
-    headers: RelayDpopRequestHeaders,
-    success: RelayAgentActivitySnapshotResponse,
-    error: RelayAuthAndInternalErrors,
-  },
-).annotate(OpenApi.Summary, "Read the current Live Activity aggregate");
-
-export const RelayUnregisterDeviceEndpoint = HttpApiEndpoint.delete(
-  "unregisterDevice",
-  "/v1/mobile/devices/:deviceId",
-  {
-    headers: RelayDpopRequestHeaders,
-    params: RelayDeviceUnregistrationParams,
-    success: RelayOkResponse,
-    error: RelayAuthAndInternalErrors,
-  },
-).annotate(OpenApi.Summary, "Unregister a mobile device");
-
-export const RelayMobileGroup = HttpApiGroup.make("mobile")
-  .add(
-    RelayRegisterDeviceEndpoint,
-    RelayRegisterLiveActivityEndpoint,
-    RelayAgentActivitySnapshotEndpoint,
-    RelayUnregisterDeviceEndpoint,
-  )
-  .annotate(OpenApi.Description, "Mobile push-notification and Live Activity registration.")
-  .middleware(RelayDpopClientAuth);
-
 export const RelayClientGroup = HttpApiGroup.make("client")
   .add(
     HttpApiEndpoint.get("listEnvironments", "/v1/environments", {
@@ -1120,7 +1054,6 @@ export const RelayApi = HttpApi.make("RelayApi")
   .add(
     RelayHealthGroup,
     RelayMetadataGroup,
-    RelayMobileGroup,
     RelayClientGroup,
     RelayTokenGroup,
     RelayDpopClientGroup,
