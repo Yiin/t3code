@@ -34,6 +34,7 @@ import type { ProviderAccountLimitsStoreShape } from "../../persistence/Services
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { isSameDirectory } from "../../workspace/directoryPaths.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
+import { toGitCommitterEnv } from "../gitCommitterEnv.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   ProviderAdapterProcessError,
@@ -1316,15 +1317,23 @@ export function makeOpenCodeAdapter(
               const t3EnvironmentEnv = input.t3Environment
                 ? toT3EnvironmentEnv(input.t3Environment)
                 : undefined;
+              // The run's committer stamp (t3code-e6l) merges unconditionally,
+              // unlike `t3Environment` (optional per session, MCP-derived).
+              const gitCommitterEnv = input.gitCommitterIdentity
+                ? toGitCommitterEnv(input.gitCommitterIdentity)
+                : undefined;
               const server = yield* openCodeRuntime.connectToOpenCodeServer({
                 binaryPath,
                 serverUrl,
                 ...(input.workerScope !== undefined ? { workerScope: input.workerScope } : {}),
-                ...(options?.environment !== undefined || t3EnvironmentEnv !== undefined
+                ...(options?.environment !== undefined ||
+                t3EnvironmentEnv !== undefined ||
+                gitCommitterEnv !== undefined
                   ? {
                       environment: {
                         ...(options?.environment ?? process.env),
                         ...t3EnvironmentEnv,
+                        ...gitCommitterEnv,
                       },
                     }
                   : {}),

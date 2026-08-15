@@ -78,6 +78,7 @@ import {
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { EpicSubagentRegistry } from "../epicSubagents.ts";
+import { EpicCommitterRegistry } from "../epicCommitter.ts";
 import { makeSubagentChildThreadId } from "../../mcp/toolkits/agents/spawnPolicy.ts";
 import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
@@ -113,6 +114,7 @@ const makeProviderServiceLiveForTest = (
     Layer.provide(fileSystemLayer),
     Layer.provideMerge(EpicWorkerScopeRegistry.layer),
     Layer.provideMerge(EpicSubagentRegistry.layer),
+    Layer.provideMerge(EpicCommitterRegistry.layer),
   );
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -626,6 +628,7 @@ function makeT3EnvironmentTestLayers(auth: ReturnType<typeof makeEnvironmentAuth
     Layer.provide(AnalyticsService.layerTest),
     Layer.provide(EpicWorkerScopeRegistry.layer),
     Layer.provide(EpicSubagentRegistry.layer),
+    Layer.provide(EpicCommitterRegistry.layer),
     Layer.provide(
       Layer.succeed(
         ProviderEventLoggers.ProviderEventLoggers,

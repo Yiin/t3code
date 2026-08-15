@@ -32,6 +32,7 @@ import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRe
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { EpicSubagentRegistry } from "./provider/epicSubagents.ts";
+import { EpicCommitterRegistry } from "./provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "./provider/workerScope.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import { ProviderUsagePollerLive } from "./provider/Layers/ProviderUsagePoller.ts";
@@ -210,6 +211,10 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   // binds them per iteration thread, `ProviderService` resolves them at
   // session start.
   Layer.provideMerge(EpicSubagentRegistry.layer),
+  // And for the run-scoped git committer identity (t3code-e6l): the runner
+  // binds every iteration thread to its run id, `ProviderService` resolves
+  // the identity at session start.
+  Layer.provideMerge(EpicCommitterRegistry.layer),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
@@ -377,10 +382,11 @@ const EpicRunnerLayerLive = EpicRunnerLive.pipe(
   Layer.provide(EpicRunConfigSource.layer),
   Layer.provide(NodeEpicRunLock.layer),
   Layer.provide(EpicWorkerScopeRegistry.layer),
-  // The same two registries `ProviderLayerLive` provides. Effect memoizes a
+  // The same registries `ProviderLayerLive` provides. Effect memoizes a
   // layer by reference, so both chains see one instance: the runner writes a
   // binding here and `ProviderService` reads it at session start.
   Layer.provide(EpicSubagentRegistry.layer),
+  Layer.provide(EpicCommitterRegistry.layer),
   // Read-only here: the runner reads account usage to pick each role's tier
   // hop. The poller owns the writes.
   Layer.provide(ProviderUsageLedgerStoreLive),

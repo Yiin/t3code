@@ -42,6 +42,7 @@ import { EnvironmentAuth } from "../src/auth/EnvironmentAuth.ts";
 import { makeUnconfiguredEnvironmentAuth } from "../src/auth/environmentAuthTestStub.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
 import { EpicSubagentRegistry } from "../src/provider/epicSubagents.ts";
+import { EpicCommitterRegistry } from "../src/provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import { makeCodexAdapter } from "../src/provider/Layers/CodexAdapter.ts";
 import {
@@ -301,6 +302,7 @@ export const makeOrchestrationIntegrationHarness = (
           Layer.provide(environmentAuthLayer),
           Layer.provide(workerScopeRegistryLayer),
           Layer.provide(EpicSubagentRegistry.layer),
+          Layer.provide(EpicCommitterRegistry.layer),
         )
       : makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
@@ -310,6 +312,7 @@ export const makeOrchestrationIntegrationHarness = (
           Layer.provide(environmentAuthLayer),
           Layer.provide(workerScopeRegistryLayer),
           Layer.provide(EpicSubagentRegistry.layer),
+          Layer.provide(EpicCommitterRegistry.layer),
         );
     const providerRegistryLayer = makeProviderRegistryLayer();
 

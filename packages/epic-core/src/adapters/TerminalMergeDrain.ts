@@ -260,6 +260,7 @@ export const makeTerminalMergeDrain = (deps: {
         Effect.map((state) => ({
           repositoryPath: state.repositoryPath,
           baseBranch: state.baseBranch,
+          operatorBaseBranch: state.operatorBaseBranch,
         })),
         Effect.catchCause(() => Effect.succeed(null)),
       ),

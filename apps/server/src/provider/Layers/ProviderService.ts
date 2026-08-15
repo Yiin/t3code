@@ -26,6 +26,7 @@ import {
   ProviderStopSessionInput,
   type AuthSessionId,
   type EpicSubagentMap,
+  type GitCommitterIdentity,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -69,6 +70,7 @@ import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { EpicSubagentRegistry } from "../epicSubagents.ts";
+import { EpicCommitterRegistry } from "../epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as EnvironmentAuth from "../../auth/EnvironmentAuth.ts";
@@ -404,6 +406,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
   const subagentRegistry = yield* EpicSubagentRegistry;
+  const committerRegistry = yield* EpicCommitterRegistry;
   // Optional on purpose: several test layers build the provider service without
   // settings, a provider snapshot registry, or a usage ledger, and none of the
   // three is worth a hard requirement when losing one only costs a session its
@@ -471,6 +474,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId: input.threadId,
           cause,
         }).pipe(Effect.as(Option.none<EpicSubagentMap>())),
+      ),
+    );
+
+  /**
+   * The run-scoped git committer identity an epic worker's session stamps
+   * into its spawn env (t3code-e6l). `None` off an epic worker — no run ever
+   * bound this thread — and an unreadable registry falls back the same way:
+   * this must never block a session start.
+   */
+  const resolveSessionCommitterIdentity = (
+    threadId: ThreadId,
+  ): Effect.Effect<Option.Option<GitCommitterIdentity>> =>
+    committerRegistry.resolve(threadId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.committer-resolution-failed", {
+          threadId,
+          cause,
+        }).pipe(Effect.as(Option.none<GitCommitterIdentity>())),
       ),
     );
 
@@ -1110,6 +1131,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId: input.binding.threadId,
         sessionInstanceId: persistedModelSelection?.instanceId ?? bindingInstanceId,
       });
+      const gitCommitterIdentity = yield* resolveSessionCommitterIdentity(input.binding.threadId);
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -1121,6 +1143,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(t3Environment !== undefined ? { t3Environment } : {}),
           ...(Option.isSome(workerScope) ? { workerScope: workerScope.value } : {}),
           ...(Option.isSome(subagents) ? { subagents: subagents.value } : {}),
+          ...(Option.isSome(gitCommitterIdentity)
+            ? { gitCommitterIdentity: gitCommitterIdentity.value }
+            : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         })
         .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
@@ -1357,6 +1382,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           sessionInstanceId: input.modelSelection?.instanceId ?? resolvedInstanceId,
         });
+        const gitCommitterIdentity = yield* resolveSessionCommitterIdentity(threadId);
         const session = yield* adapter
           .startSession({
             ...input,
@@ -1366,6 +1392,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...(t3Environment !== undefined ? { t3Environment } : {}),
             ...(Option.isSome(workerScope) ? { workerScope: workerScope.value } : {}),
             ...(Option.isSome(subagents) ? { subagents: subagents.value } : {}),
+            ...(Option.isSome(gitCommitterIdentity)
+              ? { gitCommitterIdentity: gitCommitterIdentity.value }
+              : {}),
           })
           .pipe(Effect.onError(() => clearMcpSession(threadId)));
 

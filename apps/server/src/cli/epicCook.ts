@@ -27,6 +27,8 @@ import {
   MAX_RESUMES_PER_ITERATION,
   epicRunIterationPrompt,
 } from "@t3tools/epic-core/policy";
+import { epicRunCommitterIdentity } from "../provider/epicCommitter.ts";
+import { toGitCommitterEnv } from "../provider/gitCommitterEnv.ts";
 import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import {
   RESUME_ABANDONED_REASON,
@@ -498,6 +500,12 @@ export const cookCommand = Command.make("cook", {
           harness,
           artifactsDirectory: runDirectory,
           subagents,
+          // The run's committer stamp (t3code-e6l): every worker process this
+          // dispatch spawns — pool loop or `SequentialEpicLoop` alike, both
+          // reuse this one dispatch — commits under this identity, which is
+          // what lets an in-place iteration's crediting tell the run's own
+          // work from an operator commit made in the same shared checkout.
+          environment: toGitCommitterEnv(epicRunCommitterIdentity(poolRunId)),
           ...(process.env.COOKEPIC_BIN === undefined ? {} : { binary: process.env.COOKEPIC_BIN }),
           ...(process.env.COOKEPIC_WORKER_CMD === undefined
             ? {}

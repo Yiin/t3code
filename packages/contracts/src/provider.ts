@@ -98,6 +98,21 @@ export const T3SessionEnvironment = Schema.Struct({
 export type T3SessionEnvironment = typeof T3SessionEnvironment.Type;
 
 /**
+ * A run-scoped git committer identity (t3code-e6l) stamped into an epic
+ * worker's spawn environment as `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL`.
+ * Committer only, never author — the SDK/CLI's own author env, when it sets
+ * any, is untouched, so authorship in a normal parallel commit stays the
+ * user's own configured identity. This is what lets an in-place iteration
+ * (a shared checkout, `ParallelEpicLoop`'s `iterationCommitted`) tell its own
+ * worker's commit from an operator commit made during the same window.
+ */
+export const GitCommitterIdentity = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  email: TrimmedNonEmptyString,
+});
+export type GitCommitterIdentity = typeof GitCommitterIdentity.Type;
+
+/**
  * Systemd worker-scope binding for a session that runs as an epic-run worker.
  * The server attaches it at session start; adapters wrap the provider CLI
  * spawn in the named scope unit so worker load leaves the coordinator's
@@ -174,6 +189,11 @@ export const ProviderSessionStartInput = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   t3Environment: Schema.optional(T3SessionEnvironment),
+  // Set by the epic runner for an iteration worker's session; carried
+  // independently of `t3Environment` (optional per session, MCP-derived)
+  // because the committer stamp must reach every driver's spawn env
+  // unconditionally (t3code-e6l).
+  gitCommitterIdentity: Schema.optional(GitCommitterIdentity),
   // Set by the server when the session belongs to an epic run with an active
   // worker scope; adapters route the provider CLI spawn through the scope.
   workerScope: Schema.optional(ProviderWorkerScopeBinding),

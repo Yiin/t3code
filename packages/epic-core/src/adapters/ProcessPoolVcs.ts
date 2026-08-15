@@ -140,6 +140,40 @@ export const makeProcessPoolVcs = (
       ),
 
   /**
+   * `git log --format=%cE <from>..<to>`, one committer email per commit in
+   * range, for the in-place crediting fix (t3code-e6l). `null` is the port's
+   * usual "git told us nothing" — an unreadable log, an unknown ref — so the
+   * caller can fall back to head-move credit rather than reading an infra
+   * flake as no credit.
+   */
+  commitsByCommitter: (input) =>
+    processRunner
+      .run({
+        command: "git",
+        args: ["log", "--format=%cE", `${input.from}..${input.to}`],
+        cwd: input.cwd,
+        timeout: GIT_HEAD_TIMEOUT,
+      })
+      .pipe(
+        Effect.map((output) =>
+          output.code === 0
+            ? output.stdout
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0)
+            : null,
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.committer-log-read-failed", {
+            cwd: input.cwd,
+            from: input.from,
+            to: input.to,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      ),
+
+  /**
    * A conflict probe that reads only objects: `git merge-tree --write-tree`
    * merges the two commits in memory, so it needs no worktree, no index, and
    * no trial commit, and it cannot disturb a worker still committing into the
@@ -181,6 +215,56 @@ export const makeProcessPoolVcs = (
             branch: input.branch,
             cause,
           }).pipe(Effect.as(null)),
+        ),
+      ),
+
+  /**
+   * `git symbolic-ref --short HEAD`, or `null` on a detached `HEAD` or any
+   * other read failure — the same never-failing convention as every other
+   * probe here.
+   */
+  currentBranch: (cwd: string) =>
+    processRunner
+      .run({
+        command: "git",
+        args: ["symbolic-ref", "--short", "HEAD"],
+        cwd,
+        timeout: GIT_HEAD_TIMEOUT,
+      })
+      .pipe(
+        Effect.map((output) => {
+          const branch = output.stdout.trim();
+          return output.code === 0 && branch.length > 0 ? branch : null;
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.current-branch-read-failed", { cwd, cause }).pipe(
+            Effect.as(null),
+          ),
+        ),
+      ),
+
+  /**
+   * `git merge --ff-only <branch>` at `cwd`, for the best-effort operator
+   * checkout advance (t3code-e6l). Never a gate: `true` only on a clean
+   * fast-forward, `false` for every failure — diverged history, a dirty tree
+   * the fast-forward would touch, an unknown branch, a missing repo.
+   */
+  ffOnlyMerge: (input) =>
+    processRunner
+      .run({
+        command: "git",
+        args: ["merge", "--ff-only", input.branch],
+        cwd: input.cwd,
+        timeout: GIT_HEAD_TIMEOUT,
+      })
+      .pipe(
+        Effect.map((output) => output.code === 0),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("epic.runner.operator-checkout-ff-only-failed", {
+            cwd: input.cwd,
+            branch: input.branch,
+            cause,
+          }).pipe(Effect.as(false)),
         ),
       ),
 });

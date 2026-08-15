@@ -68,6 +68,20 @@ export const childBranch = (childId: string): string => `epic/${childId}`;
  */
 export const runBaseBranch = (epicId: string): string => `epic/${epicId}/base`;
 
+/**
+ * The run-scoped git committer email stamped into every iteration worker's
+ * spawn environment as `GIT_COMMITTER_EMAIL` (t3code-e6l), and the value
+ * `ParallelEpicLoop.iterationCommitted` checks an in-place iteration's new
+ * commits against. In-place mode shares the operator's checkout, so a plain
+ * head-move check cannot tell the run's own worker from an operator commit
+ * made in the same window; this identity can.
+ *
+ * Deterministic from `runId` alone so both the stamping side and the
+ * checking side compute it independently, with nothing to persist or wire
+ * through the loop core.
+ */
+export const runCommitterEmail = (runId: string): string => `epic-run+${runId}@t3code.local`;
+
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2845-2890`. */
 export type MergeParkReason = "conflict" | "gate-failed";
 

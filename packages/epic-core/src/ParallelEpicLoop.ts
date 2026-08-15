@@ -46,6 +46,7 @@ import {
   parseMergeFixTitle,
   persistedFailureReason,
   proveEpicCompletion,
+  runCommitterEmail,
   type EpicCompletionCheck,
   type EpicCompletionProof,
   type UnlandedMergeEntry,
@@ -227,6 +228,13 @@ export interface MergeDrainShape {
   readonly integrationTarget: (run: PoolRunContext) => Effect.Effect<{
     readonly repositoryPath: string;
     readonly baseBranch: string;
+    /**
+     * The operator's branch at launch (t3code-sha), for a run that owns its
+     * base branch; `null` for a run that does not, a snapshot that predates
+     * this field, or an unreadable store — every one of which means "no
+     * best-effort checkout advance this tick" (t3code-e6l).
+     */
+    readonly operatorBaseBranch: string | null;
   } | null>;
   /**
    * Every queue entry not yet landed on the base branch, read straight from
@@ -270,6 +278,20 @@ export interface PoolVcsShape {
     readonly branch: string;
   }) => Effect.Effect<number | null>;
   /**
+   * The committer email (`%cE`) of every commit in `from..to`, for the
+   * in-place crediting fix (t3code-e6l): a shared checkout's head can move
+   * from either the run's own worker or an operator commit made in the same
+   * window, and only the committer identity tells them apart. `null` is the
+   * port's usual "git told us nothing" — an unreadable log, an unknown ref —
+   * and the caller falls back to today's head-move credit rather than
+   * treating an infra flake as no credit.
+   */
+  readonly commitsByCommitter: (input: {
+    readonly cwd: string;
+    readonly from: string;
+    readonly to: string;
+  }) => Effect.Effect<ReadonlyArray<string> | null>;
+  /**
    * The paths a merge of `branch` into `base` would leave conflicted, read
    * without a worktree, an index, or a trial commit (`git merge-tree
    * --write-tree`, git >= 2.38).
@@ -284,6 +306,23 @@ export interface PoolVcsShape {
     readonly base: string;
     readonly branch: string;
   }) => Effect.Effect<ReadonlyArray<string> | null>;
+  /**
+   * `git symbolic-ref --short HEAD`, or `null` on a detached `HEAD` or any
+   * other read failure — never a throw, mirroring every other probe here.
+   */
+  readonly currentBranch: (cwd: string) => Effect.Effect<string | null>;
+  /**
+   * `git merge --ff-only <branch>` at `cwd`, for the best-effort operator
+   * checkout advance (t3code-e6l). `true` only on a clean fast-forward;
+   * `false` for every failure — diverged history, a dirty tree the
+   * fast-forward would touch, an unknown branch, a missing repo. This is
+   * never a gate: nothing reads `false` as an error, and nothing about the
+   * run's outcome depends on it.
+   */
+  readonly ffOnlyMerge: (input: {
+    readonly cwd: string;
+    readonly branch: string;
+  }) => Effect.Effect<boolean>;
 }
 
 /**
@@ -763,14 +802,53 @@ export const runParallelEpicLoop = (
     }>;
   }): Effect.Effect<boolean> =>
     Effect.gen(function* () {
+      // In-place mode (`workspace.branch === null`) commits into the
+      // operator's own checkout, so a head that moved is not proof this
+      // child did anything — the operator could have committed in the same
+      // window (t3code-e6l). Only a commit carrying this run's own stamped
+      // committer identity counts; an unreadable log falls back to the old
+      // head-move credit rather than turning an infra flake into no credit.
+      const movedByThisRun = (input: {
+        readonly cwd: string;
+        readonly from: string | null;
+        readonly to: string;
+      }): Effect.Effect<boolean> =>
+        input.from === null
+          ? Effect.succeed(true)
+          : ports.vcs
+              .commitsByCommitter({ cwd: input.cwd, from: input.from, to: input.to })
+              .pipe(
+                Effect.map(
+                  (committers) =>
+                    committers === null || committers.includes(runCommitterEmail(runId)),
+                ),
+              );
+      const inPlace = args.workspace.branch === null;
       const headAfter = yield* ports.vcs.headCommit(args.workspace.cwd);
-      if (headAfter !== null && headAfter !== args.headBefore) return true;
+      if (headAfter !== null && headAfter !== args.headBefore) {
+        if (!inPlace) return true;
+        if (
+          yield* movedByThisRun({ cwd: args.workspace.cwd, from: args.headBefore, to: headAfter })
+        )
+          return true;
+      }
       // A child's effects can live in any repo of the set: a commit in any
       // sibling worktree counts as committed
-      // (`skills/cook-epic/run-legacy.sh:2606-2613`).
+      // (`skills/cook-epic/run-legacy.sh:2606-2613`). In-place siblings are
+      // shared checkouts too, so the same identity filter applies.
       for (const sibling of args.siblingHeadsBefore) {
         const siblingAfter = yield* ports.vcs.headCommit(sibling.worktreePath);
-        if (siblingAfter !== null && siblingAfter !== sibling.head) return true;
+        if (siblingAfter !== null && siblingAfter !== sibling.head) {
+          if (!inPlace) return true;
+          if (
+            yield* movedByThisRun({
+              cwd: sibling.worktreePath,
+              from: sibling.head,
+              to: siblingAfter,
+            })
+          )
+            return true;
+        }
       }
       if (args.workspace.branch === null || args.branchBase === null) return false;
       const count = yield* ports.vcs.commitsAhead({
@@ -2259,6 +2337,39 @@ export const runParallelEpicLoop = (
         return true;
       });
     /**
+     * Best-effort fast-forward of the operator's checkout onto the run's
+     * owned base branch (t3code-e6l), attempted once after a run proves
+     * `done`. Never a gate: not owning its base branch, no merge state yet,
+     * the operator checked out something other than the branch the run
+     * launched from, or a fast-forward git refuses (diverged history, a
+     * dirty tree the fast-forward would touch, a missing branch) — every one
+     * of these skips silently, at most a debug log. `git merge --ff-only`
+     * still succeeds against a dirty tree when the fast-forward does not
+     * touch the modified files, so this can land without disturbing
+     * uncommitted operator edits.
+     */
+    const advanceOperatorCheckoutOnDone = (
+      run: import("./ports/RunJournal.ts").PersistedEpicRun,
+    ): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        if (!run.config.vcs.runOwnedBaseBranch) return;
+        const target = yield* ports.mergeDrain.integrationTarget(runCtx);
+        if (target === null || target.operatorBaseBranch === null) return;
+        const current = yield* ports.vcs.currentBranch(input.cwd);
+        if (current !== target.operatorBaseBranch) return;
+        const advanced = yield* ports.vcs.ffOnlyMerge({
+          cwd: input.cwd,
+          branch: target.baseBranch,
+        });
+        yield* Effect.logDebug("epic.runner.operator-checkout-advance", {
+          runId,
+          cwd: input.cwd,
+          baseBranch: target.baseBranch,
+          advanced,
+        });
+      });
+
+    /**
      * One sweep of the conflict radar: trial-merge every armed worker's branch
      * against the base branch, and tell the worker what it would hit.
      *
@@ -2595,6 +2706,7 @@ export const runParallelEpicLoop = (
               );
               if (proof._tag !== "unproven") {
                 yield* writeProvenTerminalStatus(proof);
+                if (proof._tag === "complete") yield* advanceOperatorCheckoutOnDone(run);
                 return;
               }
             }
@@ -2629,6 +2741,7 @@ export const runParallelEpicLoop = (
           );
           if (proof._tag !== "unproven") {
             yield* writeProvenTerminalStatus(proof);
+            if (proof._tag === "complete") yield* advanceOperatorCheckoutOnDone(run);
             return;
           }
         }

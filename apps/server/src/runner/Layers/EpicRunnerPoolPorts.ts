@@ -108,6 +108,7 @@ import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
+import type { EpicCommitterRegistry } from "../../provider/epicCommitter.ts";
 import type { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { countFreshRunningSubagents } from "../../orchestration/subagentLiveness.ts";
 import {
@@ -2040,6 +2041,7 @@ export const makeServerMergeDrain = (deps: {
             onSome: (merge) => ({
               repositoryPath: merge.repositoryPath,
               baseBranch: merge.baseBranch,
+              operatorBaseBranch: merge.operatorBaseBranch,
             }),
           }),
         ),
@@ -2136,6 +2138,15 @@ export const makeServerPoolDispatch = (deps: {
   readonly workerScopeRegistry: EpicWorkerScopeRegistry["Service"];
   readonly subagentRegistry: EpicSubagentRegistry["Service"];
   /**
+   * The run-scoped git committer identity registry (t3code-e6l). Absent
+   * skips binding entirely — a worker's commits then carry the operator's
+   * identity, so an in-place iteration earns no commit credit from
+   * `iterationCommitted`'s identity check and must close with bead
+   * evidence. Construction stays fail-soft the same way an absent
+   * `readSessionDriverKind` does.
+   */
+  readonly committerRegistry?: EpicCommitterRegistry["Service"];
+  /**
    * The role subagents this run's worker sessions carry, read once per
    * iteration thread so a policy or usage change lands on the next iteration.
    * Takes the session's own selection, because a subagent runs inside that
@@ -2163,6 +2174,7 @@ export const makeServerPoolDispatch = (deps: {
     crypto,
     workerScopeRegistry,
     subagentRegistry,
+    committerRegistry,
     readIterationSubagents,
   } = deps;
   const readSessionDriverKind = deps.readSessionDriverKind ?? (() => Effect.succeed(null));
@@ -2234,6 +2246,17 @@ export const makeServerPoolDispatch = (deps: {
       }
       yield* subagentRegistry.bindThread({ runId, threadId, subagents });
     });
+
+  /**
+   * Bind one iteration thread to the run whose git committer identity its
+   * worker's commits should carry (t3code-e6l). Bound before the thread
+   * exists, the same way the subagent map is, and unconditionally — unlike
+   * subagents, every driver can carry env, so there is no harness this skips.
+   */
+  const bindIterationCommitter = (runId: EpicRunId, threadId: ThreadId): Effect.Effect<void> =>
+    committerRegistry === undefined
+      ? Effect.void
+      : committerRegistry.bindThread({ runId, threadId });
 
   const { readThreadDetail, awaitTurnEnd, readSettledFinalMessage } = makeThreadSettleWatch({
     projectionSnapshotQuery,
@@ -2821,6 +2844,7 @@ export const makeServerPoolDispatch = (deps: {
           worker: `iteration-${String(input.iterationIndex)}`,
         });
         yield* bindIterationSubagents(input.runId, input.threadId, input.selection);
+        yield* bindIterationCommitter(input.runId, input.threadId);
         yield* dispatchCommand({
           type: "thread.create",
           commandId: yield* commandId("thread-create"),
@@ -2892,6 +2916,7 @@ export const makeServerPoolDispatch = (deps: {
         // Rebind before the resume: if the session has to start again, it
         // starts with the role subagents rather than without them.
         yield* bindIterationSubagents(input.runId, threadId, input.selection);
+        yield* bindIterationCommitter(input.runId, threadId);
         const resumeCommandId = yield* commandId("session-resume");
         yield* dispatchCommand({
           type: "thread.session.resume",

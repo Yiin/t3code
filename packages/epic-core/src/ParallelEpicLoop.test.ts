@@ -37,7 +37,7 @@ import {
   type ReadyFrontierSelection,
   type ResumedWorker,
 } from "./ParallelEpicLoop.ts";
-import { parseMergeFixTitle, type UnlandedMergeEntry } from "./policy.ts";
+import { parseMergeFixTitle, runCommitterEmail, type UnlandedMergeEntry } from "./policy.ts";
 import type { PoolPolicy } from "./runPolicy.ts";
 import type {
   AgentDispatchCapabilities,
@@ -224,9 +224,20 @@ const fixture = (input: {
   readonly integrationTarget?: {
     readonly repositoryPath: string;
     readonly baseBranch: string;
+    readonly operatorBaseBranch?: string | null;
   } | null;
   /** The head of each named ref, re-read on every radar probe. */
   readonly refHeads?: () => Readonly<Record<string, string | null>>;
+  /** What `vcs.currentBranch` reports for the operator's checkout. */
+  readonly operatorCurrentBranch?: string | null;
+  /** What `vcs.ffOnlyMerge` answers for the operator checkout advance. */
+  readonly ffOnlyMergeResult?: boolean;
+  /**
+   * What `vcs.commitsByCommitter` answers, re-read on every probe. Absent
+   * means `null` — the port's "git told us nothing" — so a test that never
+   * sets this keeps today's plain head-move credit.
+   */
+  readonly committerEmails?: () => ReadonlyArray<string> | null;
   /** What the conflict probe reports; `null` is git telling us nothing. */
   readonly conflicts?: () => ReadonlyArray<string> | null;
   /** Kill the conflict probe with a defect. */
@@ -339,6 +350,13 @@ const fixture = (input: {
   const enqueuedMerges: Array<Parameters<MergeDrainShape["enqueueMerge"]>[0]> = [];
   const parkedBranchReads: string[] = [];
   const conflictProbes: Array<{ readonly base: string; readonly branch: string }> = [];
+  const currentBranchCalls: string[] = [];
+  const ffOnlyMergeCalls: Array<{ readonly cwd: string; readonly branch: string }> = [];
+  const committerProbes: Array<{
+    readonly cwd: string;
+    readonly from: string;
+    readonly to: string;
+  }> = [];
   const nudges: Array<{ readonly ref: string; readonly prompt: string }> = [];
   const providerDegradations: Array<{
     readonly providerInstanceId: string;
@@ -687,8 +705,10 @@ const fixture = (input: {
     integrationTarget: () =>
       Effect.succeed(
         input.integrationTarget === undefined
-          ? { repositoryPath: "/repo", baseBranch: "epic/base" }
-          : input.integrationTarget,
+          ? { repositoryPath: "/repo", baseBranch: "epic/base", operatorBaseBranch: null }
+          : input.integrationTarget === null
+            ? null
+            : { operatorBaseBranch: null, ...input.integrationTarget },
       ),
     unlandedEntries: () => Effect.succeed(input.unlandedMergeEntries ?? []),
   };
@@ -719,6 +739,21 @@ const fixture = (input: {
         conflictProbes.push({ base: probe.base, branch: probe.branch });
         if (input.probeDies === true) return Effect.die(new Error("merge-tree blew up"));
         return Effect.succeed(input.conflicts?.() ?? []);
+      }),
+    currentBranch: (cwd) =>
+      Effect.sync(() => {
+        currentBranchCalls.push(cwd);
+        return input.operatorCurrentBranch ?? null;
+      }),
+    ffOnlyMerge: (merge) =>
+      Effect.sync(() => {
+        ffOnlyMergeCalls.push(merge);
+        return input.ffOnlyMergeResult ?? false;
+      }),
+    commitsByCommitter: (probe) =>
+      Effect.sync(() => {
+        committerProbes.push({ cwd: probe.cwd, from: probe.from, to: probe.to });
+        return input.committerEmails === undefined ? null : input.committerEmails();
       }),
   };
 
@@ -825,6 +860,9 @@ const fixture = (input: {
     enqueuedMerges,
     parkedBranchReads,
     conflictProbes,
+    currentBranchCalls,
+    ffOnlyMergeCalls,
+    committerProbes,
     nudges,
     providerDegradations,
     providerClears,
@@ -908,6 +946,61 @@ it.live("counts a commit in any sibling worktree as committed", () =>
       ["epic/epic.1"],
     );
   }),
+);
+
+it.live(
+  "credits an in-place iteration whose new commit carries the run's own committer identity",
+  () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        sequential: false,
+        inPlaceWorkspace: true,
+        attempts: [{ commit: true }],
+        policy: policy({ maxIterations: 1 }),
+        committerEmails: () => [runCommitterEmail(RUN_ID)],
+      });
+      yield* test.run;
+
+      assert.equal(test.iterations[0]?.turnStatus, "completed");
+      assert.isAbove(test.committerProbes.length, 0);
+    }),
+);
+
+it.live("never credits an in-place iteration whose head only moved from an operator commit", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      inPlaceWorkspace: true,
+      attempts: [{ commit: true }],
+      policy: policy({ maxIterations: 1 }),
+      // Some other identity — the operator's own configured git identity,
+      // not this run's stamped committer (t3code-e6l).
+      committerEmails: () => ["operator@example.com"],
+    });
+    yield* test.run;
+
+    assert.equal(test.iterations[0]?.turnStatus, "failed");
+    assert.equal(test.iterations[0]?.failureReason, "child:no-commit-child-open");
+  }),
+);
+
+it.live(
+  "falls back to head-move credit for an in-place iteration when the committer log is unreadable",
+  () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        sequential: false,
+        inPlaceWorkspace: true,
+        attempts: [{ commit: true }],
+        policy: policy({ maxIterations: 1 }),
+        // `committerEmails` left unset: `commitsByCommitter` answers `null`,
+        // the port's "git told us nothing" — an infra flake must not read as
+        // no credit.
+      });
+      yield* test.run;
+
+      assert.equal(test.iterations[0]?.turnStatus, "completed");
+    }),
 );
 
 it.live("fails the run as infra:merge-reconciliation when workspace release fails", () =>
@@ -1016,6 +1109,94 @@ it.live("treats an empty frontier with no open children as done", () =>
     assert.isNull(test.runRecord().lastError);
     assert.equal(test.dispatchCount(), 0);
   }),
+);
+
+it.live(
+  "attempts a best-effort ff-only advance of the operator's checkout on a proven-done owned-base run",
+  () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        initialChildStatus: "closed",
+        runConfig: config({ vcs: { noPush: false, runOwnedBaseBranch: true } }),
+        integrationTarget: {
+          repositoryPath: "/repo",
+          baseBranch: "epic/base",
+          operatorBaseBranch: "feature-x",
+        },
+        operatorCurrentBranch: "feature-x",
+        ffOnlyMergeResult: true,
+      });
+      yield* test.run;
+
+      assert.equal(test.runRecord().status, "done");
+      assert.deepEqual(test.currentBranchCalls, ["/repo"]);
+      assert.deepEqual(test.ffOnlyMergeCalls, [{ cwd: "/repo", branch: "epic/base" }]);
+    }),
+);
+
+it.live("skips the operator checkout advance silently when the fast-forward fails", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      initialChildStatus: "closed",
+      runConfig: config({ vcs: { noPush: false, runOwnedBaseBranch: true } }),
+      integrationTarget: {
+        repositoryPath: "/repo",
+        baseBranch: "epic/base",
+        operatorBaseBranch: "feature-x",
+      },
+      operatorCurrentBranch: "feature-x",
+      ffOnlyMergeResult: false,
+    });
+    yield* test.run;
+
+    // The attempt is made — and refused by git — but never becomes a gate:
+    // the run still reports done, with no error surfaced from the refusal.
+    assert.equal(test.runRecord().status, "done");
+    assert.isNull(test.runRecord().lastError);
+    assert.deepEqual(test.ffOnlyMergeCalls, [{ cwd: "/repo", branch: "epic/base" }]);
+  }),
+);
+
+it.live("skips the operator checkout advance when the operator checked out something else", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      initialChildStatus: "closed",
+      runConfig: config({ vcs: { noPush: false, runOwnedBaseBranch: true } }),
+      integrationTarget: {
+        repositoryPath: "/repo",
+        baseBranch: "epic/base",
+        operatorBaseBranch: "feature-x",
+      },
+      operatorCurrentBranch: "some-other-branch",
+      ffOnlyMergeResult: true,
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(test.ffOnlyMergeCalls, []);
+  }),
+);
+
+it.live(
+  "never attempts an operator checkout advance for a run that does not own its base branch",
+  () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        initialChildStatus: "closed",
+        integrationTarget: {
+          repositoryPath: "/repo",
+          baseBranch: "epic/base",
+          operatorBaseBranch: "feature-x",
+        },
+        operatorCurrentBranch: "feature-x",
+        ffOnlyMergeResult: true,
+      });
+      yield* test.run;
+
+      assert.equal(test.runRecord().status, "done");
+      assert.deepEqual(test.currentBranchCalls, []);
+      assert.deepEqual(test.ffOnlyMergeCalls, []);
+    }),
 );
 
 it.live("treats an empty frontier with open children as stuck, never done", () =>
@@ -1891,6 +2072,9 @@ it.live(
         worktreeEvidence: () => Effect.succeed(null),
         commitsAhead: () => Effect.succeed(0),
         mergeTreeConflicts: () => Effect.succeed([]),
+        currentBranch: () => Effect.succeed(null),
+        ffOnlyMerge: () => Effect.succeed(false),
+        commitsByCommitter: () => Effect.succeed(null),
       };
 
       const ports: ParallelEpicLoopPorts = {

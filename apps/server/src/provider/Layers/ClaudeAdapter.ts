@@ -90,6 +90,7 @@ import {
   SUBAGENT_SPAWN_DISALLOWED_TOOLS,
 } from "../subagentSpawn.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
+import { toGitCommitterEnv } from "../gitCommitterEnv.ts";
 import { spawnWorkerScopeWrappedProcess } from "../workerScope.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
@@ -4383,10 +4384,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(forwardSubagentText ? { forwardSubagentText: true } : {}),
         canUseTool,
         // `claudeEnvironment` is built once at construction and shared across
-        // threads; merge the per-session T3_* vars without mutating it.
-        env: input.t3Environment
-          ? { ...claudeEnvironment, ...toT3EnvironmentEnv(input.t3Environment) }
-          : claudeEnvironment,
+        // threads; merge the per-session T3_* vars and the run's committer
+        // stamp (t3code-e6l) without mutating it.
+        env:
+          input.t3Environment || input.gitCommitterIdentity
+            ? {
+                ...claudeEnvironment,
+                ...(input.t3Environment ? toT3EnvironmentEnv(input.t3Environment) : {}),
+                ...(input.gitCommitterIdentity
+                  ? toGitCommitterEnv(input.gitCommitterIdentity)
+                  : {}),
+              }
+            : claudeEnvironment,
         // The SDK spawns the CLI itself; its custom-spawn seam is the only
         // way an epic worker session leaves the server's cgroup.
         ...(workerScope !== undefined

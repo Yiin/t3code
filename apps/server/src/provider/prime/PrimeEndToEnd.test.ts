@@ -60,6 +60,7 @@ import { NoOpProviderInstanceTeardownLive } from "../Services/ProviderInstanceTe
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
 import { EpicSubagentRegistry } from "../epicSubagents.ts";
+import { EpicCommitterRegistry } from "../epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../workerScope.ts";
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -134,6 +135,7 @@ const providerLayer = makeProviderServiceLive().pipe(
   Layer.provide(AnalyticsService.layerTest),
   Layer.provide(EpicWorkerScopeRegistry.layer),
   Layer.provide(EpicSubagentRegistry.layer),
+  Layer.provide(EpicCommitterRegistry.layer),
   Layer.provideMerge(adapterRegistryLayer),
   Layer.provideMerge(directoryLayer),
   Layer.provideMerge(driverEnvLayer),

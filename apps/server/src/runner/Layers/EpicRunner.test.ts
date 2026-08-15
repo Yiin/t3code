@@ -90,6 +90,7 @@ import { WorktreeProvisioner, type ProvisionWorktreeInput } from "../../vcs/Work
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
+import { EpicCommitterRegistry } from "../../provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import {
   makeMemoryStore,
@@ -953,6 +954,21 @@ function createHarness(input: {
         ) {
           landedHead = head;
         }
+        // This harness models a commit purely as `head` moving, with no real
+        // git history behind it, so `commitsByCommitter` (t3code-e6l) has
+        // nothing truthful to read. Answer as the port's own "git told us
+        // nothing" so `iterationCommitted` falls back to the harness's plain
+        // head-move signal, exactly as it did before the identity filter.
+        if (request.command === "git" && subcommand === "log") {
+          return {
+            stdout: "",
+            stderr: "",
+            code: 128 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
         if (request.command === "bd" && subcommand === "list") {
           return {
             stdout: encodeUnknownJson(input.openChildren ?? []),
@@ -1336,6 +1352,7 @@ function createHarness(input: {
           }),
       }),
     ),
+    Layer.provide(EpicCommitterRegistry.layer),
     Layer.provide(
       Layer.succeed(AgentAwarenessRelay, {
         publishThread: () => Effect.void,

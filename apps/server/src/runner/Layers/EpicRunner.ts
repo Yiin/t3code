@@ -104,6 +104,7 @@ import { ProviderAccountLimitsStore } from "../../persistence/Services/ProviderA
 import { ProviderUsageLedgerStore } from "../../persistence/Services/ProviderUsageLedger.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
+import { EpicCommitterRegistry } from "../../provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
 import { AgentAwarenessRelay } from "../../relay/AgentAwarenessRelay.ts";
 import { ServerConfig } from "../../config.ts";
@@ -223,6 +224,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
     const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
     const workerScopeRegistry = yield* EpicWorkerScopeRegistry;
     const subagentRegistry = yield* EpicSubagentRegistry;
+    const committerRegistry = yield* EpicCommitterRegistry;
     const providerUsageLedger = yield* Effect.serviceOption(ProviderUsageLedgerStore);
     const providerAccountLimits = yield* Effect.serviceOption(ProviderAccountLimitsStore);
     const providerDegradationTtlMs = Math.max(
@@ -565,6 +567,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         crypto,
         workerScopeRegistry,
         subagentRegistry,
+        committerRegistry,
         readIterationSubagents,
         readSessionDriverKind,
         ownedIterationTurnIds,
@@ -682,7 +685,10 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
           Effect.ensuring(
             Effect.andThen(
               workerScopeRegistry.releaseRun(runId),
-              subagentRegistry.releaseRun(runId),
+              Effect.andThen(
+                subagentRegistry.releaseRun(runId),
+                committerRegistry.releaseRun(runId),
+              ),
             ),
           ),
         );

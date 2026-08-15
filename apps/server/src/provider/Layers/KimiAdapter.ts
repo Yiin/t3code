@@ -43,6 +43,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
+import { toGitCommitterEnv } from "../gitCommitterEnv.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -539,9 +540,16 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
           const t3EnvironmentEnv = input.t3Environment
             ? toT3EnvironmentEnv(input.t3Environment)
             : undefined;
+          // The run's committer stamp (t3code-e6l) merges unconditionally,
+          // unlike `t3Environment` (optional per session, MCP-derived).
+          const gitCommitterEnv = input.gitCommitterIdentity
+            ? toGitCommitterEnv(input.gitCommitterIdentity)
+            : undefined;
           const spawnEnvironment =
-            options?.environment !== undefined || t3EnvironmentEnv !== undefined
-              ? { ...options?.environment, ...t3EnvironmentEnv }
+            options?.environment !== undefined ||
+            t3EnvironmentEnv !== undefined ||
+            gitCommitterEnv !== undefined
+              ? { ...options?.environment, ...t3EnvironmentEnv, ...gitCommitterEnv }
               : undefined;
           const acp = yield* makeKimiAcpRuntime({
             kimiSettings: effectiveKimiSettings,

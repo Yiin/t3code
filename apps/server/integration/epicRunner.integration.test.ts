@@ -45,6 +45,7 @@ import { makeEpicRunnerLive } from "../src/runner/Layers/EpicRunner.ts";
 import { EpicRunner } from "../src/runner/Services/EpicRunner.ts";
 import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
 import { EpicSubagentRegistry } from "../src/provider/epicSubagents.ts";
+import { EpicCommitterRegistry } from "../src/provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "../src/provider/workerScope.ts";
 import { makeMemoryStore, makeThreadDetail } from "./EpicRunnerHarness.integration.ts";
 
@@ -348,6 +349,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     Layer.provide(lockLive.layer),
     Layer.provide(EpicWorkerScopeRegistry.layer),
     Layer.provide(EpicSubagentRegistry.layer),
+    Layer.provide(EpicCommitterRegistry.layer),
     Layer.provide(engineLayer),
     Layer.provide(snapshotLayer),
     Layer.provide(processLayer),

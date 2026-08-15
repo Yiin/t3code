@@ -33,6 +33,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { formatAttachmentPathReferenceText } from "../attachmentEncoding.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
+import { toGitCommitterEnv } from "../gitCommitterEnv.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -510,6 +511,7 @@ export const makePrimeAdapter = Effect.fn("makePrimeAdapter")(function* (
               ...process.env,
               ...options?.environment,
               ...(input.t3Environment ? toT3EnvironmentEnv(input.t3Environment) : {}),
+              ...(input.gitCommitterIdentity ? toGitCommitterEnv(input.gitCommitterIdentity) : {}),
               T3_PRIME_RUNTIME_MODE: input.runtimeMode,
             };
             const sessionScope = yield* Scope.make("sequential");

@@ -44,6 +44,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { toT3EnvironmentEnv } from "../t3Environment.ts";
+import { toGitCommitterEnv } from "../gitCommitterEnv.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -1771,6 +1772,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const t3EnvironmentEnv = input.t3Environment
           ? toT3EnvironmentEnv(input.t3Environment)
           : undefined;
+        // The run's committer stamp (t3code-e6l) is unconditional, unlike
+        // `t3Environment` (optional per session, MCP-derived) — it must reach
+        // the spawn env whether or not an MCP session exists.
+        const gitCommitterEnv = input.gitCommitterIdentity
+          ? toGitCommitterEnv(input.gitCommitterIdentity)
+          : undefined;
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1793,6 +1800,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 environment: {
                   ...(options?.environment ?? process.env),
                   ...t3EnvironmentEnv,
+                  ...gitCommitterEnv,
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
@@ -1802,11 +1810,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
                 ],
               }
-            : t3EnvironmentEnv
+            : t3EnvironmentEnv || gitCommitterEnv
               ? {
                   environment: {
                     ...(options?.environment ?? process.env),
                     ...t3EnvironmentEnv,
+                    ...gitCommitterEnv,
                   },
                 }
               : {}),
