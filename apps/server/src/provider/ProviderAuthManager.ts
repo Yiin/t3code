@@ -55,6 +55,7 @@ import { managedAccountHomePath } from "./Drivers/managedAccountHome.ts";
 import {
   makeOpenCodeEnvironment,
   openCodeAuthFilePath,
+  resolveOpenCodeHomeLayout,
   resolveOpenCodeDataHome,
 } from "./Drivers/OpenCodeHome.ts";
 import { deriveProviderInstanceConfigMap } from "./Layers/ProviderInstanceRegistryHydration.ts";
@@ -83,6 +84,7 @@ interface ResolvedAuthTarget {
   readonly homePath: string;
   readonly sharedHomePath?: string;
   readonly authFilePath: string;
+  readonly sharedHomePath?: string;
 }
 
 type LoginEvent =
@@ -389,6 +391,9 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
         const homePath = yield* resolveOpenCodeDataHome(driverConfig, environment).pipe(
           Effect.provideService(Path.Path, path),
         );
+        const openCodeLayout = yield* resolveOpenCodeHomeLayout(driverConfig, environment).pipe(
+          Effect.provideService(Path.Path, path),
+        );
         return {
           instanceId,
           driver,
@@ -398,6 +403,9 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
           authFilePath: yield* openCodeAuthFilePath(driverConfig, environment).pipe(
             Effect.provideService(Path.Path, path),
           ),
+          ...(openCodeLayout.mode === "authOverlay"
+            ? { sharedHomePath: openCodeLayout.sharedDataHomePath }
+            : {}),
         };
       }
     }

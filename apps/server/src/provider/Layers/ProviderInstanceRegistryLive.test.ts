@@ -135,6 +135,7 @@ const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSetti
   enabled: false,
   binaryPath: "opencode",
   dataHomePath: "",
+  sharedDataHomePath: "",
   serverUrl: "",
   serverPassword: "",
   customModels: [],

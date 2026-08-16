@@ -443,6 +443,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         enabled: true,
         binaryPath: "/opt/homebrew/bin/opencode",
         dataHomePath: "~/.local/share-opencode-work",
+        sharedDataHomePath: "",
         serverUrl: "http://127.0.0.1:4096",
         serverPassword: "secret-password",
         customModels: [],

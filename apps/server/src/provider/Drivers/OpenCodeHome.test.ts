@@ -9,6 +9,7 @@ import {
   makeOpenCodeContinuationGroupKey,
   makeOpenCodeEnvironment,
   openCodeAuthFilePath,
+  resolveOpenCodeHomeLayout,
   resolveOpenCodeDataHome,
 } from "./OpenCodeHome.ts";
 
@@ -122,6 +123,59 @@ it.layer(NodeServices.layer)("OpenCodeHome", (it) => {
         expect(
           yield* makeOpenCodeContinuationGroupKey({ dataHomePath: "", serverUrl: "" }, fromHome),
         ).toBe(`opencode:data-home:${path.join("/accounts/from-home", ".local", "share")}`);
+      }),
+    );
+
+    it.effect("shares the database while keeping each account data home private", () =>
+      Effect.gen(function* () {
+        const first = { dataHomePath: "/accounts/one", sharedDataHomePath: "/shared/opencode" };
+        const second = { dataHomePath: "/accounts/two", sharedDataHomePath: "/shared/opencode" };
+        const firstLayout = yield* resolveOpenCodeHomeLayout(first);
+        const secondLayout = yield* resolveOpenCodeHomeLayout(second);
+
+        expect(firstLayout.mode).toBe("authOverlay");
+        expect(firstLayout.continuationKey).toBe("opencode:data-home:/shared/opencode");
+        expect(secondLayout.continuationKey).toBe(firstLayout.continuationKey);
+        expect(firstLayout.sharedDatabasePath).toBe("/shared/opencode/opencode/opencode.db");
+        expect(yield* makeOpenCodeEnvironment(first, { HOME: "/home/test" })).toMatchObject({
+          XDG_DATA_HOME: "/accounts/one",
+          OPENCODE_DB: "/shared/opencode/opencode/opencode.db",
+        });
+        expect(yield* openCodeAuthFilePath(first)).toBe("/accounts/one/opencode/auth.json");
+      }),
+    );
+
+    it.effect("keeps the direct environment and key when sharing is disabled", () =>
+      Effect.gen(function* () {
+        const baseEnv = { HOME: "/home/test", XDG_DATA_HOME: "/accounts/one" };
+        expect(
+          yield* makeOpenCodeEnvironment({ dataHomePath: "", sharedDataHomePath: "" }, baseEnv),
+        ).toBe(baseEnv);
+        expect(
+          yield* makeOpenCodeContinuationGroupKey({
+            dataHomePath: "/accounts/one",
+            sharedDataHomePath: "",
+            serverUrl: "",
+          }),
+        ).toBe("opencode:data-home:/accounts/one");
+      }),
+    );
+
+    it.effect("does not set a shared database for an external server", () =>
+      Effect.gen(function* () {
+        const environment = yield* makeOpenCodeEnvironment({
+          dataHomePath: "/accounts/one",
+          sharedDataHomePath: "/shared/opencode",
+          serverUrl: "https://opencode.example",
+        });
+        expect(
+          yield* makeOpenCodeContinuationGroupKey({
+            dataHomePath: "/accounts/one",
+            sharedDataHomePath: "/shared/opencode",
+            serverUrl: "https://opencode.example",
+          }),
+        ).toBe("opencode:server:https://opencode.example/");
+        expect(environment.OPENCODE_DB).toBeUndefined();
       }),
     );
   });
