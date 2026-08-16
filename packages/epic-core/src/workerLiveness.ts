@@ -593,16 +593,31 @@ export const tickWorkerLiveness = (
       // run-legacy.sh:1427-1430, bounded by the uncertain ceiling (t3code-77b).
       const processFingerprint = evidence.processFingerprint();
       const repoFingerprint = evidence.probeRepository();
+      if (config.uncertainStopCeiling === null) {
+        return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions };
+      }
       // Unprovable evidence defers: neither an absent process fingerprint nor a
       // timed-out probe can show that nothing changed, so neither counts toward
       // the ceiling. Such a check leaves the streak as it was, because a probe
-      // that failed is no evidence that the worker moved either.
-      if (
-        config.uncertainStopCeiling === null ||
-        processFingerprint === PROCESS_FINGERPRINT_UNAVAILABLE ||
-        repoFingerprint.includes(REPO_PROBE_TIMEOUT_MARKER)
-      ) {
-        return { state: uncertain(CODEX_INSPECTION_DISABLED_REASON), actions };
+      // that failed is no evidence that the worker moved either. The reason
+      // names which read failed: a worker that defers every check has no stop
+      // path left but the wall clock, and diagnosing that from the outside
+      // means telling these apart (t3code-bbl).
+      if (processFingerprint === PROCESS_FINGERPRINT_UNAVAILABLE) {
+        return {
+          state: uncertain(
+            `${CODEX_INSPECTION_DISABLED_REASON}; check not counted: no process fingerprint (no readable worker scope cgroup)`,
+          ),
+          actions,
+        };
+      }
+      if (repoFingerprint.includes(REPO_PROBE_TIMEOUT_MARKER)) {
+        return {
+          state: uncertain(
+            `${CODEX_INSPECTION_DISABLED_REASON}; check not counted: the repository probe timed out`,
+          ),
+          actions,
+        };
       }
       const previous = next.uncertainStreak;
       const unchanged =

@@ -333,6 +333,13 @@ interface TerminalScenarioResult {
    * leaving `infra:timeout` to be explained by guesswork (t3code-bbl).
    */
   readonly liveness: string;
+  /**
+   * The tail of the final leg's own stdout and stderr. The CLI only logs a
+   * degraded scope preparation (`epic.worker-scope.probe-failed` and kin), so
+   * on a supervision divergence this is the only trace of whether the worker
+   * ever got the cgroup its evidence reads.
+   */
+  readonly legOutputTail: string;
 }
 
 const livenessTrail = (mailboxText: string): string =>
@@ -576,11 +583,13 @@ const runTerminalScenario = (scenario: ConformanceScenario): TerminalScenarioRes
   }
   const mailboxText = `${carriedMailbox}${NodeFS.readFileSync(mailbox, "utf8")}`;
   const liveness = livenessTrail(mailboxText);
+  const legOutputTail = `${result.stdout}\n${result.stderr}`.trim().slice(-2_000);
   const values = parseCoreMailbox(mailboxText);
   if (values.length === 0) {
     return {
       transcript: synthesizePreflightFailure(scenario, `${result.stdout}\n${result.stderr}`),
       liveness,
+      legOutputTail,
     };
   }
   if (isParallelScenario(scenario)) {
@@ -613,6 +622,7 @@ const runTerminalScenario = (scenario: ConformanceScenario): TerminalScenarioRes
         releasedClaims: releasedClaimIds(workspace),
       }),
       liveness,
+      legOutputTail,
     };
   }
   return {
@@ -621,6 +631,7 @@ const runTerminalScenario = (scenario: ConformanceScenario): TerminalScenarioRes
       maxIterations: maximumIterations(scenario),
     }),
     liveness,
+    legOutputTail,
   };
 };
 
@@ -652,13 +663,13 @@ describe("terminal adapter conformance", () => {
             continue;
           }
           try {
-            const { transcript, liveness } = runTerminalScenario(scenario);
+            const { transcript, liveness, legOutputTail } = runTerminalScenario(scenario);
             const message = describeDiff(scenario, transcript);
             if (message !== "") {
               divergences.push(
                 scenario.supervision === undefined
                   ? message
-                  : `${message}\nworker-liveness trail:\n${liveness === "" ? "  (no worker-liveness events in the mailbox)" : liveness}`,
+                  : `${message}\nworker-liveness trail:\n${liveness === "" ? "  (no worker-liveness events in the mailbox)" : liveness}\nleg output tail:\n${legOutputTail}`,
               );
             }
           } catch (cause) {
