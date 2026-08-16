@@ -54,6 +54,7 @@ export interface SupervisionSettings {
   readonly inspectMaxDelaySeconds: number;
   readonly inspectMinDelaySeconds: number;
   readonly inspectRetryDelaySeconds: number;
+  readonly supervisionTickSeconds: number;
   readonly stopGraceSeconds: number;
   readonly workerTimeoutSeconds: number | null;
   readonly uncertainStopCeiling: number | null;
@@ -83,6 +84,7 @@ export const makeWorkerLivenessConfig = (input: {
   inspectMaxDelaySeconds: input.supervision.inspectMaxDelaySeconds,
   inspectMinDelaySeconds: input.supervision.inspectMinDelaySeconds,
   inspectRetryDelaySeconds: input.supervision.inspectRetryDelaySeconds,
+  supervisionTickSeconds: input.supervision.supervisionTickSeconds,
   uncertainStopCeiling: input.supervision.uncertainStopCeiling,
   /**
    * Left off deliberately. `makePoolPolicy` already turns the same

@@ -889,9 +889,11 @@ export interface EpicCompletionProofInput {
    * writes, and a merge-fix child can close its own issue — with Beads
    * showing nothing open — while the branch it was meant to land stays
    * parked or queued. Always empty for a sequential run, which never
-   * enqueues.
+   * enqueues. `null` when the merge-queue store itself could not be read:
+   * unreadable is not the same as empty, so it must not fail-open into
+   * `complete` (t3code-e46) — see `proveEpicCompletion`.
    */
-  readonly unlandedMergeEntries: ReadonlyArray<UnlandedMergeEntry>;
+  readonly unlandedMergeEntries: ReadonlyArray<UnlandedMergeEntry> | null;
 }
 
 export type EpicCompletionProof =
@@ -919,6 +921,10 @@ export const proveEpicCompletion = (input: EpicCompletionProofInput): EpicComple
   if (input.activeWorkers > 0) return { _tag: "unproven" };
 
   if (input.openChildIds.length === 0) {
+    // An unreadable merge-queue store answers neither "landed" nor
+    // "unlanded" — treat it as not yet provable and let the next tick
+    // retry, the same way a live worker keeps the answer open.
+    if (input.unlandedMergeEntries === null) return { _tag: "unproven" };
     if (input.unlandedMergeEntries.length > 0) {
       const count = input.unlandedMergeEntries.length;
       return {

@@ -268,11 +268,13 @@ const runTerminalScenario = (
        * The supervision cadence, compressed onto a real clock.
        *
        * The core leg counts simulated seconds; this one waits them out, so the
-       * numbers are the smallest the schema allows. The machine's own tick is
-       * five seconds and is not configurable, so a wedged worker here is
-       * confirmed dead on the second tick, about ten seconds in — well inside
-       * the thirty-second wall-clock cap the scenario also carries, which is
-       * the whole point: the stop must come from the evidence, not the cap.
+       * numbers are the smallest the schema allows, including the machine's
+       * own tick. That confirms a wedged worker on the second tick, about two
+       * seconds in — well inside the thirty-second wall-clock cap the
+       * scenario also carries, which is the whole point: the stop must come
+       * from the evidence, not the cap. Before `supervisionTickSeconds` was
+       * configurable that tick was fixed at five seconds, so the verdict and
+       * the cap landed close enough on a loaded runner to race (t3code-sx7).
        */
       ...(scenario.supervision === undefined
         ? {}
@@ -281,6 +283,7 @@ const runTerminalScenario = (
               idleThresholdSeconds: 1,
               inspectMinDelaySeconds: 1,
               inspectRetryDelaySeconds: 1,
+              supervisionTickSeconds: 1,
               uncertainStopCeiling: 2,
             },
           }),

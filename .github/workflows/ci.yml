@@ -32,7 +32,9 @@ jobs:
   test:
     name: Test
     runs-on: ${{ vars.CI_RUNNER_LINUX || 'blacksmith-8vcpu-ubuntu-2404' }}
-    timeout-minutes: 10
+    # The full-workspace suite takes over 10 minutes on a cold runner cache
+    # (t3code-2rw); 20 gives it headroom without hiding a hang forever.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6

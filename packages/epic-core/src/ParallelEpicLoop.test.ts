@@ -27,7 +27,9 @@ import * as Queue from "effect/Queue";
 
 import { EpicRunnerDispatchError, EpicRunnerStoreError } from "./Errors.ts";
 import {
+  reclassifyTimeoutOnConfirmedStop,
   runParallelEpicLoop,
+  type IterationSettleResult,
   type MergeDrainShape,
   type ParallelEpicLoopPorts,
   type PoolBacklogShape,
@@ -52,7 +54,7 @@ import type { RunEvent } from "./ports/RunEvents.ts";
 import type { EpicDispatchRole, RoleSelectionRequest } from "./ports/RoleSelection.ts";
 import type { EpicFallbackHop } from "./providerFallback.ts";
 import type { WorkerEvidenceShape } from "./ports/WorkerEvidence.ts";
-import type { SupervisionClock } from "./workerSupervision.ts";
+import type { SupervisionClock, WorkerSupervisionVerdict } from "./workerSupervision.ts";
 import type { PersistedEpicRun, PersistedEpicRunIteration } from "./ports/RunJournal.ts";
 import type { IterationWorkspace, WorkspaceShape } from "./ports/Workspace.ts";
 
@@ -256,8 +258,11 @@ const fixture = (input: {
   readonly onNudge?: (count: number) => void;
   /** Hand out a workspace with no branch of its own, as an in-place worker has. */
   readonly inPlaceWorkspace?: boolean;
-  /** What `mergeDrain.unlandedEntries` answers; absent means an empty queue. */
-  readonly unlandedMergeEntries?: ReadonlyArray<UnlandedMergeEntry>;
+  /**
+   * What `mergeDrain.unlandedEntries` answers; absent means an empty queue.
+   * `null` simulates an unreadable merge-queue store (t3code-e46).
+   */
+  readonly unlandedMergeEntries?: ReadonlyArray<UnlandedMergeEntry> | null;
 }) => {
   const sequential = input.sequential ?? true;
   const siblingWorktrees = input.siblingWorktrees ?? [];
@@ -375,6 +380,7 @@ const fixture = (input: {
   let releases = 0;
   let workspaceReleases = 0;
   let drainCalls = 0;
+  let unlandedEntriesCalls = 0;
   let integrationReleased: "done" | "cancelled" | "failed" | null = null;
 
   const journal: PoolRunJournalShape = {
@@ -721,7 +727,11 @@ const fixture = (input: {
             ? null
             : { operatorBaseBranch: null, ...input.integrationTarget },
       ),
-    unlandedEntries: () => Effect.succeed(input.unlandedMergeEntries ?? []),
+    unlandedEntries: () =>
+      Effect.sync(() => {
+        unlandedEntriesCalls += 1;
+        return input.unlandedMergeEntries === undefined ? [] : input.unlandedMergeEntries;
+      }),
   };
 
   const vcs: PoolVcsShape = {
@@ -883,6 +893,7 @@ const fixture = (input: {
     releases: () => releases,
     workspaceReleases: () => workspaceReleases,
     drainCalls: () => drainCalls,
+    unlandedEntriesCalls: () => unlandedEntriesCalls,
     integrationReleased: () => integrationReleased,
     dispatchCount: () => dispatchCount,
   };
@@ -1386,6 +1397,34 @@ it.live("fails a RALPH_DONE whose merge queue still holds a queued entry", () =>
     assert.include(error, "epic.2");
     assert.include(error, "queued");
   }),
+);
+
+it.live(
+  "never writes done or failed when the merge queue is unreadable after every child closes",
+  () =>
+    Effect.gen(function* () {
+      // t3code-e46: the old adapters caught a read failure into `[]`, the
+      // same shape as "nothing unlanded" — an unreadable store could write
+      // `done` over a branch the queue never confirmed had landed. The
+      // proof must stay unproven instead, and the loop keeps retrying.
+      const test = fixture({
+        attempts: [{ commit: true, close: true, comment: true }],
+        unlandedMergeEntries: null,
+        policy: policy({ runStallTimeoutMs: 600_000 }),
+      });
+      const fiber = yield* test.run.pipe(Effect.forkChild);
+      // The loop retries the unreadable queue every pollIntervalMs; wait for
+      // it to actually consult the proof path before asserting on it.
+      while (test.unlandedEntriesCalls() === 0) {
+        yield* Effect.sleep(Duration.millis(5));
+      }
+
+      assert.equal(test.dispatchCount(), 1);
+      assert.isAbove(test.unlandedEntriesCalls(), 0);
+      assert.equal(test.runRecord().status, "running");
+      assert.isNull(test.runRecord().lastError);
+      yield* Fiber.interrupt(fiber);
+    }),
 );
 
 it.effect("never completes on RALPH_DONE while a sibling worker is still running", () =>
@@ -2325,6 +2364,58 @@ it.live("stops a wedged worker that would otherwise never settle", () =>
       "inspection-started",
       "inspection-stop",
     ]);
+  }),
+);
+
+/**
+ * `reclassifyTimeoutOnConfirmedStop` in isolation (t3code-sx7).
+ *
+ * The race it narrows only opens under genuine OS-level concurrency — the
+ * terminal driver's subprocess and filesystem evidence work running while the
+ * deadline's own timer fires — which a single-threaded Effect fixture cannot
+ * reproduce on demand. Testing the reclassification directly, against a fiber
+ * whose completion is pinned before the assertion runs, is what makes this
+ * regression test deterministic instead of a coin flip.
+ */
+it.effect("reclassifies a bare timeout once the joined fiber has already exited", () =>
+  Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(
+      Effect.succeed<WorkerSupervisionVerdict>({ _tag: "stopped", reason: "confirmed" }),
+    );
+    yield* Fiber.await(fiber);
+
+    assert.deepEqual(reclassifyTimeoutOnConfirmedStop({ _tag: "timeout" }, fiber), {
+      _tag: "supervision-stopped",
+      reason: "confirmed",
+    });
+  }),
+);
+
+it.effect("leaves a bare timeout alone while the joined fiber is still running", () =>
+  Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(Effect.never);
+
+    assert.deepEqual(reclassifyTimeoutOnConfirmedStop({ _tag: "timeout" }, fiber), {
+      _tag: "timeout",
+    });
+
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
+it.effect("leaves a non-timeout result untouched even with a settled fiber", () =>
+  Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(
+      Effect.succeed<WorkerSupervisionVerdict>({ _tag: "stopped", reason: "confirmed" }),
+    );
+    yield* Fiber.await(fiber);
+
+    const settled: IterationSettleResult = {
+      _tag: "settled",
+      settle: { turnState: "completed", timedOut: false, providerError: null },
+    };
+    assert.deepEqual(reclassifyTimeoutOnConfirmedStop(settled, fiber), settled);
+    assert.deepEqual(reclassifyTimeoutOnConfirmedStop(settled, null), settled);
   }),
 );
 

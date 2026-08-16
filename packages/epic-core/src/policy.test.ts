@@ -1185,6 +1185,20 @@ describe("proveEpicCompletion", () => {
       );
     });
 
+    it("leaves an unreadable merge-queue store unproven instead of fail-opening to complete", () => {
+      // t3code-e46: `null` means the store could not be read, not "nothing
+      // unlanded". Reading it as `[]` let a run write `done` over a branch
+      // the queue never confirmed had landed.
+      expect(
+        proveEpicCompletion({
+          check: { _tag: "ready-frontier-empty" },
+          activeWorkers: 0,
+          openChildIds: [],
+          unlandedMergeEntries: null,
+        }),
+      ).toEqual({ _tag: "unproven" });
+    });
+
     it("never overrides an already-incomplete proof's own evidence", () => {
       // `openChildIds` is non-empty, so the merge-queue check never even
       // runs — the loop only reads it when Beads alone would call the run

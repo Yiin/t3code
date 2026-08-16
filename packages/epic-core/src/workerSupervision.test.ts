@@ -169,6 +169,7 @@ describe("makeWorkerLivenessConfig", () => {
         inspectMaxDelaySeconds: 600,
         inspectMinDelaySeconds: 30,
         inspectRetryDelaySeconds: 120,
+        supervisionTickSeconds: 15,
         stopGraceSeconds: 20,
         workerTimeoutSeconds: 7_200,
         uncertainStopCeiling: 8,
@@ -181,6 +182,7 @@ describe("makeWorkerLivenessConfig", () => {
     expect(config.inspectMaxDelaySeconds).toBe(600);
     expect(config.inspectMinDelaySeconds).toBe(30);
     expect(config.inspectRetryDelaySeconds).toBe(120);
+    expect(config.supervisionTickSeconds).toBe(15);
   });
 
   it("leaves the machine's absolute deadline off, because the loop owns it", () => {

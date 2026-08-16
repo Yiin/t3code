@@ -46,7 +46,11 @@ import { makeTerminalPoolDispatch } from "@t3tools/epic-core/adapters/TerminalPo
 import { makeTerminalPoolWorkspace } from "@t3tools/epic-core/adapters/TerminalPoolWorkspace";
 import { makeTerminalProviderSupport } from "@t3tools/epic-core/adapters/TerminalProviderSupport";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import { DEFAULT_MAX_NO_COMMIT_STREAK, epicRunIterationPrompt } from "@t3tools/epic-core/policy";
+import {
+  DEFAULT_MAX_NO_COMMIT_STREAK,
+  epicRunIterationPrompt,
+  runCommitterEmail,
+} from "@t3tools/epic-core/policy";
 import { makePoolPolicy, type PoolPolicySeed } from "@t3tools/epic-core/runPolicy";
 import { DEFAULT_RUN_STALL_TIMEOUT_MS } from "@t3tools/epic-core/runStall";
 import { EpicRunLock } from "@t3tools/epic-core/ports/EpicRunLock";
@@ -184,7 +188,9 @@ const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
   gate: { command: "true", disabled: false },
   vcs: { noPush: true, runOwnedBaseBranch: false },
-  execution: { sequential: !isParallelScenario(scenario) },
+  execution: isParallelScenario(scenario)
+    ? { mode: "parallel", sequential: false }
+    : { mode: "sequential", sequential: true },
   parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: scenarioWorkers(scenario) },
   limits: {
     ...DEFAULT_EPIC_RUN_CONFIG.limits,
@@ -532,7 +538,15 @@ const runCoreScenario = Effect.fn("runCoreScenario")(function* (scenario: Confor
         providerRoutes: providerSupport.routes,
         timeoutSeconds: workerDeadlineSeconds(scenario),
         stopGraceSeconds: 1,
-        environment: workspace.env,
+        // The run's committer stamp (t3code-6qy, mirroring the CLI's
+        // apps/server/src/cli/epicCook.ts): SequentialEpicLoop's crediting
+        // check now requires this run's own committer identity on a commit,
+        // so the fixture worker must carry it too.
+        environment: {
+          ...workspace.env,
+          GIT_COMMITTER_NAME: `T3 epic run conformance-${scenario.name}`,
+          GIT_COMMITTER_EMAIL: runCommitterEmail(`conformance-${scenario.name}`),
+        },
       });
       const ports: SequentialEpicLoopPorts = {
         preflight,

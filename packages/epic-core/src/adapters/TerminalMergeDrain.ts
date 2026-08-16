@@ -273,7 +273,10 @@ export const makeTerminalMergeDrain = (deps: {
             status: entry.status,
           })),
         ),
-        Effect.catchCause(() => Effect.succeed([])),
+        // An unreadable store answers `null`, not `[]` (t3code-e46): the
+        // loop's completion proof must not read "unlanded unknown" as
+        // "nothing unlanded".
+        Effect.catchCause(() => Effect.succeed(null)),
       ),
     recordIntegratedHead: (runCtx) =>
       Effect.gen(function* () {

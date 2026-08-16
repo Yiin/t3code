@@ -154,6 +154,24 @@ const waitForExit = (child: NodeChildProcess.ChildProcess) =>
     child.once("close", (code) => resolve({ code, output }));
   });
 
+// A busy CI runner delays init reaping the group leader's orphaned
+// grandchildren (the backgrounded heartbeat subshell, the fake `claude`
+// process): they linger as zombies under the same pgid after the leader
+// exits, so `kill(-pgid, 0)` keeps reporting the group alive for a beat even
+// though nothing in it does further work. Poll past that reaping gap instead
+// of trusting the leader's own exit to mean the whole group is gone.
+const waitForGroupGone = async (pgid: number): Promise<void> => {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      process.kill(-pgid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for process group ${pgid} to exit`);
+};
+
 const killGroup = async (child: NodeChildProcess.ChildProcess, signal: NodeJS.Signals) => {
   if (child.pid !== undefined) {
     try {
@@ -161,6 +179,9 @@ const killGroup = async (child: NodeChildProcess.ChildProcess, signal: NodeJS.Si
     } catch {}
   }
   await waitForExit(child);
+  if (child.pid !== undefined) {
+    await waitForGroupGone(child.pid);
+  }
 };
 
 const runLock = <A, E>(effect: Effect.Effect<A, E, EpicRunLock>, lockLayer = layer) =>

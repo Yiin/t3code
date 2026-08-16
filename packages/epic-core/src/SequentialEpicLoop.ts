@@ -9,6 +9,7 @@ import {
   childAttemptsFromHistory,
   decideIterationBoundary,
   persistedFailureReason,
+  runCommitterEmail,
 } from "./policy.ts";
 import {
   classifyIteration,
@@ -275,12 +276,63 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
     return parts.join("\n");
   });
 
+  // A sequential worker always shares the operator's own checkout (no
+  // worktree of its own), so a head that moved is not proof this child did
+  // anything — the operator could have committed in the same window
+  // (t3code-6qy, mirroring the pool's t3code-e6l fix). Only a commit
+  // carrying this run's own stamped committer identity counts; an
+  // unreadable log falls back to today's head-move credit rather than
+  // treating an infra flake as no credit.
+  const runCommitter = runCommitterEmail(input.runId);
+  const movedByThisRun = (args: {
+    readonly cwd: string;
+    readonly from: string | null;
+    readonly to: string | null;
+  }) =>
+    args.from === null || args.to === null
+      ? Effect.succeed(args.from !== args.to)
+      : ports.vcs
+          .commitsByCommitter({ cwd: args.cwd, from: args.from, to: args.to })
+          .pipe(
+            Effect.map((committers) => committers === null || committers.includes(runCommitter)),
+          );
+
   // A sequential child's effects can land in any repo of the set: a moved
-  // sibling HEAD counts as committed (`skills/cook-epic/run-legacy.sh:2718-2721`).
-  const siblingHeadsMoved = (
-    before: ReadonlyArray<{ readonly repositoryPath: string; readonly head: string | null }>,
-    after: ReadonlyArray<{ readonly repositoryPath: string; readonly head: string | null }>,
-  ): boolean => before.some((entry, index) => entry.head !== (after[index]?.head ?? null));
+  // sibling HEAD counts as committed (`skills/cook-epic/run-legacy.sh:2718-2721`),
+  // subject to the same run-identity filter as the main repo.
+  const committedByThisRun = Effect.fn("runSequentialEpicLoop.committedByThisRun")(
+    function* (args: {
+      readonly mainBefore: string | null;
+      readonly mainAfter: string | null;
+      readonly siblingsBefore: ReadonlyArray<{
+        readonly repositoryPath: string;
+        readonly head: string | null;
+      }>;
+      readonly siblingsAfter: ReadonlyArray<{
+        readonly repositoryPath: string;
+        readonly head: string | null;
+      }>;
+    }) {
+      if (
+        args.mainAfter !== null &&
+        args.mainAfter !== args.mainBefore &&
+        (yield* movedByThisRun({ cwd: input.cwd, from: args.mainBefore, to: args.mainAfter }))
+      ) {
+        return true;
+      }
+      for (const [index, before] of args.siblingsBefore.entries()) {
+        const after = args.siblingsAfter[index]?.head ?? null;
+        if (
+          after !== null &&
+          after !== before.head &&
+          (yield* movedByThisRun({ cwd: before.repositoryPath, from: before.head, to: after }))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    },
+  );
 
   const publishClaimRecovery = Effect.fn("runSequentialEpicLoop.publishClaimRecovery")(function* (
     issueId: string,
@@ -567,6 +619,12 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
         const final = yield* activeHandle.finalMessage;
         const afterHead = yield* ports.vcs.headCommit(input.repository);
         const settledSiblingHeads = yield* readSiblingHeads();
+        const settledCommitted = yield* committedByThisRun({
+          mainBefore: beforeHead,
+          mainAfter: afterHead,
+          siblingsBefore: beforeSiblingHeads,
+          siblingsAfter: settledSiblingHeads,
+        });
         outcome = classifyIteration({
           turnState: settled.turnState,
           finalMessage:
@@ -575,8 +633,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
           sessionLastError: settled.providerError,
           assistantProviderErrorsTrusted:
             activeHandle.capabilities.providerErrors === "session-and-assistant",
-          committed:
-            beforeHead !== afterHead || siblingHeadsMoved(beforeSiblingHeads, settledSiblingHeads),
+          committed: settledCommitted,
           timedOut: settled.timedOut,
         });
         yield* activeHandle.release;
@@ -586,8 +643,12 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
       const settlementStartMs = nowMs();
       const afterHead = yield* ports.vcs.headCommit(input.repository);
       const afterSiblingHeads = yield* readSiblingHeads();
-      const committed =
-        beforeHead !== afterHead || siblingHeadsMoved(beforeSiblingHeads, afterSiblingHeads);
+      const committed = yield* committedByThisRun({
+        mainBefore: beforeHead,
+        mainAfter: afterHead,
+        siblingsBefore: beforeSiblingHeads,
+        siblingsAfter: afterSiblingHeads,
+      });
       const afterWorkerFingerprint = yield* readFingerprint();
       let postChild = yield* ports.backlog.showIssue(child.id);
       const findingsDelivered =

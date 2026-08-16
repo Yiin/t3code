@@ -19,6 +19,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 
 import { make as makeFileRunJournal } from "./adapters/FileRunJournal.ts";
+import { runCommitterEmail } from "./policy.ts";
 import { runSequentialEpicLoop, type SequentialEpicLoopPorts } from "./SequentialEpicLoop.ts";
 import type { RoleSelectionRequest } from "./ports/RoleSelection.ts";
 import type { EpicFallbackHop } from "./providerFallback.ts";
@@ -145,6 +146,12 @@ const fixture = (input: {
   readonly journal?: SequentialEpicLoopPorts["journal"];
   /** Which epic this process thinks the run id belongs to. */
   readonly epicId?: string;
+  /**
+   * What `vcs.commitsByCommitter` answers, re-read on every probe. Absent
+   * means `null` — the port's "git told us nothing" — so a test that never
+   * sets this keeps today's plain head-move credit (t3code-6qy).
+   */
+  readonly committerEmails?: () => ReadonlyArray<string> | null;
 }) => {
   const epic = issue({
     id: "epic",
@@ -167,6 +174,11 @@ const fixture = (input: {
     readonly repositoryPath: string;
     readonly remote: string;
     readonly refspec: string;
+  }> = [];
+  const committerProbes: Array<{
+    readonly cwd: string;
+    readonly from: string;
+    readonly to: string;
   }> = [];
   const prompts: string[] = [];
   let dispatches = 0;
@@ -453,6 +465,15 @@ const fixture = (input: {
           input.siblings?.find((sibling) => sibling.repositoryPath === repositoryPath)
             ?.baseBranch ?? null,
         ),
+      commitsByCommitter: (probe: {
+        readonly cwd: string;
+        readonly from: string;
+        readonly to: string;
+      }) =>
+        Effect.sync(() => {
+          committerProbes.push({ cwd: probe.cwd, from: probe.from, to: probe.to });
+          return input.committerEmails === undefined ? null : input.committerEmails();
+        }),
       worktreeFingerprint: () => Effect.succeed(fingerprint),
       push: (pushInput: {
         readonly repositoryPath: string;
@@ -508,6 +529,7 @@ const fixture = (input: {
     child: () => child,
     dispatches: () => dispatches,
     pushes,
+    committerProbes,
     prompts,
     statuses,
     iterations,
@@ -1083,6 +1105,50 @@ it.live("leaves claiming to the worker and reports done when it closes the child
     assert.equal(result.iterationsCompleted, 1);
     assert.equal(test.claims(), 0);
     assert.isTrue(test.released());
+  }),
+);
+
+it.live("credits an iteration whose new commit carries the run's own committer identity", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ claim: true, commit: true, close: true }],
+      config: config({ limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 1 } }),
+      committerEmails: () => [runCommitterEmail("run")],
+    });
+    const result = yield* test.run();
+    assert.equal(result.status, "done");
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
+    assert.isAbove(test.committerProbes.length, 0);
+  }),
+);
+
+it.live("never credits an iteration whose head only moved from an operator commit", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ commit: true }],
+      config: config({ limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 1 } }),
+      // Some other identity — the operator's own configured git identity,
+      // not this run's stamped committer (t3code-6qy, mirroring t3code-e6l).
+      committerEmails: () => ["operator@example.com"],
+    });
+    yield* test.run();
+    assert.equal(test.iterations[0]?.turnStatus, "failed");
+    assert.equal(test.iterations[0]?.failureReason, "child:no-commit-child-open");
+  }),
+);
+
+it.live("falls back to head-move credit when the committer log is unreadable", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      attempts: [{ claim: true, commit: true, close: true }],
+      config: config({ limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 1 } }),
+      // `committerEmails` left unset: `commitsByCommitter` answers `null`,
+      // the port's "git told us nothing" — an infra flake must not read
+      // as no credit.
+    });
+    const result = yield* test.run();
+    assert.equal(result.status, "done");
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
   }),
 );
 

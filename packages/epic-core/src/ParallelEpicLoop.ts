@@ -26,6 +26,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 
@@ -88,6 +89,7 @@ import {
   superviseWorker,
   workerLivenessEventDetail,
   type SupervisionClock,
+  type WorkerSupervisionVerdict,
 } from "./workerSupervision.ts";
 
 /** The per-run resolved timing the dispatch adapter needs. */
@@ -244,14 +246,14 @@ export interface MergeDrainShape {
    * behind a merge-fix child, because closing the child and landing its
    * branch are two different writes.
    *
-   * Never fails, the same "nothing to report" convention as
-   * {@link MergeDrainShape.integrationTarget}: `[]` for a sequential run,
-   * which never provisions merge state, and for a run whose merge state is
-   * unreadable.
+   * Never fails: `[]` for a sequential run, which never provisions merge
+   * state. An unreadable merge state answers `null` instead of fail-opening
+   * to `[]` (t3code-e46) — `proveEpicCompletion` treats that as unproven,
+   * never as landed.
    */
   readonly unlandedEntries: (
     run: PoolRunContext,
-  ) => Effect.Effect<ReadonlyArray<UnlandedMergeEntry>>;
+  ) => Effect.Effect<ReadonlyArray<UnlandedMergeEntry> | null>;
 }
 
 /** Never-failing git probes; `null` never counts as progress. */
@@ -480,7 +482,7 @@ type RunIterationResult =
  * settled turn carries its observed settle so classification can fall back to
  * it when the final-message read carries no projection state.
  */
-type IterationSettleResult =
+export type IterationSettleResult =
   | { readonly _tag: "settled"; readonly settle: IterationSettle }
   | { readonly _tag: "timeout" }
   /** The liveness machine confirmed the worker was dead before it settled. */
@@ -717,6 +719,28 @@ const noCommitEvidenceVerdict = (input: {
 /** The dispatch-failure detail persisted as the iteration's summary. */
 const settleErrorDetail = (error: EpicRunnerDispatchError | DispatchError): string =>
   error._tag === "EpicRunnerDispatchError" ? error.message : `${error.operation}: ${error.detail}`;
+
+/**
+ * Orders a bare wall-clock timeout behind a liveness verdict that already
+ * landed by the time the timeout is observed (t3code-sx7).
+ *
+ * `boundedIteration` and the joined supervision fiber race, and on a loaded
+ * runner the deadline can win that race by scheduling luck alone even though
+ * the verdict is confirmed a moment later. `pollUnsafe` is non-blocking, so
+ * this only catches a verdict that fully exited before this check runs — it
+ * narrows the window, it does not close it (the terminal driver closes it by
+ * compressing the supervision cadence instead; see `SupervisionSettings`).
+ */
+export const reclassifyTimeoutOnConfirmedStop = (
+  result: IterationSettleResult,
+  supervisionFiber: Fiber.Fiber<WorkerSupervisionVerdict> | null,
+): IterationSettleResult => {
+  if (result._tag !== "timeout" || supervisionFiber === null) return result;
+  const exit = supervisionFiber.pollUnsafe();
+  return exit !== undefined && Exit.isSuccess(exit)
+    ? { _tag: "supervision-stopped", reason: exit.value.reason }
+    : result;
+};
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const nowMillis = Effect.map(DateTime.now, DateTime.toEpochMillis);
@@ -1586,8 +1610,8 @@ export const runParallelEpicLoop = (
               ),
             );
       /**
-       * Per-worker liveness supervision, raced against the worker's own
-       * settlement so a wedged worker ends its iteration instead of holding a
+       * Per-worker liveness supervision, forked and joined rather than raced
+       * directly, so a wedged worker ends its iteration instead of holding a
        * pool slot until the run dies.
        *
        * `iterationTimeoutMs` only catches a worker that runs too *long*. The
@@ -1595,17 +1619,22 @@ export const runParallelEpicLoop = (
        * CPU across 12 minutes, every process asleep, held for 3h16m. The
        * liveness machine reads exactly those deltas.
        *
-       * Supervision never completes on a healthy worker, so `raceFirst`
-       * interrupts it as soon as the turn settles.
+       * Supervision never completes on a healthy worker, so joining it loses
+       * the race as soon as the turn settles. Forking it separately, instead
+       * of handing the raw effect to `raceFirst`, keeps the fiber reachable
+       * after the race: `reclassifyTimeoutOnConfirmedStop` below catches a
+       * verdict that already landed by the time the deadline is observed,
+       * narrowing the window where a loaded runner's deadline beats a
+       * confirmed stop by scheduling luck. It does not close that window —
+       * the real fix is the deadline margin: the deployed driver's
+       * `supervision.supervisionTickSeconds` should stay well under the
+       * worker's wall-clock cap so the verdict has room to land first
+       * (t3code-sx7).
        */
-      const supervised: Effect.Effect<
-        IterationSettleResult,
-        EpicRunnerDispatchError | DispatchError
-      > =
+      const supervisionFiber: Fiber.Fiber<WorkerSupervisionVerdict> | null =
         ports.workerEvidence === null || dispatched.handle === null
-          ? boundedIteration
-          : Effect.raceFirst(
-              boundedIteration,
+          ? null
+          : yield* Effect.forkChild(
               superviseWorker({
                 ref: { worker: dispatched.handle.ref, repositoryPath: workspace.cwd },
                 child: issueId,
@@ -1626,7 +1655,19 @@ export const runParallelEpicLoop = (
                       detail: workerLivenessEventDetail(event),
                     })
                     .pipe(Effect.ignore),
-              }).pipe(
+              }),
+              { startImmediately: true },
+            );
+
+      const supervised: Effect.Effect<
+        IterationSettleResult,
+        EpicRunnerDispatchError | DispatchError
+      > =
+        supervisionFiber === null
+          ? boundedIteration
+          : Effect.raceFirst(
+              boundedIteration,
+              Fiber.join(supervisionFiber).pipe(
                 Effect.map(
                   (verdict): IterationSettleResult => ({
                     _tag: "supervision-stopped",
@@ -1637,11 +1678,15 @@ export const runParallelEpicLoop = (
             );
 
       const settleResult: IterationSettleResult = yield* supervised.pipe(
+        Effect.map((result) => reclassifyTimeoutOnConfirmedStop(result, supervisionFiber)),
         Effect.catch((error) =>
           Effect.succeed<IterationSettleResult>({
             _tag: "dispatch-failed",
             detail: settleErrorDetail(error),
           }),
+        ),
+        Effect.ensuring(
+          supervisionFiber === null ? Effect.void : Fiber.interrupt(supervisionFiber),
         ),
       );
       // The provider turn ends here. Everything after it is the runner's own
@@ -1981,7 +2026,7 @@ export const runParallelEpicLoop = (
       // unproven from `openChildIds` stays that way regardless of the
       // queue, so a sequential run (which never enqueues) and a run with
       // open or unready children alike skip this read entirely.
-      const unlandedMergeEntries: ReadonlyArray<UnlandedMergeEntry> =
+      const unlandedMergeEntries: ReadonlyArray<UnlandedMergeEntry> | null =
         openChildIds.length === 0 && !sequential
           ? yield* ports.mergeDrain.unlandedEntries(runCtx)
           : [];
@@ -2000,7 +2045,8 @@ export const runParallelEpicLoop = (
           proof: proof._tag,
           openChildren: openChildIds.length,
           openChildIds: describeOpenChildren(openChildIds),
-          unlandedMergeEntries: unlandedMergeEntries.length,
+          unlandedMergeEntries:
+            unlandedMergeEntries === null ? "unreadable" : unlandedMergeEntries.length,
           ...(check._tag === "backlog-empty"
             ? { readyChildIds: describeOpenChildren(check.readyChildIds) }
             : {}),

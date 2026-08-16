@@ -849,7 +849,7 @@ const make = Effect.gen(function* () {
     const providers = yield* providerRegistry.getProviders;
     const snapshot = providers.find((provider) => provider.instanceId === input.providerInstanceId);
     return (
-      snapshot?.skills.some(
+      snapshot?.skills?.some(
         (skill) => skill.enabled && skill.name.toLowerCase() === input.name.toLowerCase(),
       ) === true
     );

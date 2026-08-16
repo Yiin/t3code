@@ -48,6 +48,7 @@ const InspectorTimeoutSeconds = PositiveInt;
 const InspectMaxDelaySeconds = PositiveInt;
 const InspectMinDelaySeconds = PositiveInt;
 const InspectRetryDelaySeconds = PositiveInt;
+const SupervisionTickSeconds = PositiveInt;
 const StopGraceSeconds = PositiveInt;
 const WorkerTimeoutSeconds = Schema.NullOr(PositiveInt);
 /**
@@ -97,6 +98,7 @@ const SupervisionConfig = Schema.Struct({
   inspectMaxDelaySeconds: defaultTo(InspectMaxDelaySeconds, 7_200),
   inspectMinDelaySeconds: defaultTo(InspectMinDelaySeconds, 60),
   inspectRetryDelaySeconds: defaultTo(InspectRetryDelaySeconds, 300),
+  supervisionTickSeconds: defaultTo(SupervisionTickSeconds, 5),
   stopGraceSeconds: defaultTo(StopGraceSeconds, 15),
   workerTimeoutSeconds: defaultTo(WorkerTimeoutSeconds, null),
   uncertainStopCeiling: defaultTo(UncertainStopCeiling, 12),
@@ -203,6 +205,7 @@ export const EpicRunConfigOverride = Schema.Struct({
       inspectMaxDelaySeconds: Schema.optionalKey(InspectMaxDelaySeconds),
       inspectMinDelaySeconds: Schema.optionalKey(InspectMinDelaySeconds),
       inspectRetryDelaySeconds: Schema.optionalKey(InspectRetryDelaySeconds),
+      supervisionTickSeconds: Schema.optionalKey(SupervisionTickSeconds),
       stopGraceSeconds: Schema.optionalKey(StopGraceSeconds),
       workerTimeoutSeconds: Schema.optionalKey(WorkerTimeoutSeconds),
       uncertainStopCeiling: Schema.optionalKey(UncertainStopCeiling),
@@ -351,6 +354,13 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     scope: "core",
     label: "Inspect retry delay",
     doc: "Delays the next check after an unsuccessful inspection.",
+    control: "number",
+  },
+  {
+    key: "supervision.supervisionTickSeconds",
+    scope: "core",
+    label: "Supervision tick",
+    doc: "Sets the liveness machine's own polling cadence in seconds.",
     control: "number",
   },
   {

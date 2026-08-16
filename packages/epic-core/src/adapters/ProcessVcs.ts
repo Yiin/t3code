@@ -180,10 +180,32 @@ export const makeProcessVcs = (input: {
       Effect.catchCause(() => Effect.succeed(null)),
     );
 
+  const commitsByCommitter: VcsShape["commitsByCommitter"] = ({ cwd, from, to }) =>
+    run({
+      operation: "commitsByCommitter",
+      repositoryPath: cwd,
+      args: ["log", "--format=%cE", `${from}..${to}`],
+    }).pipe(
+      Effect.map((output) =>
+        output.code === 0
+          ? output.stdout
+              .split("\n")
+              .map((line) => line.trim())
+              .filter((line) => line.length > 0)
+          : null,
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logDebug("epic.runner.committer-log-read-failed", { cwd, from, to, cause }).pipe(
+          Effect.as(null),
+        ),
+      ),
+    );
+
   return {
     headCommit,
     currentBranch,
     commitsAhead,
+    commitsByCommitter,
     worktreeFingerprint,
     createWorktree,
     removeWorktree,

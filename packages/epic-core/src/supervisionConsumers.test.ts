@@ -40,6 +40,7 @@ const SENTINEL = {
   inspectMaxDelaySeconds: 3_333,
   inspectMinDelaySeconds: 444,
   inspectRetryDelaySeconds: 555,
+  supervisionTickSeconds: 9,
   stopGraceSeconds: 66,
   workerTimeoutSeconds: 7_777,
   uncertainStopCeiling: 8,
@@ -148,6 +149,12 @@ const CONSUMERS: Record<SupervisionField, ConsumerProof> = {
     consumer: "workerLiveness.ts, via makeWorkerLivenessConfig",
     assert: () => {
       expect(livenessConfig.uncertainStopCeiling).toBe(SENTINEL.uncertainStopCeiling);
+    },
+  },
+  supervisionTickSeconds: {
+    consumer: "workerSupervision.ts superviseWorker's tick cadence, via makeWorkerLivenessConfig",
+    assert: () => {
+      expect(livenessConfig.supervisionTickSeconds).toBe(SENTINEL.supervisionTickSeconds);
     },
   },
   stopGraceSeconds: {

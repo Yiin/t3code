@@ -179,9 +179,19 @@ const CHAIN_CODEX_SELECTION = {
 const decodeEpicRolePolicy = Schema.decodeUnknownSync(EpicRolePolicySchema);
 
 /** A role policy that points the iteration worker at one ordered hop chain. */
-const iterationWorkerPolicy = (hops: ReadonlyArray<ModelSelection>): EpicRolePolicy =>
+const iterationWorkerPolicy = (
+  hops: ReadonlyArray<ModelSelection>,
+  options?: { readonly expandSameDriverAccounts?: boolean },
+): EpicRolePolicy =>
   decodeEpicRolePolicy({
-    tiers: { primary: { hops: hops.map((selection) => ({ selection })) } },
+    tiers: {
+      primary: {
+        hops: hops.map((selection) => ({ selection })),
+        ...(options?.expandSameDriverAccounts === undefined
+          ? {}
+          : { expandSameDriverAccounts: options.expandSameDriverAccounts }),
+      },
+    },
     roles: { "iteration-worker": "primary" },
   });
 
@@ -4804,11 +4814,14 @@ describe("EpicRunner", () => {
       ],
       // The chain ends on a second Claude account, which the driver-order
       // walker could never reach: it proves the last hop came from the chain.
-      epicRolePolicy: iterationWorkerPolicy([
-        CLAUDE_WORK_SELECTION,
-        CHAIN_CODEX_SELECTION,
-        CLAUDE_PERSONAL_SELECTION,
-      ]),
+      // Same-driver expansion is disabled so the walk keeps this literal,
+      // authored hop order instead of pulling claude-personal ahead of the
+      // codex hop the way it would for an on-policy chain (see the "second
+      // Claude account" test above, which exercises that expansion).
+      epicRolePolicy: iterationWorkerPolicy(
+        [CLAUDE_WORK_SELECTION, CHAIN_CODEX_SELECTION, CLAUDE_PERSONAL_SELECTION],
+        { expandSameDriverAccounts: false },
+      ),
     });
 
     return Effect.gen(function* () {
