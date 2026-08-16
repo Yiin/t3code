@@ -69,6 +69,7 @@ import {
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { matchesLockedContinuation } from "./modelPickerLock";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -758,20 +759,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (match) {
         // When locked to a specific driver kind, ignore persisted instance
         // ids from a different kind or continuation group.
-        if (lockedProvider && match.driverKind !== lockedProvider) continue;
         if (
-          lockedContinuationGroupKey &&
-          match.continuationGroupKey !== lockedContinuationGroupKey
-        ) {
+          !matchesLockedContinuation({ entry: match, lockedProvider, lockedContinuationGroupKey })
+        )
           continue;
-        }
         return match.instanceId;
       }
     }
-    const compatibleEntries = providerInstanceEntries.filter(
-      (entry) =>
-        (!lockedProvider || entry.driverKind === lockedProvider) &&
-        (!lockedContinuationGroupKey || entry.continuationGroupKey === lockedContinuationGroupKey),
+    const compatibleEntries = providerInstanceEntries.filter((entry) =>
+      matchesLockedContinuation({ entry, lockedProvider, lockedContinuationGroupKey }),
     );
     const requestedDriverEntries = compatibleEntries.filter(
       (entry) => entry.driverKind === requestedDriverKind,

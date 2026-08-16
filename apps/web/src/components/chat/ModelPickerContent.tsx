@@ -28,6 +28,7 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
+import { matchesLockedContinuation } from "./modelPickerLock";
 
 type ModelPickerItem = {
   slug: string;
@@ -167,10 +168,11 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   );
   const matchesLockedProvider = useCallback(
     (entry: Pick<ProviderInstanceEntry, "driverKind" | "continuationGroupKey">): boolean => {
-      if (props.lockedProvider === null) return true;
-      if (entry.driverKind !== props.lockedProvider) return false;
-      if (!props.lockedContinuationGroupKey) return true;
-      return entry.continuationGroupKey === props.lockedContinuationGroupKey;
+      return matchesLockedContinuation({
+        entry,
+        lockedProvider: props.lockedProvider,
+        lockedContinuationGroupKey: props.lockedContinuationGroupKey ?? null,
+      });
     },
     [props.lockedContinuationGroupKey, props.lockedProvider],
   );
