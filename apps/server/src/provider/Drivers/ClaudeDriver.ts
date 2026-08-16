@@ -56,7 +56,11 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import {
+  makeClaudeCapabilitiesCacheKey,
+  makeClaudeContinuationGroupKey,
+  makeClaudeLegacyContinuationKeys,
+} from "./ClaudeHome.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -141,6 +145,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         env: processEnv,
       });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
+      const legacyContinuationKeys = yield* makeClaudeLegacyContinuationKeys({
+        config: effectiveConfig,
+        accountsDir: (yield* ServerConfig).accountsDir,
+      });
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
@@ -218,6 +226,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationIdentity: {
           ...fallbackContinuationIdentity,
           continuationKey: continuationGroupKey,
+          ...(legacyContinuationKeys.length > 0 ? { legacyContinuationKeys } : {}),
         },
         displayName,
         accentColor,

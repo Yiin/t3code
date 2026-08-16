@@ -39,6 +39,7 @@ export type KindAdapterMap = Partial<
 export interface AdapterRegistryInstanceOverrides {
   readonly enabled?: boolean;
   readonly continuationKey?: string;
+  readonly legacyContinuationKeys?: ReadonlyArray<string>;
 }
 
 /**
@@ -91,6 +92,10 @@ export const makeAdapterRegistryMock = (
           driverKind,
           continuationKey:
             overrides?.continuationKey ?? `${adapter.provider}:instance:${instanceId}`,
+          ...(overrides?.legacyContinuationKeys !== undefined &&
+          overrides.legacyContinuationKeys.length > 0
+            ? { legacyContinuationKeys: overrides.legacyContinuationKeys }
+            : {}),
         },
       });
     },

@@ -2,6 +2,7 @@ import * as NodeOS from "node:os";
 
 import type { ClaudeSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -38,6 +39,28 @@ export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationG
   function* (config: Pick<ClaudeSettings, "homePath">): Effect.fn.Return<string, never, Path.Path> {
     const resolvedHomePath = yield* resolveClaudeHomePath(config);
     return `claude:home:${resolvedHomePath}`;
+  },
+);
+
+export const makeClaudeLegacyContinuationKeys = Effect.fn("makeClaudeLegacyContinuationKeys")(
+  function* (input: {
+    readonly config: Pick<ClaudeSettings, "homePath">;
+    readonly accountsDir: string;
+  }): Effect.fn.Return<ReadonlyArray<string>, never, FileSystem.FileSystem | Path.Path> {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sharedKey = `claude:home:${yield* resolveClaudeHomePath(input.config)}`;
+    const managedRoot = path.join(input.accountsDir, "claudeAgent");
+    const accountNames = yield* fileSystem
+      .readDirectory(managedRoot)
+      .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<string>));
+    const accountKeys = accountNames.map(
+      (name) => `claude:home:${path.resolve(managedRoot, name)}`,
+    );
+    const defaultKey = `claude:home:${NodeOS.homedir()}`;
+    return Array.from(new Set([...accountKeys, ...(sharedKey === defaultKey ? [defaultKey] : [])]))
+      .filter((key) => key !== sharedKey)
+      .sort();
   },
 );
 
