@@ -32,13 +32,10 @@
  *   conversation. `ProviderService.startSession` accepts a persisted binding
  *   from another instance when its persisted continuation identity matches
  *   the new instance's (apps/server/src/provider/Layers/ProviderService.ts,
- *   `bindingContinuesConversation`). This is the preferred shape.
- * - Claude keys continuation on its resolved config home
- *   (apps/server/src/provider/Drivers/ClaudeHome.ts:37-42). Two accounts
- *   normally use different group keys. T3 Code refuses that switch and adds
- *   a visible activity. The server has no transcript replay path, so starting
- *   an empty provider session would make the timeline imply context that the
- *   provider did not receive.
+ *   `continuationIdentityContinues`). This is the preferred shape.
+ * - Claude keys continuation on its shared home
+ *   (apps/server/src/provider/Drivers/ClaudeHome.ts). Sibling accounts share
+ *   one group key, so T3 Code can continue the same provider conversation.
  *
  * @module providerAccountRotation
  */

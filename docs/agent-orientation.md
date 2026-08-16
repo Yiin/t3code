@@ -235,8 +235,16 @@ The probe uses a never-yielding prompt, so it sends no user message.
 
 Treat new SDK controls as optional. Check, catch, time out, and handle no result.
 
-An instance's `homePath` becomes `CLAUDE_CONFIG_DIR`. A session only resumes
-inside the config directory that created it.
+The shadow home becomes `CLAUDE_CONFIG_DIR`. The shared home holds `projects/`,
+so sibling accounts resume the same conversation. The continuation key is
+`claude:home:<sharedHomePath>`.
+
+Managed multi-account harnesses use a shadow-home overlay. The pattern is
+defined by `apps/server/src/provider/Drivers/CodexHomeLayout.ts` and
+`apps/server/src/provider/Drivers/ClaudeHome.ts`. Credentials stay private.
+Session state stays in the shared home. Managed homes use
+`~/.t3/accounts/<driver>/<instanceId>` from
+`apps/server/src/provider/Drivers/managedAccountHome.ts`.
 
 ### Epic role policy and injected subagents
 
@@ -335,8 +343,10 @@ inside the config directory that created it.
 - `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` starts and
   restarts sessions.
 - `apps/server/src/provider/Layers/ProviderService.ts` falls back to the
-  persisted resume cursor, but inherits it only when the provider instance id
-  matches. `describeSessionResume` reports the verdict without starting anything.
+  persisted resume cursor. `continuationIdentityContinues` accepts a different
+  instance when `driverKind` and `continuationKey` match. The instance id must
+  match only when no identity is persisted. `describeSessionResume` reports the
+  verdict without starting anything.
 - `apps/server/src/provider/Services/ProviderSessionDirectory.ts` and
   `apps/server/src/persistence/ProviderSessionRuntime.ts` hold the persisted
   binding and the cursor. The payload merges, so an absent key keeps the old value.
