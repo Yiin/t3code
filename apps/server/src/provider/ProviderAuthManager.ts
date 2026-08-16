@@ -48,7 +48,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
+import { makeClaudeEnvironment, resolveClaudeHomeLayout } from "./Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 import { makeKimiEnvironment } from "./Drivers/KimiHome.ts";
 import { managedAccountHomePath } from "./Drivers/managedAccountHome.ts";
@@ -314,9 +314,13 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
         const driverConfig = yield* decodeClaudeSettings(envelope.config ?? {}).pipe(
           Effect.mapError(() => authError("The provider account configuration is invalid.")),
         );
-        const environment = yield* makeClaudeEnvironment(driverConfig, instanceEnvironment).pipe(
+        const layout = yield* resolveClaudeHomeLayout(driverConfig).pipe(
           Effect.provideService(Path.Path, path),
         );
+        const environment = yield* makeClaudeEnvironment(
+          { homePath: layout.effectiveHomePath ?? driverConfig.homePath },
+          instanceEnvironment,
+        ).pipe(Effect.provideService(Path.Path, path));
         const homePath = path.resolve(
           environment.CLAUDE_CONFIG_DIR?.trim() || path.join(NodeOS.homedir(), ".claude"),
         );
