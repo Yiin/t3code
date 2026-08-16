@@ -24,6 +24,7 @@ import {
   ProviderInstanceId,
   TurnId,
   diffTranscripts,
+  parseEpicRunIterationThreadId,
   type EpicRunConfigOverride,
   type EpicRunTranscriptEvent,
   type OrchestrationCommand,
@@ -50,7 +51,11 @@ import {
 import { layer as epicRunConfigSourceLayer } from "@t3tools/epic-core/EpicRunConfigSource";
 import { layer as epicRunPreflightLayer } from "@t3tools/epic-core/EpicRunPreflight";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
-import { DEFAULT_MAX_NO_COMMIT_STREAK, epicRunIterationPrompt } from "@t3tools/epic-core/policy";
+import {
+  DEFAULT_MAX_NO_COMMIT_STREAK,
+  epicRunIterationPrompt,
+  runCommitterEmail,
+} from "@t3tools/epic-core/policy";
 import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import {
   PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
@@ -576,12 +581,23 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
   const runAgent = (threadId: string) =>
     new Promise<AgentResult>((resolvePromise) => {
       const childId = threadChildren.get(threadId);
+      // In-place crediting (t3code-e6l) only counts a commit carrying this
+      // run's own committer stamp — the one `ProviderService` merges into
+      // every real worker's spawn env. This fixture spawns the worker itself,
+      // bypassing that resolution, so it has to carry the stamp by hand too.
+      const runRef = parseEpicRunIterationThreadId(threadId);
       const child = NodeChildProcess.spawn(NodePath.join(workspace.binDir, "agent"), [], {
         cwd: threadWorktrees.get(threadId) ?? workspace.cwd,
         env: {
           ...process.env,
           ...workspace.env,
           ...(childId === undefined ? {} : { COOKEPIC_CHILD: childId }),
+          ...(runRef === null
+            ? {}
+            : {
+                GIT_COMMITTER_NAME: `T3 epic run ${runRef.runId}`,
+                GIT_COMMITTER_EMAIL: runCommitterEmail(runRef.runId),
+              }),
         },
       });
       agentProcesses.set(threadId, child);

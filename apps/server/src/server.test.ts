@@ -7302,10 +7302,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         yield* buildAppUnderTest({
           layers: {
             gitVcsDriver: {
-              execute: () =>
+              execute: (request) =>
                 Effect.succeed({
-                  exitCode: ChildProcessSpawner.ExitCode(1),
-                  stdout: "",
+                  exitCode: ChildProcessSpawner.ExitCode(request.args[0] === "remote" ? 0 : 1),
+                  stdout: request.args[0] === "remote" ? "origin\n" : "",
                   stderr: "",
                   stdoutTruncated: false,
                   stderrTruncated: false,

@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  parseEpicRunIterationThreadId,
   type OrchestrationCommand,
   type OrchestrationThread,
 } from "@t3tools/contracts";
@@ -26,6 +27,7 @@ import * as Stream from "effect/Stream";
 
 import { layer as preflightLive } from "@t3tools/epic-core/EpicRunPreflight";
 import * as EpicRunConfigSource from "@t3tools/epic-core/EpicRunConfigSource";
+import { runCommitterEmail } from "@t3tools/epic-core/policy";
 import { OrchestrationEngineService } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { OrchestrationDispatchError } from "../src/orchestration/Errors.ts";
@@ -55,8 +57,12 @@ const modelSelection = {
 } as const;
 const NOW = "2026-01-01T00:00:00.000Z";
 
-const git = (cwd: string, args: ReadonlyArray<string>) =>
-  NodeChildProcess.execFileSync("git", [...args], { cwd, encoding: "utf8" }).trim();
+const git = (cwd: string, args: ReadonlyArray<string>, env?: Readonly<Record<string, string>>) =>
+  NodeChildProcess.execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+  }).trim();
 
 interface Fixture {
   readonly root: string;
@@ -171,7 +177,15 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
           NodeFSP.writeFile(NodePath.join(fixture.cwd, "landed.txt"), "landed\n"),
         );
         git(fixture.cwd, ["add", "landed.txt"]);
-        git(fixture.cwd, ["commit", "-qm", "land child"]);
+        // In-place crediting (t3code-e6l) only counts a commit carrying this
+        // run's own committer stamp — the same one every real worker process
+        // is spawned with. This harness plays the worker's part by hand, so
+        // it has to carry the stamp by hand too.
+        const runRef = parseEpicRunIterationThreadId(threadId);
+        git(fixture.cwd, ["commit", "-qm", "land child"], {
+          GIT_COMMITTER_NAME: "Epic run worker",
+          GIT_COMMITTER_EMAIL: runCommitterEmail(runRef?.runId ?? ""),
+        });
         yield* Effect.promise(() =>
           NodeFSP.writeFile(NodePath.join(fixture.state, "comments"), "1"),
         );
@@ -418,6 +432,10 @@ const preflightBdInvocations = [
  * claim is re-taken (`--status in_progress`) because the interrupted run's
  * finalizer may have reopened the child, and no `bd ready` precedes it — the
  * boot path hands the worker in, so the frontier is never consulted for it.
+ * A credited commit ends the iteration right after the role read below: it
+ * never earns the no-commit evidence re-read (`iterationBdInvocations`'s
+ * trailing entry) because the loop only pays for that read when the turn
+ * left no credited commit behind.
  */
 const resumedIterationBdInvocations = [
   "show child-1 --json",
@@ -425,16 +443,21 @@ const resumedIterationBdInvocations = [
   "update child-1 --status in_progress",
   "show epic-1 --json",
   "label list child-1",
-  "show child-1 --json",
 ] as const;
 
-const iterationBdInvocations = [
+/**
+ * A fresh iteration's own reads through to its role check, before its
+ * outcome is known. `iterationBdInvocations` below adds the no-commit
+ * evidence re-read on top of this; a credited commit never pays for it.
+ */
+const iterationDispatchBdInvocations = [
   "ready --parent epic-1 --json",
   "show child-1 --json",
   "show epic-1 --json",
   "label list child-1",
-  "show child-1 --json",
 ] as const;
+
+const iterationBdInvocations = [...iterationDispatchBdInvocations, "show child-1 --json"] as const;
 
 /** The run a `systemctl --user restart` interrupted, read back at boot. */
 const RESUMED_RUN_ID = EpicRunId.make("run-integration-restart");
@@ -513,7 +536,8 @@ describe("EpicRunner real process boundaries", () => {
             );
             yield* waitFor(
               () => readBdInvocations(fixture).length,
-              (count) => count >= preflightBdInvocations.length + iterationBdInvocations.length + 3,
+              (count) =>
+                count >= preflightBdInvocations.length + iterationDispatchBdInvocations.length + 3,
             );
           }).pipe(Effect.provide(harness.layer)),
         );
@@ -521,7 +545,7 @@ describe("EpicRunner real process boundaries", () => {
         assert.equal(harness.store.iterations[0]?.turnStatus, "completed");
         assert.deepEqual(readBdInvocations(fixture), [
           ...preflightBdInvocations,
-          ...iterationBdInvocations,
+          ...iterationDispatchBdInvocations,
           "ready --parent epic-1 --json",
           "list --parent epic-1 --all --flat --json",
           "show child-1 --json",

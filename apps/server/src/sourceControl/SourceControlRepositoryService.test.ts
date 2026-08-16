@@ -221,6 +221,7 @@ it.effect("preserves destination probe failures instead of treating them as miss
         fileSystem: FileSystem.makeNoop({
           exists: () => Effect.fail(fileSystemCause),
           makeDirectory: () => Effect.void,
+          chmod: () => Effect.void,
         }),
       }),
     ),

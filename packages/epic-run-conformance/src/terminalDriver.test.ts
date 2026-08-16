@@ -302,8 +302,13 @@ const runTerminalScenario = (
     ...(scenario.name === "provider-fallback-persists"
       ? {}
       : { COOKEPIC_WORKER_CMD: NodePath.join(workspace.binDir, "agent") }),
+    // A lone ready child still runs in place under the shared core's `auto`
+    // default (execution.mode). Pin `parallel` so these scenarios keep
+    // exercising the pooled worktree/merge-queue path they were written for,
+    // matching the pin `coreDriver.test.ts` already carries for the same
+    // reason.
     ...(isParallelScenario(scenario)
-      ? { COOKEPIC_WORKERS: String(scenarioWorkers(scenario)) }
+      ? { COOKEPIC_WORKERS: String(scenarioWorkers(scenario)), COOKEPIC_MODE: "parallel" }
       : { COOKEPIC_SEQUENTIAL: "1" }),
     COOKEPIC_GATE: "true",
     COOKEPIC_NO_PUSH: "1",
@@ -313,6 +318,10 @@ const runTerminalScenario = (
     // A pool worker has to outlive its siblings' merges; one second only ever
     // bounded a lone sequential worker.
     COOKEPIC_WORKER_TIMEOUT: isParallelScenario(scenario) ? "30" : "1",
+    // Pin the settings home: the CLI resolves it from the real homedir
+    // regardless of $HOME, so an operator shell would otherwise leak its own
+    // role policy into the fixture (see core-delegation.sh's same pin).
+    T3CODE_HOME: NodePath.join(root, "home", ".t3"),
   };
   const mailbox = NodePath.join(runDirectory, "mailbox.jsonl");
   /**
