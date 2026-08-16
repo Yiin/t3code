@@ -29,7 +29,7 @@ export interface HarnessHomeLayout {
 const Context = {
   sharedHomePath: Schema.String,
   effectiveHomePath: Schema.String,
-  label: Schema.optional(Schema.String),
+  label: Schema.String,
 };
 
 export class HarnessHomeOverlayFileSystemError extends Schema.TaggedErrorClass<HarnessHomeOverlayFileSystemError>()(
@@ -44,7 +44,7 @@ export class HarnessHomeOverlayFileSystemError extends Schema.TaggedErrorClass<H
   },
 ) {
   override get message() {
-    return `${this.label ?? "Harness"} shadow home filesystem operation '${this.operation}' failed for '${this.path}'${this.targetPath === undefined ? "" : ` to '${this.targetPath}'`}.`;
+    return `${this.label} shadow home filesystem operation '${this.operation}' failed for '${this.path}'${this.targetPath === undefined ? "" : ` to '${this.targetPath}'`}.`;
   }
 }
 
@@ -53,7 +53,7 @@ export class HarnessHomeOverlayPathConflictError extends Schema.TaggedErrorClass
   Context,
 ) {
   override get message() {
-    return `${this.label ?? "Harness"} shadow home path '${this.effectiveHomePath}' must be different from the shared home path '${this.sharedHomePath}'.`;
+    return `${this.label} shadow home path '${this.effectiveHomePath}' must be different from the shared home path '${this.sharedHomePath}'.`;
   }
 }
 
@@ -62,7 +62,7 @@ export class HarnessHomeOverlayEntryConflictError extends Schema.TaggedErrorClas
   { ...Context, entryName: Schema.String, linkPath: Schema.String, targetPath: Schema.String },
 ) {
   override get message() {
-    return `Cannot create ${this.label ?? "Harness"} shadow home entry '${this.entryName}' because '${this.linkPath}' already exists and is not a symlink.`;
+    return `Cannot create ${this.label} shadow home entry '${this.entryName}' because '${this.linkPath}' already exists and is not a symlink.`;
   }
 }
 
@@ -71,7 +71,7 @@ export class HarnessHomeOverlayPrivateEntrySymlinkError extends Schema.TaggedErr
   { ...Context, entryName: Schema.String, path: Schema.String },
 ) {
   override get message() {
-    return `${this.label ?? "Harness"} shadow home private entry '${this.entryName}' at '${this.path}' must be a real file, not a symlink.`;
+    return `${this.label} shadow home private entry '${this.entryName}' at '${this.path}' must be a real file, not a symlink.`;
   }
 }
 
