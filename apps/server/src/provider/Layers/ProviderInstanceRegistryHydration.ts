@@ -51,13 +51,17 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
+import * as ServerConfig from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import type { ProviderInstanceTeardown } from "../Services/ProviderInstanceTeardown.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
+import { runManagedAccountHomeMigration } from "../Drivers/managedAccountHomeMigration.ts";
 
 /**
  * Synthesize a `ProviderInstanceConfigMap` from a `ServerSettings` snapshot.
@@ -151,9 +155,19 @@ const SettingsWatcherLive = Layer.effectDiscard(
 export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
   ProviderInstanceRegistry,
   never,
-  BuiltInDriversEnv | ServerSettingsService | ProviderInstanceTeardown
+  | BuiltInDriversEnv
+  | ServerSettingsService
+  | ProviderInstanceTeardown
+  | ServerConfig.ServerConfig
+  | FileSystem.FileSystem
+  | Path.Path
 > = Layer.unwrap(
   Effect.gen(function* () {
+    yield* runManagedAccountHomeMigration().pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError("Managed provider home migration failed", cause),
+      ),
+    );
     const serverSettings = yield* ServerSettingsService;
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
@@ -173,5 +187,10 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
 ) as Layer.Layer<
   ProviderInstanceRegistry,
   never,
-  BuiltInDriversEnv | ServerSettingsService | ProviderInstanceTeardown
+  | BuiltInDriversEnv
+  | ServerSettingsService
+  | ProviderInstanceTeardown
+  | ServerConfig.ServerConfig
+  | FileSystem.FileSystem
+  | Path.Path
 >;
