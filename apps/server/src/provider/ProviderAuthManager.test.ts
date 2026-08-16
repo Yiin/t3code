@@ -130,12 +130,12 @@ const makeHarness = Effect.fn("ProviderAuthManager.test.makeHarness")(function* 
     [instanceIds.claudeAgent]: {
       driver: "claudeAgent",
       environment: [{ name: "HOME", value: "/unchanged", sensitive: false }],
-      config: { binaryPath: "claude-test", homePath: homes.claudeAgent },
+      config: { binaryPath: "claude-test", shadowHomePath: homes.claudeAgent },
     },
     [instanceIds.codex]: {
       driver: "codex",
       environment: [{ name: "HOME", value: "/unchanged", sensitive: false }],
-      config: { binaryPath: "codex-test", homePath: homes.codex },
+      config: { binaryPath: "codex-test", shadowHomePath: homes.codex },
     },
     [instanceIds.kimi]: {
       driver: "kimi",

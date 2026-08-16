@@ -22,6 +22,18 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it("orders Claude shadow home after its shared home", () => {
+    const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
+
+    expect(claude).toBeDefined();
+    expect(deriveProviderSettingsFields(claude!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "homePath",
+      "shadowHomePath",
+      "launchArgs",
+    ]);
+  });
+
   it("places the Kimi home path after its binary path", () => {
     const kimi = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("kimi")];
 

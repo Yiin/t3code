@@ -102,7 +102,7 @@ describe("provider instance identity", () => {
 
 describe("provider credential homes", () => {
   it.each([
-    [claude, "homePath"],
+    [claude, "shadowHomePath"],
     [codex, "shadowHomePath"],
     [kimi, "homePath"],
     [opencode, "dataHomePath"],
@@ -147,6 +147,17 @@ describe("provider credential homes", () => {
         homePath: "/var/lib/t3/accounts/codex/codex_account_2",
       }),
     ).toBe(false);
+  });
+
+  it("uses the allocated Claude shadow home for deletion", () => {
+    expect(
+      isManagedProviderAccountHomeForDisplay({
+        accountsDir: "/var/lib/t3/accounts",
+        driver: claude,
+        instanceId: id("claude_account_2"),
+        homePath: "/var/lib/t3/accounts/claudeAgent/claude_account_2",
+      }),
+    ).toBe(true);
   });
 });
 

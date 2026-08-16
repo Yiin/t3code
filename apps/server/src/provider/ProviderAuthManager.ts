@@ -678,6 +678,8 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
     }
 
     const sharedHomes = [
+      // These are the driver's shared homes. Keep this refusal list load-bearing
+      // now that managed accounts use credentials-only shadow homes.
       path.join(NodeOS.homedir(), ".claude"),
       path.join(NodeOS.homedir(), ".codex"),
       path.join(NodeOS.homedir(), ".kimi-code"),
