@@ -6,6 +6,7 @@ import * as NodeURL from "node:url";
 
 import { assert, describe, it } from "@effect/vitest";
 import { diffTranscripts, type EpicRunTranscriptEvent } from "@t3tools/contracts";
+import { parseWorkerScopeCgroupPath } from "@t3tools/epic-core/adapters/TerminalWorkerEvidence";
 import * as Effect from "effect/Effect";
 
 import { normalizeCoreMailbox, parseCoreMailbox, parseParallelMailbox } from "./coreMailbox.ts";
@@ -228,21 +229,100 @@ const sleepMs = (milliseconds: number): void => {
   Atomics.wait(new Int32Array(shared), 0, 0, milliseconds);
 };
 
+interface WorkerScopeSupport {
+  readonly supported: boolean;
+  /** Which precondition failed, for the divergence report. Empty when supported. */
+  readonly detail: string;
+}
+
 /**
- * Whether this host can put a worker in its own systemd scope.
+ * Whether this host can give a worker the scope cgroup supervision reads.
  *
  * Liveness supervision reads the worker's cgroup for the process histogram it
  * confirms a stop against, and `TerminalWorkerEvidence` accepts only a
- * `cook-epic-*.scope` leaf. Without a systemd user manager there is no such
- * cgroup, the machine reports the fingerprint unavailable, and by design it
- * never stops a worker on evidence it could not read. So a supervision
- * scenario does not apply to such a host, and saying so beats a sixty-second
- * timeout that reads like a runner bug.
+ * `cook-epic-*.scope` leaf. By design the machine never stops a worker on
+ * evidence it could not read, so on a host without that evidence a wedged
+ * worker rides out the wall-clock cap and the scenario diverges with
+ * `infra:timeout` — a message that reads like a runner bug.
+ *
+ * A bare `systemd-run --user --scope -- true` is not proof enough: on the CI
+ * runner it exits 0 while the resulting scope cgroup is still unreadable
+ * (t3code-bbl). So this probe verifies the exact chain supervision walks:
+ * spawn a sleeper under a `cook-epic-*.scope` unit, read the child's
+ * `/proc/<pid>/cgroup` through the same parser `TerminalWorkerEvidence` uses,
+ * and read `cpu.stat` and `cgroup.procs` inside the resolved cgroup
+ * directory. Each failure names the link that broke.
  */
-const hostSupportsWorkerScopes = (): boolean =>
-  NodeChildProcess.spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--", "true"], {
-    stdio: "ignore",
-  }).status === 0;
+const probeWorkerScopeSupport = (): WorkerScopeSupport => {
+  const launch = NodeChildProcess.spawnSync(
+    "systemd-run",
+    ["--user", "--scope", "--quiet", "--", "true"],
+    { stdio: "ignore" },
+  );
+  if (launch.status !== 0) {
+    return {
+      supported: false,
+      detail:
+        "systemd-run --user --scope cannot start a unit: no systemd user manager, so a worker gets no cgroup",
+    };
+  }
+  const unit = `cook-epic-conformance-probe-${String(process.pid)}.scope`;
+  const child = NodeChildProcess.spawn(
+    "systemd-run",
+    ["--user", "--scope", "--quiet", `--unit=${unit}`, "--", "sleep", "30"],
+    { stdio: "ignore" },
+  );
+  try {
+    // The scope does not exist at the instant of the spawn; poll like a
+    // supervision tick would until the child lands in its leaf.
+    const deadline = Date.now() + 5_000;
+    let lastCgroup = "(unread)";
+    while (Date.now() < deadline) {
+      let procCgroup: string;
+      try {
+        procCgroup = NodeFS.readFileSync(`/proc/${String(child.pid ?? -1)}/cgroup`, "utf8");
+      } catch {
+        if (!processAlive(child.pid ?? undefined)) {
+          return {
+            supported: false,
+            detail: "the probe child under systemd-run --user --scope died before entering a scope",
+          };
+        }
+        sleepMs(100);
+        continue;
+      }
+      lastCgroup = procCgroup.trim().replaceAll("\n", " | ");
+      const cgroupDirectory = parseWorkerScopeCgroupPath(procCgroup);
+      if (cgroupDirectory === null) {
+        sleepMs(100);
+        continue;
+      }
+      let cpuStat: string;
+      try {
+        cpuStat = NodeFS.readFileSync(NodePath.join(cgroupDirectory, "cpu.stat"), "utf8");
+        NodeFS.readFileSync(NodePath.join(cgroupDirectory, "cgroup.procs"), "utf8");
+      } catch (cause) {
+        return {
+          supported: false,
+          detail: `the worker scope cgroup ${cgroupDirectory} is not readable: ${cause instanceof Error ? cause.message : String(cause)}`,
+        };
+      }
+      return cpuStat.includes("usage_usec")
+        ? { supported: true, detail: "" }
+        : {
+            supported: false,
+            detail: `${cgroupDirectory}/cpu.stat carries no usage_usec: the cpu controller is not delegated to the scope`,
+          };
+    }
+    return {
+      supported: false,
+      detail: `the probe child never appeared in a cook-epic-*.scope cgroup v2 leaf within 5s; its /proc cgroup stayed at: ${lastCgroup}`,
+    };
+  } finally {
+    child.kill("SIGKILL");
+    NodeChildProcess.spawnSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+  }
+};
 
 const runTerminalScenario = (
   scenario: ConformanceScenario,
@@ -516,14 +596,14 @@ describe("terminal adapter conformance", () => {
     () =>
       Effect.sync(() => {
         const divergences: string[] = [];
-        const workerScopes = hostSupportsWorkerScopes();
+        const workerScopes = probeWorkerScopeSupport();
         for (const scenario of scenarios()) {
-          if (scenario.supervision !== undefined && !workerScopes) {
+          if (scenario.supervision !== undefined && !workerScopes.supported) {
             // Reported, never quietly dropped. This leg is already opt-in, so
             // whoever turned it on gets told which precondition their host
             // fails rather than a green run that proved less than it claims.
             divergences.push(
-              `${scenario.name} cannot run on this host: no systemd user manager, so a worker gets no cgroup and liveness has no evidence to confirm a stop against`,
+              `${scenario.name} cannot run on this host: ${workerScopes.detail}; liveness has no evidence to confirm a stop against`,
             );
             continue;
           }
