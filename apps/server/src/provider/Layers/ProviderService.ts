@@ -63,7 +63,10 @@ import {
 } from "../../observability/Metrics.ts";
 import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
-import type { ProviderContinuationIdentity } from "../ProviderDriver.ts";
+import {
+  defaultProviderContinuationIdentity,
+  type ProviderContinuationIdentity,
+} from "../ProviderDriver.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -329,6 +332,52 @@ function readPersistedContinuationIdentity(
     return undefined;
   }
   return { driverKind, continuationKey };
+}
+
+/**
+ * Decide whether a persisted continuation identity still names the same
+ * conversation as the instance a session is about to run on.
+ *
+ * A persisted key in the legacy `<driver>:instance:<instanceId>` format (the
+ * default before continuation identities became driver-specific, commit
+ * a7e68538d) carries no more information than driver + instance id, so it
+ * downgrades to the pre-field instance-id comparison instead of failing the
+ * exact-match check. Every binding written before that deploy reads this
+ * way, and losing the cursor for all of them on deploy day is silent data
+ * loss, not account isolation.
+ *
+ * This downgrade only applies to a legacy-format PERSISTED key. A
+ * custom-vs-custom mismatch (a rotated account, a different driver, or a
+ * genuinely different continuation group) still starts fresh — the legacy
+ * format cannot weaken real isolation because it never named anything more
+ * specific than driver + instance to begin with.
+ */
+function continuationIdentityContinues(
+  persistedIdentity: PersistedContinuationIdentity | undefined,
+  bindingInstanceId: ProviderInstanceId | undefined,
+  resolvedInstanceId: ProviderInstanceId,
+  currentIdentity: ProviderContinuationIdentity,
+): boolean {
+  if (persistedIdentity === undefined) {
+    return bindingInstanceId === resolvedInstanceId;
+  }
+  if (persistedIdentity.driverKind !== currentIdentity.driverKind) {
+    return false;
+  }
+  if (persistedIdentity.continuationKey === currentIdentity.continuationKey) {
+    return true;
+  }
+  if (bindingInstanceId === undefined) {
+    return false;
+  }
+  const legacyKey = defaultProviderContinuationIdentity({
+    driverKind: currentIdentity.driverKind,
+    instanceId: bindingInstanceId,
+  }).continuationKey;
+  if (persistedIdentity.continuationKey === legacyKey) {
+    return bindingInstanceId === resolvedInstanceId;
+  }
+  return false;
 }
 
 function readPersistedModelSelection(
@@ -1377,16 +1426,33 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             : readPersistedContinuationIdentity(persistedBinding.runtimePayload);
         const bindingContinuesConversation =
           persistedBinding !== undefined &&
-          (persistedIdentity === undefined
-            ? persistedBinding.providerInstanceId === resolvedInstanceId
-            : persistedIdentity.driverKind === instanceInfo.continuationIdentity.driverKind &&
-              persistedIdentity.continuationKey ===
-                instanceInfo.continuationIdentity.continuationKey);
+          continuationIdentityContinues(
+            persistedIdentity,
+            persistedBinding.providerInstanceId,
+            resolvedInstanceId,
+            instanceInfo.continuationIdentity,
+          );
         const effectiveResumeCursor =
           input.resumeCursor ??
           (persistedBinding !== undefined && bindingContinuesConversation
             ? persistedBinding.resumeCursor
             : undefined);
+        if (
+          input.resumeCursor === undefined &&
+          persistedBinding !== undefined &&
+          persistedBinding.resumeCursor !== null &&
+          persistedBinding.resumeCursor !== undefined &&
+          !bindingContinuesConversation
+        ) {
+          yield* Effect.logWarning("provider.session.continuation-identity-dropped-cursor", {
+            operation: "ProviderService.startSession",
+            threadId,
+            persistedContinuationKey: persistedIdentity?.continuationKey,
+            currentContinuationKey: instanceInfo.continuationIdentity.continuationKey,
+            detail:
+              "A persisted resume cursor exists but the continuation identity no longer matches. The cursor was dropped and the session starts fresh.",
+          });
+        }
         const persistedCwdCandidate =
           persistedBinding !== undefined && bindingContinuesConversation
             ? readPersistedCwd(persistedBinding.runtimePayload)
@@ -1938,13 +2004,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
 
     // An absent persisted identity is unknown, not a mismatch: every binding
-    // written before the field existed reads that way. Only a recorded key that
-    // disagrees with the instance's current one kills the cursor.
+    // written before the field existed reads that way. A legacy-format key
+    // (see continuationIdentityContinues) also survives, since it names
+    // exactly this instance under the pre-migration default. Only a recorded
+    // key that still disagrees with the instance's current one kills the
+    // cursor.
     const persistedIdentity = readPersistedContinuationIdentity(binding.runtimePayload);
     if (
-      persistedIdentity !== undefined &&
-      (persistedIdentity.driverKind !== instanceInfo.continuationIdentity.driverKind ||
-        persistedIdentity.continuationKey !== instanceInfo.continuationIdentity.continuationKey)
+      !continuationIdentityContinues(
+        persistedIdentity,
+        instanceId,
+        instanceId,
+        instanceInfo.continuationIdentity,
+      )
     ) {
       return yield* annotate({
         ...base,

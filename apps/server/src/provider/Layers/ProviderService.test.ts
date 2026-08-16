@@ -4190,6 +4190,97 @@ it.effect("does not give a legacy cursor to a sibling instance", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect(
+  "resumes a legacy instance-format identity after the instance grows a custom continuation key",
+  () =>
+    Effect.gen(function* () {
+      const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/isolated" });
+      const threadId = asThreadId("thread-continuation-legacy-format-same-instance");
+      const resumeCursor = { opaque: "legacy-cursor" };
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* seedBinding({
+          threadId,
+          resumeCursor,
+          runtimePayload: {
+            cwd: "/tmp/project-continuation",
+            continuationIdentity: {
+              driverKind: CODEX_DRIVER,
+              continuationKey: CODEX_CONTINUATION_KEY,
+            },
+          },
+        });
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(stack.providerLayer));
+
+      const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+      assert.deepEqual(startInput?.resumeCursor, resumeCursor);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("starts fresh when a legacy-format key names a different instance", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/isolated" });
+    const threadId = asThreadId("thread-continuation-legacy-format-other-instance");
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex-work"),
+        resumeCursor: { opaque: "legacy-cursor-other-instance" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: `${CODEX_DRIVER}:instance:codex-work`,
+          },
+        },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-continuation",
+        runtimeMode: "full-access",
+      });
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
+    assert.equal(startInput?.resumeCursor, undefined);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reports a legacy-format identity as resumable by cursor", () =>
+  Effect.gen(function* () {
+    const stack = makeContinuationIdentityStack({ continuationKey: "codex:home:/isolated" });
+    const threadId = asThreadId("thread-continuation-legacy-format-verdict");
+
+    const verdict = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        resumeCursor: { opaque: "legacy-cursor-verdict" },
+        runtimePayload: {
+          continuationIdentity: {
+            driverKind: CODEX_DRIVER,
+            continuationKey: CODEX_CONTINUATION_KEY,
+          },
+        },
+      });
+      return yield* provider.describeSessionResume(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.equal(verdict.resumable, "cursor");
+    assert.equal(verdict.reason, "persisted-cursor");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("ignores a malformed persisted continuation identity", () =>
   Effect.gen(function* () {
     const stack = makeContinuationIdentityStack();
