@@ -383,6 +383,17 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    sharedDataHomePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Shared OpenCode data path",
+        description: "Optional path for the shared OpenCode session database.",
+        providerSettingsForm: {
+          placeholder: "Leave blank to keep account data separate",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     serverUrl: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -412,7 +423,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "dataHomePath", "serverUrl", "serverPassword"],
+    order: ["binaryPath", "dataHomePath", "sharedDataHomePath", "serverUrl", "serverPassword"],
   },
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
@@ -614,6 +625,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   dataHomePath: Schema.optionalKey(TrimmedString),
+  sharedDataHomePath: Schema.optionalKey(TrimmedString),
   serverUrl: Schema.optionalKey(TrimmedString),
   serverPassword: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),

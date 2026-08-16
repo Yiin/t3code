@@ -53,7 +53,11 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeOpenCodeContinuationGroupKey, makeOpenCodeEnvironment } from "./OpenCodeHome.ts";
+import {
+  makeOpenCodeContinuationGroupKey,
+  makeOpenCodeEnvironment,
+  resolveOpenCodeHomeLayout,
+} from "./OpenCodeHome.ts";
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("opencode");
@@ -130,6 +134,24 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
       // A configured dataHomePath takes precedence over an instance environment
       // XDG_DATA_HOME. A blank dataHomePath preserves that explicit variable.
       const processEnv = yield* makeOpenCodeEnvironment(effectiveConfig, instanceEnvironment);
+      const openCodeHomeLayout = yield* resolveOpenCodeHomeLayout(effectiveConfig, processEnv);
+      if (openCodeHomeLayout.mode === "authOverlay") {
+        yield* fileSystem
+          .makeDirectory(path.join(openCodeHomeLayout.sharedDataHomePath, "opencode"), {
+            recursive: true,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: `Failed to prepare the shared OpenCode data home: ${cause.message}`,
+                  cause,
+                }),
+            ),
+          );
+      }
       const continuationGroupKey = yield* makeOpenCodeContinuationGroupKey(
         effectiveConfig,
         processEnv,

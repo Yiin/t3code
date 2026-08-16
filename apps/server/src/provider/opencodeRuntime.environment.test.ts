@@ -13,12 +13,14 @@ describe("makeOpenCodeServerSpawnEnvironment", () => {
     const options = makeOpenCodeServerSpawnEnvironment({
       PATH: "/bin",
       XDG_DATA_HOME: "/accounts/opencode-work",
+      OPENCODE_DB: "/shared/opencode/opencode.db",
     });
 
     expect(options).toEqual({
       env: {
         PATH: "/bin",
         XDG_DATA_HOME: "/accounts/opencode-work",
+        OPENCODE_DB: "/shared/opencode/opencode.db",
         OPENCODE_CONFIG_CONTENT: "{}",
       },
       extendEnv: false,
@@ -68,6 +70,7 @@ describe("makeOpenCodeServerSpawnEnvironment", () => {
         };
       };
       expect(command.options.env.XDG_DATA_HOME).toBe("/accounts/opencode-work");
+      expect(command.options.env.OPENCODE_DB).toBeUndefined();
       expect(command.options.env.OPENCODE_CONFIG_CONTENT).toBe("{}");
       expect(command.options.extendEnv).toBe(false);
     }),

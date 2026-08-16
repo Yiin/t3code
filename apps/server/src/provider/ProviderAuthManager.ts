@@ -55,6 +55,7 @@ import { managedAccountHomePath } from "./Drivers/managedAccountHome.ts";
 import {
   makeOpenCodeEnvironment,
   openCodeAuthFilePath,
+  resolveOpenCodeHomeLayout,
   resolveOpenCodeDataHome,
 } from "./Drivers/OpenCodeHome.ts";
 import { deriveProviderInstanceConfigMap } from "./Layers/ProviderInstanceRegistryHydration.ts";
@@ -82,6 +83,7 @@ interface ResolvedAuthTarget {
   readonly environment: NodeJS.ProcessEnv;
   readonly homePath: string;
   readonly authFilePath: string;
+  readonly sharedHomePath?: string;
 }
 
 type LoginEvent =
@@ -382,6 +384,9 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
         const homePath = yield* resolveOpenCodeDataHome(driverConfig, environment).pipe(
           Effect.provideService(Path.Path, path),
         );
+        const openCodeLayout = yield* resolveOpenCodeHomeLayout(driverConfig, environment).pipe(
+          Effect.provideService(Path.Path, path),
+        );
         return {
           instanceId,
           driver,
@@ -391,6 +396,9 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
           authFilePath: yield* openCodeAuthFilePath(driverConfig, environment).pipe(
             Effect.provideService(Path.Path, path),
           ),
+          ...(openCodeLayout.mode === "authOverlay"
+            ? { sharedHomePath: openCodeLayout.sharedDataHomePath }
+            : {}),
         };
       }
     }
@@ -679,6 +687,7 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
       path.join(NodeOS.homedir(), ".kimi-code"),
       path.join(NodeOS.homedir(), ".local", "share", "opencode"),
       path.join(NodeOS.homedir(), ".local", "share"),
+      ...(target.sharedHomePath ? [path.resolve(target.sharedHomePath)] : []),
     ].map((value) => path.resolve(value));
     if (sharedHomes.includes(lexicalTarget)) {
       return yield* authError("The shared provider home cannot be deleted.");
