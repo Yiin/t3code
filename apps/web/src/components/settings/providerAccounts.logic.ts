@@ -94,7 +94,7 @@ function credentialHomeField(driver: ProviderDriverKind): CredentialHomeField | 
     case "claudeAgent":
       return "shadowHomePath";
     case "kimi":
-      return "homePath";
+      return "shadowHomePath";
     case "codex":
       return "shadowHomePath";
     case "opencode":
