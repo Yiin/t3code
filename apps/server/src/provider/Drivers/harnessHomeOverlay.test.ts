@@ -19,6 +19,7 @@ const manifest: HarnessHomeManifest = {
   label: "Test",
   continuationKeyPrefix: "test:home:",
   sharedEntries: ["sessions", "shared-dir"],
+  sharedFileEntries: ["index.jsonl"],
   privateEntries: ["private.json"],
   credentialEntries: ["credential.json"],
   shadowLocalEntries: ["local-dir"],

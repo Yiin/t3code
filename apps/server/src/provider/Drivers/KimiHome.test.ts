@@ -3,16 +3,63 @@ import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import {
   makeKimiContinuationGroupKey,
   makeKimiEnvironment,
+  materializeKimiShadowHome,
   resolveKimiHomePath,
+  resolveKimiHomeLayout,
 } from "./KimiHome.ts";
 
 it.layer(NodeServices.layer)("KimiHome", (it) => {
   describe("Kimi home resolution", () => {
+    it.effect("shares continuation identity while isolating the shadow home", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const sharedHomePath = path.resolve("kimi-shared");
+        const first = yield* resolveKimiHomeLayout({
+          homePath: sharedHomePath,
+          shadowHomePath: "kimi-first",
+        });
+        const second = yield* resolveKimiHomeLayout({
+          homePath: sharedHomePath,
+          shadowHomePath: "kimi-second",
+        });
+
+        expect(first.mode).toBe("authOverlay");
+        expect(first.effectiveHomePath).not.toBe(first.sharedHomePath);
+        expect(first.continuationKey).toBe(second.continuationKey);
+        expect(first.continuationKey).toBe(`kimi:home:${sharedHomePath}`);
+      }),
+    );
+
+    it.effect("materializes shared files and directories as shadow symlinks", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHomePath = yield* fileSystem.makeTempDirectory({ prefix: "kimi-shared-" });
+        const shadowHomePath = yield* fileSystem.makeTempDirectory({ prefix: "kimi-shadow-" });
+        const sharedSessions = path.join(sharedHomePath, "sessions");
+        yield* fileSystem.makeDirectory(sharedSessions);
+        yield* fileSystem.writeFileString(path.join(sharedHomePath, "session_index.jsonl"), "");
+        const layout = yield* resolveKimiHomeLayout({ homePath: sharedHomePath, shadowHomePath });
+        yield* materializeKimiShadowHome(layout);
+
+        expect(yield* fileSystem.readLink(path.join(shadowHomePath, "sessions"))).toBe(
+          sharedSessions,
+        );
+        expect(yield* fileSystem.readLink(path.join(shadowHomePath, "session_index.jsonl"))).toBe(
+          path.join(sharedHomePath, "session_index.jsonl"),
+        );
+        expect((yield* fileSystem.stat(path.join(shadowHomePath, "credentials"))).type).toBe(
+          "Directory",
+        );
+      }),
+    );
+
     it.effect("keeps the base environment unchanged when no home override is configured", () =>
       Effect.gen(function* () {
         const baseEnv = { HOME: "/home/test", KIMI_CODE_HOME: "/accounts/explicit" };

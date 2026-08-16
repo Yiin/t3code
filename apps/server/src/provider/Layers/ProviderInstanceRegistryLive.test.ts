@@ -144,6 +144,7 @@ const makeKimiConfig = (overrides: Partial<KimiSettings>): KimiSettings => ({
   enabled: false,
   binaryPath: "kimi",
   homePath: "",
+  shadowHomePath: "",
   customModels: [],
   ...overrides,
 });

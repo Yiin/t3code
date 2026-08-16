@@ -50,7 +50,7 @@ import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
-import { makeKimiEnvironment } from "./Drivers/KimiHome.ts";
+import { makeKimiEnvironment, resolveKimiHomeLayout } from "./Drivers/KimiHome.ts";
 import { managedAccountHomePath } from "./Drivers/managedAccountHome.ts";
 import {
   makeOpenCodeEnvironment,
@@ -81,6 +81,7 @@ interface ResolvedAuthTarget {
   readonly binaryPath: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly homePath: string;
+  readonly sharedHomePath?: string;
   readonly authFilePath: string;
 }
 
@@ -357,18 +358,20 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
         const driverConfig = yield* decodeKimiSettings(envelope.config ?? {}).pipe(
           Effect.mapError(() => authError("The provider account configuration is invalid.")),
         );
+        const layout = yield* resolveKimiHomeLayout(driverConfig).pipe(
+          Effect.provideService(Path.Path, path),
+        );
         const environment = yield* makeKimiEnvironment(driverConfig, instanceEnvironment).pipe(
           Effect.provideService(Path.Path, path),
         );
-        const homePath = path.resolve(
-          environment.KIMI_CODE_HOME?.trim() || path.join(NodeOS.homedir(), ".kimi-code"),
-        );
+        const homePath = layout.effectiveHomePath ?? layout.sharedHomePath;
         return {
           instanceId,
           driver,
           binaryPath: driverConfig.binaryPath,
           environment,
           homePath,
+          ...(layout.mode === "authOverlay" ? { sharedHomePath: layout.sharedHomePath } : {}),
           authFilePath: path.join(homePath, "credentials", "kimi-code.json"),
         };
       }
@@ -679,6 +682,7 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
       path.join(NodeOS.homedir(), ".kimi-code"),
       path.join(NodeOS.homedir(), ".local", "share", "opencode"),
       path.join(NodeOS.homedir(), ".local", "share"),
+      ...(target.sharedHomePath ? [target.sharedHomePath] : []),
     ].map((value) => path.resolve(value));
     if (sharedHomes.includes(lexicalTarget)) {
       return yield* authError("The shared provider home cannot be deleted.");
@@ -774,6 +778,43 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
     input: ProviderAuthLogoutInput,
     validatedHome: string | null,
   ) {
+    if (target.driver === "kimi" && target.sharedHomePath) {
+      const indexPath = path.join(target.sharedHomePath, "session_index.jsonl");
+      const index = yield* fileSystem
+        .readFileString(indexPath)
+        .pipe(Effect.orElseSucceed(() => ""));
+      if (index.length > 0) {
+        const oldPrefix = `${target.homePath}${path.sep}`;
+        const rewritten = index
+          .split("\n")
+          .map((line) => {
+            if (line.trim().length === 0) return line;
+            try {
+              const row = JSON.parse(line) as Record<string, unknown>;
+              if (typeof row.sessionDir !== "string" || !row.sessionDir.startsWith(oldPrefix)) {
+                return line;
+              }
+              return JSON.stringify({
+                ...row,
+                sessionDir: `${target.sharedHomePath}${row.sessionDir.slice(target.homePath.length)}`,
+              });
+            } catch {
+              return line;
+            }
+          })
+          .join("\n");
+        if (rewritten !== index) {
+          yield* writeFileStringAtomically({
+            filePath: indexPath,
+            contents: rewritten,
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.mapError(() => authError("Could not update the Kimi session index.")),
+          );
+        }
+      }
+    }
     if (target.driver === "claudeAgent" || target.driver === "codex") {
       yield* Effect.result(
         runLogoutCommand(target, target.driver === "claudeAgent" ? ["auth", "logout"] : ["logout"]),

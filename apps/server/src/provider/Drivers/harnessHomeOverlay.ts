@@ -13,6 +13,7 @@ export interface HarnessHomeManifest {
   readonly label: string;
   readonly continuationKeyPrefix: string;
   readonly sharedEntries: readonly string[];
+  readonly sharedFileEntries: readonly string[];
   readonly privateEntries: readonly string[];
   readonly credentialEntries: readonly string[];
   readonly shadowLocalEntries: readonly string[];
@@ -97,7 +98,7 @@ export const resolveHarnessHomeLayout = Effect.fn("resolveHarnessHomeLayout")(fu
 ): Effect.fn.Return<HarnessHomeLayout, never, Path.Path> {
   const path = yield* Path.Path;
   const sharedHomePath = resolveHomePath(path, input.homePath, input.defaultHomePath);
-  if (input.shadowHomePath.trim().length === 0) {
+  if ((input.shadowHomePath ?? "").trim().length === 0) {
     return {
       mode: "direct",
       sharedHomePath,
@@ -282,6 +283,7 @@ export const materializeHarnessHomeOverlay = Effect.fn("materializeHarnessHomeOv
   const localEntries = new Set(manifest.shadowLocalEntries);
   const entries = new Set([
     ...manifest.sharedEntries,
+    ...manifest.sharedFileEntries,
     ...sharedEntries.filter(
       (entry) =>
         !privateEntries.has(entry) && !credentialEntries.has(entry) && !localEntries.has(entry),

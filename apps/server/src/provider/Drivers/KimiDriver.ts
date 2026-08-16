@@ -37,7 +37,12 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeKimiContinuationGroupKey, makeKimiEnvironment } from "./KimiHome.ts";
+import {
+  kimiContinuationIdentity,
+  makeKimiEnvironment,
+  materializeKimiShadowHome,
+  resolveKimiHomeLayout,
+} from "./KimiHome.ts";
 const decodeKimiSettings = Schema.decodeSync(KimiSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("kimi");
@@ -94,10 +99,21 @@ export const KimiDriver: ProviderDriver<KimiSettings, KimiDriverEnv> = {
       const eventLoggers = yield* ProviderEventLoggers;
       const effectiveConfig = { ...config, enabled } satisfies KimiSettings;
       const instanceEnvironment = mergeProviderInstanceEnvironment(environment);
-      // A configured homePath takes precedence over an instance environment
-      // KIMI_CODE_HOME. A blank homePath preserves that explicit variable.
+      const homeLayout = yield* resolveKimiHomeLayout(effectiveConfig);
+      const homeContinuationIdentity = kimiContinuationIdentity(homeLayout);
+      yield* materializeKimiShadowHome(homeLayout).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
       const processEnv = yield* makeKimiEnvironment(effectiveConfig, instanceEnvironment);
-      const continuationGroupKey = yield* makeKimiContinuationGroupKey(processEnv);
+      const continuationGroupKey = homeContinuationIdentity.continuationKey;
       const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -117,12 +133,16 @@ export const KimiDriver: ProviderDriver<KimiSettings, KimiDriverEnv> = {
         env: processEnv,
       });
 
-      const adapter = yield* makeKimiAdapter(effectiveConfig, {
+      const effectiveDriverConfig = {
+        ...effectiveConfig,
+        homePath: homeLayout.effectiveHomePath ?? "",
+      } satisfies KimiSettings;
+      const adapter = yield* makeKimiAdapter(effectiveDriverConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
       });
-      const textGeneration = yield* makeKimiTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeKimiTextGeneration(effectiveDriverConfig, processEnv);
 
       const checkProvider = checkKimiProviderStatus(effectiveConfig, processEnv, displayName).pipe(
         Effect.map(stampIdentity),

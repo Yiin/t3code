@@ -345,13 +345,21 @@ export const KimiSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "~/.kimi-code", clearWhenEmpty: "omit" },
       }),
     ),
+    shadowHomePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Kimi credentials path",
+        description: "Private Kimi credentials directory for this account.",
+        providerSettingsForm: { placeholder: "", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "homePath"],
+    order: ["binaryPath", "homePath", "shadowHomePath"],
   },
 );
 export type KimiSettings = typeof KimiSettings.Type;
@@ -607,6 +615,7 @@ const KimiSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
+  shadowHomePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 

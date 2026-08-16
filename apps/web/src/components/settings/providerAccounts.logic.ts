@@ -92,8 +92,9 @@ type CredentialHomeField = "homePath" | "shadowHomePath" | "dataHomePath";
 function credentialHomeField(driver: ProviderDriverKind): CredentialHomeField | null {
   switch (driver) {
     case "claudeAgent":
-    case "kimi":
       return "homePath";
+    case "kimi":
+      return "shadowHomePath";
     case "codex":
       return "shadowHomePath";
     case "opencode":
