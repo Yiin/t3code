@@ -125,6 +125,28 @@ export function claudeContinuationIdentity(layout: ClaudeHomeLayout) {
   return harnessContinuationIdentity(CLAUDE_HOME_MANIFEST, layout);
 }
 
+export const makeClaudeLegacyContinuationKeys = Effect.fn("makeClaudeLegacyContinuationKeys")(
+  function* (input: {
+    readonly config: Pick<ClaudeSettings, "homePath">;
+    readonly accountsDir: string;
+  }): Effect.fn.Return<ReadonlyArray<string>, never, FileSystem.FileSystem | Path.Path> {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sharedKey = `claude:home:${yield* resolveClaudeHomePath(input.config)}`;
+    const managedRoot = path.join(input.accountsDir, "claudeAgent");
+    const accountNames = yield* fileSystem
+      .readDirectory(managedRoot)
+      .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<string>));
+    const accountKeys = accountNames.map(
+      (name) => `claude:home:${path.resolve(managedRoot, name)}`,
+    );
+    const defaultKey = `claude:home:${NodeOS.homedir()}`;
+    return Array.from(new Set([...accountKeys, ...(sharedKey === defaultKey ? [defaultKey] : [])]))
+      .filter((key) => key !== sharedKey)
+      .sort();
+  },
+);
+
 export const makeClaudeCapabilitiesCacheKey = Effect.fn("makeClaudeCapabilitiesCacheKey")(
   function* (
     config: Pick<ClaudeSettings, "binaryPath" | "homePath">,

@@ -3824,6 +3824,7 @@ function makeContinuationIdentityStack(options?: {
   readonly sessionResume?: ProviderSessionResumeMode;
   readonly enabled?: boolean;
   readonly continuationKey?: string;
+  readonly legacyContinuationKeys?: ReadonlyArray<string>;
 }) {
   const codex = makeFakeCodexAdapter(
     CODEX_DRIVER,
@@ -3836,6 +3837,9 @@ function makeContinuationIdentityStack(options?: {
         ...(options?.enabled !== undefined ? { enabled: options.enabled } : {}),
         ...(options?.continuationKey !== undefined
           ? { continuationKey: options.continuationKey }
+          : {}),
+        ...(options?.legacyContinuationKeys !== undefined
+          ? { legacyContinuationKeys: options.legacyContinuationKeys }
           : {}),
       },
     },
@@ -4015,6 +4019,44 @@ it.effect("inherits a sibling account cursor from the same continuation group", 
     const startInput = stack.codex.startSession.mock.calls.at(-1)?.[0];
     assert.deepEqual(startInput?.resumeCursor, resumeCursor);
     assert.equal(startInput?.cwd, "/tmp/project-continuation");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("inherits and restamps a pre-overlay continuation key", () =>
+  Effect.gen(function* () {
+    const legacyKey = "codex:home:/accounts/codex/work";
+    const currentKey = "codex:home:/shared";
+    const stack = makeContinuationIdentityStack({
+      continuationKey: currentKey,
+      legacyContinuationKeys: [legacyKey],
+    });
+    const threadId = asThreadId("thread-continuation-legacy");
+    const resumeCursor = { opaque: "from-pre-overlay" };
+
+    const payload = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      yield* seedBinding({
+        threadId,
+        providerInstanceId: ProviderInstanceId.make("codex-work"),
+        resumeCursor,
+        runtimePayload: {
+          continuationIdentity: { driverKind: CODEX_DRIVER, continuationKey: legacyKey },
+        },
+      });
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      return yield* persistedRuntimePayload(threadId);
+    }).pipe(Effect.provide(stack.providerLayer));
+
+    assert.deepEqual(stack.codex.startSession.mock.calls.at(-1)?.[0]?.resumeCursor, resumeCursor);
+    assert.deepEqual(readContinuationIdentity(payload), {
+      driverKind: CODEX_DRIVER,
+      continuationKey: currentKey,
+    });
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

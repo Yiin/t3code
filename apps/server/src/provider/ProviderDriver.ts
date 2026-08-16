@@ -78,6 +78,7 @@ export interface ProviderInstance {
 export interface ProviderContinuationIdentity {
   readonly driverKind: ProviderDriverKind;
   readonly continuationKey: string;
+  readonly legacyContinuationKeys?: ReadonlyArray<string> | undefined;
 }
 
 export function defaultProviderContinuationIdentity(input: {

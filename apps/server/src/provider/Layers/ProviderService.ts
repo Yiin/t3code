@@ -304,6 +304,15 @@ interface PersistedContinuationIdentity {
   readonly continuationKey: string;
 }
 
+function toPersistedContinuationIdentity(
+  identity: ProviderContinuationIdentity,
+): PersistedContinuationIdentity {
+  return {
+    driverKind: identity.driverKind,
+    continuationKey: identity.continuationKey,
+  };
+}
+
 /**
  * Read the continuation identity a past write left on the binding.
  *
@@ -351,6 +360,10 @@ function readPersistedContinuationIdentity(
  * genuinely different continuation group) still starts fresh — the legacy
  * format cannot weaken real isolation because it never named anything more
  * specific than driver + instance to begin with.
+ *
+ * A driver may also list continuation keys emitted by an older layout. These
+ * keys remain valid across an account swap, then the next write stamps the
+ * current identity and removes the compatibility path from persisted state.
  */
 function continuationIdentityContinues(
   persistedIdentity: PersistedContinuationIdentity | undefined,
@@ -365,6 +378,11 @@ function continuationIdentityContinues(
     return false;
   }
   if (persistedIdentity.continuationKey === currentIdentity.continuationKey) {
+    return true;
+  }
+  if (
+    currentIdentity.legacyContinuationKeys?.includes(persistedIdentity.continuationKey) === true
+  ) {
     return true;
   }
   if (bindingInstanceId === undefined) {
@@ -1547,7 +1565,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           // Record which continuation domain the cursor we are about to persist
           // belongs to. If the instance is reconfigured later, a reader can tell
           // the cursor is dead instead of handing it to a stranger.
-          continuationIdentity: instanceInfo.continuationIdentity,
+          continuationIdentity: toPersistedContinuationIdentity(instanceInfo.continuationIdentity),
           // Persist the project context so a post-restart recovery can rebuild
           // the T3_* injection for this thread.
           ...(parsed.projectId !== undefined && parsed.workspaceRoot !== undefined
@@ -1637,7 +1655,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         runtimePayload: {
           ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
           ...(turnContinuationIdentity !== undefined
-            ? { continuationIdentity: turnContinuationIdentity }
+            ? { continuationIdentity: toPersistedContinuationIdentity(turnContinuationIdentity) }
             : {}),
           activeTurnId: turn.turnId,
           lastRuntimeEvent: "provider.sendTurn",

@@ -58,6 +58,7 @@ import {
 } from "../providerUpdateSettings.ts";
 import {
   makeClaudeCapabilitiesCacheKey,
+  makeClaudeLegacyContinuationKeys,
   materializeClaudeShadowHome,
   resolveClaudeHomeLayout,
 } from "./ClaudeHome.ts";
@@ -163,6 +164,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         env: processEnv,
       });
       const continuationGroupKey = layout.continuationKey;
+      // Legacy keys derive from the ORIGINAL config: its homePath is the
+      // shared home, which is the continuation key's basis. `effectiveConfig`
+      // holds the shadow home in overlay mode and would name the wrong shared
+      // key, so every legacy key would survive the equals-shared filter.
+      const legacyContinuationKeys = yield* makeClaudeLegacyContinuationKeys({
+        config,
+        accountsDir: (yield* ServerConfig).accountsDir,
+      });
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
@@ -240,6 +249,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationIdentity: {
           ...fallbackContinuationIdentity,
           continuationKey: continuationGroupKey,
+          ...(legacyContinuationKeys.length > 0 ? { legacyContinuationKeys } : {}),
         },
         displayName,
         accentColor,
