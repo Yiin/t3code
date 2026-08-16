@@ -104,7 +104,7 @@ describe("provider credential homes", () => {
   it.each([
     [claude, "shadowHomePath"],
     [codex, "shadowHomePath"],
-    [kimi, "homePath"],
+    [kimi, "shadowHomePath"],
     [opencode, "dataHomePath"],
   ] as const)("maps %s to %s", (driver, field) => {
     const original = instance({ driver, config: { binaryPath: "provider" } });

@@ -5,7 +5,6 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { ClaudeSettings } from "@t3tools/contracts";
 

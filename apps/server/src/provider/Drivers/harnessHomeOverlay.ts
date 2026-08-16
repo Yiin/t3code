@@ -13,7 +13,8 @@ export interface HarnessHomeManifest {
   readonly label: string;
   readonly continuationKeyPrefix: string;
   readonly sharedEntries: readonly string[];
-  readonly sharedFileEntries: readonly string[];
+  /** Shared single files symlinked like directories. Optional: most manifests have none. */
+  readonly sharedFileEntries?: readonly string[];
   readonly privateEntries: readonly string[];
   readonly credentialEntries: readonly string[];
   readonly shadowLocalEntries: readonly string[];
@@ -283,7 +284,7 @@ export const materializeHarnessHomeOverlay = Effect.fn("materializeHarnessHomeOv
   const localEntries = new Set(manifest.shadowLocalEntries);
   const entries = new Set([
     ...manifest.sharedEntries,
-    ...manifest.sharedFileEntries,
+    ...(manifest.sharedFileEntries ?? []),
     ...sharedEntries.filter(
       (entry) =>
         !privateEntries.has(entry) && !credentialEntries.has(entry) && !localEntries.has(entry),

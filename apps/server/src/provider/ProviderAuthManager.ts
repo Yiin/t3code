@@ -84,7 +84,6 @@ interface ResolvedAuthTarget {
   readonly homePath: string;
   readonly sharedHomePath?: string;
   readonly authFilePath: string;
-  readonly sharedHomePath?: string;
 }
 
 type LoginEvent =
