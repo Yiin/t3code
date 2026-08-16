@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import * as PlatformError from "effect/PlatformError";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+import { type HarnessHomeManifest } from "./harnessHomeOverlay.ts";
 
 export interface CodexHomeLayout {
   readonly mode: "direct" | "authOverlay";
@@ -32,6 +33,17 @@ const KNOWN_SHARED_DIRECTORIES = [
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
 const REPLACEABLE_SHARED_RUNTIME_DIRECTORIES = new Set(["mcp-oauth-locks"]);
+
+export const codexHarnessHomeManifest: HarnessHomeManifest = {
+  driverKind: ProviderDriverKind.make("codex"),
+  label: "Codex",
+  continuationKeyPrefix: "codex:home:",
+  sharedEntries: KNOWN_SHARED_DIRECTORIES,
+  privateEntries: ["models_cache.json"],
+  credentialEntries: ["auth.json"],
+  shadowLocalEntries: [...SHADOW_LOCAL_ENTRY_NAMES],
+  replaceableRuntimeDirs: [...REPLACEABLE_SHARED_RUNTIME_DIRECTORIES],
+};
 
 function resolveHomePath(path: Path.Path, value: string | undefined): string {
   const expanded =
