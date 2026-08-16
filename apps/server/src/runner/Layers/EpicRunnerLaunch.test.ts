@@ -27,7 +27,11 @@ const snapshot = (sequential: boolean): EpicRunConfigSnapshot => ({
   fileResult: { _tag: "absent" },
   config: {
     ...DEFAULT_EPIC_RUN_CONFIG,
-    execution: { ...DEFAULT_EPIC_RUN_CONFIG.execution, sequential },
+    execution: {
+      ...DEFAULT_EPIC_RUN_CONFIG.execution,
+      mode: sequential ? "sequential" : "parallel",
+      sequential,
+    },
   },
   provenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   violations: [],
@@ -118,6 +122,24 @@ describe("EpicRunnerLaunch acquireLease", () => {
         snapshot(true),
       );
       expect(observed?.mode).toBe("sequential");
+    }),
+  );
+
+  it.effect("sends mode auto to preflight for a default-config run", () =>
+    Effect.gen(function* () {
+      let observed: EpicRunPreflightInput | undefined;
+      const launch = makeLaunch({ onPreflight: (preflightInput) => (observed = preflightInput) });
+      yield* launch.acquireLease(
+        EpicRunId.make("run-1"),
+        { cwd: "/repo", epicId: "epic-1" },
+        {
+          fileResult: { _tag: "absent" },
+          config: DEFAULT_EPIC_RUN_CONFIG,
+          provenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+          violations: [],
+        },
+      );
+      expect(observed?.mode).toBe("auto");
     }),
   );
 

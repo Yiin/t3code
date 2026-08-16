@@ -2013,23 +2013,49 @@ export const makeServerMergeDrain = (deps: {
             .getMergeState({ runId: runCtx.runId })
             .pipe(Effect.mapError(storeError("getMergeState"))),
         );
-        const head = yield* makeEpicRunMergeGit({
+        const mergeGit = makeEpicRunMergeGit({
           git: gitVcsDriver,
           setupWorktree: () => Effect.void,
-        })
-          .head(state.repositoryPath, state.baseBranch)
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new EpicRunnerDispatchError({
-                  commandType: "git.integration-resync",
-                  detail: cause.message,
-                  cause,
-                }),
+        });
+        const head = yield* mergeGit.head(state.repositoryPath, state.baseBranch).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.integration-resync",
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+        // Siblings too: an integration-fix or in-place iteration can commit in
+        // the real sibling checkouts, and the next drain compares each
+        // sibling's live head against the accepted one.
+        const siblingHeads = yield* Effect.forEach(
+          state.siblings,
+          (sibling) =>
+            mergeGit.head(sibling.repositoryPath).pipe(
+              Effect.map((siblingHead) => ({
+                repositoryPath: sibling.repositoryPath,
+                lastAcceptedHead: siblingHead,
+              })),
             ),
-          );
+          { concurrency: 1 },
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EpicRunnerDispatchError({
+                commandType: "git.integration-resync",
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
         yield* store
-          .advanceMergeIntegration({ runId: runCtx.runId, lastAcceptedHead: head })
+          .advanceMergeIntegration({
+            runId: runCtx.runId,
+            lastAcceptedHead: head,
+            ...(siblingHeads.length > 0 ? { siblingHeads } : {}),
+          })
           .pipe(Effect.mapError(storeError("advanceMergeIntegration")));
       }),
   };

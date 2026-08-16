@@ -131,6 +131,34 @@ In a terminal, the harness is the CLI you launched from.
 after `--`, and reports no per-iteration cost, so a Prime run shows no spend.
 Provider-specific setup lives in the [Prime Agent guide](./providers/prime.md).
 
+## Execution mode
+
+`execution.mode` in `.t3code/epic-run.json` selects how iterations run:
+
+- `auto` (default) picks per dispatch wave. A lone ready child with nothing
+  else in flight runs in place: the base checkout, a direct commit, no
+  worktree, no merge queue. Two or more ready children run pooled: one
+  worktree and `epic/<child-id>` branch each, landed through the merge queue.
+  While an in-place iteration runs, nothing else is dispatched and the merge
+  drain waits, because that worker can move the base branch. Merge-fix and
+  integration-fix children always run pooled; they assume branch-based work.
+  A run with `vcs.runOwnedBaseBranch` never runs in place: the real checkout
+  stays on the operator's branch while the merge state tracks
+  `epic/<epicId>/base`, so an in-place commit would land outside the run's
+  history.
+- `parallel` always runs pooled.
+- `sequential` always runs in place and forces `parallel.workers` to 1.
+
+An in-place auto iteration that commits resyncs the merge state's accepted
+heads (main and siblings), the same rule an integration-fix child follows.
+Without it the next drain would read the run's own commit as an external move
+and fail.
+
+`execution.sequential` is the legacy alias. Set only it, and true maps to
+`sequential`, false to `parallel`. Set both and disagree, and `mode` wins with
+a config warning. Runs persisted before `mode` existed decode their mode from
+the stored flag, so a resumed run keeps its original behavior.
+
 ## Run lock
 
 Only one runner may own an epic. Epic-targeted `ralph`, `cook-epic`, and the T3

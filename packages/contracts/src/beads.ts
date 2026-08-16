@@ -99,7 +99,7 @@ export const BeadsStatusResult = Schema.Union([
 ]);
 export type BeadsStatusResult = typeof BeadsStatusResult.Type;
 
-export const EpicRunPreflightMode = Schema.Literals(["parallel", "sequential"]);
+export const EpicRunPreflightMode = Schema.Literals(["auto", "parallel", "sequential"]);
 export type EpicRunPreflightMode = typeof EpicRunPreflightMode.Type;
 
 /**

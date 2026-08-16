@@ -451,10 +451,14 @@ const interruptedRun = (cwd: string): EpicRun => ({
   runtimeMode: "full-access",
   config: {
     ...DEFAULT_EPIC_RUN_CONFIG,
-    execution: { sequential: true },
+    execution: { mode: "sequential", sequential: true },
     parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: 1 },
   },
-  configProvenance: { ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE, "execution.sequential": "file" },
+  configProvenance: {
+    ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+    "execution.mode": "file" as const,
+    "execution.sequential": "file" as const,
+  },
   originThreadId: null,
   status: "running",
   maxIterations: 2,

@@ -224,7 +224,7 @@ export const makeEpicRunnerLaunch = (deps: {
         {
           workspaceRoot: input.cwd,
           epicId: input.epicId,
-          mode: configSnapshot.config.execution.sequential ? "sequential" : "parallel",
+          mode: configSnapshot.config.execution.mode,
           // Resuming this run forgives this run's own integration leftovers and
           // its own in-flight worktrees. A fresh launch passes neither, so
           // nothing is forgiven there.

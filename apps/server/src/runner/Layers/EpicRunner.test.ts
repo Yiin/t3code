@@ -124,12 +124,13 @@ const persistedSequentialConfigSnapshot = {
   config: {
     ...DEFAULT_EPIC_RUN_CONFIG,
     limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 7 },
-    execution: { sequential: true },
+    execution: { mode: "sequential", sequential: true },
     parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: 1 },
   },
   configProvenance: {
     ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
     "limits.maxIterations": "file" as const,
+    "execution.mode": "file" as const,
     "execution.sequential": "file" as const,
     "parallel.workers": "policy" as const,
   },
@@ -481,7 +482,7 @@ function createHarness(input: {
   let guardedStopRefusals = input.guardedStopRefusals ?? 0;
   let epicDescriptionReads = 0;
   const configReadRoots: string[] = [];
-  const preflightModes: Array<"parallel" | "sequential"> = [];
+  const preflightModes: Array<"auto" | "parallel" | "sequential"> = [];
   const preflightInputs: Array<EpicRunPreflightInput> = [];
   const provisionInputs: ProvisionWorktreeInput[] = [];
   const integrationProvisionInputs: ProvisionWorktreeInput[] = [];
@@ -1224,7 +1225,11 @@ function createHarness(input: {
         read: ({ repoRoot }) =>
           Effect.sync(() => {
             configReadRoots.push(repoRoot);
-            return input.configFileResult ?? { _tag: "absent" };
+            // These tests predate per-iteration auto mode: without an explicit
+            // config result they pin the pooled (parallel) path, so a solo
+            // ready child never takes the in-place fast path. Tests for the
+            // defaults themselves pass `{ _tag: "absent" }` explicitly.
+            return input.configFileResult ?? loadedConfigFile({ execution: { mode: "parallel" } });
           }),
       }),
     ),
@@ -2410,7 +2415,11 @@ describe("EpicRunner", () => {
   });
 
   it.live("persists default config and reads the exact run cwd once", () => {
-    const harness = createHarness({ script: [], readyOutput: "[]" });
+    const harness = createHarness({
+      script: [],
+      readyOutput: "[]",
+      configFileResult: { _tag: "absent" },
+    });
     return Effect.gen(function* () {
       const runner = yield* EpicRunner;
       const run = yield* runner.startRun({
@@ -2427,7 +2436,7 @@ describe("EpicRunner", () => {
       assert.deepStrictEqual(stored.configProvenance, DEFAULT_EPIC_RUN_CONFIG_PROVENANCE);
       assert.strictEqual(stored.maxIterations, DEFAULT_EPIC_RUN_CONFIG.limits.maxIterations);
       assert.deepStrictEqual(harness.configReadRoots, ["/tmp/epic-runner-repo"]);
-      assert.deepStrictEqual(harness.preflightModes, ["parallel"]);
+      assert.deepStrictEqual(harness.preflightModes, ["auto"]);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -6254,7 +6263,7 @@ describe("EpicRunner", () => {
   // WHOSE tree a dirty path belongs to, and a resume can be either mode, so the
   // resume intent never replaces it.
   for (const [label, configSnapshot, expectedMode] of [
-    ["parallel", defaultConfigSnapshot, "parallel"],
+    ["auto", defaultConfigSnapshot, "auto"],
     ["sequential", persistedSequentialConfigSnapshot, "sequential"],
   ] as const) {
     it.live(`asks the boot preflight for the ${label} mode a ${label} run persisted`, () => {
@@ -6740,7 +6749,7 @@ describe("EpicRunner", () => {
         yield* settle;
 
         // The lease was taken as a resume, in the mode the run persisted.
-        assert.strictEqual(harness.preflightModes[0], "parallel");
+        assert.strictEqual(harness.preflightModes[0], "auto");
         assert.strictEqual(harness.preflightInputs[0]?.intent, "resume");
         // Nothing fresh was started and nothing in flight was torn down.
         assert.lengthOf(harness.commandsOfType("thread.create"), 0);
@@ -7013,11 +7022,12 @@ describe("EpicRunner", () => {
   const sequentialOverrides = {
     config: {
       ...DEFAULT_EPIC_RUN_CONFIG,
-      execution: { sequential: true },
+      execution: { mode: "sequential", sequential: true },
       parallel: { ...DEFAULT_EPIC_RUN_CONFIG.parallel, workers: 1 },
     },
     configProvenance: {
       ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+      "execution.mode": "file" as const,
       "execution.sequential": "file" as const,
     },
   } satisfies Partial<EpicRun>;
@@ -8040,6 +8050,27 @@ describe("EpicRunner", () => {
       assert.strictEqual(harness.commandsOfType("thread.create")[0]?.branch, null);
       assert.deepStrictEqual(harness.provisionInputs, []);
       assert.deepStrictEqual(harness.setupInputs, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.live("auto mode runs a lone ready child in place", () => {
+    const harness = createHarness({
+      script: [{ text: "RALPH_DONE", head: "head-0" }],
+      workspaceRoot: "/tmp/epic-runner-repo",
+      // Absent config resolves to the defaults, whose execution mode is auto.
+      configFileResult: { _tag: "absent" },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRun();
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "done");
+      // In place: no worker worktree, no branch — but the integration
+      // worktree is still provisioned for later pooled waves.
+      assert.strictEqual(harness.commandsOfType("thread.create")[0]?.worktreePath, null);
+      assert.strictEqual(harness.commandsOfType("thread.create")[0]?.branch, null);
+      assert.deepStrictEqual(harness.provisionInputs, []);
+      assert.strictEqual(harness.integrationProvisionInputs.length, 1);
+      assert.deepStrictEqual(harness.preflightModes, ["auto"]);
     }).pipe(Effect.provide(harness.layer));
   });
 

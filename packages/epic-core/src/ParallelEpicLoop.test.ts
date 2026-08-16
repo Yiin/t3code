@@ -125,6 +125,10 @@ const issue = (
 const config = (override: Partial<EpicRunConfig> = {}): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
   ...override,
+  // These tests predate per-iteration auto mode: they pin the pooled
+  // (parallel) path explicitly so the solo-wave in-place fast path never
+  // triggers unless a test opts in with its own `execution` override.
+  execution: { ...DEFAULT_EPIC_RUN_CONFIG.execution, mode: "parallel", ...override.execution },
   limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 10, ...override.limits },
   server: {
     ...DEFAULT_EPIC_RUN_CONFIG.server,
@@ -160,6 +164,8 @@ const fixture = (input: {
   readonly childTitle?: string;
   readonly initialChildStatus?: string;
   readonly sequential?: boolean;
+  /** Persisted worker cap on the run row; defaults to 1. */
+  readonly workers?: number;
   readonly runConfig?: EpicRunConfig;
   readonly policy?: PoolPolicy;
   readonly providers?: ReadonlyArray<ServerProvider>;
@@ -282,7 +288,7 @@ const fixture = (input: {
     originThreadId: null,
     status: "running",
     maxIterations: 10,
-    workers: 1,
+    workers: input.workers ?? 1,
     iterationsDispatched: 0,
     iterationsCompleted: 0,
     currentThreadId: null,
@@ -347,6 +353,7 @@ const fixture = (input: {
   const stopForcedCalls: Array<{ readonly threadId: string; readonly graceSeconds: number }> = [];
   const interruptForcedCalls: string[] = [];
   const releasedClaims: string[] = [];
+  const acquireInputs: Array<{ readonly issueId: string; readonly sequential: boolean }> = [];
   const enqueuedMerges: Array<Parameters<MergeDrainShape["enqueueMerge"]>[0]> = [];
   const parkedBranchReads: string[] = [];
   const conflictProbes: Array<{ readonly base: string; readonly branch: string }> = [];
@@ -521,6 +528,10 @@ const fixture = (input: {
     acquire: (_runCtx, acquireInput) =>
       Effect.sync((): IterationWorkspace => {
         acquireCalls.push(acquireInput.issueId);
+        acquireInputs.push({
+          issueId: acquireInput.issueId,
+          sequential: acquireInput.sequential,
+        });
         if (acquireInput.sequential) {
           return {
             cwd: "/repo",
@@ -857,6 +868,7 @@ const fixture = (input: {
     stopForcedCalls,
     interruptForcedCalls,
     releasedClaims,
+    acquireInputs,
     enqueuedMerges,
     parkedBranchReads,
     conflictProbes,
@@ -1001,6 +1013,72 @@ it.live(
 
       assert.equal(test.iterations[0]?.turnStatus, "completed");
     }),
+);
+
+it.live("auto mode runs a lone ready child in place and resyncs the accepted head", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      // Auto provisions the merge infrastructure; only the solo wave goes in
+      // place. `sequential: false` keeps the fixture's integration fakes on.
+      sequential: false,
+      runConfig: config({ execution: { mode: "auto", sequential: false } }),
+      attempts: [{ commit: true, close: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
+    // In place: the base checkout, no branch, nothing for the merge queue.
+    assert.deepEqual(test.acquireInputs, [{ issueId: "epic.1", sequential: true }]);
+    assert.deepEqual(test.enqueuedMerges, []);
+    // The commit moved the base, so the merge state's accepted head resynced.
+    assert.ok(test.ordering.includes("merge:recordIntegratedHead"));
+    // A branchless iteration never triggers a drain.
+    assert.isFalse(test.ordering.includes("merge:drain"));
+  }),
+);
+
+it.live("auto mode keeps a merge-fix titled solo child pooled", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      childTitle: "Merge fix: land epic/epic.0 (conflict)",
+      runConfig: config({ execution: { mode: "auto", sequential: false } }),
+      attempts: [{ commit: true, close: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(test.acquireInputs, [{ issueId: "epic.1", sequential: false }]);
+    assert.deepEqual(
+      test.enqueuedMerges.map((merge) => merge.branch),
+      ["epic/epic.0"],
+    );
+  }),
+);
+
+it.live("auto mode pools a multi-child frontier", () =>
+  Effect.gen(function* () {
+    let frontierServed = false;
+    const test = fixture({
+      sequential: false,
+      workers: 2,
+      runConfig: config({ execution: { mode: "auto", sequential: false } }),
+      frontier: () => {
+        if (frontierServed) return { _tag: "empty" };
+        frontierServed = true;
+        return { _tag: "children", issueIds: ["epic.1", "epic.2"] };
+      },
+      attempts: [{ commit: true, close: true }, { commit: true }],
+    });
+    yield* test.run;
+
+    assert.equal(test.runRecord().status, "done");
+    assert.deepEqual(test.acquireInputs, [
+      { issueId: "epic.1", sequential: false },
+      { issueId: "epic.2", sequential: false },
+    ]);
+  }),
 );
 
 it.live("fails the run as infra:merge-reconciliation when workspace release fails", () =>

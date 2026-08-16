@@ -359,6 +359,20 @@ export type InitializeEpicRunMergeStateInput = typeof InitializeEpicRunMergeStat
 export const AdvanceEpicRunMergeIntegrationInput = Schema.Struct({
   runId: EpicRunId,
   lastAcceptedHead: Schema.String,
+  /**
+   * New accepted heads for every sibling; absent for single-repo runs. An
+   * in-place auto-mode iteration can commit in the real sibling checkouts,
+   * so a resync that only advanced the main head would leave the next drain
+   * reading this run's own sibling commits as an external move.
+   */
+  siblingHeads: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        repositoryPath: Schema.String,
+        lastAcceptedHead: Schema.String,
+      }),
+    ),
+  ),
 });
 export type AdvanceEpicRunMergeIntegrationInput = typeof AdvanceEpicRunMergeIntegrationInput.Type;
 

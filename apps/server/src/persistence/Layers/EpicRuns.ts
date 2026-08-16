@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaGetter from "effect/SchemaGetter";
 import * as Struct from "effect/Struct";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
@@ -54,10 +55,45 @@ import {
   type EpicRunStoreShape,
 } from "../Services/EpicRuns.ts";
 
+type EpicRunConfigEncoded = (typeof EpicRunConfigSchema)["Encoded"];
+
+/**
+ * Rows persisted before `execution.mode` existed carry only the legacy
+ * `sequential` boolean. A plain decode would fill the schema default ("auto")
+ * and silently change a resumed run's behavior, so pin the mode from the
+ * stored flag first: true -> "sequential", false -> "parallel".
+ */
+const normalizeLegacyExecutionMode = (encoded: unknown): EpicRunConfigEncoded => {
+  if (typeof encoded !== "object" || encoded === null || Array.isArray(encoded)) {
+    return encoded as EpicRunConfigEncoded;
+  }
+  const record = encoded as Record<string, unknown>;
+  const execution = record.execution;
+  if (typeof execution !== "object" || execution === null || Array.isArray(execution)) {
+    return encoded as EpicRunConfigEncoded;
+  }
+  if ("mode" in execution) return encoded as EpicRunConfigEncoded;
+  const executionRecord = execution as Record<string, unknown>;
+  return {
+    ...record,
+    execution: {
+      ...executionRecord,
+      mode: executionRecord.sequential === true ? "sequential" : "parallel",
+    },
+  } as EpicRunConfigEncoded;
+};
+
+const EpicRunConfigJsonColumn = Schema.fromJsonString(Schema.Unknown).pipe(
+  Schema.decodeTo(EpicRunConfigSchema, {
+    decode: SchemaGetter.transform(normalizeLegacyExecutionMode),
+    encode: SchemaGetter.transform((config) => config),
+  }),
+);
+
 const EpicRunDbRow = EpicRun.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
-    config: Schema.fromJsonString(EpicRunConfigSchema),
+    config: EpicRunConfigJsonColumn,
     configProvenance: Schema.fromJsonString(EpicRunConfigProvenanceSchema),
   }),
 );
@@ -1068,17 +1104,49 @@ const makeEpicRunStore = Effect.gen(function* () {
     );
 
   const advanceMergeIntegration: EpicRunStoreShape["advanceMergeIntegration"] = (input) =>
-    advanceEpicRunMergeIntegration(input).pipe(
-      Effect.mapError(
-        toEpicRunStoreError(
-          "EpicRunStore.advanceMergeIntegration:query",
-          "EpicRunStore.advanceMergeIntegration:encodeRequest",
-          {
-            runId: input.runId,
-          },
+    sql
+      .withTransaction(
+        advanceEpicRunMergeIntegration(input).pipe(
+          Effect.andThen(
+            Effect.suspend(() => {
+              const siblingHeads = input.siblingHeads;
+              if (siblingHeads === undefined) return Effect.void;
+              return getEpicRunMergeStateRow({ runId: input.runId }).pipe(
+                Effect.flatMap(
+                  Option.match({
+                    onNone: () => Effect.void,
+                    onSome: (state) =>
+                      advanceEpicRunMergeSiblingHeads({
+                        runId: input.runId,
+                        siblings: JSON.stringify(
+                          state.siblings.map((sibling) => {
+                            const moved = siblingHeads.find(
+                              (head) => head.repositoryPath === sibling.repositoryPath,
+                            );
+                            return moved === undefined
+                              ? sibling
+                              : { ...sibling, lastAcceptedHead: moved.lastAcceptedHead };
+                          }),
+                        ),
+                      }),
+                  }),
+                ),
+              );
+            }),
+          ),
         ),
-      ),
-    );
+      )
+      .pipe(
+        Effect.mapError(
+          toEpicRunStoreError(
+            "EpicRunStore.advanceMergeIntegration:query",
+            "EpicRunStore.advanceMergeIntegration:encodeRequest",
+            {
+              runId: input.runId,
+            },
+          ),
+        ),
+      );
 
   const beginParkMerge: EpicRunStoreShape["beginParkMerge"] = (input) =>
     sql

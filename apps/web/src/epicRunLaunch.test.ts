@@ -23,13 +23,18 @@ const stubPreflightResult = (
 });
 
 describe("epicRunPreflightModeForConfig", () => {
-  it("preflights a launch that sets no execution key as parallel", () => {
-    expect(epicRunPreflightModeForConfig(undefined)).toBe("parallel");
-    expect(epicRunPreflightModeForConfig({ vcs: { noPush: true } })).toBe("parallel");
-    expect(DEFAULT_EPIC_RUN_CONFIG.execution.sequential).toBe(false);
+  it("preflights a launch that sets no execution key as auto", () => {
+    expect(epicRunPreflightModeForConfig(undefined)).toBe("auto");
+    expect(epicRunPreflightModeForConfig({ vcs: { noPush: true } })).toBe("auto");
+    expect(DEFAULT_EPIC_RUN_CONFIG.execution.mode).toBe("auto");
   });
 
-  it("follows the execution flag the launch carries", () => {
+  it("follows the execution mode the launch carries", () => {
+    expect(epicRunPreflightModeForConfig({ execution: { mode: "parallel" } })).toBe("parallel");
+    expect(epicRunPreflightModeForConfig({ execution: { mode: "sequential" } })).toBe("sequential");
+  });
+
+  it("maps the legacy execution flag the launch carries", () => {
     expect(epicRunPreflightModeForConfig({ execution: { sequential: true } })).toBe("sequential");
     expect(epicRunPreflightModeForConfig({ execution: { sequential: false } })).toBe("parallel");
   });

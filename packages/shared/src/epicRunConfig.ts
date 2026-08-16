@@ -7,6 +7,7 @@ import {
   type EpicRunConfigOverride,
   type EpicRunConfigProvenance,
   type EpicRunConfigProvenanceSource,
+  type ExecutionMode,
 } from "@t3tools/contracts";
 
 export type { EpicRunConfigProvenance, EpicRunConfigProvenanceSource };
@@ -97,6 +98,33 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
 
   const resolved = config as unknown as EpicRunConfigValue;
   const violations: EpicRunConfigViolation[] = [];
+
+  // Mode precedence: an explicit `execution.mode` wins. An explicit legacy
+  // `execution.sequential` maps onto the mode (true -> "sequential", false ->
+  // "parallel"). Neither means "auto".
+  const modeSource = provenance["execution.mode"] ?? "default";
+  const sequentialSource = provenance["execution.sequential"] ?? "default";
+  if (modeSource !== "default" && sequentialSource !== "default") {
+    const legacyMode = resolved.execution.sequential ? "sequential" : "parallel";
+    if (legacyMode !== resolved.execution.mode) {
+      violations.push({
+        key: "execution.mode",
+        message: "Conflicts with execution.sequential; execution.mode wins.",
+      });
+    }
+  } else if (modeSource === "default" && sequentialSource !== "default") {
+    (resolved.execution as { mode: ExecutionMode }).mode = resolved.execution.sequential
+      ? "sequential"
+      : "parallel";
+    provenance["execution.mode"] = sequentialSource;
+  }
+  // Keep the legacy boolean coherent for readers that have not moved to mode.
+  const effectiveSequential = resolved.execution.mode === "sequential";
+  if (resolved.execution.sequential !== effectiveSequential) {
+    (resolved.execution as { sequential: boolean }).sequential = effectiveSequential;
+    provenance["execution.sequential"] = provenance["execution.mode"] ?? "default";
+  }
+
   if (
     !resolved.gate.disabled &&
     resolved.gate.command === null &&
@@ -113,7 +141,7 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
       message: "The selected harness cannot enforce the budget limit.",
     });
   }
-  if (resolved.execution.sequential && resolved.parallel.workers > 1) {
+  if (resolved.execution.mode === "sequential" && resolved.parallel.workers > 1) {
     const workersWereExplicit = provenance["parallel.workers"] !== "default";
     (resolved.parallel as { workers: number }).workers = 1;
     provenance["parallel.workers"] = "policy";

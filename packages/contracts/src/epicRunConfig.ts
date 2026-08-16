@@ -61,6 +61,8 @@ const ProviderModelSelection = Schema.NullOr(ModelSelection);
 const NoPush = Schema.Boolean;
 const OrientationFile = Schema.NullOr(RepositoryContainedPath);
 const ExecutionSequential = Schema.Boolean;
+export const ExecutionMode = Schema.Literals(["auto", "parallel", "sequential"]);
+export type ExecutionMode = typeof ExecutionMode.Type;
 const ParallelSiblings = Schema.Array(RelativePath).check(Schema.isUnique());
 const ParallelWorkers = PositiveInt;
 const RuntimeModeSchema = RuntimeMode;
@@ -121,6 +123,8 @@ const OrientationConfig = Schema.Struct({
 });
 
 const ExecutionConfig = Schema.Struct({
+  mode: defaultTo(ExecutionMode, "auto"),
+  /** Legacy alias for `mode`: true maps to "sequential", false to "parallel". */
   sequential: defaultTo(ExecutionSequential, false),
 });
 
@@ -228,6 +232,7 @@ export const EpicRunConfigOverride = Schema.Struct({
   ),
   execution: Schema.optionalKey(
     Schema.Struct({
+      mode: Schema.optionalKey(ExecutionMode),
       sequential: Schema.optionalKey(ExecutionSequential),
     }),
   ),
@@ -426,10 +431,17 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     control: "number",
   },
   {
+    key: "execution.mode",
+    scope: "core",
+    label: "Execution mode",
+    doc: "Auto runs a solo ready child in place and pools multiple ready children.",
+    control: "select",
+  },
+  {
     key: "execution.sequential",
     scope: "core",
     label: "Sequential execution",
-    doc: "Runs one worker in the base checkout.",
+    doc: "Legacy alias for execution mode: on maps to sequential, off to parallel.",
     control: "toggle",
   },
   {

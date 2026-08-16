@@ -355,15 +355,16 @@ export const layer = Layer.effect(
         // resume's own missing-worktree report. A sequential launch still
         // issues no worktree command at all.
         const worktrees =
-          input.mode === "parallel" || resumeWorktreePaths.size > 0
+          input.mode !== "sequential" || resumeWorktreePaths.size > 0
             ? parseWorktreeList(
                 (yield* runGit(input.workspaceRoot, ["worktree", "list", "--porcelain"])).stdout,
               )
             : [];
 
-        if (input.mode === "sequential") {
-          // Sequential workers commit directly on the base branch in the main
-          // checkout: any dirt — tracked or untracked — is fatal.
+        if (input.mode !== "parallel") {
+          // Sequential and in-place auto workers commit directly on the base
+          // branch in the main checkout: any dirt — tracked or untracked — is
+          // fatal.
           const dirtyPaths = [...trackedDirtyPaths, ...untrackedPaths].toSorted();
           if (dirtyPaths.length > 0) {
             if (policy.baseTreeDirt === "blocker") {
@@ -606,7 +607,7 @@ export const layer = Layer.effect(
               cwd: input.workspaceRoot,
               siblings: siblingEntries,
               pushEnabled: !configSnapshot.config.vcs.noPush,
-              layoutMode: input.mode === "parallel",
+              layoutMode: input.mode !== "sequential",
             }),
           );
           if (resolved._tag === "Failure") {

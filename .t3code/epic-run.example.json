@@ -15,7 +15,7 @@
   "provider": { "modelSelection": null },
   "vcs": { "noPush": false },
   "orientation": { "file": null },
-  "execution": { "sequential": false },
+  "execution": { "mode": "auto", "sequential": false },
   "parallel": { "siblings": [], "workers": 3 },
   "runtime": { "mode": "full-access" },
   "retry": { "rateLimitBackoffSeconds": 120 },

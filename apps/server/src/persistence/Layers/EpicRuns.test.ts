@@ -98,6 +98,38 @@ describe("EpicRunStore", () => {
     }).pipe(Effect.provide(epicRunStoreLayer)),
   );
 
+  it.effect("derives the execution mode of a pre-mode row from its legacy flag", () =>
+    Effect.gen(function* () {
+      const store = yield* EpicRunStore;
+      const sql = yield* SqlClient.SqlClient;
+      // Rows written before `execution.mode` existed carry only the legacy
+      // boolean. Decode must pin the mode from it, not fill the new "auto"
+      // default and silently change a resumed run.
+      yield* store.upsertRun(makeRun({ runId: EpicRunId.make("run-legacy-seq") }));
+      yield* store.upsertRun(makeRun({ runId: EpicRunId.make("run-legacy-par") }));
+      yield* sql`
+        UPDATE epic_runs SET config_json = '{"execution":{"sequential":true}}'
+        WHERE run_id = 'run-legacy-seq'
+      `;
+      yield* sql`
+        UPDATE epic_runs SET config_json = '{"execution":{"sequential":false}}'
+        WHERE run_id = 'run-legacy-par'
+      `;
+
+      const sequential = Option.getOrThrow(
+        yield* store.getRun({ runId: EpicRunId.make("run-legacy-seq") }),
+      );
+      assert.strictEqual(sequential.config.execution.mode, "sequential");
+      assert.strictEqual(sequential.config.execution.sequential, true);
+
+      const parallel = Option.getOrThrow(
+        yield* store.getRun({ runId: EpicRunId.make("run-legacy-par") }),
+      );
+      assert.strictEqual(parallel.config.execution.mode, "parallel");
+      assert.strictEqual(parallel.config.execution.sequential, false);
+    }).pipe(Effect.provide(epicRunStoreLayer)),
+  );
+
   it.effect("round-trips non-default config and provenance as JSON", () =>
     Effect.gen(function* () {
       const store = yield* EpicRunStore;
@@ -107,11 +139,12 @@ describe("EpicRunStore", () => {
         config: {
           ...DEFAULT_EPIC_RUN_CONFIG,
           limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxIterations: 7 },
-          execution: { sequential: true },
+          execution: { mode: "sequential" as const, sequential: true },
         },
         configProvenance: {
           ...DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
           "limits.maxIterations": "file",
+          "execution.mode": "override",
           "execution.sequential": "override",
           "parallel.workers": "policy",
         },

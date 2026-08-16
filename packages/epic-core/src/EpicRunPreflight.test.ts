@@ -35,7 +35,7 @@ const run = (
     readonly config?: EpicRunConfigFileResult;
     readonly configSnapshot?: EpicRunConfigSnapshot;
     readonly onConfigRead?: () => void;
-    readonly mode?: "parallel" | "sequential";
+    readonly mode?: "auto" | "parallel" | "sequential";
     readonly intent?: "launch" | "resume";
     readonly workspaceExists?: boolean;
     readonly worktreeList?: string;

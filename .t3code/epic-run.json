@@ -3,7 +3,6 @@
     "command": "vp check && vpr typecheck && vp run --concurrency-limit 2 test",
     "disabled": false
   },
-  "execution": { "sequential": true },
   "provider": {
     "modelSelection": {
       "instanceId": "claudeAgent",

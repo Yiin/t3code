@@ -112,6 +112,67 @@ describe("resolveEpicRunConfig", () => {
     });
   });
 
+  it("defaults execution mode to auto with no clamp", () => {
+    const result = resolveEpicRunConfig({
+      file: null,
+      environment: null,
+      override: null,
+      harness: null,
+    });
+    expect(result.config.execution.mode).toBe("auto");
+    expect(result.config.execution.sequential).toBe(false);
+    expect(result.config.parallel.workers).toBe(3);
+  });
+
+  it("maps the legacy sequential flag onto the mode", () => {
+    const sequential = resolveEpicRunConfig({
+      file: { execution: { sequential: true } },
+      environment: null,
+      override: null,
+      harness: null,
+    });
+    expect(sequential.config.execution.mode).toBe("sequential");
+    expect(sequential.provenance["execution.mode"]).toBe("file");
+    expect(sequential.config.parallel.workers).toBe(1);
+
+    const parallel = resolveEpicRunConfig({
+      file: { execution: { sequential: false } },
+      environment: null,
+      override: null,
+      harness: null,
+    });
+    expect(parallel.config.execution.mode).toBe("parallel");
+    expect(parallel.config.parallel.workers).toBe(3);
+  });
+
+  it("lets an explicit mode win over a conflicting legacy flag", () => {
+    const result = resolveEpicRunConfig({
+      file: { execution: { sequential: true } },
+      environment: null,
+      override: { execution: { mode: "auto" } },
+      harness: null,
+    });
+    expect(result.config.execution.mode).toBe("auto");
+    expect(result.config.execution.sequential).toBe(false);
+    expect(result.config.parallel.workers).toBe(3);
+    expect(result.violations).toContainEqual({
+      key: "execution.mode",
+      message: "Conflicts with execution.sequential; execution.mode wins.",
+    });
+  });
+
+  it("clamps workers for an explicit sequential mode and keeps the flag coherent", () => {
+    const result = resolveEpicRunConfig({
+      file: { execution: { mode: "sequential" }, parallel: { workers: 4 } },
+      environment: null,
+      override: null,
+      harness: null,
+    });
+    expect(result.config.execution.sequential).toBe(true);
+    expect(result.config.parallel.workers).toBe(1);
+    expect(result.provenance["parallel.workers"]).toBe("policy");
+  });
+
   it("allows an absent gate but rejects an explicitly enabled missing gate", () => {
     expect(
       resolveEpicRunConfig({ file: null, environment: null, override: null, harness: null })

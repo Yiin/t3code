@@ -459,6 +459,12 @@ type RunIterationResult =
       readonly providerTurnDispatched: boolean;
       readonly issueId: string;
       readonly iterationIndex: number;
+      /**
+       * True when the iteration's workspace had a branch, so a `done` outcome
+       * enqueued (or resynced) merge work the drain must pick up. In-place
+       * iterations have no branch and never need a drain.
+       */
+      readonly mergeCandidate: boolean;
       /** True when the loop reopened this child's standing claim after failure. */
       readonly claimReleased: boolean;
     }
@@ -531,6 +537,13 @@ interface ActiveIteration {
   modelSelection: ModelSelection;
   /** The policy role chosen from the child's title before dispatch. */
   role: EpicDispatchRole;
+  /**
+   * This worker runs in place (auto mode, lone ready child): it commits
+   * directly in the base checkout, so like an integration-fix child it can
+   * move the base branch. The pool loop refuses to drain or dispatch while
+   * one is active.
+   */
+  readonly inPlace: boolean;
   /**
    * This worker is an integration-fix child (t3code-sha), dispatched directly
    * onto the run's own base branch. Set as soon as the title is known — before
@@ -979,6 +992,12 @@ export const runParallelEpicLoop = (
     readonly runCtx: PoolRunContext;
     readonly run: import("./ports/RunJournal.ts").PersistedEpicRun;
     readonly selection: ReadyChildSelection;
+    /**
+     * Auto mode only: run this iteration in place — the base checkout, no
+     * worktree, no merge queue. Decided per dispatch wave from the ready
+     * frontier; always false in fixed parallel or sequential mode.
+     */
+    readonly inPlace: boolean;
     readonly onDispatched: (threadId: ThreadId) => void;
     /**
      * Fired once this iteration knows which selection it will dispatch on,
@@ -1141,7 +1160,6 @@ export const runParallelEpicLoop = (
       if (parseIntegrationFixTitle(issueEvidenceBefore.title ?? "") !== null) {
         args.onIntegrationFixDetected();
       }
-
       // One selection per dispatch, resolved from the child's own role. A
       // merge-fix child is an ordinary ready child everywhere else in the
       // loop, so its title is the only thing that names it.
@@ -1189,7 +1207,7 @@ export const runParallelEpicLoop = (
         workspace = yield* ports.workspace.acquire(args.runCtx, {
           issueId,
           issueTitle: issueEvidenceBefore.title?.trim() || issueId,
-          sequential: run.config.execution.sequential,
+          sequential: run.config.execution.mode === "sequential" || args.inPlace,
         });
       } else {
         const adopted = yield* ports.workspace
@@ -1197,7 +1215,7 @@ export const runParallelEpicLoop = (
             issueId,
             branch: resumedWorker.branch,
             worktreePath: resumedWorker.worktreePath,
-            sequential: run.config.execution.sequential,
+            sequential: run.config.execution.mode === "sequential" || args.inPlace,
           })
           .pipe(
             Effect.map((adoptedWorkspace) => ({
@@ -1745,7 +1763,13 @@ export const runParallelEpicLoop = (
       const noCommitChildClosed = evidenceVerdict?.accepted ?? false;
 
       const mergeStartedAtMs = yield* nowMillis;
-      if (!run.config.execution.sequential && workspace.branch !== null) {
+      // A branched workspace always goes through the merge queue. A workspace
+      // without a branch commits straight to the base checkout: an in-place
+      // auto-mode iteration, which must then resync the merge state's
+      // accepted heads so the next drain does not read this run's own commit
+      // as an external move. (A sequential run has no merge state at all, and
+      // never reaches this resync — `inPlace` is only ever true in auto mode.)
+      if (workspace.branch !== null) {
         const integrationFix = parseIntegrationFixTitle(issueEvidenceBefore.title ?? "");
         if (integrationFix !== null) {
           // The child was dispatched directly onto the run's base branch
@@ -1774,6 +1798,25 @@ export const runParallelEpicLoop = (
           yield* ports.mergeDrain
             .enqueueMerge({ runId, childId: originalChild, branch: workspace.branch })
             .pipe(Effect.mapError(journalError("enqueueMerge")));
+        }
+      } else if (args.inPlace) {
+        // Same resync rule as the integration-fix path above, on the same
+        // observable fact: any accepted head — main or sibling — moved.
+        const headAfter = yield* ports.vcs.headCommit(workspace.cwd);
+        const siblingHeadsAfter = yield* Effect.forEach(workspace.siblingWorktrees, (sibling) =>
+          Effect.map(ports.vcs.headCommit(sibling.worktreePath), (head) => ({
+            worktreePath: sibling.worktreePath,
+            head,
+          })),
+        );
+        const siblingMoved = siblingHeadsAfter.some((after) => {
+          const before = siblingHeadsBefore.find(
+            (entry) => entry.worktreePath === after.worktreePath,
+          );
+          return after.head !== null && after.head !== before?.head;
+        });
+        if ((headAfter !== null && headAfter !== headBefore) || siblingMoved) {
+          yield* ports.mergeDrain.recordIntegratedHead(args.runCtx);
         }
       }
 
@@ -1848,6 +1891,7 @@ export const runParallelEpicLoop = (
         providerTurnDispatched: true,
         issueId,
         iterationIndex,
+        mergeCandidate: workspace.branch !== null,
         claimReleased,
       } as const;
     }).pipe(
@@ -2483,6 +2527,7 @@ export const runParallelEpicLoop = (
       run: import("./ports/RunJournal.ts").PersistedEpicRun,
       selection: ReadyChildSelection,
       key: string,
+      inPlace: boolean,
     ) =>
       Effect.gen(function* () {
         // Resolved here, synchronously, before this iteration's fiber is
@@ -2525,6 +2570,7 @@ export const runParallelEpicLoop = (
           modelSelection:
             selection._tag === "resume" ? selection.worker.selection : run.modelSelection,
           role: "iteration-worker",
+          inPlace,
           isIntegrationFix,
         };
         active.set(key, activeIteration);
@@ -2532,6 +2578,7 @@ export const runParallelEpicLoop = (
           runCtx,
           run,
           selection,
+          inPlace,
           onDispatched: () => {
             activeIteration.charged = true;
           },
@@ -2604,7 +2651,10 @@ export const runParallelEpicLoop = (
         threadId: worker.threadId,
         resumeCount: worker.resumeCount,
       });
-      yield* launch(initialRun, { _tag: "resume", worker }, worker.issueId);
+      // Resumed workers are never in-place: the in-place style is a
+      // per-wave decision, and a stranded in-place iteration that comes back
+      // through resume keeps whatever workspace shape its row records.
+      yield* launch(initialRun, { _tag: "resume", worker }, worker.issueId, false);
     }
 
     while (true) {
@@ -2614,7 +2664,8 @@ export const runParallelEpicLoop = (
       // run's own base branch, and stays flagged active in this map through
       // its whole iteration — settlement, `recordIntegratedHead`, and its
       // `workspace.release` all happen before the loop ever removes it
-      // (`launch` above). Draining while one is active races the merge
+      // (`launch` above). An in-place auto-mode worker commits in the base
+      // checkout the same way. Draining while either is active races the merge
       // queue's own view of the base branch against the one worker allowed to
       // move it: a still-open trial sees the base moved out from under it
       // ("moved externally"), and a still-checked-out worktree refuses the
@@ -2622,9 +2673,11 @@ export const runParallelEpicLoop = (
       // costs nothing — no new dispatch happens either while a drain is
       // pending — and the settlement event that clears this flag is what
       // wakes the loop back up.
-      const integrationFixActive = [...active.values()].some((worker) => worker.isIntegrationFix);
+      const baseBranchWriterActive = [...active.values()].some(
+        (worker) => worker.isIntegrationFix || worker.inPlace,
+      );
 
-      if (drainBeforeDispatch && !integrationFixActive) {
+      if (drainBeforeDispatch && !baseBranchWriterActive) {
         const result = yield* ports.mergeDrain.drain(runCtx);
         if (result._tag === "fatal") {
           yield* withTransition(
@@ -2685,7 +2738,12 @@ export const runParallelEpicLoop = (
           0,
           policy.maxIterations - run.iterationsDispatched - uncharged,
         );
-        const slots = Math.min(Math.max(0, run.workers - active.size), remainingDispatches);
+        // An in-place worker owns the base checkout, so nothing else may run
+        // alongside it.
+        const inPlaceActive = [...active.values()].some((worker) => worker.inPlace);
+        const slots = inPlaceActive
+          ? 0
+          : Math.min(Math.max(0, run.workers - active.size), remainingDispatches);
 
         if (slots > 0) {
           const frontier = yield* ports.backlog
@@ -2723,9 +2781,35 @@ export const runParallelEpicLoop = (
                     .filter((issueId, index, issueIds) => issueIds.indexOf(issueId) === index)
                     .filter((issueId) => !active.has(issueId))
                     .map((issueId) => [issueId, { _tag: "child", issueId }] as const);
+            // Auto mode picks the workspace style per wave from the ready
+            // frontier: a lone ready child with nothing else in flight runs
+            // in place (base checkout, no worktree, no merge queue), several
+            // ready children run pooled. Merge-fix and integration-fix
+            // children assume branch-based work, so they always run pooled —
+            // deciding takes the child's title, one extra evidence read and
+            // only on solo waves. A run that owns its base branch never runs
+            // in place: the real checkout stays on the operator's branch
+            // while the merge state tracks `epic/<epicId>/base`, so an
+            // in-place commit would land outside the run's history.
+            let inPlaceWave = false;
+            const soloSelection = selections.length === 1 ? selections[0] : undefined;
+            if (
+              run.config.execution.mode === "auto" &&
+              !run.config.vcs.runOwnedBaseBranch &&
+              active.size === 0 &&
+              soloSelection !== undefined &&
+              soloSelection[1]._tag === "child"
+            ) {
+              const soloTitle =
+                (yield* ports.backlog.issueEvidence(input.cwd, soloSelection[1].issueId)).title ??
+                "";
+              inPlaceWave =
+                parseIntegrationFixTitle(soloTitle) === null &&
+                parseMergeFixTitle(soloTitle) === null;
+            }
             const launched = selections.slice(0, slots);
             for (const [key, selection] of launched) {
-              yield* launch(run, selection, key);
+              yield* launch(run, selection, key, inPlaceWave);
             }
             if (launched.length > 0) yield* noteProgress;
           }
@@ -2814,8 +2898,8 @@ export const runParallelEpicLoop = (
         completionProof,
       });
       if (
-        !run.config.execution.sequential &&
         settlement.exit.value._tag === "classified" &&
+        settlement.exit.value.mergeCandidate &&
         settlement.exit.value.outcome.kind === "done"
       ) {
         drainBeforeDispatch = true;

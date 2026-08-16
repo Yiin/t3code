@@ -3,6 +3,7 @@ import {
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   EPIC_RUN_CONFIG_FIELDS,
   EpicRunEngine,
+  ExecutionMode,
   RuntimeMode,
   type EnvironmentId,
   type EpicRunConfig,
@@ -44,6 +45,7 @@ export function EpicRunProvenanceChip(props: {
 /** Select option sets for the registry keys whose schema is a literal union. */
 function selectOptionsFor(key: string): readonly string[] | null {
   if (key === "engine") return EpicRunEngine.literals;
+  if (key === "execution.mode") return ExecutionMode.literals;
   if (key === "runtime.mode") return RuntimeMode.literals;
   return null;
 }
