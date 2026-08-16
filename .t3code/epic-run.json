@@ -10,5 +10,6 @@
       "options": [{ "id": "effort", "value": "high" }]
     }
   },
-  "vcs": { "runOwnedBaseBranch": true }
+  "vcs": { "runOwnedBaseBranch": true },
+  "execution": { "sequential": true }
 }
