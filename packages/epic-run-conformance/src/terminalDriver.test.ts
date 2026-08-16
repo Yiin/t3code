@@ -324,9 +324,42 @@ const probeWorkerScopeSupport = (): WorkerScopeSupport => {
   }
 };
 
-const runTerminalScenario = (
-  scenario: ConformanceScenario,
-): ReadonlyArray<EpicRunTranscriptEvent> => {
+interface TerminalScenarioResult {
+  readonly transcript: ReadonlyArray<EpicRunTranscriptEvent>;
+  /**
+   * The `worker-liveness` stage lines from the raw mailbox, one per event.
+   * A supervision divergence appends them so the report shows how far the
+   * machine got — idle seen, inspection started, verdict reached — instead of
+   * leaving `infra:timeout` to be explained by guesswork (t3code-bbl).
+   */
+  readonly liveness: string;
+}
+
+const livenessTrail = (mailboxText: string): string =>
+  mailboxText
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .flatMap((line) => {
+      try {
+        const event = JSON.parse(line) as {
+          readonly type?: unknown;
+          readonly iterationIndex?: unknown;
+          readonly issueId?: unknown;
+          readonly stage?: unknown;
+          readonly detail?: unknown;
+        };
+        return event.type === "worker-liveness"
+          ? [
+              `  [${String(event.iterationIndex)} ${String(event.issueId)}] ${String(event.stage)}: ${String(event.detail)}`,
+            ]
+          : [];
+      } catch {
+        return [];
+      }
+    })
+    .join("\n");
+
+const runTerminalScenario = (scenario: ConformanceScenario): TerminalScenarioResult => {
   const workspace = makeConformanceWorkspace(scenario);
   const root = NodePath.dirname(workspace.cwd);
   const runDirectory = NodePath.join(root, "terminal-run");
@@ -541,9 +574,14 @@ const runTerminalScenario = (
       `${scenario.name} terminal adapter produced no mailbox (status ${String(result.status)}): ${result.stderr.trim()}`,
     );
   }
-  const values = parseCoreMailbox(`${carriedMailbox}${NodeFS.readFileSync(mailbox, "utf8")}`);
+  const mailboxText = `${carriedMailbox}${NodeFS.readFileSync(mailbox, "utf8")}`;
+  const liveness = livenessTrail(mailboxText);
+  const values = parseCoreMailbox(mailboxText);
   if (values.length === 0) {
-    return synthesizePreflightFailure(scenario, `${result.stdout}\n${result.stderr}`);
+    return {
+      transcript: synthesizePreflightFailure(scenario, `${result.stdout}\n${result.stderr}`),
+      liveness,
+    };
   }
   if (isParallelScenario(scenario)) {
     const pool = parseParallelMailbox(values);
@@ -563,21 +601,27 @@ const runTerminalScenario = (
       );
     }
     const landed = landedChildIds(workspace);
-    return normalizeParallelTranscript({
-      epicId: scenario.beads.epicId,
-      iterations: pool.iterations.map((iteration) => ({
-        ...iteration,
-        committed: iteration.issueId !== null && landed.has(iteration.issueId),
-      })),
-      run: pool.run,
-      comments: beadCommentCounts(workspace),
-      releasedClaims: releasedClaimIds(workspace),
-    });
+    return {
+      transcript: normalizeParallelTranscript({
+        epicId: scenario.beads.epicId,
+        iterations: pool.iterations.map((iteration) => ({
+          ...iteration,
+          committed: iteration.issueId !== null && landed.has(iteration.issueId),
+        })),
+        run: pool.run,
+        comments: beadCommentCounts(workspace),
+        releasedClaims: releasedClaimIds(workspace),
+      }),
+      liveness,
+    };
   }
-  return normalizeCoreMailbox(values, scenario.beads.epicId, {
-    comments: beadComments(workspace.env["CONFORMANCE_STATE"]),
-    maxIterations: maximumIterations(scenario),
-  });
+  return {
+    transcript: normalizeCoreMailbox(values, scenario.beads.epicId, {
+      comments: beadComments(workspace.env["CONFORMANCE_STATE"]),
+      maxIterations: maximumIterations(scenario),
+    }),
+    liveness,
+  };
 };
 
 const describeDiff = (
@@ -608,9 +652,15 @@ describe("terminal adapter conformance", () => {
             continue;
           }
           try {
-            const actual = runTerminalScenario(scenario);
-            const message = describeDiff(scenario, actual);
-            if (message !== "") divergences.push(message);
+            const { transcript, liveness } = runTerminalScenario(scenario);
+            const message = describeDiff(scenario, transcript);
+            if (message !== "") {
+              divergences.push(
+                scenario.supervision === undefined
+                  ? message
+                  : `${message}\nworker-liveness trail:\n${liveness === "" ? "  (no worker-liveness events in the mailbox)" : liveness}`,
+              );
+            }
           } catch (cause) {
             divergences.push(
               `${scenario.name} driver failure: ${cause instanceof Error ? cause.message : String(cause)}`,
