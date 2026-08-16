@@ -179,9 +179,18 @@ const deprecatedEnvironmentOverride = (
         },
       }),
   // run.sh only ever passes "1" through; anything else is rejected there.
-  ...(environment.COOKEPIC_SEQUENTIAL === undefined
+  // COOKEPIC_MODE rides the same schema decode, which owns value validation
+  // and the explicit-mode-wins conflict rule against the legacy flag.
+  ...(environment.COOKEPIC_SEQUENTIAL === undefined && environment.COOKEPIC_MODE === undefined
     ? {}
-    : { execution: { sequential: environment.COOKEPIC_SEQUENTIAL === "1" } }),
+    : {
+        execution: {
+          ...(environment.COOKEPIC_SEQUENTIAL === undefined
+            ? {}
+            : { sequential: environment.COOKEPIC_SEQUENTIAL === "1" }),
+          ...(environment.COOKEPIC_MODE === undefined ? {} : { mode: environment.COOKEPIC_MODE }),
+        },
+      }),
   ...(environment.COOKEPIC_PERMISSION_MODE === undefined
     ? {}
     : {

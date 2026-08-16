@@ -255,7 +255,8 @@ run_fixture() {
   (
     cd "$repo"
     env -u BEADS_DIR -u BEADS_DOLT_SERVER_HOST HOME="$root/home" \
-      XDG_CONFIG_HOME="$root/config" COOKEPIC_EPIC="$epic" \
+      XDG_CONFIG_HOME="$root/config" T3CODE_HOME="$root/home/.t3" \
+      COOKEPIC_EPIC="$epic" \
       COOKEPIC_T3_BIN="$TMP_ROOT/t3-source" COOKEPIC_HARNESS=worker-cmd \
       COOKEPIC_WORKER_CMD="$root/worker.sh" \
       COOKEPIC_NO_GATE=1 COOKEPIC_NO_PUSH=1 COOKEPIC_MAX_DISPATCHES=1 \
@@ -313,7 +314,8 @@ run_prime_fallback_fixture() {
   (
     cd "$repo"
     env -u BEADS_DIR -u BEADS_DOLT_SERVER_HOST HOME="$root/home" \
-      XDG_CONFIG_HOME="$root/config" PATH="$root/bin:$PATH" COOKEPIC_EPIC="$epic" \
+      XDG_CONFIG_HOME="$root/config" T3CODE_HOME="$root/home/.t3" \
+      PATH="$root/bin:$PATH" COOKEPIC_EPIC="$epic" \
       COOKEPIC_T3_BIN="$TMP_ROOT/t3-source" COOKEPIC_HARNESS=prime \
       COOKEPIC_BIN="$root/prime.sh" COOKEPIC_MODEL=prime/custom-model \
       COOKEPIC_NO_GATE=1 COOKEPIC_NO_PUSH=1 COOKEPIC_MAX_DISPATCHES=2 \
@@ -356,7 +358,9 @@ jq -e '.status == "done"' "$core_root/run/run.json" >/dev/null \
 
 parallel_root="$TMP_ROOT/parallel"
 make_fixture "$parallel_root"
-run_fixture "$parallel_root" COOKEPIC_WORKERS=2
+# Mode is pinned: this section proves the worktree + merge-queue landing path,
+# which auto would skip for a lone ready child by running it in place.
+run_fixture "$parallel_root" COOKEPIC_WORKERS=2 COOKEPIC_MODE=parallel
 assert_contains "$parallel_root/final-state.json" '"status": "closed"'
 jq -e '.status == "done" and .config.parallel.workers == 2' \
   "$parallel_root/run/run.json" >/dev/null \
@@ -372,8 +376,10 @@ if [ -n "$(git -C "$parallel_root/repo" branch --list 'cook-epic-integration-*')
   fail 'parallel cook left its integration branch behind'
 fi
 
-# No shape knob at all: the shared default of three workers must select the
-# pool loop through the shim.
+# No shape knob at all: the default is execution.mode auto with the shared
+# three-worker cap, and auto runs a lone ready child in place — a direct
+# commit on the base checkout, no worktree and no merge queue. Two commits:
+# the base and the child's own.
 default_root="$TMP_ROOT/default-shape"
 make_fixture "$default_root"
 run_fixture "$default_root"
@@ -382,8 +388,9 @@ jq -e '.status == "done" and .config.parallel.workers == 3
   and .configProvenance["parallel.workers"] == "default"' \
   "$default_root/run/run.json" >/dev/null \
   || fail 'the default shape did not record a done three-worker pool run'
-[ "$(git -C "$default_root/repo" rev-list --count HEAD)" = 3 ] \
-  || fail 'the default shape did not land the child commit on the base branch'
+[ "$(git -C "$default_root/repo" rev-list --count HEAD)" = 2 ] \
+  || fail 'the default auto shape did not commit the lone child in place on the base branch'
+assert_not_exists "$default_root/run/merge-queue.json"
 assert_not_exists "$default_root/run/worktrees"
 
 prime_sequential_root="$TMP_ROOT/prime-sequential"

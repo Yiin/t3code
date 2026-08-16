@@ -28,6 +28,7 @@
 #   COOKEPIC_WORKER_CMD        test hook: run this instead of a harness
 #   COOKEPIC_T3_BIN            t3 entrypoint override
 #   COOKEPIC_SEQUENTIAL        1 = force one worker in the base checkout -> execution.sequential
+#   COOKEPIC_MODE              auto, parallel, or sequential  -> execution.mode
 # Unset means the parallel pool loop at the shared default of three workers
 # (per-worker worktrees, merge queue). COOKEPIC_SEQUENTIAL=1 and
 # COOKEPIC_WORKERS=1 are the two escapes to one worker in the base checkout.
@@ -81,6 +82,17 @@ if [[ -v COOKEPIC_SEQUENTIAL && -n ${COOKEPIC_SEQUENTIAL} && ${COOKEPIC_SEQUENTI
   fail 'COOKEPIC_SEQUENTIAL must be 1 or unset' \
     'set COOKEPIC_SEQUENTIAL=1 to force sequential execution, or unset it'
 fi
+if [[ -v COOKEPIC_MODE && -n ${COOKEPIC_MODE} ]]; then
+  case ${COOKEPIC_MODE} in
+    auto | parallel | sequential) ;;
+    *) fail "COOKEPIC_MODE must be auto, parallel, or sequential, got '${COOKEPIC_MODE}'" \
+      'set COOKEPIC_MODE to one of the three modes or unset it' ;;
+  esac
+  if [[ -v COOKEPIC_SEQUENTIAL && -n ${COOKEPIC_SEQUENTIAL} && ${COOKEPIC_MODE} != sequential ]]; then
+    fail "COOKEPIC_SEQUENTIAL=1 contradicts COOKEPIC_MODE=${COOKEPIC_MODE}" \
+      'drop one of the two: COOKEPIC_MODE wins ties in the config schema, so prefer it'
+  fi
+fi
 if [[ -v COOKEPIC_WORKERS && -n ${COOKEPIC_WORKERS} ]]; then
   [[ ${COOKEPIC_WORKERS} =~ ^[1-9][0-9]*$ ]] \
     || fail "COOKEPIC_WORKERS must be a positive integer, got '${COOKEPIC_WORKERS}'" \
@@ -112,7 +124,7 @@ for name in COOKEPIC_T3_BIN COOKEPIC_GATE COOKEPIC_NO_GATE COOKEPIC_NO_PUSH \
   COOKEPIC_MAX_DISPATCHES COOKEPIC_MAX_ATTEMPTS COOKEPIC_WORKER_TIMEOUT \
   COOKEPIC_STOP_GRACE COOKEPIC_MODEL COOKEPIC_ORIENTATION_FILE \
   COOKEPIC_HARNESS COOKEPIC_BIN COOKEPIC_WORKER_CMD COOKEPIC_PERMISSION_MODE \
-  COOKEPIC_SEQUENTIAL COOKEPIC_WORKERS COOKEPIC_SIBLINGS; do
+  COOKEPIC_SEQUENTIAL COOKEPIC_MODE COOKEPIC_WORKERS COOKEPIC_SIBLINGS; do
   if [[ -v $name && -z ${!name} ]]; then unset "$name"; fi
 done
 
