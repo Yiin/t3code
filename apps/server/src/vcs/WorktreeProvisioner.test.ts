@@ -131,7 +131,14 @@ describe("WorktreeProvisioner", () => {
         path: "/worktrees/child",
       });
 
-      assert.deepEqual(operations, ["list", "fetch", "resolve", "branch-exists", "create"]);
+      assert.deepEqual(operations, [
+        "list",
+        "remotes",
+        "fetch",
+        "resolve",
+        "branch-exists",
+        "create",
+      ]);
       assert.deepInclude(createInput, {
         cwd: "/repo",
         refName: "fetched-sha",
@@ -149,6 +156,10 @@ describe("WorktreeProvisioner", () => {
                 operations.push("list");
                 return gitResult(0);
               }
+              if (request.args[0] === "remote") {
+                operations.push("remotes");
+                return gitResult(0, "origin\n");
+              }
               operations.push("branch-exists");
               return gitResult(1);
             }),
@@ -164,6 +175,51 @@ describe("WorktreeProvisioner", () => {
           createWorktree: (request) =>
             Effect.sync(() => {
               operations.push("create");
+              createInput = request;
+              return {
+                worktree: {
+                  path: request.path ?? "/tmp/default-worktree",
+                  refName: request.newRefName ?? request.refName,
+                },
+              };
+            }),
+        }),
+      ),
+    );
+  });
+
+  it.effect("falls back to the local base branch when the repo has no origin remote", () => {
+    let createInput:
+      | Parameters<GitWorkflowService.GitWorkflowService["Service"]["createWorktree"]>[0]
+      | null = null;
+    return Effect.gen(function* () {
+      const provisioner = yield* WorktreeProvisioner;
+      const result = yield* provisioner.provision({
+        projectCwd: "/repo",
+        branch: "epic/remoteless",
+        baseBranch: "main",
+        startFromOrigin: true,
+        path: "/worktrees/remoteless",
+      });
+
+      assert.deepInclude(createInput, {
+        cwd: "/repo",
+        refName: "main",
+        newRefName: "epic/remoteless",
+        baseRefName: "main",
+        path: "/worktrees/remoteless",
+      });
+      assert.deepEqual(result, { path: "/worktrees/remoteless", refName: "epic/remoteless" });
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          execute: (request) =>
+            Effect.succeed(request.args[0] === "remote" ? gitResult(0, "\n") : gitResult(1)),
+          fetchRemote: () => Effect.die("must not fetch without an origin remote"),
+          resolveRemoteTrackingCommit: () =>
+            Effect.die("must not resolve a remote base without an origin remote"),
+          createWorktree: (request) =>
+            Effect.sync(() => {
               createInput = request;
               return {
                 worktree: {

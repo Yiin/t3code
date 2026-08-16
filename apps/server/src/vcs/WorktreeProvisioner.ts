@@ -99,6 +99,18 @@ const makeWithEnqueue = (enqueueCommand: EnqueueCommand) =>
       return result.exitCode === 0;
     });
 
+    const originRemoteExists = Effect.fn("WorktreeProvisioner.originRemoteExists")(function* (
+      cwd: string,
+    ) {
+      const result = yield* git.execute({
+        operation: "WorktreeProvisioner.listRemotes",
+        cwd,
+        args: ["remote"],
+        timeoutMs: 5_000,
+      });
+      return result.stdout.split(/\r?\n/u).some((line) => line.trim() === "origin");
+    });
+
     const readRegisteredWorktree = Effect.fn("WorktreeProvisioner.readRegisteredWorktree")(
       function* (cwd: string, targetPath: string) {
         const result = yield* git.execute({
@@ -171,13 +183,21 @@ const makeWithEnqueue = (enqueueCommand: EnqueueCommand) =>
 
       let worktreeBaseRef = input.baseBranch;
       if (input.startFromOrigin) {
-        yield* gitWorkflow.fetchRemote({ cwd: input.projectCwd, remoteName: "origin" });
-        const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-          cwd: input.projectCwd,
-          refName: input.baseBranch,
-          fallbackRemoteName: "origin",
-        });
-        worktreeBaseRef = resolvedRemoteBase.commitSha;
+        // A remoteless repo (e.g. a local-only dotfiles repo) has nothing to
+        // fetch; start from the local base branch instead of failing.
+        if (yield* originRemoteExists(input.projectCwd)) {
+          yield* gitWorkflow.fetchRemote({ cwd: input.projectCwd, remoteName: "origin" });
+          const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
+            cwd: input.projectCwd,
+            refName: input.baseBranch,
+            fallbackRemoteName: "origin",
+          });
+          worktreeBaseRef = resolvedRemoteBase.commitSha;
+        } else {
+          yield* Effect.logDebug("skipping origin fetch: repository has no origin remote", {
+            projectCwd: input.projectCwd,
+          });
+        }
       }
 
       const reuseBranch =
