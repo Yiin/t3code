@@ -1,10 +1,62 @@
 import * as NodeOS from "node:os";
 
-import type { ClaudeSettings } from "@t3tools/contracts";
+import { ProviderDriverKind, type ClaudeSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+import {
+  type HarnessHomeLayout,
+  type HarnessHomeManifest,
+  type HarnessHomeOverlayError,
+  harnessContinuationIdentity,
+  materializeHarnessHomeOverlay,
+  resolveHarnessHomeLayout,
+} from "./harnessHomeOverlay.ts";
+
+export interface ClaudeHomeLayout extends HarnessHomeLayout {
+  readonly sharedStatePath: string;
+}
+
+export const CLAUDE_HOME_MANIFEST: HarnessHomeManifest = {
+  driverKind: ProviderDriverKind.make("claudeAgent"),
+  label: "Claude",
+  continuationKeyPrefix: "claude:home:",
+  sharedEntries: [
+    "projects",
+    "session-env",
+    "shell-snapshots",
+    "todos",
+    "statsig",
+    "plugins",
+    "file-history",
+    "memory-backups",
+    "cache",
+    "downloads",
+    "hooks",
+    "jobs",
+  ],
+  privateEntries: [
+    ".credentials.json",
+    ".claude.json",
+    "backups",
+    "policy-limits.json",
+    "remote-settings.json",
+    "stats-cache.json",
+  ],
+  credentialEntries: [".credentials.json", ".claude.json"],
+  shadowLocalEntries: [
+    "sessions",
+    ".last-cleanup",
+    ".last-update-result.json",
+    "daemon",
+    "daemon.log",
+    "debug",
+    "paste-cache",
+  ],
+  replaceableRuntimeDirs: ["shell-snapshots", "session-env", "statsig"],
+};
 
 export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function* (
   config: Pick<ClaudeSettings, "homePath">,
@@ -12,6 +64,34 @@ export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function
   const path = yield* Path.Path;
   const homePath = config.homePath.trim();
   return path.resolve(homePath.length > 0 ? expandHomePath(homePath) : NodeOS.homedir());
+});
+
+export const resolveClaudeHomeLayout = Effect.fn("resolveClaudeHomeLayout")(function* (
+  config: Pick<ClaudeSettings, "homePath" | "shadowHomePath">,
+): Effect.fn.Return<ClaudeHomeLayout, never, Path.Path> {
+  const path = yield* Path.Path;
+  const sharedHomePath = yield* resolveClaudeHomePath(config);
+  const sharedStatePath = path.resolve(
+    config.homePath.trim().length > 0
+      ? expandHomePath(config.homePath)
+      : path.join(NodeOS.homedir(), ".claude"),
+  );
+  const layout = yield* resolveHarnessHomeLayout(CLAUDE_HOME_MANIFEST, {
+    homePath: sharedStatePath,
+    shadowHomePath: config.shadowHomePath,
+    defaultHomePath: sharedStatePath,
+  });
+  return { ...layout, sharedHomePath, sharedStatePath };
+});
+
+export const materializeClaudeShadowHome = Effect.fn("materializeClaudeShadowHome")(function* (
+  layout: ClaudeHomeLayout,
+): Effect.fn.Return<void, HarnessHomeOverlayError, FileSystem.FileSystem | Path.Path> {
+  if (layout.mode !== "authOverlay") return;
+  yield* materializeHarnessHomeOverlay(CLAUDE_HOME_MANIFEST, {
+    ...layout,
+    sharedHomePath: layout.sharedStatePath,
+  });
 });
 
 export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function* (
@@ -40,6 +120,10 @@ export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationG
     return `claude:home:${resolvedHomePath}`;
   },
 );
+
+export function claudeContinuationIdentity(layout: ClaudeHomeLayout) {
+  return harnessContinuationIdentity(CLAUDE_HOME_MANIFEST, layout);
+}
 
 export const makeClaudeCapabilitiesCacheKey = Effect.fn("makeClaudeCapabilitiesCacheKey")(
   function* (

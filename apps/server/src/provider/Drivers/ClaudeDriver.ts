@@ -56,7 +56,11 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import {
+  makeClaudeCapabilitiesCacheKey,
+  materializeClaudeShadowHome,
+  resolveClaudeHomeLayout,
+} from "./ClaudeHome.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -135,12 +139,30 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         driverKind: DRIVER_KIND,
         instanceId,
       });
-      const effectiveConfig = { ...config, enabled } satisfies ClaudeSettings;
+      const layout = yield* resolveClaudeHomeLayout(config).pipe(
+        Effect.provideService(Path.Path, path),
+      );
+      yield* materializeClaudeShadowHome(layout).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: `Failed to materialize Claude shadow home: ${String(cause)}`,
+              cause,
+            }),
+        ),
+      );
+      const effectiveConfig = {
+        ...config,
+        enabled,
+        homePath: layout.mode === "authOverlay" ? layout.effectiveHomePath! : config.homePath,
+      } satisfies ClaudeSettings;
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
       });
-      const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
+      const continuationGroupKey = layout.continuationKey;
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,

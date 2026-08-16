@@ -4,13 +4,20 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
+import * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
+import { ClaudeSettings } from "@t3tools/contracts";
 
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
+  materializeClaudeShadowHome,
+  resolveClaudeHomeLayout,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
+
+const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
   describe("Claude home resolution", () => {
@@ -55,6 +62,61 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
 
         expect(yield* makeClaudeContinuationGroupKey({ homePath: "" })).toBe(
           `claude:home:${resolved}`,
+        );
+      }),
+    );
+
+    it.effect("shares the continuation key across Claude shadow homes", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const sharedHome = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped({
+          prefix: "t3code-claude-shared-",
+        });
+        const first = yield* resolveClaudeHomeLayout(
+          decodeClaudeSettings({
+            homePath: sharedHome,
+            shadowHomePath: path.join(sharedHome, "one"),
+          }),
+        );
+        const second = yield* resolveClaudeHomeLayout(
+          decodeClaudeSettings({
+            homePath: sharedHome,
+            shadowHomePath: path.join(sharedHome, "two"),
+          }),
+        );
+        expect(first.mode).toBe("authOverlay");
+        expect(first.continuationKey).toBe(second.continuationKey);
+        expect(first.sharedStatePath).toBe(sharedHome);
+      }),
+    );
+
+    it.effect("materializes shared Claude state while keeping credentials and sessions local", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3code-claude-shared-",
+        });
+        const shadowHome = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3code-claude-shadow-",
+        });
+        yield* fileSystem.makeDirectory(path.join(sharedHome, "projects"));
+        yield* fileSystem.writeFileString(path.join(sharedHome, "settings.json"), "shared");
+        yield* fileSystem.writeFileString(path.join(shadowHome, ".credentials.json"), "private");
+        yield* fileSystem.makeDirectory(path.join(shadowHome, "sessions"));
+        const layout = yield* resolveClaudeHomeLayout(
+          decodeClaudeSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+        );
+        yield* materializeClaudeShadowHome(layout);
+        expect(yield* fileSystem.readLink(path.join(shadowHome, "projects"))).toBe(
+          path.join(sharedHome, "projects"),
+        );
+        expect(yield* fileSystem.readFileString(path.join(shadowHome, ".credentials.json"))).toBe(
+          "private",
+        );
+        expect(yield* fileSystem.exists(path.join(shadowHome, "sessions"))).toBe(true);
+        expect(yield* fileSystem.readLink(path.join(shadowHome, "settings.json"))).toBe(
+          path.join(sharedHome, "settings.json"),
         );
       }),
     );
