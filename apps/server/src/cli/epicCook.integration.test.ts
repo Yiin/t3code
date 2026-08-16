@@ -42,6 +42,11 @@ const makeFixture = (childCount: number, workerDelaySeconds = 0) => {
     ...process.env,
     HOME: fakeHome,
     XDG_CONFIG_HOME: NodePath.join(root, "config"),
+    // The cooked run's gate flocks $XDG_RUNTIME_DIR/t3code/cook-epic-heavy.lock,
+    // a machine-global path. Pin it inside the fixture so a fixture gate never
+    // queues behind a real epic run's gate — the outer gate holds that lock for
+    // the whole suite, so contention is a guaranteed 900s lock-wait failure.
+    XDG_RUNTIME_DIR: NodePath.join(root, "runtime"),
   };
   delete bdEnvironment.BEADS_DIR;
   delete bdEnvironment.BEADS_DOLT_SERVER_HOST;
