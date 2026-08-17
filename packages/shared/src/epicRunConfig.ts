@@ -1,8 +1,10 @@
 import * as Schema from "effect/Schema";
 
 import {
-  EPIC_RUN_CONFIG_FIELDS,
+  EPIC_RUN_CONFIG_LEAF_KEY_SET,
+  EPIC_RUN_CONFIG_LEAF_KEYS,
   EpicRunConfig,
+  hasEpicRunConfigValue,
   type EpicRunConfig as EpicRunConfigValue,
   type EpicRunConfigOverride,
   type EpicRunConfigProvenance,
@@ -25,11 +27,6 @@ export interface ResolveEpicRunConfigInput {
 }
 
 const DEFAULT_CONFIG = Schema.decodeUnknownSync(EpicRunConfig)({});
-const LEAF_KEYS = EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only").map(
-  (field) => field.key,
-);
-const LEAF_KEY_SET = new Set(LEAF_KEYS);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -49,7 +46,7 @@ function applyOverride(
 ): void {
   for (const [key, value] of Object.entries(input)) {
     const dottedKey = prefix === "" ? key : `${prefix}.${key}`;
-    if (LEAF_KEY_SET.has(dottedKey)) {
+    if (EPIC_RUN_CONFIG_LEAF_KEY_SET.has(dottedKey)) {
       target[key] = cloneValue(value);
       provenance[dottedKey] = source;
       continue;
@@ -84,7 +81,7 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
 } {
   const config = cloneValue(DEFAULT_CONFIG) as Record<string, unknown>;
   const provenance: Record<string, EpicRunConfigProvenanceSource> = Object.fromEntries(
-    LEAF_KEYS.map((key) => [key, "default" as const]),
+    EPIC_RUN_CONFIG_LEAF_KEYS.map((key) => [key, "default" as const]),
   );
 
   const layers = [
@@ -142,7 +139,7 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
     });
   }
   if (resolved.execution.mode === "sequential" && resolved.parallel.workers > 1) {
-    const workersWereExplicit = provenance["parallel.workers"] !== "default";
+    const workersWereExplicit = hasEpicRunConfigValue(provenance, "parallel.workers");
     (resolved.parallel as { workers: number }).workers = 1;
     provenance["parallel.workers"] = "policy";
     if (workersWereExplicit) {

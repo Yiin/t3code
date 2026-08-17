@@ -10,9 +10,9 @@
  */
 import {
   DEFAULT_RUNTIME_MODE,
+  hasEpicRunConfigValue,
   type EpicRoleId,
   type EpicRolePolicy,
-  type EpicRunConfigProvenance,
   EpicRunId,
   type LaunchEpicRunInput,
   type ModelSelection,
@@ -70,9 +70,6 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 export const isValidOrientationFile = (value: string): boolean =>
   !/^(?:[A-Za-z]:[\\/]|[\\/])/u.test(value) && !value.split(/[\\/]/u).includes("..");
-
-const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
-  provenance[key] !== undefined && provenance[key] !== "default";
 
 /**
  * What a resumed run already owns, handed to `acquireLease` by the boot path.
@@ -324,7 +321,7 @@ export const makeEpicRunnerLaunch = (deps: {
     maxIterations: number | undefined,
   ): EpicRunConfigSnapshot =>
     maxIterations === undefined ||
-    hasConfiguredValue(configSnapshot.provenance, "limits.maxIterations")
+    hasEpicRunConfigValue(configSnapshot.provenance, "limits.maxIterations")
       ? configSnapshot
       : {
           ...configSnapshot,
@@ -357,13 +354,13 @@ export const makeEpicRunnerLaunch = (deps: {
     const modelSelection =
       !modelSelectionAlreadyResolved &&
       configuredModelSelection !== null &&
-      hasConfiguredValue(configSnapshot.provenance, "provider.modelSelection")
+      hasEpicRunConfigValue(configSnapshot.provenance, "provider.modelSelection")
         ? configuredModelSelection
         : input.modelSelection;
-    const runtimeMode = hasConfiguredValue(configSnapshot.provenance, "runtime.mode")
+    const runtimeMode = hasEpicRunConfigValue(configSnapshot.provenance, "runtime.mode")
       ? configSnapshot.config.runtime.mode
       : (input.runtimeMode ?? DEFAULT_RUNTIME_MODE);
-    const maxIterations = hasConfiguredValue(configSnapshot.provenance, "limits.maxIterations")
+    const maxIterations = hasEpicRunConfigValue(configSnapshot.provenance, "limits.maxIterations")
       ? configSnapshot.config.limits.maxIterations
       : (input.maxIterations ?? configSnapshot.config.limits.maxIterations);
     const run: EpicRun = {
@@ -620,7 +617,7 @@ export const makeEpicRunnerLaunch = (deps: {
         input.inheritOriginModelSelection === true
           ? yield* resolveOriginModelSelection(input)
           : configuredModelSelection !== null &&
-              hasConfiguredValue(configSnapshot.provenance, "provider.modelSelection")
+              hasEpicRunConfigValue(configSnapshot.provenance, "provider.modelSelection")
             ? configuredModelSelection
             : project.value.defaultModelSelection;
       if (selectedModel === null) {

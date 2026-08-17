@@ -2,10 +2,15 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   EPIC_RUN_CONFIG_FIELDS,
+  EPIC_RUN_CONFIG_KEY_PREFIXES,
+  EPIC_RUN_CONFIG_LEAF_KEYS,
+  EPIC_RUN_CONFIG_LEAF_KEY_SET,
   EpicRunConfig,
   EpicRunConfigOverride,
   type EpicRunConfigControl,
+  hasEpicRunConfigValue,
 } from "./epicRunConfig.ts";
 
 const decodeConfig = Schema.decodeUnknownSync(EpicRunConfig);
@@ -296,5 +301,47 @@ describe("EPIC_RUN_CONFIG_FIELDS", () => {
       scope: "core-partial",
       enforceableOn: ["claude", "ccx"],
     });
+  });
+});
+
+describe("epic-run config views", () => {
+  it("derives public leaves and proper prefixes from the registry", () => {
+    const expectedLeaves = EPIC_RUN_CONFIG_FIELDS.filter(
+      ({ scope }) => scope !== "terminal-only",
+    ).map(({ key }) => key);
+
+    expect(EPIC_RUN_CONFIG_LEAF_KEYS).toEqual(expectedLeaves);
+    expect([...EPIC_RUN_CONFIG_LEAF_KEY_SET]).toEqual(expectedLeaves);
+    for (const prefix of EPIC_RUN_CONFIG_KEY_PREFIXES) {
+      expect(EPIC_RUN_CONFIG_LEAF_KEY_SET.has(prefix)).toBe(false);
+      expect(EPIC_RUN_CONFIG_LEAF_KEYS.some((key) => key.startsWith(`${prefix}.`))).toBe(true);
+    }
+    expect(EPIC_RUN_CONFIG_KEY_PREFIXES).toEqual(
+      new Set([
+        "budget",
+        "gate",
+        "supervision",
+        "limits",
+        "provider",
+        "vcs",
+        "orientation",
+        "execution",
+        "parallel",
+        "runtime",
+        "retry",
+        "lock",
+        "server",
+      ]),
+    );
+  });
+
+  it("tracks configured provenance without treating missing keys as configured", () => {
+    expect(hasEpicRunConfigValue(DEFAULT_EPIC_RUN_CONFIG_PROVENANCE, "limits.maxIterations")).toBe(
+      false,
+    );
+    expect(hasEpicRunConfigValue({ "limits.maxIterations": "file" }, "limits.maxIterations")).toBe(
+      true,
+    );
+    expect(hasEpicRunConfigValue({}, "limits.maxIterations")).toBe(false);
   });
 });

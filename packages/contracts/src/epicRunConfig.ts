@@ -734,10 +734,26 @@ export type EpicRunConfigProvenanceSource = typeof EpicRunConfigProvenanceSource
 export const EpicRunConfigProvenance = Schema.Record(Schema.String, EpicRunConfigProvenanceSource);
 export type EpicRunConfigProvenance = typeof EpicRunConfigProvenance.Type;
 
+/** Public config fields that can be supplied to a server epic run. */
+export const EPIC_RUN_CONFIG_LEAF_KEYS = EPIC_RUN_CONFIG_FIELDS.filter(
+  (field) => field.scope !== "terminal-only",
+).map((field) => field.key);
+
+/** Fast membership lookup for public epic-run config fields. */
+export const EPIC_RUN_CONFIG_LEAF_KEY_SET: ReadonlySet<string> = new Set(EPIC_RUN_CONFIG_LEAF_KEYS);
+
+/** Dotted object paths that contain at least one public config field. */
+export const EPIC_RUN_CONFIG_KEY_PREFIXES: ReadonlySet<string> = new Set(
+  EPIC_RUN_CONFIG_LEAF_KEYS.flatMap((key) => {
+    const segments = key.split(".");
+    return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("."));
+  }),
+);
+
+export const hasEpicRunConfigValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
+  provenance[key] !== undefined && provenance[key] !== "default";
+
 /** Exhaustive provenance for a run decoded without a persisted config snapshot. */
 export const DEFAULT_EPIC_RUN_CONFIG_PROVENANCE: EpicRunConfigProvenance = Object.fromEntries(
-  EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only").map((field) => [
-    field.key,
-    "default" as const,
-  ]),
+  EPIC_RUN_CONFIG_LEAF_KEYS.map((key) => [key, "default" as const]),
 );

@@ -7,7 +7,8 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import {
-  EPIC_RUN_CONFIG_FIELDS,
+  EPIC_RUN_CONFIG_KEY_PREFIXES,
+  EPIC_RUN_CONFIG_LEAF_KEY_SET,
   EpicRunConfig,
   EpicRunConfigOverride,
   type EpicRunConfig as EpicRunConfigValue,
@@ -42,14 +43,6 @@ export class EpicRunConfigSource extends Context.Service<
   EpicRunConfigSourceShape
 >()("@t3tools/epic-core/EpicRunConfigSource") {}
 
-const configFields = EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only");
-const knownLeafKeys = new Set(configFields.map((field) => field.key));
-const knownPrefixes = new Set(
-  configFields.flatMap((field) => {
-    const segments = field.key.split(".");
-    return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("."));
-  }),
-);
 const knownObjectLeafKeys: Readonly<Record<string, ReadonlySet<string>>> = {
   "provider.modelSelection": new Set(["provider", "instanceId", "model", "options"]),
 };
@@ -64,7 +57,7 @@ function inspectKeys(value: unknown): {
     if (typeof current !== "object" || current === null || Array.isArray(current)) return;
     for (const [key, child] of Object.entries(current)) {
       const dottedKey = prefix === "" ? key : `${prefix}.${key}`;
-      if (knownLeafKeys.has(dottedKey)) {
+      if (EPIC_RUN_CONFIG_LEAF_KEY_SET.has(dottedKey)) {
         presentKeys.push(dottedKey);
         const knownChildren = knownObjectLeafKeys[dottedKey];
         if (knownChildren !== undefined && typeof child === "object" && child !== null) {
@@ -72,7 +65,7 @@ function inspectKeys(value: unknown): {
             if (!knownChildren.has(childKey)) unknownKeys.push(`${dottedKey}.${childKey}`);
           }
         }
-      } else if (knownPrefixes.has(dottedKey)) {
+      } else if (EPIC_RUN_CONFIG_KEY_PREFIXES.has(dottedKey)) {
         visit(child, dottedKey);
       } else {
         unknownKeys.push(dottedKey);

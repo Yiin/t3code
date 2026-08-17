@@ -5,7 +5,7 @@
  * replaces each matching seed value when the loop freezes its policy, so a run
  * keeps the timing and budget it was launched with across restarts.
  */
-import type { EpicRunConfigProvenance } from "@t3tools/contracts";
+import { hasEpicRunConfigValue } from "@t3tools/contracts";
 
 import type { PersistedEpicRun } from "./ports/RunJournal.ts";
 
@@ -57,13 +57,10 @@ export interface PoolPolicy extends Omit<PoolPolicySeed, "iterationTimeoutMs"> {
   readonly maxAttemptsPerChild: number;
 }
 
-const hasConfiguredValue = (provenance: EpicRunConfigProvenance, key: string): boolean =>
-  provenance[key] !== undefined && provenance[key] !== "default";
-
 /** Freeze all loop policy from the persisted row that starts this loop. */
 export const makePoolPolicy = (seed: PoolPolicySeed, run: PersistedEpicRun): PoolPolicy => {
   const configured = <Value>(key: string, value: Value, fallback: Value): Value =>
-    hasConfiguredValue(run.configProvenance, key) ? value : fallback;
+    hasEpicRunConfigValue(run.configProvenance, key) ? value : fallback;
   const retryBaseDelayMs = configured(
     "server.retryBaseDelayMs",
     run.config.server.retryBaseDelayMs,
@@ -73,7 +70,7 @@ export const makePoolPolicy = (seed: PoolPolicySeed, run: PersistedEpicRun): Poo
     retryBaseDelayMs,
     configured("server.retryMaxDelayMs", run.config.server.retryMaxDelayMs, seed.retryMaxDelayMs),
   );
-  const configuredWorkerTimeout = hasConfiguredValue(
+  const configuredWorkerTimeout = hasEpicRunConfigValue(
     run.configProvenance,
     "supervision.workerTimeoutSeconds",
   )
