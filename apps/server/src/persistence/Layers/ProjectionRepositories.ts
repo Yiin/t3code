@@ -1,19 +1,4 @@
 import * as Layer from "effect/Layer";
-import * as Effect from "effect/Effect";
-
-import {
-  ProjectionPendingApprovalRepository,
-  ProjectionProjectRepository,
-  ProjectionStateRepository,
-  ProjectionThreadActivityRepository,
-  ProjectionThreadMessageRepository,
-  ProjectionThreadProposedPlanRepository,
-  ProjectionThreadSessionRepository,
-  ProjectionThreadSubagentRepository,
-  ProjectionThreadRepository,
-  ProjectionTurnRepository,
-  ProjectionStore,
-} from "../Services/ProjectionStore.ts";
 
 import { ProjectionPendingApprovalRepositoryLive } from "./ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepositoryLive } from "./ProjectionProjects.ts";
@@ -40,23 +25,5 @@ const repositoryLayers = Layer.mergeAll(
   ProjectionStateRepositoryLive,
 );
 
-const projectionStore = Layer.effect(
-  ProjectionStore,
-  Effect.gen(function* () {
-    return {
-      projects: yield* ProjectionProjectRepository,
-      threads: yield* ProjectionThreadRepository,
-      threadMessages: yield* ProjectionThreadMessageRepository,
-      threadProposedPlans: yield* ProjectionThreadProposedPlanRepository,
-      threadActivities: yield* ProjectionThreadActivityRepository,
-      threadSubagents: yield* ProjectionThreadSubagentRepository,
-      threadSessions: yield* ProjectionThreadSessionRepository,
-      turns: yield* ProjectionTurnRepository,
-      pendingApprovals: yield* ProjectionPendingApprovalRepository,
-      state: yield* ProjectionStateRepository,
-    };
-  }),
-).pipe(Layer.provide(repositoryLayers));
-
-/** Provides the unified store and its compatibility repository facets. */
-export const ProjectionStoreLive = Layer.merge(repositoryLayers, projectionStore);
+/** Provides the projection implementations with their private table seams. */
+export const ProjectionStoreLive = repositoryLayers;

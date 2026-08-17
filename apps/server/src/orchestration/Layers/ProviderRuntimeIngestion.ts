@@ -51,7 +51,7 @@ import {
   classifyAccountRotationReason,
   resolveAccountRotationTarget,
 } from "../providerAccountRotation.ts";
-import { ProjectionStore } from "../../persistence/Services/ProjectionStore.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionStoreLive } from "../../persistence/Layers/ProjectionStore.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -963,7 +963,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
-  const projectionTurnRepository = (yield* ProjectionStore).turns;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
   // Optional seams for account rotation on usage-limit failures. Absent in
   // minimal harnesses (most tests); rotation simply stays off then.

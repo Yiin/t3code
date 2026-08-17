@@ -27,7 +27,16 @@ import { type ProjectionThreadMessage } from "../../persistence/Services/Project
 import { type ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { type ProjectionThreadSubagent } from "../../persistence/Services/ProjectionThreadSubagents.ts";
 import type { ProjectionTurn } from "../../persistence/Services/ProjectionTurns.ts";
-import { ProjectionStore } from "../../persistence/Services/ProjectionStore.ts";
+import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
+import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import { ProjectionThreadMessageRepository } from "../../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionThreadProposedPlanRepository } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
+import { ProjectionThreadSubagentRepository } from "../../persistence/Services/ProjectionThreadSubagents.ts";
+import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionStoreLive } from "../../persistence/Layers/ProjectionStore.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { ServerConfig } from "../../config.ts";
@@ -476,17 +485,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
   function* () {
     const sql = yield* SqlClient.SqlClient;
     const eventStore = yield* OrchestrationEventStore;
-    const projectionStore = yield* ProjectionStore;
-    const projectionStateRepository = projectionStore.state;
-    const projectionProjectRepository = projectionStore.projects;
-    const projectionThreadRepository = projectionStore.threads;
-    const projectionThreadMessageRepository = projectionStore.threadMessages;
-    const projectionThreadProposedPlanRepository = projectionStore.threadProposedPlans;
-    const projectionThreadActivityRepository = projectionStore.threadActivities;
-    const projectionThreadSubagentRepository = projectionStore.threadSubagents;
-    const projectionThreadSessionRepository = projectionStore.threadSessions;
-    const projectionTurnRepository = projectionStore.turns;
-    const projectionPendingApprovalRepository = projectionStore.pendingApprovals;
+    const projectionStateRepository = yield* ProjectionStateRepository;
+    const projectionProjectRepository = yield* ProjectionProjectRepository;
+    const projectionThreadRepository = yield* ProjectionThreadRepository;
+    const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
+    const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
+    const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
+    const projectionThreadSubagentRepository = yield* ProjectionThreadSubagentRepository;
+    const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
+    const projectionTurnRepository = yield* ProjectionTurnRepository;
+    const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
