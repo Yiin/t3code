@@ -191,6 +191,25 @@ export const EpicRunPreflightBlocker = Schema.Union([
   Schema.TaggedStruct("workspace_missing", {
     workspaceRoot: TrimmedNonEmptyString,
   }),
+  /**
+   * Children of this epic that are closed while their branches never landed.
+   *
+   * Merge-queue state is keyed by run id, so a new run of the same epic starts
+   * with an empty queue. It reads those children as done, reconciles only what
+   * its own iterations produce, and reports `done` over code that is still
+   * sitting on an unmerged branch (t3code-9gg). Nothing downstream can catch
+   * it: `proveEpicCompletion` asks Beads and this run's own queue, and both
+   * say the epic is finished.
+   */
+  Schema.TaggedStruct("stranded_child_branches", {
+    baseBranch: TrimmedNonEmptyString,
+    branches: Schema.Array(
+      Schema.Struct({
+        childId: TrimmedNonEmptyString,
+        branch: TrimmedNonEmptyString,
+      }),
+    ),
+  }),
 ]);
 export type EpicRunPreflightBlocker = typeof EpicRunPreflightBlocker.Type;
 
@@ -241,6 +260,26 @@ export const EpicRunPreflightWarning = Schema.Union([
    */
   Schema.TaggedStruct("resume_worktree_missing", {
     paths: Schema.Array(TrimmedNonEmptyString),
+  }),
+  /**
+   * The blocker's payload, demoted for a resume.
+   *
+   * A resumed run keeps its own run id, so its queue still holds the entries it
+   * enqueued and its own iterations still drain them; refusing it would refuse
+   * a crashed run permission to continue itself, which is the mistake
+   * `integration_leftover` already made once. But the resume is not clean
+   * either: a crash between the worker closing its child and the coordinator
+   * enqueuing its branch leaves an entry no queue holds, and `bd ready` never
+   * returns a closed child. Say what was seen and let the run continue.
+   */
+  Schema.TaggedStruct("stranded_child_branches_accepted", {
+    baseBranch: TrimmedNonEmptyString,
+    branches: Schema.Array(
+      Schema.Struct({
+        childId: TrimmedNonEmptyString,
+        branch: TrimmedNonEmptyString,
+      }),
+    ),
   }),
 ]);
 export type EpicRunPreflightWarning = typeof EpicRunPreflightWarning.Type;

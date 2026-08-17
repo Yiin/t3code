@@ -40,6 +40,8 @@ const run = (
     readonly workspaceExists?: boolean;
     readonly worktreeList?: string;
     readonly branchList?: string;
+    /** Answers only the `git branch --no-merged <base> epic/*` scan. */
+    readonly unmergedBranchList?: string;
     readonly resume?: { readonly runId: string; readonly worktreePaths?: readonly string[] };
     /** Per-path `exists` answers for the resume probe; `/repo` uses `workspaceExists`. */
     readonly pathExists?: Readonly<Record<string, boolean>>;
@@ -88,8 +90,16 @@ const run = (
               });
             }
             if (args[0] === "branch") {
+              // Two different `git branch` calls reach this fake: the
+              // integration-leftover scan (`cook-epic-integration-*`) and the
+              // stranded-child scan (`--no-merged <base> epic/*`). Answering
+              // both with one string cross-contaminates them — an `epic/*`
+              // branch list would fire a phantom `integration_leftover`,
+              // because that scan does not re-filter by prefix.
               return Effect.succeed({
-                stdout: options?.branchList ?? "",
+                stdout: args.includes("--no-merged")
+                  ? (options?.unmergedBranchList ?? "")
+                  : (options?.branchList ?? ""),
                 stderr: "",
                 code: 0 as never,
                 timedOut: false,
@@ -941,6 +951,255 @@ describe("EpicRunPreflight", () => {
       ]);
     }),
   );
+
+  describe("stranded child branches (t3code-9gg)", () => {
+    interface BdChildRow {
+      readonly id: string;
+      readonly status: string;
+    }
+    const closedChild = (id: string): BdChildRow => ({ id, status: "closed" });
+    const bdList = (entries: ReadonlyArray<BdChildRow>) => ({ list: JSON.stringify(entries) });
+
+    it.effect("blocks a closed child whose branch never landed", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          { mode: "parallel", unmergedBranchList: "epic/child-1\n" },
+        );
+        expect(result.ok).toBe(false);
+        expect(result.blockers).toContainEqual({
+          _tag: "stranded_child_branches",
+          baseBranch: "main",
+          branches: [{ childId: "child-1", branch: "epic/child-1" }],
+        });
+      }),
+    );
+
+    it.effect("blocks in sequential mode too", () =>
+      Effect.gen(function* () {
+        // The check is deliberately outside the parallel-only mode gate: a
+        // sequential run commits straight onto the base and never looks at
+        // `epic/<childId>`, so it strands a previous parallel run's branches
+        // exactly as thoroughly.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          { mode: "sequential", unmergedBranchList: "epic/child-1\n" },
+        );
+        expect(result.blockers.some((blocker) => blocker._tag === "stranded_child_branches")).toBe(
+          true,
+        );
+      }),
+    );
+
+    it.effect("names every stranded child, sorted", () =>
+      Effect.gen(function* () {
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-2"), closedChild("child-1"), closedChild("child-3")]),
+          { unmergedBranchList: "epic/child-3\nepic/child-1\n" },
+        );
+        expect(result.blockers).toContainEqual({
+          _tag: "stranded_child_branches",
+          baseBranch: "main",
+          branches: [
+            { childId: "child-1", branch: "epic/child-1" },
+            { childId: "child-3", branch: "epic/child-3" },
+          ],
+        });
+      }),
+    );
+
+    it.effect("ignores a closed child whose branch is merged", () =>
+      Effect.gen(function* () {
+        // Merged-ness is the signal, not existence: child branches are never
+        // deleted after landing, so every finished epic leaves them behind.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          { unmergedBranchList: "epic/other-epic-child\n" },
+        );
+        expect(result.ok).toBe(true);
+        expect(result.blockers).toEqual([]);
+      }),
+    );
+
+    it.effect("ignores an unmerged branch whose child is still open", () =>
+      Effect.gen(function* () {
+        // An open child is work the run will pick up and land itself.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([
+            { id: "child-1", status: "open" },
+            { id: "child-2", status: "in_progress" },
+          ]),
+          { unmergedBranchList: "epic/child-1\nepic/child-2\n" },
+        );
+        expect(result.ok).toBe(true);
+      }),
+    );
+
+    it.effect("ignores the run-owned base branch, which matches the same pattern", () =>
+      Effect.gen(function* () {
+        // `epic/*` also matches `epic/<epicId>/base`, and that branch is
+        // unmerged into the operator's branch by design. It can never equal a
+        // `childBranch(id)`, so the intersection drops it.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          { unmergedBranchList: `${runBaseBranch("epic-1")}\n` },
+        );
+        expect(result.ok).toBe(true);
+      }),
+    );
+
+    it.effect("issues no branch scan when the epic has no closed children", () =>
+      Effect.gen(function* () {
+        // Every run of a young epic takes this path, so it must cost nothing.
+        const scans: Array<ReadonlyArray<string>> = [];
+        const result = yield* run("# branch.head main\n", undefined, undefined, {
+          onGit: (input) => {
+            if (input.args.includes("--no-merged")) scans.push(input.args);
+          },
+        });
+        expect(result.ok).toBe(true);
+        expect(scans).toEqual([]);
+      }),
+    );
+
+    it.effect("warns instead of blocking when the run is resuming", () =>
+      Effect.gen(function* () {
+        // A resume keeps its own run id, so its queue still holds what it
+        // enqueued, and a resume fails on any blocker at all. Refusing it would
+        // refuse a crashed run permission to continue itself.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          { unmergedBranchList: "epic/child-1\n", resume: { runId: "run-9" } },
+        );
+        expect(result.ok).toBe(true);
+        expect(result.blockers.some((blocker) => blocker._tag === "stranded_child_branches")).toBe(
+          false,
+        );
+        expect(result.warnings).toContainEqual({
+          _tag: "stranded_child_branches_accepted",
+          baseBranch: "main",
+          branches: [{ childId: "child-1", branch: "epic/child-1" }],
+        });
+      }),
+    );
+
+    it.effect("measures against the run-owned base branch when it exists", () =>
+      Effect.gen(function* () {
+        const scans: Array<ReadonlyArray<string>> = [];
+        yield* run("# branch.head main\n", undefined, bdList([closedChild("child-1")]), {
+          config: {
+            _tag: "loaded",
+            configPath: "/repo/.t3code/epic-run.json",
+            override: { vcs: { runOwnedBaseBranch: true } },
+            config: {} as never,
+            presentKeys: ["vcs.runOwnedBaseBranch"],
+            unknownKeys: [],
+          },
+          onGit: (input) => {
+            if (input.args.includes("--no-merged")) scans.push(input.args);
+          },
+        });
+        expect(scans).toEqual([
+          [
+            "branch",
+            "--list",
+            "--no-merged",
+            runBaseBranch("epic-1"),
+            "--format=%(refname:short)",
+            "epic/*",
+          ],
+        ]);
+      }),
+    );
+
+    it.effect("falls back to the checked-out branch when the owned base does not exist", () =>
+      Effect.gen(function* () {
+        // The run would create it from the current branch, so the current
+        // branch is what a not-yet-existing owned base measures as.
+        const scans: Array<ReadonlyArray<string>> = [];
+        yield* run("# branch.head main\n", undefined, bdList([closedChild("child-1")]), {
+          config: {
+            _tag: "loaded",
+            configPath: "/repo/.t3code/epic-run.json",
+            override: { vcs: { runOwnedBaseBranch: true } },
+            config: {} as never,
+            presentKeys: ["vcs.runOwnedBaseBranch"],
+            unknownKeys: [],
+          },
+          processOverride: (input) =>
+            input.args[0] === "show-ref"
+              ? {
+                  stdout: "",
+                  stderr: "",
+                  code: 1 as never,
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                }
+              : undefined,
+          onGit: (input) => {
+            if (input.args.includes("--no-merged")) scans.push(input.args);
+          },
+        });
+        expect(scans[0]?.[3]).toBe("main");
+      }),
+    );
+
+    it.effect("does not cross-contaminate the integration-leftover scan", () =>
+      Effect.gen(function* () {
+        // Two `git branch` calls now run in parallel mode. The leftover scan
+        // does not re-filter by prefix, so an `epic/*` result reaching it would
+        // read as a leftover integration branch.
+        const result = yield* run(
+          "# branch.head main\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          { mode: "parallel", unmergedBranchList: "epic/child-1\n" },
+        );
+        expect(result.blockers.some((blocker) => blocker._tag === "integration_leftover")).toBe(
+          false,
+        );
+        expect(result.blockers.some((blocker) => blocker._tag === "stranded_child_branches")).toBe(
+          true,
+        );
+      }),
+    );
+
+    it.effect("skips the check on a detached HEAD", () =>
+      Effect.gen(function* () {
+        // There is no base branch to measure against, and detached HEAD
+        // already blocks on its own.
+        const scans: Array<ReadonlyArray<string>> = [];
+        const result = yield* run(
+          "# branch.head (detached)\n",
+          undefined,
+          bdList([closedChild("child-1")]),
+          {
+            unmergedBranchList: "epic/child-1\n",
+            onGit: (input) => {
+              if (input.args.includes("--no-merged")) scans.push(input.args);
+            },
+          },
+        );
+        expect(scans).toEqual([]);
+        expect(result.blockers).toEqual([{ _tag: "detached_head" }]);
+      }),
+    );
+  });
 
   describe("siblings", () => {
     const siblingSnapshot = (

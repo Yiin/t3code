@@ -28,7 +28,23 @@ export function epicRunPreflightBlockerText(blocker: EpicRunPreflightBlocker): s
       return `${blocker.branch} is checked out here, and the run lands by updating that ref. Switch to another branch before launching.`;
     case "workspace_missing":
       return `The workspace ${blocker.workspaceRoot} does not exist.`;
+    case "stranded_child_branches":
+      return strandedChildBranchesText(blocker);
   }
+}
+
+/** Rendered identically whether it blocks a launch or warns a resume. */
+function strandedChildBranchesText(input: {
+  readonly baseBranch: string;
+  readonly branches: readonly { readonly childId: string; readonly branch: string }[];
+}): string {
+  const listed = input.branches.map(({ childId, branch }) => `${childId} (${branch})`).join(", ");
+  return (
+    `${String(input.branches.length)} closed ${input.branches.length === 1 ? "child" : "children"} of this epic ` +
+    `never landed on ${input.baseBranch}: ${listed}. A run that starts here reads them as done and ` +
+    `will not merge them. Land each branch, or delete one you know is finished with ` +
+    `\`git branch -D <branch>\`.`
+  );
 }
 
 export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): string {
@@ -51,6 +67,8 @@ export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): s
       return `The resumed run keeps its own uncommitted changes to: ${warning.paths.join(", ")}`;
     case "resume_worktree_missing":
       return `These worktrees are gone, so the resumed run starts those children fresh: ${warning.paths.join(", ")}`;
+    case "stranded_child_branches_accepted":
+      return strandedChildBranchesText(warning);
   }
 }
 

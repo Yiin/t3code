@@ -21,7 +21,12 @@ import {
 import { resolveEpicRunConfig, type EpicRunConfigViolation } from "@t3tools/shared/epicRunConfig";
 
 import { EpicRunConfigSource, type EpicRunConfigFileResult } from "./EpicRunConfigSource.ts";
-import { INTEGRATION_BRANCH_PREFIX, integrationBranch, runBaseBranch } from "./policy.ts";
+import {
+  childBranch,
+  INTEGRATION_BRANCH_PREFIX,
+  integrationBranch,
+  runBaseBranch,
+} from "./policy.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
 import { ProcessRunner } from "./processRunner.ts";
 import { makeSiblingResolver } from "./siblings.ts";
@@ -65,7 +70,32 @@ export function formatEpicRunPreflightBlocker(blocker: EpicRunPreflightBlocker):
       );
     case "workspace_missing":
       return boundedBlockerText(`The workspace ${blocker.workspaceRoot} does not exist.`);
+    case "stranded_child_branches":
+      return boundedBlockerText(strandedChildBranchesText(blocker));
   }
+}
+
+/**
+ * The one text both the blocker and its resume warning render.
+ *
+ * It has to name every branch, because the operator's next move is per-branch:
+ * land it, or delete it. There is no override flag, and there are two ways to
+ * reach this over branches that are genuinely finished — the epic was
+ * squash-merged into another branch, or `vcs.runOwnedBaseBranch` was flipped
+ * between runs so the previous run landed on a different base. Both look
+ * exactly like stranding from here, so the text says how to clear one.
+ */
+function strandedChildBranchesText(input: {
+  readonly baseBranch: string;
+  readonly branches: ReadonlyArray<{ readonly childId: string; readonly branch: string }>;
+}): string {
+  const listed = input.branches.map(({ childId, branch }) => `${childId} (${branch})`).join(", ");
+  return (
+    `${String(input.branches.length)} closed ${input.branches.length === 1 ? "child" : "children"} of this epic ` +
+    `never landed on ${input.baseBranch}: ${listed}. A run that starts here reads them as done and ` +
+    `will not merge them. Land each branch, or delete one you know is finished with ` +
+    `\`git branch -D <branch>\`.`
+  );
 }
 
 /**
@@ -200,6 +230,23 @@ function deadLocalClaimIds(entries: ReadonlyArray<Record<string, unknown>>): Rea
     } catch {
       ids.push(entry["id"]);
     }
+  }
+  return ids;
+}
+
+/**
+ * The ids of every closed child in a `bd list --parent` payload.
+ *
+ * Shaped like {@link deadLocalClaimIds} and for the same reason: `bd` hands
+ * back untyped JSON, so every field this file reads off a row is narrowed here
+ * rather than at each use.
+ */
+function closedChildIds(entries: ReadonlyArray<Record<string, unknown>>): ReadonlyArray<string> {
+  const ids: Array<string> = [];
+  for (const entry of entries) {
+    if (entry["status"] !== "closed") continue;
+    const id = entry["id"];
+    if (typeof id === "string" && id.length > 0) ids.push(id);
   }
   return ids;
 }
@@ -653,6 +700,89 @@ export const layer = Layer.effect(
           }
           const childIds = deadLocalClaimIds(childEntries);
           if (childIds.length > 0) warnings.push({ _tag: "stale_claims", childIds });
+
+          // A run that dies during merge reconciliation leaves children closed
+          // whose branches never landed. Merge-queue state is keyed by run id,
+          // so the NEXT run starts with an empty queue, reads those children as
+          // done, and reconciles only what its own iterations produce — the
+          // code is stranded and the run still reports `done` (t3code-9gg).
+          //
+          // Deliberately outside the mode gate above: a sequential run of the
+          // same epic strands a previous parallel run's branches just as
+          // thoroughly, because it commits straight onto the base and never
+          // looks at `epic/<childId>` at all.
+          const closedChildren = closedChildIds(childEntries);
+          // Detached HEAD has no base to compare against, and it already
+          // blocks on its own. No closed children means no git call at all,
+          // which is every run of a young epic.
+          if (closedChildren.length > 0 && currentBranchName !== null) {
+            // Resolved the way the run itself will resolve it
+            // (`runBaseBranch.ts`), minus the create: an owned base branch that
+            // does not exist yet is one this run would create from the current
+            // branch, so the current branch is the right thing to measure
+            // against either way.
+            const ownedBranch = runBaseBranch(input.epicId);
+            const ownedBranchCheck = configSnapshot.config.vcs.runOwnedBaseBranch
+              ? yield* processRunner
+                  .run({
+                    command: "git",
+                    args: ["show-ref", "--verify", "--quiet", `refs/heads/${ownedBranch}`],
+                    cwd: input.workspaceRoot,
+                    timeout: COMMAND_TIMEOUT,
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      (error) =>
+                        new EpicRunPreflightError({ message: `git show-ref: ${error.message}` }),
+                    ),
+                  )
+              : null;
+            const baseBranch =
+              ownedBranchCheck !== null && ownedBranchCheck.code === 0
+                ? ownedBranch
+                : currentBranchName;
+
+            // One `git branch` for the whole epic. `epic/*` also matches the
+            // run-owned `epic/<epicId>/base`, but that can never equal a
+            // `childBranch(id)`, so the intersection drops it.
+            const unmerged = new Set(
+              (yield* runGit(input.workspaceRoot, [
+                "branch",
+                "--list",
+                "--no-merged",
+                baseBranch,
+                "--format=%(refname:short)",
+                "epic/*",
+              ])).stdout
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0),
+            );
+            const stranded = closedChildren
+              .map((childId) => ({ childId, branch: childBranch(childId) }))
+              .filter((entry) => unmerged.has(entry.branch))
+              .toSorted((left, right) => left.childId.localeCompare(right.childId));
+            if (stranded.length > 0) {
+              // A resume owns the queue that holds these entries, so refusing
+              // it would refuse a crashed run permission to continue itself —
+              // the mistake `integration_leftover` above already made once, and
+              // a resume fails on any blocker at all
+              // (`EpicRunnerLaunch.ts`). It still gets said out loud: the
+              // resume's own boot log prints every warning, and the gap this
+              // covers is real — a crash between a worker closing its child and
+              // the coordinator enqueuing its branch leaves an entry no queue
+              // holds, and `bd ready` never returns a closed child.
+              if (resume === undefined) {
+                blockers.push({ _tag: "stranded_child_branches", baseBranch, branches: stranded });
+              } else {
+                warnings.push({
+                  _tag: "stranded_child_branches_accepted",
+                  baseBranch,
+                  branches: stranded,
+                });
+              }
+            }
+          }
         }
 
         return {

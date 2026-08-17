@@ -28,6 +28,36 @@ describe("epic run preflight presentation", () => {
     ]);
   });
 
+  it("names every stranded branch and how to clear one", () => {
+    // The operator's next move is per-branch, and there is no override flag,
+    // so the text has to carry both the list and the escape hatch.
+    expect(
+      epicRunPreflightBlockerText({
+        _tag: "stranded_child_branches",
+        baseBranch: "epic/t3code-2cc/base",
+        branches: [
+          { childId: "t3code-2cc.2", branch: "epic/t3code-2cc.2" },
+          { childId: "t3code-2cc.3", branch: "epic/t3code-2cc.3" },
+        ],
+      }),
+    ).toBe(
+      "2 closed children of this epic never landed on epic/t3code-2cc/base: " +
+        "t3code-2cc.2 (epic/t3code-2cc.2), t3code-2cc.3 (epic/t3code-2cc.3). " +
+        "A run that starts here reads them as done and will not merge them. " +
+        "Land each branch, or delete one you know is finished with `git branch -D <branch>`.",
+    );
+  });
+
+  it("says child, not children, for a single stranded branch", () => {
+    expect(
+      epicRunPreflightBlockerText({
+        _tag: "stranded_child_branches",
+        baseBranch: "mine",
+        branches: [{ childId: "t3code-2cc.5", branch: "epic/t3code-2cc.5" }],
+      }),
+    ).toContain("1 closed child of this epic never landed on mine");
+  });
+
   it("shows config paths and redacted diagnostics verbatim", () => {
     expect(
       epicRunPreflightBlockerText({
@@ -60,6 +90,11 @@ describe("epic run preflight presentation", () => {
       }),
       epicRunPreflightWarningText({ _tag: "dirty_tree_accepted", paths: ["a.ts"] }),
       epicRunPreflightWarningText({ _tag: "resume_worktree_missing", paths: ["/wt/child-1"] }),
+      epicRunPreflightWarningText({
+        _tag: "stranded_child_branches_accepted",
+        baseBranch: "mine",
+        branches: [{ childId: "t3code-2cc.5", branch: "epic/t3code-2cc.5" }],
+      }),
     ]).toEqual([
       "These children have stale claims: epic-1.1",
       "Epic epic-1 has no ready children.",
@@ -68,6 +103,9 @@ describe("epic run preflight presentation", () => {
       "epic/t3code-5m4/base is 3 commit(s) behind the checked-out branch; a run reusing it starts fresh workers from old code.",
       "The resumed run keeps its own uncommitted changes to: a.ts",
       "These worktrees are gone, so the resumed run starts those children fresh: /wt/child-1",
+      "1 closed child of this epic never landed on mine: t3code-2cc.5 (epic/t3code-2cc.5). " +
+        "A run that starts here reads them as done and will not merge them. " +
+        "Land each branch, or delete one you know is finished with `git branch -D <branch>`.",
     ]);
   });
 });
