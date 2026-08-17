@@ -103,7 +103,41 @@ const currentState = (
     .loginStatus(terminalId)
     .pipe(Stream.take(1), Stream.runHead, Effect.map(Option.getOrThrow));
 
+/**
+ * The harness home variables the login command table is asserted against.
+ *
+ * `mergeProviderInstanceEnvironment` builds a login environment on top of
+ * `process.env`, which is right in production — a login terminal should inherit
+ * the host env. It also means a shell that exports one of these leaks it into
+ * every row, so the codex/kimi/opencode rows see the host's `CLAUDE_CONFIG_DIR`
+ * where the assertion expects `undefined`. Any t3 Claude agent session with a
+ * shadow home is such a shell (t3code-y4l).
+ */
+const HARNESS_HOME_VARIABLES = [
+  "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
+  "KIMI_CODE_HOME",
+  "XDG_DATA_HOME",
+] as const;
+
+/** Take the harness home variables out of `process.env` for one scope. */
+const withoutHostHarnessHomes = Effect.acquireRelease(
+  Effect.sync(() => {
+    const saved = HARNESS_HOME_VARIABLES.map((name) => [name, process.env[name]] as const);
+    for (const name of HARNESS_HOME_VARIABLES) delete process.env[name];
+    return saved;
+  }),
+  (saved) =>
+    Effect.sync(() => {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }),
+);
+
 const makeHarness = Effect.fn("ProviderAuthManager.test.makeHarness")(function* () {
+  yield* withoutHostHarnessHomes;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "provider-auth-" });
