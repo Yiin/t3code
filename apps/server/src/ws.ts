@@ -80,7 +80,10 @@ import {
   describeEpicIterationRejection,
   EpicIterationOwnership,
 } from "./orchestration/epicIterationOwnership.ts";
-import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import {
+  normalizeDispatchCommand,
+  removeNormalizedCommandAttachments,
+} from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -1212,7 +1215,15 @@ const makeWsRpcLayer = (
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
               const normalizedCommand = yield* normalizeDispatchCommand(command);
-              const result = yield* dispatchNormalizedCommand(normalizedCommand);
+              // Dispatch can still fail after normalization wrote attachment
+              // files to disk. A dispatch failure rolls back its transaction, so
+              // no message-sent event references those files. Remove them here
+              // rather than leave them orphaned until an unrelated thread delete
+              // or prune happens to cover them. We clean only on a typed failure,
+              // not on interrupt, to avoid racing a just-committed event.
+              const result = yield* dispatchNormalizedCommand(normalizedCommand).pipe(
+                Effect.tapError(() => removeNormalizedCommandAttachments(normalizedCommand)),
+              );
               // The provider session is stopped by ThreadTeardownReactor off the
               // `thread.archived` event, so archiving through any path — this
               // handler, the runner, a future one — releases it. Terminals stay

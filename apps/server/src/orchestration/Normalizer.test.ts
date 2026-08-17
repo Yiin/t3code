@@ -16,7 +16,11 @@ import {
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { canonicalizeClientCommandTimestamps, normalizeDispatchCommand } from "./Normalizer.ts";
+import {
+  canonicalizeClientCommandTimestamps,
+  normalizeDispatchCommand,
+  removeNormalizedCommandAttachments,
+} from "./Normalizer.ts";
 
 const clientCreatedAt = "2031-01-01T00:00:00.000Z";
 const serverReceivedAt = "2026-07-18T00:00:00.000Z";
@@ -224,6 +228,88 @@ describe("normalizeDispatchCommand attachments", () => {
       ).pipe(Effect.flip);
 
       expect(error.message).toBe("Attachment 'broken.pdf' is not a readable data URL.");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("removes an already-written file when a later attachment fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const good = base64("first file survives only if the turn does");
+
+      const command: ClientTurnStartCommand = {
+        ...turnStartWith("cmd-partial", {
+          type: "file",
+          name: "good.log",
+          mimeType: "text/plain",
+          sizeBytes: 42,
+          dataUrl: `data:text/plain;base64,${good}`,
+        }),
+        message: {
+          messageId: MessageId.make("message-cmd-partial"),
+          role: "user",
+          text: "Take these",
+          attachments: [
+            {
+              type: "file",
+              name: "good.log",
+              mimeType: "text/plain",
+              sizeBytes: 42,
+              dataUrl: `data:text/plain;base64,${good}`,
+            },
+            {
+              type: "file",
+              name: "broken.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 3,
+              dataUrl: "not-a-data-url",
+            },
+          ],
+        },
+      };
+
+      yield* normalizeDispatchCommand(command).pipe(Effect.flip);
+
+      const entries = yield* fileSystem
+        .readDirectory(config.attachmentsDir)
+        .pipe(Effect.orElseSucceed((): Array<string> => []));
+      expect(entries).toHaveLength(0);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("removeNormalizedCommandAttachments deletes the files a turn wrote", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+
+      const normalized = yield* normalizeDispatchCommand(
+        turnStartWith("cmd-cleanup", {
+          type: "file",
+          name: "run.log",
+          mimeType: "text/plain",
+          sizeBytes: 5,
+          dataUrl: `data:text/plain;base64,${base64("bytes")}`,
+        }),
+      );
+      if (normalized.type !== "thread.turn.start") {
+        throw new Error("Expected a thread.turn.start command");
+      }
+      const attachment = normalized.message.attachments[0];
+      if (!attachment) {
+        throw new Error("Expected one normalized attachment");
+      }
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir: config.attachmentsDir,
+        attachment,
+      });
+      if (!attachmentPath) {
+        throw new Error("Expected a resolved attachment path");
+      }
+      expect(yield* fileSystem.exists(attachmentPath)).toBe(true);
+
+      yield* removeNormalizedCommandAttachments(normalized);
+
+      expect(yield* fileSystem.exists(attachmentPath)).toBe(false);
     }).pipe(Effect.provide(testLayer)),
   );
 });

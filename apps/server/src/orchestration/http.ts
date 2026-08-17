@@ -8,7 +8,7 @@ import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { EpicIterationOwnership } from "./epicIterationOwnership.ts";
-import { normalizeDispatchCommand } from "./Normalizer.ts";
+import { normalizeDispatchCommand, removeNormalizedCommandAttachments } from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentInternal,
@@ -69,18 +69,23 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );
           // Same gate as the WebSocket surface: a running epic iteration is
-          // the runner's, whichever client door the command arrives at.
-          const rejection = yield* epicIterationOwnership.checkClientCommand(normalizedCommand);
-          if (rejection !== null) {
-            return yield* failEnvironmentInvalidRequest("epic_run_iteration_owned");
-          }
-          return yield* orchestrationEngine
-            .dispatch(normalizedCommand)
-            .pipe(
-              Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_dispatch_failed", cause),
-              ),
-            );
+          // the runner's, whichever client door the command arrives at. A
+          // rejection or dispatch failure past normalization means no event
+          // references the files it wrote, so remove them instead of orphaning
+          // them on disk.
+          return yield* Effect.gen(function* () {
+            const rejection = yield* epicIterationOwnership.checkClientCommand(normalizedCommand);
+            if (rejection !== null) {
+              return yield* failEnvironmentInvalidRequest("epic_run_iteration_owned");
+            }
+            return yield* orchestrationEngine
+              .dispatch(normalizedCommand)
+              .pipe(
+                Effect.catch((cause) =>
+                  failEnvironmentInternal("orchestration_dispatch_failed", cause),
+                ),
+              );
+          }).pipe(Effect.tapError(() => removeNormalizedCommandAttachments(normalizedCommand)));
         }),
       );
   }),

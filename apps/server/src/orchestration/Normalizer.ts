@@ -110,6 +110,11 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       return canonicalCommand as OrchestrationCommand;
     }
 
+    // Files land on disk before the message-sent event is decided. If a later
+    // attachment fails validation, the ones already written would be orphaned,
+    // so we track and remove them on any failure of this write pass.
+    const writtenAttachmentPaths: Array<string> = [];
+
     const normalizedAttachments = yield* Effect.forEach(
       canonicalCommand.message.attachments,
       (attachment) =>
@@ -190,10 +195,20 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
                 }),
             ),
           );
+          writtenAttachmentPaths.push(attachmentPath);
 
           return persistedAttachment;
         }),
       { concurrency: 1 },
+    ).pipe(
+      Effect.onError(() =>
+        Effect.forEach(
+          writtenAttachmentPaths,
+          (attachmentPath) =>
+            fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.ignore),
+          { concurrency: 1 },
+        ),
+      ),
     );
 
     return {
@@ -203,4 +218,38 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
         attachments: normalizedAttachments,
       },
     } satisfies OrchestrationCommand;
+  });
+
+// Normalization writes attachment files before the message-sent event is
+// decided. If the dispatch that follows fails, no event ever references those
+// files, so nothing prunes them. Call this on the dispatch error path to remove
+// the files a turn.start wrote. Safe to call for any command: it acts only on
+// turn.start attachments, and it swallows removal errors so it never masks the
+// original failure.
+export const removeNormalizedCommandAttachments = (command: OrchestrationCommand) =>
+  Effect.gen(function* () {
+    if (command.type !== "thread.turn.start") {
+      return;
+    }
+    const attachments = command.message.attachments;
+    if (attachments.length === 0) {
+      return;
+    }
+    const fileSystem = yield* FileSystem.FileSystem;
+    const serverConfig = yield* ServerConfig;
+    yield* Effect.forEach(
+      attachments,
+      (attachment) =>
+        Effect.gen(function* () {
+          const attachmentPath = resolveAttachmentPath({
+            attachmentsDir: serverConfig.attachmentsDir,
+            attachment,
+          });
+          if (!attachmentPath) {
+            return;
+          }
+          yield* fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.ignore);
+        }),
+      { concurrency: 1 },
+    );
   });
