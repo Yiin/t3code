@@ -15,14 +15,12 @@ import {
   type ProjectionProjectRepositoryShape,
 } from "../Services/ProjectionProjects.ts";
 
-const ProjectionProjectDbRow = ProjectionProject.mapFields(
+export const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
   }),
 );
-type ProjectionProjectDbRow = typeof ProjectionProjectDbRow.Type;
-
 const makeProjectionProjectRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -64,7 +62,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
 
   const getProjectionProjectRow = SqlSchema.findOneOption({
     Request: GetProjectionProjectInput,
-    Result: ProjectionProjectDbRow,
+    Result: ProjectionProjectDbRowSchema,
     execute: ({ projectId }) =>
       sql`
         SELECT
@@ -83,7 +81,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
 
   const listProjectionProjectRows = SqlSchema.findAll({
     Request: Schema.Void,
-    Result: ProjectionProjectDbRow,
+    Result: ProjectionProjectDbRowSchema,
     execute: () =>
       sql`
         SELECT

@@ -18,7 +18,7 @@ import {
   type ProjectionThreadSubagentRepositoryShape,
 } from "../Services/ProjectionThreadSubagents.ts";
 
-const ProjectionThreadSubagentDbRowSchema = ProjectionThreadSubagent.mapFields(
+export const ProjectionThreadSubagentDbRowSchema = ProjectionThreadSubagent.mapFields(
   Struct.assign({
     agentType: Schema.NullOr(TrimmedNonEmptyString),
     description: Schema.NullOr(TrimmedNonEmptyString),

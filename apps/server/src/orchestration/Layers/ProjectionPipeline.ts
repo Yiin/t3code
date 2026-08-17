@@ -29,6 +29,7 @@ import { type ProjectionThreadSubagent } from "../../persistence/Services/Projec
 import type { ProjectionTurn } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionStore } from "../../persistence/Services/ProjectionStore.ts";
 import { ProjectionStoreLive } from "../../persistence/Layers/ProjectionStore.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -41,18 +42,7 @@ import {
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
 
-export const ORCHESTRATION_PROJECTOR_NAMES = {
-  projects: "projection.projects",
-  threads: "projection.threads",
-  threadMessages: "projection.thread-messages",
-  threadProposedPlans: "projection.thread-proposed-plans",
-  threadActivities: "projection.thread-activities",
-  threadSubagents: "projection.thread-subagents",
-  threadSessions: "projection.thread-sessions",
-  threadTurns: "projection.thread-turns",
-  checkpoints: "projection.checkpoints",
-  pendingApprovals: "projection.pending-approvals",
-} as const;
+export { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 
 type ProjectorName =
   (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
