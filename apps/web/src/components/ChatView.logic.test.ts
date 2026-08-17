@@ -20,6 +20,7 @@ import {
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
   migrateDraftErrorEntry,
+  prepareSendAction,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
@@ -263,6 +264,103 @@ describe("deriveComposerSendState", () => {
         elementContextCount: 0,
       }).hasSendableContent,
     ).toBe(false);
+  });
+});
+
+describe("prepareSendAction", () => {
+  const baseInput = {
+    draftText: "hello",
+    imageCount: 0,
+    terminalContexts: [],
+    elementContextCount: 0,
+    showPlanFollowUpPrompt: false,
+    planMarkdown: null,
+    activeProject: true,
+    isFirstMessage: false,
+    sendEnvMode: "local" as const,
+    activeThreadWorktreePath: null,
+    activeThreadBranch: null,
+  };
+
+  it("gives plan follow-up precedence over every other branch", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        draftText: "",
+        showPlanFollowUpPrompt: true,
+        planMarkdown: "- Do the work",
+      }),
+    ).toEqual({
+      _tag: "plan-follow-up",
+      text: "PLEASE IMPLEMENT THIS PLAN:\n- Do the work",
+      interactionMode: "default",
+    });
+  });
+
+  it("recognizes standalone slash commands before empty content", () => {
+    expect(prepareSendAction({ ...baseInput, draftText: "/plan" })).toEqual({
+      _tag: "slash-command",
+      command: "plan",
+    });
+  });
+
+  it("reports expired terminal context when no sendable content remains", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        draftText: "\uFFFC",
+        terminalContexts: [
+          {
+            id: "expired",
+            threadId,
+            terminalId: "default",
+            terminalLabel: "Terminal 1",
+            lineStart: 1,
+            lineEnd: 1,
+            text: "",
+            createdAt: now,
+          },
+        ],
+      }),
+    ).toEqual({ _tag: "empty", expiredTerminalContextCount: 1 });
+  });
+
+  it("checks the project before the worktree base branch", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        activeProject: false,
+        isFirstMessage: true,
+        sendEnvMode: "worktree",
+      }),
+    ).toEqual({ _tag: "missing-project" });
+  });
+
+  it("requires a base branch for a new worktree", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        isFirstMessage: true,
+        sendEnvMode: "worktree",
+      }),
+    ).toEqual({ _tag: "missing-base-branch" });
+  });
+
+  it("returns send data when all guards pass", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        isFirstMessage: true,
+        sendEnvMode: "worktree",
+        activeThreadBranch: "main",
+      }),
+    ).toEqual({
+      _tag: "send",
+      trimmedPrompt: "hello",
+      sendableTerminalContexts: [],
+      expiredTerminalContextCount: 0,
+      baseBranchForWorktree: "main",
+    });
   });
 });
 

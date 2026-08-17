@@ -20,6 +20,8 @@ import {
   type TerminalContextDraft,
 } from "../lib/terminalContext";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
+import { parseStandaloneComposerSlashCommand, type ComposerSlashCommand } from "../composer-logic";
+import { resolvePlanFollowUpSubmission } from "../proposedPlan";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
@@ -315,6 +317,94 @@ export function deriveComposerSendState(options: {
       options.imageCount > 0 ||
       sendableTerminalContexts.length > 0 ||
       elementContextCount > 0,
+  };
+}
+
+export type PrepareSendAction =
+  | {
+      readonly _tag: "plan-follow-up";
+      readonly text: string;
+      readonly interactionMode: "default" | "plan";
+    }
+  | {
+      readonly _tag: "slash-command";
+      readonly command: Exclude<ComposerSlashCommand, "model">;
+    }
+  | { readonly _tag: "empty"; readonly expiredTerminalContextCount: number }
+  | { readonly _tag: "missing-project" }
+  | { readonly _tag: "missing-base-branch" }
+  | {
+      readonly _tag: "send";
+      readonly trimmedPrompt: string;
+      readonly sendableTerminalContexts: TerminalContextDraft[];
+      readonly expiredTerminalContextCount: number;
+      readonly baseBranchForWorktree: string | null;
+    };
+
+export function prepareSendAction(input: {
+  draftText: string;
+  imageCount: number;
+  terminalContexts: ReadonlyArray<TerminalContextDraft>;
+  elementContextCount: number;
+  showPlanFollowUpPrompt: boolean;
+  planMarkdown: string | null;
+  activeProject: boolean;
+  isFirstMessage: boolean;
+  sendEnvMode: DraftThreadEnvMode;
+  activeThreadWorktreePath: string | null;
+  activeThreadBranch: string | null;
+}): PrepareSendAction {
+  const sendState = deriveComposerSendState({
+    prompt: input.draftText,
+    imageCount: input.imageCount,
+    terminalContexts: input.terminalContexts,
+    elementContextCount: input.elementContextCount,
+  });
+
+  if (input.showPlanFollowUpPrompt && input.planMarkdown !== null) {
+    const followUp = resolvePlanFollowUpSubmission({
+      draftText: sendState.trimmedPrompt,
+      planMarkdown: input.planMarkdown,
+    });
+    return {
+      _tag: "plan-follow-up",
+      text: followUp.text,
+      interactionMode: followUp.interactionMode,
+    };
+  }
+
+  const standaloneSlashCommand =
+    input.imageCount === 0 &&
+    sendState.sendableTerminalContexts.length === 0 &&
+    input.elementContextCount === 0
+      ? parseStandaloneComposerSlashCommand(sendState.trimmedPrompt)
+      : null;
+  if (standaloneSlashCommand) {
+    return { _tag: "slash-command", command: standaloneSlashCommand };
+  }
+
+  if (!sendState.hasSendableContent) {
+    return {
+      _tag: "empty",
+      expiredTerminalContextCount: sendState.expiredTerminalContextCount,
+    };
+  }
+  if (!input.activeProject) {
+    return { _tag: "missing-project" };
+  }
+
+  const shouldCreateWorktree =
+    input.isFirstMessage && input.sendEnvMode === "worktree" && !input.activeThreadWorktreePath;
+  if (shouldCreateWorktree && !input.activeThreadBranch) {
+    return { _tag: "missing-base-branch" };
+  }
+
+  return {
+    _tag: "send",
+    trimmedPrompt: sendState.trimmedPrompt,
+    sendableTerminalContexts: sendState.sendableTerminalContexts,
+    expiredTerminalContextCount: sendState.expiredTerminalContextCount,
+    baseBranchForWorktree: shouldCreateWorktree ? input.activeThreadBranch : null,
   };
 }
 

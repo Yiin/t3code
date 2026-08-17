@@ -73,10 +73,7 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
-import {
-  collapseExpandedComposerCursor,
-  parseStandaloneComposerSlashCommand,
-} from "../composer-logic";
+import { collapseExpandedComposerCursor } from "../composer-logic";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -101,11 +98,7 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useUiStateStore } from "../uiStateStore";
-import {
-  buildPlanImplementationThreadTitle,
-  buildPlanImplementationPrompt,
-  resolvePlanFollowUpSubmission,
-} from "../proposedPlan";
+import { buildPlanImplementationThreadTitle, buildPlanImplementationPrompt } from "../proposedPlan";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -260,7 +253,7 @@ import {
   buildThreadTurnInterruptInput,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
-  deriveComposerSendState,
+  prepareSendAction,
   hasServerAcknowledgedLocalDispatch,
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
@@ -4437,53 +4430,43 @@ function ChatViewContent(props: ChatViewProps) {
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
     const promptForSend = promptRef.current;
-    const {
-      trimmedPrompt: trimmed,
-      sendableTerminalContexts: sendableComposerTerminalContexts,
-      expiredTerminalContextCount,
-      hasSendableContent,
-    } = deriveComposerSendState({
-      prompt: promptForSend,
+    const sendAction = prepareSendAction({
+      draftText: promptForSend,
       imageCount: composerImages.length,
       terminalContexts: composerTerminalContexts,
       elementContextCount:
         composerElementContexts.length +
         composerPreviewAnnotations.length +
         composerReviewComments.length,
+      showPlanFollowUpPrompt,
+      planMarkdown: activeProposedPlan?.planMarkdown ?? null,
+      activeProject: activeProject !== null,
+      isFirstMessage: !isServerThread || activeThread.messages.length === 0,
+      sendEnvMode,
+      activeThreadWorktreePath: activeThread.worktreePath,
+      activeThreadBranch,
     });
-    if (showPlanFollowUpPrompt && activeProposedPlan) {
-      const followUp = resolvePlanFollowUpSubmission({
-        draftText: trimmed,
-        planMarkdown: activeProposedPlan.planMarkdown,
-      });
+    if (sendAction._tag === "plan-follow-up") {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
       await onSubmitPlanFollowUp({
-        text: followUp.text,
-        interactionMode: followUp.interactionMode,
+        text: sendAction.text,
+        interactionMode: sendAction.interactionMode,
       });
       return;
     }
-    const standaloneSlashCommand =
-      composerImages.length === 0 &&
-      sendableComposerTerminalContexts.length === 0 &&
-      composerElementContexts.length === 0 &&
-      composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0
-        ? parseStandaloneComposerSlashCommand(trimmed)
-        : null;
-    if (standaloneSlashCommand) {
-      handleInteractionModeChange(standaloneSlashCommand);
+    if (sendAction._tag === "slash-command") {
+      handleInteractionModeChange(sendAction.command);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
       return;
     }
-    if (!hasSendableContent) {
-      if (expiredTerminalContextCount > 0) {
+    if (sendAction._tag === "empty") {
+      if (sendAction.expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
-          expiredTerminalContextCount,
+          sendAction.expiredTerminalContextCount,
           "empty",
         );
         toastManager.add(
@@ -4496,7 +4479,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
       return;
     }
-    if (!activeProject) {
+    if (sendAction._tag === "missing-project") {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
@@ -4506,21 +4489,19 @@ function ChatViewContent(props: ChatViewProps) {
       );
       return;
     }
-    const threadIdForSend = activeThread.id;
-    const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
-    const baseBranchForWorktree =
-      isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath
-        ? activeThreadBranch
-        : null;
-
-    // In worktree mode, require an explicit base branch so we don't silently
-    // fall back to local execution when branch selection is missing.
-    const shouldCreateWorktree =
-      isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
-    if (shouldCreateWorktree && !activeThreadBranch) {
-      setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
+    if (sendAction._tag === "missing-base-branch") {
+      setThreadError(activeThread.id, "Select a base branch before sending in New worktree mode.");
       return;
     }
+    if (sendAction._tag !== "send" || !activeProject) return;
+    const {
+      trimmedPrompt: trimmed,
+      sendableTerminalContexts: sendableComposerTerminalContexts,
+      expiredTerminalContextCount,
+      baseBranchForWorktree,
+    } = sendAction;
+    const threadIdForSend = activeThread.id;
+    const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
 
     sendInFlightRef.current = true;
     if (isDraftHeroState && activeThreadKey) {
