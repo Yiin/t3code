@@ -8,10 +8,6 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type {
   ServerProcessDiagnosticsEntry,
@@ -39,6 +35,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { isAtomCommandInterrupted, squashAtomCommandFailure } from "../../state/command-results";
 
 const NUMBER_FORMAT = new Intl.NumberFormat();
 

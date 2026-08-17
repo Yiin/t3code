@@ -3,15 +3,12 @@
 import { CheckIcon, CopyIcon, ExternalLinkIcon, LoaderIcon, SendIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { EnvironmentId, ProviderAuthLoginStartResult } from "@t3tools/contracts";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { isAtomCommandInterrupted, squashAtomCommandFailure } from "../../state/command-results";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";

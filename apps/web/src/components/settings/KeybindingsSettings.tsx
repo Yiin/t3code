@@ -28,10 +28,6 @@ import {
   type ServerUpsertKeybindingInput,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 
 import { isElectron } from "../../env";
 import { useOpenInPreferredEditor } from "../../editorPreferences";
@@ -72,6 +68,7 @@ import {
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { isAtomCommandInterrupted, squashAtomCommandFailure } from "../../state/command-results";
 
 function KeybindingPill({ value }: { value: string }) {
   const parts = value.split("+");

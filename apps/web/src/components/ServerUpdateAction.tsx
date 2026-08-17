@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { EnvironmentId, ServerSelfUpdateCapability } from "@t3tools/contracts";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { isAtomCommandInterrupted, squashAtomCommandFailure } from "~/state/command-results";
 import { manualServerUpdateCommand } from "~/versionSkew";
 import { Button } from "./ui/button";
 import { Spinner } from "./ui/spinner";
