@@ -15,7 +15,10 @@ function withLogicalId<Resource extends object>(resource: Resource, logicalId: s
   return new Proxy(resource, {
     has: (target, property) => property === "LogicalId" || property in target,
     get: (target, property, receiver) =>
-      property === "LogicalId" ? logicalId : Reflect.get(target, property, receiver),
+      property === "LogicalId"
+        ? logicalId
+        : // oxlint-disable-next-line anti-slop/no-reflect-get -- A get trap must forward the receiver so the wrapped lazy output proxy resolves its own getters.
+          Reflect.get(target, property, receiver),
   });
 }
 

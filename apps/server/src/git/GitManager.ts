@@ -343,24 +343,7 @@ export function matchesBranchHeadContext(
 }
 
 function toPullRequestInfo(summary: ChangeRequest): PullRequestInfo {
-  return {
-    number: summary.number,
-    title: summary.title,
-    url: summary.url,
-    baseRefName: summary.baseRefName,
-    headRefName: summary.headRefName,
-    state: summary.state ?? "open",
-    updatedAt: summary.updatedAt,
-    ...(summary.isCrossRepository !== undefined
-      ? { isCrossRepository: summary.isCrossRepository }
-      : {}),
-    ...(summary.headRepositoryNameWithOwner !== undefined
-      ? { headRepositoryNameWithOwner: summary.headRepositoryNameWithOwner }
-      : {}),
-    ...(summary.headRepositoryOwnerLogin !== undefined
-      ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
-      : {}),
-  };
+  return summary;
 }
 
 function limitContext(value: string, maxChars: number): string {

@@ -40,6 +40,12 @@ narrows it to one scenario. Editing one scenario means running all three.
 - `packages/effect-acp` owns the ACP schema and client behavior.
 - `packages/effect-codex-app-server` owns the Codex App Server schema and client behavior.
 - Keep the shared protocol package private and separate from `packages/shared`.
+- Generators run via `node scripts/generate.ts` and need network: acp downloads
+  pinned release assets (v0.11.3); codex crawls the GitHub API at a pinned commit.
+- Tests: `vp test run packages/effect-acp` (same for `packages/effect-codex-app-server`).
+- Only `apps/server` consumes them, through their subpath exports.
+- `apps/server` pattern-matches on error tags (`Acp*`, `CodexAppServer*`). Error
+  tags must never change.
 
 ## EpicRunner paths and facts
 
@@ -190,6 +196,20 @@ before run completion. Provider fallback uses structured evidence only.
   orchestration reactors, then the reaper's synchronous boot pass, then
   `EpicRunner.start()`. That order is load bearing.
 
+## Projection persistence
+
+- Write path: `apps/server/src/orchestration/Layers/ProjectionPipeline.ts`. Ten
+  projectors yield ten per-table repositories.
+- Read path: `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts`.
+  Nineteen methods; bypasses the repository interfaces and talks `SqlClient`
+  directly.
+- The ten repository pairs live in `persistence/{Services,Layers}/Projection*.ts`.
+  The `ProjectionCheckpoints` pair is dead code.
+- `apps/server/src/orchestration/projector.ts:228` carries a "mirrors
+  `Layers/ProjectionSnapshotQuery.ts`, change both or neither" comment.
+- Epic t3code-1ec consolidates all of this into one `ProjectionStore` module.
+  Check `bd list --parent t3code-1ec` before touching the area.
+
 ## Epic run gotchas
 
 - The run PubSub fans out only from `publishRunChange` in
@@ -201,6 +221,32 @@ before run completion. Provider fallback uses structured evidence only.
   `apps/web/src/epicRun.logic.ts`, and `apps/web/src/epicRunPreflightPresentation.ts`.
   `groupEpicRunIterationThreads` in `apps/web/src/components/Sidebar.logic.ts`
   folds a run's iteration threads by parsing the thread id.
+
+## Web state & client-runtime
+
+- Environment atom factories live in `packages/client-runtime/src/state/*.ts`. They
+  are instantiated against `connectionAtomRuntime`
+  (`apps/web/src/connection/runtime.ts:26`) in mirror files under
+  `apps/web/src/state/`.
+- `apps/web/src/state/entities.ts` holds the thread/project read hooks, with
+  null-ref empty-atom guards.
+- `apps/web/src/state/use-atom-command.ts` is the sanctioned command hook
+  (143 uses).
+- Direct imports of `@t3tools/client-runtime/state/runtime` outside
+  `apps/web/src/state/` are being removed by epic t3code-1ec. New code routes
+  commands through per-feature hooks on the
+  `apps/web/src/state/sourceControlActions.ts` pattern.
+
+## Web UI layout
+
+- `apps/web/src/components/ChatView.tsx` is ~6.2k lines. Complex components use
+  the `X.logic.ts` + `X.logic.test.ts` extraction pattern (`ChatView.logic.ts`,
+  `MessagesTimeline.logic.ts`, `Sidebar.logic.ts`): pure functions tested with
+  vite-plus/test.
+- Two sidebars exist behind the `sidebarV2Enabled` setting (default `false`,
+  `packages/contracts/src/settings.ts:102`). The gate is in
+  `AppSidebarLayout.tsx:103-108`, and `/settings` forces v1. A finish-or-revert
+  decision is tracked in epic t3code-1ec child t3code-1ec.8.
 
 ## Message delivery
 

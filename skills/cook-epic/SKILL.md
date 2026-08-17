@@ -15,7 +15,22 @@ status) and git (commits, merges).
 **This is the only skill for running an epic.** It handles a chain, a wide
 frontier, and every mix of the two in one run — nobody has to predict the shape
 up front. `run.sh` execs `t3 epic cook`, the same shared orchestration core the
-T3 Code server runner drives. The default shape is the parallel pool at three
+T3 Code server runner drives.
+
+**Launch server-hosted first. `run.sh` is the fallback, not the default.**
+When a T3 Code server is running (check: `t3 epic list` answers), start the run
+on it so it is owned by a root session and visible in t3code chat and the epic
+dashboards:
+
+```bash
+t3 epic start --epic <EPIC> --cwd "$(pwd)"   # then: t3 epic watch / status / pause / cancel
+```
+
+A `bash run.sh <run-dir>` launch execs `t3 epic cook`, a foreground serverless
+run detached from every session. Nothing shows in t3code chat and the run dies
+with the launching shell. Use it only when no server is running (pure terminal
+use, CI), and say so in your report. Agents inside a t3code-managed session must
+never default to `run.sh`. The default shape is the parallel pool at three
 workers: per-worker worktrees, an integration branch, and a serialized merge
 queue, with claiming, retry budgets, a per-child gate, and verify-by-effects.
 `COOKEPIC_SEQUENTIAL=1` or `COOKEPIC_WORKERS=1` escapes to one worker at a

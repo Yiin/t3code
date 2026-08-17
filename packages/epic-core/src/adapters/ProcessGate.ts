@@ -44,7 +44,7 @@ const boundOutput = (output: string, maxBytes: number): string => {
     bytes += characterBytes;
   }
   // The cut lands mid-line, so drop the partial leading fragment's whitespace.
-  return chunks.reverse().join("").trimStart();
+  return chunks.toReversed().join("").trimStart();
 };
 
 export const heavyGateLockPath = (input: {

@@ -113,7 +113,10 @@ const schemaErrorAttributes = (error: unknown): Record<string, unknown> | undefi
   if (Option.isNone(encoded) || typeof encoded.value !== "object" || encoded.value === null) {
     return undefined;
   }
-  const tag = Reflect.get(encoded.value, "_tag");
+  if (!("_tag" in encoded.value)) {
+    return undefined;
+  }
+  const tag = encoded.value._tag;
   if (typeof tag !== "string") {
     return undefined;
   }
