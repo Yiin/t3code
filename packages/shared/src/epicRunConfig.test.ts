@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { EPIC_RUN_CONFIG_FIELDS, ProviderInstanceId } from "@t3tools/contracts";
+import { EPIC_RUN_CONFIG_PUBLIC_FIELDS, ProviderInstanceId } from "@t3tools/contracts";
 
 import { resolveEpicRunConfig } from "./epicRunConfig.ts";
 
@@ -16,9 +16,7 @@ describe("resolveEpicRunConfig", () => {
     expect(result.config.parallel.workers).toBe(3);
     expect(result.violations).toEqual([]);
     expect(Object.keys(result.provenance).toSorted()).toEqual(
-      EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only")
-        .map((field) => field.key)
-        .toSorted(),
+      EPIC_RUN_CONFIG_PUBLIC_FIELDS.map((field) => field.key).toSorted(),
     );
     expect(new Set(Object.values(result.provenance))).toEqual(new Set(["default"]));
   });

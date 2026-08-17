@@ -722,6 +722,22 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
   },
 ];
 
+/** Config fields that apply to hosted epic runs and the shared runner core. */
+export const EPIC_RUN_CONFIG_PUBLIC_FIELDS = EPIC_RUN_CONFIG_FIELDS.filter(
+  (field) => field.scope !== "terminal-only",
+);
+
+/** Config fields that apply only to the terminal coordinator. */
+export const EPIC_RUN_CONFIG_TERMINAL_FIELDS = EPIC_RUN_CONFIG_FIELDS.filter(
+  (field) => field.scope === "terminal-only",
+);
+
+/** Fields in the order used by the operator-facing options form. */
+export const EPIC_RUN_CONFIG_DISPLAY_FIELDS = [
+  ...EPIC_RUN_CONFIG_PUBLIC_FIELDS,
+  ...EPIC_RUN_CONFIG_TERMINAL_FIELDS,
+] as const;
+
 export const EpicRunConfigProvenanceSource = Schema.Literals([
   "default",
   "file",
@@ -735,9 +751,7 @@ export const EpicRunConfigProvenance = Schema.Record(Schema.String, EpicRunConfi
 export type EpicRunConfigProvenance = typeof EpicRunConfigProvenance.Type;
 
 /** Public config fields that can be supplied to a server epic run. */
-export const EPIC_RUN_CONFIG_LEAF_KEYS = EPIC_RUN_CONFIG_FIELDS.filter(
-  (field) => field.scope !== "terminal-only",
-).map((field) => field.key);
+export const EPIC_RUN_CONFIG_LEAF_KEYS = EPIC_RUN_CONFIG_PUBLIC_FIELDS.map((field) => field.key);
 
 /** Fast membership lookup for public epic-run config fields. */
 export const EPIC_RUN_CONFIG_LEAF_KEY_SET: ReadonlySet<string> = new Set(EPIC_RUN_CONFIG_LEAF_KEYS);

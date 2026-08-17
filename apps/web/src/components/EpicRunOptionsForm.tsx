@@ -1,7 +1,8 @@
 import {
   DEFAULT_EPIC_RUN_CONFIG,
   DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
-  EPIC_RUN_CONFIG_FIELDS,
+  EPIC_RUN_CONFIG_DISPLAY_FIELDS,
+  EPIC_RUN_CONFIG_TERMINAL_FIELDS,
   EpicRunEngine,
   ExecutionMode,
   RuntimeMode,
@@ -170,7 +171,7 @@ function EpicRunOptionRow(props: {
   readonly onClear: () => void;
 }) {
   const { field } = props;
-  const terminalOnly = field.scope === "terminal-only";
+  const terminalOnly = EPIC_RUN_CONFIG_TERMINAL_FIELDS.includes(field);
   const control = (
     <EpicRunOptionControl
       field={field}
@@ -289,7 +290,7 @@ export function EpicRunOptionsForm(props: {
         </Button>
       </div>
       <div className="divide-y divide-border/60">
-        {EPIC_RUN_CONFIG_FIELDS.map((field) => {
+        {EPIC_RUN_CONFIG_DISPLAY_FIELDS.map((field) => {
           const section =
             field.scope !== previousScope ? SCOPE_SECTION_LABELS[field.scope] : undefined;
           previousScope = field.scope;

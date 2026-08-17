@@ -5,7 +5,7 @@ import type {
   EpicRun,
   ProjectId,
 } from "@t3tools/contracts";
-import { EPIC_RUN_CONFIG_FIELDS } from "@t3tools/contracts";
+import { EPIC_RUN_CONFIG_PUBLIC_FIELDS } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -190,17 +190,15 @@ function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId:
           Run configuration
         </summary>
         <div className="mt-2 space-y-1">
-          {EPIC_RUN_CONFIG_FIELDS.filter((field) => field.scope !== "terminal-only").map(
-            (field) => (
-              <div key={field.key} className="flex items-center gap-2">
-                <span className="font-mono">{field.key}</span>
-                <span className="min-w-0 flex-1 truncate text-foreground/80">
-                  {formatEpicRunOptionValue(epicRunEffectiveValue(config, field.key))}
-                </span>
-                <EpicRunProvenanceChip source={configProvenance[field.key]} />
-              </div>
-            ),
-          )}
+          {EPIC_RUN_CONFIG_PUBLIC_FIELDS.map((field) => (
+            <div key={field.key} className="flex items-center gap-2">
+              <span className="font-mono">{field.key}</span>
+              <span className="min-w-0 flex-1 truncate text-foreground/80">
+                {formatEpicRunOptionValue(epicRunEffectiveValue(config, field.key))}
+              </span>
+              <EpicRunProvenanceChip source={configProvenance[field.key]} />
+            </div>
+          ))}
         </div>
       </details>
     </div>
