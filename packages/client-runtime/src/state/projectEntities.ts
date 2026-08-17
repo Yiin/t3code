@@ -13,6 +13,7 @@ import type { EnvironmentCatalogState } from "./connections.ts";
 import { arrayElementsEqual, parseProjectKey, projectKey, projectRefsEqual } from "./entities.ts";
 
 const EMPTY_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = Object.freeze([]);
+const EMPTY_PROJECT_REFS: ReadonlyArray<ScopedProjectRef> = Object.freeze([]);
 const EMPTY_PROJECT_INDEX: ReadonlyMap<ProjectId, OrchestrationProjectShell> = new Map();
 
 export function createEnvironmentProjectAtoms(input: {
@@ -21,6 +22,12 @@ export function createEnvironmentProjectAtoms(input: {
     environmentId: EnvironmentId,
   ) => Atom.Atom<OrchestrationShellSnapshot | null>;
 }) {
+  const emptyProjectAtom = Atom.make<EnvironmentProject | null>(null).pipe(
+    Atom.withLabel("environment-project:empty"),
+  );
+  const emptyProjectRefsAtom = Atom.make(EMPTY_PROJECT_REFS).pipe(
+    Atom.withLabel("environment-project-refs:empty"),
+  );
   const environmentProjectsAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make(
       (get): ReadonlyArray<OrchestrationProjectShell> =>
@@ -97,9 +104,11 @@ export function createEnvironmentProjectAtoms(input: {
   return {
     environmentProjectsAtom,
     environmentProjectIndexAtom,
-    environmentProjectRefsAtom,
+    environmentProjectRefsAtom: (environmentId: EnvironmentId | null) =>
+      environmentId === null ? emptyProjectRefsAtom : environmentProjectRefsAtom(environmentId),
     projectRefsAtom,
     projectsAtom,
-    projectAtom: (ref: ScopedProjectRef) => projectAtomFamily(projectKey(ref)),
+    projectAtom: (ref: ScopedProjectRef | null) =>
+      ref === null ? emptyProjectAtom : projectAtomFamily(projectKey(ref)),
   };
 }

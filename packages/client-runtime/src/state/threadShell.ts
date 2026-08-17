@@ -35,6 +35,12 @@ export function createEnvironmentThreadShellAtoms(input: {
     environmentId: EnvironmentId,
   ) => Atom.Atom<OrchestrationShellSnapshot | null>;
 }) {
+  const emptyThreadShellAtom = Atom.make<EnvironmentThreadShell | null>(null).pipe(
+    Atom.withLabel("environment-thread-shell:empty"),
+  );
+  const emptyThreadRefsAtom = Atom.make(EMPTY_SCOPED_THREAD_REFS).pipe(
+    Atom.withLabel("environment-thread-refs:empty"),
+  );
   const environmentThreadsAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make(
       (get): ReadonlyArray<OrchestrationThreadShell> =>
@@ -175,12 +181,14 @@ export function createEnvironmentThreadShellAtoms(input: {
   return {
     environmentThreadsAtom,
     environmentThreadIndexAtom,
-    environmentThreadRefsAtom,
+    environmentThreadRefsAtom: (environmentId: EnvironmentId | null) =>
+      environmentId === null ? emptyThreadRefsAtom : environmentThreadRefsAtom(environmentId),
     environmentThreadRefsByProjectAtom,
     threadRefsAtom,
     threadShellsAtom,
     threadShellsForProjectRefsAtom: (refs: ReadonlyArray<ScopedProjectRef>) =>
       threadShellsForProjectRefsAtomFamily(projectRefCollectionKey(refs)),
-    threadShellAtom: (ref: ScopedThreadRef) => threadShellAtomFamily(threadKey(ref)),
+    threadShellAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyThreadShellAtom : threadShellAtomFamily(threadKey(ref)),
   };
 }

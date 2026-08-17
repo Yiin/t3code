@@ -72,6 +72,46 @@ export function createEnvironmentThreadDetailAtoms<E>(
     threadId: ScopedThreadRef["threadId"],
   ) => Atom.Atom<AsyncResult.AsyncResult<EnvironmentThreadState, E>>,
 ) {
+  const emptyStateAtom = Atom.make(AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE)).pipe(
+    Atom.withLabel("environment-thread-state:empty"),
+  );
+  const emptyDetailAtom = Atom.make<EnvironmentThread | null>(null).pipe(
+    Atom.withLabel("environment-thread-detail:empty"),
+  );
+  const emptyStatusAtom = Atom.make("initial").pipe(
+    Atom.withLabel("environment-thread-status:empty"),
+  );
+  const emptyErrorAtom = Atom.make<unknown | null>(null).pipe(
+    Atom.withLabel("environment-thread-error:empty"),
+  );
+  const emptyMessagesAtom = Atom.make(EMPTY_MESSAGES).pipe(
+    Atom.withLabel("environment-thread-messages:empty"),
+  );
+  const emptyActivitiesAtom = Atom.make(EMPTY_ACTIVITIES).pipe(
+    Atom.withLabel("environment-thread-activities:empty"),
+  );
+  const emptyActivitiesTruncatedAtom = Atom.make<OrchestrationThreadActivityTruncation | null>(
+    null,
+  ).pipe(Atom.withLabel("environment-thread-activities-truncated:empty"));
+  const emptyProposedPlansAtom = Atom.make(EMPTY_PROPOSED_PLANS).pipe(
+    Atom.withLabel("environment-thread-proposed-plans:empty"),
+  );
+  const emptyCheckpointsAtom = Atom.make(EMPTY_CHECKPOINTS).pipe(
+    Atom.withLabel("environment-thread-checkpoints:empty"),
+  );
+  const emptySubagentsAtom = Atom.make(EMPTY_SUBAGENTS).pipe(
+    Atom.withLabel("environment-thread-subagents:empty"),
+  );
+  const emptyHasRunningSubagentsAtom = Atom.make(false).pipe(
+    Atom.withLabel("environment-thread-has-running-subagents:empty"),
+  );
+  const emptySessionAtom = Atom.make<OrchestrationSession | null>(null).pipe(
+    Atom.withLabel("environment-thread-session:empty"),
+  );
+  const emptyLatestTurnAtom = Atom.make<OrchestrationLatestTurn | null>(null).pipe(
+    Atom.withLabel("environment-thread-latest-turn:empty"),
+  );
+
   const threadStateValueAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
     return Atom.make((get) =>
@@ -205,20 +245,35 @@ export function createEnvironmentThreadDetailAtoms<E>(
   );
 
   return {
-    stateAtom: (ref: ScopedThreadRef) => threadStateValueAtomFamily(threadKey(ref)),
-    detailAtom: (ref: ScopedThreadRef) => threadDetailAtomFamily(threadKey(ref)),
-    statusAtom: (ref: ScopedThreadRef) => threadStatusAtomFamily(threadKey(ref)),
-    errorAtom: (ref: ScopedThreadRef) => threadErrorAtomFamily(threadKey(ref)),
-    messagesAtom: (ref: ScopedThreadRef) => threadMessagesAtomFamily(threadKey(ref)),
-    activitiesAtom: (ref: ScopedThreadRef) => threadActivitiesAtomFamily(threadKey(ref)),
-    activitiesTruncatedAtom: (ref: ScopedThreadRef) =>
-      threadActivitiesTruncatedAtomFamily(threadKey(ref)),
-    proposedPlansAtom: (ref: ScopedThreadRef) => threadProposedPlansAtomFamily(threadKey(ref)),
-    checkpointsAtom: (ref: ScopedThreadRef) => threadCheckpointsAtomFamily(threadKey(ref)),
-    subagentsAtom: (ref: ScopedThreadRef) => threadSubagentsAtomFamily(threadKey(ref)),
-    hasRunningSubagentsAtom: (ref: ScopedThreadRef) =>
-      threadHasRunningSubagentsAtomFamily(threadKey(ref)),
-    sessionAtom: (ref: ScopedThreadRef) => threadSessionAtomFamily(threadKey(ref)),
-    latestTurnAtom: (ref: ScopedThreadRef) => threadLatestTurnAtomFamily(threadKey(ref)),
+    stateAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyStateAtom : threadStateValueAtomFamily(threadKey(ref)),
+    detailAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyDetailAtom : threadDetailAtomFamily(threadKey(ref)),
+    statusAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyStatusAtom : threadStatusAtomFamily(threadKey(ref)),
+    errorAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyErrorAtom : threadErrorAtomFamily(threadKey(ref)),
+    messagesAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyMessagesAtom : threadMessagesAtomFamily(threadKey(ref)),
+    activitiesAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyActivitiesAtom : threadActivitiesAtomFamily(threadKey(ref)),
+    activitiesTruncatedAtom: (ref: ScopedThreadRef | null) =>
+      ref === null
+        ? emptyActivitiesTruncatedAtom
+        : threadActivitiesTruncatedAtomFamily(threadKey(ref)),
+    proposedPlansAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyProposedPlansAtom : threadProposedPlansAtomFamily(threadKey(ref)),
+    checkpointsAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyCheckpointsAtom : threadCheckpointsAtomFamily(threadKey(ref)),
+    subagentsAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptySubagentsAtom : threadSubagentsAtomFamily(threadKey(ref)),
+    hasRunningSubagentsAtom: (ref: ScopedThreadRef | null) =>
+      ref === null
+        ? emptyHasRunningSubagentsAtom
+        : threadHasRunningSubagentsAtomFamily(threadKey(ref)),
+    sessionAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptySessionAtom : threadSessionAtomFamily(threadKey(ref)),
+    latestTurnAtom: (ref: ScopedThreadRef | null) =>
+      ref === null ? emptyLatestTurnAtom : threadLatestTurnAtomFamily(threadKey(ref)),
   };
 }

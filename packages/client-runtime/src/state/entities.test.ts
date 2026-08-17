@@ -199,6 +199,51 @@ function makeHarness() {
 }
 
 describe("environment entity projections", () => {
+  it("shares frozen empty atoms for null thread and project references", () => {
+    const harness = makeHarness();
+    const nullProject = harness.projects.projectAtom(null);
+    const nullProjectRefs = harness.projects.environmentProjectRefsAtom(null);
+    const nullThread = harness.threadShells.threadShellAtom(null);
+    const nullThreadRefs = harness.threadShells.environmentThreadRefsAtom(null);
+    const nullDetail = harness.threadDetails.detailAtom(null);
+    const nullMessages = harness.threadDetails.messagesAtom(null);
+    const nullActivities = harness.threadDetails.activitiesAtom(null);
+    const nullActivitiesTruncated = harness.threadDetails.activitiesTruncatedAtom(null);
+    const nullPlans = harness.threadDetails.proposedPlansAtom(null);
+    const nullCheckpoints = harness.threadDetails.checkpointsAtom(null);
+    const nullSubagents = harness.threadDetails.subagentsAtom(null);
+    const nullRunningSubagents = harness.threadDetails.hasRunningSubagentsAtom(null);
+    const nullSession = harness.threadDetails.sessionAtom(null);
+    const nullLatestTurn = harness.threadDetails.latestTurnAtom(null);
+    const nullState = harness.threadDetails.stateAtom(null);
+    const nullStatus = harness.threadDetails.statusAtom(null);
+    const nullError = harness.threadDetails.errorAtom(null);
+
+    expect(nullProject).toBe(harness.projects.projectAtom(null));
+    expect(nullProjectRefs).toBe(harness.projects.environmentProjectRefsAtom(null));
+    expect(nullThread).toBe(harness.threadShells.threadShellAtom(null));
+    expect(nullThreadRefs).toBe(harness.threadShells.environmentThreadRefsAtom(null));
+    expect(nullDetail).toBe(harness.threadDetails.detailAtom(null));
+    expect(nullMessages).toBe(harness.threadDetails.messagesAtom(null));
+    expect(nullActivities).toBe(harness.threadDetails.activitiesAtom(null));
+    expect(nullActivitiesTruncated).toBe(harness.threadDetails.activitiesTruncatedAtom(null));
+    expect(nullPlans).toBe(harness.threadDetails.proposedPlansAtom(null));
+    expect(nullCheckpoints).toBe(harness.threadDetails.checkpointsAtom(null));
+    expect(nullSubagents).toBe(harness.threadDetails.subagentsAtom(null));
+    expect(nullRunningSubagents).toBe(harness.threadDetails.hasRunningSubagentsAtom(null));
+    expect(nullSession).toBe(harness.threadDetails.sessionAtom(null));
+    expect(nullLatestTurn).toBe(harness.threadDetails.latestTurnAtom(null));
+    expect(nullState).toBe(harness.threadDetails.stateAtom(null));
+    expect(nullStatus).toBe(harness.threadDetails.statusAtom(null));
+    expect(nullError).toBe(harness.threadDetails.errorAtom(null));
+    expect(harness.registry.get(nullProject)).toBeNull();
+    expect(Object.isFrozen(harness.registry.get(nullProjectRefs))).toBe(true);
+    expect(harness.registry.get(nullThread)).toBeNull();
+    expect(Object.isFrozen(harness.registry.get(nullThreadRefs))).toBe(true);
+    expect(harness.registry.get(nullDetail)).toBeNull();
+    expect(harness.registry.get(nullMessages)).toEqual([]);
+  });
+
   it("composes detail collections with authoritative shell workspace metadata", () => {
     const messages: OrchestrationThread["messages"] = [];
     const detail = {
