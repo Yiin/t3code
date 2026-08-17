@@ -110,6 +110,21 @@ const exists = (fs: FileSystem.FileSystem, path: string) =>
     Effect.orElseSucceed(() => false),
   );
 
+/**
+ * Whether the entry itself is a symbolic link.
+ *
+ * `stat` follows links, so a link to a directory reports `Directory`. Merging
+ * such an entry as a directory would walk into the link's TARGET and move
+ * files that live outside the account home entirely — a real account here
+ * links `projects/<slug>/memory` at a shared directory. A link is moved as a
+ * link instead.
+ */
+const isSymlink = (fs: FileSystem.FileSystem, path: string) =>
+  fs.readLink(path).pipe(
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+
 function mergeTree(
   fs: FileSystem.FileSystem,
   path: Path.Path,
@@ -120,7 +135,8 @@ function mergeTree(
   return Effect.gen(function* () {
     const sourceStat = yield* fs.stat(source);
     const destinationExists = yield* exists(fs, destination);
-    if (sourceStat.type === "Directory") {
+    const sourceIsSymlink = yield* isSymlink(fs, source);
+    if (sourceStat.type === "Directory" && !sourceIsSymlink) {
       yield* fs.makeDirectory(destination, { recursive: true });
       for (const child of yield* fs.readDirectory(source)) {
         yield* mergeTree(
@@ -131,7 +147,15 @@ function mergeTree(
           path.join(conflictRoot, child),
         );
       }
-      yield* fs.remove(source, { recursive: false });
+      // `remove` maps to `fs.rm`, which REFUSES a directory unless it is told
+      // to recurse — even an empty one. Recursing here is safe only because
+      // every child moved out above; a leftover means a child was parked, and
+      // deleting it would destroy the parked copy. Leave such a directory in
+      // place: `ensureSymlink` reports it later instead of losing data.
+      const remaining = yield* fs.readDirectory(source);
+      if (remaining.length === 0) {
+        yield* fs.remove(source, { recursive: true });
+      }
       return;
     }
     if (!destinationExists) {
@@ -140,6 +164,12 @@ function mergeTree(
       return;
     }
     const destinationStat = yield* fs.stat(destination);
+    if (sourceIsSymlink) {
+      // A link whose name is taken in the shared home: park the link itself.
+      yield* fs.makeDirectory(path.dirname(conflictRoot), { recursive: true });
+      yield* fs.rename(source, conflictRoot);
+      return;
+    }
     if (sourceStat.type === "File" && destinationStat.type === "File") {
       const sourceBytes = yield* fs.readFile(source);
       const destinationBytes = yield* fs.readFile(destination);
@@ -158,7 +188,15 @@ function mergeTree(
   });
 }
 
-function migrateOne(plan: ManagedAccountMovePlan, fs: FileSystem.FileSystem, path: Path.Path) {
+/**
+ * Move one account's shared entries into the shared home. Exported for tests:
+ * the pure planner cannot catch a filesystem-semantics bug, and one shipped.
+ */
+export function migrateAccountHome(
+  plan: ManagedAccountMovePlan,
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+) {
   return Effect.gen(function* () {
     const markerPath = path.join(plan.accountPath, MARKER);
     const marker = yield* fs.readFileString(markerPath).pipe(Effect.orElseSucceed(() => ""));
@@ -213,7 +251,7 @@ export const runManagedAccountHomeMigration = Effect.fn("runManagedAccountHomeMi
           move.instanceId
         ],
       } as ProviderInstanceConfigMap;
-      const migrated = yield* migrateOne(move, fs, path).pipe(
+      const migrated = yield* migrateAccountHome(move, fs, path).pipe(
         Effect.flatMap((didMigrate) =>
           didMigrate
             ? settings
