@@ -1,7 +1,7 @@
 import type { DiscoveredLocalServer, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useMemo } from "react";
 
-import { previewEnvironment } from "./state/preview";
+import { previewEnvironment } from "./state/environments";
 import { useEnvironmentQuery } from "./state/query";
 
 const EMPTY_PORTS: ReadonlyArray<DiscoveredLocalServer> = Object.freeze([]);

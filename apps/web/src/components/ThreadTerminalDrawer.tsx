@@ -62,8 +62,7 @@ import {
 import { readLocalApi } from "~/localApi";
 import { useAttachedTerminalSession } from "../state/terminalSessions";
 import { serverEnvironment } from "../state/server";
-import { previewEnvironment } from "../state/preview";
-import { terminalEnvironment } from "../state/terminal";
+import { previewEnvironment, terminalEnvironment } from "../state/environments";
 import { openTerminalLinkInPreview } from "./preview/openTerminalLinkInPreview";
 import { useAtomCommand } from "../state/use-atom-command";
 

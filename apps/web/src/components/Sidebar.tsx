@@ -96,7 +96,7 @@ import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
 import { openDiscoveredPort } from "./preview/openDiscoveredPort";
 import { useAtomCommand } from "../state/use-atom-command";
-import { previewEnvironment } from "../state/preview";
+import { previewEnvironment } from "../state/environments";
 import {
   legacyProjectCwdPreferenceKey,
   resolveProjectExpanded,

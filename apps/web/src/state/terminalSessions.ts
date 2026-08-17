@@ -10,7 +10,7 @@ import { ThreadId, type EnvironmentId, type TerminalAttachInput } from "@t3tools
 import { useMemo } from "react";
 
 import { useEnvironmentQuery } from "./query";
-import { terminalEnvironment } from "./terminal";
+import { terminalEnvironment } from "./environments";
 
 export function useAttachedTerminalSession(input: {
   readonly environmentId: EnvironmentId | null;

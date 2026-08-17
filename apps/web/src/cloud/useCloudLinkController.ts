@@ -8,7 +8,7 @@ import {
 import { useState } from "react";
 
 import { toastManager } from "../components/ui/toast";
-import { relayEnvironmentDiscovery } from "../state/relay";
+import { relayEnvironmentDiscovery } from "../state/environments";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   linkPrimaryEnvironment as linkPrimaryEnvironmentAtom,

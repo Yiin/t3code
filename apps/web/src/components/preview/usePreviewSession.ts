@@ -13,7 +13,7 @@ import {
   readThreadPreviewState,
   reconcilePreviewServerSessions,
 } from "~/previewStateStore";
-import { previewEnvironment } from "~/state/preview";
+import { previewEnvironment } from "~/state/environments";
 
 class PreviewSessionThreadKeyParseError extends Schema.TaggedErrorClass<PreviewSessionThreadKeyParseError>()(
   "PreviewSessionThreadKeyParseError",

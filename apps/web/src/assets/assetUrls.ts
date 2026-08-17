@@ -4,7 +4,7 @@ import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 
-import { assetEnvironment } from "~/state/assets";
+import { assetEnvironment } from "~/state/environments";
 import { usePreparedConnection } from "~/state/session";
 
 export { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";

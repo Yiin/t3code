@@ -15,7 +15,7 @@ import { type ReactNode, useCallback, useEffect, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
 import { cn } from "~/lib/utils";
-import { relayEnvironmentDiscovery } from "~/state/relay";
+import { relayEnvironmentDiscovery } from "~/state/environments";
 import { useRelayEnvironmentDiscovery } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";

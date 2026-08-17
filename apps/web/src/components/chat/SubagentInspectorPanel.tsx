@@ -22,7 +22,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { formatElapsed, type SubagentGroup } from "../../session-logic";
 import { formatContextWindowTokens } from "~/lib/contextWindow";
 import { cn } from "~/lib/utils";
-import { orchestrationEnvironment } from "~/state/orchestration";
+import { orchestrationEnvironment } from "~/state/environments";
 import { useThreadShell } from "~/state/entities";
 import { useEnvironmentThread } from "~/state/threads";
 import ChatMarkdown from "../ChatMarkdown";

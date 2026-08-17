@@ -38,7 +38,7 @@ import { resolveBrowserRecordingStopTarget } from "~/browser/browserRecordingSco
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { isElectron } from "~/env";
 import { useEnvironments } from "~/state/environments";
-import { previewEnvironment } from "~/state/preview";
+import { previewEnvironment } from "~/state/environments";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { useAtomCommand } from "~/state/use-atom-command";
 

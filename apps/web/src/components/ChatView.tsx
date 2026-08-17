@@ -187,7 +187,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { terminalEnvironment } from "../state/terminal";
+import { previewEnvironment, terminalEnvironment } from "../state/environments";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
@@ -263,7 +263,6 @@ import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
-import { previewEnvironment } from "../state/preview";
 import { skillsEnvironment } from "../state/skills";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";

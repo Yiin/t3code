@@ -24,9 +24,9 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback } from "react";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { gitEnvironment } from "./git";
+import { gitEnvironment } from "./environments";
 import { useEnvironmentQuery } from "./query";
-import { sourceControlEnvironment } from "./sourceControl";
+import { sourceControlEnvironment } from "./environments";
 import { useAtomCommand } from "./use-atom-command";
 import { vcsActionManager, vcsEnvironment } from "./vcs";
 
