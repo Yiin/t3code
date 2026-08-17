@@ -1,7 +1,7 @@
 /**
  * Never-failing git probes for the pool loop, over a {@link ProcessRunner};
  * `null` never counts as progress. Shared by the server runner
- * (`EpicRunnerPoolPorts.ts`) and the terminal `t3 epic cook` entry.
+ * (`PoolMergeDrain.ts`) and the terminal `t3 epic cook` entry.
  */
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";

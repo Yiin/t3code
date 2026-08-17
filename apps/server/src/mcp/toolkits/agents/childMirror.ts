@@ -91,7 +91,7 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 /**
  * Append one activity to the parent thread, swallowing every failure.
  *
- * Follows `dispatchBestEffort` in `EpicRunnerPoolPorts.ts`: `catchCause`
+ * Follows `dispatchBestEffort` in `PoolDispatch.ts`: `catchCause`
  * recovers defects too, so a broken projection cannot escape as an unhandled
  * cause into the tool call.
  */

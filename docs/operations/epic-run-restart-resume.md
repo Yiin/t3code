@@ -173,7 +173,7 @@ session-lifecycle conformance suite,
 
 ### The resumed agent re-does work it already committed
 
-`headBefore` never reaches the database. `EpicRunnerPoolPorts.ts` strips it and
+`headBefore` never reaches the database. `PoolWorkspace.ts` strips it and
 `headAfter` before persisting an iteration row, so the boot path cannot tell the
 agent where its own work started. Mitigation: the resume prompt does not claim
 to know. `EPIC_RUN_RESTART_RESUME_PROMPT` in `packages/epic-core/src/policy.ts`

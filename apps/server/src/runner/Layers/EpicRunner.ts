@@ -8,7 +8,7 @@
  * public service surface (assembled from `./EpicRunnerLaunch.ts` and
  * `./EpicRunnerLifecycle.ts`), loop supervision (FiberMap, live-loop marks,
  * failure backstops), restart reconciliation, and the `withTransition`
- * semaphore. Everything the loop touches goes through `./EpicRunnerPoolPorts.ts`.
+ * semaphore. The loop uses separate workspace and dispatch adapters.
  *
  * @module EpicRunner
  */
@@ -116,7 +116,8 @@ import { makeEpicRunnerLaunch } from "./EpicRunnerLaunch.ts";
 import { makeEpicRunnerLifecycle } from "./EpicRunnerLifecycle.ts";
 import { makeEpicRunnerRoleSelection } from "./EpicRunnerRoleSelection.ts";
 import { makeServerWorkerEvidence } from "./EpicRunnerWorkerEvidence.ts";
-import { makeServerPoolDispatch, makeServerPoolWorkspace } from "./EpicRunnerPoolPorts.ts";
+import { makeServerPoolDispatch } from "./PoolDispatch.ts";
+import { makeServerPoolWorkspace } from "./PoolWorkspace.ts";
 import { makeEpicRunReadModel } from "./PoolRunReadModel.ts";
 import { makeServerPoolJournal } from "./PoolRunJournal.ts";
 import { makeAbandonRunningIterations } from "./PoolIterationAbandon.ts";

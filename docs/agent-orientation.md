@@ -49,9 +49,9 @@ narrows it to one scenario. Editing one scenario means running all three.
 - `apps/server/src/runner/Layers/EpicRunner.ts` owns lifecycle and restart recovery.
 - `EpicRunnerLaunch.ts` owns preflight, the lease, and run creation.
   `EpicRunnerLifecycle.ts` owns pause, resume, cancel, and the worker cap.
-- `EpicRunnerPoolPorts.ts` adapts server ports.
+- `PoolWorkspace.ts` and `PoolDispatch.ts` adapt server workspace and dispatch ports.
 - Provisioning is per surface. Mirror every change between
-  `EpicRunnerPoolPorts.ensureIntegrationWorkspace` and
+  `PoolWorkspace.ensureIntegrationWorkspace` and
   `TerminalPoolWorkspace.ensureIntegration`. The drain is shared instead: both
   surfaces call `drainMergeQueue` (`adapters/TerminalMergeDrain.ts:20`), so a drain
   change lands once.
@@ -193,7 +193,7 @@ before run completion. Provider fallback uses structured evidence only.
 ## Epic run gotchas
 
 - The run PubSub fans out only from `publishRunChange` in
-  `EpicRunnerPoolPorts.ts`, so a journal-only iteration write stays invisible to
+  `PoolRunReadModel.ts`, so a journal-only iteration write stays invisible to
   clients until the next run-row save.
 - `EpicWorkerScopeRegistry` in `apps/server/src/provider/workerScope.ts` is
   in-memory, so a session resumed after a restart spawns outside its systemd scope.
@@ -268,7 +268,7 @@ Session state stays in the shared home. Managed homes use
   utilization never skips a hop. A dead tier costs a role its model, never its
   existence.
 - Server delivery is five files: `readIterationSubagents` in `EpicRunner.ts`,
-  `bindIterationSubagents` in `EpicRunnerPoolPorts.ts`, the in-memory
+  `bindIterationSubagents` in `PoolDispatch.ts`, the in-memory
   `EpicSubagentRegistry` in `apps/server/src/provider/epicSubagents.ts`,
   `resolveSessionSubagents` at session start in `ProviderService.ts`, and the
   `agents` option in `ClaudeAdapter.ts`. A session with no registry binding

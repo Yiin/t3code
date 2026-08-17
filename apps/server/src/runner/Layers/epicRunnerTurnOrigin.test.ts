@@ -13,7 +13,7 @@ import * as Effect from "effect/Effect";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { makeServerPoolDispatch } from "./EpicRunnerPoolPorts.ts";
+import { makeServerPoolDispatch } from "./PoolDispatch.ts";
 
 const threadId = ThreadId.make("thread-iteration-1");
 

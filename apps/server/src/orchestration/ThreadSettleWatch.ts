@@ -1,7 +1,7 @@
 /**
  * ThreadSettleWatch - wait for a thread's turn to end, then read what it said.
  *
- * Extracted verbatim from `runner/Layers/EpicRunnerPoolPorts.ts`, where every
+ * Extracted verbatim from `runner/Layers/PoolDispatch.ts`, where every
  * piece of it was module-private. The epic runner needs it to settle an
  * iteration; the `spawn_agent` toolkit needs exactly the same thing to settle a
  * thread-backed subagent, and nothing else the runner wraps around it.

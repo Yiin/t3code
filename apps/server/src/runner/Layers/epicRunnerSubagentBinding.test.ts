@@ -24,7 +24,7 @@ import type { OrchestrationCommand } from "@t3tools/contracts";
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
-import { makeServerPoolDispatch } from "./EpicRunnerPoolPorts.ts";
+import { makeServerPoolDispatch } from "./PoolDispatch.ts";
 
 const runId = EpicRunId.make("run-subagents-1");
 const threadId = ThreadId.make("thread-iteration-1");

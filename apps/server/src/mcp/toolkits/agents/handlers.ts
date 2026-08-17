@@ -98,7 +98,7 @@ const statusFromTurnState = (turnState: ThreadTurnState): Exclude<SpawnAgentStat
       return "interrupted";
     // `null` means nothing projected a turn state at all, and `running` means
     // the turn row lagged behind the settle signal. Both read as completed,
-    // matching the epic runner's own settle in `EpicRunnerPoolPorts.ts`.
+    // matching the epic runner's own settle in `PoolDispatch.ts`.
     case "completed":
     case "running":
     case null:

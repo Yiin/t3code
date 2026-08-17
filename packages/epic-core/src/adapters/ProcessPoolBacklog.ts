@@ -1,7 +1,7 @@
 /**
  * The `bd` probes the pool loop reads its backlog through, over a
  * {@link ProcessRunner}. Shared by the server runner
- * (`EpicRunnerPoolPorts.ts`) and the terminal `t3 epic cook` entry. Evidence
+ * (`PoolWorkspace.ts`) and the terminal `t3 epic cook` entry. Evidence
  * reads never fail: an unreadable issue yields conservative nulls, exactly
  * like the server's probes, and the loop treats unknown as unproven.
  */

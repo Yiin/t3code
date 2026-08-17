@@ -23,7 +23,7 @@ import * as Option from "effect/Option";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { makeServerPoolDispatch } from "./EpicRunnerPoolPorts.ts";
+import { makeServerPoolDispatch } from "./PoolDispatch.ts";
 
 const threadId = ThreadId.make("thread-iteration-7");
 /** The turn the dead process left behind. A resumed wait must ignore it. */

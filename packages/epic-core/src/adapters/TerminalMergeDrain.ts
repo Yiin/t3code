@@ -5,7 +5,7 @@
  * `bd`/`git` CLIs.
  *
  * A semantic port of the server's `makeServerMergeDrain`
- * (`EpicRunnerPoolPorts.ts`): same drain input derivation from the persisted
+ * (`PoolMergeDrain.ts`): same drain input derivation from the persisted
  * run, same integration-worktree asset restoration, same holder convention.
  * The terminal fold hook is a deliberate no-op — notes folding was dropped
  * for the terminal surface (t3code-06s.28).

@@ -15,7 +15,7 @@ export class MergeQueuePortError extends Schema.TaggedErrorClass<MergeQueuePortE
 ) {
   /**
    * Without this the class inherits an empty `message`, and every reader of it
-   * reports nothing. `EpicRunnerPoolPorts` renders a drain failure as
+   * reports nothing. `PoolMergeDrain` renders a drain failure as
    * `Epic runner failed to dispatch git.merge-queue: ${message}`, so three epic
    * runs failed with a bare trailing colon while the real cause — a gate that
    * timed out after two hours — sat populated one level down.

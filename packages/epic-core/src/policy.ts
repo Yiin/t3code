@@ -353,7 +353,7 @@ export const parseIntegrationFixTitle = (
  * `mergeFixDescription`'s `baseBranch`, which for this conflict never
  * contains the operator's commits and gives the child nothing to resolve.
  * The child is dispatched on that exact base branch, already checked out
- * (`EpicRunnerPoolPorts.ts`/`TerminalPoolWorkspace.ts` route
+ * (`PoolWorkspace.ts`/`TerminalPoolWorkspace.ts` route
  * `parseIntegrationFixTitle` to it directly, the same reused-branch dispatch
  * a per-entry merge-fix child gets), so resolving the conflict and
  * committing is the whole fix — there is no separate branch to land.

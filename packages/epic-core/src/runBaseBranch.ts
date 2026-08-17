@@ -11,7 +11,7 @@
  *
  * Ownership: `epic/<epicId>/base` belongs to the epic, not to any one run —
  * unlike `cook-epic-integration-<runId>`, which a run deletes at its own end
- * (`EpicRunnerPoolPorts.ts`, `TerminalPoolWorkspace.ts`), this branch
+ * (`PoolWorkspace.ts`, `TerminalPoolWorkspace.ts`), this branch
  * deliberately outlives the run that created it, so a later run of the same
  * epic keeps building on the same base instead of losing landed progress.
  * Nothing deletes it. `EpicRunPreflight` warns (never blocks) when a reused

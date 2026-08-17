@@ -4,7 +4,7 @@
  * and the integration branch, over the `git` CLI and the node filesystem.
  *
  * A semantic port of the server's `makeServerPoolWorkspace`
- * (`EpicRunnerPoolPorts.ts`) with the same branch and path conventions: the
+ * (`PoolWorkspace.ts`) with the same branch and path conventions: the
  * integration worktree at `<worktreesRoot>/integration` on
  * `cook-epic-integration-<runId>`, one worker worktree per iteration at
  * `<worktreesRoot>/<issueId>` on `epic/<issueId>`, and sibling layouts under
@@ -119,7 +119,7 @@ export const makeTerminalPoolWorkspace = (deps: {
    * makes repeated conflicts cheaper, so a repository whose config git declines
    * to write still runs — the trial merge carries the same settings as `-c`
    * flags anyway (`../rerere.ts`). Server twin:
-   * `EpicRunnerPoolPorts.enableRerere`.
+   * `PoolWorkspace.enableRerere`.
    */
   const enableRerere = (repositoryPath: string) =>
     Effect.forEach(
@@ -389,7 +389,7 @@ export const makeTerminalPoolWorkspace = (deps: {
       // has no branch to integrate from. `null` here means the same thing it
       // means for a snapshot that predates this field: no continuous
       // integration for this run. Mirrors the server twin
-      // (`EpicRunnerPoolPorts.ts`).
+      // (`PoolWorkspace.ts`).
       const operatorBaseBranch = run.config.vcs.runOwnedBaseBranch
         ? yield* readCurrentBranch(run.cwd).pipe(
             Effect.catch((error) =>
