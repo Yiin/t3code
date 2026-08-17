@@ -3,6 +3,7 @@ import {
   applySubagentActivity,
   closeRunningSubagentsForSession,
   decodeProviderTurnSteerAttributedActivityPayload,
+  isCodexRootInputProgressActivity,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
@@ -795,6 +796,9 @@ export function projectEvent(
         "payload",
       ).pipe(
         Effect.map((payload) => {
+          if (isCodexRootInputProgressActivity(payload.activity)) {
+            return nextBase;
+          }
           const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
           if (!thread) {
             return nextBase;

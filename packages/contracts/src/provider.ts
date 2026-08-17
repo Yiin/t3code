@@ -258,6 +258,8 @@ export const ProviderEvent = Schema.Struct({
   provider: ProviderDriverKind,
   // See ProviderSession for the migration story.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  /** Provider-native thread identity active when this event was emitted. */
+  providerThreadId: Schema.optional(TrimmedNonEmptyString),
   threadId: ThreadId,
   createdAt: IsoDateTime,
   method: TrimmedNonEmptyString,

@@ -1836,6 +1836,177 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
     }),
   );
+
+  it.effect("keeps root subAgentActivity events flat for every lifecycle kind", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      for (const [index, kind] of (["started", "interacted", "interrupted"] as const).entries()) {
+        yield* runtime.emit({
+          id: asEventId(`evt-root-${kind}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          providerThreadId: "provider-root",
+          createdAt: `2026-01-01T00:00:0${index}.000Z`,
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId(`root-${kind}`),
+          payload: {
+            startedAtMs: 1_777_999_999_000 + index,
+            threadId: "provider-root",
+            turnId: "turn-1",
+            item: {
+              type: "subAgentActivity",
+              id: `root-${kind}`,
+              kind,
+              agentPath: "/root",
+              agentThreadId: "provider-root",
+            },
+          },
+        } satisfies ProviderEvent);
+      }
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      NodeAssert.deepStrictEqual(
+        runtimeEvents.map((event) => event.type),
+        ["item.started", "item.started", "item.started"],
+      );
+      for (const event of runtimeEvents) {
+        if (event.type === "item.started") {
+          NodeAssert.equal(
+            (event.payload.data as { agentPath?: string } | undefined)?.agentPath,
+            "/root",
+          );
+        }
+      }
+    }),
+  );
+
+  it.effect("filters the provider root from mixed legacy collab receivers", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-mixed-root-child"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        providerThreadId: "provider-root",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("mixed-root-child"),
+        payload: {
+          startedAtMs: 1_777_999_999_000,
+          threadId: "provider-root",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "mixed-root-child",
+            tool: "spawnAgent",
+            status: "inProgress",
+            senderThreadId: "provider-root",
+            receiverThreadIds: ["provider-root", "nested-child"],
+            agentsStates: {
+              "provider-root": { status: "running" },
+              "nested-child": { status: "pendingInit" },
+            },
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const item = runtimeEvents[0];
+      NodeAssert.equal(item?.type, "item.started");
+      if (item?.type === "item.started") {
+        NodeAssert.deepStrictEqual(
+          (item.payload.data as { receiverThreadIds?: string[] }).receiverThreadIds,
+          ["nested-child"],
+        );
+      }
+      const task = runtimeEvents[1];
+      NodeAssert.equal(task?.type, "task.started");
+      if (task?.type === "task.started") {
+        NodeAssert.equal(task.payload.taskId, "nested-child");
+      }
+    }),
+  );
+
+  it.effect("keeps a root-only legacy sendInput completion flat", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-root-only-send-input"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        providerThreadId: "provider-root",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("root-only-send-input"),
+        payload: {
+          completedAtMs: 1_777_999_999_000,
+          threadId: "provider-root",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "root-only-send-input",
+            tool: "sendInput",
+            status: "completed",
+            senderThreadId: "child-thread",
+            receiverThreadIds: ["provider-root"],
+            agentsStates: {
+              "provider-root": { status: "running" },
+            },
+          },
+        },
+      } satisfies ProviderEvent);
+
+      yield* runtime.emit({
+        id: asEventId("evt-root-only-send-input-sentinel"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        providerThreadId: "provider-root",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/diff/updated",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "provider-root",
+          turnId: "turn-1",
+          diff: "sentinel diff",
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventFiber));
+      NodeAssert.deepStrictEqual(
+        runtimeEvents.map((event) => event.type),
+        ["item.completed", "turn.diff.updated"],
+      );
+      const item = runtimeEvents[0];
+      if (item?.type === "item.completed") {
+        NodeAssert.deepStrictEqual(
+          (item.payload.data as { receiverThreadIds?: string[] }).receiverThreadIds,
+          [],
+        );
+      }
+    }),
+  );
 });
 
 const scopedLifecycleRuntimeFactory = makeScopedRuntimeFactory();

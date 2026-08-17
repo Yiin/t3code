@@ -26,6 +26,7 @@ import {
   isRecoverableThreadResumeError,
   makeCodexSessionRuntime,
   openCodexThread,
+  rememberCollabReceiverTurns,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
@@ -51,6 +52,87 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
       error.message,
       "Failed to generate Codex App Server identifier for provider-event.",
     );
+  });
+});
+
+describe("rememberCollabReceiverTurns", () => {
+  it("does not let root receivers poison later root notifications", () => {
+    const turns = new Map<string, TurnId>();
+    const parentTurnId = TurnId.make("parent-turn");
+    const providerThreadId = "provider-root";
+
+    rememberCollabReceiverTurns(
+      turns,
+      {
+        method: "item/started",
+        params: {
+          threadId: providerThreadId,
+          turnId: "child-turn",
+          startedAtMs: 1,
+          item: {
+            type: "subAgentActivity",
+            id: "root-input",
+            kind: "started",
+            agentPath: "/root",
+            agentThreadId: providerThreadId,
+          },
+        },
+      },
+      parentTurnId,
+      providerThreadId,
+    );
+    rememberCollabReceiverTurns(
+      turns,
+      {
+        method: "item/completed",
+        params: {
+          threadId: "child-thread",
+          turnId: "child-turn",
+          completedAtMs: 2,
+          item: {
+            type: "collabAgentToolCall",
+            id: "root-only-send-input",
+            tool: "sendInput",
+            status: "completed",
+            senderThreadId: "child-thread",
+            receiverThreadIds: [providerThreadId],
+            agentsStates: {
+              [providerThreadId]: { status: "running" },
+            },
+          },
+        },
+      },
+      parentTurnId,
+      providerThreadId,
+    );
+    rememberCollabReceiverTurns(
+      turns,
+      {
+        method: "item/started",
+        params: {
+          threadId: providerThreadId,
+          turnId: "parent-turn",
+          startedAtMs: 2,
+          item: {
+            type: "collabAgentToolCall",
+            id: "mixed-receivers",
+            tool: "spawnAgent",
+            status: "inProgress",
+            senderThreadId: providerThreadId,
+            receiverThreadIds: [providerThreadId, "nested-child"],
+            agentsStates: {
+              [providerThreadId]: { status: "running" },
+              "nested-child": { status: "pendingInit" },
+            },
+          },
+        },
+      },
+      parentTurnId,
+      providerThreadId,
+    );
+
+    NodeAssert.equal(turns.has(providerThreadId), false);
+    NodeAssert.equal(turns.get("nested-child"), parentTurnId);
   });
 });
 

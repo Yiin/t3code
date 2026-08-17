@@ -8,6 +8,8 @@ import {
   type OrchestrationMessage,
   type OrchestrationProposedPlanId,
   CheckpointRef,
+  CODEX_ROOT_INPUT_PROGRESS_MARKER,
+  CODEX_ROOT_SUBAGENT_TYPE,
   isToolLifecycleItemType,
   SUBAGENT_TEXT_ACTIVITY_KIND,
   SUBAGENT_THINKING_ACTIVITY_KIND,
@@ -651,6 +653,14 @@ export function runtimeEventToActivities(
     }
 
     case "task.progress": {
+      if (
+        event.payload.taskId === event.payload.providerThreadId &&
+        event.payload.subagentType === CODEX_ROOT_SUBAGENT_TYPE &&
+        event.payload.toolUseId !== undefined &&
+        event.payload.description === CODEX_ROOT_INPUT_PROGRESS_MARKER
+      ) {
+        return [];
+      }
       // A chatty subagent emits hundreds of task.progress events per run. Key
       // the activity by (threadId, taskId) instead of the per-event eventId so
       // the projection upserts one row in place, mirroring the tool.updated
@@ -673,6 +683,9 @@ export function runtimeEventToActivities(
               : "Reasoning update",
           payload: {
             taskId: event.payload.taskId,
+            ...(event.payload.providerThreadId
+              ? { providerThreadId: event.payload.providerThreadId }
+              : {}),
             ...(event.payload.description.trim().length > 0
               ? { title: truncateDetail(event.payload.description, 120) }
               : {}),

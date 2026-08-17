@@ -3,6 +3,7 @@ import {
   applySubagentActivity,
   type ChatAttachment,
   decodeProviderTurnSteerAttributedActivityPayload,
+  isCodexRootInputProgressActivity,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
   type OrchestrationThreadSubagent,
@@ -1058,6 +1059,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.activity-appended":
+          if (isCodexRootInputProgressActivity(event.payload.activity)) {
+            return;
+          }
           yield* projectionThreadActivityRepository.upsert({
             activityId: event.payload.activity.id,
             threadId: event.payload.threadId,

@@ -212,6 +212,7 @@ describe("ProviderRuntimeEvent", () => {
       threadId: "thread-1",
       payload: {
         taskId: "task-1",
+        providerThreadId: "provider-thread-1",
         description: "Reading files",
         toolUseId: "toolu_spawn_1",
         subagentType: "Explore",
@@ -224,6 +225,7 @@ describe("ProviderRuntimeEvent", () => {
     }
     expect(parsed.payload.toolUseId).toBe("toolu_spawn_1");
     expect(parsed.payload.subagentType).toBe("Explore");
+    expect(parsed.payload.providerThreadId).toBe("provider-thread-1");
   });
 
   it("decodes task.updated with a partial state patch", () => {

@@ -494,6 +494,17 @@ function runtimeEventBase(
   };
 }
 
+function isProviderRootSubAgentActivity(item: SubAgentActivityItem): boolean {
+  return item.agentPath === "/root";
+}
+
+function collabReceiverThreadIds(
+  item: CollabAgentToolCallItem,
+  providerThreadId: string | undefined,
+): ReadonlyArray<string> {
+  return item.receiverThreadIds.filter((threadId) => threadId !== providerThreadId);
+}
+
 function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
@@ -522,7 +533,7 @@ function mapItemLifecycle(
         : undefined;
   const data =
     item.type === "collabAgentToolCall"
-      ? normalizeCollabAgentActivityData(item)
+      ? normalizeCollabAgentActivityData(item, event.providerThreadId)
       : item.type === "subAgentActivity"
         ? normalizeSubAgentActivityData(item)
         : event.payload;
@@ -628,6 +639,7 @@ function mapSubAgentActivityTaskEvents(
       type: "task.progress",
       payload: {
         taskId,
+        ...(event.providerThreadId ? { providerThreadId: event.providerThreadId } : {}),
         description: "Subagent received input",
         toolUseId: item.id,
         subagentType,
@@ -683,16 +695,23 @@ function collabAgentResult(item: CollabAgentToolCallItem): string | undefined {
  * normalize only this item type while the untouched notification remains in
  * `ProviderRuntimeEvent.raw.payload` for diagnostics.
  */
-function normalizeCollabAgentActivityData(item: CollabAgentToolCallItem) {
+function normalizeCollabAgentActivityData(
+  item: CollabAgentToolCallItem,
+  providerThreadId: string | undefined,
+) {
   const prompt = trimText(item.prompt ?? undefined);
   const description = promptExcerpt(item.prompt);
-  const result = collabAgentResult(item);
+  const receiverThreadIds = collabReceiverThreadIds(item, providerThreadId);
+  const result = collabAgentResult({ ...item, receiverThreadIds });
+  const agentsStates = Object.fromEntries(
+    Object.entries(item.agentsStates).filter(([threadId]) => threadId !== providerThreadId),
+  );
   return {
     toolCallId: item.id,
     toolName: item.tool === "spawnAgent" ? "Task" : item.tool,
     collabTool: item.tool,
-    receiverThreadIds: item.receiverThreadIds,
-    agentsStates: item.agentsStates,
+    receiverThreadIds,
+    agentsStates,
     input: {
       ...(prompt ? { prompt } : {}),
       ...(description ? { description } : {}),
@@ -751,12 +770,13 @@ function mapCollabAgentTaskEvents(
   const prompt = trimText(item.prompt ?? undefined);
   const excerpt = promptExcerpt(item.prompt);
   const subagentType = collabAgentSubagentType(item);
+  const receiverThreadIds = collabReceiverThreadIds(item, event.providerThreadId);
 
   if (lifecycle === "item.started") {
     if (item.tool !== "spawnAgent") {
       return [];
     }
-    return item.receiverThreadIds.map(
+    return receiverThreadIds.map(
       (childThreadId): ProviderRuntimeEvent => ({
         ...base,
         type: "task.started",
@@ -771,7 +791,7 @@ function mapCollabAgentTaskEvents(
     );
   }
 
-  return item.receiverThreadIds.flatMap((childThreadId): ReadonlyArray<ProviderRuntimeEvent> => {
+  return receiverThreadIds.flatMap((childThreadId): ReadonlyArray<ProviderRuntimeEvent> => {
     const state = item.agentsStates[childThreadId];
     if (!state) {
       return [];
@@ -799,6 +819,7 @@ function mapCollabAgentTaskEvents(
         payload: {
           taskId: RuntimeTaskId.make(childThreadId),
           description: collabAgentProgressDescription(state, excerpt),
+          ...(event.providerThreadId ? { providerThreadId: event.providerThreadId } : {}),
           toolUseId: item.id,
           subagentType,
         },
@@ -1109,6 +1130,7 @@ function mapToRuntimeEvents(
         type: "task.progress",
         payload: {
           taskId: RuntimeTaskId.make(payload.threadId),
+          ...(event.providerThreadId ? { providerThreadId: event.providerThreadId } : {}),
           description: "Subagent turn started",
         },
       },
@@ -1198,7 +1220,9 @@ function mapToRuntimeEvents(
         : startedItem.type === "collabAgentToolCall"
           ? mapCollabAgentTaskEvents(event, canonicalThreadId, "item.started", startedItem)
           : startedItem.type === "subAgentActivity"
-            ? mapSubAgentActivityTaskEvents(event, canonicalThreadId, startedItem)
+            ? isProviderRootSubAgentActivity(startedItem)
+              ? []
+              : mapSubAgentActivityTaskEvents(event, canonicalThreadId, startedItem)
             : [];
     return [started, ...taskEvents];
   }

@@ -572,9 +572,8 @@ export type OrchestrationThreadSubagent = typeof OrchestrationThreadSubagent.Typ
  *
  * Ingestion (`ProviderRuntimeIngestion`) constructs these payloads untyped;
  * these schemas pin the shape so the fold below — and any other consumer —
- * decodes instead of casting. `toolUseId` and `subagentType` are absent from
- * payloads today; they are declared here so ingestion can start forwarding
- * them without another contract change.
+ * decodes instead of casting. The linkage and provider identity fields keep
+ * replay decisions tied to provider evidence instead of display text alone.
  */
 export const SubagentTaskStartedActivityPayload = Schema.Struct({
   taskId: TrimmedNonEmptyString,
@@ -587,13 +586,34 @@ export type SubagentTaskStartedActivityPayload = typeof SubagentTaskStartedActiv
 
 export const SubagentTaskProgressActivityPayload = Schema.Struct({
   taskId: TrimmedNonEmptyString,
+  providerThreadId: Schema.optional(TrimmedNonEmptyString),
   title: Schema.optional(TrimmedNonEmptyString),
   summary: Schema.optional(TrimmedNonEmptyString),
   detail: Schema.optional(TrimmedNonEmptyString),
   lastToolName: Schema.optional(TrimmedNonEmptyString),
   usage: Schema.optional(Schema.Unknown),
+  subagentType: Schema.optional(TrimmedNonEmptyString),
+  toolUseId: Schema.optional(TrimmedNonEmptyString),
 });
 export type SubagentTaskProgressActivityPayload = typeof SubagentTaskProgressActivityPayload.Type;
+
+export const CODEX_ROOT_SUBAGENT_TYPE = "root";
+export const CODEX_ROOT_INPUT_PROGRESS_MARKER = "Subagent received input";
+
+/** True only for the Codex child-to-root interaction marker that caused phantom rows. */
+export function isCodexRootInputProgressActivity(activity: OrchestrationThreadActivity): boolean {
+  if (activity.kind !== "task.progress") return false;
+  const decoded = decodeSubagentTaskProgressPayload(activity.payload);
+  if (Option.isNone(decoded)) return false;
+  const payload = decoded.value;
+  return (
+    payload.taskId === payload.providerThreadId &&
+    payload.subagentType === CODEX_ROOT_SUBAGENT_TYPE &&
+    payload.toolUseId !== undefined &&
+    payload.title === CODEX_ROOT_INPUT_PROGRESS_MARKER &&
+    payload.detail === CODEX_ROOT_INPUT_PROGRESS_MARKER
+  );
+}
 
 export const SubagentTaskCompletedActivityPayload = Schema.Struct({
   taskId: TrimmedNonEmptyString,
@@ -875,6 +895,7 @@ export const applySubagentActivity = (
       const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
       const existing = index === -1 ? undefined : subagents[index];
       if (existing === undefined) {
+        if (isCodexRootInputProgressActivity(activity)) return subagents;
         return [
           ...subagents,
           {
