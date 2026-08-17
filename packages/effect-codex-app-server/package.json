@@ -31,7 +31,8 @@
     "probe": "node test/examples/codex-app-server-probe.ts"
   },
   "dependencies": {
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "effect-jsonrpc-stdio": "workspace:*"
   },
   "devDependencies": {
     "@effect/openapi-generator": "catalog:",

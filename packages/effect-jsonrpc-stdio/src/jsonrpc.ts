@@ -17,7 +17,7 @@ export const JsonRpcRequestEnvelope = <A, I>(method: string, params: Schema.Code
 export const JsonRpcNotificationEnvelope = <A, I>(method: string, params: Schema.Codec<A, I>) =>
   Schema.Struct({ jsonrpc: Schema.Literal("2.0"), method: Schema.Literal(method), params });
 export const JsonRpcResponseEnvelope = Schema.Struct({
-  jsonrpc: Schema.Literal("2.0"),
+  jsonrpc: Schema.optionalKey(Schema.Literal("2.0")),
   id: JsonRpcId,
   result: Schema.optional(Schema.Unknown),
   error: Schema.optional(JsonRpcError),

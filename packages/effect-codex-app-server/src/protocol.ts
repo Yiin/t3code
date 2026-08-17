@@ -7,9 +7,15 @@ import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import {
+  JsonRpcId,
+  JsonRpcResponseEnvelope,
+  decodeJsonl,
+  encodeJsonl,
+} from "effect-jsonrpc-stdio/jsonrpc";
+import { logProtocol as logCoreProtocol } from "effect-jsonrpc-stdio/protocol";
 
 import * as CodexError from "./errors.ts";
-import { JsonRpcId, JsonRpcResponseEnvelope } from "./_internal/shared.ts";
 const isJsonRpcId = Schema.is(JsonRpcId);
 const isJsonRpcResponseEnvelope = Schema.is(JsonRpcResponseEnvelope);
 const isCodexAppServerError = Schema.is(CodexError.CodexAppServerError);
@@ -91,14 +97,10 @@ function isIncomingResponse(value: unknown): value is typeof JsonRpcResponseEnve
   return isJsonRpcResponseEnvelope(value);
 }
 
-const encodeJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
-const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
-
 const encodeWireMessage = (
   message: Record<string, unknown>,
 ): Effect.Effect<string, CodexError.CodexAppServerProtocolParseError> =>
-  encodeJsonString(message).pipe(
-    Effect.map((encoded) => `${encoded}\n`),
+  encodeJsonl(Schema.Unknown, message).pipe(
     Effect.mapError((cause) => {
       const method = typeof message.method === "string" ? message.method : undefined;
       const requestId =
@@ -119,7 +121,7 @@ const encodeWireMessage = (
 const decodeWireMessage = (
   line: string,
 ): Effect.Effect<unknown, CodexError.CodexAppServerProtocolParseError> =>
-  decodeJsonString(line).pipe(
+  decodeJsonl(line).pipe(
     Effect.mapError((cause) =>
       CodexError.CodexAppServerProtocolParseError.fromSchemaError("decode-wire-message", cause),
     ),
@@ -167,10 +169,12 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       if (event.direction === "outgoing" && !options.logOutgoing) {
         return Effect.void;
       }
-      return (
-        options.logger?.(event) ??
-        Effect.logDebug("Codex App Server protocol event").pipe(Effect.annotateLogs({ event }))
-      );
+      return logCoreProtocol(event, {
+        ...(options.logIncoming === undefined ? {} : { logIncoming: options.logIncoming }),
+        ...(options.logOutgoing === undefined ? {} : { logOutgoing: options.logOutgoing }),
+        ...(options.logger === undefined ? {} : { logger: options.logger }),
+        label: "Codex App Server",
+      });
     };
 
     const failAllPending = (error: CodexError.CodexAppServerError) =>

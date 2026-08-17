@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import type * as SchemaIssue from "effect/SchemaIssue";
+import { schemaIssueDiagnostics } from "effect-jsonrpc-stdio/errors";
 
 export const CodexAppServerRequestOperation = Schema.Literals([
   "decode-payload",
@@ -29,38 +29,6 @@ export interface CodexAppServerSchemaIssueDiagnostics {
   readonly issueKinds: ReadonlyArray<CodexAppServerSchemaIssueKind>;
   readonly maximumPathDepth: number;
 }
-
-const schemaIssueDiagnostics = (root: SchemaIssue.Issue): CodexAppServerSchemaIssueDiagnostics => {
-  let issueCount = 0;
-  let maximumPathDepth = 0;
-  const issueKinds = new Set<CodexAppServerSchemaIssueKind>();
-
-  const visit = (issue: SchemaIssue.Issue, pathDepth: number): void => {
-    issueCount += 1;
-    issueKinds.add(issue._tag);
-    maximumPathDepth = Math.max(maximumPathDepth, pathDepth);
-    switch (issue._tag) {
-      case "Filter":
-      case "Encoding":
-        visit(issue.issue, pathDepth);
-        break;
-      case "Pointer":
-        visit(issue.issue, pathDepth + issue.path.length);
-        break;
-      case "Composite":
-      case "AnyOf":
-        for (const child of issue.issues) visit(child, pathDepth);
-        break;
-    }
-  };
-
-  visit(root, 0);
-  return {
-    issueCount,
-    issueKinds: [...issueKinds],
-    maximumPathDepth,
-  };
-};
 
 export const CodexAppServerPayloadKind = Schema.Literals([
   "null",
