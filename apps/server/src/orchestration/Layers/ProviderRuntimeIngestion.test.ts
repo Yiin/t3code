@@ -9,6 +9,7 @@ import {
   OrchestrationReadModel,
   ProviderDriverKind,
   ProviderRuntimeEvent,
+  RuntimeTaskId,
   ProviderSession,
   ProviderInstanceId,
   type ModelSelection,
@@ -61,7 +62,10 @@ import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityRes
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
-import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import {
+  ProviderRuntimeIngestionLive,
+  runtimeEventToActivities,
+} from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -274,6 +278,35 @@ function waitForThread<E>(
 }
 
 describe("ProviderRuntimeIngestion", () => {
+  it("drops the exact Codex root input marker and keeps near matches", () => {
+    const event = {
+      type: "task.progress",
+      eventId: asEventId("evt-root-input"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-08-17T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        taskId: RuntimeTaskId.make("provider-root"),
+        providerThreadId: "provider-root",
+        description: "Subagent received input",
+        subagentType: "root",
+        toolUseId: "call-send-message",
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    expect(runtimeEventToActivities(event)).toEqual([]);
+    const [nearMatch] = runtimeEventToActivities({
+      ...event,
+      payload: { ...event.payload, description: "Real child progress" },
+    });
+    expect(nearMatch?.payload).toMatchObject({
+      taskId: "provider-root",
+      providerThreadId: "provider-root",
+      subagentType: "root",
+      toolUseId: "call-send-message",
+    });
+  });
+
   function createHarness(options?: {
     readonly serverSettings?: Partial<ServerSettings>;
     readonly modelSelection?: ModelSelection;

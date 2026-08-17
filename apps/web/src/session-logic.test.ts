@@ -2339,6 +2339,33 @@ describe("deriveSubagentGroups", () => {
     expect(groups[0]?.completedAt).toBe("2026-02-23T00:00:08.000Z");
   });
 
+  it("keeps a root subAgentActivity flat instead of opening a group", () => {
+    const activity = makeActivity({
+      id: "root-interaction",
+      createdAt: "2026-02-23T00:00:05.000Z",
+      kind: "tool.updated",
+      summary: "Subagent task",
+      sequence: 5,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        data: {
+          toolCallId: "root-interaction",
+          toolName: "Task",
+          collabTool: "sendInput",
+          agentPath: "/root",
+          receiverThreadIds: ["provider-root"],
+          agentsStates: {},
+          input: { description: "/root", subagent_type: "root" },
+        },
+      },
+    });
+    const entries = deriveWorkLogEntries([activity]);
+
+    expect(entries).toHaveLength(1);
+    expect(deriveSubagentGroups(entries, { turnSettled: false })).toEqual([]);
+  });
+
   it("opens no group for the T3 MCP spawn tool, leaving only its mirrored row", () => {
     // `mcp__t3-code__spawn_agent` trips classifyToolItemType's "agent" test, so
     // it arrives as a collab row. Its mirrored read-model row can carry no

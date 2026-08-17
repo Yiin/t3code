@@ -1234,6 +1234,46 @@ it("creates a running row for progress on an unseen task", () => {
   assert.strictEqual(row.startedAt, "2026-01-01T00:00:05.000Z");
 });
 
+it("rejects only an unseen Codex root input marker", () => {
+  const rootMarker = subagentActivity({
+    id: "task-progress:thread-1:provider-root",
+    kind: "task.progress",
+    payload: {
+      taskId: "provider-root",
+      providerThreadId: "provider-root",
+      title: "Subagent received input",
+      detail: "Subagent received input",
+      subagentType: "root",
+      toolUseId: "call-send-message",
+    },
+    createdAt: "2026-01-01T00:00:06.000Z",
+  });
+
+  assert.strictEqual(applySubagentActivity([], rootMarker).length, 0);
+
+  const existing = applySubagentActivity([], subagentStarted).map((row) => ({
+    ...row,
+    subagentId: "provider-root",
+  }));
+  const updated = applySubagentActivity(existing, rootMarker);
+  assert.strictEqual(updated[0]?.lastProgressSummary, "Subagent received input");
+
+  const nearMatch = subagentActivity({
+    ...rootMarker,
+    id: "near-match",
+    payload: {
+      taskId: "provider-root",
+      providerThreadId: "provider-root",
+      title: "Subagent received input",
+      detail: "Real child progress",
+      subagentType: "root",
+      toolUseId: "call-send-message",
+    },
+  });
+  assert.strictEqual(applySubagentActivity([], nearMatch).length, 1);
+  assert.strictEqual(applySubagentActivity([], subagentProgress).length, 1);
+});
+
 it("closes running subagent rows when the session reaches a terminal status", () => {
   const running = applySubagentActivity([], subagentStarted);
 

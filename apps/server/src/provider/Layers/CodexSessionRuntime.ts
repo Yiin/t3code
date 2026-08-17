@@ -665,10 +665,11 @@ function readRouteFields(notification: CodexServerNotification): {
   }
 }
 
-function rememberCollabReceiverTurns(
+export function rememberCollabReceiverTurns(
   collabReceiverTurns: Map<string, TurnId>,
   notification: CodexServerNotification,
   parentTurnId: TurnId | undefined,
+  providerThreadId: string | undefined,
 ): void {
   if (!parentTurnId) {
     return;
@@ -679,6 +680,10 @@ function rememberCollabReceiverTurns(
   }
 
   const item = notification.params.item;
+  if (item.type === "subAgentActivity" && item.agentPath === "/root") {
+    return;
+  }
+
   if (item.type === "subAgentActivity" && item.kind === "started") {
     collabReceiverTurns.set(item.agentThreadId, parentTurnId);
     return;
@@ -689,6 +694,9 @@ function rememberCollabReceiverTurns(
   }
 
   for (const receiverThreadId of item.receiverThreadIds) {
+    if (receiverThreadId === providerThreadId) {
+      continue;
+    }
     collabReceiverTurns.set(receiverThreadId, parentTurnId);
   }
 }
@@ -900,10 +908,12 @@ export const makeCodexSessionRuntime = (
     const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
       Effect.gen(function* () {
         const id = yield* randomUUIDv4("provider-event");
+        const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
         return yield* offerEvent({
           id: EventId.make(id),
           provider: PROVIDER,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
+          ...(providerThreadId ? { providerThreadId } : {}),
           createdAt: yield* nowIso,
           ...event,
         });
@@ -956,6 +966,7 @@ export const makeCodexSessionRuntime = (
           collabReceiverTurns,
           notification,
           childParentTurnId ?? route.turnId,
+          currentProviderThreadId(yield* Ref.get(sessionRef)),
         );
         if (childParentTurnId && shouldSuppressChildConversationNotification(notification.method)) {
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);

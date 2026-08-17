@@ -1130,6 +1130,9 @@ export function deriveSubagentGroups(
     if (entry.itemType !== "collab_agent_tool_call") {
       continue;
     }
+    if (isProviderRootSubagentEntry(entry)) {
+      continue;
+    }
     const operation = subagentCollabOperation(entry);
     if (operation !== null && operation !== "spawnAgent") {
       continue;
@@ -1182,6 +1185,10 @@ function isThreadBackedSpawnToolCall(entry: WorkLogEntry): boolean {
 function subagentCollabOperation(entry: WorkLogEntry): string | null {
   const data = asRecord(entry.toolData);
   return asTrimmedString(data?.collabTool) ?? asTrimmedString(asRecord(data?.item)?.tool);
+}
+
+function isProviderRootSubagentEntry(entry: WorkLogEntry): boolean {
+  return asTrimmedString(asRecord(entry.toolData)?.agentPath) === "/root";
 }
 
 function uniqueOrderedWorkEntries(

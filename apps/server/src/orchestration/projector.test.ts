@@ -42,6 +42,63 @@ function makeEvent(input: {
 }
 
 describe("orchestration projector", () => {
+  effectIt.effect("does not render a replayed Codex root input marker", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-17T00:00:00.000Z";
+      const create = makeEvent({
+        sequence: 1,
+        type: "thread.created",
+        aggregateKind: "thread",
+        aggregateId: "thread-root-marker",
+        occurredAt: createdAt,
+        commandId: "cmd-create-root-marker",
+        payload: {
+          threadId: "thread-root-marker",
+          projectId: "project-1",
+          title: "Root marker",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const marker = makeEvent({
+        sequence: 2,
+        type: "thread.activity-appended",
+        aggregateKind: "thread",
+        aggregateId: "thread-root-marker",
+        occurredAt: createdAt,
+        commandId: "cmd-root-marker",
+        payload: {
+          threadId: "thread-root-marker",
+          activity: {
+            id: "task-progress:thread-root-marker:provider-root",
+            tone: "info",
+            kind: "task.progress",
+            summary: "Subagent received input",
+            payload: {
+              taskId: "provider-root",
+              providerThreadId: "provider-root",
+              title: "Subagent received input",
+              detail: "Subagent received input",
+              subagentType: "root",
+              toolUseId: "call-send-message",
+            },
+            turnId: "turn-1",
+            createdAt,
+          },
+        },
+      });
+
+      const afterCreate = yield* projectEvent(createEmptyReadModel(createdAt), create);
+      const afterMarker = yield* projectEvent(afterCreate, marker);
+      expect(afterMarker.threads[0]?.activities).toEqual([]);
+      expect(afterMarker.threads[0]?.subagents).toEqual([]);
+    }),
+  );
+
   effectIt.effect("attributes only a valid steered user message marker", () =>
     Effect.gen(function* () {
       const createdAt = "2026-01-01T00:00:00.000Z";
