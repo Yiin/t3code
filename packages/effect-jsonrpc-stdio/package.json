@@ -1,0 +1,35 @@
+{
+  "name": "effect-jsonrpc-stdio",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./stdio": {
+      "types": "./src/stdio.ts",
+      "import": "./src/stdio.ts"
+    },
+    "./errors": {
+      "types": "./src/errors.ts",
+      "import": "./src/errors.ts"
+    },
+    "./jsonrpc": {
+      "types": "./src/jsonrpc.ts",
+      "import": "./src/jsonrpc.ts"
+    },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "import": "./src/protocol.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "vp test run"
+  },
+  "dependencies": {
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

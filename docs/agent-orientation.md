@@ -34,6 +34,13 @@ narrows it to one scenario. Editing one scenario means running all three.
 - `packages/epic-core` owns shared runner logic.
 - `packages/shared` has explicit exports. `.repos` is read-only reference code.
 
+## Protocol packages
+
+- `packages/effect-jsonrpc-stdio` owns shared Effect stdio JSON-RPC primitives.
+- `packages/effect-acp` owns the ACP schema and client behavior.
+- `packages/effect-codex-app-server` owns the Codex App Server schema and client behavior.
+- Keep the shared protocol package private and separate from `packages/shared`.
+
 ## EpicRunner paths and facts
 
 - `ParallelEpicLoop.ts` drives scheduling and `workerSupervision.ts`.
