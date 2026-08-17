@@ -3,7 +3,6 @@ import { useAtomValue } from "@effect/atom-react";
 import { useEffect } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
-import { useClientSettings } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
@@ -29,7 +28,6 @@ function ChatRouteGlobalShortcuts() {
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const sidebarV2Enabled = useClientSettings((settings) => settings.sidebarV2Enabled);
   const projectCount = useProjects().length;
   const terminalOpen = useTerminalUiStateStore((state) =>
     routeThreadRef
@@ -81,10 +79,9 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
-        // Sidebar v2 routes creation through the command palette whenever
-        // there is a real choice to make; v1 (and single-project setups)
-        // keep the immediate contextual create.
-        if (sidebarV2Enabled && projectCount > 1) {
+        // Route creation through the command palette whenever there is a
+        // real project choice to make.
+        if (projectCount > 1) {
           openCommandPalette({ open: "new-thread-in" });
           return;
         }
@@ -156,7 +153,6 @@ function ChatRouteGlobalShortcuts() {
     projectCount,
     routeThreadRef,
     selectedThreadKeysSize,
-    sidebarV2Enabled,
     terminalOpen,
   ]);
 
