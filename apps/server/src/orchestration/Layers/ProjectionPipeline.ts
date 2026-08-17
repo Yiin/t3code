@@ -22,39 +22,13 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
-import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
-import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
-import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
-import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { type ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
-import {
-  type ProjectionThreadMessage,
-  ProjectionThreadMessageRepository,
-} from "../../persistence/Services/ProjectionThreadMessages.ts";
-import {
-  type ProjectionThreadProposedPlan,
-  ProjectionThreadProposedPlanRepository,
-} from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
-import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
-import {
-  type ProjectionThreadSubagent,
-  ProjectionThreadSubagentRepository,
-} from "../../persistence/Services/ProjectionThreadSubagents.ts";
-import {
-  type ProjectionTurn,
-  ProjectionTurnRepository,
-} from "../../persistence/Services/ProjectionTurns.ts";
-import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
-import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
-import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
-import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
-import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
-import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
-import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
-import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
-import { ProjectionThreadSubagentRepositoryLive } from "../../persistence/Layers/ProjectionThreadSubagents.ts";
-import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
-import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
+import { type ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
+import { type ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+import { type ProjectionThreadSubagent } from "../../persistence/Services/ProjectionThreadSubagents.ts";
+import type { ProjectionTurn } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionStore } from "../../persistence/Services/ProjectionStore.ts";
+import { ProjectionStoreLive } from "../../persistence/Layers/ProjectionStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -512,16 +486,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
   function* () {
     const sql = yield* SqlClient.SqlClient;
     const eventStore = yield* OrchestrationEventStore;
-    const projectionStateRepository = yield* ProjectionStateRepository;
-    const projectionProjectRepository = yield* ProjectionProjectRepository;
-    const projectionThreadRepository = yield* ProjectionThreadRepository;
-    const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
-    const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
-    const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
-    const projectionThreadSubagentRepository = yield* ProjectionThreadSubagentRepository;
-    const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
-    const projectionTurnRepository = yield* ProjectionTurnRepository;
-    const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
+    const projectionStore = yield* ProjectionStore;
+    const projectionStateRepository = projectionStore.state;
+    const projectionProjectRepository = projectionStore.projects;
+    const projectionThreadRepository = projectionStore.threads;
+    const projectionThreadMessageRepository = projectionStore.threadMessages;
+    const projectionThreadProposedPlanRepository = projectionStore.threadProposedPlans;
+    const projectionThreadActivityRepository = projectionStore.threadActivities;
+    const projectionThreadSubagentRepository = projectionStore.threadSubagents;
+    const projectionThreadSessionRepository = projectionStore.threadSessions;
+    const projectionTurnRepository = projectionStore.turns;
+    const projectionPendingApprovalRepository = projectionStore.pendingApprovals;
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -1835,15 +1810,4 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 export const OrchestrationProjectionPipelineLive = Layer.effect(
   OrchestrationProjectionPipeline,
   makeOrchestrationProjectionPipeline(),
-).pipe(
-  Layer.provideMerge(ProjectionProjectRepositoryLive),
-  Layer.provideMerge(ProjectionThreadRepositoryLive),
-  Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
-  Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),
-  Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
-  Layer.provideMerge(ProjectionThreadSubagentRepositoryLive),
-  Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
-  Layer.provideMerge(ProjectionTurnRepositoryLive),
-  Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),
-  Layer.provideMerge(ProjectionStateRepositoryLive),
-);
+).pipe(Layer.provideMerge(ProjectionStoreLive));

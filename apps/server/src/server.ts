@@ -22,7 +22,7 @@ import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/
 import { EpicRunStoreLive } from "./persistence/Layers/EpicRuns.ts";
 import { ProviderAccountLimitsStoreLive } from "./persistence/Layers/ProviderAccountLimits.ts";
 import { ProviderUsageLedgerStoreLive } from "./persistence/Layers/ProviderUsageLedger.ts";
-import { ProjectionProjectRepositoryLive } from "./persistence/Layers/ProjectionProjects.ts";
+import { ProjectionStoreLive } from "./persistence/Layers/ProjectionStore.ts";
 import { EpicRunnerLive } from "./runner/Layers/EpicRunner.ts";
 import * as NodeEpicRunLock from "@t3tools/epic-core/adapters/NodeEpicRunLock";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -213,7 +213,7 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   // pointing at the same dead path (t3code-2cm). Effect memoizes a layer by
   // reference, so this is the same `ProjectionProjectRepository` instance
   // `ProjectionPipeline` provides (ProjectionPipeline.ts).
-  Layer.provide(ProjectionProjectRepositoryLive),
+  Layer.provide(ProjectionStoreLive),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
