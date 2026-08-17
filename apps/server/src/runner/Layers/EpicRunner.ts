@@ -120,11 +120,11 @@ import {
   makeAbandonRunningIterations,
   makeEpicRunReadModel,
   makeReadOrientation,
-  makeServerMergeDrain,
   makeServerPoolDispatch,
   makeServerPoolJournal,
   makeServerPoolWorkspace,
 } from "./EpicRunnerPoolPorts.ts";
+import { makeServerMergeDrain } from "./PoolMergeDrain.ts";
 
 export { assembleIterationPrompt } from "@t3tools/epic-core/ParallelEpicLoop";
 
@@ -568,7 +568,14 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         readSessionDriverKind,
         ownedIterationTurnIds,
       }),
-      mergeDrain: makeServerMergeDrain({ store, processRunner, fileSystem, path, gitVcsDriver }),
+      mergeDrain: makeServerMergeDrain({
+        store,
+        processRunner,
+        fileSystem,
+        path,
+        gitVcsDriver,
+        iterations: baseJournal,
+      }),
       vcs: makeProcessPoolVcs(processRunner),
       providerInventory: Option.isNone(providerRegistry)
         ? null

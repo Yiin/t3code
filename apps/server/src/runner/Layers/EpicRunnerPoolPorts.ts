@@ -36,7 +36,6 @@ import type * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { resolveRunBaseBranch } from "@t3tools/epic-core/runBaseBranch";
 import { RERERE_CONFIG_ARGS } from "@t3tools/epic-core/rerere";
 import type {
-  MergeDrainShape,
   PoolBacklogShape,
   PoolRunEventsShape,
   PoolRunJournalShape,
@@ -60,24 +59,12 @@ import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 import {
   decideGraceStep,
   integrationBranch as integrationBranchName,
-  mergeSlotHolder,
   parseIntegrationFixTitle,
   parseMergeFixTitle,
   runBaseBranch as runBaseBranchName,
 } from "@t3tools/epic-core/policy";
 import { hasRalphBlocked, hasRalphDone, parseRalphReport } from "@t3tools/epic-core/ralphProtocol";
-import { drainMergeQueue } from "@t3tools/epic-core/MergeQueue";
-import { makeProcessBacklog } from "@t3tools/epic-core/adapters/ProcessBacklog";
-import { makeProcessGate } from "@t3tools/epic-core/adapters/ProcessGate";
-import { GateError } from "@t3tools/epic-core/ports/Gate";
-import type {
-  GateReceiptJournalShape,
-  PersistedGateReceipt,
-} from "@t3tools/epic-core/ports/GateReceipts";
-import { makeProcessMergeRepair } from "@t3tools/epic-core/adapters/ProcessMergeRepair";
-import { makeProcessMergeSlot } from "@t3tools/epic-core/adapters/ProcessMergeSlot";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
-import { MergeQueuePortError } from "@t3tools/epic-core/ports/MergeQueue";
 import {
   makeSiblingResolver,
   mirrorPath,
@@ -86,7 +73,6 @@ import {
   type SiblingRef,
 } from "@t3tools/epic-core/siblings";
 import * as Crypto from "effect/Crypto";
-import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -117,7 +103,6 @@ import type { ServerConfig } from "../../config.ts";
 import type { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import type { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
 import type { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
-import { makeEpicRunMergeQueueStore } from "../EpicRunMergeQueueStore.ts";
 import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
 import { journalError, nowIso, storeError } from "./poolPortErrors.ts";
 import { setupWorktreeAssets, writeBeadsRedirect } from "./poolWorktreeAssets.ts";
@@ -320,35 +305,6 @@ export const makeServerPoolJournal = (store: EpicRunStore["Service"]): PoolRunJo
  * updates a row, so a restart reads back exactly what every earlier lifetime
  * of the run recorded.
  */
-export const makeServerGateReceipts = (
-  store: EpicRunStore["Service"],
-): GateReceiptJournalShape => ({
-  record: (receipt) =>
-    store
-      .recordGateReceipt({
-        ...receipt,
-        runId: EpicRunId.make(receipt.runId),
-        inputHeads: receipt.inputHeads,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new GateError({
-              operation: "gateReceipts.record",
-              detail: cause.message,
-              cause,
-            }),
-        ),
-      ),
-  list: (runId) =>
-    store.listGateReceipts({ runId: EpicRunId.make(runId) }).pipe(
-      Effect.map((rows): ReadonlyArray<PersistedGateReceipt> => rows),
-      Effect.mapError(
-        (cause) => new GateError({ operation: "gateReceipts.list", detail: cause.message, cause }),
-      ),
-    ),
-});
-
 /** Worktree lifecycle for pool iterations and the integration branch. */
 export const makeServerPoolWorkspace = (deps: {
   readonly store: EpicRunStore["Service"];
@@ -1545,292 +1501,6 @@ export const makeServerPoolWorkspace = (deps: {
 };
 
 /** The merge-queue writes and the queued-branch drain the scheduler runs. */
-export const makeServerMergeDrain = (deps: {
-  readonly store: EpicRunStore["Service"];
-  readonly processRunner: ProcessRunner.ProcessRunner["Service"];
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly path: Path.Path;
-  readonly gitVcsDriver: GitVcsDriver["Service"];
-}): MergeDrainShape => {
-  const { store, processRunner, fileSystem, path, gitVcsDriver } = deps;
-  const mergeQueueStore = makeEpicRunMergeQueueStore(store);
-  const mergeGate = makeProcessGate({
-    processRunner,
-    environment: process.env,
-    uid: process.getuid?.() ?? 0,
-  });
-  const mergeRepair = makeProcessMergeRepair({
-    processRunner,
-    environment: process.env,
-    uid: process.getuid?.() ?? 0,
-  });
-
-  const writeDrainBeadsRedirect = writeBeadsRedirect({ fileSystem, path });
-
-  const drain: MergeDrainShape["drain"] = Effect.fn("EpicRunner.drainQueuedBranches")(
-    function* (runCtx) {
-      const run = yield* store.getRun({ runId: runCtx.runId }).pipe(
-        Effect.mapError(storeError("getRun")),
-        Effect.flatMap(
-          Option.match({
-            onNone: () =>
-              Effect.fail(
-                new EpicRunnerStoreError({
-                  operation: `merge drain run not found: ${runCtx.runId}`,
-                }),
-              ),
-            onSome: Effect.succeed,
-          }),
-        ),
-      );
-      if (run.config.execution.sequential) return { _tag: "idle" } as const;
-      // The drain's `setup_worktree` mapping: the main integration worktree
-      // gets the beads redirect plus assets; a SIBLING integration worktree
-      // gets assets only, sourced from its own checkout — siblings have no
-      // beads database (`skills/cook-epic/run-legacy.sh:1007-1011,3110-3112`).
-      const mergeState = yield* store.getMergeState({ runId: run.runId }).pipe(
-        Effect.map(Option.getOrNull),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("epic.runner.merge-state-read-failed", {
-            runId: run.runId,
-            cause,
-          }).pipe(Effect.as(null)),
-        ),
-      );
-      const siblingAssetSources = new Map(
-        (mergeState?.siblings ?? []).map((sibling) => [
-          sibling.integrationWorktreePath,
-          sibling.repositoryPath,
-        ]),
-      );
-      const restoreIntegrationWorktreeAssets = (cwd: string) =>
-        Effect.gen(function* () {
-          const siblingSource =
-            mergeState !== null && cwd !== mergeState.integrationWorktreePath
-              ? siblingAssetSources.get(cwd)
-              : undefined;
-          if (siblingSource === undefined) {
-            yield* writeDrainBeadsRedirect(run.cwd, cwd);
-          }
-          yield* setupWorktreeAssets({ fileSystem, path }, siblingSource ?? run.cwd, cwd);
-        }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new MergeQueuePortError({
-                operation: "setupWorktree",
-                detail: `Could not restore integration worktree assets in ${cwd}`,
-                cause,
-              }),
-          ),
-        );
-      const git = makeEpicRunMergeGit({
-        git: gitVcsDriver,
-        setupWorktree: restoreIntegrationWorktreeAssets,
-      });
-      // The merge slot is a bd coordination primitive nothing else creates.
-      // Without it every acquire fails and the drain defers forever, which
-      // reads as a healthy run: the lock keeps heartbeating and no worker is
-      // alive to look wrong. Terminal parity: TerminalMergeDrain does the
-      // same. Create is idempotent and best-effort — a real contention
-      // failure still defers the drain.
-      yield* processRunner
-        .run({ command: "bd", args: ["merge-slot", "create"], cwd: run.cwd })
-        .pipe(Effect.ignore);
-      // A red gate's bounded output can hide the real failure (t3code-9hv),
-      // and the one-line diagnosis is all that used to survive a drain.
-      // Persist the full output of every failed gate under the run's git dir
-      // — never inside the integration worktree, which MergeQueue resets and
-      // cleans after a failed gate — and hand the path to the diagnosis.
-      // Best-effort: a write failure must not mask the gate result itself.
-      let gateLogSequence = 0;
-      const mergeGateWithLog: typeof mergeGate = {
-        run: (gateInput) =>
-          mergeGate.run(gateInput).pipe(
-            Effect.flatMap((result) => {
-              if (result.passed) return Effect.succeed(result);
-              gateLogSequence += 1;
-              const sequence = gateLogSequence;
-              return Effect.flatMap(DateTime.now, (now) => {
-                const logPath = path.join(
-                  run.cwd,
-                  ".git",
-                  "t3code",
-                  "epic-runs",
-                  run.runId,
-                  `gate-${String(DateTime.toEpochMillis(now))}-${String(sequence)}.log`,
-                );
-                return fileSystem.makeDirectory(path.dirname(logPath), { recursive: true }).pipe(
-                  Effect.andThen(fileSystem.writeFileString(logPath, result.output)),
-                  Effect.map(() => ({ ...result, outputPath: logPath })),
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning("epic.runner.gate-log-persist-failed", {
-                      runId: run.runId,
-                      cause,
-                    }).pipe(Effect.as(result)),
-                  ),
-                );
-              });
-            }),
-          ),
-      };
-      const result = yield* drainMergeQueue(
-        {
-          runId: run.runId,
-          epicId: run.epicId,
-          holder: mergeSlotHolder(run.runId),
-          gateCommand: run.config.gate.disabled ? null : run.config.gate.command,
-          pushEnabled: !run.config.vcs.noPush,
-          verified: !run.config.gate.disabled,
-          maxGateOutputBytes: 1024 * 1024,
-        },
-        {
-          store: mergeQueueStore,
-          git,
-          slot: makeProcessMergeSlot({ repositoryPath: run.cwd, processRunner }),
-          gate: mergeGateWithLog,
-          gateReceipts: makeServerGateReceipts(store),
-          repair: mergeRepair,
-          backlog: makeProcessBacklog({ repositoryPath: run.cwd, processRunner }),
-          // The same journal the loop writes its `RALPH_MSG` clauses into, so
-          // a merge-fix child quotes what each author actually reported.
-          iterations: makeServerPoolJournal(store),
-          events: {
-            emit: (event) =>
-              Effect.logInfo(`epic.runner.merge-${event.event}`, {
-                runId: run.runId,
-                ...event,
-              }).pipe(Effect.asVoid),
-          },
-          fold: {
-            run: (childId) =>
-              Effect.logDebug("epic.runner.merge-fold-hook", {
-                runId: run.runId,
-                childId,
-              }).pipe(Effect.asVoid),
-          },
-        },
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new EpicRunnerDispatchError({
-              commandType: "git.merge-queue",
-              detail: cause.message,
-              cause,
-            }),
-        ),
-      );
-      // The loop consumes a narrow view; the queue-length telemetry stays here.
-      if (result._tag === "fatal" && "detail" in result) {
-        return { _tag: "fatal", detail: result.detail } as const;
-      }
-      if (result._tag === "deferred") {
-        return { _tag: "deferred", holder: result.holder } as const;
-      }
-      if (result._tag === "drained") {
-        return {
-          _tag: "drained",
-          ...(result.blocked === undefined ? {} : { blocked: result.blocked }),
-        } as const;
-      }
-      return { _tag: "idle" } as const;
-    },
-  );
-
-  return {
-    drain,
-    enqueueMerge: (input) =>
-      store.enqueueMerge(input).pipe(Effect.mapError(journalError("enqueueMerge"))),
-    findParkedOriginalChild: (input) =>
-      store
-        .findParkedOriginalChild(input)
-        .pipe(Effect.mapError(journalError("findParkedOriginalChild"))),
-    integrationTarget: (runCtx) =>
-      store.getMergeState({ runId: runCtx.runId }).pipe(
-        Effect.map((state) =>
-          Option.match(state, {
-            onNone: () => null,
-            onSome: (merge) => ({
-              repositoryPath: merge.repositoryPath,
-              baseBranch: merge.baseBranch,
-              operatorBaseBranch: merge.operatorBaseBranch,
-            }),
-          }),
-        ),
-        Effect.catchCause(() => Effect.succeed(null)),
-      ),
-    unlandedEntries: (runCtx) =>
-      store.getMergeState({ runId: runCtx.runId }).pipe(
-        Effect.map((state) =>
-          Option.match(state, {
-            onNone: () => [],
-            onSome: (merge) =>
-              merge.entries.map((entry) => ({
-                childId: entry.childId,
-                branch: entry.branch,
-                status: entry.status,
-              })),
-          }),
-        ),
-        // An unreadable store answers `null`, not `[]` (t3code-e46): the
-        // loop's completion proof must not read "unlanded unknown" as
-        // "nothing unlanded".
-        Effect.catchCause(() => Effect.succeed(null)),
-      ),
-    recordIntegratedHead: (runCtx) =>
-      Effect.gen(function* () {
-        const state = Option.getOrThrow(
-          yield* store
-            .getMergeState({ runId: runCtx.runId })
-            .pipe(Effect.mapError(storeError("getMergeState"))),
-        );
-        const mergeGit = makeEpicRunMergeGit({
-          git: gitVcsDriver,
-          setupWorktree: () => Effect.void,
-        });
-        const head = yield* mergeGit.head(state.repositoryPath, state.baseBranch).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EpicRunnerDispatchError({
-                commandType: "git.integration-resync",
-                detail: cause.message,
-                cause,
-              }),
-          ),
-        );
-        // Siblings too: an integration-fix or in-place iteration can commit in
-        // the real sibling checkouts, and the next drain compares each
-        // sibling's live head against the accepted one.
-        const siblingHeads = yield* Effect.forEach(
-          state.siblings,
-          (sibling) =>
-            mergeGit.head(sibling.repositoryPath).pipe(
-              Effect.map((siblingHead) => ({
-                repositoryPath: sibling.repositoryPath,
-                lastAcceptedHead: siblingHead,
-              })),
-            ),
-          { concurrency: 1 },
-        ).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EpicRunnerDispatchError({
-                commandType: "git.integration-resync",
-                detail: cause.message,
-                cause,
-              }),
-          ),
-        );
-        yield* store
-          .advanceMergeIntegration({
-            runId: runCtx.runId,
-            lastAcceptedHead: head,
-            ...(siblingHeads.length > 0 ? { siblingHeads } : {}),
-          })
-          .pipe(Effect.mapError(storeError("advanceMergeIntegration")));
-      }),
-  };
-};
-
 /** Preserve the pre-extraction dispatch error's persisted message shape. */
 const dispatchErrorFromRunner = (error: EpicRunnerDispatchError) =>
   // The loop renders DispatchError as `${operation}: ${detail}`; with the
