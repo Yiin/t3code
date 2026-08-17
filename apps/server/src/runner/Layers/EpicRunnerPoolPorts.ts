@@ -22,25 +22,15 @@ import {
   ProviderSessionResumeSettledActivityPayload,
   ThreadId,
   decodeProviderTurnSteerAttributedActivityPayload,
-  type EpicRun as TransportEpicRun,
   type EpicSubagentMap,
   type ProviderSessionResumeOutcome,
   type TurnId,
 } from "@t3tools/contracts";
-import {
-  EpicRunnerDispatchError,
-  EpicRunnerStoreError,
-  EpicRunNotFoundError,
-} from "@t3tools/epic-core/Errors";
+import { EpicRunnerDispatchError, EpicRunnerStoreError } from "@t3tools/epic-core/Errors";
 import type * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { resolveRunBaseBranch } from "@t3tools/epic-core/runBaseBranch";
 import { RERERE_CONFIG_ARGS } from "@t3tools/epic-core/rerere";
-import type {
-  PoolBacklogShape,
-  PoolRunEventsShape,
-  PoolRunJournalShape,
-  PoolTimings,
-} from "@t3tools/epic-core/ParallelEpicLoop";
+import type { PoolTimings } from "@t3tools/epic-core/ParallelEpicLoop";
 import type { PoolDispatchShape } from "@t3tools/epic-core/ports/PoolDispatch";
 import {
   type AgentDispatchCapabilities,
@@ -50,10 +40,6 @@ import {
   type IterationHandle,
   type IterationSettle,
 } from "@t3tools/epic-core/ports/AgentDispatch";
-import {
-  type PersistedEpicRun,
-  type PersistedEpicRunIteration,
-} from "@t3tools/epic-core/ports/RunJournal";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 
 import {
@@ -78,7 +64,6 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
-import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
@@ -94,17 +79,13 @@ import {
   type SettledTurn,
 } from "../../orchestration/ThreadSettleWatch.ts";
 import type { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import {
-  EpicRunStore,
-  type EpicRun,
-  type EpicRunIteration as EpicRunIterationRow,
-} from "../../persistence/Services/EpicRuns.ts";
+import { EpicRunStore, type EpicRun } from "../../persistence/Services/EpicRuns.ts";
 import type { ServerConfig } from "../../config.ts";
 import type { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import type { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
 import type { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
-import { journalError, nowIso, storeError } from "./poolPortErrors.ts";
+import { nowIso, storeError } from "./poolPortErrors.ts";
 import { setupWorktreeAssets, writeBeadsRedirect } from "./poolWorktreeAssets.ts";
 
 const GIT_HEAD_TIMEOUT_MS = 15_000;
@@ -136,167 +117,11 @@ const decodeResumeSettledActivity = Schema.decodeUnknownOption(
  * inside one radar tick.
  */
 const NUDGE_ABSORPTION_READS = 10;
-const RECENT_ITERATIONS_LIMIT = 25;
 
 /** The one driver whose adapter passes injected subagent definitions through. */
 const CLAUDE_SUBAGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 
 const isEpicRunnerDispatchError = Schema.is(EpicRunnerDispatchError);
-
-/**
- * Assemble the public run read model from a row plus its already-capped
- * iterations. Pure, so the single-run and batched list paths cannot drift.
- */
-const buildTransportRun = (
-  run: EpicRun,
-  recentIterations: ReadonlyArray<EpicRunIterationRow>,
-): TransportEpicRun => ({
-  ...run,
-  recentIterations: recentIterations.map((iteration) => ({
-    ...iteration,
-    workerId: iteration.workerId ?? null,
-    branch: iteration.branch ?? null,
-    worktreePath: iteration.worktreePath ?? null,
-    resumeCount: iteration.resumeCount ?? 0,
-    lastResumedAt: iteration.lastResumedAt ?? null,
-  })),
-  threadRefs: recentIterations.flatMap((iteration) =>
-    iteration.issueId === null
-      ? []
-      : [
-          {
-            issueId: iteration.issueId,
-            threadId: iteration.threadId,
-            iterationIndex: iteration.iterationIndex,
-          },
-        ],
-  ),
-});
-
-/**
- * The run read model and the run-change fan-out the WS subscription consumes.
- *
- * Lifecycle writes persist in `EpicRunner.ts`, then call `publishRunChange`.
- * The loop's journal writes through {@link makeServerPoolJournal} and publishes
- * through the `events` port, so both paths land on the same PubSub.
- */
-export const makeEpicRunReadModel = (deps: {
-  readonly store: EpicRunStore["Service"];
-  readonly changes: PubSub.PubSub<TransportEpicRun>;
-}) => {
-  const { store, changes } = deps;
-
-  const enrichRun = Effect.fn("EpicRunner.enrichRun")(function* (run: EpicRun) {
-    const iterations = yield* store
-      .listIterations({ runId: run.runId })
-      .pipe(Effect.mapError(storeError("listIterations")));
-    return buildTransportRun(run, iterations.slice(-RECENT_ITERATIONS_LIMIT));
-  });
-
-  /**
-   * Enrich a whole listing with ONE iteration query, not one per run.
-   *
-   * `listRecentIterationsForRuns` already caps each run at
-   * `RECENT_ITERATIONS_LIMIT`, so the grouping here does no slicing of its
-   * own; a run with no iterations is absent from the batch and gets an empty
-   * array.
-   */
-  const enrichRuns = Effect.fn("EpicRunner.enrichRuns")(function* (runs: ReadonlyArray<EpicRun>) {
-    const iterations = yield* store
-      .listRecentIterationsForRuns({
-        runIds: runs.map((run) => run.runId),
-        limitPerRun: RECENT_ITERATIONS_LIMIT,
-      })
-      .pipe(Effect.mapError(storeError("listRecentIterationsForRuns")));
-    const byRunId = new Map<string, Array<EpicRunIterationRow>>();
-    for (const iteration of iterations) {
-      const bucket = byRunId.get(iteration.runId);
-      if (bucket === undefined) byRunId.set(iteration.runId, [iteration]);
-      else bucket.push(iteration);
-    }
-    return runs.map((run) => buildTransportRun(run, byRunId.get(run.runId) ?? []));
-  });
-
-  /** Enrich and fan out a persisted run row. Never re-writes the store. */
-  const publishRunChange = (run: EpicRun) =>
-    enrichRun(run).pipe(
-      Effect.flatMap((enriched) => PubSub.publish(changes, enriched)),
-      Effect.asVoid,
-    );
-
-  const events: PoolRunEventsShape = {
-    // Iteration changes reach the UI through the next run publish, exactly as
-    // they did before the rewire; only run rows fan out to the PubSub.
-    publish: (event) =>
-      event.type === "run-state-changed" ? publishRunChange(event.run) : Effect.void,
-  };
-
-  return { enrichRun, enrichRuns, publishRunChange, events };
-};
-
-/**
- * The durable run store behind the loop's journal port. The crash-safe
- * write-ahead ordering is the store's own contract: `allocateIteration`
- * atomically inserts the running row before orchestration begins, and
- * `updateIteration` lands the terminal state after the turn resolves.
- */
-export const makeServerPoolJournal = (store: EpicRunStore["Service"]): PoolRunJournalShape => ({
-  createRun: (run) => store.upsertRun(run).pipe(Effect.mapError(journalError("createRun"))),
-  saveRun: (run) => store.upsertRun(run).pipe(Effect.mapError(journalError("saveRun"))),
-  getRun: (runId) =>
-    store.getRun({ runId }).pipe(
-      Effect.map((run): Option.Option<PersistedEpicRun> => run),
-      Effect.mapError(journalError("getRun")),
-    ),
-  appendIteration: (iteration) => {
-    // The server row carries worker identity instead of head probes.
-    const { headBefore: _headBefore, headAfter: _headAfter, ...row } = iteration;
-    // A fresh row has measured nothing yet. The store spells that `null`; the
-    // port spells it "key absent". They mean the same thing, so translate.
-    return store
-      .appendIteration({
-        ...row,
-        phaseTimings: row.phaseTimings ?? null,
-        promptBytes: row.promptBytes ?? null,
-      })
-      .pipe(Effect.mapError(journalError("appendIteration")));
-  },
-  allocateIteration: (input) =>
-    store.allocateIteration(input).pipe(Effect.mapError(journalError("allocateIteration"))),
-  updateIteration: (input) => {
-    const { headBefore: _headBefore, headAfter: _headAfter, ...row } = input;
-    // An absent measurement is `null` here, which the store reads as "leave
-    // the stored value alone" — an abandon flip must not erase what the
-    // settle before it measured.
-    return store
-      .updateIteration({
-        ...row,
-        phaseTimings: row.phaseTimings ?? null,
-        promptBytes: row.promptBytes ?? null,
-      })
-      .pipe(Effect.mapError(journalError("updateIteration")));
-  },
-  markIterationResumed: (input) =>
-    store.reopenIteration(input).pipe(Effect.mapError(journalError("markIterationResumed"))),
-  listIterations: (runId) =>
-    store.listIterations({ runId }).pipe(
-      Effect.map((rows): ReadonlyArray<PersistedEpicRunIteration> => rows),
-      Effect.mapError(journalError("listIterations")),
-    ),
-  getLatestIteration: (runId) =>
-    store.getLatestIteration({ runId }).pipe(
-      Effect.map((row): Option.Option<PersistedEpicRunIteration> => row),
-      Effect.mapError(journalError("getLatestIteration")),
-    ),
-  upsertProviderDegradation: (input) =>
-    store
-      .upsertProviderDegradation(input)
-      .pipe(Effect.mapError(journalError("upsertProviderDegradation"))),
-  clearProviderDegradation: (input) =>
-    store
-      .clearProviderDegradation(input)
-      .pipe(Effect.mapError(journalError("clearProviderDegradation"))),
-});
 
 /**
  * The durable gate-receipt journal behind the merge drain's evidence port.
@@ -2456,119 +2281,3 @@ export const makeServerPoolDispatch = (deps: {
  * path needs it: it withholds the rows it is about to resume, and abandoning
  * one of those would stop the very session the resume is going to continue.
  */
-export const makeAbandonRunningIterations = (deps: {
-  readonly store: EpicRunStore["Service"];
-  readonly engine: OrchestrationEngineService["Service"];
-  readonly crypto: Crypto.Crypto;
-  readonly backlog: PoolBacklogShape;
-  readonly ownedIterationTurnIds: Map<ThreadId, TurnId>;
-}) => {
-  const { store, engine, crypto, backlog, ownedIterationTurnIds } = deps;
-
-  const commandId = (tag: string) =>
-    crypto.randomUUIDv4.pipe(
-      Effect.map((uuid) => CommandId.make(`server:epic-run-${tag}:${uuid}`)),
-      Effect.orDie,
-    );
-
-  const dispatchBestEffort = (
-    label: string,
-    command: Parameters<typeof engine.dispatch>[0],
-  ): Effect.Effect<void> =>
-    engine.dispatch(command).pipe(
-      Effect.asVoid,
-      Effect.catchCause((cause) => Effect.logWarning(label, { cause })),
-    );
-
-  return Effect.fn("EpicRunner.abandonRunningIterations")(function* (
-    runId: EpicRun["runId"],
-    summary: string,
-    failureReason: string,
-    commandPrefix: string,
-    onlyIterationIndexes?: ReadonlySet<number>,
-  ) {
-    const run = yield* store.getRun({ runId }).pipe(
-      Effect.mapError(storeError("getRun")),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.fail(new EpicRunNotFoundError({ runId })),
-          onSome: Effect.succeed,
-        }),
-      ),
-    );
-    const iterations = yield* store
-      .listRunningIterations({ runId })
-      .pipe(Effect.mapError(storeError("listRunningIterations")));
-    for (const iteration of iterations) {
-      if (
-        onlyIterationIndexes !== undefined &&
-        !onlyIterationIndexes.has(iteration.iterationIndex)
-      ) {
-        continue;
-      }
-      const abandonedAt = yield* nowIso;
-      if (iteration.issueId !== null) {
-        yield* dispatchBestEffort(`epic.runner.${commandPrefix}-interrupt-failed`, {
-          type: "thread.turn.interrupt",
-          commandId: yield* commandId(`${commandPrefix}-interrupt`),
-          threadId: iteration.threadId,
-          ...(ownedIterationTurnIds.has(iteration.threadId)
-            ? { turnId: ownedIterationTurnIds.get(iteration.threadId) }
-            : {}),
-          createdAt: abandonedAt,
-        });
-        // No stop grace here, unlike the loop's own forced stop: these rows
-        // belong to nobody. A boot pass is interrupting turns whose process
-        // already died, and a cancel is a person asking for the run to stop
-        // now, so waiting seconds per row would buy neither of them anything.
-        yield* dispatchBestEffort(`epic.runner.${commandPrefix}-session-stop-failed`, {
-          type: "thread.session.stop",
-          commandId: yield* commandId(`${commandPrefix}-session-stop`),
-          threadId: iteration.threadId,
-          createdAt: abandonedAt,
-        });
-      }
-      yield* store
-        .updateIteration({
-          runId,
-          iterationIndex: iteration.iterationIndex,
-          turnStatus: "abandoned",
-          summary,
-          why: null,
-          failureReason,
-          phaseTimings: null,
-          promptBytes: null,
-          finishedAt: abandonedAt,
-        })
-        .pipe(Effect.mapError(storeError("updateIteration")));
-      if (iteration.issueId !== null) {
-        yield* backlog.releaseClaimedChild(run.cwd, iteration.issueId);
-      }
-      ownedIterationTurnIds.delete(iteration.threadId);
-    }
-  });
-};
-
-/**
- * The orientation card spliced into every iteration prompt. Candidate
- * resolution matches the terminal coordinator (`run-legacy.sh:1845-1858`): the
- * configured file, then `docs/agent-orientation.md`, then `AGENTS.md`.
- */
-export const makeReadOrientation = (deps: {
-  readonly fileSystem: FileSystem.FileSystem;
-  readonly path: Path.Path;
-}) => {
-  const { fileSystem, path } = deps;
-  return (checkoutPath: string, orientationFile: string | null): Effect.Effect<string | null> =>
-    Effect.gen(function* () {
-      const candidates =
-        orientationFile === null ? ["docs/agent-orientation.md", "AGENTS.md"] : [orientationFile];
-      for (const candidate of candidates) {
-        const contents = yield* fileSystem
-          .readFileString(path.join(checkoutPath, candidate))
-          .pipe(Effect.option);
-        if (Option.isSome(contents)) return contents.value;
-      }
-      return null;
-    });
-};
