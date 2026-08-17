@@ -39,22 +39,16 @@ describe("ClientSettings word wrap", () => {
   });
 });
 
-describe("ClientSettings sidebar v2", () => {
-  it("defaults the beta off", () => {
-    expect(decodeClientSettings({}).sidebarV2Enabled).toBe(false);
-  });
-
-  it("drops the retired per-device auto-settle key without disturbing the rest", () => {
+describe("ClientSettings retired sidebar keys", () => {
+  it("drops retired sidebar keys without disturbing the rest", () => {
     // Stored blobs on disk can still carry the old key. Decoding one must not
     // reset every other setting to its default.
     const decoded = decodeClientSettings({
       sidebarAutoSettleAfterDays: 7,
-      sidebarV2Enabled: true,
       wordWrap: false,
     });
 
     expect(decoded).not.toHaveProperty("sidebarAutoSettleAfterDays");
-    expect(decoded.sidebarV2Enabled).toBe(true);
     expect(decoded.wordWrap).toBe(false);
     // Even a value the old schema would have rejected must decode cleanly now.
     expect(() => decodeClientSettings({ sidebarAutoSettleAfterDays: 0 })).not.toThrow();
@@ -68,7 +62,7 @@ describe("ClientSettings epics grouping mode", () => {
   });
 
   it("keeps the default when a stored blob predates the key", () => {
-    const decoded = decodeClientSettings({ wordWrap: false, sidebarV2Enabled: true });
+    const decoded = decodeClientSettings({ wordWrap: false });
     expect(decoded.epicsGroupingMode).toBe("recency");
     expect(decoded.wordWrap).toBe(false);
   });
