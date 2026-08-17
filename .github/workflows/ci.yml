@@ -91,27 +91,6 @@ jobs:
           # (the Test job relies on that), so a missing bd here must fail.
           COOKEPIC_REQUIRE_BD: "1"
 
-      # Diagnostics for t3code-bbl: systemd-run --user --scope exits 0 on this
-      # runner, but the scope cgroup supervision reads is not usable. This step
-      # shows which link of the chain breaks so the runner can be fixed. Every
-      # command tolerates failure; the step never fails the job.
-      - name: Worker scope diagnostics (t3code-bbl)
-        run: |
-          run() { echo "+ $*"; "$@" || echo "  -> exit $?"; }
-          run id
-          echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
-          echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-<unset>}"
-          run cat /proc/self/cgroup
-          run cat /sys/fs/cgroup/cgroup.controllers
-          run stat -f -c %T /sys/fs/cgroup
-          run loginctl show-user "$(id -un)"
-          run systemctl show -p Delegate,DelegateControllers "user@$(id -u).service"
-          run cat "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers"
-          run systemd-run --user --scope --quiet --unit=cook-epic-diag.scope -- bash -c \
-            'cat /proc/self/cgroup; leaf="$(sed -n "s/^0:://p" /proc/self/cgroup)"; run() { echo "+ $*"; "$@" || echo "  -> exit $?"; }; run cat "/sys/fs/cgroup${leaf}/cpu.stat"; run cat "/sys/fs/cgroup${leaf}/cgroup.procs"'
-          run systemctl --user stop cook-epic-diag.scope
-        continue-on-error: true
-
       - name: Run terminal conformance driver
         run: vp run --filter @t3tools/epic-run-conformance test
         env:
