@@ -6,6 +6,7 @@ import {
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
+  OrchestrationCheckpointStatus,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
   OrchestrationGetSubagentActivitiesInput,
@@ -50,7 +51,6 @@ import {
   toPersistenceSqlError,
   type ProjectionRepositoryError,
 } from "../../persistence/Errors.ts";
-import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -124,6 +124,16 @@ const ProjectionRunningThreadBackedSubagentRowSchema = Schema.Struct({
   turnId: ProjectionThreadSubagent.fields.turnId,
   agentType: Schema.NullOr(TrimmedNonEmptyString),
   description: Schema.NullOr(TrimmedNonEmptyString),
+});
+const ProjectionCheckpoint = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  checkpointTurnCount: NonNegativeInt,
+  checkpointRef: CheckpointRef,
+  status: OrchestrationCheckpointStatus,
+  files: Schema.Array(OrchestrationCheckpointFile),
+  assistantMessageId: Schema.NullOr(MessageId),
+  completedAt: IsoDateTime,
 });
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
