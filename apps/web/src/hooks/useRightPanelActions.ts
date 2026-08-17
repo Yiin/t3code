@@ -1,4 +1,3 @@
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
   PreviewCloseInput,
@@ -11,6 +10,7 @@ import { useCallback, useEffect } from "react";
 
 import { nextTerminalId } from "@t3tools/shared/terminalLabels";
 import { MAX_TERMINALS_PER_GROUP } from "../types";
+import type { AtomCommandResult } from "../state/command-results";
 import {
   selectActiveRightPanelSurface,
   type RightPanelSurface,

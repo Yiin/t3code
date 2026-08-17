@@ -1,10 +1,5 @@
 import { useAuth } from "@clerk/react";
 import { ManagedRelay, setManagedRelaySession } from "@t3tools/client-runtime/relay";
-import {
-  reportAtomCommandResult,
-  settleAsyncResult,
-  settlePromise,
-} from "@t3tools/client-runtime/state/runtime";
 import * as Effect from "effect/Effect";
 import { useEffect, useRef, type ReactNode } from "react";
 
@@ -12,6 +7,11 @@ import { environmentCatalog } from "../connection/catalog";
 import { runtime } from "../lib/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useAtomCommand } from "../state/use-atom-command";
+import {
+  reportAtomCommandResult,
+  settleAsyncResult,
+  settlePromise,
+} from "../state/command-results";
 import { resolveRelayClerkTokenOptions } from "./publicConfig";
 
 let relayTokenProvider: (() => Promise<string | null>) | null = null;
