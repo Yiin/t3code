@@ -197,6 +197,18 @@ export const materializeConformanceWorkspace = (
     // reaches its own gate waits for the gate that is running it. That is a
     // deadlock, not a slow test, and it ends at the gate's two-hour timeout.
     XDG_RUNTIME_DIR: root,
+    // Redirecting XDG_RUNTIME_DIR also moves the systemd user bus out from
+    // under `systemd-run --user`, which resolves it at `$XDG_RUNTIME_DIR/bus`
+    // unless DBUS_SESSION_BUS_ADDRESS says otherwise. A desktop or SSH session
+    // exports that address, so the redirect costs nothing there — but a bare
+    // CI job does not, worker scope preparation degrades to unwrapped spawns,
+    // the worker has no cgroup fingerprint, and no uncertain check ever counts
+    // toward the liveness stop ceiling (t3code-bbl). Point the bus back at the
+    // real runtime directory explicitly.
+    ...(process.env.DBUS_SESSION_BUS_ADDRESS === undefined &&
+    process.env.XDG_RUNTIME_DIR !== undefined
+      ? { DBUS_SESSION_BUS_ADDRESS: `unix:path=${process.env.XDG_RUNTIME_DIR}/bus` }
+      : {}),
     CONFORMANCE_ROOT: root,
     CONFORMANCE_STATE: statePath,
     CONFORMANCE_JOURNAL: journalPath,
