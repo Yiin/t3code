@@ -25,6 +25,11 @@ export const RIGHT_PANEL_KINDS = [
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
+export const browserSurfaceId = (tabId: string): `browser:${string}` => `browser:${tabId}`;
+export const fileSurfaceId = (relativePath: string): `file:${string}` => `file:${relativePath}`;
+export const terminalSurfaceId = (terminalId: string): `terminal:${string}` =>
+  `terminal:${terminalId}`;
+
 export type RightPanelSurface =
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
@@ -113,7 +118,7 @@ const singletonSurface = (
 
 const browserSurface = (tabId: string | null): RightPanelSurface =>
   tabId
-    ? { id: `browser:${tabId}`, kind: "preview", resourceId: tabId }
+    ? { id: browserSurfaceId(tabId), kind: "preview", resourceId: tabId }
     : { id: "browser:new", kind: "preview", resourceId: null };
 
 const fileSurface = (
@@ -121,7 +126,7 @@ const fileSurface = (
   revealLine: number | null,
   revealRequestId: number,
 ): RightPanelSurface => ({
-  id: `file:${relativePath}`,
+  id: fileSurfaceId(relativePath),
   kind: "file",
   relativePath,
   revealLine,
@@ -129,7 +134,7 @@ const fileSurface = (
 });
 
 const terminalSurface = (terminalId: string): RightPanelSurface => ({
-  id: `terminal:${terminalId}`,
+  id: terminalSurfaceId(terminalId),
   kind: "terminal",
   resourceId: terminalId,
   terminalIds: [terminalId],
@@ -291,7 +296,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             const withoutStandaloneExplorer = current.surfaces.filter(
               (surface) => surface.kind !== "files",
             );
-            const surfaceId = `file:${relativePath}` as const;
+            const surfaceId = fileSurfaceId(relativePath);
             const existing = withoutStandaloneExplorer.find(
               (surface): surface is Extract<RightPanelSurface, { kind: "file" }> =>
                 surface.id === surfaceId && surface.kind === "file",
@@ -475,7 +480,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
       reconcileBrowserSurfaces: (ref, tabIds) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            const validIds = new Set(tabIds.map((tabId) => `browser:${tabId}`));
+            const validIds = new Set(tabIds.map(browserSurfaceId));
             const nonBrowser = current.surfaces.filter((surface) => surface.kind !== "preview");
             const existingBrowser = current.surfaces.filter(
               (surface): surface is Extract<RightPanelSurface, { kind: "preview" }> =>
@@ -485,7 +490,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             );
             const knownIds = new Set(existingBrowser.map((surface) => surface.id));
             const added = tabIds
-              .filter((tabId) => !knownIds.has(`browser:${tabId}`))
+              .filter((tabId) => !knownIds.has(browserSurfaceId(tabId)))
               .map((tabId) => browserSurface(tabId));
             const surfaces = [...nonBrowser, ...existingBrowser, ...added];
             const activeStillExists = surfaces.some(

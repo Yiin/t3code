@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   migratePersistedRightPanelState,
+  browserSurfaceId,
+  fileSurfaceId,
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
   selectThreadRightPanelState,
@@ -18,6 +20,11 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
+  it("builds stable ids for resource-backed surfaces", () => {
+    expect(browserSurfaceId("tab-a")).toBe("browser:tab-a");
+    expect(fileSurfaceId("src/index.ts")).toBe("file:src/index.ts");
+  });
+
   it("drops the legacy singleton terminal surface during migration", () => {
     expect(
       migratePersistedRightPanelState({
