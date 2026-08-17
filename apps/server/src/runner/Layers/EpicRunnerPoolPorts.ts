@@ -52,21 +52,11 @@ import {
   type IterationSettle,
 } from "@t3tools/epic-core/ports/AgentDispatch";
 import {
-  RunJournalError,
   type PersistedEpicRun,
   type PersistedEpicRunIteration,
 } from "@t3tools/epic-core/ports/RunJournal";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
-import { findWorkspaceNodeModules, NODE_MODULES } from "@t3tools/epic-core/workspaceNodeModules";
 
-/**
- * Materialise `node_modules/` and `node_modules/.pnpm/`, then link each store
- * package whole — the least that keeps a worker's install off the shared store.
- */
-const ROOT_NODE_MODULES_DEPTH = 2;
-
-/** A package's own node_modules is shallow — scopes and `.bin` at most. */
-const PACKAGE_NODE_MODULES_DEPTH = 4;
 import {
   decideGraceStep,
   integrationBranch as integrationBranchName,
@@ -102,7 +92,6 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
-import type * as PlatformError from "effect/PlatformError";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 
@@ -130,6 +119,8 @@ import type { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
 import type { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeEpicRunMergeQueueStore } from "../EpicRunMergeQueueStore.ts";
 import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
+import { journalError, nowIso, storeError } from "./poolPortErrors.ts";
+import { setupWorktreeAssets, writeBeadsRedirect } from "./poolWorktreeAssets.ts";
 
 const GIT_HEAD_TIMEOUT_MS = 15_000;
 
@@ -165,178 +156,7 @@ const RECENT_ITERATIONS_LIMIT = 25;
 /** The one driver whose adapter passes injected subagent definitions through. */
 const CLAUDE_SUBAGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 
-const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-
 const isEpicRunnerDispatchError = Schema.is(EpicRunnerDispatchError);
-
-const storeError = (operation: string) => (cause: unknown) =>
-  new EpicRunnerStoreError({ operation, cause });
-
-/** The env files `setup_worktree_assets` copies (never production/staging). */
-const WORKTREE_ASSET_ENV_FILES = [
-  ".env",
-  ".env.local",
-  ".env.development",
-  ".env.development.local",
-  ".env.test",
-] as const;
-
-/**
- * `setup_worktree_assets` (`skills/cook-epic/run-legacy.sh:998-1011`): a
- * `node_modules` symlink from the source repo plus copies of the whitelisted
- * env files, each only when absent in the worktree. Sibling worktrees get
- * exactly this — no beads redirect; siblings have no beads database.
- *
- * In a workspace monorepo the root `node_modules` is not enough on its own:
- * each package resolves its imports through its own gitignored `node_modules`,
- * so those get mirrored too. See `@t3tools/epic-core/workspaceNodeModules`.
- */
-const setupWorktreeAssets = (
-  deps: {
-    readonly fileSystem: FileSystem.FileSystem;
-    readonly path: Path.Path;
-  },
-  sourceRepo: string,
-  target: string,
-): Effect.Effect<void, PlatformError.PlatformError> =>
-  Effect.gen(function* () {
-    const linkNodeModules = (relative: string) =>
-      Effect.gen(function* () {
-        const source = deps.path.join(sourceRepo, relative);
-        const targetLink = deps.path.join(target, relative);
-        // The owning package directory has to exist in this worktree; a branch
-        // that never added the package simply has nothing to link into.
-        const targetParent = deps.path.dirname(targetLink);
-        if (
-          (yield* deps.fileSystem.exists(source)) &&
-          (yield* deps.fileSystem.exists(targetParent)) &&
-          !(yield* deps.fileSystem.exists(targetLink))
-        ) {
-          yield* deps.fileSystem.symlink(source, targetLink);
-        }
-      });
-
-    /**
-     * Rebuild a package's `node_modules` as a tree of its own, copying every
-     * symlink target verbatim.
-     *
-     * Linking the directory itself would be wrong: pnpm records workspace
-     * dependencies as repo-relative links (`@t3tools/contracts -> ../../../contracts`),
-     * and through a directory link those resolve against the SOURCE checkout.
-     * The worktree would then typecheck the source copy of its own siblings
-     * instead of the branch under test. Copied verbatim into a real directory
-     * here, the same relative target resolves inside the worktree, while
-     * store links (`../../../node_modules/.pnpm/...`) still reach the shared
-     * store through the root `node_modules` link.
-     */
-    const replicateLinkTree = (
-      source: string,
-      targetDir: string,
-      depth: number,
-    ): Effect.Effect<void, PlatformError.PlatformError> =>
-      Effect.gen(function* () {
-        yield* deps.fileSystem.makeDirectory(targetDir, { recursive: true });
-        const entries = yield* deps.fileSystem.readDirectory(source);
-        for (const entry of entries) {
-          const from = deps.path.join(source, entry);
-          const to = deps.path.join(targetDir, entry);
-          if (yield* deps.fileSystem.exists(to)) continue;
-          // readLink doubles as the symlink test; stat would follow the link.
-          const linkTarget = yield* deps.fileSystem
-            .readLink(from)
-            .pipe(Effect.catchCause(() => Effect.succeed(null)));
-          if (linkTarget !== null) {
-            yield* deps.fileSystem.symlink(linkTarget, to);
-            continue;
-          }
-          const info = yield* deps.fileSystem.stat(from);
-          if (info.type === "Directory") {
-            // Past the budget, link the directory whole; materialising every
-            // level of the pnpm store would be hundreds of thousands of entries.
-            if (depth <= 1) {
-              yield* deps.fileSystem.symlink(from, to);
-              continue;
-            }
-            yield* replicateLinkTree(from, to, depth - 1);
-            continue;
-          }
-          yield* deps.fileSystem.symlink(from, to);
-        }
-      });
-
-    // The root node_modules is materialised, not linked. Linking it made a
-    // worker share the source's dependency links, so `pnpm install` in a
-    // worktree wrote through and repointed the real checkout at a temporary
-    // directory; pruning it then broke every other worker and the gate with
-    // ERR_MODULE_NOT_FOUND. Two levels deep the worktree owns node_modules/
-    // and node_modules/.pnpm/, so an install or prune rewrites its own links.
-    {
-      const rootSource = deps.path.join(sourceRepo, NODE_MODULES);
-      const rootTarget = deps.path.join(target, NODE_MODULES);
-      if (
-        (yield* deps.fileSystem.exists(rootSource)) &&
-        !(yield* deps.fileSystem.exists(rootTarget))
-      ) {
-        yield* replicateLinkTree(rootSource, rootTarget, ROOT_NODE_MODULES_DEPTH);
-      }
-    }
-
-    // Best-effort: a directory we cannot read contributes no workspace
-    // packages rather than failing the whole worktree. A link we miss here
-    // surfaces later as a plain dependency-resolution error, which is a far
-    // better failure than refusing to provision the worktree at all.
-    const listDirectories = (absolutePath: string) =>
-      Effect.gen(function* () {
-        const entries = yield* deps.fileSystem.readDirectory(absolutePath);
-        const directories: Array<string> = [];
-        for (const entry of entries) {
-          // Catch per ENTRY, not per directory. `stat` follows symlinks and
-          // throws on a dangling one, and a repo-root catch meant a single
-          // broken link hid every workspace package beside it: no per-package
-          // node_modules was mirrored, and the gate died on a missing
-          // dependency that looked nothing like the cause. A name we cannot
-          // stat is simply not a directory.
-          const info = yield* deps.fileSystem
-            .stat(deps.path.join(absolutePath, entry))
-            .pipe(Effect.catchCause(() => Effect.succeed(null)));
-          if (info !== null && info.type === "Directory") directories.push(entry);
-        }
-        return directories;
-      }).pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<string>>([])));
-
-    const workspaceNodeModules = yield* findWorkspaceNodeModules(
-      listDirectories,
-      sourceRepo,
-      (...segments) => deps.path.join(...segments),
-    );
-    for (const relative of workspaceNodeModules) {
-      const source = deps.path.join(sourceRepo, relative);
-      const targetDir = deps.path.join(target, relative);
-      const targetParent = deps.path.dirname(targetDir);
-      if (
-        (yield* deps.fileSystem.exists(source)) &&
-        (yield* deps.fileSystem.exists(targetParent)) &&
-        !(yield* deps.fileSystem.exists(targetDir))
-      ) {
-        yield* replicateLinkTree(source, targetDir, PACKAGE_NODE_MODULES_DEPTH);
-      }
-    }
-
-    for (const name of WORKTREE_ASSET_ENV_FILES) {
-      const source = deps.path.join(sourceRepo, name);
-      const targetFile = deps.path.join(target, name);
-      if ((yield* deps.fileSystem.exists(source)) && !(yield* deps.fileSystem.exists(targetFile))) {
-        yield* deps.fileSystem.copyFile(source, targetFile);
-      }
-    }
-  });
-
-const journalError = (operation: string) => (cause: unknown) =>
-  new RunJournalError({
-    operation,
-    detail: cause instanceof Error ? cause.message : String(cause),
-    ...(cause === undefined ? {} : { cause }),
-  });
 
 /**
  * Assemble the public run read model from a row plus its already-capped
@@ -684,35 +504,7 @@ export const makeServerPoolWorkspace = (deps: {
       { cwd: run.cwd, epicId: run.epicId, runOwnedBaseBranch: run.config.vcs.runOwnedBaseBranch },
     );
 
-  const resolveBeadsDirectory = (cwd: string) =>
-    Effect.gen(function* () {
-      const beadsDirectory = path.join(cwd, ".beads");
-      const canonicalBeads = yield* fileSystem
-        .realPath(beadsDirectory)
-        .pipe(Effect.orElseSucceed(() => beadsDirectory));
-      const redirect = yield* fileSystem.readFileString(path.join(canonicalBeads, "redirect")).pipe(
-        Effect.map((contents) => contents.trim()),
-        Effect.orElseSucceed(() => ""),
-      );
-      const target =
-        redirect.length === 0
-          ? canonicalBeads
-          : path.isAbsolute(redirect)
-            ? redirect
-            : path.resolve(cwd, redirect);
-      return yield* fileSystem.realPath(target).pipe(Effect.orElseSucceed(() => target));
-    });
-
-  const writeBeadsRedirect = (runCwd: string, worktreeCwd: string) =>
-    Effect.gen(function* () {
-      const targetBeads = yield* resolveBeadsDirectory(runCwd);
-      const worktreeBeads = path.join(worktreeCwd, ".beads");
-      yield* fileSystem.makeDirectory(worktreeBeads, { recursive: true });
-      yield* fileSystem.writeFileString(
-        path.join(worktreeBeads, "redirect"),
-        path.relative(worktreeCwd, targetBeads),
-      );
-    });
+  const writeRunBeadsRedirect = writeBeadsRedirect({ fileSystem, path });
 
   const releaseProvisionedWorktree = (input: {
     readonly repositoryPath: string;
@@ -877,7 +669,7 @@ export const makeServerPoolWorkspace = (deps: {
         // operator's checkout, `run.cwd` IS the operator's repository and the
         // config lands there.
         yield* enableRerere(run.cwd);
-        yield* writeBeadsRedirect(run.cwd, provisioned.path).pipe(
+        yield* writeRunBeadsRedirect(run.cwd, provisioned.path).pipe(
           Effect.mapError(
             (cause) =>
               new EpicRunnerDispatchError({
@@ -1216,7 +1008,7 @@ export const makeServerPoolWorkspace = (deps: {
                 ),
               );
             created.push({ repo: run.cwd, worktreePath: main.path });
-            yield* writeBeadsRedirect(run.cwd, main.path).pipe(
+            yield* writeRunBeadsRedirect(run.cwd, main.path).pipe(
               Effect.mapError(
                 (cause) =>
                   new EpicRunnerDispatchError({
@@ -1349,7 +1141,7 @@ export const makeServerPoolWorkspace = (deps: {
             ),
           );
         return yield* Effect.gen(function* () {
-          yield* writeBeadsRedirect(runCtx.cwd, provisioned.path).pipe(
+          yield* writeRunBeadsRedirect(runCtx.cwd, provisioned.path).pipe(
             Effect.mapError(
               (cause) =>
                 new EpicRunnerDispatchError({
@@ -1773,32 +1565,7 @@ export const makeServerMergeDrain = (deps: {
     uid: process.getuid?.() ?? 0,
   });
 
-  const writeBeadsRedirect = (runCwd: string, worktreeCwd: string) =>
-    Effect.gen(function* () {
-      const beadsDirectory = path.join(runCwd, ".beads");
-      const canonicalBeads = yield* fileSystem
-        .realPath(beadsDirectory)
-        .pipe(Effect.orElseSucceed(() => beadsDirectory));
-      const redirect = yield* fileSystem.readFileString(path.join(canonicalBeads, "redirect")).pipe(
-        Effect.map((contents) => contents.trim()),
-        Effect.orElseSucceed(() => ""),
-      );
-      const targetBeads =
-        redirect.length === 0
-          ? canonicalBeads
-          : path.isAbsolute(redirect)
-            ? redirect
-            : path.resolve(runCwd, redirect);
-      const resolved = yield* fileSystem
-        .realPath(targetBeads)
-        .pipe(Effect.orElseSucceed(() => targetBeads));
-      const worktreeBeads = path.join(worktreeCwd, ".beads");
-      yield* fileSystem.makeDirectory(worktreeBeads, { recursive: true });
-      yield* fileSystem.writeFileString(
-        path.join(worktreeBeads, "redirect"),
-        path.relative(worktreeCwd, resolved),
-      );
-    });
+  const writeDrainBeadsRedirect = writeBeadsRedirect({ fileSystem, path });
 
   const drain: MergeDrainShape["drain"] = Effect.fn("EpicRunner.drainQueuedBranches")(
     function* (runCtx) {
@@ -1843,7 +1610,7 @@ export const makeServerMergeDrain = (deps: {
               ? siblingAssetSources.get(cwd)
               : undefined;
           if (siblingSource === undefined) {
-            yield* writeBeadsRedirect(run.cwd, cwd);
+            yield* writeDrainBeadsRedirect(run.cwd, cwd);
           }
           yield* setupWorktreeAssets({ fileSystem, path }, siblingSource ?? run.cwd, cwd);
         }).pipe(
