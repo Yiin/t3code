@@ -15,10 +15,19 @@ export const OrchestrationProjectionPipelineLayerLive = OrchestrationProjectionP
   Layer.provide(OrchestrationEventStoreLive),
 );
 
-export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
+/**
+ * The projection store is the composition seam for both projection writes and
+ * reads. Keep the individual tags available for focused tests and adapters,
+ * but assemble them once for the runtime.
+ */
+export const OrchestrationProjectionStoreLayerLive = Layer.mergeAll(
   OrchestrationProjectionSnapshotQueryLive,
+  OrchestrationProjectionPipelineLive,
+).pipe(Layer.provide(OrchestrationEventStoreLive));
+
+export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
   OrchestrationEventInfrastructureLayerLive,
-  OrchestrationProjectionPipelineLayerLive,
+  OrchestrationProjectionStoreLayerLive,
 );
 
 export const OrchestrationLayerLive = Layer.mergeAll(
