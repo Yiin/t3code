@@ -258,7 +258,7 @@ const makeReconcile = <R>(input: {
       // resolvable MCP credential, and a projected session that claims the
       // provider is alive. The write has to happen here, not in a finalizer:
       // once the scope is closed and the entry is dropped below,
-      // `ProviderAdapterRegistry` can no longer resolve the instance and the
+      // `ProviderInstanceRegistry` no longer contains the instance and the
       // stop fails outright.
       if (torndownIds.length > 0) {
         yield* teardown.stopSessionsOnInstances(torndownIds);

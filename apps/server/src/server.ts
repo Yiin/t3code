@@ -29,7 +29,6 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
 import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts";
-import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { EpicSubagentRegistry } from "./provider/epicSubagents.ts";
@@ -193,14 +192,9 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
   Layer.provide(ProviderSessionRuntime.layer),
 );
 
-// `ProviderAdapterRegistryLive` is now a facade that resolves kind → adapter
-// by looking up the default `ProviderInstance` per driver in the instance
-// registry. Adapter construction itself moved inside each driver's
-// `create()`; `ProviderEventLoggersLive` owns the shared native/canonical
-// NDJSON writers and is provided at the outer runtime layer so both
-// `ProviderService` and the per-instance drivers read the same logger pair.
+// Provider adapters are owned by the live instance registry. Adapter
+// construction happens inside each driver's `create()`.
 const ProviderLayerLive = ProviderServiceLive.pipe(
-  Layer.provide(ProviderAdapterRegistryLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
   // The runner binds epic iteration threads to the run's systemd worker
   // scope; `ProviderService` resolves the binding at session start. One
@@ -235,7 +229,7 @@ const OrchestrationRetentionLayerLive = OrchestrationRetentionSweeperLive.pipe(
 // before it closes that instance's scope. The only path that writes a
 // `stopped` binding, revokes the thread's MCP credential, and updates the
 // projected session is the `thread.session.stop` command — and that path sits
-// *above* the instance registry, since `ProviderAdapterRegistry` resolves
+// *above* the instance registry, since `ProviderService` resolves
 // every adapter through it. `ProviderInstanceTeardown` inverts the dependency
 // so the registry can reach it without closing a layer cycle.
 //

@@ -2,7 +2,7 @@
  * ProviderServiceLive - Cross-provider orchestration layer.
  *
  * Routes validated transport/API calls to provider adapters through
- * `ProviderAdapterRegistry` and `ProviderSessionDirectory`, and exposes a
+ * `ProviderInstanceRegistry` and `ProviderSessionDirectory`, and exposes a
  * unified provider event stream for subscribers.
  *
  * It does not implement provider protocol details (adapter concern).
@@ -61,14 +61,18 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  ProviderUnsupportedError,
+  type ProviderAdapterError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderContinuationIdentity,
 } from "../ProviderDriver.ts";
-import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
+import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
@@ -468,7 +472,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // no-op.
   const canonicalEventLogger = options?.canonicalEventLogger ?? eventLoggers.canonical;
 
-  const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
+  const registry = yield* ProviderInstanceRegistry;
+  const getAdapter = (instanceId: ProviderInstanceId) =>
+    registry
+      .getInstance(instanceId)
+      .pipe(
+        Effect.flatMap((instance) =>
+          instance === undefined
+            ? Effect.fail(new ProviderUnsupportedError({ provider: instanceId }))
+            : Effect.succeed(instance.adapter),
+        ),
+      );
+  const lookupInstanceInfo = (instanceId: ProviderInstanceId) =>
+    registry.getInstance(instanceId).pipe(
+      Effect.flatMap((instance) =>
+        instance === undefined
+          ? Effect.fail(new ProviderUnsupportedError({ provider: instanceId }))
+          : Effect.succeed({
+              instanceId: instance.instanceId,
+              driverKind: instance.driverKind,
+              displayName: instance.displayName,
+              accentColor: instance.accentColor,
+              enabled: instance.enabled,
+              continuationIdentity: instance.continuationIdentity,
+            }),
+      ),
+    );
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const fileSystem = yield* FileSystem.FileSystem;
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -1019,12 +1048,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // adapter's `streamEvents` source terminates when the old scope closes.
   const reconcileInstanceSubscriptions = Effect.gen(function* () {
     const previous = yield* Ref.get(subscribedAdapters);
-    const currentIds = yield* registry.listInstances();
+    const currentIds = yield* Effect.map(registry.listInstances, (instances) =>
+      instances.map((instance) => instance.instanceId),
+    );
     const next = new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>();
     for (const id of currentIds) {
-      const adapterOption = yield* registry
-        .getByInstance(id)
-        .pipe(Effect.tapError(Effect.logWarning), Effect.option);
+      const adapterOption = yield* getAdapter(id).pipe(
+        Effect.tapError(Effect.logWarning),
+        Effect.option,
+      );
       if (Option.isNone(adapterOption)) continue;
       const adapter = adapterOption.value;
       next.set(id, adapter);
@@ -1179,7 +1211,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       "provider.thread_id": input.binding.threadId,
     });
     return yield* Effect.gen(function* () {
-      const adapter = yield* registry.getByInstance(bindingInstanceId);
+      const adapter = yield* getAdapter(bindingInstanceId);
       const hasResumeCursor =
         input.binding.resumeCursor !== null && input.binding.resumeCursor !== undefined;
       const hasActiveSession = yield* adapter.hasSession(input.binding.threadId);
@@ -1321,7 +1353,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
     }
     const instanceId = yield* requireBindingInstanceId(input.operation, binding);
-    const adapter = yield* registry.getByInstance(instanceId);
+    const adapter = yield* getAdapter(instanceId);
 
     const hasRequestedSession = yield* adapter.hasSession(input.threadId);
     if (hasRequestedSession) {
@@ -1409,7 +1441,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.runtime_mode": parsed.runtimeMode,
       });
       return yield* Effect.gen(function* () {
-        const instanceInfo = yield* registry.getInstanceInfo(resolvedInstanceId);
+        const instanceInfo = yield* lookupInstanceInfo(resolvedInstanceId);
         const resolvedProvider = instanceInfo.driverKind;
         metricProvider = resolvedProvider;
         if (parsed.provider !== undefined && parsed.provider !== resolvedProvider) {
@@ -1506,7 +1538,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
         });
-        const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        const adapter = yield* getAdapter(resolvedInstanceId);
         yield* prepareMcpSession(threadId, resolvedInstanceId, resolvedProvider);
         const t3Environment = yield* resolveT3SessionEnvironment({
           threadId,
@@ -1642,7 +1674,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // stamped on it too. Never fail a started turn over this: an instance the
       // registry just routed through can only go missing in a race, and the
       // merged payload then keeps whatever the last write left.
-      const turnContinuationIdentity = yield* registry.getInstanceInfo(routed.instanceId).pipe(
+      const turnContinuationIdentity = yield* lookupInstanceInfo(routed.instanceId).pipe(
         Effect.map((info): ProviderContinuationIdentity | undefined => info.continuationIdentity),
         Effect.orElseSucceed(() => undefined),
       );
@@ -1983,13 +2015,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
     const instanceId = binding.providerInstanceId;
 
-    const adapterOption = yield* registry.getByInstance(instanceId).pipe(Effect.option);
+    const adapterOption = yield* getAdapter(instanceId).pipe(Effect.option);
     if (Option.isNone(adapterOption)) {
       return yield* annotate({ ...base, resumable: "no", reason: "instance-not-configured" });
     }
     const adapter = adapterOption.value;
 
-    const instanceInfoOption = yield* registry.getInstanceInfo(instanceId).pipe(Effect.option);
+    const instanceInfoOption = yield* lookupInstanceInfo(instanceId).pipe(Effect.option);
     if (Option.isNone(instanceInfoOption)) {
       return yield* annotate({ ...base, resumable: "no", reason: "instance-not-configured" });
     }
@@ -2051,10 +2083,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
 
   const getCapabilities: ProviderServiceMethod<"getCapabilities"> = (instanceId) =>
-    registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
+    getAdapter(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
 
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
-    registry.getInstanceInfo(instanceId);
+    lookupInstanceInfo(instanceId);
 
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",

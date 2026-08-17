@@ -27,7 +27,7 @@
  * published, not once the reactor has handled it. Reconcile closes the
  * instance scope the moment this effect returns, and a `stopSession` that
  * runs after that close fails with `ProviderUnsupportedError` —
- * `ProviderAdapterRegistry` resolves adapters live, so the removed instance
+ * `ProviderInstanceRegistry` no longer contains the removed instance,
  * is already gone. So we wait for the projected session to report `stopped`,
  * the same signal `ws.ts` waits on before removing a worktree: the reactor
  * writes it only after `ProviderService.stopSession` returns.

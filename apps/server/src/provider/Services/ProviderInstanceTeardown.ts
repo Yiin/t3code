@@ -15,7 +15,7 @@
  *
  * The registry cannot call that path directly. `ProviderService` and
  * `OrchestrationEngineService` are both built *on top of*
- * `ProviderInstanceRegistry` — `ProviderAdapterRegistry` resolves every
+ * `ProviderInstanceRegistry` resolves every
  * adapter through it — so a direct dependency would close a layer cycle.
  * This tag inverts it: the registry depends on a narrow interface, and the
  * implementation that knows about commands lives in `orchestration/Layers`
@@ -23,7 +23,7 @@
  *
  * The write has to survive the scope close, so `stopSessionsOnInstances`
  * must complete *before* reconcile closes anything. Once the scope is closed
- * and the entry is dropped from the registry, `ProviderAdapterRegistry`
+ * and the entry is dropped from the registry, `ProviderInstanceRegistry`
  * fails to resolve the instance and `ProviderService.stopSession` fails with
  * `ProviderUnsupportedError` — nothing gets written at all.
  *

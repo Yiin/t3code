@@ -10,7 +10,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
-import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderInstanceRegistry } from "../src/provider/Services/ProviderInstanceRegistry.ts";
 import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
 import {
@@ -73,7 +73,7 @@ const makeIntegrationFixture = Effect.gen(function* () {
 
   const shared = Layer.mergeAll(
     directoryLayer,
-    Layer.succeed(ProviderAdapterRegistry, registry),
+    Layer.succeed(ProviderInstanceRegistry, registry),
     ServerSettingsService.layerTest(DEFAULT_SERVER_SETTINGS),
     AnalyticsService.layerTest,
     Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),

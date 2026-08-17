@@ -33,7 +33,7 @@ import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import { ProjectionCheckpointRepository } from "../src/persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepository } from "../src/persistence/Services/ProjectionPendingApprovals.ts";
 import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
-import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderInstanceRegistry } from "../src/provider/Services/ProviderInstanceRegistry.ts";
 import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
 import { ProviderSessionDirectory } from "../src/provider/Services/ProviderSessionDirectory.ts";
@@ -248,7 +248,7 @@ export const makeOrchestrationIntegrationHarness = (
         });
     const fakeRegistry = adapterHarness
       ? Layer.succeed(
-          ProviderAdapterRegistry,
+          ProviderInstanceRegistry,
           makeAdapterRegistryMock({ [adapterHarness.provider]: adapterHarness.adapter }),
         )
       : null;
@@ -273,7 +273,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provide(ProviderSessionRuntimeRepositoryLive),
     );
     const realCodexRegistry = Layer.effect(
-      ProviderAdapterRegistry,
+      ProviderInstanceRegistry,
       Effect.gen(function* () {
         const codexSettings = yield* decodeCodexSettings({});
         const codexAdapter = yield* makeCodexAdapter(codexSettings);

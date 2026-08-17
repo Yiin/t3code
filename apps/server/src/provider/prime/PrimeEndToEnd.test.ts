@@ -4,7 +4,7 @@
  * real pipeline rather than a mocked adapter registry.
  *
  * Every test here builds `ProviderInstanceRegistryLive` over the real
- * `PrimeDriver`, wraps it in the real `ProviderAdapterRegistryLive`, and hands
+ * `PrimeDriver` and hands it to the real `ProviderService`.
  * that to the real `ProviderService` with a real SQLite-backed session
  * directory. The only fake is the binary: `scripts/prime-rpc-mock.ts` behind a
  * shell wrapper. No credentials, no network, no user daemon.
@@ -50,12 +50,11 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { PrimeDriver } from "../Drivers/PrimeDriver.ts";
 import type { PrimeResumeCursor } from "../Layers/PrimeAdapter.ts";
-import { ProviderAdapterRegistryLive } from "../Layers/ProviderAdapterRegistry.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryLayer } from "../Layers/ProviderInstanceRegistryLive.ts";
 import { makeProviderServiceLive } from "../Layers/ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "../Layers/ProviderSessionDirectory.ts";
-import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
+import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { NoOpProviderInstanceTeardownLive } from "../Services/ProviderInstanceTeardown.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -126,9 +125,7 @@ const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
   Layer.provide(SqlitePersistenceMemory),
 );
 const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
-const adapterRegistryLayer = ProviderAdapterRegistryLive.pipe(
-  Layer.provide(ProviderInstanceRegistryLayer({ drivers: [PrimeDriver], configMap })),
-);
+const instanceRegistryLayer = ProviderInstanceRegistryLayer({ drivers: [PrimeDriver], configMap });
 
 const providerLayer = makeProviderServiceLive().pipe(
   Layer.provide(Layer.succeed(EnvironmentAuth, makeUnconfiguredEnvironmentAuth())),
@@ -136,7 +133,7 @@ const providerLayer = makeProviderServiceLive().pipe(
   Layer.provide(EpicWorkerScopeRegistry.layer),
   Layer.provide(EpicSubagentRegistry.layer),
   Layer.provide(EpicCommitterRegistry.layer),
-  Layer.provideMerge(adapterRegistryLayer),
+  Layer.provideMerge(instanceRegistryLayer),
   Layer.provideMerge(directoryLayer),
   Layer.provideMerge(driverEnvLayer),
 );
@@ -192,8 +189,14 @@ const commandsSeenByPrime = Effect.fn("PrimeEndToEnd.commandsSeenByPrime")(funct
   readonly threadId: ThreadId;
   readonly instanceId: ProviderInstanceId;
 }) {
-  const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
-  const adapter = yield* registry.getByInstance(input.instanceId);
+  const registry = yield* ProviderInstanceRegistry;
+  const adapter = yield* registry
+    .getInstance(input.instanceId)
+    .pipe(
+      Effect.flatMap((instance) =>
+        instance === undefined ? Effect.die("missing instance") : Effect.succeed(instance.adapter),
+      ),
+    );
   const snapshot = yield* adapter.readThread(input.threadId);
   return snapshot.turns.at(-1)?.items ?? [];
 });
@@ -347,9 +350,25 @@ it.layer(providerLayer, { timeout: 60_000 })("Prime provider end to end", (it) =
       );
 
       // Each adapter only knows its own thread.
-      const primaryRegistry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
-      const primaryAdapter = yield* primaryRegistry.getByInstance(primaryId);
-      const secondaryAdapter = yield* primaryRegistry.getByInstance(secondaryId);
+      const primaryRegistry = yield* ProviderInstanceRegistry;
+      const primaryAdapter = yield* primaryRegistry
+        .getInstance(primaryId)
+        .pipe(
+          Effect.flatMap((instance) =>
+            instance === undefined
+              ? Effect.die("missing instance")
+              : Effect.succeed(instance.adapter),
+          ),
+        );
+      const secondaryAdapter = yield* primaryRegistry
+        .getInstance(secondaryId)
+        .pipe(
+          Effect.flatMap((instance) =>
+            instance === undefined
+              ? Effect.die("missing instance")
+              : Effect.succeed(instance.adapter),
+          ),
+        );
       assert.notStrictEqual(primaryAdapter, secondaryAdapter);
       assert.isTrue(yield* primaryAdapter.hasSession(primaryThread));
       assert.isFalse(yield* primaryAdapter.hasSession(secondaryThread));

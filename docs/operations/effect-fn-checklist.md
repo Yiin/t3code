@@ -183,7 +183,6 @@ Effect.fn("name")(
 - [ ] [apps/server/src/serverLayers.ts](../../apps/server/src/serverLayers.ts) (`3`)
 - [ ] [apps/server/src/telemetry/Layers/AnalyticsService.ts](../../apps/server/src/telemetry/Layers/AnalyticsService.ts) (`2`)
 - [ ] [apps/server/src/telemetry/Identify.ts](../../apps/server/src/telemetry/Identify.ts) (`2`)
-- [ ] [apps/server/src/provider/Layers/ProviderAdapterRegistry.ts](../../apps/server/src/provider/Layers/ProviderAdapterRegistry.ts) (`2`)
 - [ ] [apps/server/src/provider/Layers/CodexProvider.ts](../../apps/server/src/provider/Layers/CodexProvider.ts) (`2`)
 - [ ] [apps/server/src/provider/Layers/ClaudeProvider.ts](../../apps/server/src/provider/Layers/ClaudeProvider.ts) (`2`)
 - [ ] [apps/server/src/persistence/NodeSqliteClient.ts](../../apps/server/src/persistence/NodeSqliteClient.ts) (`2`)
