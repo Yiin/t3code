@@ -131,7 +131,6 @@ import {
 } from "../threadRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatRelativeTimeLabel } from "../timestampFormat";
-import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { Kbd } from "./ui/kbd";
 import {
   getArm64IntelBuildWarningDescription,
@@ -3513,7 +3512,6 @@ export default function Sidebar() {
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
-  const isOnSettings = pathname.startsWith("/settings");
   const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const sidebarProjectGroupingMode = useClientSettings((s) => s.sidebarProjectGroupingMode);
@@ -4197,69 +4195,65 @@ export default function Sidebar() {
       ))}
       <SidebarChromeHeader isElectron={isElectron} />
 
-      {isOnSettings ? (
-        <SettingsSidebarNav pathname={pathname} />
-      ) : (
-        <>
-          <SidebarProjectsContent
-            showArm64IntelBuildWarning={showArm64IntelBuildWarning}
-            arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
-            desktopUpdateButtonAction={desktopUpdateButtonAction}
-            desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
-            handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
-            projectSortOrder={sidebarProjectSortOrder}
-            threadSortOrder={sidebarThreadSortOrder}
-            projectGroupingMode={sidebarProjectGroupingMode}
-            threadPreviewCount={sidebarThreadPreviewCount}
-            updateSettings={updateSettings}
-            openAddProject={openAddProjectCommandPalette}
-            isManualProjectSorting={isManualProjectSorting}
-            projectDnDSensors={projectDnDSensors}
-            projectCollisionDetection={projectCollisionDetection}
-            handleProjectDragStart={handleProjectDragStart}
-            handleProjectDragEnd={handleProjectDragEnd}
-            handleProjectDragCancel={handleProjectDragCancel}
-            handleNewThread={handleNewThread}
-            archiveThread={archiveThread}
-            deleteThread={deleteThread}
-            sortedProjects={sortedProjects}
-            epicRunsByEnvironment={epicRunsByEnvironment}
-            epicRunTitlesByRunId={epicRunTitlesByRunId}
-            expandedThreadListsByProject={expandedThreadListsByProject}
-            activeRouteProjectKey={activeRouteProjectKey}
-            routeThreadKey={routeThreadKey}
-            newThreadShortcutLabel={newThreadShortcutLabel}
-            commandPaletteShortcutLabel={commandPaletteShortcutLabel}
-            threadJumpLabelByKey={visibleThreadJumpLabelByKey}
-            attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-            expandThreadListForProject={expandThreadListForProject}
-            collapseThreadListForProject={collapseThreadListForProject}
-            dragInProgressRef={dragInProgressRef}
-            suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
-            suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
-            attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
-            projectsLength={projects.length}
-          />
+      <>
+        <SidebarProjectsContent
+          showArm64IntelBuildWarning={showArm64IntelBuildWarning}
+          arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
+          desktopUpdateButtonAction={desktopUpdateButtonAction}
+          desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
+          handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
+          projectSortOrder={sidebarProjectSortOrder}
+          threadSortOrder={sidebarThreadSortOrder}
+          projectGroupingMode={sidebarProjectGroupingMode}
+          threadPreviewCount={sidebarThreadPreviewCount}
+          updateSettings={updateSettings}
+          openAddProject={openAddProjectCommandPalette}
+          isManualProjectSorting={isManualProjectSorting}
+          projectDnDSensors={projectDnDSensors}
+          projectCollisionDetection={projectCollisionDetection}
+          handleProjectDragStart={handleProjectDragStart}
+          handleProjectDragEnd={handleProjectDragEnd}
+          handleProjectDragCancel={handleProjectDragCancel}
+          handleNewThread={handleNewThread}
+          archiveThread={archiveThread}
+          deleteThread={deleteThread}
+          sortedProjects={sortedProjects}
+          epicRunsByEnvironment={epicRunsByEnvironment}
+          epicRunTitlesByRunId={epicRunTitlesByRunId}
+          expandedThreadListsByProject={expandedThreadListsByProject}
+          activeRouteProjectKey={activeRouteProjectKey}
+          routeThreadKey={routeThreadKey}
+          newThreadShortcutLabel={newThreadShortcutLabel}
+          commandPaletteShortcutLabel={commandPaletteShortcutLabel}
+          threadJumpLabelByKey={visibleThreadJumpLabelByKey}
+          attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
+          expandThreadListForProject={expandThreadListForProject}
+          collapseThreadListForProject={collapseThreadListForProject}
+          dragInProgressRef={dragInProgressRef}
+          suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
+          suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
+          attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
+          projectsLength={projects.length}
+        />
 
-          <SidebarGroup className="px-2 py-2">
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  type="button"
-                  onClick={openEpics}
-                  isActive={pathname.startsWith("/epics")}
-                >
-                  <LayersIcon className="size-4" />
-                  <span>Epics</span>
-                  <EpicsUnreadBadge />
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </SidebarGroup>
-          <SidebarSeparator />
-          <SidebarChromeFooter />
-        </>
-      )}
+        <SidebarGroup className="px-2 py-2">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                type="button"
+                onClick={openEpics}
+                isActive={pathname.startsWith("/epics")}
+              >
+                <LayersIcon className="size-4" />
+                <span>Epics</span>
+                <EpicsUnreadBadge />
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarGroup>
+        <SidebarSeparator />
+        <SidebarChromeFooter />
+      </>
     </>
   );
 }
