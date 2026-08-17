@@ -1,6 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { RpcClientError } from "effect/unstable/rpc";
+import {
+  JsonRpcId as CoreJsonRpcId,
+  encodeJsonl as encodeCoreJsonl,
+} from "effect-jsonrpc-stdio/jsonrpc";
 
 import * as AcpSchema from "../_generated/schema.gen.ts";
 import * as AcpError from "../errors.ts";
@@ -71,15 +75,12 @@ export function decodeExtNotificationRegistration<A, I>(
     );
 }
 
-const encoder = new TextEncoder();
-
-const JsonRpcId = Schema.Union([Schema.Number, Schema.String]);
 const JsonRpcHeaders = Schema.Array(Schema.Unknown);
 
 export const jsonRpcRequest = <A, I>(method: string, params: Schema.Codec<A, I>) =>
   Schema.Struct({
     jsonrpc: Schema.Literal("2.0"),
-    id: JsonRpcId,
+    id: CoreJsonRpcId,
     method: Schema.Literal(method),
     params,
     headers: JsonRpcHeaders,
@@ -95,11 +96,9 @@ export const jsonRpcNotification = <A, I>(method: string, params: Schema.Codec<A
 export const jsonRpcResponse = <A, I>(result: Schema.Codec<A, I>) =>
   Schema.Struct({
     jsonrpc: Schema.Literal("2.0"),
-    id: JsonRpcId,
+    id: CoreJsonRpcId,
     result,
   });
 
 export const encodeJsonl = <A, I>(schema: Schema.Codec<A, I>, value: A) =>
-  Effect.map(Schema.encodeEffect(Schema.fromJsonString(schema))(value), (encoded) =>
-    encoder.encode(`${encoded}\n`),
-  );
+  Effect.map(encodeCoreJsonl(schema, value), (encoded) => new TextEncoder().encode(encoded));

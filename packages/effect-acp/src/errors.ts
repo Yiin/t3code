@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import type * as SchemaIssue from "effect/SchemaIssue";
+import { schemaIssueDiagnostics } from "effect-jsonrpc-stdio/errors";
 
 import * as AcpSchema from "./_generated/schema.gen.ts";
 
@@ -33,38 +33,6 @@ export interface AcpSchemaIssueDiagnostics {
   readonly issueKinds: ReadonlyArray<AcpSchemaIssueKind>;
   readonly maximumPathDepth: number;
 }
-
-const schemaIssueDiagnostics = (root: SchemaIssue.Issue): AcpSchemaIssueDiagnostics => {
-  let issueCount = 0;
-  let maximumPathDepth = 0;
-  const issueKinds = new Set<AcpSchemaIssueKind>();
-
-  const visit = (issue: SchemaIssue.Issue, pathDepth: number): void => {
-    issueCount += 1;
-    issueKinds.add(issue._tag);
-    maximumPathDepth = Math.max(maximumPathDepth, pathDepth);
-    switch (issue._tag) {
-      case "Filter":
-      case "Encoding":
-        visit(issue.issue, pathDepth);
-        break;
-      case "Pointer":
-        visit(issue.issue, pathDepth + issue.path.length);
-        break;
-      case "Composite":
-      case "AnyOf":
-        for (const child of issue.issues) visit(child, pathDepth);
-        break;
-    }
-  };
-
-  visit(root, 0);
-  return {
-    issueCount,
-    issueKinds: [...issueKinds],
-    maximumPathDepth,
-  };
-};
 
 export interface AcpRequestDiagnostics {
   readonly method?: string;

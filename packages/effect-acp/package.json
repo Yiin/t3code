@@ -38,7 +38,8 @@
     "generate": "node scripts/generate.ts"
   },
   "dependencies": {
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "effect-jsonrpc-stdio": "workspace:*"
   },
   "devDependencies": {
     "@effect/openapi-generator": "catalog:",

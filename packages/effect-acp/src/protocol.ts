@@ -12,6 +12,7 @@ import * as RpcClientError from "effect/unstable/rpc/RpcClientError";
 import * as RpcMessage from "effect/unstable/rpc/RpcMessage";
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as RpcServer from "effect/unstable/rpc/RpcServer";
+import { logProtocol as logCoreProtocol } from "effect-jsonrpc-stdio/protocol";
 
 import * as AcpSchema from "./_generated/schema.gen.ts";
 import { CLIENT_METHODS } from "./_generated/meta.gen.ts";
@@ -107,16 +108,12 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const extPending = yield* Ref.make(new Map<string, AcpPendingRequest>());
 
   const logProtocol = (event: AcpProtocolLogEvent) => {
-    if (event.direction === "incoming" && !options.logIncoming) {
-      return Effect.void;
-    }
-    if (event.direction === "outgoing" && !options.logOutgoing) {
-      return Effect.void;
-    }
-    return (
-      options.logger?.(event) ??
-      Effect.logDebug("ACP protocol event").pipe(Effect.annotateLogs({ event }))
-    );
+    return logCoreProtocol(event, {
+      ...(options.logIncoming === undefined ? {} : { logIncoming: options.logIncoming }),
+      ...(options.logOutgoing === undefined ? {} : { logOutgoing: options.logOutgoing }),
+      ...(options.logger === undefined ? {} : { logger: options.logger }),
+      label: "ACP",
+    });
   };
 
   const offerOutgoing = Effect.fn("offerOutgoing")(function* (
