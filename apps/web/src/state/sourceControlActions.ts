@@ -4,6 +4,7 @@ import type {
   AtomCommandResult,
   AtomCommandSuccess,
 } from "@t3tools/client-runtime/state/runtime";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import {
   VcsActionUnavailableError,
   type VcsActionOperation,
@@ -53,6 +54,7 @@ interface SourceControlActionState<
     AtomCommandResult<AtomCommandSuccess<R>, AtomCommandFailure<R> | VcsActionUnavailableError>
   >;
   readonly resetError: () => void;
+  readonly isInterrupted: (result: AtomCommandResult<unknown, unknown>) => boolean;
 }
 
 const ACTION_OPERATION = {
@@ -112,6 +114,7 @@ function useAction<
     error: ownsState ? state.error : null,
     isPending: ownsState && state.isRunning,
     resetError,
+    isInterrupted: isAtomCommandInterrupted,
     run,
   };
 }

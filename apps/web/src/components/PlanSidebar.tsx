@@ -1,8 +1,5 @@
 import { memo, useState, useCallback } from "react";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+import { isAtomCommandInterrupted, squashAtomCommandFailure } from "~/state/command-results";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { Badge } from "./ui/badge";

@@ -1,5 +1,4 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -146,7 +145,7 @@ export function PullRequestThreadDialog({
       });
       setPreparingMode(null);
       if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) {
+        if (preparePullRequestThreadAction.isInterrupted(result)) {
           preparePullRequestThreadAction.resetError();
         }
         return;
