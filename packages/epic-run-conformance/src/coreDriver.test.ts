@@ -1001,28 +1001,46 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
       const rows = yield* journal.listIterations(run.runId);
       /**
        * The drain is serialized, and the receipts are the only place that
-       * shows it: two branches that landed together were verified by ONE gate
-       * over both, not by two gates racing the same base.
+       * shows it. Batching is opportunistic, not guaranteed: entries queued
+       * together are verified by ONE gate over both, but a worker that
+       * settles after the drain has already woken lands in the next round,
+       * so a loaded host can legitimately produce one entry gate per branch
+       * (t3code-wrm saw exactly that once at loadPerCpu 2.95). The batching
+       * itself is proven deterministically in `MergeQueue.test.ts`
+       * ("compatible batches", t3code-22o.8), where both entries are queued
+       * by construction.
        *
-       * A batch receipt names every branch it merged, space separated, and
-       * blames nobody — a null `childId`, because one child of several cannot
-       * be held responsible for a red batch.
+       * What must hold on every timing: each acquired branch is gated
+       * exactly once and passed, and a batch receipt blames nobody — a null
+       * `childId`, because one child of several cannot be held responsible
+       * for a red batch — while a lone entry names its own child.
        */
       if (scenario.name === "parallel-happy-path") {
         const entries = (yield* gateReceipts.list(runId)).filter(
           (receipt) => receipt.phase === "entry",
         );
-        const acquiredBranches = [...acquiredWorkspaces.values()]
-          .flatMap((acquired) => (acquired.branch === null ? [] : [acquired.branch]))
-          .toSorted();
-        assert.equal(
-          entries.length,
-          1,
-          `expected one batched entry gate, got ${JSON.stringify(entries.map((entry) => entry.branch))}`,
+        const childByBranch = new Map(
+          [...acquiredWorkspaces.entries()].flatMap(([issueId, acquired]) =>
+            acquired.branch === null ? [] : [[acquired.branch, issueId] as const],
+          ),
         );
-        assert.equal(entries[0]?.childId, null, "a batch gate blames no single child");
-        assert.deepEqual((entries[0]?.branch ?? "").split(" ").toSorted(), acquiredBranches);
-        assert.equal(entries[0]?.outcome, "passed");
+        const gatedBranches = entries
+          .flatMap((entry) => (entry.branch ?? "").split(" "))
+          .toSorted();
+        assert.deepEqual(
+          gatedBranches,
+          [...childByBranch.keys()].toSorted(),
+          `every acquired branch is gated exactly once, got ${JSON.stringify(entries.map((entry) => entry.branch))}`,
+        );
+        for (const entry of entries) {
+          assert.equal(entry.outcome, "passed");
+          const branches = (entry.branch ?? "").split(" ");
+          assert.equal(
+            entry.childId,
+            branches.length === 1 ? (childByBranch.get(branches[0] ?? "") ?? null) : null,
+            "a batch gate blames no single child; a lone entry names its own",
+          );
+        }
       }
       yield* lease.success.release.pipe(Effect.ignore);
       const landed = landedChildIds(workspace);

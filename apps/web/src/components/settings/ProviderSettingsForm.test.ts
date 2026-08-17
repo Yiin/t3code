@@ -34,13 +34,14 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
-  it("places the Kimi home path after its binary path", () => {
+  it("orders the Kimi credentials path after its shared home", () => {
     const kimi = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("kimi")];
 
     expect(kimi).toBeDefined();
     expect(deriveProviderSettingsFields(kimi!).map((field) => field.key)).toEqual([
       "binaryPath",
       "homePath",
+      "shadowHomePath",
     ]);
   });
 
