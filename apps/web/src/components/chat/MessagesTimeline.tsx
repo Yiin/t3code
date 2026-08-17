@@ -43,7 +43,6 @@ import {
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
 import {
-  BotIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronsDownUpIcon,
@@ -75,7 +74,6 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
-  resolveUserMessageAuthorLabel,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
@@ -974,16 +972,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
-  const authorLabel = resolveUserMessageAuthorLabel(row.message.origin);
 
+  // Every row reaching here is the human's: `deriveMessagesTimelineRows` drops
+  // agent-authored user rows before they become timeline rows.
   return (
     <div className="group flex flex-col items-end gap-1">
-      {authorLabel ? (
-        <p className="flex items-center gap-1 pe-1 text-[11px] text-muted-foreground">
-          <BotIcon className="size-3" aria-hidden />
-          {authorLabel}
-        </p>
-      ) : null}
       <div className="relative max-w-[80%] rounded-2xl border border-border bg-secondary p-3">
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">

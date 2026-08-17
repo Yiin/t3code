@@ -329,6 +329,63 @@ describe("deriveMessagesTimelineRows", () => {
     }
   });
 
+  it("drops agent-authored user rows and keeps the human's", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "user-1-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:00Z",
+          message: {
+            id: "user-1" as never,
+            role: "user",
+            text: "Start the epic",
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            streaming: false,
+          },
+        },
+        {
+          id: "epic-status-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:01:00Z",
+          message: {
+            id: "epic-run-status:run-1:m1" as never,
+            role: "user",
+            origin: "agent",
+            text: "EpicRunner run run-1 for health-d5c: started. Iterations 0/50.",
+            turnId: null,
+            createdAt: "2026-01-01T00:01:00Z",
+            updatedAt: "2026-01-01T00:01:00Z",
+            streaming: false,
+          },
+        },
+        {
+          id: "assistant-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:01:05Z",
+          message: {
+            id: "assistant-1" as never,
+            role: "assistant",
+            text: "The run is live.",
+            turnId: "turn-1" as never,
+            createdAt: "2026-01-01T00:01:05Z",
+            updatedAt: "2026-01-01T00:01:06Z",
+            streaming: false,
+          },
+        },
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    const messageIds = rows.flatMap((row) => (row.kind === "message" ? [row.message.id] : []));
+    expect(messageIds).toEqual(["user-1", "assistant-1"]);
+  });
+
   it("only enables assistant copy for the terminal assistant message in a turn", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [

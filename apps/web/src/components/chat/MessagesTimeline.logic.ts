@@ -276,7 +276,7 @@ export function computeMessageDurationStart(
   return result;
 }
 
-/** What an agent-authored `role: "user"` row is called in the timeline. */
+/** What an agent-authored `role: "user"` row is called in the inspector drawer. */
 export const AGENT_USER_MESSAGE_AUTHOR_LABEL = "Parent";
 
 /**
@@ -286,6 +286,10 @@ export const AGENT_USER_MESSAGE_AUTHOR_LABEL = "Parent";
  * drives (a parent messaging its child thread, the epic runner continuing an
  * iteration). Only the second one needs saying — an unlabelled row is the
  * human's, which is what every thread looked like before `origin` existed.
+ *
+ * The main timeline no longer needs this: it drops agent-authored user rows
+ * entirely (`deriveMessagesTimelineRows`). The subagent inspector drawer keeps
+ * them, because there the parent's prompt is the transcript.
  */
 export function resolveUserMessageAuthorLabel(
   origin: OrchestrationMessageOrigin | undefined,
@@ -782,6 +786,13 @@ export function deriveMessagesTimelineRows(input: {
         createdAt: timelineEntry.createdAt,
         proposedPlan: timelineEntry.proposedPlan,
       });
+      continue;
+    }
+
+    // Agent-authored user rows (epic-run status posts, a parent prompting this
+    // thread) exist to start a turn, not to be read — the assistant's reply
+    // carries the content. The subagent inspector drawer still shows them.
+    if (timelineEntry.message.role === "user" && timelineEntry.message.origin === "agent") {
       continue;
     }
 

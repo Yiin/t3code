@@ -411,6 +411,28 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-user-message-collapsible="false"');
   });
 
+  it("renders nothing for an agent-authored user message", async () => {
+    const humanEntry = buildUserTimelineEntry("Start the epic.");
+    const agentEntry = {
+      ...humanEntry,
+      id: "entry-epic-status",
+      message: {
+        ...humanEntry.message,
+        id: MessageId.make("epic-run-status:run-1:m1"),
+        origin: "agent" as const,
+        text: "EpicRunner run run-1 for health-d5c: completed. Iterations 34/50.",
+      },
+    };
+
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[humanEntry, agentEntry]} />,
+    );
+
+    expect(markup).toContain("Start the epic.");
+    expect(markup).not.toContain("EpicRunner run");
+    expect(markup).not.toContain(">Parent</p>");
+  });
+
   it("renders inline terminal labels with the composer chip UI", async () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
