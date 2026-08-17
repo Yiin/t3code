@@ -81,6 +81,18 @@ describe("threadRoutes", () => {
     });
   });
 
+  it("keeps canonical server routes active", () => {
+    const target = resolveThreadRouteTarget({
+      environmentId: "env-1",
+      threadId: "thread-1",
+    });
+
+    expect(resolveActiveThreadRouteRef(target, null)).toEqual({
+      environmentId: "env-1",
+      threadId: "thread-1",
+    });
+  });
+
   it("does not treat a draft's reserved thread ref as an active sidebar thread", () => {
     const target = resolveThreadRouteTarget({ draftId: "draft-1" });
 
