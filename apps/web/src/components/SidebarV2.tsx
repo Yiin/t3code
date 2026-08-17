@@ -14,6 +14,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import {
+  ArchiveIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -49,6 +50,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { isElectron } from "../env";
+import { isTerminalEpicRunStatus } from "../epicRun.logic";
 import {
   resolveShortcutCommand,
   shortcutLabelForCommand,
@@ -786,11 +788,20 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
   onToggle: (runId: string, expanded: boolean) => void;
   onSettle: (runId: string) => void;
   onOpenRun: (group: SidebarEpicRunGroup<EnvironmentThreadShell>) => void;
+  attemptArchiveThread: (threadRef: ScopedThreadRef) => Promise<void>;
   onIterationClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
   onIterationActivate: (threadRef: ScopedThreadRef) => void;
 }) {
-  const { expanded, group, onIterationActivate, onIterationClick, onOpenRun, onSettle, onToggle } =
-    props;
+  const {
+    attemptArchiveThread,
+    expanded,
+    group,
+    onIterationActivate,
+    onIterationClick,
+    onOpenRun,
+    onSettle,
+    onToggle,
+  } = props;
   const statusPill = resolveEpicRunStatusPill(group.status);
   const countLabel = epicRunIterationCountLabel(group.iterations.length);
   const rowLabel = epicRunGroupRowLabel(group);
@@ -817,6 +828,41 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
     },
     [group.runId, onSettle],
   );
+  const stopPropagationOnPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+    },
+    [],
+  );
+  const archivable = group.status !== null && isTerminalEpicRunStatus(group.status);
+  const [confirmingArchive, setConfirmingArchive] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const clearConfirmingArchive = useCallback(() => setConfirmingArchive(false), []);
+  const handleStartArchiveConfirmation = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfirmingArchive(true);
+    },
+    [],
+  );
+  const handleConfirmArchiveClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setConfirmingArchive(false);
+      setArchiving(true);
+      void (async () => {
+        for (const iteration of group.iterations) {
+          await attemptArchiveThread(
+            scopeThreadRef(iteration.thread.environmentId, iteration.thread.id),
+          );
+        }
+        setArchiving(false);
+      })();
+    },
+    [attemptArchiveThread, group.iterations],
+  );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
       if (event.target !== event.currentTarget) return;
@@ -831,7 +877,12 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
     <>
       {/* Selection-safe: hitting the chevron toggles the group, it must not
           clear a multi-selection. Opening the run clears it explicitly. */}
-      <li data-epic-run-group-row data-thread-selection-safe className="list-none py-0.5">
+      <li
+        data-epic-run-group-row
+        data-thread-selection-safe
+        className="list-none py-0.5"
+        onMouseLeave={clearConfirmingArchive}
+      >
         <div
           role="button"
           tabIndex={0}
@@ -880,8 +931,13 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
               <span
                 role="status"
                 className={cn(
-                  "inline-flex shrink-0 items-center gap-1 text-xs font-medium transition-opacity group-hover/v2-run:opacity-0 group-focus-within/v2-run:opacity-0 pointer-coarse:opacity-0",
+                  "inline-flex shrink-0 items-center gap-1 text-xs font-medium",
                   statusPill.colorClass,
+                  confirmingArchive
+                    ? "pointer-events-none opacity-0"
+                    : archivable && !archiving
+                      ? "pointer-events-none transition-opacity group-hover/v2-run:opacity-0 group-focus-within/v2-run:opacity-0 pointer-coarse:opacity-0"
+                      : "",
                 )}
               >
                 <span
@@ -895,15 +951,46 @@ const SidebarV2EpicRunGroupRow = memo(function SidebarV2EpicRunGroupRow(props: {
                 {statusPill.label}
               </span>
             ) : null}
-            <button
-              type="button"
-              aria-label={`Settle epic run ${rowLabel.primary} (${group.runId})`}
-              onClick={handleSettle}
-              className="absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md border border-sidebar-border bg-sidebar-row-hover px-2 text-xs text-muted-foreground opacity-0 transition-opacity pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-ring group-hover/v2-run:opacity-100 group-focus-within/v2-run:opacity-100 pointer-coarse:opacity-100 dark:border-transparent dark:inset-ring-1 dark:inset-ring-white/5"
-            >
-              <CheckIcon className="size-3" />
-              Settle
-            </button>
+            {!archivable ? (
+              <button
+                type="button"
+                aria-label={`Settle epic run ${rowLabel.primary} (${group.runId})`}
+                onClick={handleSettle}
+                className="absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md border border-sidebar-border bg-sidebar-row-hover px-2 text-xs text-muted-foreground opacity-0 transition-opacity pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-ring group-hover/v2-run:opacity-100 group-focus-within/v2-run:opacity-100 pointer-coarse:opacity-100 dark:border-transparent dark:inset-ring-1 dark:inset-ring-white/5"
+              >
+                <CheckIcon className="size-3" />
+                Settle
+              </button>
+            ) : null}
+            {archivable && !archiving ? (
+              confirmingArchive ? (
+                <button
+                  type="button"
+                  data-thread-selection-safe
+                  data-testid={`sidebar-v2-epic-run-archive-confirm-${group.runId}`}
+                  aria-label={`Confirm archive run ${rowLabel.primary}`}
+                  className="absolute top-1/2 right-0 inline-flex h-6 -translate-y-1/2 cursor-pointer items-center rounded-md bg-destructive/12 px-2 text-xs font-medium text-destructive hover:bg-destructive/18 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-destructive/40"
+                  onPointerDown={stopPropagationOnPointerDown}
+                  onClick={handleConfirmArchiveClick}
+                >
+                  Confirm
+                </button>
+              ) : (
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 group-hover/v2-run:pointer-events-auto group-hover/v2-run:opacity-100 group-focus-within/v2-run:pointer-events-auto group-focus-within/v2-run:opacity-100">
+                  <button
+                    type="button"
+                    data-thread-selection-safe
+                    data-testid={`sidebar-v2-epic-run-archive-${group.runId}`}
+                    aria-label={`Archive run ${rowLabel.primary}`}
+                    className="inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-row-hover hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                    onPointerDown={stopPropagationOnPointerDown}
+                    onClick={handleStartArchiveConfirmation}
+                  >
+                    <ArchiveIcon aria-hidden className="size-3.5" />
+                  </button>
+                </div>
+              )
+            ) : null}
           </span>
         </div>
       </li>
@@ -1073,7 +1160,23 @@ export default function SidebarV2() {
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
-  const { settleThread, unsettleThread, deleteThread } = useThreadActions();
+  const { archiveThread, settleThread, unsettleThread, deleteThread } = useThreadActions();
+  const attemptArchiveThread = useCallback(
+    async (threadRef: ScopedThreadRef) => {
+      const result = await archiveThread(threadRef);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to archive thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    },
+    [archiveThread],
+  );
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -2121,6 +2224,7 @@ export default function SidebarV2() {
                       onToggle={setEpicRunGroupExpanded}
                       onSettle={settleEpicRunGroup}
                       onOpenRun={openEpicRun}
+                      attemptArchiveThread={attemptArchiveThread}
                       onIterationClick={handleThreadClick}
                       onIterationActivate={navigateToThread}
                     />
