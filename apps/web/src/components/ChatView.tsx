@@ -112,7 +112,6 @@ import {
 import { useRunnerOwnedIteration } from "../hooks/useRunnerOwnedIteration";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
-import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
@@ -137,7 +136,8 @@ import { SubagentInspectorPanel } from "./chat/SubagentInspectorPanel";
 import type { SubagentCommandFailure } from "./chat/SubagentInspectorFooter";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
-import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
+import { shortcutLabelForCommand } from "../keybindings";
+import { useChatKeybindings } from "./ChatViewKeybindings";
 import PlanSidebar from "./PlanSidebar";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
@@ -152,18 +152,12 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
-import {
-  buildProjectScript,
-  commandForProjectScript,
-  nextProjectScriptId,
-  projectScriptIdFromCommand,
-} from "~/projectScripts";
+import { buildProjectScript, commandForProjectScript, nextProjectScriptId } from "~/projectScripts";
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import { useEnvironmentSettings } from "../hooks/useSettings";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
-import { getTerminalFocusOwner } from "../lib/terminalFocus";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -374,35 +368,6 @@ const PreviewPanel = lazy(() =>
 const DiffPanel = lazy(() => import("./DiffPanel"));
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
-const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
-  "input",
-  "textarea",
-  "select",
-  '[contenteditable="true"]',
-  '[contenteditable="plaintext-only"]',
-  '[role="textbox"]',
-].join(",");
-const TYPE_TO_FOCUS_INTERACTIVE_SELECTOR = [
-  "button",
-  "a[href]",
-  "summary",
-  '[role="button"]',
-  '[role="checkbox"]',
-  '[role="menuitem"]',
-  '[role="option"]',
-  '[role="radio"]',
-  '[role="switch"]',
-  '[role="tab"]',
-].join(",");
-const TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR = [
-  '[data-slot="dialog"]',
-  '[data-slot="menu-popup"]',
-  '[data-slot="select-popup"]',
-  '[data-slot="popover-popup"]',
-  '[data-slot="combobox-popup"]',
-  '[data-slot="autocomplete-popup"]',
-].join(",");
-
 type EnvironmentUnavailableState = {
   readonly environmentId: EnvironmentId;
   readonly label: string;
@@ -410,26 +375,6 @@ type EnvironmentUnavailableState = {
 };
 
 type ThreadPlanCatalogEntry = Pick<Thread, "id" | "proposedPlans">;
-
-function eventPathContainsSelector(event: Event, selector: string): boolean {
-  const path = event.composedPath();
-  if (path.length === 0 && event.target) {
-    path.push(event.target);
-  }
-  return path.some((target) => target instanceof Element && target.closest(selector));
-}
-
-function shouldTypeToFocusComposer(event: KeyboardEvent): boolean {
-  if (event.defaultPrevented || event.isComposing) return false;
-  if (event.metaKey || event.ctrlKey || event.altKey) return false;
-  if (event.key.length !== 1) return false;
-
-  if (eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR)) return false;
-  if (eventPathContainsSelector(event, TYPE_TO_FOCUS_INTERACTIVE_SELECTOR)) return false;
-  if (document.querySelector(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)) return false;
-
-  return true;
-}
 
 function formatOutgoingPrompt(params: {
   provider: ProviderDriverKind;
@@ -4188,150 +4133,34 @@ function ChatViewContent(props: ChatViewProps) {
     terminalUiOpenByThreadRef.current[activeThreadKey] = current;
   }, [activeThreadKey, focusComposer, terminalUiState.terminalOpen]);
 
-  useEffect(() => {
-    const handler = (event: globalThis.KeyboardEvent) => {
-      if (!activeThreadId || isCommandPaletteOpen()) {
-        return;
-      }
-      const terminalFocusOwner = getTerminalFocusOwner();
-      if (event.defaultPrevented && terminalFocusOwner === null) {
-        return;
-      }
-      const shortcutContext = {
-        terminalFocus: terminalFocusOwner !== null,
-        terminalOpen: Boolean(terminalUiState.terminalOpen),
-        modelPickerOpen: composerRef.current?.isModelPickerOpen() ?? false,
-      };
-
-      if (
-        !shortcutContext.terminalFocus &&
-        !shortcutContext.modelPickerOpen &&
-        shouldTypeToFocusComposer(event)
-      ) {
-        if (composerRef.current?.insertTextAtEnd(event.key)) {
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-      }
-
-      const command = resolveShortcutCommand(event, keybindings, {
-        context: shortcutContext,
-      });
-      if (!command) return;
-
-      if (command === "terminal.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleTerminalVisibility();
-        return;
-      }
-
-      if (command === "rightPanel.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleRightPanel();
-        return;
-      }
-
-      if (command === "terminal.split") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel") {
-          splitPanelTerminal();
-          return;
-        }
-        if (!terminalUiState.terminalOpen) {
-          setTerminalOpen(true);
-        }
-        splitTerminal();
-        return;
-      }
-
-      if (command === "terminal.splitVertical") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel") {
-          splitPanelTerminal("vertical");
-          return;
-        }
-        if (!terminalUiState.terminalOpen) {
-          setTerminalOpen(true);
-        }
-        splitTerminal("vertical");
-        return;
-      }
-
-      if (command === "terminal.close") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel" && activeRightPanelSurface?.kind === "terminal") {
-          closePanelTerminal(activeRightPanelSurface.activeTerminalId);
-          return;
-        }
-        if (!terminalUiState.terminalOpen) return;
-        closeTerminal(terminalUiState.activeTerminalId);
-        return;
-      }
-
-      if (command === "terminal.new") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel") {
-          addTerminalSurface();
-          return;
-        }
-        if (!terminalUiState.terminalOpen) {
-          setTerminalOpen(true);
-        }
-        createNewTerminal();
-        return;
-      }
-
-      if (command === "diff.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        onToggleDiff();
-        return;
-      }
-
-      if (command === "modelPicker.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        composerRef.current?.toggleModelPicker();
-        return;
-      }
-
-      const scriptId = projectScriptIdFromCommand(command);
-      if (!scriptId || !activeProject) return;
-      const script = activeProject.scripts.find((entry) => entry.id === scriptId);
-      if (!script) return;
-      event.preventDefault();
-      event.stopPropagation();
-      void runProjectScript(script);
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [
-    activeProject,
-    activeRightPanelSurface,
-    addTerminalSurface,
-    terminalUiState.terminalOpen,
-    terminalUiState.activeTerminalId,
+  useChatKeybindings({
     activeThreadId,
-    closeTerminal,
-    closePanelTerminal,
-    createNewTerminal,
-    setTerminalOpen,
-    runProjectScript,
-    splitTerminal,
-    splitPanelTerminal,
+    activeProject,
     keybindings,
-    onToggleDiff,
-    toggleRightPanel,
-    toggleTerminalVisibility,
-    composerRef,
-  ]);
+    terminalOpen: Boolean(terminalUiState.terminalOpen),
+    rightPanelTerminal: activeRightPanelSurface?.kind === "terminal",
+    activeTerminalId: terminalUiState.activeTerminalId,
+    activePanelTerminalId:
+      activeRightPanelSurface?.kind === "terminal"
+        ? activeRightPanelSurface.activeTerminalId
+        : null,
+    composerOpen: () => composerRef.current?.isModelPickerOpen() ?? false,
+    actions: {
+      setTerminalOpen,
+      toggleTerminalVisibility,
+      toggleRightPanel,
+      splitTerminal,
+      splitPanelTerminal,
+      closeTerminal,
+      closePanelTerminal,
+      createNewTerminal,
+      addTerminalSurface,
+      onToggleDiff,
+      toggleModelPicker: () => composerRef.current?.toggleModelPicker(),
+      insertTextAtEnd: (text) => composerRef.current?.insertTextAtEnd(text) ?? false,
+      runProjectScript,
+    },
+  });
 
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
