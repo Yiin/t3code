@@ -40,6 +40,7 @@ import {
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
+import { planImagePersistence, toPersistedComposerImage } from "./ChatComposer.logic";
 import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
@@ -47,7 +48,6 @@ import {
 import {
   type ComposerImageAttachment,
   type DraftId,
-  type PersistedComposerImageAttachment,
   useComposerDraftStore,
   useComposerThreadDraft,
   useEffectiveComposerModelState,
@@ -532,9 +532,6 @@ export interface ChatComposerProps {
 
   // Refs the parent needs kept in sync
   promptRef: React.RefObject<string>;
-  composerAttachmentsRef: React.RefObject<ComposerImageAttachment[]>;
-  composerTerminalContextsRef: React.RefObject<TerminalContextDraft[]>;
-  composerElementContextsRef: React.RefObject<ElementContextDraft[]>;
   composerRef: React.RefObject<ChatComposerHandle | null>;
 
   // Callbacks
@@ -623,9 +620,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     gitCwd,
     promptRef,
     composerRef,
-    composerAttachmentsRef,
-    composerTerminalContextsRef,
-    composerElementContextsRef,
     onSend,
     onInterrupt,
     onImplementPlanInNewThread,
@@ -657,6 +651,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
   const nonPersistedComposerAttachmentIds = composerDraft.nonPersistedImageIds;
+
+  // Keep the imperative prompt ref current for editor actions. Send reads the
+  // complete draft from the store at the point of dispatch.
+  promptRef.current = prompt;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
@@ -1235,6 +1233,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, addComposerDraftImages],
   );
 
+  useEffect(() => {
+    setComposerCursor((existing) => clampCollapsedComposerCursor(prompt, existing));
+  }, [prompt]);
+
   const removeComposerAttachmentFromDraft = useCallback(
     (imageId: string) => {
       removeComposerDraftImage(composerDraftTarget, imageId);
@@ -1264,26 +1266,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setPrompt,
     ],
   );
-
-  // ------------------------------------------------------------------
-  // Sync refs back to parent
-  // ------------------------------------------------------------------
-  useEffect(() => {
-    promptRef.current = prompt;
-    setComposerCursor((existing) => clampCollapsedComposerCursor(prompt, existing));
-  }, [prompt, promptRef]);
-
-  useEffect(() => {
-    composerAttachmentsRef.current = composerAttachments;
-  }, [composerAttachments, composerAttachmentsRef]);
-
-  useEffect(() => {
-    composerTerminalContextsRef.current = composerTerminalContexts;
-  }, [composerTerminalContexts, composerTerminalContextsRef]);
-
-  useEffect(() => {
-    composerElementContextsRef.current = composerElementContexts;
-  }, [composerElementContexts, composerElementContextsRef]);
 
   // ------------------------------------------------------------------
   // Composer menu highlight sync
@@ -1430,45 +1412,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         getComposerDraft(composerDraftTarget)?.persistedAttachments ?? [];
       try {
         const currentPersistedAttachments = getPersistedAttachmentsForThread();
-        const existingPersistedById = new Map(
-          currentPersistedAttachments.map((attachment) => [attachment.id, attachment]),
-        );
-        const stagedAttachmentById = new Map<string, PersistedComposerImageAttachment>();
-        await Promise.all(
+        const stagedAttachments = await Promise.all(
           composerAttachments.map(async (image) => {
             try {
-              const dataUrl = await readFileAsDataUrl(image.file);
-              stagedAttachmentById.set(image.id, {
-                type: image.type,
-                id: image.id,
-                name: image.name,
-                mimeType: image.mimeType,
-                sizeBytes: image.sizeBytes,
-                dataUrl,
-              });
+              return toPersistedComposerImage(image, await readFileAsDataUrl(image.file));
             } catch {
-              const existingPersisted = existingPersistedById.get(image.id);
-              if (existingPersisted) {
-                stagedAttachmentById.set(image.id, existingPersisted);
-              }
+              return { id: image.id };
             }
           }),
         );
-        const serialized = Array.from(stagedAttachmentById.values());
+        const serialized = planImagePersistence(stagedAttachments, currentPersistedAttachments);
         if (cancelled) return;
         syncComposerDraftPersistedAttachments(composerDraftTarget, serialized);
       } catch {
-        const currentImageIds = new Set(composerAttachments.map((image) => image.id));
         const fallbackPersistedAttachments = getPersistedAttachmentsForThread();
-        const fallbackPersistedIds: Array<string> = [];
-        for (const attachment of fallbackPersistedAttachments) {
-          if (currentImageIds.has(attachment.id)) {
-            fallbackPersistedIds.push(attachment.id);
-          }
-        }
-        const fallbackPersistedIdSet = new Set(fallbackPersistedIds);
+        const currentImageIds = new Set(composerAttachments.map((image) => image.id));
         const fallbackAttachments = fallbackPersistedAttachments.filter((attachment) =>
-          fallbackPersistedIdSet.has(attachment.id),
+          currentImageIds.has(attachment.id),
         );
         if (cancelled) return;
         syncComposerDraftPersistedAttachments(composerDraftTarget, fallbackAttachments);
@@ -1871,7 +1831,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const { accepted, error } = screenComposerAttachments(files, {
       driver: selectedProvider,
       providerLabel: selectedProviderLabel,
-      attachedCount: composerAttachmentsRef.current.length,
+      attachedCount: composerAttachments.length,
     });
     const nextAttachments: ComposerImageAttachment[] = accepted.map(({ file, kind }) => ({
       type: kind,
@@ -2139,9 +2099,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       },
       getSendContext: () => ({
         prompt: promptRef.current,
-        images: composerAttachmentsRef.current,
-        terminalContexts: composerTerminalContextsRef.current,
-        elementContexts: composerElementContextsRef.current,
+        images: composerAttachments,
+        terminalContexts: composerTerminalContexts,
+        elementContexts: composerElementContexts,
         previewAnnotations: composerPreviewAnnotations,
         reviewComments: composerReviewComments,
         selectedPromptEffort,
@@ -2160,9 +2120,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerTerminalContexts,
       insertComposerDraftTerminalContext,
       promptRef,
-      composerAttachmentsRef,
-      composerTerminalContextsRef,
-      composerElementContextsRef,
       composerPreviewAnnotations,
       composerReviewComments,
       isConnecting,
