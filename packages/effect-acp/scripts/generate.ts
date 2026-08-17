@@ -11,7 +11,12 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import {
+  collectSchemaEntries,
+  formatGeneratedDirectory,
+  isGeneratorFormatError,
+  normalizeNullableTypes,
+} from "../../effect-jsonrpc-stdio/scripts/generator.ts";
 
 const CURRENT_SCHEMA_RELEASE = "v0.11.3";
 
@@ -111,89 +116,6 @@ const writeGeneratedFiles = Effect.fn("writeGeneratedFiles")(function* (
   yield* fs.writeFileString(metaOutputPath, metaOutput);
 });
 
-function collectSchemaEntries(
-  chunk: string,
-): ReadonlyArray<{ readonly name: string; readonly code: string }> {
-  const lines = chunk
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("//"));
-  const entries: Array<{ name: string; code: string }> = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const typeLine = lines[index];
-    if (!typeLine?.startsWith("export type ")) {
-      continue;
-    }
-
-    const constLine = lines[index + 1];
-    if (!constLine?.startsWith("export const ")) {
-      throw new Error(`Malformed generator output near: ${typeLine}`);
-    }
-
-    const match = /^export type ([A-Za-z0-9_]+)/.exec(typeLine);
-    if (!match?.[1]) {
-      throw new Error(`Could not extract schema name from: ${typeLine}`);
-    }
-
-    entries.push({
-      name: match[1],
-      code: `${typeLine}\n${constLine}`,
-    });
-    index += 1;
-  }
-
-  return entries;
-}
-
-function normalizeNullableTypes(value: Schema.Json): Schema.Json {
-  if (Array.isArray(value)) {
-    return value.map(normalizeNullableTypes);
-  }
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-
-  const normalizedEntries = Object.entries(value).map(([key, child]) => [
-    key,
-    normalizeNullableTypes(child),
-  ]);
-  const normalizedObject = Object.fromEntries(normalizedEntries) as Record<string, Schema.Json>;
-  const typeValue = normalizedObject.type;
-
-  if (!Array.isArray(typeValue)) {
-    return normalizedObject;
-  }
-
-  const normalizedTypes = typeValue.filter((entry): entry is string => typeof entry === "string");
-  if (normalizedTypes.length !== typeValue.length || !normalizedTypes.includes("null")) {
-    return normalizedObject;
-  }
-
-  const nonNullTypes = normalizedTypes.filter((entry) => entry !== "null");
-  if (nonNullTypes.length !== 1) {
-    return normalizedObject;
-  }
-  const nonNullType = nonNullTypes[0]!;
-
-  const nextObject: Record<string, Schema.Json> = {};
-  for (const [key, child] of Object.entries(normalizedObject)) {
-    if (key !== "type") {
-      nextObject[key] = child;
-    }
-  }
-
-  return {
-    anyOf: [
-      {
-        ...nextObject,
-        type: nonNullType,
-      },
-      { type: "null" },
-    ],
-  };
-}
-
 const generateSchemas = Effect.fn("generateSchemas")(function* (skipDownload: boolean) {
   const { upstreamMetaPath, upstreamSchemaPath } = yield* getGeneratedPaths();
 
@@ -264,16 +186,13 @@ const generateSchemas = Effect.fn("generateSchemas")(function* (skipDownload: bo
   );
 
   const { generatedDir } = yield* getGeneratedPaths();
-  yield* Effect.service(ChildProcessSpawner.ChildProcessSpawner).pipe(
-    Effect.flatMap((spawner) => spawner.spawn(ChildProcess.make("bun", ["oxfmt", generatedDir]))),
-    Effect.flatMap((child) => child.exitCode),
-    Effect.tap((code) =>
-      code === 0
-        ? Effect.void
-        : Effect.fail<GenerateCommandError>({
-            _tag: "GenerateCommandError",
-            message: `oxfmt failed with exit code ${code}`,
-          }),
+  yield* formatGeneratedDirectory(generatedDir).pipe(
+    Effect.mapError(
+      (error) =>
+        ({
+          _tag: "GenerateCommandError",
+          message: isGeneratorFormatError(error) ? error.message : String(error),
+        }) satisfies GenerateCommandError,
     ),
   );
 });
