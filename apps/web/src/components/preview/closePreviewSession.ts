@@ -1,4 +1,4 @@
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import type { AtomCommandResult } from "~/state/previewActions";
 import type {
   EnvironmentId,
   PreviewCloseInput,

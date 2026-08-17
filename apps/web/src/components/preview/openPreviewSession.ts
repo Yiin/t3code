@@ -4,7 +4,7 @@ import type {
   PreviewSessionSnapshot,
   ScopedThreadRef,
 } from "@t3tools/contracts";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import type { AtomCommandResult } from "~/state/previewActions";
 
 import { applyPreviewServerSnapshot, rememberPreviewUrl } from "~/previewStateStore";
 

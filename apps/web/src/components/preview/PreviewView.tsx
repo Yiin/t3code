@@ -1,7 +1,6 @@
 "use client";
 
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   FILL_PREVIEW_VIEWPORT,
   type PreviewViewportSetting,
@@ -20,8 +19,11 @@ import {
 } from "~/previewStateStore";
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useEnvironment, useEnvironmentHttpBaseUrl } from "~/state/environments";
-import { previewEnvironment } from "~/state/environments";
-import { useAtomCommand } from "~/state/use-atom-command";
+import {
+  squashAtomCommandFailure,
+  usePreviewOpenCommand,
+  usePreviewResizeAction,
+} from "~/state/previewActions";
 
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
@@ -75,8 +77,8 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
   const addImage = useComposerDraftStore((store) => store.addImage);
   const environment = useEnvironment(threadRef.environmentId);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(threadRef.environmentId);
-  const open = useAtomCommand(previewEnvironment.open);
-  const resize = useAtomCommand(previewEnvironment.resize, "preview viewport resize");
+  const open = usePreviewOpenCommand();
+  const resize = usePreviewResizeAction();
 
   usePreviewSession(threadRef);
 

@@ -1,7 +1,6 @@
 "use client";
 
 import { RegistryContext, useAtomSet, useAtomValue } from "@effect/atom-react";
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   FILL_PREVIEW_VIEWPORT,
   PREVIEW_AUTOMATION_OPERATIONS,
@@ -39,6 +38,7 @@ import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { isElectron } from "~/env";
 import { useEnvironments } from "~/state/environments";
 import { previewEnvironment } from "~/state/environments";
+import { squashAtomCommandFailure } from "~/state/previewActions";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { useAtomCommand } from "~/state/use-atom-command";
 

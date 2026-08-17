@@ -2,7 +2,6 @@
 
 import { useAtomValue } from "@effect/atom-react";
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -14,6 +13,7 @@ import {
   reconcilePreviewServerSessions,
 } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/environments";
+import { runPreviewOpenAction } from "~/state/previewActions";
 
 class PreviewSessionThreadKeyParseError extends Schema.TaggedErrorClass<PreviewSessionThreadKeyParseError>()(
   "PreviewSessionThreadKeyParseError",
@@ -68,21 +68,15 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
 
       recoveringUrl = recoverableUrl;
       const currentRecoveryId = ++recoveryId;
-      void runAtomCommand(
-        get.registry,
-        previewEnvironment.open,
-        {
-          environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId, url: recoverableUrl },
+      void runPreviewOpenAction(get.registry, threadRef, { url: recoverableUrl }).then(
+        (openResult) => {
+          if (disposed || currentRecoveryId !== recoveryId) return;
+          recoveringUrl = null;
+          if (openResult._tag === "Failure") return;
+          applyPreviewServerSnapshot(threadRef, openResult.value);
+          get.refresh(sessionsAtom);
         },
-        { reportDefect: false, reportFailure: false },
-      ).then((openResult) => {
-        if (disposed || currentRecoveryId !== recoveryId) return;
-        recoveringUrl = null;
-        if (openResult._tag === "Failure") return;
-        applyPreviewServerSnapshot(threadRef, openResult.value);
-        get.refresh(sessionsAtom);
-      });
+      );
     };
 
     const applyLatestEvent = (result: Atom.Type<typeof eventsAtom>) => {
