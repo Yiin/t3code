@@ -195,6 +195,51 @@ export function collectUserMessageBlobPreviewUrls(message: ChatMessage): string[
   return previewUrls;
 }
 
+export type DraftErrorEntry = {
+  readonly message: string | null;
+  readonly at: number;
+};
+
+export function migrateDraftErrorEntry(
+  draftEntry: DraftErrorEntry,
+  serverEntry: DraftErrorEntry | undefined,
+): DraftErrorEntry | null {
+  if (
+    serverEntry !== undefined &&
+    (serverEntry.at > draftEntry.at || serverEntry.message === draftEntry.message)
+  ) {
+    return null;
+  }
+  return draftEntry;
+}
+
+export type AttachmentPreviewHandoff = Readonly<Record<string, ReadonlyArray<string>>>;
+
+export function decideAttachmentPreviewPromotions(
+  handoffs: AttachmentPreviewHandoff,
+  serverMessages: ReadonlyArray<ChatMessage>,
+): Array<{ messageId: string; previewUrls: string[] }> {
+  const serverMessagesById = new Map(
+    serverMessages
+      .filter((message) => message.role === "user")
+      .map((message) => [String(message.id), message] as const),
+  );
+  return Object.entries(handoffs).flatMap(([messageId, handoffPreviewUrls]) => {
+    const serverMessage = serverMessagesById.get(messageId);
+    const serverPreviewUrls = (serverMessage?.attachments ?? []).flatMap((attachment) =>
+      attachment.type === "image" && attachment.previewUrl ? [attachment.previewUrl] : [],
+    );
+    if (
+      serverPreviewUrls.length === 0 ||
+      serverPreviewUrls.length !== handoffPreviewUrls.length ||
+      serverPreviewUrls.some((previewUrl) => previewUrl.startsWith("blob:"))
+    ) {
+      return [];
+    }
+    return [{ messageId, previewUrls: serverPreviewUrls }];
+  });
+}
+
 export interface PullRequestDialogState {
   initialReference: string | null;
   key: number;

@@ -8,16 +8,18 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { Thread } from "../types";
+import type { ChatMessage, Thread } from "../types";
 import {
   MAX_HIDDEN_MOUNTED_PREVIEW_THREADS,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
   buildThreadTurnInterruptInput,
+  decideAttachmentPreviewPromotions,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
+  migrateDraftErrorEntry,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
@@ -81,6 +83,63 @@ const readySession = {
   lastError: null,
   updatedAt: "2026-03-29T00:00:10.000Z",
 };
+
+function imageMessage(id: string, previewUrl?: string): ChatMessage {
+  return {
+    id: MessageId.make(id),
+    role: "user",
+    text: "image",
+    turnId: null,
+    streaming: false,
+    createdAt: now,
+    updatedAt: now,
+    attachments: [
+      {
+        type: "image",
+        id: `attachment-${id}`,
+        name: "image.png",
+        mimeType: "image/png",
+        sizeBytes: 1,
+        ...(previewUrl ? { previewUrl } : {}),
+      },
+    ],
+  };
+}
+
+describe("draft promotion reconciliation", () => {
+  it("keeps the newer server error", () => {
+    expect(
+      migrateDraftErrorEntry({ message: "draft", at: 1 }, { message: "server", at: 2 }),
+    ).toBeNull();
+  });
+
+  it("migrates a newer draft error", () => {
+    expect(
+      migrateDraftErrorEntry({ message: "draft", at: 2 }, { message: "server", at: 1 }),
+    ).toEqual({
+      message: "draft",
+      at: 2,
+    });
+  });
+
+  it("promotes matching non-blob server previews only", () => {
+    expect(
+      decideAttachmentPreviewPromotions({ "message-1": ["blob:local"] }, [
+        imageMessage("message-1", "https://cdn/image.png"),
+      ]),
+    ).toEqual([{ messageId: "message-1", previewUrls: ["https://cdn/image.png"] }]);
+    expect(
+      decideAttachmentPreviewPromotions({ "message-1": ["blob:local", "blob:other"] }, [
+        imageMessage("message-1", "https://cdn/image.png"),
+      ]),
+    ).toEqual([]);
+    expect(
+      decideAttachmentPreviewPromotions({ "message-1": ["blob:local"] }, [
+        imageMessage("message-1", "blob:server"),
+      ]),
+    ).toEqual([]);
+  });
+});
 
 describe("resolveThreadMetadataUpdateForNextTurn", () => {
   const modelSelection = {
