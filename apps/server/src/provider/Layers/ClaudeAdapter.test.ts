@@ -3156,6 +3156,67 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("recovers the real tool_use id from synthetic heartbeat ids", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      // Claude Code >=2.1.2xx mints `${toolUseId}-heartbeat-${n}` per beat and
+      // moves the real tool_use id into parent_tool_use_id.
+      harness.query.emit({
+        type: "tool_progress",
+        tool_use_id: "toolu-bash-1-heartbeat-18",
+        tool_name: "Bash",
+        parent_tool_use_id: "toolu-bash-1",
+        elapsed_time_seconds: 570,
+        session_id: "sdk-session-heartbeat",
+        uuid: "tool-progress-heartbeat-top-level",
+      } as unknown as SDKMessage);
+      // A subagent tool's heartbeat: the parent is the spawning Task tool, not
+      // the tool itself, so it must survive normalization.
+      harness.query.emit({
+        type: "tool_progress",
+        tool_use_id: "toolu-child-2-heartbeat-3",
+        tool_name: "Grep",
+        parent_tool_use_id: "toolu-spawn-2",
+        elapsed_time_seconds: 90,
+        session_id: "sdk-session-heartbeat",
+        uuid: "tool-progress-heartbeat-subagent",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const progressEvents = runtimeEvents.filter((event) => event.type === "tool.progress");
+      assert.equal(progressEvents.length, 2);
+      const [topLevel, subagent] = progressEvents;
+      assert.equal(topLevel?.type, "tool.progress");
+      if (topLevel?.type === "tool.progress") {
+        assert.equal(topLevel.payload.toolUseId, "toolu-bash-1");
+        assert.equal(topLevel.payload.parentToolUseId, undefined);
+      }
+      assert.equal(subagent?.type, "tool.progress");
+      if (subagent?.type === "tool.progress") {
+        assert.equal(subagent.payload.toolUseId, "toolu-child-2");
+        assert.equal(subagent.payload.parentToolUseId, "toolu-spawn-2");
+      }
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "tags stream events carrying parent_tool_use_id instead of mixing them into the main thread",
     () => {

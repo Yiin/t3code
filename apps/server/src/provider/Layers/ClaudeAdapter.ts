@@ -1044,6 +1044,27 @@ function titleForTool(itemType: CanonicalItemType): string {
   }
 }
 
+/**
+ * Claude Code >=2.1.2xx mints a fresh synthetic id per tool heartbeat
+ * (`${toolUseId}-heartbeat-${n}`) and moves the real tool_use id into
+ * parent_tool_use_id. Recover the real id so ingestion's per-tool upsert key
+ * (`tool-progress:{threadId}:{toolUseId}`) coalesces heartbeats into one
+ * activity row again, and drop a parent that just points back at the tool
+ * itself so the row does not nest as if it ran inside a subagent.
+ */
+function normalizeToolProgressIds(input: {
+  readonly toolUseId: string;
+  readonly parentToolUseId?: string | null | undefined;
+}): { readonly toolUseId: string; readonly parentToolUseId?: string } {
+  const match = /^(?<realId>.+)-heartbeat-\d+$/.exec(input.toolUseId);
+  const toolUseId = match?.groups?.realId ?? input.toolUseId;
+  const parentToolUseId = input.parentToolUseId ?? undefined;
+  return {
+    toolUseId,
+    ...(parentToolUseId && parentToolUseId !== toolUseId ? { parentToolUseId } : {}),
+  };
+}
+
 const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -3523,14 +3544,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
 
     if (message.type === "tool_progress") {
+      const ids = normalizeToolProgressIds({
+        toolUseId: message.tool_use_id,
+        parentToolUseId: message.parent_tool_use_id,
+      });
       yield* offerRuntimeEvent({
         ...base,
         type: "tool.progress",
         payload: {
-          toolUseId: message.tool_use_id,
+          toolUseId: ids.toolUseId,
           toolName: message.tool_name,
           elapsedSeconds: message.elapsed_time_seconds,
-          ...(message.parent_tool_use_id ? { parentToolUseId: message.parent_tool_use_id } : {}),
+          ...(ids.parentToolUseId ? { parentToolUseId: ids.parentToolUseId } : {}),
           ...(message.task_id ? { taskId: RuntimeTaskId.make(message.task_id) } : {}),
         },
       });
