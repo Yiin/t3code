@@ -135,11 +135,15 @@ export default defineConfig({
       "anti-slop/no-conditional-empty-object-spread": "error",
       "anti-slop/no-known-value-widening": "error",
       "anti-slop/no-module-mocking": "error",
-      "anti-slop/no-object-parameters": "error",
+      // Off: `object` is the right contract for WeakSet keys and structural guards.
+      "anti-slop/no-object-parameters": "off",
       "anti-slop/no-reflect-apply": "error",
-      "anti-slop/no-reflect-get": "error",
+      // Off: a Proxy get trap must forward its receiver, which needs Reflect.get.
+      "anti-slop/no-reflect-get": "off",
       "anti-slop/no-runtime-typeof": "error",
-      "anti-slop/no-shape-in-symbol-names": "error",
+      // Off: `*Shape` is this repo's name for an Effect service interface. The tag
+      // class already owns the plain name, so a rename only swaps one suffix for another.
+      "anti-slop/no-shape-in-symbol-names": "off",
       "anti-slop/no-unknown-parameters": "error",
       "anti-slop/no-unknown-returns": "error",
       "anti-slop/no-unknown-type-aliases": "error",
