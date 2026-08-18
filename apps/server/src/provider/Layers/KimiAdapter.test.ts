@@ -69,13 +69,31 @@ function waitForFileContent(
   return readAttempt(attempts);
 }
 
+/**
+ * One raw JSON-RPC request the mock ACP agent received from the adapter.
+ *
+ * Only the fields these tests assert on are modelled; the log also carries
+ * frames with neither `method` nor `params`, so both stay optional.
+ */
+const AcpRequestLogLine = Schema.Struct({
+  method: Schema.optional(Schema.String),
+  params: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        prompt: Schema.optional(Schema.Array(Schema.Unknown)),
+      }),
+    ),
+  ),
+});
+const decodeAcpRequestLogLine = Schema.decodeUnknownSync(AcpRequestLogLine);
+
 async function readJsonLines(filePath: string) {
   const raw = await NodeFSP.readFile(filePath, "utf8");
   return raw
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
+    .map((line) => decodeAcpRequestLogLine(JSON.parse(line)));
 }
 
 const kimiAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
@@ -90,7 +108,7 @@ const readPromptBlocks = (requestLogPath: string) =>
     yield* waitForFileContent(requestLogPath, "session/prompt");
     const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
     const promptRequest = requests.find((entry) => entry.method === "session/prompt");
-    return (promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined)?.prompt;
+    return promptRequest?.params?.prompt;
   });
 
 it.layer(kimiAdapterTestLayer)("KimiAdapterLive", (it) => {

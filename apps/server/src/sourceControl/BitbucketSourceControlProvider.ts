@@ -1,6 +1,5 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { SourceControlProviderError, type ChangeRequest } from "@t3tools/contracts";
 
 import * as BitbucketApi from "./BitbucketApi.ts";
@@ -9,25 +8,7 @@ import * as SourceControlProvider from "./SourceControlProvider.ts";
 import type { SourceControlApiDiscoverySpec } from "./SourceControlProviderDiscovery.ts";
 
 function toChangeRequest(summary: NormalizedBitbucketPullRequestRecord): ChangeRequest {
-  return {
-    provider: "bitbucket",
-    number: summary.number,
-    title: summary.title,
-    url: summary.url,
-    baseRefName: summary.baseRefName,
-    headRefName: summary.headRefName,
-    state: summary.state,
-    updatedAt: summary.updatedAt ?? Option.none(),
-    ...(summary.isCrossRepository !== undefined
-      ? { isCrossRepository: summary.isCrossRepository }
-      : {}),
-    ...(summary.headRepositoryNameWithOwner !== undefined
-      ? { headRepositoryNameWithOwner: summary.headRepositoryNameWithOwner }
-      : {}),
-    ...(summary.headRepositoryOwnerLogin !== undefined
-      ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
-      : {}),
-  };
+  return { provider: "bitbucket", ...summary };
 }
 
 export const make = Effect.gen(function* () {

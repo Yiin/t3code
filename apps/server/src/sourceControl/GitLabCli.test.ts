@@ -1,6 +1,7 @@
 import { assert, it, afterEach, expect, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { VcsProcessExitError } from "@t3tools/contracts";
@@ -72,6 +73,7 @@ layer("GitLabCli.layer", (it) => {
         baseRefName: "main",
         headRefName: "feature/mr-threads",
         state: "open",
+        updatedAt: Option.none(),
         isCrossRepository: true,
         headRepositoryNameWithOwner: "octocat/t3code",
         headRepositoryOwnerLogin: "octocat",
@@ -130,6 +132,7 @@ layer("GitLabCli.layer", (it) => {
           baseRefName: "main",
           headRefName: "feature/mr-list",
           state: "merged",
+          updatedAt: Option.none(),
         },
       ]);
       expect(mockedRun).toHaveBeenCalledWith(

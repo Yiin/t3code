@@ -337,13 +337,13 @@ export const parseInspectorDecision = (
     return null;
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record);
+  const keys = Object.keys(value);
   if (!keys.every((key) => INSPECTOR_RESULT_KEYS.has(key))) return null; // run-legacy.sh:1469
-  if (!("decision" in record) || !("confidence" in record) || !("rationale" in record)) {
+  if (!("decision" in value) || !("confidence" in value) || !("rationale" in value)) {
     return null; // run-legacy.sh:1470
   }
-  const { decision, confidence, rationale, next_check_seconds: nextCheck } = record;
+  const { decision, confidence, rationale } = value;
+  const nextCheck: unknown = "next_check_seconds" in value ? value.next_check_seconds : undefined;
   if (decision !== "continue" && decision !== "stop" && decision !== "uncertain") return null; // run-legacy.sh:1471
   if (confidence !== "high" && confidence !== "medium" && confidence !== "low") return null; // run-legacy.sh:1472
   if (typeof rationale !== "string" || !/\S/.test(rationale)) return null; // run-legacy.sh:1473

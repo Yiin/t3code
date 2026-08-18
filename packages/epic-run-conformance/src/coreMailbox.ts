@@ -6,14 +6,13 @@ import {
   EpicRunTranscriptEvent,
   type EpicRunTranscriptEvent as TranscriptEvent,
 } from "@t3tools/contracts";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 const decodeEvent = Schema.decodeUnknownSync(EpicRunTranscriptEvent);
 
-const record = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+const record = (value: unknown): { readonly [key: PropertyKey]: unknown } | null =>
+  Predicate.isReadonlyObject(value) ? value : null;
 
 const string = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
@@ -24,7 +23,7 @@ export const parseCoreMailbox = (contents: string): ReadonlyArray<unknown> =>
   contents
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as unknown);
+    .map((line): unknown => JSON.parse(line));
 
 const transcriptProvider = (driver: string): string =>
   driver === "claudeAgent" ? "claude" : driver;
@@ -41,6 +40,35 @@ const terminalDriverForInstance = (instanceId: string): string | undefined => {
   }
 };
 
+/** The turn states a mailbox iteration row can report. */
+const MAILBOX_TURN_STATUSES = ["running", "completed", "failed", "abandoned"] as const;
+type MailboxTurnStatus = (typeof MAILBOX_TURN_STATUSES)[number];
+
+const isMailboxTurnStatus = (value: string): value is MailboxTurnStatus =>
+  MAILBOX_TURN_STATUSES.some((status) => status === value);
+
+/** The last state one iteration row reached in the mailbox. */
+interface ParallelMailboxIteration {
+  readonly iterationIndex: number;
+  readonly issueId: string | null;
+  readonly turnStatus: MailboxTurnStatus;
+  readonly failureReason: string | null;
+}
+
+/** The run's own last row in the mailbox. */
+interface ParallelMailboxRun {
+  readonly status: string;
+  readonly lastError: string | null;
+  /** The worker cap the run row carries; `null` when it published none. */
+  readonly workers: number | null;
+}
+
+/** Every durable fact `normalizeParallelTranscript` reads from a mailbox. */
+export interface ParallelMailbox {
+  readonly iterations: ReadonlyArray<ParallelMailboxIteration>;
+  readonly run: ParallelMailboxRun;
+}
+
 /**
  * The pool view of a mailbox: the last state each iteration row reached, plus
  * the run's own last row.
@@ -49,36 +77,9 @@ const terminalDriverForInstance = (instanceId: string): string | undefined => {
  * is the sequential contract. A pool run has no such order, so this reduces
  * the same stream to the durable facts `normalizeParallelTranscript` needs.
  */
-export const parseParallelMailbox = (
-  values: ReadonlyArray<unknown>,
-): {
-  readonly iterations: ReadonlyArray<{
-    readonly iterationIndex: number;
-    readonly issueId: string | null;
-    readonly turnStatus: "running" | "completed" | "failed" | "abandoned";
-    readonly failureReason: string | null;
-  }>;
-  readonly run: {
-    readonly status: string;
-    readonly lastError: string | null;
-    /** The worker cap the run row carries; `null` when it published none. */
-    readonly workers: number | null;
-  };
-} => {
-  const iterations = new Map<
-    number,
-    {
-      readonly iterationIndex: number;
-      readonly issueId: string | null;
-      readonly turnStatus: "running" | "completed" | "failed" | "abandoned";
-      readonly failureReason: string | null;
-    }
-  >();
-  let run: {
-    readonly status: string;
-    readonly lastError: string | null;
-    readonly workers: number | null;
-  } = {
+export const parseParallelMailbox = (values: ReadonlyArray<unknown>): ParallelMailbox => {
+  const iterations = new Map<number, ParallelMailboxIteration>();
+  let run: ParallelMailboxRun = {
     status: "failed",
     lastError: "the run published no terminal row",
     workers: null,
@@ -91,11 +92,18 @@ export const parseParallelMailbox = (
       const item = record(input.iteration);
       const iterationIndex = number(item?.iterationIndex);
       const turnStatus = string(item?.turnStatus);
-      if (item === null || iterationIndex === undefined || turnStatus === undefined) continue;
+      if (
+        item === null ||
+        iterationIndex === undefined ||
+        turnStatus === undefined ||
+        !isMailboxTurnStatus(turnStatus)
+      ) {
+        continue;
+      }
       iterations.set(iterationIndex, {
         iterationIndex,
         issueId: string(item.issueId) ?? null,
-        turnStatus: turnStatus as "running" | "completed" | "failed" | "abandoned",
+        turnStatus,
         failureReason: string(item.failureReason) ?? null,
       });
       continue;

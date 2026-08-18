@@ -1,9 +1,24 @@
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+
 export const EPIC_PLAN_MARKER_PREFIX = "T3_EPIC_PLAN:";
 
-export interface EpicPlanMarker {
-  readonly v: 1;
-  readonly epicId: string;
-}
+const EpicPlanMarkerSchema = Schema.Struct({
+  v: Schema.Literal(1),
+  epicId: Schema.String.check(
+    Schema.makeFilter((value) =>
+      value.trim().length === 0 ? "Expected a non-empty epic id." : undefined,
+    ),
+  ),
+});
+
+export type EpicPlanMarker = typeof EpicPlanMarkerSchema.Type;
+
+// The marker is a whole line of agent output, so an unrecognised extra key means
+// a different producer wrote it. Reject rather than silently drop the key.
+const decodeMarkerJson = Schema.decodeUnknownOption(Schema.fromJsonString(EpicPlanMarkerSchema), {
+  onExcessProperty: "error",
+});
 
 export function formatEpicPlanMarker(epicId: string): string {
   const trimmed = epicId.trim();
@@ -22,22 +37,5 @@ export function parseTerminalEpicPlanMarker(text: string): EpicPlanMarker | null
   if (!line?.startsWith(`${EPIC_PLAN_MARKER_PREFIX} `)) {
     return null;
   }
-  const json = line.slice(EPIC_PLAN_MARKER_PREFIX.length + 1);
-  try {
-    const value: unknown = JSON.parse(json);
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      Array.isArray(value) ||
-      Object.keys(value).length !== 2 ||
-      (value as { v?: unknown }).v !== 1 ||
-      typeof (value as { epicId?: unknown }).epicId !== "string" ||
-      (value as { epicId: string }).epicId.trim().length === 0
-    ) {
-      return null;
-    }
-    return { v: 1, epicId: (value as { epicId: string }).epicId };
-  } catch {
-    return null;
-  }
+  return Option.getOrNull(decodeMarkerJson(line.slice(EPIC_PLAN_MARKER_PREFIX.length + 1)));
 }

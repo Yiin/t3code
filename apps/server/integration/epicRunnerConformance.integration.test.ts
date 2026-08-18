@@ -534,8 +534,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
         env: { ...process.env, ...workspace.env, ...input.env },
         extendEnv: false,
       }),
-    runStreaming: () => Effect.die("unused"),
-  } as never);
+  });
 
   const store = makeMemoryStore();
   const history: Array<{ readonly run: EpicRun; readonly head: string | null }> = [];
@@ -1098,7 +1097,7 @@ const runServerScenario = Effect.fn("runServerScenario")(function* (scenario: Co
       iterations: store.iterations.map((iteration) => ({
         iterationIndex: iteration.iterationIndex,
         issueId: iteration.issueId,
-        turnStatus: iteration.turnStatus as "running" | "completed" | "failed" | "abandoned",
+        turnStatus: iteration.turnStatus,
         failureReason: iteration.failureReason,
         committed: iteration.issueId !== null && landed.has(iteration.issueId),
       })),

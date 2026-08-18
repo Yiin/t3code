@@ -150,7 +150,7 @@ function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
   key: ProviderInstanceId,
 ): Record<ProviderInstanceId, V> {
-  const next = { ...record } as Record<ProviderInstanceId, V>;
+  const next: Record<ProviderInstanceId, V> = { ...record };
   delete next[key];
   return next;
 }

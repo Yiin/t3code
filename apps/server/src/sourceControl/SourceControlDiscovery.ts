@@ -1,8 +1,4 @@
-import {
-  type SourceControlDiscoveryResult,
-  type VcsDiscoveryItem,
-  type VcsDriverKind,
-} from "@t3tools/contracts";
+import { type SourceControlDiscoveryResult, type VcsDriverKind } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -131,7 +127,7 @@ export const make = Effect.gen(function* () {
   return SourceControlDiscovery.of({
     discover: Effect.all({
       versionControlSystems: Effect.all(
-        VCS_PROBES.map((entry) => probe(entry)) as ReadonlyArray<Effect.Effect<VcsDiscoveryItem>>,
+        VCS_PROBES.map((entry) => probe(entry)),
         { concurrency: "unbounded" },
       ),
       sourceControlProviders: sourceControlProviders.discover,

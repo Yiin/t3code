@@ -423,11 +423,11 @@ const parseDurationInput = (value: string): Duration.Duration | null => {
   if (trimmed.length === 0) return null;
 
   const shorthand = DurationShorthandPattern.exec(trimmed);
-  const normalizedInput = shorthand?.groups
+  const normalizedInput: Duration.Input | null = shorthand?.groups
     ? (() => {
         const amountText = shorthand.groups.value;
         const unitText = shorthand.groups.unit;
-        if (typeof amountText !== "string" || typeof unitText !== "string") {
+        if (amountText === undefined || unitText === undefined) {
           return null;
         }
 
@@ -455,7 +455,7 @@ const parseDurationInput = (value: string): Duration.Duration | null => {
 
   if (normalizedInput === null) return null;
 
-  const decoded = Duration.fromInput(normalizedInput as Duration.Input);
+  const decoded = Duration.fromInput(normalizedInput);
   return Option.isSome(decoded) ? decoded.value : null;
 };
 

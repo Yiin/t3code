@@ -23,7 +23,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../src/checkpointing/CheckpointStore.ts";
-import { TextGeneration, type TextGenerationShape } from "../src/textGeneration/TextGeneration.ts";
+import { TextGeneration } from "../src/textGeneration/TextGeneration.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../src/persistence/Layers/ProjectionPendingApprovals.ts";
@@ -124,18 +124,18 @@ class WaitForTimeoutError extends Schema.TaggedErrorClass<WaitForTimeoutError>()
   },
 ) {}
 
-function waitFor<A, E>(
-  read: Effect.Effect<A, E>,
-  predicate: (value: A) => boolean,
-  description: string,
-  timeoutMs?: number,
-): Effect.Effect<A, never>;
 function waitFor<A, B extends A, E>(
   read: Effect.Effect<A, E>,
   predicate: (value: A) => value is B,
   description: string,
   timeoutMs?: number,
 ): Effect.Effect<B, never>;
+function waitFor<A, E>(
+  read: Effect.Effect<A, E>,
+  predicate: (value: A) => boolean,
+  description: string,
+  timeoutMs?: number,
+): Effect.Effect<A, never>;
 function waitFor<A, E>(
   read: Effect.Effect<A, E>,
   predicate: (value: A) => boolean,
@@ -336,10 +336,10 @@ export const makeOrchestrationIntegrationHarness = (
         readonly newBranch: string;
       }) => Effect.succeed({ branch: input.newBranch }),
     });
-    const textGenerationLayer = Layer.succeed(TextGeneration, {
+    const textGenerationLayer = Layer.mock(TextGeneration)({
       generateBranchName: () => Effect.succeed({ branch: "update" }),
       generateThreadTitle: () => Effect.succeed({ title: "New thread" }),
-    } as unknown as TextGenerationShape);
+    });
     const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(gitWorkflowLayer),
@@ -462,7 +462,7 @@ export const makeOrchestrationIntegrationHarness = (
         (thread): thread is OrchestrationThread => thread !== null && predicate(thread),
         `projected thread '${threadId}'`,
         timeoutMs,
-      ) as Effect.Effect<OrchestrationThread, never>;
+      );
 
     const waitForDomainEvent: OrchestrationIntegrationHarness["waitForDomainEvent"] = (
       predicate,
@@ -506,14 +506,7 @@ export const makeOrchestrationIntegrationHarness = (
         } => row !== null && predicate(row),
         `pending approval '${requestId}'`,
         timeoutMs,
-      ) as Effect.Effect<
-        {
-          readonly status: "pending" | "resolved";
-          readonly decision: "accept" | "acceptForSession" | "decline" | "cancel" | null;
-          readonly resolvedAt: string | null;
-        },
-        never
-      >;
+      );
 
     function waitForReceipt(
       predicate: (receipt: OrchestrationRuntimeReceipt) => boolean,

@@ -36,6 +36,8 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import { ThreadId } from "@t3tools/contracts";
+
 import type {
   ProviderDriverKind,
   ProviderRuntimeEvent,
@@ -43,7 +45,6 @@ import type {
   ProviderSession,
   ProviderSessionStartInput,
   ProviderTurnStartResult,
-  ThreadId,
   TurnId,
 } from "@t3tools/contracts";
 
@@ -321,7 +322,7 @@ export const describeAcpMidTurnDeliveryConformance = <R>(
     observeMidTurnDelivery(
       harness,
       input as MidTurnDeliveryConformanceInput<never>,
-      `${name.toLowerCase()}-mid-turn-${scenario}` as ThreadId,
+      ThreadId.make(`${name.toLowerCase()}-mid-turn-${scenario}`),
     );
 
   it.effect(row("the agent receives the second message as its own prompt, after the first"), () =>
@@ -399,7 +400,7 @@ export const describeAcpMidTurnDeliveryConformance = <R>(
     () =>
       input.runScenario((harness) =>
         Effect.gen(function* () {
-          const threadId = `${name.toLowerCase()}-mid-turn-stale-interrupt` as ThreadId;
+          const threadId = ThreadId.make(`${name.toLowerCase()}-mid-turn-stale-interrupt`);
           const events = yield* Ref.make<ReadonlyArray<ProviderRuntimeEvent>>([]);
           const collector = yield* harness.adapter.streamEvents.pipe(
             Stream.filter((event) => event.threadId === threadId),

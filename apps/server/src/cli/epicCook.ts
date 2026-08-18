@@ -109,7 +109,7 @@ const optionalString = (name: string, description: string) =>
 const deprecatedEnvironmentOverride = (
   environment: NodeJS.ProcessEnv,
   harness: TerminalHarness,
-): unknown => ({
+) => ({
   ...(environment.T3CODE_EPIC_RUN_ENGINE === undefined && environment.COOKEPIC_ENGINE === undefined
     ? {}
     : {
@@ -300,8 +300,7 @@ export const cookCommand = Command.make("cook", {
           ? {}
           : {
               gate: {
-                ...(gateFlag === undefined ? {} : { command: gateFlag }),
-                ...(gateFlag === undefined ? {} : { disabled: false }),
+                ...(gateFlag === undefined ? {} : { command: gateFlag, disabled: false }),
                 ...(flags.noGate ? { disabled: true } : {}),
               },
             }),

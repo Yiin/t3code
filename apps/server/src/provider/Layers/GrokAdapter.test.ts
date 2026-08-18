@@ -88,13 +88,46 @@ function waitForFileContent(
   return readAttempt(attempts);
 }
 
+/**
+ * One raw JSON-RPC frame the mock ACP agent received from the adapter.
+ *
+ * The log mixes requests the adapter sends (`method` + `params`) with its
+ * replies to agent requests (`result`), so every field stays optional and only
+ * the fields these tests assert on are modelled.
+ */
+const AcpLogLine = Schema.Struct({
+  method: Schema.optional(Schema.String),
+  params: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        prompt: Schema.optional(Schema.Array(Schema.Unknown)),
+      }),
+    ),
+  ),
+  result: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        outcome: Schema.optional(
+          Schema.NullOr(Schema.Struct({ optionId: Schema.optional(Schema.String) })),
+        ),
+      }),
+    ),
+  ),
+});
+const decodeAcpLogLine = Schema.decodeUnknownSync(AcpLogLine);
+
+/** Narrows a native log record to the `{ event: { kind } }` shape this test filters on. */
+const isNativeEventRecord = Schema.is(
+  Schema.Struct({ event: Schema.Struct({ kind: Schema.String }) }),
+);
+
 async function readJsonLines(filePath: string) {
   const raw = await NodeFSP.readFile(filePath, "utf8");
   return raw
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
+    .map((line) => decodeAcpLogLine(JSON.parse(line)));
 }
 
 const grokAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
@@ -1096,14 +1129,8 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       assert.isTrue(
         requests.some(
           (entry) =>
-            !("method" in entry) &&
-            typeof entry.result === "object" &&
-            entry.result !== null &&
-            "outcome" in entry.result &&
-            typeof entry.result.outcome === "object" &&
-            entry.result.outcome !== null &&
-            "optionId" in entry.result.outcome &&
-            entry.result.outcome.optionId === "agent-defined-approval-id",
+            entry.method === undefined &&
+            entry.result?.outcome?.optionId === "agent-defined-approval-id",
         ),
       );
 
@@ -1182,13 +1209,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         nativeEventLogger: {
           filePath: "memory://grok-native-events",
           write: (record: unknown) =>
-            typeof record === "object" &&
-            record !== null &&
-            "event" in record &&
-            typeof record.event === "object" &&
-            record.event !== null &&
-            "kind" in record.event &&
-            record.event.kind === "notification"
+            isNativeEventRecord(record) && record.event.kind === "notification"
               ? Effect.die(new Error("native log write failed"))
               : Effect.void,
           close: () => Effect.void,
@@ -1268,9 +1289,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* waitForFileContent(requestLogPath, 80, "session/prompt");
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
       const promptRequest = requests.find((entry) => entry.method === "session/prompt");
-      const promptBlocks = (
-        promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
-      )?.prompt;
+      const promptBlocks = promptRequest?.params?.prompt;
 
       assert.deepEqual(promptBlocks, [
         { type: "text", text: "look at both attachments" },
@@ -1333,9 +1352,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* waitForFileContent(requestLogPath, 80, "session/prompt");
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
       const promptRequest = requests.find((entry) => entry.method === "session/prompt");
-      const promptBlocks = (
-        promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
-      )?.prompt;
+      const promptBlocks = promptRequest?.params?.prompt;
 
       assert.deepEqual(promptBlocks, [
         { type: "text", text: "read the note" },

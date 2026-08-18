@@ -1,5 +1,5 @@
 import { TextGenerationError, type ModelSelection, type PrimeSettings } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 import * as Effect from "effect/Effect";
@@ -27,7 +27,7 @@ import {
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
-  sanitizeCommitSubject,
+  toCommitMessageResult,
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
@@ -226,13 +226,7 @@ export const makePrimeTextGeneration = Effect.fn("makePrimeTextGeneration")(func
         outputSchema: built.outputSchema,
         modelSelection: input.modelSelection,
       });
-      return {
-        subject: sanitizeCommitSubject(generated.subject),
-        body: generated.body.trim(),
-        ...("branch" in generated && typeof generated.branch === "string"
-          ? { branch: sanitizeFeatureBranchName(generated.branch) }
-          : {}),
-      };
+      return toCommitMessageResult(generated);
     });
   const generatePrContent: TextGeneration.TextGeneration["Service"]["generatePrContent"] =
     Effect.fn("PrimeTextGeneration.generatePrContent")(function* (input) {

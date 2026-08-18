@@ -1233,7 +1233,7 @@ export default function SidebarV2() {
     () =>
       new Map(
         deriveProviderInstanceEntries(serverProviders).map(
-          (entry) => [entry.instanceId as string, entry] as const,
+          (entry) => [entry.instanceId, entry] as const,
         ),
       ),
     [serverProviders],

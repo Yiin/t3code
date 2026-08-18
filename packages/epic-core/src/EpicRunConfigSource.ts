@@ -43,14 +43,17 @@ export class EpicRunConfigSource extends Context.Service<
   EpicRunConfigSourceShape
 >()("@t3tools/epic-core/EpicRunConfigSource") {}
 
-const knownObjectLeafKeys: Readonly<Record<string, ReadonlySet<string>>> = {
-  "provider.modelSelection": new Set(["provider", "instanceId", "model", "options"]),
-};
+const knownObjectLeafKeys = new Map<string, ReadonlySet<string>>([
+  ["provider.modelSelection", new Set(["provider", "instanceId", "model", "options"])],
+]);
 
-function inspectKeys(value: unknown): {
+/** Which recognised config keys a file sets, and which keys nothing owns. */
+export interface EpicRunConfigKeyReport {
   readonly presentKeys: readonly string[];
   readonly unknownKeys: readonly string[];
-} {
+}
+
+function inspectKeys(value: unknown): EpicRunConfigKeyReport {
   const presentKeys: string[] = [];
   const unknownKeys: string[] = [];
   const visit = (current: unknown, prefix: string): void => {
@@ -59,7 +62,7 @@ function inspectKeys(value: unknown): {
       const dottedKey = prefix === "" ? key : `${prefix}.${key}`;
       if (EPIC_RUN_CONFIG_LEAF_KEY_SET.has(dottedKey)) {
         presentKeys.push(dottedKey);
-        const knownChildren = knownObjectLeafKeys[dottedKey];
+        const knownChildren = knownObjectLeafKeys.get(dottedKey);
         if (knownChildren !== undefined && typeof child === "object" && child !== null) {
           for (const childKey of Object.keys(child)) {
             if (!knownChildren.has(childKey)) unknownKeys.push(`${dottedKey}.${childKey}`);

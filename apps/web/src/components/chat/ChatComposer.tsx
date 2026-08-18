@@ -11,7 +11,6 @@ import type {
   ServerProvider,
   ServerWorkspaceSlashCommand,
   ThreadId,
-  TurnId,
 } from "@t3tools/contracts";
 import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import {
@@ -122,6 +121,7 @@ import {
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
 import type { UnifiedSettings } from "@t3tools/contracts/settings";
 import type { SessionPhase, Thread } from "../../types";
+import type { ActivePlanState, LatestProposedPlanState } from "../../session-logic";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import {
@@ -504,8 +504,8 @@ export interface ChatComposerProps {
   // Plan
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: Thread["proposedPlans"][number] | null;
-  activePlan: { turnId?: TurnId } | null;
-  sidebarProposedPlan: { turnId?: TurnId } | null;
+  activePlan: ActivePlanState | null;
+  sidebarProposedPlan: LatestProposedPlanState | null;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
 
@@ -515,7 +515,7 @@ export interface ChatComposerProps {
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
-  providerStatuses: ServerProvider[];
+  providerStatuses: ReadonlyArray<ServerProvider>;
   serverSlashCommands: ReadonlyArray<ServerWorkspaceSlashCommand>;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;

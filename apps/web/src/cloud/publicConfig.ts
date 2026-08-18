@@ -39,21 +39,13 @@ function normalizeSecureUrl(value: string): string | null {
 
 export function resolveCloudPublicConfig(): CloudPublicConfig {
   return {
-    clerkPublishableKey: trimNonEmpty(
-      import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined,
-    ),
-    clerkJwtTemplate: trimNonEmpty(import.meta.env.VITE_CLERK_JWT_TEMPLATE as string | undefined),
-    relayUrl: normalizeSecureRelayUrl(
-      (import.meta.env.VITE_T3CODE_RELAY_URL as string | undefined) ?? "",
-    ),
+    clerkPublishableKey: trimNonEmpty(import.meta.env.VITE_CLERK_PUBLISHABLE_KEY),
+    clerkJwtTemplate: trimNonEmpty(import.meta.env.VITE_CLERK_JWT_TEMPLATE),
+    relayUrl: normalizeSecureRelayUrl(import.meta.env.VITE_T3CODE_RELAY_URL ?? ""),
     relayTracing: {
-      tracesUrl: normalizeSecureUrl(
-        (import.meta.env.VITE_RELAY_OTLP_TRACES_URL as string | undefined) ?? "",
-      ),
-      tracesDataset: trimNonEmpty(
-        import.meta.env.VITE_RELAY_OTLP_TRACES_DATASET as string | undefined,
-      ),
-      tracesToken: trimNonEmpty(import.meta.env.VITE_RELAY_OTLP_TRACES_TOKEN as string | undefined),
+      tracesUrl: normalizeSecureUrl(import.meta.env.VITE_RELAY_OTLP_TRACES_URL ?? ""),
+      tracesDataset: trimNonEmpty(import.meta.env.VITE_RELAY_OTLP_TRACES_DATASET),
+      tracesToken: trimNonEmpty(import.meta.env.VITE_RELAY_OTLP_TRACES_TOKEN),
     },
   };
 }

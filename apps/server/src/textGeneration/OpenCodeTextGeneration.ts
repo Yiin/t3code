@@ -12,7 +12,7 @@ import {
   type ModelSelection,
   type OpenCodeSettings,
 } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
@@ -26,7 +26,7 @@ import {
 } from "./TextGenerationPrompts.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
-  sanitizeCommitSubject,
+  toCommitMessageResult,
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
@@ -545,13 +545,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         modelSelection: input.modelSelection,
       });
 
-      return {
-        subject: sanitizeCommitSubject(generated.subject),
-        body: generated.body.trim(),
-        ...("branch" in generated && typeof generated.branch === "string"
-          ? { branch: sanitizeFeatureBranchName(generated.branch) }
-          : {}),
-      };
+      return toCommitMessageResult(generated);
     });
 
   const generatePrContent: TextGeneration.TextGeneration["Service"]["generatePrContent"] =

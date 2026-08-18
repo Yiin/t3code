@@ -157,7 +157,7 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
  */
 const bestEffort = <E, R>(
   step: Effect.Effect<void, E, R>,
-  context: Record<string, unknown>,
+  context: Readonly<Record<string, string>>,
 ): Effect.Effect<void, never, R> =>
   step.pipe(
     Effect.asVoid,

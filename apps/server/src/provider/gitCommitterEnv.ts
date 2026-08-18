@@ -7,7 +7,7 @@ import type { GitCommitterIdentity } from "@t3tools/contracts";
  * normal commit's authorship stays whatever the process's own git config
  * says, and only the committer trailer carries the run's stamp.
  */
-export function toGitCommitterEnv(identity: GitCommitterIdentity): Record<string, string> {
+export function toGitCommitterEnv(identity: GitCommitterIdentity) {
   return {
     GIT_COMMITTER_NAME: identity.name,
     GIT_COMMITTER_EMAIL: identity.email,

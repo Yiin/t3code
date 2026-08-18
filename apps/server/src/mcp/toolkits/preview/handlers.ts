@@ -36,10 +36,7 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
 
 const invokeTargeted = <A>(
   operation: PreviewAutomationOperation,
-  input: {
-    readonly tabId?: PreviewTabId | undefined;
-    readonly [key: string]: unknown;
-  },
+  input: { readonly tabId?: PreviewTabId | undefined },
   timeoutMs?: number,
 ) => {
   const { tabId, ...operationInput } = input;
@@ -48,12 +45,14 @@ const invokeTargeted = <A>(
 
 const handlers = {
   preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
-  preview_open: (input) =>
-    invokeTargeted<PreviewAutomationStatus>("open", {
+  preview_open: (input) => {
+    const openInput = {
       ...input,
       show: input.show ?? true,
       reuseExistingTab: input.reuseExistingTab ?? true,
-    }),
+    };
+    return invokeTargeted<PreviewAutomationStatus>("open", openInput);
+  },
   preview_navigate: (input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
   preview_resize: (input) =>

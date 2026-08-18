@@ -136,7 +136,7 @@ export const makeClaudeLegacyContinuationKeys = Effect.fn("makeClaudeLegacyConti
     const managedRoot = path.join(input.accountsDir, "claudeAgent");
     const accountNames = yield* fileSystem
       .readDirectory(managedRoot)
-      .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<string>));
+      .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
     const accountKeys = accountNames.map(
       (name) => `claude:home:${path.resolve(managedRoot, name)}`,
     );

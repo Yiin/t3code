@@ -14,18 +14,15 @@ export function findErrorTraceId(error: unknown): string | null {
       continue;
     }
     seen.add(current);
-    const record = current as {
-      readonly cause?: unknown;
-      readonly errors?: unknown;
-      readonly traceId?: unknown;
-    };
-    if (typeof record.traceId === "string" && record.traceId.trim().length > 0) {
-      return record.traceId;
+    const traceId = "traceId" in current ? current.traceId : undefined;
+    if (typeof traceId === "string" && traceId.trim().length > 0) {
+      return traceId;
     }
 
-    if (Array.isArray(record.errors)) {
-      for (let index = record.errors.length - 1; index >= 0; index -= 1) {
-        pending.push(record.errors[index]);
+    const errors = "errors" in current ? current.errors : undefined;
+    if (Array.isArray(errors)) {
+      for (let index = errors.length - 1; index >= 0; index -= 1) {
+        pending.push(errors[index]);
       }
     }
     if (Cause.isCause(current)) {
@@ -41,8 +38,8 @@ export function findErrorTraceId(error: unknown): string | null {
         }
       }
     }
-    if ("cause" in record) {
-      pending.push(record.cause);
+    if ("cause" in current) {
+      pending.push(current.cause);
     }
   }
 

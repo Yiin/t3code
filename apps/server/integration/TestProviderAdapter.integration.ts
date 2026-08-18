@@ -337,7 +337,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         const deferredTurnCompletedEvents: ProviderRuntimeEvent[] = [];
         for (const fixtureEvent of response.events) {
           const rawEvent: Record<string, unknown> = {
-            ...(fixtureEvent as Record<string, unknown>),
+            ...fixtureEvent,
             eventId: yield* randomUUIDv4(input.threadId),
             provider,
             sessionId: RuntimeSessionId.make(String(input.threadId)),

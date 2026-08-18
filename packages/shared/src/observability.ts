@@ -128,12 +128,13 @@ type OtlpSpanEvent = OtlpSpan["events"][number];
 type OtlpSpanLink = OtlpSpan["links"][number];
 type OtlpSpanStatus = OtlpSpan["status"];
 
+type EndedSpanStatus = Extract<Tracer.SpanStatus, { _tag: "Ended" }>;
+
 interface SerializableSpan {
   readonly name: string;
   readonly traceId: string;
   readonly spanId: string;
   readonly parent: Option.Option<Tracer.AnySpan>;
-  readonly status: Tracer.SpanStatus;
   readonly sampled: boolean;
   readonly kind: Tracer.SpanKind;
   readonly attributes: ReadonlyMap<string, unknown>;
@@ -240,8 +241,10 @@ function formatTraceExit(exit: Exit.Exit<unknown, unknown>): EffectTraceRecord["
   };
 }
 
-export function spanToTraceRecord(span: SerializableSpan): EffectTraceRecord {
-  const status = span.status as Extract<Tracer.SpanStatus, { _tag: "Ended" }>;
+export function spanToTraceRecord(
+  span: SerializableSpan,
+  status: EndedSpanStatus,
+): EffectTraceRecord {
   const parentSpanId = Option.getOrUndefined(span.parent)?.spanId;
 
   return {
@@ -359,16 +362,17 @@ class LocalFileSpan implements Tracer.Span {
   }
 
   end(endTime: bigint, exit: Exit.Exit<unknown, unknown>): void {
-    this.status = {
+    const status: EndedSpanStatus = {
       _tag: "Ended",
       startTime: this.status.startTime,
       endTime,
       exit,
     };
+    this.status = status;
     this.delegate.end(endTime, exit);
 
     if (this.sampled) {
-      this.push(spanToTraceRecord(this));
+      this.push(spanToTraceRecord(this, status));
     }
   }
 

@@ -16,6 +16,9 @@ import {
   EMPTY_TERMINAL_BUFFER_STATE,
 } from "./terminalSession.ts";
 
+/** The metadata scan's seed: no terminals reported yet. */
+const NO_TERMINALS: ReadonlyArray<TerminalSummary> = [];
+
 export function createTerminalEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
@@ -52,7 +55,7 @@ export function createTerminalEnvironmentAtoms<R, E>(
       label: "environment-data:terminal:metadata",
       subscribe: (_input: null) =>
         subscribe(WS_METHODS.subscribeTerminalMetadata, {}).pipe(
-          Stream.scan([] as ReadonlyArray<TerminalSummary>, applyTerminalMetadataStreamEvent),
+          Stream.scan(NO_TERMINALS, applyTerminalMetadataStreamEvent),
         ),
     }),
     open: createEnvironmentRpcCommand(runtime, {

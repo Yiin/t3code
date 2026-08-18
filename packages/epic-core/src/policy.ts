@@ -85,19 +85,32 @@ export const runCommitterEmail = (runId: string): string => `epic-run+${runId}@t
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2845-2890`. */
 export type MergeParkReason = "conflict" | "gate-failed";
 
+const MERGE_PARK_REASONS: ReadonlyArray<MergeParkReason> = ["conflict", "gate-failed"];
+
+const isMergeParkReason = (value: string): value is MergeParkReason =>
+  MERGE_PARK_REASONS.some((reason) => reason === value);
+
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2882`. */
 export const mergeFixTitle = (branch: string, reason: MergeParkReason): string =>
   `Merge fix: land ${branch} (${reason})`;
 
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2675-2679`. */
-const MERGE_FIX_TITLE_PATTERN = /^Merge fix: land ([^ ]+) \((conflict|gate-failed)\)$/;
+const MERGE_FIX_TITLE_PATTERN = new RegExp(
+  `^Merge fix: land ([^ ]+) \\((${MERGE_PARK_REASONS.join("|")})\\)$`,
+);
 
-export const parseMergeFixTitle = (
-  title: string,
-): { readonly branch: string; readonly reason: MergeParkReason } | null => {
+/** The branch and reason encoded in a merge-fix issue title. */
+export interface ParsedMergeFixTitle {
+  readonly branch: string;
+  readonly reason: MergeParkReason;
+}
+
+export const parseMergeFixTitle = (title: string): ParsedMergeFixTitle | null => {
   const match = MERGE_FIX_TITLE_PATTERN.exec(title);
-  if (match?.[1] === undefined || match[2] === undefined) return null;
-  return { branch: match[1], reason: match[2] as MergeParkReason };
+  const branch = match?.[1];
+  const reason = match?.[2];
+  if (branch === undefined || reason === undefined || !isMergeParkReason(reason)) return null;
+  return { branch, reason };
 };
 
 /** Terminal parity: `skills/cook-epic/run-legacy.sh:2885`. */

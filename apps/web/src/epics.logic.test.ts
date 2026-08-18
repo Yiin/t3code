@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { BeadsEpicSummary, BeadsIssueSummary, EpicRun } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  type BeadsEpicSummary,
+  type BeadsIssueSummary,
+  type EpicRun,
+} from "@t3tools/contracts";
 import {
   epicChildren,
   epicCounts,
@@ -77,9 +83,24 @@ describe("epics logic", () => {
   it("dedupes environment and workspace pairs while preserving preferred order", () => {
     expect(
       uniqueEpicProjectSources([
-        { environmentId: "a", workspaceRoot: "/repo", projectId: "preferred", projectTitle: "A" },
-        { environmentId: "a", workspaceRoot: "/repo", projectId: "duplicate", projectTitle: "B" },
-        { environmentId: "b", workspaceRoot: "/repo", projectId: "remote", projectTitle: "C" },
+        {
+          environmentId: EnvironmentId.make("a"),
+          workspaceRoot: "/repo",
+          projectId: ProjectId.make("preferred"),
+          projectTitle: "A",
+        },
+        {
+          environmentId: EnvironmentId.make("a"),
+          workspaceRoot: "/repo",
+          projectId: ProjectId.make("duplicate"),
+          projectTitle: "B",
+        },
+        {
+          environmentId: EnvironmentId.make("b"),
+          workspaceRoot: "/repo",
+          projectId: ProjectId.make("remote"),
+          projectTitle: "C",
+        },
       ]).map((source) => source.projectId),
     ).toEqual(["preferred", "remote"]);
   });
@@ -102,11 +123,21 @@ describe("epics logic", () => {
       }) as never;
     const sources = [
       {
-        project: { environmentId: "env", workspaceRoot: "/b", projectId: "b", projectTitle: "B" },
+        project: {
+          environmentId: EnvironmentId.make("env"),
+          workspaceRoot: "/b",
+          projectId: ProjectId.make("b"),
+          projectTitle: "B",
+        },
         result: available("/b"),
       },
       {
-        project: { environmentId: "env", workspaceRoot: "/a", projectId: "a", projectTitle: "A" },
+        project: {
+          environmentId: EnvironmentId.make("env"),
+          workspaceRoot: "/a",
+          projectId: ProjectId.make("a"),
+          projectTitle: "A",
+        },
         result: available("/a"),
       },
     ];

@@ -17,7 +17,7 @@ export interface ArchivedThreadSnapshotsState {
 }
 
 const ARCHIVED_THREADS_ENVIRONMENT_KEY_SEPARATOR = "\u001f";
-const environmentIdOrder = Order.String as Order.Order<EnvironmentId>;
+const environmentIdOrder: Order.Order<EnvironmentId> = Order.String;
 
 export function makeArchivedThreadsEnvironmentKey(
   environmentIds: ReadonlyArray<EnvironmentId>,

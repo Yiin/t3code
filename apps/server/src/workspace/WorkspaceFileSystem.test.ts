@@ -186,7 +186,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           operation: "realpath-target",
         });
         expect(error.cause).toBeInstanceOf(Error);
-        expect((error.cause as NodeJS.ErrnoException).code).toBe("ENOENT");
+        expect(error.cause).toMatchObject({ code: "ENOENT" });
       }),
     );
   });

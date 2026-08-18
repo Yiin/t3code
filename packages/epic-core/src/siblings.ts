@@ -179,7 +179,7 @@ export const makeSiblingResolver = (run: SiblingProcessRun): SiblingResolver => 
     input: ResolveSiblingsInput,
   ) {
     // No siblings configured: no process invocations at all.
-    if (input.siblings.length === 0) return [] as ReadonlyArray<SiblingRef>;
+    if (input.siblings.length === 0) return [];
     // Legacy $REPO is canonical; canonicalize the root once so relative paths
     // and the layout geometry are computed against the real location.
     const rootResult = yield* runCommand(input.cwd, {

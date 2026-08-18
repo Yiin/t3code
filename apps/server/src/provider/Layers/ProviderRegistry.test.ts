@@ -28,7 +28,7 @@ import {
 } from "@t3tools/contracts";
 import * as PlatformError from "effect/PlatformError";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { deepMerge } from "@t3tools/shared/Struct";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
@@ -105,15 +105,9 @@ function selectDescriptor(
   label: string,
   options: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }>,
 ) {
-  return {
-    id,
-    label,
-    type: "select" as const,
-    options: [...options],
-    ...(options.find((option) => option.isDefault)?.id
-      ? { currentValue: options.find((option) => option.isDefault)?.id }
-      : {}),
-  };
+  const descriptor = { id, label, type: "select" as const, options: [...options] };
+  const defaultOptionId = options.find((option) => option.isDefault)?.id;
+  return defaultOptionId ? { ...descriptor, currentValue: defaultOptionId } : descriptor;
 }
 
 function booleanDescriptor(id: string, label: string) {
@@ -167,10 +161,13 @@ function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   });
 }
 
+/** The environment a `StandardCommand` carries, as the spawner contract declares it. */
+type CommandEnvironment = ChildProcess.CommandOptions["env"];
+
 function mockSpawnerLayer(
   handler: (
     args: ReadonlyArray<string>,
-    environment?: NodeJS.ProcessEnv,
+    environment?: CommandEnvironment,
   ) => {
     stdout: string;
     stderr: string;
@@ -180,11 +177,10 @@ function mockSpawnerLayer(
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
-      const cmd = command as unknown as {
-        args: ReadonlyArray<string>;
-        options?: { readonly env?: NodeJS.ProcessEnv };
-      };
-      return Effect.succeed(mockHandle(handler(cmd.args, cmd.options?.env)));
+      if (!ChildProcess.isStandardCommand(command)) {
+        return Effect.die(new Error("mock spawner received a piped command"));
+      }
+      return Effect.succeed(mockHandle(handler(command.args, command.options.env)));
     }),
   );
 }
@@ -198,19 +194,16 @@ function recordingMockSpawnerLayer(
 ) {
   const commands: Array<{
     readonly args: ReadonlyArray<string>;
-    readonly env: NodeJS.ProcessEnv | undefined;
+    readonly env: CommandEnvironment;
   }> = [];
   const layer = Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
-      const cmd = command as unknown as {
-        args: ReadonlyArray<string>;
-        options?: {
-          readonly env?: NodeJS.ProcessEnv;
-        };
-      };
-      commands.push({ args: cmd.args, env: cmd.options?.env });
-      return Effect.succeed(mockHandle(handler(cmd.args)));
+      if (!ChildProcess.isStandardCommand(command)) {
+        return Effect.die(new Error("mock spawner received a piped command"));
+      }
+      commands.push({ args: command.args, env: command.options.env });
+      return Effect.succeed(mockHandle(handler(command.args)));
     }),
   );
   return { layer, commands };
@@ -225,11 +218,10 @@ function mockCommandSpawnerLayer(
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
-      const cmd = command as unknown as {
-        command: string;
-        args: ReadonlyArray<string>;
-      };
-      return Effect.succeed(mockHandle(handler(cmd.command, cmd.args)));
+      if (!ChildProcess.isStandardCommand(command)) {
+        return Effect.die(new Error("mock spawner received a piped command"));
+      }
+      return Effect.succeed(mockHandle(handler(command.command, command.args)));
     }),
   );
 }

@@ -2247,7 +2247,7 @@ function ChatViewContent(props: ChatViewProps) {
         }
         const turnCount =
           summary.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[summary.turnId];
-        if (typeof turnCount !== "number") {
+        if (turnCount === undefined) {
           break;
         }
         byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
@@ -4678,7 +4678,7 @@ function ChatViewContent(props: ChatViewProps) {
   onRevertToTurnCountRef.current = onRevertToTurnCount;
   const onRevertUserMessage = useCallback((messageId: MessageId) => {
     const targetTurnCount = revertTurnCountRef.current.get(messageId);
-    if (typeof targetTurnCount !== "number") {
+    if (targetTurnCount === undefined) {
       return;
     }
     void onRevertToTurnCountRef.current(targetTurnCount);
@@ -5016,14 +5016,14 @@ function ChatViewContent(props: ChatViewProps) {
                         respondingRequestIds={respondingRequestIds}
                         showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                         activeProposedPlan={activeProposedPlan}
-                        activePlan={activePlan as { turnId?: TurnId } | null}
-                        sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
+                        activePlan={activePlan}
+                        sidebarProposedPlan={sidebarProposedPlan}
                         planSidebarLabel={planSidebarLabel}
                         planSidebarOpen={planSidebarOpen}
                         runtimeMode={runtimeMode}
                         interactionMode={interactionMode}
                         lockedProvider={lockedProvider}
-                        providerStatuses={providerStatuses as ServerProvider[]}
+                        providerStatuses={providerStatuses}
                         serverSlashCommands={workspaceSkillCommands}
                         activeProjectDefaultModelSelection={activeProject?.defaultModelSelection}
                         activeThreadModelSelection={activeThread?.modelSelection}

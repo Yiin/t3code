@@ -540,7 +540,7 @@ const mapSessionVerificationErrors = <A, R>(
 
 function parseBearerToken(request: HttpServerRequest.HttpServerRequest): string | null {
   const header = request.headers["authorization"];
-  if (typeof header !== "string" || !header.startsWith(AUTHORIZATION_PREFIX)) {
+  if (header === undefined || !header.startsWith(AUTHORIZATION_PREFIX)) {
     return null;
   }
   const token = header.slice(AUTHORIZATION_PREFIX.length).trim();
@@ -549,7 +549,7 @@ function parseBearerToken(request: HttpServerRequest.HttpServerRequest): string 
 
 function parseDpopToken(request: HttpServerRequest.HttpServerRequest): string | null {
   const header = request.headers["authorization"];
-  if (typeof header !== "string" || !header.startsWith(DPOP_AUTHORIZATION_PREFIX)) {
+  if (header === undefined || !header.startsWith(DPOP_AUTHORIZATION_PREFIX)) {
     return null;
   }
   const token = header.slice(DPOP_AUTHORIZATION_PREFIX.length).trim();

@@ -45,12 +45,16 @@ export function buildEpicRunConfigOverride(
   const override: Record<string, unknown> = {};
   for (const [key, value] of touched) {
     const segments = key.split(".");
+    const leaf = segments.pop();
+    if (leaf === undefined) continue;
     let node = override;
-    for (const segment of segments.slice(0, -1)) {
-      if (!isPlainRecord(node[segment])) node[segment] = {};
-      node = node[segment] as Record<string, unknown>;
+    for (const segment of segments) {
+      const child = node[segment];
+      const branch = isPlainRecord(child) ? child : {};
+      node[segment] = branch;
+      node = branch;
     }
-    node[segments[segments.length - 1] as string] = value;
+    node[leaf] = value;
   }
   return override as EpicRunConfigOverride;
 }

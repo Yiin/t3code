@@ -2,10 +2,8 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Match from "effect/Match";
-import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import type * as DateTime from "effect/DateTime";
 
 import {
   TrimmedNonEmptyString,
@@ -17,6 +15,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import {
   decodeGitLabMergeRequestJson,
   decodeGitLabMergeRequestListJson,
+  type NormalizedGitLabMergeRequestRecord,
 } from "./gitLabMergeRequests.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
 
@@ -223,18 +222,7 @@ export const GitLabCliError = Schema.Union([
 export type GitLabCliError = typeof GitLabCliError.Type;
 export const isGitLabCliError = Schema.is(GitLabCliError);
 
-export interface GitLabMergeRequestSummary {
-  readonly number: number;
-  readonly title: string;
-  readonly url: string;
-  readonly baseRefName: string;
-  readonly headRefName: string;
-  readonly state?: "open" | "closed" | "merged";
-  readonly updatedAt?: Option.Option<DateTime.Utc>;
-  readonly isCrossRepository?: boolean;
-  readonly headRepositoryNameWithOwner?: string | null;
-  readonly headRepositoryOwnerLogin?: string | null;
-}
+export type GitLabMergeRequestSummary = NormalizedGitLabMergeRequestRecord;
 
 export interface GitLabRepositoryCloneUrls {
   readonly nameWithOwner: string;
@@ -362,15 +350,6 @@ function sourceProjectIdentifier(
   return source?.repository ?? source?.owner ?? null;
 }
 
-function toSummaryWithOptionalUpdatedAt(
-  record: GitLabMergeRequestSummary & {
-    readonly updatedAt: Option.Option<DateTime.Utc>;
-  },
-): GitLabMergeRequestSummary {
-  const { updatedAt, ...summary } = record;
-  return Option.isSome(updatedAt) ? { ...summary, updatedAt } : summary;
-}
-
 function parseRepositoryPath(repository: string): {
   readonly namespacePath: string | null;
   readonly projectPath: string;
@@ -463,7 +442,7 @@ export const make = Effect.gen(function* () {
                     );
                   }
 
-                  return Effect.succeed(decoded.success.map(toSummaryWithOptionalUpdatedAt));
+                  return Effect.succeed(decoded.success);
                 }),
               ),
         ),
@@ -490,7 +469,7 @@ export const make = Effect.gen(function* () {
                 );
               }
 
-              return Effect.succeed(toSummaryWithOptionalUpdatedAt(decoded.success));
+              return Effect.succeed(decoded.success);
             }),
           ),
         ),

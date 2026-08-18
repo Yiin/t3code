@@ -35,7 +35,7 @@ export function resolveCatalogDependencies(
       const lookupKey = catalogKey.length > 0 ? catalogKey : name;
       const resolved = catalog[lookupKey];
 
-      if (typeof resolved !== "string" || resolved.length === 0) {
+      if (resolved === undefined || resolved.length === 0) {
         throw new CatalogDependencyResolutionError({
           workspacePackage,
           dependencyName: name,

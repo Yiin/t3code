@@ -246,7 +246,9 @@ class JsonRpcChild {
     try {
       message = JSON.parse(line) as JsonRpcMessage;
     } catch (error) {
-      NodeProcess.stdout.write(`[parse-error] ${(error as Error).message}\n`);
+      NodeProcess.stdout.write(
+        `[parse-error] ${error instanceof Error ? error.message : String(error)}\n`,
+      );
       return;
     }
 

@@ -1,4 +1,3 @@
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import type { ScopedEpicPlanCorrelation } from "@t3tools/client-runtime/state/planned-epic";
 
 export function plannedEpicIdentity(correlation: ScopedEpicPlanCorrelation): string {
@@ -18,10 +17,10 @@ export function plannedEpicRoute(correlation: ScopedEpicPlanCorrelation) {
 
 export function plannedEpicLaunchInput(correlation: ScopedEpicPlanCorrelation) {
   return {
-    environmentId: correlation.environmentId as EnvironmentId,
+    environmentId: correlation.environmentId,
     input: {
       epicId: correlation.epicId,
-      projectId: correlation.projectId as ProjectId,
+      projectId: correlation.projectId,
       cwd: correlation.cwd,
       // The planning conversation is the launcher: without it the run's
       // sidebar group floats at project level and never tidies away with
@@ -51,5 +50,7 @@ export async function launchPlannedEpic<
     await input.navigate(plannedEpicRoute(input.correlation));
     return;
   }
+  // TS cannot narrow a value of generic type `R` by its discriminant, so the
+  // `_tag === "Success"` early return above is invisible to the checker here.
   input.onFailure(result as Extract<R, { readonly _tag: "Failure" }>);
 }

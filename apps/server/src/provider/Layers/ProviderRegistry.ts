@@ -273,7 +273,7 @@ export const ProviderRegistryLive = Layer.effect(
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.flatMap((cachedProvider) => {
               if (cachedProvider === undefined) {
-                return Effect.void.pipe(Effect.as(undefined as ServerProvider | undefined));
+                return Effect.void.pipe(Effect.as<ServerProvider | undefined>(undefined));
               }
               const correlation = {
                 cachedProvider,
@@ -286,7 +286,7 @@ export const ProviderRegistryLive = Layer.effect(
                   cachedInstanceId: cachedProvider.instanceId ?? null,
                   driver: source.driverKind,
                   cachedDriver: cachedProvider.driver ?? null,
-                }).pipe(Effect.as(undefined as ServerProvider | undefined));
+                }).pipe(Effect.as<ServerProvider | undefined>(undefined));
               }
               return Effect.succeed(hydrateCachedProvider(correlation));
             }),
@@ -368,9 +368,7 @@ export const ProviderRegistryLive = Layer.effect(
         ? yield* usageLedger.value
             .listForInstance({ providerInstanceId: provider.instanceId })
             .pipe(
-              Effect.orElseSucceed(
-                () => undefined as ReadonlyArray<ProviderUsageSample> | undefined,
-              ),
+              Effect.orElseSucceed((): ReadonlyArray<ProviderUsageSample> | undefined => undefined),
             )
         : undefined;
       const limits = Option.isSome(accountLimits)
@@ -378,7 +376,7 @@ export const ProviderRegistryLive = Layer.effect(
             .listForInstance({ providerInstanceId: provider.instanceId })
             .pipe(
               Effect.orElseSucceed(
-                () => undefined as ReadonlyArray<ProviderAccountLimit> | undefined,
+                (): ReadonlyArray<ProviderAccountLimit> | undefined => undefined,
               ),
             )
         : undefined;

@@ -101,13 +101,55 @@ async function readArgvLog(filePath: string) {
     .map((line) => line.split("\t").filter((token) => token.length > 0));
 }
 
-async function readJsonLines(filePath: string) {
+/**
+ * One raw JSON-RPC frame the mock ACP agent received from the adapter.
+ *
+ * The log mixes both directions of the client half of the protocol: requests
+ * the adapter sends (`method` + `params`) and the adapter's replies to agent
+ * requests (`result`). Every field is therefore optional, and only the fields
+ * the tests assert on are modelled.
+ */
+const AcpLogLine = Schema.Struct({
+  method: Schema.optional(Schema.String),
+  params: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        sessionId: Schema.optional(Schema.String),
+        configId: Schema.optional(Schema.String),
+        modeId: Schema.optional(Schema.String),
+        value: Schema.optional(Schema.Unknown),
+        prompt: Schema.optional(Schema.Array(Schema.Unknown)),
+      }),
+    ),
+  ),
+  result: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        outcome: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              outcome: Schema.optional(Schema.String),
+              optionId: Schema.optional(Schema.String),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+});
+type AcpLogLine = typeof AcpLogLine.Type;
+
+/** Narrows one ACP prompt block to the `resource_link` shape whose `uri` the mirror test reads. */
+const isResourceLinkBlock = Schema.is(Schema.Struct({ uri: Schema.String }));
+const decodeAcpLogLine = Schema.decodeUnknownSync(AcpLogLine);
+
+async function readJsonLines(filePath: string): Promise<ReadonlyArray<AcpLogLine>> {
   const raw = await NodeFSP.readFile(filePath, "utf8");
   return raw
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
+    .map((line) => decodeAcpLogLine(JSON.parse(line)));
 }
 
 async function waitForFileContent(filePath: string, attempts = 40) {
@@ -125,7 +167,7 @@ async function waitForFileContent(filePath: string, attempts = 40) {
 
 function waitForJsonLogMatch(
   filePath: string,
-  predicate: (entry: Record<string, unknown>) => boolean,
+  predicate: (entry: AcpLogLine) => boolean,
   attempts = 40,
 ) {
   return Effect.gen(function* () {
@@ -398,20 +440,13 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         .find(
           (entry) =>
             entry.method === "session/set_mode" ||
-            (entry.method === "session/set_config_option" &&
-              (entry.params as Record<string, unknown> | undefined)?.configId === "mode"),
+            (entry.method === "session/set_config_option" && entry.params?.configId === "mode"),
         );
       assert.isDefined(modeRequest);
-      assert.equal(
-        (modeRequest?.params as Record<string, unknown> | undefined)?.sessionId,
-        "mock-session-1",
-      );
+      assert.equal(modeRequest?.params?.sessionId, "mock-session-1");
       assert.include(
         ["architect", "plan"],
-        String(
-          (modeRequest?.params as Record<string, unknown> | undefined)?.modeId ??
-            (modeRequest?.params as Record<string, unknown> | undefined)?.value,
-        ),
+        String(modeRequest?.params?.modeId ?? modeRequest?.params?.value),
       );
     }),
   );
@@ -454,9 +489,8 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
         const requestsAfterStart = yield* Effect.promise(() => readJsonLines(requestLogPath));
         const configIdsAfterStart = requestsAfterStart.flatMap((entry) =>
-          entry.method === "session/set_config_option" &&
-          typeof (entry.params as Record<string, unknown> | undefined)?.configId === "string"
-            ? [String((entry.params as Record<string, unknown>).configId)]
+          entry.method === "session/set_config_option" && entry.params?.configId !== undefined
+            ? [entry.params.configId]
             : [],
         );
         assert.deepStrictEqual(configIdsAfterStart, [
@@ -478,9 +512,8 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
         const finalRequests = yield* Effect.promise(() => readJsonLines(requestLogPath));
         const finalConfigIds = finalRequests.flatMap((entry) =>
-          entry.method === "session/set_config_option" &&
-          typeof (entry.params as Record<string, unknown> | undefined)?.configId === "string"
-            ? [String((entry.params as Record<string, unknown>).configId)]
+          entry.method === "session/set_config_option" && entry.params?.configId !== undefined
+            ? [entry.params.configId]
             : [],
         );
         assert.deepStrictEqual(finalConfigIds, ["model", "reasoning", "context", "fast", "mode"]);
@@ -741,15 +774,8 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
         const permissionResponse = requests.find(
           (entry) =>
-            !("method" in entry) &&
-            typeof entry.result === "object" &&
-            entry.result !== null &&
-            "outcome" in entry.result &&
-            typeof entry.result.outcome === "object" &&
-            entry.result.outcome !== null &&
-            "outcome" in entry.result.outcome &&
-            entry.result.outcome.outcome === "selected" &&
-            "optionId" in entry.result.outcome &&
+            entry.method === undefined &&
+            entry.result?.outcome?.outcome === "selected" &&
             entry.result.outcome.optionId === "allow-always",
         );
         assert.isDefined(permissionResponse);
@@ -963,15 +989,8 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         assert.equal(turnCompleted.payload.stopReason, "cancelled");
       }
 
-      const isCancelledApprovalResponse = (entry: Record<string, unknown>) =>
-        !("method" in entry) &&
-        typeof entry.result === "object" &&
-        entry.result !== null &&
-        "outcome" in entry.result &&
-        typeof entry.result.outcome === "object" &&
-        entry.result.outcome !== null &&
-        "outcome" in entry.result.outcome &&
-        entry.result.outcome.outcome === "cancelled";
+      const isCancelledApprovalResponse = (entry: AcpLogLine) =>
+        entry.method === undefined && entry.result?.outcome?.outcome === "cancelled";
       const approvalResponses = yield* waitForJsonLogMatch(
         requestLogPath,
         isCancelledApprovalResponse,
@@ -1199,20 +1218,18 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
       const setConfigRequests = requests.filter(
         (entry) =>
-          entry.method === "session/set_config_option" &&
-          (entry.params as Record<string, unknown> | undefined)?.configId === "model",
+          entry.method === "session/set_config_option" && entry.params?.configId === "model",
       );
       assert.isAbove(setConfigRequests.length, 0, "should call session/set_config_option");
-      assert.equal((setConfigRequests[0]?.params as Record<string, unknown>)?.value, "composer-2");
+      assert.equal(setConfigRequests[0]?.params?.value, "composer-2");
 
       const fastConfigRequests = requests.filter(
         (entry) =>
-          entry.method === "session/set_config_option" &&
-          (entry.params as Record<string, unknown> | undefined)?.configId === "fast",
+          entry.method === "session/set_config_option" && entry.params?.configId === "fast",
       );
       assert.isAbove(fastConfigRequests.length, 0, "should apply fast mode as a separate config");
       const lastFastConfig = fastConfigRequests[fastConfigRequests.length - 1];
-      assert.equal((lastFastConfig?.params as Record<string, unknown>)?.value, "true");
+      assert.equal(lastFastConfig?.params?.value, "true");
 
       yield* adapter.stopSession(threadId);
     }),
@@ -1263,13 +1280,12 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
       const fastConfigRequests = requests.filter(
         (entry) =>
-          entry.method === "session/set_config_option" &&
-          (entry.params as Record<string, unknown> | undefined)?.configId === "fast",
+          entry.method === "session/set_config_option" && entry.params?.configId === "fast",
       );
       assert.isAtLeast(fastConfigRequests.length, 2, "should set fast mode on and then off");
 
       const lastFastConfig = fastConfigRequests[fastConfigRequests.length - 1];
-      assert.equal((lastFastConfig?.params as Record<string, unknown>)?.value, "false");
+      assert.equal(lastFastConfig?.params?.value, "false");
 
       yield* adapter.stopSession(threadId);
     }),
@@ -1348,8 +1364,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
         const fastConfigRequests = requests.filter(
           (entry) =>
-            entry.method === "session/set_config_option" &&
-            (entry.params as Record<string, unknown> | undefined)?.configId === "fast",
+            entry.method === "session/set_config_option" && entry.params?.configId === "fast",
         );
         assert.isAbove(
           fastConfigRequests.length,
@@ -1357,7 +1372,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
           "fast mode should apply when instance id matches the adapter binding",
         );
         const lastFastConfig = fastConfigRequests[fastConfigRequests.length - 1];
-        assert.equal((lastFastConfig?.params as Record<string, unknown>)?.value, "true");
+        assert.equal(lastFastConfig?.params?.value, "true");
 
         yield* adapter.stopSession(threadId);
       }).pipe(Effect.provide(customAdapterLayer));
@@ -1437,12 +1452,10 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         (entry) => entry.method === "session/prompt",
       );
       const promptRequest = requests.find((entry) => entry.method === "session/prompt");
-      const promptBlocks = (
-        promptRequest?.params as { prompt?: ReadonlyArray<unknown> } | undefined
-      )?.prompt;
+      const promptBlocks = promptRequest?.params?.prompt;
 
-      const linkBlock = promptBlocks?.[2] as Record<string, unknown> | undefined;
-      const linkedUri = typeof linkBlock?.uri === "string" ? linkBlock.uri : "file:///missing";
+      const linkBlock = promptBlocks?.[2];
+      const linkedUri = isResourceLinkBlock(linkBlock) ? linkBlock.uri : "file:///missing";
       const linkedPath = NodeURL.fileURLToPath(linkedUri);
       const mirrorRoot = NodePath.join(workspaceDir, ".t3code", "attachments");
 

@@ -1,6 +1,6 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
-import type { DraftId } from "./composerDraftStore";
+import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { DraftId } from "./composerDraftStore";
 
 export type ThreadRouteTarget =
   | {
@@ -41,7 +41,7 @@ export function resolveThreadRouteRef(
     return null;
   }
 
-  return scopeThreadRef(params.environmentId as EnvironmentId, params.threadId as ThreadId);
+  return scopeThreadRef(EnvironmentId.make(params.environmentId), ThreadId.make(params.threadId));
 }
 
 export function resolveThreadRouteTarget(
@@ -50,7 +50,10 @@ export function resolveThreadRouteTarget(
   if (params.environmentId && params.threadId) {
     return {
       kind: "server",
-      threadRef: scopeThreadRef(params.environmentId as EnvironmentId, params.threadId as ThreadId),
+      threadRef: scopeThreadRef(
+        EnvironmentId.make(params.environmentId),
+        ThreadId.make(params.threadId),
+      ),
     };
   }
 
@@ -60,7 +63,7 @@ export function resolveThreadRouteTarget(
 
   return {
     kind: "draft",
-    draftId: params.draftId as DraftId,
+    draftId: DraftId.make(params.draftId),
   };
 }
 

@@ -68,7 +68,7 @@ const capabilityPaths = (value: unknown): ReadonlyArray<string> => {
   return paths;
 };
 
-const formatExit = <A>(exit: Exit.Exit<A, EffectAcpErrors.AcpError>): unknown => {
+const formatExit = <A>(exit: Exit.Exit<A, EffectAcpErrors.AcpError>) => {
   if (Exit.isSuccess(exit)) {
     return { _tag: "Success", value: exit.value };
   }

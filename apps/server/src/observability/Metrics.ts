@@ -123,7 +123,7 @@ const withMetricsImpl = <A, E, R>(
           metricAttributes({
             ...baseAttributes,
             outcome,
-            ...(options.outcomeAttributes ? options.outcomeAttributes(outcome) : {}),
+            ...options.outcomeAttributes?.(outcome),
           }),
         ),
         1,

@@ -558,11 +558,11 @@ type SubAgentActivityItem = Extract<CodexLifecycleItem, { type: "subAgentActivit
 // A `subAgentActivity` kind maps onto the collab tool vocabulary the web
 // subagent projection already groups by: only a spawn opens a group, the
 // other two are later operations on an open one.
-const SUB_AGENT_ACTIVITY_COLLAB_TOOL: Record<SubAgentActivityItem["kind"], string> = {
+const SUB_AGENT_ACTIVITY_COLLAB_TOOL = {
   started: "spawnAgent",
   interacted: "sendInput",
   interrupted: "closeAgent",
-};
+} as const satisfies Record<SubAgentActivityItem["kind"], string>;
 
 function subAgentActivityType(item: SubAgentActivityItem): string {
   const segments = item.agentPath

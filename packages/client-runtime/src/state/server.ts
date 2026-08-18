@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
+  type ServerLifecycleStreamEvent,
   type ServerLifecycleWelcomePayload,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -206,10 +207,7 @@ export function serverConfigStateChanges(environmentId: EnvironmentId) {
 
 export function projectServerWelcome(
   current: Option.Option<ServerLifecycleWelcomePayload>,
-  event: {
-    readonly type: "welcome" | "ready";
-    readonly payload: unknown;
-  },
+  event: ServerLifecycleStreamEvent,
 ): readonly [
   Option.Option<ServerLifecycleWelcomePayload>,
   ReadonlyArray<ServerLifecycleWelcomePayload>,
@@ -217,8 +215,7 @@ export function projectServerWelcome(
   if (event.type !== "welcome") {
     return [current, []];
   }
-  const welcome = event.payload as ServerLifecycleWelcomePayload;
-  return [Option.some(welcome), [welcome]];
+  return [Option.some(event.payload), [event.payload]];
 }
 
 export function resolveServerConfigValue(

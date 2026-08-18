@@ -115,10 +115,14 @@ const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.
 function readNestedString(input: unknown, keys: ReadonlyArray<string>): string | undefined {
   let value = input;
   for (const key of keys) {
-    if (typeof value !== "object" || value === null || !(key in value)) {
+    if (typeof value !== "object" || value === null) {
       return undefined;
     }
-    value = (value as Record<string, unknown>)[key];
+    const fields = new Map<string, unknown>(Object.entries(value));
+    if (!fields.has(key)) {
+      return undefined;
+    }
+    value = fields.get(key);
   }
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }

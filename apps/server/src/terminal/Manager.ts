@@ -188,7 +188,7 @@ export class TerminalManager extends Context.Service<
   }
 >()("t3/terminal/Manager/TerminalManager") {}
 
-interface TerminalSubprocessInspectResult {
+export interface TerminalSubprocessInspectResult {
   readonly hasRunningSubprocess: boolean;
   readonly childCommand: string | null;
   readonly processIds: ReadonlyArray<number>;
@@ -393,7 +393,7 @@ function isDuplicateAttachSnapshotEvent(
   event: TerminalEvent,
   initialSnapshot: TerminalSessionSnapshot,
 ) {
-  return typeof event.sequence === "number" && typeof initialSnapshot.sequence === "number"
+  return event.sequence !== undefined && initialSnapshot.sequence !== undefined
     ? event.sequence <= initialSnapshot.sequence
     : event.type === "started" &&
         event.snapshot.threadId === initialSnapshot.threadId &&
@@ -401,10 +401,7 @@ function isDuplicateAttachSnapshotEvent(
         event.snapshot.updatedAt <= initialSnapshot.updatedAt;
 }
 
-function advanceEventSequence(session: TerminalSessionState): {
-  readonly updatedAt: string;
-  readonly sequence: number;
-} {
+function advanceEventSequence(session: TerminalSessionState) {
   const updatedAt = DateTime.formatIso(DateTime.nowUnsafe());
   session.eventSequence += 1;
   session.updatedAt = updatedAt;
@@ -928,10 +925,7 @@ function findEscapeSequenceEndIndex(input: string, start: number): number | null
   return isEscapeFinalByte(input.charCodeAt(cursor)) ? cursor + 1 : start + 1;
 }
 
-function sanitizeTerminalHistoryChunk(
-  pendingControlSequence: string,
-  data: string,
-): { visibleText: string; pendingControlSequence: string } {
+function sanitizeTerminalHistoryChunk(pendingControlSequence: string, data: string) {
   const input = `${pendingControlSequence}${data}`;
   let visibleText = "";
   let index = 0;
@@ -1543,7 +1537,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const threadPrefix = `${toSafeThreadId(threadId)}_`;
     const entries = yield* fileSystem
       .readDirectory(logsDir, { recursive: false })
-      .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+      .pipe(Effect.orElseSucceed((): Array<string> => []));
     yield* Effect.forEach(
       entries.filter(
         (name) =>
@@ -1821,8 +1815,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
     const attempt = yield* Effect.result(
       options.ptyAdapter.spawn({
-        shell: candidate.shell,
-        ...(candidate.args ? { args: candidate.args } : {}),
+        ...candidate,
         cwd: session.cwd,
         cols: session.cols,
         rows: session.rows,
@@ -2188,19 +2181,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       });
 
       yield* evictInactiveSessionsIfNeeded();
-      yield* startSession(
-        session,
-        {
-          threadId: input.threadId,
-          terminalId,
-          cwd: input.cwd,
-          ...(input.worktreePath !== undefined ? { worktreePath: input.worktreePath } : {}),
-          cols,
-          rows,
-          ...(input.env ? { env: input.env } : {}),
-        },
-        "started",
-      );
+      yield* startSession(session, { ...input, cols, rows }, "started");
       return snapshot(session);
     }
 
@@ -2243,13 +2224,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       yield* startSession(
         liveSession,
         {
-          threadId: input.threadId,
-          terminalId,
-          cwd: input.cwd,
+          ...input,
           worktreePath: liveSession.worktreePath,
           cols: targetCols,
           rows: targetRows,
-          ...(input.env ? { env: input.env } : {}),
         },
         "started",
       );
@@ -2615,19 +2593,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session.pendingProcessEventIndex = 0;
         session.processEventDrainRunning = false;
         yield* persistHistory(input.threadId, terminalId, session.history);
-        yield* startSession(
-          session,
-          {
-            threadId: input.threadId,
-            terminalId,
-            cwd: input.cwd,
-            ...(input.worktreePath !== undefined ? { worktreePath: input.worktreePath } : {}),
-            cols,
-            rows,
-            ...(input.env ? { env: input.env } : {}),
-          },
-          "restarted",
-        );
+        yield* startSession(session, { ...input, cols, rows }, "restarted");
         return snapshot(session);
       }),
     );

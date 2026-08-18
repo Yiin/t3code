@@ -305,7 +305,7 @@ export default function DiffPanel({
       : "Branch changes";
   const selectedCheckpointRange = useMemo(
     () =>
-      typeof selectedCheckpointTurnCount === "number"
+      selectedCheckpointTurnCount !== undefined
         ? {
             fromTurnCount: Math.max(0, selectedCheckpointTurnCount - 1),
             toTurnCount: selectedCheckpointTurnCount,
@@ -415,7 +415,7 @@ export default function DiffPanel({
     ? activeCheckpointDiff.isPending
     : branchDiffPreview.isPending;
   const selectedPatchError = selectedTurn ? activeCheckpointDiff.error : branchDiffPreview.error;
-  const hasResolvedPatch = typeof selectedPatch === "string";
+  const hasResolvedPatch = selectedPatch !== undefined;
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const renderablePatch = useMemo(
     () =>

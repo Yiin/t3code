@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { BeadsStatusResult, EpicRun, EpicRunStatus } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  type BeadsStatusResult,
+  type EpicRun,
+  type EpicRunStatus,
+} from "@t3tools/contracts";
 
 import type { EpicProjectSource } from "./epics.logic";
 import {
@@ -21,9 +27,9 @@ import {
 } from "./epicsPage.logic";
 
 const source: EpicProjectSource = {
-  environmentId: "env",
+  environmentId: EnvironmentId.make("env"),
   workspaceRoot: "/repo",
-  projectId: "project",
+  projectId: ProjectId.make("project"),
   projectTitle: "T3 Code",
 };
 
@@ -109,9 +115,9 @@ describe("epics page rows", () => {
 
   it("keys rows by environment, workspace, and epic id so cloned repos do not collide", () => {
     const clone: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/clone",
-      projectId: "clone",
+      projectId: ProjectId.make("clone"),
       projectTitle: "Clone",
     };
     const rows = [epicRowModel(source, epic(), []), epicRowModel(clone, epic(), [])];
@@ -239,9 +245,9 @@ describe("epic groups", () => {
     // active project must not jump above the one listed before it.
     const quiet = source;
     const busy: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/busy",
-      projectId: "busy",
+      projectId: ProjectId.make("busy"),
       projectTitle: "Busy",
     };
     const groups = epicGroupModels({
@@ -275,15 +281,15 @@ describe("epic groups", () => {
 
   it("skips a source with no snapshot and one whose snapshot has no epics", () => {
     const empty: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/empty",
-      projectId: "empty",
+      projectId: ProjectId.make("empty"),
       projectTitle: "Empty",
     };
     const loading: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/loading",
-      projectId: "loading",
+      projectId: ProjectId.make("loading"),
       projectTitle: "Loading",
     };
     const groups = epicGroupModels({
@@ -334,15 +340,15 @@ describe("partial beads failures", () => {
 
   it("names the project and carries the reason for every failed source", () => {
     const other: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/other",
-      projectId: "other",
+      projectId: ProjectId.make("other"),
       projectTitle: "Other",
     };
     const missing: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/missing",
-      projectId: "missing",
+      projectId: ProjectId.make("missing"),
       projectTitle: "Missing",
     };
     const entries = partialFailureEntries(
@@ -365,15 +371,15 @@ describe("partial beads failures", () => {
 
   it("names both an unavailable snapshot and a failed subscription", () => {
     const broken: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/broken",
-      projectId: "broken",
+      projectId: ProjectId.make("broken"),
       projectTitle: "Broken",
     };
     const dropped: EpicProjectSource = {
-      environmentId: "env",
+      environmentId: EnvironmentId.make("env"),
       workspaceRoot: "/dropped",
-      projectId: "dropped",
+      projectId: ProjectId.make("dropped"),
       projectTitle: "Dropped",
     };
     const failures = epicSourceFailures(

@@ -109,31 +109,25 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
  * shared contracts fold sees exactly the read-model shape it produces.
  */
 function toThreadSubagentReadModel(row: ProjectionThreadSubagent): OrchestrationThreadSubagent {
-  return {
-    subagentId: row.subagentId,
-    turnId: row.turnId,
-    ...(row.agentType !== undefined ? { agentType: row.agentType } : {}),
-    ...(row.description !== undefined ? { description: row.description } : {}),
-    status: row.status,
-    ...(row.lastProgressSummary !== undefined
-      ? { lastProgressSummary: row.lastProgressSummary }
-      : {}),
-    ...(row.lastToolName !== undefined ? { lastToolName: row.lastToolName } : {}),
-    ...(row.usage !== undefined ? { usage: row.usage } : {}),
-    ...(row.spawnedByItemId !== undefined ? { spawnedByItemId: row.spawnedByItemId } : {}),
-    ...(row.childThreadId !== undefined ? { childThreadId: row.childThreadId } : {}),
-    startedAt: row.startedAt,
-    updatedAt: row.updatedAt,
-    completedAt: row.completedAt,
-  };
+  const { threadId: _threadId, ...readModel } = row;
+  return readModel;
 }
 
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
-  if (typeof payload !== "object" || payload === null) {
+  if (typeof payload !== "object" || payload === null || !("requestId" in payload)) {
     return null;
   }
-  const requestId = (payload as Record<string, unknown>).requestId;
+  const { requestId } = payload;
   return typeof requestId === "string" ? ApprovalRequestId.make(requestId) : null;
+}
+
+/** Lower-cased `detail` off an activity payload, for failure-reason matching. */
+function extractActivityFailureDetail(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null || !("detail" in payload)) {
+    return null;
+  }
+  const { detail } = payload;
+  return typeof detail === "string" ? detail.toLowerCase() : null;
 }
 
 function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
@@ -162,11 +156,7 @@ function derivePendingUserInputCountFromActivities(
     if (requestId === null) {
       continue;
     }
-    const payload =
-      typeof activity.payload === "object" && activity.payload !== null
-        ? (activity.payload as Record<string, unknown>)
-        : null;
-    const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
+    const detail = extractActivityFailureDetail(activity.payload);
 
     if (activity.kind === "user-input.requested") {
       openRequestIds.add(requestId);
@@ -375,7 +365,7 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
   const attachmentsRootDir = serverConfig.attachmentsDir;
   const readAttachmentRootEntries = fileSystem
     .readDirectory(attachmentsRootDir, { recursive: false })
-    .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+    .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
 
   const removeDeletedThreadAttachmentEntry = Effect.fn("removeDeletedThreadAttachmentEntry")(
     function* (threadSegment: string, entry: string) {
@@ -1566,11 +1556,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             requestId,
           });
           if (event.payload.activity.kind === "approval.resolved") {
+            const activityPayload = event.payload.activity.payload;
             const resolvedDecisionRaw =
-              typeof event.payload.activity.payload === "object" &&
-              event.payload.activity.payload !== null &&
-              "decision" in event.payload.activity.payload
-                ? (event.payload.activity.payload as { decision?: unknown }).decision
+              typeof activityPayload === "object" &&
+              activityPayload !== null &&
+              "decision" in activityPayload
+                ? activityPayload.decision
                 : null;
             const resolvedDecision =
               resolvedDecisionRaw === "accept" ||
@@ -1597,13 +1588,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
           if (event.payload.activity.kind === "provider.approval.respond.failed") {
-            const payload =
-              typeof event.payload.activity.payload === "object" &&
-              event.payload.activity.payload !== null
-                ? (event.payload.activity.payload as Record<string, unknown>)
-                : null;
-            const detail =
-              typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
+            const detail = extractActivityFailureDetail(event.payload.activity.payload);
             if (isStalePendingApprovalFailureDetail(detail)) {
               if (Option.isNone(existingRow)) {
                 return;

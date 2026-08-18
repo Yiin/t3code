@@ -1,9 +1,4 @@
-import type {
-  OrchestrationEvent,
-  OrchestrationReadModel,
-  ProjectId,
-  ThreadId,
-} from "@t3tools/contracts";
+import type { OrchestrationEvent, OrchestrationReadModel } from "@t3tools/contracts";
 import { OrchestrationCommand } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -56,10 +51,7 @@ interface CommandEnvelope {
   startedAtMs: number;
 }
 
-function commandToAggregateRef(command: OrchestrationCommand): {
-  readonly aggregateKind: "project" | "thread";
-  readonly aggregateId: ProjectId | ThreadId;
-} {
+function commandToAggregateRef(command: OrchestrationCommand) {
   switch (command.type) {
     case "project.create":
     case "project.meta.update":
@@ -67,12 +59,12 @@ function commandToAggregateRef(command: OrchestrationCommand): {
       return {
         aggregateKind: "project",
         aggregateId: command.projectId,
-      };
+      } as const;
     default:
       return {
         aggregateKind: "thread",
         aggregateId: command.threadId,
-      };
+      } as const;
   }
 }
 

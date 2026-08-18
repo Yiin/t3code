@@ -200,6 +200,14 @@ export const listAcrossSkillRoots = (
     return commands;
   });
 
+/**
+ * The listing shape: every parsed command minus its body. Dropping `content`
+ * by rest-destructuring keeps an absent `description` absent.
+ */
+function summarizeCommands(entry: CacheEntry): ReadonlyArray<Omit<SkillCommand, "content">> {
+  return Array.from(entry.commands.values(), ({ content: _content, ...command }) => command);
+}
+
 export const makeSkillCommandRegistry = Effect.fn("makeSkillCommandRegistry")(function* () {
   const cache = yield* Ref.make(new Map<string, CacheEntry>());
   const scanSemaphore = yield* Semaphore.make(1);
@@ -239,25 +247,12 @@ export const makeSkillCommandRegistry = Effect.fn("makeSkillCommandRegistry")(fu
         Effect.flatMap((next) =>
           Ref.modify(cache, (current) => {
             const cached = current.get(NodePath.resolve(root));
-            const entry = cached?.fingerprint === next.fingerprint ? cached : next;
-            if (entry === cached) {
-              return [
-                Array.from(entry.commands.values(), ({ name, description }) => ({
-                  name,
-                  ...(description ? { description } : {}),
-                })),
-                current,
-              ] as const;
+            if (cached?.fingerprint === next.fingerprint) {
+              return [summarizeCommands(cached), current] as const;
             }
             const updated = new Map(current);
             updated.set(NodePath.resolve(root), next);
-            return [
-              Array.from(next.commands.values(), ({ name, description }) => ({
-                name,
-                ...(description ? { description } : {}),
-              })),
-              updated,
-            ] as const;
+            return [summarizeCommands(next), updated] as const;
           }),
         ),
         Effect.catchCause((cause) =>

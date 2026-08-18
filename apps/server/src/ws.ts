@@ -167,12 +167,16 @@ function legacySetupFailureDescription(cause: unknown): string {
   return String(cause);
 }
 
-function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesError): {
+type ProjectEntriesFailureContext = {
   readonly failure: ProjectEntriesFailure;
   readonly normalizedCwd?: string;
   readonly timeout?: string;
   readonly detail?: string;
-} {
+};
+
+function projectEntriesFailureContext(
+  error: WorkspaceEntries.WorkspaceEntriesError,
+): ProjectEntriesFailureContext {
   switch (error._tag) {
     case "WorkspaceRootNotExistsError":
       return {
@@ -218,11 +222,15 @@ function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesEr
   }
 }
 
-function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntriesBrowseError): {
+type FilesystemBrowseFailureContext = {
   readonly failure: FilesystemBrowseFailure;
   readonly parentPath?: string;
   readonly platform?: string;
-} {
+};
+
+function filesystemBrowseFailureContext(
+  error: WorkspaceEntries.WorkspaceEntriesBrowseError,
+): FilesystemBrowseFailureContext {
   switch (error._tag) {
     case "WorkspaceEntriesWindowsPathUnsupportedError":
       return { failure: "windows_path_unsupported", platform: error.platform };
@@ -235,17 +243,29 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
   }
 }
 
-function projectFileFailureContext(
-  error:
-    | WorkspaceFileSystem.WorkspaceFileSystemError
-    | WorkspacePaths.WorkspacePathOutsideRootError,
-): {
+/** Structured payload carried by the setup-script thread activities emitted below. */
+type SetupScriptActivityPayload =
+  | { readonly detail: string; readonly worktreePath: string }
+  | {
+      readonly scriptId: string;
+      readonly scriptName: string;
+      readonly terminalId: string;
+      readonly worktreePath: string;
+    };
+
+type ProjectFileFailureContext = {
   readonly failure: ProjectFileFailure;
   readonly resolvedPath?: string;
   readonly resolvedWorkspaceRoot?: string;
   readonly operation?: ProjectFileOperation;
   readonly operationPath?: string;
-} {
+};
+
+function projectFileFailureContext(
+  error:
+    | WorkspaceFileSystem.WorkspaceFileSystemError
+    | WorkspacePaths.WorkspacePathOutsideRootError,
+): ProjectFileFailureContext {
   switch (error._tag) {
     case "WorkspacePathOutsideRootError":
       return { failure: "workspace_path_outside_root" };
@@ -634,7 +654,7 @@ const makeWsRpcLayer = (
         readonly kind: "setup-script.requested" | "setup-script.started" | "setup-script.failed";
         readonly summary: string;
         readonly createdAt: string;
-        readonly payload: Record<string, unknown>;
+        readonly payload: SetupScriptActivityPayload;
         readonly tone: "info" | "error";
       }) =>
         Effect.all({

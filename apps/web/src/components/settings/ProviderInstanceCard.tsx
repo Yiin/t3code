@@ -516,11 +516,7 @@ export function ProviderInstanceCard({
   const updateDisplayName = (value: string) => {
     const trimmed = value.trim();
     const { displayName: _omit, ...rest } = instance;
-    onUpdate(
-      trimmed.length > 0
-        ? ({ ...rest, displayName: trimmed } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
+    onUpdate(trimmed.length > 0 ? { ...rest, displayName: trimmed } : rest);
   };
 
   const updateEnabled = (value: boolean) => {
@@ -530,36 +526,24 @@ export function ProviderInstanceCard({
   const updateAccentColor = (value: string) => {
     const normalized = normalizeProviderAccentColor(value);
     const { accentColor: _omit, ...rest } = instance;
-    onUpdate(
-      normalized
-        ? ({ ...rest, accentColor: normalized } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
+    onUpdate(normalized ? { ...rest, accentColor: normalized } : rest);
   };
 
   const updateConfig = (nextConfig: Record<string, unknown> | undefined) => {
     const { config: _omit, ...rest } = instance;
-    onUpdate(
-      nextConfig !== undefined
-        ? ({ ...rest, config: nextConfig } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
+    onUpdate(nextConfig !== undefined ? { ...rest, config: nextConfig } : rest);
   };
 
   const updateCustomModels = (next: ReadonlyArray<string>) => {
     const nextConfig = nextConfigBlobWithValue(instance.config, "customModels", [...next]);
     const { config: _omit, ...rest } = instance;
-    onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
+    onUpdate({ ...rest, config: nextConfig });
   };
 
   const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
     const cleaned = environment.filter((variable) => variable.name.trim().length > 0);
     const { environment: _omit, ...rest } = instance;
-    onUpdate(
-      cleaned.length > 0
-        ? ({ ...rest, environment: cleaned } as ProviderInstanceConfig)
-        : (rest as ProviderInstanceConfig),
-    );
+    onUpdate(cleaned.length > 0 ? { ...rest, environment: cleaned } : rest);
   };
 
   const titleIconNode = driverKind ? (

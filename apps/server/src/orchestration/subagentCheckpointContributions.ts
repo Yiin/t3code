@@ -52,7 +52,7 @@ export function readSubagentContributionWindow(input: {
         Effect.logWarning("failed to attribute subagent files", {
           threadId: input.parentThreadId,
           detail: error.message,
-        }).pipe(Effect.as([] as ReadonlyArray<ThreadTurnDiffSubagentContribution>)),
+        }).pipe(Effect.as([])),
       ),
     );
 }

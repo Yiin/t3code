@@ -3,7 +3,6 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
@@ -304,7 +303,6 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           "ProjectionTurnRepository.listByThreadId:decodeRows",
         ),
       ),
-      Effect.map((rows) => rows as ReadonlyArray<Schema.Schema.Type<typeof ProjectionTurn>>),
     );
 
   const getByTurnId: ProjectionTurnRepositoryShape["getByTurnId"] = (input) =>
@@ -314,13 +312,6 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           "ProjectionTurnRepository.getByTurnId:query",
           "ProjectionTurnRepository.getByTurnId:decodeRow",
         ),
-      ),
-      Effect.flatMap((rowOption) =>
-        Option.match(rowOption, {
-          onNone: () => Effect.succeed(Option.none()),
-          onSome: (row) =>
-            Effect.succeed(Option.some(row as Schema.Schema.Type<typeof ProjectionTurnById>)),
-        }),
       ),
     );
 

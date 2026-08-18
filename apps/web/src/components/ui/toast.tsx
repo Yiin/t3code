@@ -89,7 +89,10 @@ const TOAST_ICONS = {
 
 /** Visually shorten long error bodies; clipboard copy still uses the full `description` string. */
 const ERROR_DESCRIPTION_CLAMP_MIN_CHARS = 180;
-function errorDescriptionClampClass(type: unknown, description: unknown): string | undefined {
+function errorDescriptionClampClass(
+  type: string | undefined,
+  description: ReactNode,
+): string | undefined {
   if (type !== "error" || typeof description !== "string") {
     return undefined;
   }
@@ -180,8 +183,8 @@ function ToastDescriptionAndExpandable({
   toastType,
 }: {
   toastData: ThreadToastData | undefined;
-  toastDescription: unknown;
-  toastType: unknown;
+  toastDescription: ReactNode;
+  toastType: string | undefined;
 }) {
   const expandableContent = toastData?.expandableContent;
   const labels = toastData?.expandableLabels ?? {};
@@ -281,7 +284,7 @@ interface ToastBodyDescriptor {
 
 function deriveToastBodyDescriptor(toast: {
   readonly type?: string | undefined;
-  readonly description?: unknown;
+  readonly description?: ReactNode;
   readonly actionProps?: unknown;
   readonly data?: ThreadToastData | undefined;
 }): ToastBodyDescriptor {
@@ -318,8 +321,8 @@ function deriveToastBodyDescriptor(toast: {
 interface ToastBodyContentProps extends ToastBodyDescriptor {
   readonly actionProps: { readonly children?: ReactNode } | undefined;
   readonly toastData: ThreadToastData | undefined;
-  readonly toastDescription: unknown;
-  readonly toastType: unknown;
+  readonly toastDescription: ReactNode;
+  readonly toastType: string | undefined;
 }
 
 function ToastBodyContent({

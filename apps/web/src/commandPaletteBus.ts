@@ -6,17 +6,26 @@ export interface CommandPaletteOpenDetail {
   readonly open?: "add-project" | "new-thread-in" | "epics";
 }
 
+declare global {
+  interface WindowEventMap {
+    [COMMAND_PALETTE_OPEN_EVENT]: CustomEvent<CommandPaletteOpenDetail>;
+  }
+}
+
 export function openCommandPalette(detail?: CommandPaletteOpenDetail): void {
   window.dispatchEvent(
-    new CustomEvent(COMMAND_PALETTE_OPEN_EVENT, detail ? { detail } : undefined),
+    new CustomEvent<CommandPaletteOpenDetail>(
+      COMMAND_PALETTE_OPEN_EVENT,
+      detail ? { detail } : undefined,
+    ),
   );
 }
 
 export function onOpenCommandPalette(
   listener: (detail: CommandPaletteOpenDetail) => void,
 ): () => void {
-  const handler = (event: Event) => {
-    listener((event as CustomEvent<CommandPaletteOpenDetail>).detail ?? {});
+  const handler = (event: CustomEvent<CommandPaletteOpenDetail>) => {
+    listener(event.detail ?? {});
   };
   window.addEventListener(COMMAND_PALETTE_OPEN_EVENT, handler);
   return () => window.removeEventListener(COMMAND_PALETTE_OPEN_EVENT, handler);

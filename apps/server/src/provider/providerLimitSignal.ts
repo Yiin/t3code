@@ -111,16 +111,16 @@ export interface CodexRateLimitSnapshot {
 
 export type CodexLimitSource = "codex.app_server.read" | "codex.app_server.notification";
 
-const CODEX_REACHED_KIND: Record<
-  V2GetAccountRateLimitsResponse__RateLimitReachedType,
-  ProviderLimitKind
-> = {
+const CODEX_REACHED_KIND = {
   rate_limit_reached: "usage-limit",
   workspace_owner_usage_limit_reached: "usage-limit",
   workspace_member_usage_limit_reached: "usage-limit",
   workspace_owner_credits_depleted: "credits-depleted",
   workspace_member_credits_depleted: "credits-depleted",
-};
+} as const satisfies Record<
+  V2GetAccountRateLimitsResponse__RateLimitReachedType,
+  ProviderLimitKind
+>;
 
 const moreUsedCodexWindow = (
   snapshot: CodexRateLimitSnapshot,
@@ -259,15 +259,15 @@ export function classifyOpenCodeMessageError(
   };
 }
 
-const TEXT_CATEGORY_KIND: Record<
-  NonNullable<ReturnType<typeof detectProviderError>>["category"],
-  ProviderLimitKind
-> = {
+const TEXT_CATEGORY_KIND = {
   "spend-limit": "spend-limit",
   "rate-limit": "usage-limit",
   auth: "auth",
   unavailable: "unavailable",
-};
+} as const satisfies Record<
+  NonNullable<ReturnType<typeof detectProviderError>>["category"],
+  ProviderLimitKind
+>;
 
 /**
  * Text fallback for harnesses (and paths) with no structured signal. Delegates

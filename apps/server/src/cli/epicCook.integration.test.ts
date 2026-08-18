@@ -438,7 +438,7 @@ const writeEpicRolePolicy = (fixture: ReturnType<typeof makeFixture>, policy: un
 };
 
 /** A stand-in `claude` that records its argv and reports an epic with no work. */
-const writeFakeClaude = (fixture: ReturnType<typeof makeFixture>): { readonly capture: string } => {
+const writeFakeClaude = (fixture: ReturnType<typeof makeFixture>) => {
   const capture = NodePath.join(fixture.root, "claude-args");
   const binaryPath = NodePath.join(fixture.root, "claude.sh");
   NodeFS.writeFileSync(

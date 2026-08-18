@@ -28,7 +28,7 @@ export function stackedThreadToast(
   // Helper-owned `actionLayout` must win over any caller-provided `data`, so spread
   // the caller's data first and apply `actionLayout: "stacked-end"` last.
   const mergedData: ThreadToastData = {
-    ...(data !== undefined ? data : {}),
+    ...data,
     actionLayout: "stacked-end",
   };
   if (actionVariant !== undefined) {

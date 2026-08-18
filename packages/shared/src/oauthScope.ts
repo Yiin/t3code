@@ -65,10 +65,8 @@ export function parseAllowedOAuthScope<Scope extends string>(input: {
   readonly allowedScopes: ReadonlySet<Scope>;
 }): ReadonlyArray<Scope> | null {
   const scopes = parseOAuthScope(input.value);
-  if (
-    scopes === null ||
-    !scopes.every((scope): scope is Scope => input.allowedScopes.has(scope as Scope))
-  ) {
+  const allowedScopes: ReadonlySet<string> = input.allowedScopes;
+  if (scopes === null || !scopes.every((scope): scope is Scope => allowedScopes.has(scope))) {
     return null;
   }
   return scopes;

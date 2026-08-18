@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import type {
   MessageId,
+  OrchestrationCheckpointStatus,
   OrchestrationCheckpointSummary,
   OrchestrationEvent,
   OrchestrationLatestTurn,
@@ -57,10 +58,13 @@ const openRequestKinds: ReadonlySet<string> = new Set(THREAD_ACTIVITY_OPEN_REQUE
  * `activities` must already be sorted ascending by (sequence, createdAt, id);
  * filtering keeps that order.
  */
-function capActivities(activities: ReadonlyArray<OrchestrationThreadActivity>): {
+/** A capped activity window plus how many activities the cap discarded. */
+interface CappedActivities {
   readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
   readonly droppedCount: number;
-} {
+}
+
+function capActivities(activities: ReadonlyArray<OrchestrationThreadActivity>): CappedActivities {
   if (activities.length <= THREAD_DETAIL_ACTIVITY_LIMIT) {
     return { activities, droppedCount: 0 };
   }
@@ -542,9 +546,7 @@ export function applyThreadDetailEvent(
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToTurnState(
-                    latestCheckpoint.status as "ready" | "missing" | "error",
-                  ),
+                  state: checkpointStatusToTurnState(latestCheckpoint.status),
                   requestedAt: latestCheckpoint.completedAt,
                   startedAt: latestCheckpoint.completedAt,
                   completedAt: latestCheckpoint.completedAt,
@@ -631,7 +633,7 @@ function settledTurnStateForSessionStatus(
 }
 
 function checkpointStatusToTurnState(
-  status: "ready" | "missing" | "error",
+  status: OrchestrationCheckpointStatus,
 ): OrchestrationLatestTurn["state"] {
   switch (status) {
     case "ready":

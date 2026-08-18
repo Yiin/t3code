@@ -402,14 +402,9 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const registry: ProviderInstanceRegistryShape = {
       getInstance: (id) => Ref.get(entries).pipe(Effect.map((map) => map.get(id)?.instance)),
       listInstances: Ref.get(entries).pipe(
-        Effect.map(
-          (map) =>
-            Array.from(map.values(), (live) => live.instance) as ReadonlyArray<ProviderInstance>,
-        ),
+        Effect.map((map) => Array.from(map.values(), (live) => live.instance)),
       ),
-      listUnavailable: Ref.get(unavailable).pipe(
-        Effect.map((map) => Array.from(map.values()) as ReadonlyArray<ServerProvider>),
-      ),
+      listUnavailable: Ref.get(unavailable).pipe(Effect.map((map) => Array.from(map.values()))),
       // Getters: each read constructs a fresh Stream / Effect descriptor
       // so multiple consumers don't share a single already-started
       // Channel or subscription. Matches the pattern `ProviderRegistry`
@@ -448,7 +443,7 @@ export const ProviderInstanceRegistryLayer = <R>(input: {
   Layer.effect(
     ProviderInstanceRegistry,
     makeProviderInstanceRegistry(input).pipe(Effect.map((built) => built.registry)),
-  ) as Layer.Layer<ProviderInstanceRegistry, never, R | ProviderInstanceTeardown>;
+  );
 
 /**
  * Layer variant that also exposes the mutator tag. Consumed by
@@ -472,10 +467,6 @@ export const ProviderInstanceRegistryMutableLayer = <R>(input: {
         ),
       ),
     ),
-  ) as Layer.Layer<
-    ProviderInstanceRegistry | ProviderInstanceRegistryMutator,
-    never,
-    R | ProviderInstanceTeardown
-  >;
+  );
 
 export { defaultInstanceIdForDriver };

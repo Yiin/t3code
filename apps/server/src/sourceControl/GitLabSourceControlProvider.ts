@@ -1,6 +1,5 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { SourceControlProviderError, type ChangeRequest } from "@t3tools/contracts";
 
 import * as GitLabCli from "./GitLabCli.ts";
@@ -18,25 +17,7 @@ import {
 import { findAuthenticatedGitLabHost, parseGitLabAuthStatusHosts } from "./gitLabAuthStatus.ts";
 
 function toChangeRequest(summary: GitLabCli.GitLabMergeRequestSummary): ChangeRequest {
-  return {
-    provider: "gitlab",
-    number: summary.number,
-    title: summary.title,
-    url: summary.url,
-    baseRefName: summary.baseRefName,
-    headRefName: summary.headRefName,
-    state: summary.state ?? "open",
-    updatedAt: summary.updatedAt ?? Option.none(),
-    ...(summary.isCrossRepository !== undefined
-      ? { isCrossRepository: summary.isCrossRepository }
-      : {}),
-    ...(summary.headRepositoryNameWithOwner !== undefined
-      ? { headRepositoryNameWithOwner: summary.headRepositoryNameWithOwner }
-      : {}),
-    ...(summary.headRepositoryOwnerLogin !== undefined
-      ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
-      : {}),
-  };
+  return { provider: "gitlab", ...summary };
 }
 
 function parseGitLabAuth(input: SourceControlAuthProbeInput) {

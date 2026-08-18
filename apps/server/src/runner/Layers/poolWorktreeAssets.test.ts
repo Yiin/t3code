@@ -6,8 +6,8 @@ import * as Path from "effect/Path";
 
 import { resolveBeadsDirectory, setupWorktreeAssets } from "./poolWorktreeAssets.ts";
 
-const withTempDirectory = <A, E>(
-  use: (root: string, fileSystem: FileSystem.FileSystem, path: Path.Path) => Effect.Effect<A, E>,
+const withTempDirectory = <A, E, R>(
+  use: (root: string, fileSystem: FileSystem.FileSystem, path: Path.Path) => Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;

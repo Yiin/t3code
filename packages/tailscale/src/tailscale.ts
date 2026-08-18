@@ -91,9 +91,11 @@ export class TailscaleStatusParseError extends Schema.TaggedErrorClass<Tailscale
   }
 }
 
+// `tailscale status --json` documents both fields; `NullOr` keeps a null from an
+// older CLI build from failing the whole decode.
 const TailscaleStatusSelf = Schema.Struct({
-  DNSName: Schema.optional(Schema.Unknown),
-  TailscaleIPs: Schema.optional(Schema.Unknown),
+  DNSName: Schema.optional(Schema.NullOr(Schema.String)),
+  TailscaleIPs: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
 });
 
 const TailscaleStatusJson = Schema.Struct({
@@ -123,7 +125,7 @@ const decodeTailscaleStatusJson = Schema.decodeEffect(Schema.fromJsonString(Tail
 
 function normalizeMagicDnsName(status: TailscaleStatusJson): string | null {
   const dnsName = status.Self?.DNSName;
-  if (typeof dnsName !== "string") {
+  if (dnsName == null) {
     return null;
   }
 
@@ -163,15 +165,7 @@ export const parseTailscaleStatus = (
   decodeTailscaleStatusJson(rawStatusJson).pipe(
     Effect.mapError((cause) => new TailscaleStatusParseError({ cause })),
     Effect.map((parsed) => {
-      const rawIps = parsed.Self?.TailscaleIPs;
-      const tailnetIpv4Addresses: Array<string> = [];
-      if (Array.isArray(rawIps)) {
-        for (const address of rawIps) {
-          if (typeof address === "string" && isTailscaleIpv4Address(address)) {
-            tailnetIpv4Addresses.push(address);
-          }
-        }
-      }
+      const tailnetIpv4Addresses = (parsed.Self?.TailscaleIPs ?? []).filter(isTailscaleIpv4Address);
 
       return {
         magicDnsName: normalizeMagicDnsName(parsed),

@@ -6,6 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 
 import {
   EpicRunLock,
@@ -14,6 +15,14 @@ import {
   type EpicRunLockLease,
   type EpicRunLockOwner,
 } from "../ports/EpicRunLock.ts";
+
+/** The `errno` code a rejected Node syscall carries, or undefined. */
+const errnoCode = (cause: unknown): string | undefined =>
+  Predicate.isObject(cause) &&
+  Predicate.hasProperty(cause, "code") &&
+  Predicate.isString(cause.code)
+    ? cause.code
+    : undefined;
 
 const staleSeconds = 300;
 const heartbeatMilliseconds = 30_000;
@@ -60,7 +69,7 @@ const processExists = (pid: number): boolean => {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return errnoCode(error) === "EPERM";
   }
 };
 
@@ -102,7 +111,7 @@ const groupExists = (pgid: number): boolean => {
     process.kill(-pgid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return errnoCode(error) === "EPERM";
   }
 };
 
@@ -369,8 +378,7 @@ export const makeLayer = (options: NodeEpicRunLockOptions = {}) => {
                   timer.unref();
                   return lease;
                 } catch (cause) {
-                  const error = cause as NodeJS.ErrnoException;
-                  if (error.code !== "EEXIST") throw cause;
+                  if (errnoCode(cause) !== "EEXIST") throw cause;
                   if (attempt === 0 && (await isStale(file, now()))) {
                     await NodeFSP.unlink(file).catch(() => undefined);
                     continue;

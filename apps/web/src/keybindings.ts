@@ -270,7 +270,7 @@ export function threadJumpCommandForIndex(index: number): ThreadJumpKeybindingCo
 }
 
 export function threadJumpIndexFromCommand(command: string): number | null {
-  const index = THREAD_JUMP_KEYBINDING_COMMANDS.indexOf(command as ThreadJumpKeybindingCommand);
+  const index = THREAD_JUMP_KEYBINDING_COMMANDS.findIndex((entry) => entry === command);
   return index === -1 ? null : index;
 }
 
@@ -315,9 +315,7 @@ export function modelPickerJumpCommandForIndex(
 }
 
 export function modelPickerJumpIndexFromCommand(command: string): number | null {
-  const index = MODEL_PICKER_JUMP_KEYBINDING_COMMANDS.indexOf(
-    command as ModelPickerJumpKeybindingCommand,
-  );
+  const index = MODEL_PICKER_JUMP_KEYBINDING_COMMANDS.findIndex((entry) => entry === command);
   return index === -1 ? null : index;
 }
 

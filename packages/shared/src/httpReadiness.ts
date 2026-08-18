@@ -7,32 +7,55 @@ import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 export const DEFAULT_HTTP_READY_PROBE_TIMEOUT_MS = 1_000;
 
+/** Structured form of one link in a readiness failure chain. */
+export interface ReadinessCauseRecord {
+  readonly _tag?: string;
+  readonly name?: string;
+  readonly message?: string;
+  readonly reason?: ReadinessCauseDescription;
+  readonly cause?: ReadinessCauseDescription;
+}
+
+/** A readiness failure reduced to a value that logs and JSON round-trip cleanly. */
+export type ReadinessCauseDescription = ReadinessCauseRecord | string | number | boolean | null;
+
 /**
  * Normalizes an arbitrary readiness probe failure into a plain, structured value
  * suitable for diagnostic logging. Preserves the tagged-error `_tag` (and
  * message/cause) shape for Effect tagged errors while recursing through nested
  * `cause`/`reason` chains.
  */
-export function describeReadinessCause(cause: unknown): unknown {
+export function describeReadinessCause(cause: unknown): ReadinessCauseDescription {
   if (cause instanceof Error) {
-    const tag = (cause as { readonly _tag?: unknown })._tag;
-    const nested = (cause as { readonly cause?: unknown }).cause;
+    const tag = "_tag" in cause && typeof cause._tag === "string" ? cause._tag : undefined;
+    const nested = "cause" in cause ? cause.cause : undefined;
     return {
-      ...(typeof tag === "string" ? { _tag: tag } : { name: cause.name }),
+      ...(tag === undefined ? { name: cause.name } : { _tag: tag }),
       message: cause.message,
       ...(nested === undefined ? {} : { cause: describeReadinessCause(nested) }),
     };
   }
-  if (typeof cause !== "object" || cause === null) {
+  if (typeof cause === "string" || typeof cause === "number" || typeof cause === "boolean") {
     return cause;
   }
+  if (cause === null || cause === undefined) {
+    return null;
+  }
+  if (typeof cause !== "object") {
+    // bigint, symbol, and function are not JSON-safe, so record their text form.
+    return String(cause);
+  }
 
-  const record = cause as Readonly<Record<string, unknown>>;
+  const tag = "_tag" in cause && typeof cause._tag === "string" ? cause._tag : undefined;
+  const message =
+    "message" in cause && typeof cause.message === "string" ? cause.message : undefined;
+  const reason = "reason" in cause ? cause.reason : undefined;
+  const nested = "cause" in cause ? cause.cause : undefined;
   return {
-    ...(typeof record._tag === "string" ? { _tag: record._tag } : {}),
-    ...(typeof record.message === "string" ? { message: record.message } : {}),
-    ...(record.reason === undefined ? {} : { reason: describeReadinessCause(record.reason) }),
-    ...(record.cause === undefined ? {} : { cause: describeReadinessCause(record.cause) }),
+    ...(tag === undefined ? {} : { _tag: tag }),
+    ...(message === undefined ? {} : { message }),
+    ...(reason === undefined ? {} : { reason: describeReadinessCause(reason) }),
+    ...(nested === undefined ? {} : { cause: describeReadinessCause(nested) }),
   };
 }
 

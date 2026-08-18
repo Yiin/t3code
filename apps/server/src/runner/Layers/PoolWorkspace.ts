@@ -250,7 +250,7 @@ export const makeServerPoolWorkspace = (deps: {
     const cached = resolvedSiblings.get(run.runId);
     if (cached !== undefined) return cached;
     const configured = run.config.parallel.siblings;
-    if (configured.length === 0) return [] as ReadonlyArray<SiblingRef>;
+    if (configured.length === 0) return [];
     const siblings = yield* makeSiblingResolver(processRunner.run)
       .resolveSiblings({
         cwd: run.cwd,

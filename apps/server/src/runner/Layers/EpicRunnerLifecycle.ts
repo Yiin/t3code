@@ -111,25 +111,12 @@ export const makeEpicRunnerLifecycle = (deps: {
   /** Dispatch something cancellation can survive losing (interrupts, session stops). */
   const dispatchBestEffort = (
     label: string,
-    command: {
-      readonly type: "thread.turn.interrupt" | "thread.session.stop";
-      readonly threadId: ThreadId;
-      readonly turnId?: TurnId;
-      readonly createdAt: string;
-    },
+    command: Parameters<typeof engine.dispatch>[0],
   ): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      const fullCommand = {
-        ...command,
-        commandId: yield* commandId(
-          `cancel-${command.type === "thread.turn.interrupt" ? "interrupt" : "session-stop"}`,
-        ),
-      } as Parameters<typeof engine.dispatch>[0];
-      yield* engine.dispatch(fullCommand).pipe(
-        Effect.asVoid,
-        Effect.catchCause((cause) => Effect.logWarning(label, { cause })),
-      );
-    });
+    engine.dispatch(command).pipe(
+      Effect.asVoid,
+      Effect.catchCause((cause) => Effect.logWarning(label, { cause })),
+    );
 
   const pauseRun: EpicRunnerShape["pauseRun"] = ({ runId }) =>
     Effect.gen(function* () {
@@ -266,12 +253,14 @@ export const makeEpicRunnerLifecycle = (deps: {
           const ownedTurnId = ownedTurnIdsAtCancel.get(iteration.threadId);
           yield* dispatchBestEffort("epic.runner.cancel-interrupt-failed", {
             type: "thread.turn.interrupt",
+            commandId: yield* commandId("cancel-interrupt"),
             threadId: iteration.threadId,
             ...(ownedTurnId === undefined ? {} : { turnId: ownedTurnId }),
             createdAt: cancelledAt,
           });
           yield* dispatchBestEffort("epic.runner.cancel-session-stop-failed", {
             type: "thread.session.stop",
+            commandId: yield* commandId("cancel-session-stop"),
             threadId: iteration.threadId,
             createdAt: cancelledAt,
           });

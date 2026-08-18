@@ -272,14 +272,31 @@ const requireObject = (
     ? Effect.succeed(data)
     : Effect.fail(protocolError(`'${command}' returned invalid data`));
 
+function isPrimeRpcModel(value: Record<string, unknown>): value is PrimeRpcModel {
+  return typeof value.provider === "string" && typeof value.id === "string";
+}
+
+function isPrimeRpcState(value: Record<string, unknown>): value is PrimeRpcState {
+  return (
+    (value.model === null || isRecord(value.model)) &&
+    typeof value.thinkingLevel === "string" &&
+    typeof value.isStreaming === "boolean" &&
+    typeof value.isCompacting === "boolean" &&
+    (value.sessionFile === null || typeof value.sessionFile === "string") &&
+    typeof value.sessionId === "string" &&
+    typeof value.messageCount === "number" &&
+    typeof value.pendingMessageCount === "number"
+  );
+}
+
 const decodeModel = (
   data: unknown,
   command: string,
 ): Effect.Effect<PrimeRpcModel, PrimeRpcProtocolError> =>
   requireObject(data, command).pipe(
     Effect.flatMap((model) =>
-      typeof model.provider === "string" && typeof model.id === "string"
-        ? Effect.succeed(model as PrimeRpcModel)
+      isPrimeRpcModel(model)
+        ? Effect.succeed(model)
         : Effect.fail(protocolError(`'${command}' returned an invalid model`)),
     ),
   );
@@ -287,22 +304,12 @@ const decodeModel = (
 const decodeState = (data: unknown): Effect.Effect<PrimeRpcState, PrimeRpcProtocolError> =>
   requireObject(data, "get_state").pipe(
     Effect.flatMap((state) => {
-      if (
-        !(state.model === null || isRecord(state.model)) ||
-        typeof state.thinkingLevel !== "string" ||
-        typeof state.isStreaming !== "boolean" ||
-        typeof state.isCompacting !== "boolean" ||
-        !(state.sessionFile === null || typeof state.sessionFile === "string") ||
-        typeof state.sessionId !== "string" ||
-        typeof state.messageCount !== "number" ||
-        typeof state.pendingMessageCount !== "number"
-      ) {
+      if (!isPrimeRpcState(state)) {
         return Effect.fail(protocolError("'get_state' returned invalid data"));
       }
-      const decodedState = state as unknown as PrimeRpcState;
       return state.model === null
-        ? Effect.succeed(decodedState)
-        : decodeModel(state.model, "get_state").pipe(Effect.as(decodedState));
+        ? Effect.succeed(state)
+        : decodeModel(state.model, "get_state").pipe(Effect.as(state));
     }),
   );
 

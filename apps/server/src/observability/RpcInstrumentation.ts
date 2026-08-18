@@ -29,7 +29,7 @@ function shouldTraceRpc(method: string): boolean {
 const rpcSpanAttributes = (
   method: string,
   traceAttributes?: Readonly<Record<string, unknown>>,
-): Record<string, unknown> => ({
+) => ({
   ...DEFAULT_RPC_SPAN_ATTRIBUTES,
   "rpc.method": method,
   ...traceAttributes,

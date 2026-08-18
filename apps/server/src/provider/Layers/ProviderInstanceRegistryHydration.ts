@@ -45,6 +45,7 @@ import {
   defaultInstanceIdForDriver,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
+  type ProviderInstanceId,
   ProviderDriverKind,
   ServerSettings,
 } from "@t3tools/contracts";
@@ -79,9 +80,13 @@ import { runManagedAccountHomeMigration } from "../Drivers/managedAccountHomeMig
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,
 ): ProviderInstanceConfigMap => {
-  const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
+  const merged: Record<ProviderInstanceId, ProviderInstanceConfig> = {
+    ...settings.providerInstances,
+  };
 
-  for (const legacyKey of Object.keys(settings.providers)) {
+  // The settings schema owns this catalog. A settings slot can land before
+  // its runtime driver and still hydrate as an unavailable shadow.
+  for (const [legacyKey, legacyConfig] of Object.entries(settings.providers)) {
     const driverKind = ProviderDriverKind.make(legacyKey);
     const instanceId = defaultInstanceIdForDriver(driverKind);
     if (instanceId in merged) {
@@ -90,9 +95,6 @@ export const deriveProviderInstanceConfigMap = (
       continue;
     }
 
-    // The settings schema owns this catalog. A settings slot can land before
-    // its runtime driver and still hydrate as an unavailable shadow.
-    const legacyConfig = (settings.providers as Readonly<Record<string, unknown>>)[legacyKey];
     if (legacyConfig === undefined) {
       continue;
     }
@@ -103,7 +105,7 @@ export const deriveProviderInstanceConfigMap = (
     };
   }
 
-  return merged as ProviderInstanceConfigMap;
+  return merged;
 };
 
 /**
@@ -172,10 +174,8 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );
-    const initialConfigMap =
-      initialSettings === undefined
-        ? ({} as ProviderInstanceConfigMap)
-        : deriveProviderInstanceConfigMap(initialSettings);
+    const initialConfigMap: ProviderInstanceConfigMap =
+      initialSettings === undefined ? {} : deriveProviderInstanceConfigMap(initialSettings);
 
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
       drivers: BUILT_IN_DRIVERS,

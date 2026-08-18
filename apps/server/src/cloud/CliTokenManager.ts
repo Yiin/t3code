@@ -66,10 +66,10 @@ const readLoopbackAuthorizationAction = Effect.fn(
     const event = yield* Queue.take(input).pipe(Effect.mapError(() => new Terminal.QuitError({})));
     const keyName = event.key.name.toLowerCase();
     if (!event.key.ctrl && !event.key.meta && keyName === "h") {
-      return "headless" as const;
+      return { _tag: "HeadlessRequested" } as const;
     }
     if (keyName === "enter" || keyName === "return") {
-      return "open-browser" as const;
+      return { _tag: "OpenBrowserRequested" } as const;
     }
   }
 });
@@ -96,11 +96,8 @@ export const waitForLoopbackAuthorization = Effect.fn(
           ),
           readLoopbackAuthorizationAction(terminalInput),
         );
-        if (typeof result !== "string") {
+        if (result._tag !== "OpenBrowserRequested") {
           return result;
-        }
-        if (result === "headless") {
-          return { _tag: "HeadlessRequested" } as const;
         }
         yield* input
           .launchBrowser(input.authorizationUrl)
@@ -159,7 +156,7 @@ function idTokenIdentity(idToken: string | undefined): string | null {
   const claims = decodeOidcIdentityClaimsJson(decoded.success);
   if (Option.isNone(claims)) return null;
   for (const value of [claims.value.email, claims.value.preferred_username, claims.value.sub]) {
-    if (typeof value === "string" && value.length > 0) return value;
+    if (value !== undefined && value.length > 0) return value;
   }
   return null;
 }

@@ -86,7 +86,7 @@ class NodePtyProcess implements PtyAdapter.PtyProcess {
     this.process.resize(cols, rows);
   }
 
-  kill(signal?: string): void {
+  kill(signal?: NodeJS.Signals): void {
     this.process.kill(signal);
   }
 

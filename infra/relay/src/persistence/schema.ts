@@ -1,3 +1,4 @@
+import type { RelayManagedEndpointProviderKind } from "@t3tools/contracts/relay";
 import {
   boolean,
   index,
@@ -18,7 +19,9 @@ export const relayEnvironmentLinks = pgTable(
     environmentPublicKey: text("environment_public_key").notNull(),
     endpointHttpBaseUrl: text("endpoint_http_base_url").notNull(),
     endpointWsBaseUrl: text("endpoint_ws_base_url").notNull(),
-    endpointProviderKind: varchar("endpoint_provider_kind", { length: 32 }).notNull(),
+    endpointProviderKind: varchar("endpoint_provider_kind", { length: 32 })
+      .$type<RelayManagedEndpointProviderKind>()
+      .notNull(),
     notificationsEnabled: boolean("notifications_enabled").notNull().default(true),
     liveActivitiesEnabled: boolean("live_activities_enabled").notNull().default(true),
     managedTunnelsEnabled: boolean("managed_tunnels_enabled").notNull().default(false),

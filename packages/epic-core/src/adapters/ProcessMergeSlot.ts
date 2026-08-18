@@ -23,7 +23,7 @@ const decodeMergeSlotStatus = Schema.decodeUnknownOption(MergeSlotStatus);
 
 const parseJson = (text: string): Option.Option<unknown> => {
   try {
-    return Option.some(JSON.parse(text) as unknown);
+    return Option.some<unknown>(JSON.parse(text));
   } catch {
     return Option.none();
   }

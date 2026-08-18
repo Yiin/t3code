@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { type CursorSettings, type ModelSelection } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 import { TextGenerationError } from "@t3tools/contracts";
@@ -18,7 +18,7 @@ import {
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
-  sanitizeCommitSubject,
+  toCommitMessageResult,
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
@@ -182,13 +182,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
         modelSelection: input.modelSelection,
       });
 
-      return {
-        subject: sanitizeCommitSubject(generated.subject),
-        body: generated.body.trim(),
-        ...("branch" in generated && typeof generated.branch === "string"
-          ? { branch: sanitizeFeatureBranchName(generated.branch) }
-          : {}),
-      };
+      return toCommitMessageResult(generated);
     });
 
   const generatePrContent: TextGeneration.TextGeneration["Service"]["generatePrContent"] =

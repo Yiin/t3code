@@ -28,10 +28,13 @@ export class ClerkPublishableKeyFrontendApiError extends Schema.TaggedErrorClass
   }
 }
 
-function parseClerkFrontendApi(publishableKey: string): {
+/** The Clerk frontend API origin derived from a publishable key. */
+interface ClerkFrontendApiOrigin {
   readonly hostname: string;
   readonly url: string;
-} {
+}
+
+function parseClerkFrontendApi(publishableKey: string): ClerkFrontendApiOrigin {
   const keyPrefix = publishableKey.startsWith("pk_test_")
     ? "pk_test"
     : publishableKey.startsWith("pk_live_")

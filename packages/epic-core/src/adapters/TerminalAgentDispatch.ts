@@ -15,7 +15,11 @@ import {
   type IterationHandle,
   type IterationSettle,
 } from "../ports/AgentDispatch.ts";
-import { wrapWorkerScopeSpawn, type WorkerScopePreparation } from "../workerScope.ts";
+import {
+  wrapWorkerScopeSpawn,
+  type SpawnInvocation,
+  type WorkerScopePreparation,
+} from "../workerScope.ts";
 import type { TerminalProviderRoute } from "./TerminalProviderSupport.ts";
 import type { TerminalWorkerActivity } from "./TerminalWorkerActivity.ts";
 
@@ -290,7 +294,7 @@ const primeInvocation = (input: {
   readonly prompt: string;
   readonly selection: AgentSelection;
   readonly inspector: boolean;
-}): { readonly command: string; readonly args: ReadonlyArray<string> } => ({
+}): SpawnInvocation => ({
   command: input.options.binary ?? "prime-agent",
   args: [
     "--mode",
@@ -339,7 +343,7 @@ const claudeInvocation = (input: {
    * or inspector auxiliary is one prompt long and spawns nobody.
    */
   readonly subagents?: EpicSubagentMap | undefined;
-}): { readonly command: string; readonly args: ReadonlyArray<string> } => ({
+}): SpawnInvocation => ({
   command: input.options.binary ?? "claude",
   args: [
     "-p",
@@ -367,7 +371,7 @@ const invocation = (input: {
   readonly selection: AgentSelection;
   readonly sessionId: string | null;
   readonly cwd: string;
-}): { readonly command: string; readonly args: ReadonlyArray<string> } => {
+}): SpawnInvocation => {
   const { options, prompt, promptPath, selection, sessionId, cwd } = input;
   const model = selection.model;
   switch (options.harness) {
@@ -446,10 +450,16 @@ const invocation = (input: {
   }
 };
 
+/** The dispatch options and harness a selection routes to, after fallback. */
+interface RoutedDispatch {
+  readonly options: TerminalAgentDispatchOptions;
+  readonly harness: TerminalHarness;
+}
+
 const routeOptions = (
   options: TerminalAgentDispatchOptions,
   selection: AgentSelection,
-): { readonly options: TerminalAgentDispatchOptions; readonly harness: TerminalHarness } => {
+): RoutedDispatch => {
   const route = options.providerRoutes?.find(
     (candidate) => candidate.instanceId === selection.instanceId,
   );

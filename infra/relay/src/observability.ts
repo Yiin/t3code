@@ -212,7 +212,7 @@ class RelayTraceSpan implements Tracer.Span {
 const withSchemaErrorAttributes = (delegate: Tracer.Tracer): Tracer.Tracer =>
   Tracer.make({
     span: (options) => new RelayTraceSpan(delegate.span(options)),
-    ...(delegate.context ? { context: delegate.context } : {}),
+    context: delegate.context,
   });
 
 export const makeRelayTraceLayer = (input: {

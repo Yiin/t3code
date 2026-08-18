@@ -181,8 +181,7 @@ const make = Effect.gen(function* () {
               endpoint: {
                 httpBaseUrl: row.endpointHttpBaseUrl,
                 wsBaseUrl: row.endpointWsBaseUrl,
-                providerKind:
-                  row.endpointProviderKind as RelayClientEnvironmentRecord["endpoint"]["providerKind"],
+                providerKind: row.endpointProviderKind,
               },
               linkedAt: row.createdAt,
             })),
@@ -233,8 +232,7 @@ const make = Effect.gen(function* () {
                   endpoint: {
                     httpBaseUrl: row.endpointHttpBaseUrl,
                     wsBaseUrl: row.endpointWsBaseUrl,
-                    providerKind:
-                      row.endpointProviderKind as RelayClientEnvironmentRecord["endpoint"]["providerKind"],
+                    providerKind: row.endpointProviderKind,
                   },
                   environmentPublicKey: row.environmentPublicKey,
                   linkedAt: row.createdAt,

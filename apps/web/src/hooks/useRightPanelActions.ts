@@ -58,11 +58,11 @@ interface RightPanelActionsOptions {
   readonly openTerminal: (input: {
     environmentId: EnvironmentId;
     input: TerminalOpenInput;
-  }) => unknown;
+  }) => void;
   readonly closeTerminalMutation: (input: {
     environmentId: EnvironmentId;
     input: TerminalCloseInput;
-  }) => unknown;
+  }) => void;
   readonly closePreview: (input: {
     environmentId: EnvironmentId;
     input: PreviewCloseInput;

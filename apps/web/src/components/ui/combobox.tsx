@@ -9,7 +9,7 @@ import { Input } from "~/components/ui/input";
 import { ScrollArea } from "~/components/ui/scroll-area";
 
 const ComboboxContext = React.createContext<{
-  chipsRef: React.RefObject<Element | null> | null;
+  chipsRef: React.RefObject<HTMLDivElement | null> | null;
   multiple: boolean;
 }>({
   chipsRef: null,
@@ -19,7 +19,7 @@ const ComboboxContext = React.createContext<{
 function Combobox<Value, Multiple extends boolean | undefined = false>(
   props: ComboboxPrimitive.Root.Props<Value, Multiple>,
 ) {
-  const chipsRef = React.useRef<Element | null>(null);
+  const chipsRef = React.useRef<HTMLDivElement | null>(null);
   const value = React.useMemo(() => ({ chipsRef, multiple: !!props.multiple }), [props.multiple]);
   return (
     <ComboboxContext value={value}>
@@ -36,7 +36,7 @@ function ComboboxChipsInput({
   size?: "sm" | "default" | "lg" | number;
   ref?: React.Ref<HTMLInputElement>;
 }) {
-  const sizeValue = (size ?? "default") as "sm" | "default" | "lg" | number;
+  const sizeValue = size ?? "default";
 
   return (
     <ComboboxPrimitive.Input
@@ -71,7 +71,7 @@ function ComboboxInput({
   unstyled?: boolean;
   ref?: React.Ref<HTMLInputElement>;
 }) {
-  const sizeValue = (size ?? "default") as "sm" | "default" | "lg" | number;
+  const sizeValue = size ?? "default";
 
   return (
     <div className="relative not-has-[>*.w-full]:w-fit w-full text-foreground has-disabled:opacity-64">
@@ -338,7 +338,7 @@ function ComboboxChips({
         className,
       )}
       data-slot="combobox-chips"
-      ref={chipsRef as React.Ref<HTMLDivElement> | null}
+      ref={chipsRef}
       {...props}
     >
       {startAddon && (

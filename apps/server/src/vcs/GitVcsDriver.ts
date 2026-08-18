@@ -418,16 +418,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     ).pipe(Effect.map((result) => result.exitCode === 0 && result.stdout.trim() === "true"));
 
   const execute: VcsDriver.VcsDriver["Service"]["execute"] = (input) =>
-    gitCommand(vcsProcess, input.operation, input.cwd, input.args, {
-      ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
-      ...(input.env !== undefined ? { env: input.env } : {}),
-      ...(input.allowNonZeroExit !== undefined ? { allowNonZeroExit: input.allowNonZeroExit } : {}),
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-      ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
-      ...(input.appendTruncationMarker !== undefined
-        ? { appendTruncationMarker: input.appendTruncationMarker }
-        : {}),
-    });
+    gitCommand(vcsProcess, input.operation, input.cwd, input.args, input);
 
   const detectRepository: VcsDriver.VcsDriver["Service"]["detectRepository"] = Effect.fn(
     "detectRepository",

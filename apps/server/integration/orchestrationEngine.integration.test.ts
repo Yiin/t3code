@@ -1012,9 +1012,7 @@ it.live(
         );
         assert.equal(failureActivity !== undefined, true);
         assert.equal(
-          String(
-            (failureActivity?.payload as { readonly detail?: string } | undefined)?.detail,
-          ).includes("No active provider session"),
+          String(activityPayload(failureActivity)["detail"]).includes("No active provider session"),
           true,
         );
       }),

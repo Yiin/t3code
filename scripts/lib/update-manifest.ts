@@ -36,9 +36,9 @@ function parseFileRecord(
     return null;
   }
   if (
-    typeof currentFile.url !== "string" ||
-    typeof currentFile.sha512 !== "string" ||
-    typeof currentFile.size !== "number"
+    currentFile.url === undefined ||
+    currentFile.sha512 === undefined ||
+    currentFile.size === undefined
   ) {
     throw new Error(
       `Invalid ${platformLabel} update manifest at ${sourcePath}:${lineNumber}: incomplete file entry.`,

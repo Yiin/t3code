@@ -36,14 +36,14 @@ export interface ThreadPreviewState {
   recentlySeenUrls: string[];
 }
 
-const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze({
+const EMPTY_THREAD_PREVIEW_STATE: ThreadPreviewState = Object.freeze<ThreadPreviewState>({
   snapshot: null,
   sessions: {},
   suppressedTabIds: new Set<string>(),
   activeTabId: null,
   desktopOverlay: null,
   desktopByTabId: {},
-  recentlySeenUrls: [] as string[],
+  recentlySeenUrls: [],
 });
 
 const emptyPreviewStateAtom = Atom.make<ThreadPreviewState>(EMPTY_THREAD_PREVIEW_STATE).pipe(

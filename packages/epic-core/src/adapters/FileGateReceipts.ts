@@ -41,7 +41,7 @@ export const make = Effect.fn("FileGateReceipts.make")(function* (
     const exists = yield* fileSystem
       .exists(filePath)
       .pipe(Effect.mapError(gateError("gateReceipts.exists")));
-    if (!exists) return [] as ReadonlyArray<string>;
+    if (!exists) return [];
     const contents = yield* fileSystem
       .readFileString(filePath)
       .pipe(Effect.mapError(gateError("gateReceipts.read")));

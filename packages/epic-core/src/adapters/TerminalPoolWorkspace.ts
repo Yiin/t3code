@@ -348,7 +348,7 @@ export const makeTerminalPoolWorkspace = (deps: {
   ) {
     const cached = resolvedSiblings.get(runId);
     if (cached !== undefined) return cached;
-    if (siblings.length === 0) return [] as ReadonlyArray<SiblingRef>;
+    if (siblings.length === 0) return [];
     const resolved = yield* makeSiblingResolver(processRunner.run)
       .resolveSiblings({ cwd, siblings, pushEnabled, layoutMode })
       .pipe(

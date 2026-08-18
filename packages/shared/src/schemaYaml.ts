@@ -61,7 +61,7 @@ export function parseYaml<E extends string>(
 ): SchemaGetter.Getter<unknown, E> {
   return SchemaGetter.transformOrFail((input: E) =>
     Effect.try({
-      try: () => parseYamlString(input, options) as unknown,
+      try: (): unknown => parseYamlString(input, options),
       catch: (error) =>
         new SchemaIssue.InvalidValue(Option.none(), { message: formatYamlParseError(error) }),
     }),

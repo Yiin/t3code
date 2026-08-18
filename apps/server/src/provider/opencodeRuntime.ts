@@ -47,10 +47,7 @@ const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 
-export function makeOpenCodeServerSpawnEnvironment(environment?: NodeJS.ProcessEnv): {
-  readonly env: NodeJS.ProcessEnv;
-  readonly extendEnv: boolean;
-} {
+export function makeOpenCodeServerSpawnEnvironment(environment?: NodeJS.ProcessEnv) {
   return {
     env: {
       ...environment,
@@ -706,7 +703,7 @@ export const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const loadInventoryFromCli: OpenCodeRuntimeShape["loadInventoryFromCli"] = (input) =>
     Effect.gen(function* () {
-      const env = input.environment !== undefined ? { environment: input.environment } : ({} as {});
+      const env = input.environment !== undefined ? { environment: input.environment } : {};
 
       const runModelsCli = () =>
         runOpenCodeCommand({

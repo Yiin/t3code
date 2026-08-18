@@ -13,7 +13,7 @@ function structuralMethod(value: string): string {
   return value.length <= 128 && /^[A-Za-z][A-Za-z0-9._:/-]*$/.test(value) ? value : "unknown";
 }
 
-function summarizePayload(payload: unknown): Readonly<Record<string, unknown>> {
+function summarizePayload(payload: unknown) {
   if (payload === null) return { valueType: "null" };
   if (typeof payload === "string") {
     return { valueType: "string", byteLength: new TextEncoder().encode(payload).byteLength };
@@ -29,12 +29,15 @@ function summarizePayload(payload: unknown): Readonly<Record<string, unknown>> {
   }
 
   try {
-    const record = payload as Record<string, unknown>;
     return {
       valueType: "object",
-      fieldCount: Object.keys(record).length,
-      ...(typeof record._tag === "string" ? { messageTag: errorTag(record) } : {}),
-      ...(typeof record.tag === "string" ? { method: structuralMethod(record.tag) } : {}),
+      fieldCount: Object.keys(payload).length,
+      ...("_tag" in payload && typeof payload._tag === "string"
+        ? { messageTag: errorTag(payload) }
+        : {}),
+      ...("tag" in payload && typeof payload.tag === "string"
+        ? { method: structuralMethod(payload.tag) }
+        : {}),
     };
   } catch {
     return { valueType: "object" };

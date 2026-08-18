@@ -136,9 +136,6 @@ export const make = Effect.gen(function* () {
   const flush: AnalyticsService["Service"]["flush"] = Effect.gen(function* () {
     while (true) {
       const batch = yield* Ref.modify(bufferRef, (current) => {
-        if (current.length === 0) {
-          return [[] as ReadonlyArray<BufferedAnalyticsEvent>, current] as const;
-        }
         const nextBatch = current.slice(0, telemetryConfig.flushBatchSize);
         const remaining = current.slice(nextBatch.length);
         return [nextBatch, remaining] as const;

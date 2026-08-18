@@ -56,7 +56,7 @@ function ProjectEpicQuery({
 }) {
   const query = useEnvironmentQuery(
     epicsEnvironment.list({
-      environmentId: source.environmentId as EnvironmentId,
+      environmentId: source.environmentId,
       input: { workspaceRoot: source.workspaceRoot },
     }),
   );
@@ -76,12 +76,10 @@ function EnvironmentRunsQuery({
   environmentId,
   onRuns,
 }: {
-  readonly environmentId: string;
-  readonly onRuns: (environmentId: string, runs: ReadonlyArray<EpicRun> | null) => void;
+  readonly environmentId: EnvironmentId;
+  readonly onRuns: (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => void;
 }) {
-  const query = useEnvironmentQuery(
-    epicsEnvironment.allRuns({ environmentId: environmentId as EnvironmentId, input: {} }),
-  );
+  const query = useEnvironmentQuery(epicsEnvironment.allRuns({ environmentId, input: {} }));
   useEffect(() => onRuns(environmentId, query.data), [environmentId, onRuns, query.data]);
   return null;
 }
@@ -317,15 +315,18 @@ export function EpicsRouteView() {
   const [runsByEnvironment, setRunsByEnvironment] = useState<
     ReadonlyMap<string, ReadonlyArray<EpicRun>>
   >(() => new Map());
-  const onRuns = useCallback((environmentId: string, runs: ReadonlyArray<EpicRun> | null) => {
-    setRunsByEnvironment((current) => {
-      const next = runs ?? NO_RUNS;
-      if (current.get(environmentId) === next) return current;
-      const updated = new Map(current);
-      updated.set(environmentId, next);
-      return updated;
-    });
-  }, []);
+  const onRuns = useCallback(
+    (environmentId: EnvironmentId, runs: ReadonlyArray<EpicRun> | null) => {
+      setRunsByEnvironment((current) => {
+        const next = runs ?? NO_RUNS;
+        if (current.get(environmentId) === next) return current;
+        const updated = new Map(current);
+        updated.set(environmentId, next);
+        return updated;
+      });
+    },
+    [],
+  );
 
   const groups = epicGroupModels({ sources, results, runsByEnvironment });
   const recentRows = sortEpicRowsByActivity(groups.flatMap((group) => group.rows));

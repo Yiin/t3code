@@ -32,12 +32,10 @@ export const readCliDesiredLinkMode = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const value = yield* secrets.get(CLOUD_CLI_DESIRED_LINK_SECRET);
   if (Option.isNone(value)) {
-    return "managed" as CliDesiredLinkMode;
+    return "managed";
   }
   // Legacy links stored the literal "true" and are always managed.
-  return new TextDecoder().decode(value.value) === "publish_only"
-    ? ("publish_only" as CliDesiredLinkMode)
-    : ("managed" as CliDesiredLinkMode);
+  return new TextDecoder().decode(value.value) === "publish_only" ? "publish_only" : "managed";
 });
 
 export const setCliDesiredCloudLink = Effect.fn("cloud.cli_state.set_desired")(function* (

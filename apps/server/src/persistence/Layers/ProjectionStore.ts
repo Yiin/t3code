@@ -1784,45 +1784,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 if (latestTurnByThread.has(row.threadId)) {
                   continue;
                 }
-                latestTurnByThread.set(row.threadId, {
-                  turnId: row.turnId,
-                  state:
-                    row.state === "error"
-                      ? "error"
-                      : row.state === "interrupted"
-                        ? "interrupted"
-                        : row.state === "completed"
-                          ? "completed"
-                          : "running",
-                  requestedAt: row.requestedAt,
-                  startedAt: row.startedAt,
-                  completedAt: row.completedAt,
-                  assistantMessageId: row.assistantMessageId,
-                  ...(row.sourceProposedPlanThreadId !== null && row.sourceProposedPlanId !== null
-                    ? {
-                        sourceProposedPlan: {
-                          threadId: row.sourceProposedPlanThreadId,
-                          planId: row.sourceProposedPlanId,
-                        },
-                      }
-                    : {}),
-                });
+                latestTurnByThread.set(row.threadId, mapLatestTurn(row));
               }
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(

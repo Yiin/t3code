@@ -1,4 +1,4 @@
-import { defineRule } from "@oxlint/plugins";
+import { defineRule, type ESTree } from "@oxlint/plugins";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -6,7 +6,7 @@ import { getPropertyName, isIdentifier, unwrapExpression } from "../utils.ts";
 
 // Effect Schema decoder/encoder APIs allocate compiled functions. Keep them
 // outside function bodies so hot paths do not rebuild compilers per call.
-const COMPILER_METHODS = new Set<keyof typeof Schema>([
+const COMPILER_METHODS: ReadonlySet<string> = new Set<keyof typeof Schema>([
   "is",
   "asserts",
   "decodeEffect",
@@ -36,64 +36,55 @@ const COMPILER_METHODS = new Set<keyof typeof Schema>([
   "encodeUnknownSync",
 ]);
 
-const getSchemaCompilerMethod = (callee: unknown): Option.Option<string> => {
+const getSchemaCompilerMethod = (callee: ESTree.Node): Option.Option<string> => {
   const expression = unwrapExpression(callee);
-  if (Option.isNone(expression) || expression.value.type !== "MemberExpression") {
-    return Option.none();
-  }
+  if (expression.type !== "MemberExpression") return Option.none();
 
-  const object = unwrapExpression(expression.value.object);
+  const object = unwrapExpression(expression.object);
   if (!isIdentifier(object, "Schema")) return Option.none();
 
-  return Option.filter(getPropertyName(expression.value.property), (method) =>
-    COMPILER_METHODS.has(method as keyof typeof Schema),
+  return Option.filter(getPropertyName(expression.property), (method) =>
+    COMPILER_METHODS.has(method),
   );
 };
 
-const isStaticSchemaReference = (node: unknown): boolean => {
+const isStaticSchemaReference = (node: ESTree.Node): boolean => {
   const expression = unwrapExpression(node);
-  if (Option.isNone(expression)) return false;
 
-  if (expression.value.type === "Identifier") {
-    const [firstChar] = expression.value.name;
+  if (expression.type === "Identifier") {
+    const [firstChar] = expression.name;
     return firstChar !== undefined && firstChar.toUpperCase() === firstChar;
   }
 
-  return expression.value.type === "MemberExpression";
+  return expression.type === "MemberExpression";
 };
 
-const isNestedStaticSchemaCall = (node: unknown): boolean => {
+const isNestedStaticSchemaCall = (node: ESTree.Node): boolean => {
   const expression = unwrapExpression(node);
-  if (Option.isNone(expression) || expression.value.type !== "CallExpression") return false;
+  if (expression.type !== "CallExpression") return false;
 
-  const callee = unwrapExpression(expression.value.callee);
-  if (Option.isNone(callee) || callee.value.type !== "MemberExpression") return false;
+  const callee = unwrapExpression(expression.callee);
+  if (callee.type !== "MemberExpression") return false;
 
-  const object = unwrapExpression(callee.value.object);
+  const object = unwrapExpression(callee.object);
   if (!isIdentifier(object, "Schema")) return false;
 
-  const method = getPropertyName(callee.value.property);
+  const method = getPropertyName(callee.property);
   if (Option.isSome(method) && method.value === "fromJsonString") {
-    const firstArg = expression.value.arguments[0];
+    const firstArg = expression.arguments[0];
+    if (firstArg === undefined) return false;
     return isStaticSchemaReference(firstArg) || isNestedStaticSchemaCall(firstArg);
   }
 
   return true;
 };
 
-const isImmediatelyInvoked = (node: unknown): boolean => {
+const isImmediatelyInvoked = (node: ESTree.Node): boolean => {
   const expression = unwrapExpression(node);
-  if (Option.isNone(expression)) return false;
+  if (expression.parent === null) return false;
 
-  const parent =
-    "parent" in expression.value ? unwrapExpression(expression.value.parent) : Option.none();
-  return (
-    Option.isSome(parent) &&
-    parent.value.type === "CallExpression" &&
-    unwrapExpression(parent.value.callee).pipe(
-      Option.exists((callee) => callee === expression.value),
-    )
-  );
+  const parent = unwrapExpression(expression.parent);
+  return parent.type === "CallExpression" && unwrapExpression(parent.callee) === expression;
 };
 
 const messageHigh = (method: string) =>
@@ -141,7 +132,9 @@ export default defineRule({
         if (!isImmediatelyInvoked(node)) return;
 
         const firstArg = node.arguments[0];
-        const high = firstArg && isNestedStaticSchemaCall(firstArg);
+        if (firstArg === undefined) return;
+
+        const high = isNestedStaticSchemaCall(firstArg);
         if (!high && !isStaticSchemaReference(firstArg)) return;
 
         context.report({

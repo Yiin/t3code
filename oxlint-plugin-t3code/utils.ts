@@ -8,51 +8,34 @@ type ExpressionWrapper =
   | ESTree.TSAsExpression
   | ESTree.TSTypeAssertion;
 
-type AstNode = ESTree.Node;
-
-const asAstNode = (node: unknown): Option.Option<AstNode> =>
-  typeof node === "object" && node !== null && "type" in node && typeof node.type === "string"
-    ? Option.some(node as AstNode)
-    : Option.none();
-
-const isExpressionWrapper = (node: AstNode): node is ExpressionWrapper =>
+const isExpressionWrapper = (node: ESTree.Node): node is ExpressionWrapper =>
   node.type === "ChainExpression" ||
   node.type === "ParenthesizedExpression" ||
   node.type === "TSNonNullExpression" ||
   node.type === "TSAsExpression" ||
   node.type === "TSTypeAssertion";
 
-export function unwrapExpression(node: unknown): Option.Option<AstNode> {
-  let current = asAstNode(node);
+export function unwrapExpression(node: ESTree.Node): ESTree.Node {
+  let current: ESTree.Node = node;
 
-  while (Option.isSome(current) && isExpressionWrapper(current.value)) {
-    current = asAstNode(current.value.expression);
+  while (isExpressionWrapper(current)) {
+    current = current.expression;
   }
 
   return current;
 }
 
-export function getPropertyName(node: unknown): Option.Option<string> {
-  return Option.flatMap(asAstNode(node), (expression) => {
-    if (expression.type === "Identifier" && typeof expression.name === "string") {
-      return Option.some(expression.name);
-    }
-    if (expression.type === "PrivateIdentifier" && typeof expression.name === "string") {
-      return Option.some(expression.name);
-    }
-    if (expression.type === "Literal" && typeof expression.value === "string") {
-      return Option.some(expression.value);
-    }
-    return Option.none();
-  });
+export function getPropertyName(node: ESTree.Node): Option.Option<string> {
+  if (node.type === "Identifier" || node.type === "PrivateIdentifier") {
+    return Option.some(node.name);
+  }
+  // `Literal` covers every literal kind, so `value` is a genuine union here.
+  if (node.type === "Literal" && typeof node.value === "string") {
+    return Option.some(node.value);
+  }
+  return Option.none();
 }
 
-export function isIdentifier(node: Option.Option<AstNode>, name?: string): boolean {
-  if (Option.isNone(node)) return false;
-  const expression = node.value;
-  return (
-    expression.type === "Identifier" &&
-    typeof expression.name === "string" &&
-    (name === undefined || expression.name === name)
-  );
+export function isIdentifier(node: ESTree.Node, name?: string): boolean {
+  return node.type === "Identifier" && (name === undefined || node.name === name);
 }

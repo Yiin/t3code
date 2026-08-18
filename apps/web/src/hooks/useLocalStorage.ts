@@ -80,6 +80,12 @@ export const removeLocalStorageItem = (key: string) => {
 
 const LOCAL_STORAGE_CHANGE_EVENT = "t3code:local_storage_change";
 
+declare global {
+  interface WindowEventMap {
+    [LOCAL_STORAGE_CHANGE_EVENT]: CustomEvent<LocalStorageChangeDetail>;
+  }
+}
+
 interface LocalStorageChangeDetail {
   key: string;
 }
@@ -125,10 +131,10 @@ export function useLocalStorage<T, E>(
       };
 
       window.addEventListener("storage", handleStorageChange);
-      window.addEventListener(LOCAL_STORAGE_CHANGE_EVENT, handleLocalChange as EventListener);
+      window.addEventListener(LOCAL_STORAGE_CHANGE_EVENT, handleLocalChange);
       return () => {
         window.removeEventListener("storage", handleStorageChange);
-        window.removeEventListener(LOCAL_STORAGE_CHANGE_EVENT, handleLocalChange as EventListener);
+        window.removeEventListener(LOCAL_STORAGE_CHANGE_EVENT, handleLocalChange);
       };
     },
     [key],

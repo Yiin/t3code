@@ -684,12 +684,12 @@ function compactMinimapPreview(text: string | null | undefined) {
 
 function resolveTimelineRowTop(state: TimelinePositionState, rowIndex: number) {
   const top = state.positionAtIndex?.(rowIndex);
-  return typeof top === "number" && Number.isFinite(top) ? top : null;
+  return top !== undefined && Number.isFinite(top) ? top : null;
 }
 
 function resolveTimelineRowHeight(state: TimelinePositionState, rowIndex: number) {
   const height = state.sizeAtIndex?.(rowIndex);
-  return typeof height === "number" && Number.isFinite(height) ? height : null;
+  return height !== undefined && Number.isFinite(height) ? height : null;
 }
 
 function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {

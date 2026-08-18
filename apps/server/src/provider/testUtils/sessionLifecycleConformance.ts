@@ -20,13 +20,14 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import type * as Scope from "effect/Scope";
 
+import { ThreadId } from "@t3tools/contracts";
+
 import type {
   ProviderDriverKind,
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
   ProviderTurnStartResult,
-  ThreadId,
 } from "@t3tools/contracts";
 
 import type { ProviderAdapterCapabilities } from "../Services/ProviderAdapter.ts";
@@ -154,7 +155,7 @@ export interface SessionLifecycleConformanceInput<R = never> {
 }
 
 const threadIdFor = (name: string, scenario: string): ThreadId =>
-  `${name}-lifecycle-${scenario}` as ThreadId;
+  ThreadId.make(`${name}-lifecycle-${scenario}`);
 
 const startInput = (
   input: { readonly provider: ProviderDriverKind },

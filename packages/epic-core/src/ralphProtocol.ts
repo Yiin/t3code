@@ -177,10 +177,11 @@ export const parseRalphReport = (text: string): RalphReport | null => {
     return { summary: null, why: null };
   }
 
-  const record = parsed as Record<string, unknown>;
+  const summary = "summary" in parsed ? parsed.summary : undefined;
+  const why = "why" in parsed ? parsed.why : undefined;
   return {
-    summary: typeof record.summary === "string" ? record.summary : null,
-    why: typeof record.why === "string" ? record.why : null,
+    summary: typeof summary === "string" ? summary : null,
+    why: typeof why === "string" ? why : null,
   };
 };
 

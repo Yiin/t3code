@@ -61,19 +61,36 @@ export function mergeEpicRuns(
   return changed ? [...byId.values()].sort(compareCanonicalRuns) : current;
 }
 
+/** Where a run in the collection came from: the seed fetch or the live stream. */
+type RunSource = "seed" | "live";
+
 type RunBatch = {
-  readonly source: "seed" | "live";
+  readonly source: RunSource;
   readonly runs: ReadonlyArray<EpicRun>;
 };
 
+/** The merged run collection plus the source that last wrote each run. */
+interface RunCollection {
+  readonly runs: ReadonlyArray<EpicRun>;
+  readonly provenance: ReadonlyMap<string, RunSource>;
+}
+
+/** `RunCollection` plus whether the stream has emitted its first value. */
+interface RunCollectionAccumulator extends RunCollection {
+  readonly initialized: boolean;
+}
+
+/** The latest run for one identity, plus the first-emission flag. */
+interface LatestRunAccumulator {
+  readonly initialized: boolean;
+  readonly run: EpicRun | null;
+}
+
 function mergeEpicRunBatch(
   current: ReadonlyArray<EpicRun>,
-  provenance: ReadonlyMap<string, "seed" | "live">,
+  provenance: ReadonlyMap<string, RunSource>,
   batch: RunBatch,
-): {
-  readonly runs: ReadonlyArray<EpicRun>;
-  readonly provenance: ReadonlyMap<string, "seed" | "live">;
-} {
+): RunCollection {
   const byId = new Map(current.map((run) => [run.runId, run]));
   const nextProvenance = new Map(provenance);
   let changed = false;
@@ -160,13 +177,10 @@ export function epicRunCollectionChanges() {
         );
         return Stream.merge(seeds, live).pipe(
           Stream.mapAccum(
-            () => ({
+            (): RunCollectionAccumulator => ({
               initialized: false,
-              runs: [] as ReadonlyArray<EpicRun>,
-              provenance: new Map<string, "seed" | "live">() as ReadonlyMap<
-                string,
-                "seed" | "live"
-              >,
+              runs: [],
+              provenance: new Map(),
             }),
             (state, batch) => {
               const next = mergeEpicRunBatch(state.runs, state.provenance, batch);
@@ -189,7 +203,7 @@ export function epicRunChanges(identity: {
 }) {
   return epicRunCollectionChanges().pipe(
     Stream.mapAccum(
-      () => ({ initialized: false, run: null as EpicRun | null }),
+      (): LatestRunAccumulator => ({ initialized: false, run: null }),
       (state, runs) => {
         const next = latestEpicRunForIdentity(runs, identity);
         const nextState = { initialized: true, run: next };
@@ -204,7 +218,7 @@ export function epicRunChanges(identity: {
 export function activeEpicRunForThreadChanges(threadId: string) {
   return epicRunCollectionChanges().pipe(
     Stream.mapAccum(
-      () => ({ initialized: false, run: null as EpicRun | null }),
+      (): LatestRunAccumulator => ({ initialized: false, run: null }),
       (state, runs) => {
         const next = activeEpicRunForThread(runs, threadId);
         const nextState = { initialized: true, run: next };

@@ -144,7 +144,7 @@ const toProtocolMessage = (
     readonly result?: unknown;
     readonly error?: CodexError.CodexAppServerProtocolErrorShape;
   },
-): { readonly [key: string]: unknown } => ({
+) => ({
   id: requestId,
   ...(fields.result !== undefined ? { result: fields.result } : {}),
   ...(fields.error !== undefined ? { error: fields.error } : {}),

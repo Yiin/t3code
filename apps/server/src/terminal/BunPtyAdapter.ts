@@ -69,12 +69,12 @@ class BunPtyProcess implements PtyAdapter.PtyProcess {
     this.process.terminal.resize(cols, rows);
   }
 
-  kill(signal?: string): void {
+  kill(signal?: NodeJS.Signals): void {
     if (!signal) {
       this.process.kill();
       return;
     }
-    this.process.kill(signal as NodeJS.Signals);
+    this.process.kill(signal);
   }
 
   onData(callback: (data: string) => void): () => void {

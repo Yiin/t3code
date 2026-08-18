@@ -1,7 +1,7 @@
 import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { EpicRun } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type EpicRun } from "@t3tools/contracts";
 
 import { Button } from "../components/ui/button";
 import type { EpicProjectSource } from "../epics.logic";
@@ -44,9 +44,9 @@ describe("EpicsEmptyState", () => {
 });
 
 const source: EpicProjectSource = {
-  environmentId: "env",
+  environmentId: EnvironmentId.make("env"),
   workspaceRoot: "/repo",
-  projectId: "project",
+  projectId: ProjectId.make("project"),
   projectTitle: "T3 Code",
 };
 
@@ -181,12 +181,16 @@ describe("EpicRunLog", () => {
     const resumed = renderToStaticMarkup(
       <EpicRunLog
         run={logRun([logIteration({ resumeCount: 2 })])}
-        environmentId="env"
+        environmentId={EnvironmentId.make("env")}
         cwd="/repo"
       />,
     );
     const untouched = renderToStaticMarkup(
-      <EpicRunLog run={logRun([logIteration({})])} environmentId="env" cwd="/repo" />,
+      <EpicRunLog
+        run={logRun([logIteration({})])}
+        environmentId={EnvironmentId.make("env")}
+        cwd="/repo"
+      />,
     );
 
     expect(resumed).toContain("resumed 2 times");
@@ -199,14 +203,14 @@ describe("EpicRunLog", () => {
         run={logRun([
           logIteration({ turnStatus: "abandoned", failureReason: "infra:resume-unsupported" }),
         ])}
-        environmentId="env"
+        environmentId={EnvironmentId.make("env")}
         cwd="/repo"
       />,
     );
     const timedOut = renderToStaticMarkup(
       <EpicRunLog
         run={logRun([logIteration({ turnStatus: "failed", failureReason: "infra:timeout" })])}
-        environmentId="env"
+        environmentId={EnvironmentId.make("env")}
         cwd="/repo"
       />,
     );

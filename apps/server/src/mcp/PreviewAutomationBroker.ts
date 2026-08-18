@@ -111,7 +111,7 @@ const removeConnectionFromState = (
   current: BrokerState,
   clientId: string,
   queue: ClientConnection["queue"],
-): { readonly state: BrokerState; readonly disconnected: ReadonlyArray<PendingRequest> } => {
+) => {
   const clients = new Map(current.clients);
   const assignments = new Map(current.assignments);
   const pending = new Map(current.pending);
@@ -125,10 +125,8 @@ const removeConnectionFromState = (
     pending.delete(requestId);
     disconnected.push(entry);
   }
-  return {
-    state: { ...current, clients, assignments, pending },
-    disconnected,
-  };
+  const state: BrokerState = { ...current, clients, assignments, pending };
+  return { state, disconnected };
 };
 
 const selectorDiagnosticsFromInput = (
@@ -570,7 +568,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       } else {
         assignments.set(assignmentKey, {
           ...assignment,
-          ...(resultTabId === undefined ? {} : { tabId: resultTabId }),
+          tabId: resultTabId,
           tabSequence: requestSequence,
         });
       }

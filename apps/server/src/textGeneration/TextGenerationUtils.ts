@@ -1,10 +1,13 @@
 import { TextGenerationError } from "@t3tools/contracts";
+import { sanitizeFeatureBranchName } from "@t3tools/shared/git";
 import * as Schema from "effect/Schema";
+
+import type { CommitMessageGenerationResult } from "./TextGeneration.ts";
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
 /** Convert an Effect Schema to a flat JSON Schema object, inlining `$defs` when present. */
-export function toJsonSchemaObject(schema: Schema.Top): unknown {
+export function toJsonSchemaObject(schema: Schema.Top) {
   const document = Schema.toJsonSchemaDocument(schema);
   if (document.definitions && Object.keys(document.definitions).length > 0) {
     return { ...document.schema, $defs: document.definitions };
@@ -31,6 +34,28 @@ export function sanitizeCommitSubject(raw: string): string {
     return withoutTrailingPeriod;
   }
   return withoutTrailingPeriod.slice(0, 72).trimEnd();
+}
+
+/**
+ * Turn a decoded commit-message payload into the service result.
+ *
+ * The prompt only asks for `branch` when the caller wants one, so the schema
+ * that produced `generated` omits the field otherwise. Keep the key absent in
+ * that case instead of setting it to `undefined`.
+ */
+export function toCommitMessageResult(generated: {
+  readonly subject: string;
+  readonly body: string;
+  readonly branch?: string;
+}): CommitMessageGenerationResult {
+  const result = {
+    subject: sanitizeCommitSubject(generated.subject),
+    body: generated.body.trim(),
+  };
+  if (generated.branch === undefined) {
+    return result;
+  }
+  return { ...result, branch: sanitizeFeatureBranchName(generated.branch) };
 }
 
 /** Normalise a raw PR title to a single line with a sensible fallback. */

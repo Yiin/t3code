@@ -25,6 +25,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import type * as Types from "effect/Types";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
@@ -556,17 +557,19 @@ function updateProviderSession(
 ): Effect.Effect<ProviderSession> {
   return Effect.gen(function* () {
     const updatedAt = yield* nowIso;
-    const nextSession = {
+    // Mutable so the two clear flags can drop the key outright. Writing
+    // `undefined` instead would persist the key and defeat the merge that
+    // rebuilds the session from its stored runtime payload.
+    const nextSession: Types.Mutable<ProviderSession> = {
       ...context.session,
       ...patch,
       updatedAt,
-    } as ProviderSession & Record<string, unknown>;
-    const mutableSession = nextSession as Record<string, unknown>;
+    };
     if (options?.clearActiveTurnId) {
-      delete mutableSession.activeTurnId;
+      delete nextSession.activeTurnId;
     }
     if (options?.clearLastError) {
-      delete mutableSession.lastError;
+      delete nextSession.lastError;
     }
     context.session = nextSession;
     return nextSession;

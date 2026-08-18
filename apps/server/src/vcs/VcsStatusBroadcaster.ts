@@ -190,7 +190,9 @@ export class VcsStatusBroadcaster extends Context.Service<
   }
 >()("t3/vcs/VcsStatusBroadcaster") {}
 
-function fingerprintStatusPart(status: unknown): string {
+function fingerprintStatusPart(
+  status: VcsStatusLocalResult | VcsStatusRemoteResult | null,
+): string {
   return JSON.stringify(status);
 }
 

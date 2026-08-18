@@ -303,7 +303,7 @@ NodeProcess.stdin.on("data", (chunk: string) => {
   buffer = records.pop() ?? "";
   for (const record of records) {
     const line = record.endsWith("\r") ? record.slice(0, -1) : record;
-    const decoded = JSON.parse(line) as unknown;
+    const decoded: unknown = JSON.parse(line);
     if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
       throw new Error("invalid command");
     }

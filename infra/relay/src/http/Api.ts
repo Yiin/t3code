@@ -810,7 +810,7 @@ function clerkVerificationFailureReason(cause: unknown): string {
     return "audience_mismatch";
   }
   if (typeof cause === "object" && cause !== null && "reason" in cause) {
-    const reason = (cause as { readonly reason?: unknown }).reason;
+    const reason = cause.reason;
     if (typeof reason === "string" && reason.length > 0) {
       return safeAuthFailureReason(reason);
     }

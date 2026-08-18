@@ -1282,9 +1282,7 @@ export const makeCodexSessionRuntime = (
       );
 
     yield* Effect.forEach(
-      Object.values(
-        CodexRpc.SERVER_NOTIFICATION_METHODS,
-      ) as ReadonlyArray<CodexRpc.ServerNotificationMethod>,
+      Object.values(CodexRpc.SERVER_NOTIFICATION_METHODS),
       registerServerNotification,
       { concurrency: 1, discard: true },
     );

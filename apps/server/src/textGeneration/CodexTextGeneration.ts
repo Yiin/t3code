@@ -8,7 +8,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { type CodexSettings, type ModelSelection } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -25,7 +25,7 @@ import {
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
-  sanitizeCommitSubject,
+  toCommitMessageResult,
   sanitizePrTitle,
   sanitizeThreadTitle,
   toJsonSchemaObject,
@@ -315,13 +315,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         modelSelection: input.modelSelection,
       });
 
-      return {
-        subject: sanitizeCommitSubject(generated.subject),
-        body: generated.body.trim(),
-        ...("branch" in generated && typeof generated.branch === "string"
-          ? { branch: sanitizeFeatureBranchName(generated.branch) }
-          : {}),
-      };
+      return toCommitMessageResult(generated);
     });
 
   const generatePrContent: TextGeneration.TextGeneration["Service"]["generatePrContent"] =

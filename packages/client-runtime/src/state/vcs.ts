@@ -168,7 +168,7 @@ export function createVcsEnvironmentAtoms<R, E>(
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
         subscribe(WS_METHODS.subscribeVcsStatus, input).pipe(
           Stream.mapAccum(
-            () => null as VcsStatusResult | null,
+            (): VcsStatusResult | null => null,
             (current, event) => {
               const next = applyGitStatusStreamEvent(current, event);
               return [next, [next]] as const;

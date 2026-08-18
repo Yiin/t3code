@@ -34,7 +34,7 @@ function validateRelayUrl(value: string) {
 }
 
 function readBuildTimeValue(value: string | undefined): string {
-  return typeof value === "undefined" ? "" : value.trim();
+  return value === undefined ? "" : value.trim();
 }
 
 function normalizeSecureUrl(value: string): string | null {

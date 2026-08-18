@@ -34,73 +34,58 @@ export function loadRepoEnv({
   const localEnv = readEnvFile(NodePath.join(repoRoot, ".env.local"));
   const config = resolvePublicConfig(baseEnv, localEnv, rootEnv);
 
-  return {
-    ...rootEnv,
-    ...localEnv,
-    ...baseEnv,
-    ...(config.clerkPublishableKey
-      ? {
-          T3CODE_CLERK_PUBLISHABLE_KEY: config.clerkPublishableKey,
-          VITE_CLERK_PUBLISHABLE_KEY: config.clerkPublishableKey,
-          EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: config.clerkPublishableKey,
-        }
-      : {}),
-    ...(config.clerkJwtTemplate
-      ? {
-          T3CODE_CLERK_JWT_TEMPLATE: config.clerkJwtTemplate,
-          VITE_CLERK_JWT_TEMPLATE: config.clerkJwtTemplate,
-          EXPO_PUBLIC_CLERK_JWT_TEMPLATE: config.clerkJwtTemplate,
-        }
-      : {}),
-    ...(config.clerkCliOAuthClientId
-      ? {
-          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: config.clerkCliOAuthClientId,
-          VITE_CLERK_CLI_OAUTH_CLIENT_ID: config.clerkCliOAuthClientId,
-        }
-      : {}),
-    ...(config.relayUrl
-      ? {
-          T3CODE_RELAY_URL: config.relayUrl,
-          VITE_T3CODE_RELAY_URL: config.relayUrl,
-        }
-      : {}),
-    ...(config.mobileOtlpTracesUrl
-      ? {
-          T3CODE_MOBILE_OTLP_TRACES_URL: config.mobileOtlpTracesUrl,
-          EXPO_PUBLIC_OTLP_TRACES_URL: config.mobileOtlpTracesUrl,
-        }
-      : {}),
-    ...(config.mobileOtlpTracesDataset
-      ? {
-          T3CODE_MOBILE_OTLP_TRACES_DATASET: config.mobileOtlpTracesDataset,
-          EXPO_PUBLIC_OTLP_TRACES_DATASET: config.mobileOtlpTracesDataset,
-        }
-      : {}),
-    ...(config.mobileOtlpTracesToken
-      ? {
-          T3CODE_MOBILE_OTLP_TRACES_TOKEN: config.mobileOtlpTracesToken,
-          EXPO_PUBLIC_OTLP_TRACES_TOKEN: config.mobileOtlpTracesToken,
-        }
-      : {}),
-    ...(config.relayClientOtlpTracesUrl
-      ? {
-          T3CODE_RELAY_CLIENT_OTLP_TRACES_URL: config.relayClientOtlpTracesUrl,
-          VITE_RELAY_OTLP_TRACES_URL: config.relayClientOtlpTracesUrl,
-        }
-      : {}),
-    ...(config.relayClientOtlpTracesDataset
-      ? {
-          T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET: config.relayClientOtlpTracesDataset,
-          VITE_RELAY_OTLP_TRACES_DATASET: config.relayClientOtlpTracesDataset,
-        }
-      : {}),
-    ...(config.relayClientOtlpTracesToken
-      ? {
-          T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN: config.relayClientOtlpTracesToken,
-          VITE_RELAY_OTLP_TRACES_TOKEN: config.relayClientOtlpTracesToken,
-        }
-      : {}),
-  };
+  // Each resolved config value is republished under every name its consumers read.
+  const aliases: ReadonlyArray<readonly [string | undefined, readonly string[]]> = [
+    [
+      config.clerkPublishableKey,
+      [
+        "T3CODE_CLERK_PUBLISHABLE_KEY",
+        "VITE_CLERK_PUBLISHABLE_KEY",
+        "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY",
+      ],
+    ],
+    [
+      config.clerkJwtTemplate,
+      ["T3CODE_CLERK_JWT_TEMPLATE", "VITE_CLERK_JWT_TEMPLATE", "EXPO_PUBLIC_CLERK_JWT_TEMPLATE"],
+    ],
+    [
+      config.clerkCliOAuthClientId,
+      ["T3CODE_CLERK_CLI_OAUTH_CLIENT_ID", "VITE_CLERK_CLI_OAUTH_CLIENT_ID"],
+    ],
+    [config.relayUrl, ["T3CODE_RELAY_URL", "VITE_T3CODE_RELAY_URL"]],
+    [config.mobileOtlpTracesUrl, ["T3CODE_MOBILE_OTLP_TRACES_URL", "EXPO_PUBLIC_OTLP_TRACES_URL"]],
+    [
+      config.mobileOtlpTracesDataset,
+      ["T3CODE_MOBILE_OTLP_TRACES_DATASET", "EXPO_PUBLIC_OTLP_TRACES_DATASET"],
+    ],
+    [
+      config.mobileOtlpTracesToken,
+      ["T3CODE_MOBILE_OTLP_TRACES_TOKEN", "EXPO_PUBLIC_OTLP_TRACES_TOKEN"],
+    ],
+    [
+      config.relayClientOtlpTracesUrl,
+      ["T3CODE_RELAY_CLIENT_OTLP_TRACES_URL", "VITE_RELAY_OTLP_TRACES_URL"],
+    ],
+    [
+      config.relayClientOtlpTracesDataset,
+      ["T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET", "VITE_RELAY_OTLP_TRACES_DATASET"],
+    ],
+    [
+      config.relayClientOtlpTracesToken,
+      ["T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN", "VITE_RELAY_OTLP_TRACES_TOKEN"],
+    ],
+  ];
+
+  const env: Record<string, string | undefined> = { ...rootEnv, ...localEnv, ...baseEnv };
+  for (const [value, names] of aliases) {
+    if (!value) {
+      continue;
+    }
+    for (const name of names) {
+      env[name] = value;
+    }
+  }
+  return env;
 }
 
 export function resolvePublicConfig(...sources: readonly Environment[]): T3CodePublicConfig {

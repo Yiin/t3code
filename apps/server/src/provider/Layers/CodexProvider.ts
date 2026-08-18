@@ -70,6 +70,8 @@ export interface CodexAppServerProviderSnapshot {
   readonly limit: ProviderAccountLimitSignal | null;
 }
 
+const EMPTY_CODEX_USAGE_READINGS: ReadonlyArray<ProviderUsageReading> = [];
+
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: "None",
   minimal: "Minimal",
@@ -376,7 +378,7 @@ const readCodexRateLimitsForProbe = Effect.fn("readCodexRateLimitsForProbe")(fun
     .pipe(Effect.timeoutOption(Duration.millis(CODEX_RATE_LIMITS_TIMEOUT_MS)), Effect.result);
 
   if (Result.isFailure(result) || Option.isNone(result.success)) {
-    return { usage: [] as ReadonlyArray<ProviderUsageReading>, limit: null };
+    return { usage: EMPTY_CODEX_USAGE_READINGS, limit: null };
   }
   const detectedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
   return {

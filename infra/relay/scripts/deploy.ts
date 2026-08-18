@@ -283,13 +283,13 @@ function relayPublicConfigValues(
       clientTracingToken: undefined,
     };
   }
-  const value = output as Record<string, unknown>;
+  const fields = new Map<string, unknown>(Object.entries(output));
   const text = (name: string) => {
-    const candidate = value[name];
+    const candidate = fields.get(name);
     return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
   };
   const secret = (name: string): string | undefined => {
-    const candidate = value[name];
+    const candidate = fields.get(name);
     if (!Redacted.isRedacted(candidate)) {
       return text(name);
     }

@@ -777,7 +777,7 @@ export const layerCloudflareBindings = (
               Effect.map((response) =>
                 response.result.filter(
                   (record): record is typeof record & { readonly id: string } =>
-                    typeof record.id === "string" &&
+                    record.id !== undefined &&
                     normalizeHostname(record.name) === normalizeHostname(hostname),
                 ),
               ),

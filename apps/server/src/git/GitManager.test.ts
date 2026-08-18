@@ -10,6 +10,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { expect } from "vite-plus/test";
@@ -17,10 +18,9 @@ import type {
   GitActionProgressEvent,
   GitPreparePullRequestThreadInput,
   ModelSelection,
-  ThreadId,
 } from "@t3tools/contracts";
 
-import { GitCommandError, TextGenerationError } from "@t3tools/contracts";
+import { GitCommandError, TextGenerationError, ThreadId } from "@t3tools/contracts";
 import * as GitHubCli from "../sourceControl/GitHubCli.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -688,7 +688,14 @@ function makeManager(input?: {
   );
 }
 
-const asThreadId = (threadId: string) => threadId as ThreadId;
+const asThreadId = Schema.decodeSync(ThreadId);
+
+function requireWorktreePath(worktreePath: string | null): string {
+  if (worktreePath === null) {
+    throw new Error("Expected a worktree path.");
+  }
+  return worktreePath;
+}
 
 const GitManagerTestLayer = GitVcsDriver.layer.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-git-manager-test-" })),
@@ -3070,8 +3077,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
 
       expect(result.branch).toBe("feature/pr-worktree");
       expect(result.worktreePath).not.toBeNull();
-      expect(NodeFS.existsSync(result.worktreePath as string)).toBe(true);
-      const worktreeBranch = (yield* runGit(result.worktreePath as string, [
+      expect(NodeFS.existsSync(requireWorktreePath(result.worktreePath))).toBe(true);
+      const worktreeBranch = (yield* runGit(requireWorktreePath(result.worktreePath), [
         "branch",
         "--show-current",
       ])).stdout.trim();
@@ -3186,7 +3193,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(setupCalls[0]).toEqual({
         threadId: "thread-pr-setup",
         projectCwd: repoDir,
-        worktreePath: result.worktreePath as string,
+        worktreePath: requireWorktreePath(result.worktreePath),
       });
     }),
   );
@@ -3236,7 +3243,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       });
 
       expect(result.worktreePath).not.toBeNull();
-      const upstreamRef = (yield* runGit(result.worktreePath as string, [
+      const upstreamRef = (yield* runGit(requireWorktreePath(result.worktreePath), [
         "rev-parse",
         "--abbrev-ref",
         "@{upstream}",
@@ -3244,7 +3251,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(upstreamRef).toBe("fork-seed/feature/pr-fork");
       expect(upstreamRef.startsWith("origin/")).toBe(false);
       expect(
-        (yield* runGit(result.worktreePath as string, [
+        (yield* runGit(requireWorktreePath(result.worktreePath), [
           "config",
           "--get",
           "remote.fork-seed.url",
@@ -3467,7 +3474,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         expect((yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim()).toBe("main");
         expect((yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim()).toBe(mainBefore);
         expect(
-          (yield* runGit(result.worktreePath as string, [
+          (yield* runGit(requireWorktreePath(result.worktreePath), [
             "branch",
             "--show-current",
           ])).stdout.trim(),
@@ -3526,7 +3533,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         expect(result.branch).toBe("t3code/pr-92/main");
         expect((yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim()).toBe(localMainBefore);
         expect(
-          (yield* runGit(result.worktreePath as string, [
+          (yield* runGit(requireWorktreePath(result.worktreePath), [
             "rev-parse",
             "--abbrev-ref",
             "@{upstream}",
@@ -3643,7 +3650,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
 
       expect(result.branch).toBe("feature/pr-setup-failure");
       expect(result.worktreePath).not.toBeNull();
-      expect(NodeFS.existsSync(result.worktreePath as string)).toBe(true);
+      expect(NodeFS.existsSync(requireWorktreePath(result.worktreePath))).toBe(true);
     }),
   );
 

@@ -241,7 +241,11 @@ export const materializeHarnessHomeOverlay = Effect.fn("materializeHarnessHomeOv
   layout: HarnessHomeLayout,
 ): Effect.fn.Return<void, HarnessHomeOverlayError, FileSystem.FileSystem | Path.Path> {
   if (layout.mode !== "authOverlay" || !layout.effectiveHomePath) return;
-  const activeLayout = { ...layout, label: manifest.label } as ActiveLayout;
+  const activeLayout: ActiveLayout = {
+    ...layout,
+    effectiveHomePath: layout.effectiveHomePath,
+    label: manifest.label,
+  };
   if (activeLayout.sharedHomePath === activeLayout.effectiveHomePath)
     return yield* new HarnessHomeOverlayPathConflictError(activeLayout);
   const fileSystem = yield* FileSystem.FileSystem;

@@ -2,13 +2,15 @@ import type {
   BeadsEpicSummary,
   BeadsIssueSummary,
   BeadsStatusResult,
+  EnvironmentId,
   EpicRun,
+  ProjectId,
 } from "@t3tools/contracts";
 
 export interface EpicProjectSource {
-  readonly environmentId: string;
+  readonly environmentId: EnvironmentId;
   readonly workspaceRoot: string;
-  readonly projectId: string;
+  readonly projectId: ProjectId;
   readonly projectTitle: string;
 }
 

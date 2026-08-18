@@ -171,13 +171,7 @@ export function parseCursorTaskNotification(params: unknown): CursorTaskSignal |
   };
 }
 
-export function extractTodosAsPlan(params: typeof CursorUpdateTodosRequest.Type): {
-  readonly explanation?: string;
-  readonly plan: ReadonlyArray<{
-    readonly step: string;
-    readonly status: "pending" | "inProgress" | "completed";
-  }>;
-} {
+export function extractTodosAsPlan(params: typeof CursorUpdateTodosRequest.Type) {
   const plan = params.todos.flatMap((todo) => {
     const step = todo.content?.trim() ?? todo.title?.trim() ?? "";
     if (step === "") {

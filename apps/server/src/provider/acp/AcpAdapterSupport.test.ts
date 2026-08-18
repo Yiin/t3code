@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as EffectAcpErrors from "effect-acp/errors";
-import { ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 
 import { ProviderAdapterRequestError } from "../Errors.ts";
 import {
@@ -20,7 +20,7 @@ describe("AcpAdapterSupport", () => {
   it("maps ACP request errors to provider adapter request errors", () => {
     const error = mapAcpToAdapterError(
       ProviderDriverKind.make("cursor"),
-      "thread-1" as never,
+      ThreadId.make("thread-1"),
       "session/prompt",
       new EffectAcpErrors.AcpRequestError({
         code: -32602,
@@ -41,7 +41,7 @@ describe("AcpAdapterSupport", () => {
 
     const error = mapAcpOrAdapterError(
       ProviderDriverKind.make("grok"),
-      "thread-1" as never,
+      ThreadId.make("thread-1"),
       "session/prompt",
       original,
     );
@@ -52,7 +52,7 @@ describe("AcpAdapterSupport", () => {
   it("maps a refused resume to a provider adapter resume error", () => {
     const error = mapAcpSessionStartError({
       provider: ProviderDriverKind.make("kimi"),
-      threadId: "thread-1" as never,
+      threadId: ThreadId.make("thread-1"),
       method: "session/start",
       resumeSessionId: "session-9",
       error: new EffectAcpErrors.AcpUnsupportedCapabilityError({
@@ -69,7 +69,7 @@ describe("AcpAdapterSupport", () => {
   it("keeps a start failure that carried no cursor a request error", () => {
     const error = mapAcpSessionStartError({
       provider: ProviderDriverKind.make("kimi"),
-      threadId: "thread-1" as never,
+      threadId: ThreadId.make("thread-1"),
       method: "session/start",
       resumeSessionId: undefined,
       error: new EffectAcpErrors.AcpRequestError({

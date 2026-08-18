@@ -47,7 +47,7 @@ export function buildUnavailableProviderSnapshot(
 ): Effect.Effect<ServerProvider> {
   return Effect.gen(function* () {
     const checkedAt = input.checkedAt ?? (yield* nowIso);
-    const displayName = input.displayName?.trim() || (input.driverKind as string);
+    const displayName = input.displayName?.trim() || input.driverKind;
 
     const base = buildServerProvider({
       presentation: { displayName },

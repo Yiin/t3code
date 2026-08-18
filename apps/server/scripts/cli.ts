@@ -112,7 +112,7 @@ const applyPublishIconOverrides = Effect.fn("applyPublishIconOverrides")(functio
   }
 
   yield* Effect.log("[cli] Applied publish icon overrides to dist/client");
-  return backups as ReadonlyArray<PublishIconBackup>;
+  return backups;
 });
 
 const restorePublishIconOverrides = Effect.fn("restorePublishIconOverrides")(function* (

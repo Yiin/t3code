@@ -1435,7 +1435,7 @@ function removeDraftThreadReferences(
     Object.entries(state.logicalProjectDraftThreadKeyByLogicalProjectKey).filter(
       ([, draftThreadKey]) => draftThreadKey !== threadKey,
     ),
-  ) as Record<string, string>;
+  );
   const { [threadKey]: _removedDraftThread, ...restDraftThreadsByThreadKey } =
     state.draftThreadsByThreadKey;
   const { [threadKey]: removedComposerDraft, ...restDraftsByThreadKey } = state.draftsByThreadKey;
@@ -3371,9 +3371,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         );
         const draftThreadsByThreadKey = Object.fromEntries(
           Object.entries(normalizedPersisted.draftThreadsByThreadKey).map(
-            ([threadKey, draftThread]) => [threadKey, toHydratedDraftThreadState(draftThread)],
+            ([threadKey, draftThread]): [string, DraftThreadState] => [
+              threadKey,
+              toHydratedDraftThreadState(draftThread),
+            ],
           ),
-        ) as Record<string, DraftThreadState>;
+        );
         return {
           ...currentState,
           draftsByThreadKey,
@@ -3418,13 +3421,13 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
           parseScopedProjectKey(logicalProjectKey)?.environmentId !== environmentId &&
           !removedThreadKeys.has(threadKey),
       ),
-    ) as Record<string, string>;
+    );
     const nextDraftThreads = Object.fromEntries(
       Object.entries(state.draftThreadsByThreadKey).filter(
         ([threadKey, draftThread]) =>
           draftThread.environmentId !== environmentId && !removedThreadKeys.has(threadKey),
       ),
-    ) as Record<string, DraftThreadState>;
+    );
     const nextDrafts = Object.fromEntries(
       Object.entries(state.draftsByThreadKey).filter(([threadKey, draft]) => {
         if (!removedThreadKeys.has(threadKey)) {
@@ -3433,7 +3436,7 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
         revokeDraftThreadPreviewUrls(draft);
         return false;
       }),
-    ) as Record<string, ComposerThreadDraftState>;
+    );
 
     return {
       draftsByThreadKey: nextDrafts,

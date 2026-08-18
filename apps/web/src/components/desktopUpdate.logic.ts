@@ -58,7 +58,7 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
   }
   if (state.status === "downloading") {
     const progress =
-      typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
+      state.downloadPercent == null ? "" : ` (${Math.floor(state.downloadPercent)}%)`;
     return `Downloading update${progress}`;
   }
   if (state.status === "downloaded") {
@@ -85,7 +85,7 @@ export function getDesktopUpdateInstallConfirmationMessage(
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
   if (!result.accepted || result.completed) return null;
-  if (typeof result.state.message !== "string") return null;
+  if (result.state.message == null) return null;
   const message = result.state.message.trim();
   return message.length > 0 ? message : null;
 }

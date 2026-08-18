@@ -1,7 +1,16 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
-import { EnvironmentScopeRequiredError, ProjectId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_EPIC_RUN_CONFIG,
+  DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
+  EnvironmentScopeRequiredError,
+  EpicRunId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type EpicRun,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -29,18 +38,21 @@ import {
   watchEpicRun,
 } from "./epic.ts";
 
-const run = {
-  runId: "run-1",
+const run: EpicRun = {
+  runId: EpicRunId.make("run-1"),
   epicId: "t3code-vst",
   projectId: ProjectId.make("project-1"),
   cwd: "/repo",
   prompt: "Cook it",
   orientationFile: null,
-  modelSelection: { instanceId: "codex", model: "gpt-5" },
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
   runtimeMode: "full-access",
+  config: DEFAULT_EPIC_RUN_CONFIG,
+  configProvenance: DEFAULT_EPIC_RUN_CONFIG_PROVENANCE,
   originThreadId: null,
   status: "running",
   maxIterations: 10,
+  workers: 1,
   iterationsDispatched: 2,
   iterationsCompleted: 2,
   currentThreadId: ThreadId.make("thread-1"),
@@ -53,7 +65,7 @@ const run = {
   updatedAt: "2026-07-29T00:00:00.000Z",
   threadRefs: [],
   recentIterations: [],
-} as const;
+};
 
 it("resolves the project whose normalized workspace root matches", () => {
   // The shell snapshot only ever contains active projects — getShellSnapshot
@@ -99,10 +111,7 @@ it("clears runtime state only on a genuine transport failure", () => {
 });
 
 it("formats compact output deterministically", () => {
-  assert.strictEqual(
-    formatEpicRunCompact(run as never),
-    "run-1\trunning\tt3code-vst\t2/10\tthread-1\t-",
-  );
+  assert.strictEqual(formatEpicRunCompact(run), "run-1\trunning\tt3code-vst\t2/10\tthread-1\t-");
 });
 
 it("formats lists as counted TOON and JSON as pure JSON", () => {
@@ -345,7 +354,7 @@ it.effect("shares the discovery session with the command that follows it", () =>
 
 // watchEpicRun -----------------------------------------------------------
 
-const runWithStatus = (status: string) => ({ ...run, status }) as never;
+const runWithStatus = (status: EpicRun["status"]): EpicRun => ({ ...run, status });
 
 it.effect("keeps watching after a poll fails and finishes when the run is done", () =>
   Effect.gen(function* () {

@@ -27,10 +27,10 @@ const isTeardownEvent = (event: OrchestrationEvent): event is ThreadTeardownEven
 
 // The trigger is part of the command id so an operator reading the event log can
 // tell a settle-driven stop from an archive-driven one.
-const stopCommandIdPrefix: Record<TeardownEventType, string> = {
+const stopCommandIdPrefix = {
   "thread.settled": "session-stop-for-settle",
   "thread.archived": "session-stop-for-archive",
-};
+} satisfies Record<TeardownEventType, string>;
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 

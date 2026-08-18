@@ -10,8 +10,11 @@ interface WindowControlsOverlayLike {
   removeEventListener(type: "geometrychange", listener: EventListener): void;
 }
 
-interface NavigatorWithWindowControlsOverlay extends Navigator {
-  readonly windowControlsOverlay?: WindowControlsOverlayLike;
+declare global {
+  interface Navigator {
+    // Window Controls Overlay is Chromium-only, so lib.dom does not declare it.
+    readonly windowControlsOverlay?: WindowControlsOverlayLike;
+  }
 }
 
 function getWindowControlsOverlay(): WindowControlsOverlayLike | null {
@@ -19,7 +22,7 @@ function getWindowControlsOverlay(): WindowControlsOverlayLike | null {
     return null;
   }
 
-  return (navigator as NavigatorWithWindowControlsOverlay).windowControlsOverlay ?? null;
+  return navigator.windowControlsOverlay ?? null;
 }
 
 export function syncDocumentWindowControlsOverlayClass(): () => void {

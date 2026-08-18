@@ -5,23 +5,24 @@ export interface SubagentActivityLink {
   readonly spawnedByItemId?: string;
 }
 
-function asRecord(value: unknown): Readonly<Record<string, unknown>> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Readonly<Record<string, unknown>>)
-    : null;
-}
-
+/**
+ * Activity payloads are `Schema.Unknown` on the wire, and the two link fields
+ * this match needs are written across many activity kinds, so no single
+ * contract schema covers them. `in` reads the fields without claiming a shape
+ * the payload may not have.
+ */
 export function isSubagentActivity(
   activity: OrchestrationThreadActivity,
   subagent: SubagentActivityLink,
 ): boolean {
-  const payload = asRecord(activity.payload);
-  if (payload === null) return false;
+  const payload = activity.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
 
+  const parentToolUseId = "parentToolUseId" in payload ? payload.parentToolUseId : undefined;
+  const taskId = "taskId" in payload ? payload.taskId : undefined;
   return (
-    (subagent.spawnedByItemId !== undefined &&
-      payload.parentToolUseId === subagent.spawnedByItemId) ||
-    payload.taskId === subagent.subagentId
+    (subagent.spawnedByItemId !== undefined && parentToolUseId === subagent.spawnedByItemId) ||
+    taskId === subagent.subagentId
   );
 }
 

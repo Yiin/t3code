@@ -418,7 +418,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         const iterations = yield* store.listIterations({ runId: run.runId });
         const mergeState = yield* store.getMergeState({ runId: run.runId });
         const strandedBranches = Option.match(mergeState, {
-          onNone: () => [] as Array<string>,
+          onNone: (): ReadonlyArray<string> => [],
           onSome: (state) => state.entries.map((entry) => entry.branch),
         });
         const stranded = new Set(strandedBranches);

@@ -23,10 +23,12 @@ function respondError(id: number | string, code: number, message: string): void 
 
 function logRequest(message: Record<string, unknown>): void {
   if (!requestLogPath) return;
-  const entry: Record<string, unknown> = { method: message.method };
   // `params` is logged only when present, so a test can tell an omitted
   // payload apart from an empty object.
-  if ("params" in message) entry.params = message.params;
+  const entry =
+    "params" in message
+      ? { method: message.method, params: message.params }
+      : { method: message.method };
   NodeFS.appendFileSync(requestLogPath, `${JSON.stringify(entry)}\n`, "utf8");
 }
 

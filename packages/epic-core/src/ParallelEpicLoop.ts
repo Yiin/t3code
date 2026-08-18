@@ -698,12 +698,18 @@ export const assembleIterationPrompt = (input: {
 }): string =>
   `${input.basePrompt}\n\nCook exactly \`${input.issueId}\` this iteration.\n\n## Epic context (resolved at dispatch)\n\n${input.epicContext ?? "(epic description unavailable)"}\n\n${input.orientationCard ?? "(no orientation card in this repo)"}${input.siblingRule ? `\n\n${input.siblingRule}` : ""}`;
 
+/** Whether a commit-free iteration still counts as done, and why not. */
+interface NoCommitEvidenceVerdict {
+  readonly accepted: boolean;
+  readonly failureReason: string | null;
+}
+
 const noCommitEvidenceVerdict = (input: {
   readonly status: string | null;
   readonly isResearch: boolean;
   readonly commentsBefore: number;
   readonly commentsAfter: number;
-}): { readonly accepted: boolean; readonly failureReason: string | null } => {
+}): NoCommitEvidenceVerdict => {
   if (input.status !== "closed") {
     return { accepted: false, failureReason: "no-commit-child-open" };
   }

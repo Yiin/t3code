@@ -957,7 +957,7 @@ const program = Effect.gen(function* () {
         ? params.sessionId
         : sessionId;
 
-    if (typeof nextModeId === "string" && nextModeId.trim()) {
+    if (nextModeId !== undefined && nextModeId.trim()) {
       currentModeId = nextModeId.trim();
       return agent.client
         .sessionUpdate({

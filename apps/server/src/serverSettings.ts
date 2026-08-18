@@ -37,7 +37,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as PubSub from "effect/PubSub";
+import * as Rec from "effect/Record";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -261,23 +263,16 @@ function stripDefaultServerSettings(current: unknown, defaults: unknown): unknow
     return Equal.equals(current, defaults) ? undefined : current;
   }
 
-  if (
-    current !== null &&
-    defaults !== null &&
-    typeof current === "object" &&
-    typeof defaults === "object"
-  ) {
-    const currentRecord = current as Record<string, unknown>;
-    const defaultsRecord = defaults as Record<string, unknown>;
+  if (Predicate.isObject(current) && Predicate.isObject(defaults)) {
     const next: Record<string, unknown> = {};
 
-    for (const key of Object.keys(currentRecord)) {
+    for (const key of Object.keys(current)) {
       if (ATOMIC_SETTINGS_KEYS.has(key)) {
-        if (!Equal.equals(currentRecord[key], defaultsRecord[key])) {
-          next[key] = currentRecord[key];
+        if (!Equal.equals(current[key], defaults[key])) {
+          next[key] = current[key];
         }
       } else {
-        const stripped = stripDefaultServerSettings(currentRecord[key], defaultsRecord[key]);
+        const stripped = stripDefaultServerSettings(current[key], defaults[key]);
         if (stripped !== undefined) {
           next[key] = stripped;
         }
@@ -357,10 +352,8 @@ const make = Effect.gen(function* () {
     settings: ServerSettings,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
     Effect.gen(function* () {
-      const providerInstances: Record<string, ProviderInstanceConfig> = {
-        ...settings.providerInstances,
-      };
-      for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+      const providerInstances = { ...settings.providerInstances };
+      for (const [instanceId, instance] of Rec.toEntries(settings.providerInstances)) {
         if (!instance.environment) continue;
         const environment: ProviderInstanceEnvironmentVariable[] = [];
         for (const variable of instance.environment) {
@@ -394,7 +387,7 @@ const make = Effect.gen(function* () {
       }
       return {
         ...settings,
-        providerInstances: providerInstances as ServerSettings["providerInstances"],
+        providerInstances,
       };
     });
 
@@ -403,12 +396,10 @@ const make = Effect.gen(function* () {
     next: ServerSettings,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
     Effect.gen(function* () {
-      const providerInstances: Record<string, ProviderInstanceConfig> = {
-        ...next.providerInstances,
-      };
+      const providerInstances = { ...next.providerInstances };
 
       const nextSecretKeys = new Set<string>();
-      for (const [instanceId, instance] of Object.entries(next.providerInstances)) {
+      for (const [instanceId, instance] of Rec.toEntries(next.providerInstances)) {
         if (!instance.environment) continue;
         const environment: ProviderInstanceEnvironmentVariable[] = [];
         for (const variable of instance.environment) {
@@ -473,7 +464,7 @@ const make = Effect.gen(function* () {
         } satisfies ProviderInstanceConfig;
       }
 
-      for (const [instanceId, instance] of Object.entries(current.providerInstances)) {
+      for (const [instanceId, instance] of Rec.toEntries(current.providerInstances)) {
         for (const variable of instance.environment ?? []) {
           if (!variable.sensitive) continue;
           const secretName = providerEnvironmentSecretName({ instanceId, name: variable.name });
@@ -495,7 +486,7 @@ const make = Effect.gen(function* () {
 
       return {
         ...next,
-        providerInstances: providerInstances as ServerSettings["providerInstances"],
+        providerInstances,
       };
     });
 

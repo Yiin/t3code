@@ -73,8 +73,8 @@ export function HostedBrowserWebview(props: {
     };
   }, [tabId]);
 
-  const setWebviewRef = useCallback((node: HTMLElement | null) => {
-    webviewRef.current = node as ElectronWebview | null;
+  const setWebviewRef = useCallback((node: ElectronWebview | null) => {
+    webviewRef.current = node;
     if (node && !node.hasAttribute("allowpopups")) node.setAttribute("allowpopups", "true");
   }, []);
 

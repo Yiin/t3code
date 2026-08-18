@@ -46,11 +46,12 @@ export const fixPath = Effect.fn("fixPath")(function* (): Effect.fn.Return<
 
   if (platform === "win32") {
     const repairedEnvironment = yield* resolveWindowsEnvironment(env).pipe(
-      Effect.catchDefect((defect) =>
-        Effect.sync(() => {
-          logPathHydrationWarning("Failed to hydrate PATH from the user environment.", defect);
-          return {} as Partial<NodeJS.ProcessEnv>;
-        }),
+      Effect.catchDefect(
+        (defect): Effect.Effect<Partial<NodeJS.ProcessEnv>> =>
+          Effect.sync(() => {
+            logPathHydrationWarning("Failed to hydrate PATH from the user environment.", defect);
+            return {};
+          }),
       ),
     );
     for (const [key, value] of Object.entries(repairedEnvironment)) {

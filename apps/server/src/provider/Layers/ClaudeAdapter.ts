@@ -15,6 +15,7 @@ import {
   type PermissionMode,
   type PermissionResult,
   type PermissionUpdate,
+  type SDKCompactBoundaryMessage,
   type SDKMessage,
   type SDKControlGetContextUsageResponse,
   type SDKResultMessage,
@@ -43,6 +44,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
+  type RuntimeMode,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -644,16 +646,18 @@ function normalizeClaudeContextUsageApiSnapshot(
 }
 
 function compactBoundaryTokenUsageSnapshot(
-  message: Record<string, unknown>,
+  message: SDKCompactBoundaryMessage,
   contextWindow?: number,
   totalProcessedTokens?: number,
 ): ThreadTokenUsageSnapshot | undefined {
-  const metadata = message.compact_metadata;
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+  // `compact_metadata` is declared required by the SDK, but this runs against
+  // whatever the subprocess actually wrote, so an absent blob still degrades
+  // to "no snapshot" instead of throwing.
+  const compactMetadata = message.compact_metadata;
+  if (!compactMetadata) {
     return undefined;
   }
 
-  const compactMetadata = metadata as Record<string, unknown>;
   const postTokens = finiteNonNegativeInteger(compactMetadata.post_tokens);
   if (postTokens === undefined || postTokens <= 0) {
     return undefined;
@@ -1065,12 +1069,27 @@ function normalizeToolProgressIds(input: {
   };
 }
 
-const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
+/**
+ * One block of a user message's content array, as the SDK declares it. Deriving
+ * it here keeps the attachment builders below tied to the SDK's own union
+ * instead of a hand-written mirror of it.
+ */
+type ClaudeUserContentBlock = Exclude<SDKUserMessage["message"]["content"], string>[number];
+type ClaudeImageMimeType = Extract<
+  Extract<ClaudeUserContentBlock, { readonly type: "image" }>["source"],
+  { readonly type: "base64" }
+>["media_type"];
+
+const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = [
   "image/gif",
   "image/jpeg",
   "image/png",
   "image/webp",
-]);
+] as const satisfies ReadonlyArray<ClaudeImageMimeType>;
+
+function isSupportedClaudeImageMimeType(value: string): value is ClaudeImageMimeType {
+  return SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.some((mimeType) => mimeType === value);
+}
 const CLAUDE_SETTING_SOURCES = [
   "user",
   "project",
@@ -1113,8 +1132,20 @@ function buildPromptText(
   return applyClaudePromptEffortPrefix(input.input?.trim() ?? "", promptEffort);
 }
 
+/** `approval-required` keeps the SDK's default permission prompting. */
+function permissionModeForRuntimeMode(runtimeMode: RuntimeMode): PermissionMode | undefined {
+  switch (runtimeMode) {
+    case "auto-accept-edits":
+      return "acceptEdits";
+    case "full-access":
+      return "bypassPermissions";
+    case "approval-required":
+      return undefined;
+  }
+}
+
 function buildUserMessage(input: {
-  readonly sdkContent: Array<Record<string, unknown>>;
+  readonly sdkContent: Array<ClaudeUserContentBlock>;
 }): SDKUserMessage {
   return {
     type: "user",
@@ -1122,15 +1153,15 @@ function buildUserMessage(input: {
     parent_tool_use_id: null,
     message: {
       role: "user",
-      content: input.sdkContent as unknown as SDKUserMessage["message"]["content"],
+      content: input.sdkContent,
     },
-  } as SDKUserMessage;
+  };
 }
 
 function buildClaudeImageContentBlock(input: {
-  readonly mimeType: string;
+  readonly mimeType: ClaudeImageMimeType;
   readonly bytes: Uint8Array;
-}): Record<string, unknown> {
+}): ClaudeUserContentBlock {
   return {
     type: "image",
     source: {
@@ -1153,7 +1184,7 @@ function buildClaudeDocumentContentBlock(input: {
   readonly title: string;
   readonly mimeType: string;
   readonly bytes: Uint8Array;
-}): Record<string, unknown> {
+}): ClaudeUserContentBlock {
   return {
     type: "document",
     source:
@@ -1181,7 +1212,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
   },
 ) {
   const text = buildPromptText(input, dependencies.boundInstanceId);
-  const sdkContent: Array<Record<string, unknown>> = [];
+  const sdkContent: Array<ClaudeUserContentBlock> = [];
 
   if (text.length > 0) {
     sdkContent.push({ type: "text", text });
@@ -1193,10 +1224,14 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
   const pathReferences: Array<AttachmentPathReference> = [];
 
   for (const attachment of input.attachments ?? []) {
-    if (
-      attachment.type === "image" &&
-      !SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType)
-    ) {
+    // Narrowed once, up front, so the image block builder below receives a
+    // media type the SDK's own union accepts. A non-image attachment leaves
+    // this undefined, which is exactly the "not an image" test used later.
+    const imageMimeType =
+      attachment.type === "image" && isSupportedClaudeImageMimeType(attachment.mimeType)
+        ? attachment.mimeType
+        : undefined;
+    if (attachment.type === "image" && imageMimeType === undefined) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "turn/start",
@@ -1228,10 +1263,10 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
       ),
     );
 
-    if (attachment.type === "image") {
+    if (imageMimeType !== undefined) {
       sdkContent.push(
         buildClaudeImageContentBlock({
-          mimeType: attachment.mimeType,
+          mimeType: imageMimeType,
           bytes: yield* readBytes,
         }),
       );
@@ -3282,7 +3317,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* emitThreadTokenUsage(
           context,
           compactBoundaryTokenUsageSnapshot(
-            message as unknown as Record<string, unknown>,
+            message,
             context.lastKnownContextWindow,
             context.lastKnownTotalProcessedTokens,
           ),
@@ -3512,7 +3547,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // warning at runtime. The runtime fallback still catches undeclared
         // wire-only subtypes (like background_tasks_changed used to be).
         message satisfies never;
-        const unknownMessage = message as never as { subtype: string };
+        const unknownMessage: { subtype: string } = message;
         yield* emitRuntimeWarning(
           context,
           describeUnknownSdkMessage(`Claude system message '${unknownMessage.subtype}'`, message),
@@ -3687,7 +3722,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Exhaustiveness guard (see handleSystemMessage): new SDK top-level
         // message types fail typecheck here instead of warning at runtime.
         message satisfies never;
-        const unknownMessage = message as never as { type: string };
+        const unknownMessage: { type: string } = message;
         yield* emitRuntimeWarning(
           context,
           describeUnknownSdkMessage(`Claude SDK message '${unknownMessage.type}'`, message),
@@ -4107,7 +4142,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
           aborted = true;
           pendingUserInputs.delete(requestId);
-          runFork(Deferred.succeed(answersDeferred, {} as ProviderUserInputAnswers));
+          runFork(Deferred.succeed(answersDeferred, {}));
         };
         callbackOptions.signal.addEventListener("abort", onAbort, {
           once: true,
@@ -4345,11 +4380,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : undefined;
       const ultracode = isClaudeUltracodeEffort(effort);
       const effectiveEffort = getEffectiveClaudeAgentEffort(effort, modelSelection?.model);
-      const runtimeModeToPermission: Record<string, PermissionMode> = {
-        "auto-accept-edits": "acceptEdits",
-        "full-access": "bypassPermissions",
-      };
-      const permissionMode = runtimeModeToPermission[input.runtimeMode];
+      const permissionMode = permissionModeForRuntimeMode(input.runtimeMode);
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
@@ -4388,11 +4419,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
         // normalized to `xhigh` above and paired with `settings.ultracode`.
-        ...(effectiveEffort
-          ? {
-              effort: effectiveEffort as unknown as NonNullable<ClaudeQueryOptions["effort"]>,
-            }
-          : {}),
+        ...(effectiveEffort ? { effort: effectiveEffort } : {}),
         ...(permissionMode ? { permissionMode } : {}),
         ...(permissionMode === "bypassPermissions"
           ? { allowDangerouslySkipPermissions: true }

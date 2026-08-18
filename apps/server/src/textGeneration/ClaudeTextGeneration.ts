@@ -14,7 +14,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { type ClaudeSettings, type ModelSelection } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import { TextGenerationError } from "@t3tools/contracts";
@@ -27,7 +27,7 @@ import {
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
-  sanitizeCommitSubject,
+  toCommitMessageResult,
   sanitizePrTitle,
   sanitizeThreadTitle,
   toJsonSchemaObject,
@@ -282,13 +282,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         modelSelection: input.modelSelection,
       });
 
-      return {
-        subject: sanitizeCommitSubject(generated.subject),
-        body: generated.body.trim(),
-        ...("branch" in generated && typeof generated.branch === "string"
-          ? { branch: sanitizeFeatureBranchName(generated.branch) }
-          : {}),
-      };
+      return toCommitMessageResult(generated);
     });
 
   const generatePrContent: TextGeneration.TextGeneration["Service"]["generatePrContent"] =

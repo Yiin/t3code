@@ -16,13 +16,6 @@ const isExemptFile = (filename: string) => {
   return EXEMPT_FILENAME_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
 };
 
-const getLiteralStringValue = (node: unknown): Option.Option<string> => {
-  if (typeof node !== "object" || node === null) return Option.none();
-  if (!("type" in node) || node.type !== "Literal") return Option.none();
-  if (!("value" in node) || typeof node.value !== "string") return Option.none();
-  return Option.some(node.value);
-};
-
 const isServiceModuleSpecifier = (specifier: string) => {
   const withoutQuery = normalizePath(specifier).split(/[?#]/u)[0] ?? "";
   const basename = withoutQuery.split("/").pop() ?? "";
@@ -45,8 +38,7 @@ export default defineRule({
       },
       ImportDeclaration(node) {
         if (importsServiceModule) return;
-        const source = getLiteralStringValue(node.source);
-        if (Option.isSome(source) && isServiceModuleSpecifier(source.value)) {
+        if (isServiceModuleSpecifier(node.source.value)) {
           importsServiceModule = true;
         }
       },
@@ -55,9 +47,9 @@ export default defineRule({
         if (isExemptFile(context.filename)) return;
 
         const callee = unwrapExpression(node.callee);
-        if (Option.isNone(callee) || callee.value.type !== "MemberExpression") return;
+        if (callee.type !== "MemberExpression") return;
 
-        const property = getPropertyName(callee.value.property);
+        const property = getPropertyName(callee.property);
         if (Option.isNone(property) || property.value !== GUARDED_METHOD) return;
 
         context.report({ node, message });

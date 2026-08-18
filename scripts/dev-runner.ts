@@ -32,6 +32,9 @@ export const DEFAULT_T3_HOME = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(NodeOS.homedir(), ".t3"),
 );
 
+const DEV_RUNNER_MODES = ["dev", "dev:server", "dev:web"] as const;
+type DevMode = (typeof DEV_RUNNER_MODES)[number];
+
 const MODE_ARGS = {
   dev: [
     "run",
@@ -43,12 +46,9 @@ const MODE_ARGS = {
   ],
   "dev:server": ["run", "--filter=t3", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
-} as const satisfies Record<string, ReadonlyArray<string>>;
+} as const satisfies Record<DevMode, ReadonlyArray<string>>;
 
-type DevMode = keyof typeof MODE_ARGS;
 type PortAvailabilityCheck<R = never> = (port: number) => Effect.Effect<boolean, never, R>;
-
-const DEV_RUNNER_MODES = Object.keys(MODE_ARGS) as Array<DevMode>;
 
 export function getDevRunnerModeArgs(mode: DevMode): ReadonlyArray<string> {
   return MODE_ARGS[mode];
@@ -285,10 +285,7 @@ export function createDevRunnerEnv({
   });
 }
 
-function portPairForOffset(offset: number): {
-  readonly serverPort: number;
-  readonly webPort: number;
-} {
+function portPairForOffset(offset: number) {
   return {
     serverPort: BASE_SERVER_PORT + offset,
     webPort: BASE_WEB_PORT + offset,

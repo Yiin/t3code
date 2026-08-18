@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   ApprovalRequestId,
   CommandId,
+  EpicRunId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   epicRunIterationThreadId,
@@ -24,14 +25,18 @@ const runId = "run-a";
 const iterationThreadId = ThreadId.make(epicRunIterationThreadId({ runId, iterationIndex: 1 }));
 const interactiveThreadId = ThreadId.make("thread-interactive");
 
-const runningIteration = (iterationIndex: number): EpicRunIteration =>
-  ({
-    runId,
-    iterationIndex,
-    threadId: ThreadId.make(epicRunIterationThreadId({ runId, iterationIndex })),
-    status: "running",
-    startedAt: now,
-  }) as unknown as EpicRunIteration;
+const runningIteration = (iterationIndex: number): EpicRunIteration => ({
+  runId: EpicRunId.make(runId),
+  iterationIndex,
+  threadId: ThreadId.make(epicRunIterationThreadId({ runId, iterationIndex })),
+  issueId: null,
+  turnStatus: "running",
+  summary: null,
+  why: null,
+  failureReason: null,
+  startedAt: now,
+  finishedAt: null,
+});
 
 const turnStart = (threadId: ThreadId): OrchestrationCommand => ({
   type: "thread.turn.start",

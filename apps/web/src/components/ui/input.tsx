@@ -39,7 +39,7 @@ function Input({
         data-slot="input"
         size={typeof size === "number" ? size : undefined}
         style={nativeStyle}
-        {...(nativeInputProps as React.ComponentProps<"input">)}
+        {...nativeInputProps}
       />
     );
   } else {

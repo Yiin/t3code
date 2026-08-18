@@ -169,10 +169,11 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     return SynchronizedRef.modifyEffect(stateRef, (state) => {
       const session = state.sessions.get(compositeKey(threadId, tabId));
       if (!session) {
-        return Effect.succeed([
+        const failed: readonly [ModifyResult, ManagerState] = [
           { kind: "fail", error: new PreviewSessionLookupError({ threadId, tabId }) },
           state,
-        ] as readonly [ModifyResult, ManagerState]);
+        ];
+        return Effect.succeed(failed);
       }
       return mutator(session).pipe(
         Effect.flatMap(
@@ -180,10 +181,11 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             if (emit) yield* PubSub.publish(eventsPubSub, emit);
             const sessions = new Map(state.sessions);
             sessions.set(compositeKey(threadId, tabId), next);
-            return [{ kind: "ok", result } as ModifyResult, { sessions }] as readonly [
-              ModifyResult,
-              ManagerState,
+            const committed: readonly [ModifyResult, ManagerState] = [
+              { kind: "ok", result },
+              { sessions },
             ];
+            return committed;
           }),
         ),
       );
@@ -302,7 +304,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         return {
           next: { ...session, snapshot },
           emit,
-          result: undefined as void,
+          result: undefined,
         };
       }),
     );
@@ -341,7 +343,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       // Verify the session exists; the desktop bridge handles the actual reload
       // and will report progress back via `reportStatus`. No event emitted.
       yield* mutateExistingSession(input.threadId, input.tabId, (session) =>
-        Effect.succeed({ next: session, emit: null, result: undefined as void }),
+        Effect.succeed({ next: session, emit: null, result: undefined }),
       );
     },
   );

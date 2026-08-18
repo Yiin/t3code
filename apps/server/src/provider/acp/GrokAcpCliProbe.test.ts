@@ -58,7 +58,7 @@ const rpcIdFromEnvelope = (envelope: Record<string, unknown> | undefined): RpcId
   return typeof id === "string" || typeof id === "number" ? id : undefined;
 };
 
-const formatExit = <A>(exit: Exit.Exit<A, EffectAcpErrors.AcpError>): unknown => {
+const formatExit = <A>(exit: Exit.Exit<A, EffectAcpErrors.AcpError>) => {
   if (Exit.isSuccess(exit)) return { _tag: "Success", value: exit.value };
 
   const failure = Option.getOrUndefined(Cause.findErrorOption(exit.cause));

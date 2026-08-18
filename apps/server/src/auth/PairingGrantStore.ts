@@ -460,7 +460,7 @@ export const make = Effect.gen(function* () {
           }
 
           const remainingUses = grant.remainingUses;
-          if (typeof remainingUses === "number") {
+          if (remainingUses !== "unbounded") {
             if (remainingUses <= 1) {
               next.delete(credential);
             } else {

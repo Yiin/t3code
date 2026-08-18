@@ -23,22 +23,9 @@ import {
 function toChangeRequest(summary: GitHubCli.GitHubPullRequestSummary): ChangeRequest {
   return {
     provider: "github",
-    number: summary.number,
-    title: summary.title,
-    url: summary.url,
-    baseRefName: summary.baseRefName,
-    headRefName: summary.headRefName,
+    ...summary,
     state: summary.state ?? "open",
     updatedAt: Option.none(),
-    ...(summary.isCrossRepository !== undefined
-      ? { isCrossRepository: summary.isCrossRepository }
-      : {}),
-    ...(summary.headRepositoryNameWithOwner !== undefined
-      ? { headRepositoryNameWithOwner: summary.headRepositoryNameWithOwner }
-      : {}),
-    ...(summary.headRepositoryOwnerLogin !== undefined
-      ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
-      : {}),
   };
 }
 

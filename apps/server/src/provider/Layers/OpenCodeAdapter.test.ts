@@ -35,6 +35,7 @@ import {
   OpenCodeRuntimeError,
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
+import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   appendOpenCodeAssistantTextDelta,
   isOpenCodeNotFound,
@@ -60,28 +61,85 @@ type MessageEntry = {
   parts: Array<unknown>;
 };
 
+/** Body the adapter sends to `session.create`; it never sets a title. */
+interface SessionCreateInput {
+  readonly permission?: unknown;
+  readonly title?: string;
+  readonly directory?: string;
+}
+
+/** Body the adapter sends to `session.promptAsync`. */
+interface PromptCall {
+  readonly sessionID: string;
+  readonly model?: unknown;
+  readonly agent?: string;
+  readonly variant?: string;
+  readonly parts?: ReadonlyArray<unknown>;
+}
+
+/** Everything the OpenCode runtime test double records for later assertions. */
+interface RuntimeMockState {
+  startCalls: Array<string>;
+  sessionCreateUrls: Array<string>;
+  sessionCreateInputs: Array<SessionCreateInput>;
+  authHeaders: Array<string | null>;
+  abortCalls: Array<string>;
+  closeCalls: Array<string>;
+  revertCalls: Array<{ sessionID: string; messageID?: string }>;
+  promptCalls: Array<PromptCall>;
+  promptAsyncError: Error | null;
+  closeError: Error | null;
+  messages: Array<MessageEntry>;
+  subscribedEvents: Array<unknown>;
+  subscribedEventsReady: Promise<void> | null;
+  sessionGetIds: Array<string>;
+  missingSessionIds: Set<string>;
+  transientErrorSessionIds: Set<string>;
+  sessionDirectoryById: Map<string, string>;
+  sessionUpdateCalls: Array<{ sessionID: string; permission: unknown }>;
+  forkCalls: Array<{ sessionID: string; directory?: string }>;
+}
+
+/** The observability record the adapter hands to its native NDJSON logger. */
+const NativeObservabilityRecord = Schema.Struct({
+  event: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        provider: Schema.optional(Schema.String),
+        threadId: Schema.optional(Schema.String),
+        providerThreadId: Schema.optional(Schema.String),
+        type: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
+});
+type NativeObservabilityRecord = typeof NativeObservabilityRecord.Type;
+const decodeNativeObservabilityRecord = Schema.decodeUnknownSync(NativeObservabilityRecord);
+
+const runtimeMockState: RuntimeMockState = {
+  startCalls: [],
+  sessionCreateUrls: [],
+  sessionCreateInputs: [],
+  authHeaders: [],
+  abortCalls: [],
+  closeCalls: [],
+  revertCalls: [],
+  promptCalls: [],
+  promptAsyncError: null,
+  closeError: null,
+  messages: [],
+  subscribedEvents: [],
+  subscribedEventsReady: null,
+  sessionGetIds: [],
+  missingSessionIds: new Set<string>(),
+  transientErrorSessionIds: new Set<string>(),
+  sessionDirectoryById: new Map<string, string>(),
+  sessionUpdateCalls: [],
+  forkCalls: [],
+};
+
 const runtimeMock = {
-  state: {
-    startCalls: [] as string[],
-    sessionCreateUrls: [] as string[],
-    sessionCreateInputs: [] as Array<Record<string, unknown>>,
-    authHeaders: [] as Array<string | null>,
-    abortCalls: [] as string[],
-    closeCalls: [] as string[],
-    revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
-    promptCalls: [] as Array<unknown>,
-    promptAsyncError: null as Error | null,
-    closeError: null as Error | null,
-    messages: [] as MessageEntry[],
-    subscribedEvents: [] as unknown[],
-    subscribedEventsReady: null as Promise<void> | null,
-    sessionGetIds: [] as string[],
-    missingSessionIds: new Set<string>(),
-    transientErrorSessionIds: new Set<string>(),
-    sessionDirectoryById: new Map<string, string>(),
-    sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
-    forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
-  },
+  state: runtimeMockState,
   reset() {
     this.state.startCalls.length = 0;
     this.state.sessionCreateUrls.length = 0;
@@ -146,7 +204,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
   createOpenCodeSdkClient: ({ baseUrl, serverPassword }) =>
     ({
       session: {
-        create: async (input: Record<string, unknown>) => {
+        create: async (input: SessionCreateInput) => {
           runtimeMock.state.sessionCreateUrls.push(baseUrl);
           runtimeMock.state.sessionCreateInputs.push(input);
           runtimeMock.state.authHeaders.push(
@@ -167,7 +225,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             });
           }
           const directory = runtimeMock.state.sessionDirectoryById.get(sessionID);
-          return { data: { id: sessionID, ...(directory ? { directory } : {}) } };
+          return { data: directory ? { id: sessionID, directory } : { id: sessionID } };
         },
         update: async ({ sessionID, permission }: { sessionID: string; permission: unknown }) => {
           runtimeMock.state.sessionUpdateCalls.push({ sessionID, permission });
@@ -176,16 +234,16 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         fork: async ({ sessionID, directory }: { sessionID: string; directory?: string }) => {
           // Fork clones history into a new session bound to the directory.
           const forkedId = `${sessionID}_fork`;
-          runtimeMock.state.forkCalls.push({ sessionID, ...(directory ? { directory } : {}) });
+          runtimeMock.state.forkCalls.push(directory ? { sessionID, directory } : { sessionID });
           if (directory) {
             runtimeMock.state.sessionDirectoryById.set(forkedId, directory);
           }
-          return { data: { id: forkedId, ...(directory ? { directory } : {}) } };
+          return { data: directory ? { id: forkedId, directory } : { id: forkedId } };
         },
         abort: async ({ sessionID }: { sessionID: string }) => {
           runtimeMock.state.abortCalls.push(sessionID);
         },
-        promptAsync: async (input: unknown) => {
+        promptAsync: async (input: PromptCall) => {
           runtimeMock.state.promptCalls.push(input);
           if (runtimeMock.state.promptAsyncError) {
             throw runtimeMock.state.promptAsyncError;
@@ -193,10 +251,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         },
         messages: async () => ({ data: runtimeMock.state.messages }),
         revert: async ({ sessionID, messageID }: { sessionID: string; messageID?: string }) => {
-          runtimeMock.state.revertCalls.push({
-            sessionID,
-            ...(messageID ? { messageID } : {}),
-          });
+          runtimeMock.state.revertCalls.push(messageID ? { sessionID, messageID } : { sessionID });
           if (!messageID) {
             runtimeMock.state.messages = [];
             return;
@@ -273,12 +328,15 @@ const makeOpenCodeAdapterTestLayer = (options: OpenCodeAdapterLiveOptions) =>
     Layer.provideMerge(NodeServices.layer),
   );
 
-const makeRecordingAdapterTestLayer = (
-  instanceId = ProviderInstanceId.make("opencode"),
-): {
+/** An adapter layer paired with the account limits its adapter recorded. */
+interface RecordingAdapterTestLayer {
   readonly layer: ReturnType<typeof makeOpenCodeAdapterTestLayer>;
   readonly recordedLimits: Array<ProviderAccountLimit>;
-} => {
+}
+
+const makeRecordingAdapterTestLayer = (
+  instanceId = ProviderInstanceId.make("opencode"),
+): RecordingAdapterTestLayer => {
   const recordedLimits: Array<ProviderAccountLimit> = [];
   return {
     recordedLimits,
@@ -512,10 +570,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       });
 
       // The prompt targets the resumed id, and the turn re-surfaces the cursor.
-      NodeAssert.deepEqual(
-        (runtimeMock.state.promptCalls[0] as { sessionID: string }).sessionID,
-        "ses_persisted",
-      );
+      NodeAssert.deepEqual(runtimeMock.state.promptCalls[0]?.sessionID, "ses_persisted");
       NodeAssert.deepEqual(result.resumeCursor, {
         schemaVersion: 1,
         sessionId: "ses_persisted",
@@ -649,7 +704,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         NodeAssert.deepEqual(runtimeMock.state.sessionCreateUrls, []);
         NodeAssert.equal(runtimeMock.state.forkCalls.length, 1);
         NodeAssert.equal(runtimeMock.state.forkCalls[0]?.sessionID, "ses_otherdir");
-        NodeAssert.equal(typeof runtimeMock.state.forkCalls[0]?.directory, "string");
+        NodeAssert.notEqual(runtimeMock.state.forkCalls[0]?.directory, undefined);
         // Permission ruleset re-asserted on the fork for the current runtimeMode.
         NodeAssert.equal(runtimeMock.state.sessionUpdateCalls.length, 1);
         NodeAssert.equal(runtimeMock.state.sessionUpdateCalls[0]?.sessionID, "ses_otherdir_fork");
@@ -1898,14 +1953,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
   it.effect("writes provider-native observability records using the session thread id", () =>
     Effect.gen(function* () {
-      const nativeEvents: Array<{
-        readonly event?: {
-          readonly provider?: string;
-          readonly threadId?: string;
-          readonly providerThreadId?: string;
-          readonly type?: string;
-        };
-      }> = [];
+      const nativeEvents: Array<NativeObservabilityRecord> = [];
       const nativeThreadIds: Array<string | null> = [];
       runtimeMock.state.subscribedEvents = [
         {
@@ -1939,10 +1987,10 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         },
       ];
 
-      const nativeEventLogger = {
+      const nativeEventLogger: EventNdjsonLogger = {
         filePath: "memory://opencode-native-events",
-        write: (event: unknown, threadId: ThreadId | null) => {
-          nativeEvents.push(event as (typeof nativeEvents)[number]);
+        write: (event, threadId) => {
+          nativeEvents.push(decodeNativeObservabilityRecord(event));
           nativeThreadIds.push(threadId ?? null);
           return Effect.void;
         },
@@ -2098,11 +2146,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           readProviderSessionsCreated: () =>
             Effect.sync(() => runtimeMock.state.sessionCreateInputs.length),
           readTurnTargets: () =>
-            Effect.sync(() =>
-              runtimeMock.state.promptCalls.map(
-                (call) => (call as { readonly sessionID: string }).sessionID,
-              ),
-            ),
+            Effect.sync(() => runtimeMock.state.promptCalls.map((call) => call.sessionID)),
           sendTurnInput: {
             modelSelection: createModelSelection(
               ProviderInstanceId.make("opencode"),

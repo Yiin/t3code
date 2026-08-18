@@ -107,7 +107,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     }
 
     if (canonicalCommand.type !== "thread.turn.start") {
-      return canonicalCommand as OrchestrationCommand;
+      return canonicalCommand satisfies OrchestrationCommand;
     }
 
     // Files land on disk before the message-sent event is decided. If a later

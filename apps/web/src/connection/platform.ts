@@ -562,7 +562,7 @@ const platformConnectionSourceLayer = Layer.effect(
       }
 
       yield* Ref.set(cacheRef, next);
-      return registrations as ReadonlyArray<PlatformConnectionRegistration>;
+      return registrations;
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
     return PlatformConnectionSource.of({

@@ -526,7 +526,7 @@ export const makeServerLayer = Layer.unwrap(
         Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
-          if (typeof address === "string" || !("port" in address)) {
+          if (address._tag !== "TcpAddress") {
             return;
           }
 
@@ -548,7 +548,7 @@ export const makeServerLayer = Layer.unwrap(
             Effect.gen(function* () {
               const server = yield* HttpServer.HttpServer;
               const address = server.address;
-              if (typeof address === "string" || !("port" in address)) {
+              if (address._tag !== "TcpAddress") {
                 return null;
               }
 
@@ -599,7 +599,7 @@ export const makeServerLayer = Layer.unwrap(
         if (!(yield* CloudCliState.readCliDesiredCloudLink)) return;
         const server = yield* HttpServer.HttpServer;
         const address = server.address;
-        if (typeof address === "string" || !("port" in address)) return;
+        if (address._tag !== "TcpAddress") return;
         yield* Effect.forkScoped(
           Effect.sleep("250 millis").pipe(
             Effect.andThen(reconcileDesiredCloudLink(`http://127.0.0.1:${address.port}`)),

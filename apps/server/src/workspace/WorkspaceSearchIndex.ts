@@ -129,10 +129,7 @@ function toProjectEntry(item: MixedItem): ProjectEntry | null {
   };
 }
 
-function mapMixedSearchResult(
-  result: MixedSearchResult,
-  limit: number,
-): { readonly entries: ProjectEntry[]; readonly truncated: boolean } {
+function mapMixedSearchResult(result: MixedSearchResult, limit: number) {
   const entries: ProjectEntry[] = [];
   for (const item of result.items) {
     const entry = toProjectEntry(item);

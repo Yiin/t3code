@@ -1,11 +1,5 @@
-import type {
-  BeadsIssueSummary,
-  BeadsStatusResult,
-  EnvironmentId,
-  EpicRun,
-  ProjectId,
-} from "@t3tools/contracts";
-import { EPIC_RUN_CONFIG_PUBLIC_FIELDS } from "@t3tools/contracts";
+import type { BeadsIssueSummary, BeadsStatusResult, EpicRun } from "@t3tools/contracts";
+import { EnvironmentId, EPIC_RUN_CONFIG_PUBLIC_FIELDS } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -26,6 +20,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
+  type EpicProjectSource,
   epicChildren,
   epicStatusLabel,
   issueStatusLabel,
@@ -87,13 +82,6 @@ import {
 } from "../epicRunLaunch";
 import { presentEpicRunPreflight } from "../epicRunPreflightPresentation";
 
-interface DetailSource {
-  readonly environmentId: string;
-  readonly workspaceRoot: string;
-  readonly projectId: string;
-  readonly projectTitle: string;
-}
-
 function useElapsed(startedAt: string | null, endedAt: string | null) {
   const [now, setNow] = useState(() => (endedAt ? Date.parse(endedAt) : Date.now()));
   useEffect(() => {
@@ -143,7 +131,7 @@ function EpicRunPill(props: { readonly run: EpicRun }) {
  * How the run was configured, plus a way back to the thread that launched it.
  * All of it already rides the contract and none of it was on screen.
  */
-function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId: string }) {
+function EpicRunMetaLine(props: { readonly run: EpicRun; readonly environmentId: EnvironmentId }) {
   const { config, configProvenance } = props.run;
   const gate = config.gate.disabled ? "no gate" : (config.gate.command ?? "default gate");
   return (
@@ -216,7 +204,7 @@ export function EpicRunResumeFailureNote(props: { readonly run: EpicRun }) {
 
 export function EpicRunLog(props: {
   readonly run: EpicRun;
-  readonly environmentId: string;
+  readonly environmentId: EnvironmentId;
   readonly cwd: string;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -271,7 +259,7 @@ export function EpicRunLog(props: {
                     text={iteration.summary}
                     cwd={props.cwd}
                     threadRef={{
-                      environmentId: props.environmentId as EnvironmentId,
+                      environmentId: props.environmentId,
                       threadId: iteration.threadId,
                     }}
                   />
@@ -286,7 +274,7 @@ export function EpicRunLog(props: {
                       text={iteration.why}
                       cwd={props.cwd}
                       threadRef={{
-                        environmentId: props.environmentId as EnvironmentId,
+                        environmentId: props.environmentId,
                         threadId: iteration.threadId,
                       }}
                     />
@@ -307,7 +295,7 @@ export function EpicRunLog(props: {
  */
 function EpicRunHistoryEntry(props: {
   readonly run: EpicRun;
-  readonly environmentId: string;
+  readonly environmentId: EnvironmentId;
   readonly cwd: string;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -353,9 +341,9 @@ function EpicRunHistoryEntry(props: {
 }
 
 function EpicRunSection(props: {
-  readonly environmentId: string;
+  readonly environmentId: EnvironmentId;
   readonly epicId: string;
-  readonly source: DetailSource;
+  readonly source: EpicProjectSource;
   readonly issues: ReadonlyArray<BeadsIssueSummary>;
   readonly history: EpicRunHistory;
 }) {
@@ -420,7 +408,7 @@ function EpicRunSection(props: {
     if (startControl === null || startControl.busy) return;
     setPending("starting");
     setStartedRunId(null);
-    const environmentId = props.environmentId as EnvironmentId;
+    const environmentId = props.environmentId;
     const config = buildEpicRunConfigOverride(touchedOptions);
     void preflightAndLaunchEpicRun({
       preflightInput: {
@@ -435,7 +423,7 @@ function EpicRunSection(props: {
         environmentId,
         input: {
           epicId: props.epicId,
-          projectId: props.source.projectId as ProjectId,
+          projectId: props.source.projectId,
           cwd: props.source.workspaceRoot,
           ...(config === undefined ? {} : { config }),
         },
@@ -481,7 +469,7 @@ function EpicRunSection(props: {
     if (!run || state === "stopping") return;
     setPending("stopping");
     void stopRun({
-      environmentId: props.environmentId as EnvironmentId,
+      environmentId: props.environmentId,
       input: { runId: run.runId },
     }).then((result) => {
       if (result._tag === "Success") return;
@@ -495,7 +483,7 @@ function EpicRunSection(props: {
     if (!run || state !== "running" || pending !== null) return;
     setPending("pausing");
     void pauseRun({
-      environmentId: props.environmentId as EnvironmentId,
+      environmentId: props.environmentId,
       input: { runId: run.runId },
     }).then((result) => {
       if (result._tag === "Success") return;
@@ -509,7 +497,7 @@ function EpicRunSection(props: {
     if (!run || (state !== "paused" && state !== "pausing") || pending !== null) return;
     setPending("resuming");
     void resumeRun({
-      environmentId: props.environmentId as EnvironmentId,
+      environmentId: props.environmentId,
       input: { runId: run.runId },
     }).then((result) => {
       if (result._tag === "Success") return;
@@ -565,7 +553,7 @@ function EpicRunSection(props: {
       {optionsOpen && startControl ? (
         <div className="mb-3 min-w-0 rounded-xl border border-border px-4 py-3">
           <EpicRunOptionsForm
-            environmentId={props.environmentId as EnvironmentId}
+            environmentId={props.environmentId}
             workspaceRoot={props.source.workspaceRoot}
             epicId={props.epicId}
             touched={touchedOptions}
@@ -727,7 +715,7 @@ function EpicRunSection(props: {
 }
 
 function EpicDetailQuery(props: {
-  readonly source: DetailSource;
+  readonly source: EpicProjectSource;
   readonly onResult: (
     projectId: string,
     result: BeadsStatusResult | null,
@@ -736,7 +724,7 @@ function EpicDetailQuery(props: {
 }) {
   const query = useEnvironmentQuery(
     epicsEnvironment.list({
-      environmentId: props.source.environmentId as EnvironmentId,
+      environmentId: props.source.environmentId,
       input: { workspaceRoot: props.source.workspaceRoot },
     }),
   );
@@ -748,7 +736,9 @@ function EpicDetailQuery(props: {
 }
 
 function EpicDetailRouteView() {
-  const { environmentId, epicId } = Route.useParams();
+  const params = Route.useParams();
+  const environmentId = EnvironmentId.make(params.environmentId);
+  const epicId = params.epicId;
   const { project: requestedProjectId } = Route.useSearch();
   const projects = useProjects();
   const sources = useMemo(
@@ -790,9 +780,7 @@ function EpicDetailRouteView() {
   // One subscription for every run in the environment, narrowed to this epic
   // below — the per-epic `run` atom only ever surfaced the latest one, which is
   // what made a page of five runs look like a page of one.
-  const runsQuery = useEnvironmentQuery(
-    epicsEnvironment.allRuns({ environmentId: environmentId as EnvironmentId, input: {} }),
-  );
+  const runsQuery = useEnvironmentQuery(epicsEnvironment.allRuns({ environmentId, input: {} }));
   const runs = runsQuery.data;
   const projectId = match?.project.projectId ?? null;
   const workspaceRoot = match?.project.workspaceRoot ?? null;

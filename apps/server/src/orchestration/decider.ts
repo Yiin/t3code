@@ -1,4 +1,5 @@
 import {
+  ApprovalRequestId,
   EventId,
   SUBAGENT_STEER_REQUESTED_ACTIVITY_KIND,
   SUBAGENT_STOP_REQUESTED_ACTIVITY_KIND,
@@ -10,6 +11,7 @@ import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import type * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
@@ -36,6 +38,15 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 // QUEUED_TURN_START_GRACE_MS in client-runtime threadSettled.ts.
 const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 
+const isApprovalRequestId = Schema.is(ApprovalRequestId);
+
+/** The `requestId` off an activity payload of unknown shape, or null. */
+function extractActivityRequestId(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null || !("requestId" in payload)) return null;
+  const { requestId } = payload;
+  return typeof requestId === "string" ? requestId : null;
+}
+
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
  * approval or user-input request with no later resolution for the same
@@ -46,9 +57,11 @@ const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
  * failure detail marks the request stale/unknown — or settle would be
  * rejected on threads whose shell flags read as clear.
  */
-function isStaleRequestFailureDetail(payload: Record<string, unknown> | null): boolean {
-  const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
-  if (detail === null) return false;
+function isStaleRequestFailureDetail(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null || !("detail" in payload)) return false;
+  const { detail: rawDetail } = payload;
+  if (typeof rawDetail !== "string") return false;
+  const detail = rawDetail.toLowerCase();
   return (
     detail.includes("stale pending approval request") ||
     detail.includes("unknown pending approval request") ||
@@ -65,11 +78,7 @@ function hasOpenBlockingRequest(thread: {
 }): boolean {
   const openRequestIds = new Set<string>();
   for (const activity of thread.activities) {
-    const payload =
-      typeof activity.payload === "object" && activity.payload !== null
-        ? (activity.payload as Record<string, unknown>)
-        : null;
-    const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
+    const requestId = extractActivityRequestId(activity.payload);
     if (requestId === null) continue;
     if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
       openRequestIds.add(requestId);
@@ -78,7 +87,7 @@ function hasOpenBlockingRequest(thread: {
     } else if (
       (activity.kind === "provider.approval.respond.failed" ||
         activity.kind === "provider.user-input.respond.failed") &&
-      isStaleRequestFailureDetail(payload)
+      isStaleRequestFailureDetail(activity.payload)
     ) {
       openRequestIds.delete(requestId);
     }
@@ -1181,14 +1190,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      const requestId =
-        typeof command.activity.payload === "object" &&
-        command.activity.payload !== null &&
-        "requestId" in command.activity.payload &&
-        typeof (command.activity.payload as { requestId?: unknown }).requestId === "string"
-          ? ((command.activity.payload as { requestId: string })
-              .requestId as OrchestrationEvent["metadata"]["requestId"])
-          : undefined;
+      const rawRequestId = extractActivityRequestId(command.activity.payload);
+      const requestId = isApprovalRequestId(rawRequestId) ? rawRequestId : undefined;
       const activityAppendedEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1231,7 +1234,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
 
     default: {
       command satisfies never;
-      const fallback = command as never as { type: string };
+      // `command` is `never` here, so it is assignable without an assertion.
+      const fallback: { type: string } = command;
       return yield* new OrchestrationCommandInvariantError({
         commandType: fallback.type,
         detail: `Unknown command type: ${fallback.type}`,

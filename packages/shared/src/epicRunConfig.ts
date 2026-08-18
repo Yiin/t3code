@@ -26,15 +26,20 @@ export interface ResolveEpicRunConfigInput {
   readonly harness: string | null;
 }
 
-const DEFAULT_CONFIG = Schema.decodeUnknownSync(EpicRunConfig)({});
+const decodeEpicRunConfig = Schema.decodeUnknownSync(EpicRunConfig);
+const DEFAULT_CONFIG = decodeEpicRunConfig({});
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneValue(child)]));
 }
 
 function cloneValue(value: unknown): unknown {
   if (Array.isArray(value)) return [...value];
   if (!isRecord(value)) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneValue(child)]));
+  return cloneRecord(value);
 }
 
 function applyOverride(
@@ -53,8 +58,9 @@ function applyOverride(
     }
     if (isRecord(value)) {
       const existing = target[key];
-      if (!isRecord(existing)) target[key] = {};
-      applyOverride(target[key] as Record<string, unknown>, value, source, provenance, dottedKey);
+      const child = isRecord(existing) ? existing : {};
+      target[key] = child;
+      applyOverride(child, value, source, provenance, dottedKey);
       continue;
     }
     target[key] = cloneValue(value);
@@ -74,12 +80,14 @@ function explicitlyEnablesMissingGate(input: EpicRunConfigOverride | null): bool
  * and deprecated environment shims. The environment layer remains only for
  * migration from the old terminal settings.
  */
-export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
+export interface ResolvedEpicRunConfig {
   readonly config: EpicRunConfigValue;
   readonly provenance: EpicRunConfigProvenance;
   readonly violations: readonly EpicRunConfigViolation[];
-} {
-  const config = cloneValue(DEFAULT_CONFIG) as Record<string, unknown>;
+}
+
+export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): ResolvedEpicRunConfig {
+  const config = cloneRecord(DEFAULT_CONFIG);
   const provenance: Record<string, EpicRunConfigProvenanceSource> = Object.fromEntries(
     EPIC_RUN_CONFIG_LEAF_KEYS.map((key) => [key, "default" as const]),
   );
@@ -93,7 +101,9 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
     if (value !== null) applyOverride(config, value, source, provenance);
   }
 
-  const resolved = config as unknown as EpicRunConfigValue;
+  // Every layer is an override of an already-valid config, so the merged record
+  // must satisfy the same schema. Decoding here proves it instead of asserting it.
+  const merged = decodeEpicRunConfig(config);
   const violations: EpicRunConfigViolation[] = [];
 
   // Mode precedence: an explicit `execution.mode` wins. An explicit legacy
@@ -101,30 +111,28 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
   // "parallel"). Neither means "auto".
   const modeSource = provenance["execution.mode"] ?? "default";
   const sequentialSource = provenance["execution.sequential"] ?? "default";
+  let mode: ExecutionMode = merged.execution.mode;
   if (modeSource !== "default" && sequentialSource !== "default") {
-    const legacyMode = resolved.execution.sequential ? "sequential" : "parallel";
-    if (legacyMode !== resolved.execution.mode) {
+    const legacyMode = merged.execution.sequential ? "sequential" : "parallel";
+    if (legacyMode !== mode) {
       violations.push({
         key: "execution.mode",
         message: "Conflicts with execution.sequential; execution.mode wins.",
       });
     }
   } else if (modeSource === "default" && sequentialSource !== "default") {
-    (resolved.execution as { mode: ExecutionMode }).mode = resolved.execution.sequential
-      ? "sequential"
-      : "parallel";
+    mode = merged.execution.sequential ? "sequential" : "parallel";
     provenance["execution.mode"] = sequentialSource;
   }
   // Keep the legacy boolean coherent for readers that have not moved to mode.
-  const effectiveSequential = resolved.execution.mode === "sequential";
-  if (resolved.execution.sequential !== effectiveSequential) {
-    (resolved.execution as { sequential: boolean }).sequential = effectiveSequential;
+  const sequential = mode === "sequential";
+  if (merged.execution.sequential !== sequential) {
     provenance["execution.sequential"] = provenance["execution.mode"] ?? "default";
   }
 
   if (
-    !resolved.gate.disabled &&
-    resolved.gate.command === null &&
+    !merged.gate.disabled &&
+    merged.gate.command === null &&
     [input.file, input.environment, input.override].some(explicitlyEnablesMissingGate)
   ) {
     violations.push({
@@ -132,15 +140,16 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
       message: "Gate is enabled, but no gate command is configured.",
     });
   }
-  if (resolved.budget.usd !== null && input.harness !== "claude" && input.harness !== "ccx") {
+  if (merged.budget.usd !== null && input.harness !== "claude" && input.harness !== "ccx") {
     violations.push({
       key: "budget.usd",
       message: "The selected harness cannot enforce the budget limit.",
     });
   }
-  if (resolved.execution.mode === "sequential" && resolved.parallel.workers > 1) {
+  let workers = merged.parallel.workers;
+  if (mode === "sequential" && workers > 1) {
     const workersWereExplicit = hasEpicRunConfigValue(provenance, "parallel.workers");
-    (resolved.parallel as { workers: number }).workers = 1;
+    workers = 1;
     provenance["parallel.workers"] = "policy";
     if (workersWereExplicit) {
       violations.push({
@@ -149,18 +158,23 @@ export function resolveEpicRunConfig(input: ResolveEpicRunConfigInput): {
       });
     }
   }
-  if (resolved.server.retryMaxDelayMs < resolved.server.retryBaseDelayMs) {
+  if (merged.server.retryMaxDelayMs < merged.server.retryBaseDelayMs) {
     violations.push({
       key: "server.retryMaxDelayMs",
       message: "Maximum retry delay must be at least the base retry delay.",
     });
   }
-  if (resolved.supervision.inspectMaxDelaySeconds < resolved.supervision.inspectMinDelaySeconds) {
+  if (merged.supervision.inspectMaxDelaySeconds < merged.supervision.inspectMinDelaySeconds) {
     violations.push({
       key: "supervision.inspectMaxDelaySeconds",
       message: "Maximum inspect delay must be at least the minimum inspect delay.",
     });
   }
 
+  const resolved: EpicRunConfigValue = {
+    ...merged,
+    execution: { ...merged.execution, mode, sequential },
+    parallel: { ...merged.parallel, workers },
+  };
   return { config: resolved, provenance, violations };
 }

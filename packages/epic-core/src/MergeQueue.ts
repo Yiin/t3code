@@ -315,7 +315,7 @@ const touchedRepos = Effect.fn("MergeQueue.touchedRepos")(function* (
   snapshot: MergeQueueSnapshot,
   branch: string,
 ) {
-  if (snapshot.siblings.length === 0) return [] as ReadonlyArray<MergeFixTouchedRepo>;
+  if (snapshot.siblings.length === 0) return [];
   const touched: Array<MergeFixTouchedRepo> = [];
   const mainAhead = yield* ports.git.commitsAhead({
     repositoryPath: snapshot.repositoryPath,

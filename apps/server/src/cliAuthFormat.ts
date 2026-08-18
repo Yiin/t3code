@@ -6,7 +6,7 @@ import type { IssuedBearerSession, IssuedPairingLink } from "./auth/EnvironmentA
 const newline = "\n";
 
 function serializeOptionalFields(values: ReadonlyArray<string | null | undefined>) {
-  return values.filter((value): value is string => typeof value === "string" && value.length > 0);
+  return values.filter((value): value is string => value != null && value.length > 0);
 }
 
 function formatClientMetadata(metadata: AuthClientMetadata): string {

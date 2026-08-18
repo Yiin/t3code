@@ -437,15 +437,26 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
+/**
+ * A provider driver may attach a monotonic `sessionSequence` next to the
+ * declared event fields. The runtime-event contract does not carry it, so read
+ * it off the value instead of asserting a wider event type.
+ */
+function readSessionSequence(event: ProviderRuntimeEvent): number | undefined {
+  if (!("sessionSequence" in event)) {
+    return undefined;
+  }
+  const { sessionSequence } = event;
+  return typeof sessionSequence === "number" ? sessionSequence : undefined;
+}
+
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskContext?: TaskActivityMetadata,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
-    const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
-    return eventWithSequence.sessionSequence !== undefined
-      ? { sequence: eventWithSequence.sessionSequence }
-      : {};
+    const sessionSequence = readSessionSequence(event);
+    return sessionSequence !== undefined ? { sequence: sessionSequence } : {};
   })();
   switch (event.type) {
     case "request.opened": {
@@ -1521,7 +1532,7 @@ const make = Effect.gen(function* () {
           ? SUBAGENT_TEXT_ACTIVITY_KIND
           : SUBAGENT_THINKING_ACTIVITY_KIND;
       const idPrefix = streamKind === "assistant_text" ? "subagent-text" : "subagent-thinking";
-      const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
+      const sessionSequence = readSessionSequence(event);
       const activity: OrchestrationThreadActivity = {
         id: EventId.make(`${idPrefix}:${event.threadId}:${parentToolUseId}:${segment}`),
         createdAt: event.createdAt,
@@ -1535,9 +1546,7 @@ const make = Effect.gen(function* () {
           ...(subagentType ? { subagentType } : {}),
         },
         turnId: toTurnId(event.turnId) ?? null,
-        ...(eventWithSequence.sessionSequence !== undefined
-          ? { sequence: eventWithSequence.sessionSequence }
-          : {}),
+        ...(sessionSequence !== undefined ? { sequence: sessionSequence } : {}),
       };
 
       // Claude normally emits one complete block, but can defensively emit

@@ -227,7 +227,7 @@ export const materializeConformanceWorkspace = (
       NodeFS.readFileSync(journalPath, "utf8")
         .split("\n")
         .filter((line) => line !== "")
-        .map((line) => JSON.parse(line) as unknown),
+        .map((line): unknown => JSON.parse(line)),
   };
 };
 
@@ -241,9 +241,9 @@ export const releasedClaimIds = (workspace: ConformanceWorkspace): ReadonlySet<s
   const released = new Set<string>();
   for (const item of workspace.readTranscript()) {
     if (typeof item !== "object" || item === null) continue;
-    const entry = item as Readonly<Record<string, unknown>>;
-    if (entry["tool"] !== "bd" || !Array.isArray(entry["argv"])) continue;
-    const argv = entry["argv"] as ReadonlyArray<unknown>;
+    if (!("tool" in item) || item.tool !== "bd") continue;
+    if (!("argv" in item) || !Array.isArray(item.argv)) continue;
+    const argv: ReadonlyArray<unknown> = item.argv;
     const statusIndex = argv.indexOf("--status");
     if (argv[0] === "update" && statusIndex > 0 && argv[statusIndex + 1] === "open") {
       const issueId = argv[1];
@@ -261,9 +261,9 @@ export const releasedClaimIds = (workspace: ConformanceWorkspace): ReadonlySet<s
 export const beadCommentCounts = (workspace: ConformanceWorkspace): ReadonlyMap<string, number> => {
   const statePath = workspace.env["CONFORMANCE_STATE"];
   if (statePath === undefined) return new Map();
-  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
-    readonly children?: ReadonlyArray<Record<string, unknown>>;
-  };
+  const state: { readonly children?: ReadonlyArray<Record<string, unknown>> } = JSON.parse(
+    NodeFS.readFileSync(statePath, "utf8"),
+  );
   return new Map(
     (state.children ?? []).flatMap((child) =>
       typeof child["id"] === "string" && typeof child["comment_count"] === "number"

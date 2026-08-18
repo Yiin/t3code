@@ -78,17 +78,8 @@ export const resolveHeadlessConnectionString = (
   return `http://${formatHostForUrl(connectionHost)}:${port}`;
 };
 
-export const resolveListeningPort = (address: unknown, fallbackPort: number): number => {
-  if (
-    typeof address === "object" &&
-    address !== null &&
-    "port" in address &&
-    typeof address.port === "number"
-  ) {
-    return address.port;
-  }
-  return fallbackPort;
-};
+export const resolveListeningPort = (address: HttpServer.Address, fallbackPort: number): number =>
+  address._tag === "TcpAddress" ? address.port : fallbackPort;
 
 export const buildPairingUrl = (connectionString: string, token: string): string => {
   const url = new URL(connectionString);

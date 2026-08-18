@@ -136,15 +136,15 @@ export const formatEpicRunCompact = (run: EpicRun): string =>
     run.lastError ?? "-",
   ].join("\t");
 
-export const formatEpicOutput = (value: unknown, json: boolean): string =>
+export const formatEpicOutput = (value: EpicRun | ReadonlyArray<EpicRun>, json: boolean): string =>
   json
     ? encodeJsonOutput(value)
-    : Array.isArray(value)
-      ? [
+    : "runId" in value
+      ? formatEpicRunCompact(value)
+      : [
           `runs[${value.length}]{runId,status,epicId,iterations,currentThreadId,lastError}:`,
           ...value.map((run) => `  ${formatEpicRunCompact(run)}`),
-        ].join("\n")
-      : formatEpicRunCompact(value as EpicRun);
+        ].join("\n");
 
 /**
  * One bearer session, shared by every call a single `t3 epic` invocation makes.
@@ -285,7 +285,13 @@ const startCommand = Command.make("start", {
     Effect.gen(function* () {
       const promptText = Option.getOrUndefined(flags.prompt);
       const promptFile = Option.getOrUndefined(flags.promptFile);
-      if ((promptText === undefined) === (promptFile === undefined)) {
+      const promptSource =
+        promptText !== undefined && promptFile === undefined
+          ? ({ kind: "text", text: promptText } as const)
+          : promptFile !== undefined && promptText === undefined
+            ? ({ kind: "file", path: promptFile } as const)
+            : null;
+      if (promptSource === null) {
         return yield* new EpicCliError({
           operation: "resolvePrompt",
           detail: "Exactly one of --prompt or --prompt-file is required.",
@@ -306,7 +312,9 @@ const startCommand = Command.make("start", {
             });
           }
           const prompt =
-            promptText ?? (yield* fs.readFileString(path.resolve(promptFile as string)));
+            promptSource.kind === "text"
+              ? promptSource.text
+              : yield* fs.readFileString(path.resolve(promptSource.path));
           const payload: EpicRunInput = {
             epicId: flags.epic,
             projectId: project.id,

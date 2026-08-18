@@ -40,6 +40,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -179,6 +180,8 @@ export const appendChildSpawned = (
 const latestActivitySummary = (thread: OrchestrationThread | undefined): string | undefined =>
   nonEmpty(thread?.activities[thread.activities.length - 1]?.summary, 120);
 
+const hasToolName = Schema.is(Schema.Struct({ toolName: Schema.String }));
+
 /**
  * The child's newest tool row, named the way the roster labels it.
  *
@@ -191,11 +194,8 @@ const latestToolName = (thread: OrchestrationThread | undefined): string | undef
     const activity = activities[index];
     if (activity === undefined || !activity.kind.startsWith("tool.")) continue;
     const payload = activity.payload;
-    const named =
-      typeof payload === "object" && payload !== null && "toolName" in payload
-        ? (payload as { readonly toolName?: unknown }).toolName
-        : undefined;
-    return nonEmpty(typeof named === "string" ? named : activity.summary, 120);
+    const named = hasToolName(payload) ? payload.toolName : undefined;
+    return nonEmpty(named ?? activity.summary, 120);
   }
   return undefined;
 };

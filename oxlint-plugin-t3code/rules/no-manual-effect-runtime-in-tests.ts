@@ -1,4 +1,4 @@
-import { defineRule } from "@oxlint/plugins";
+import { defineRule, type ESTree } from "@oxlint/plugins";
 import * as Option from "effect/Option";
 
 import { getPropertyName, isIdentifier, unwrapExpression } from "../utils.ts";
@@ -51,14 +51,12 @@ const baselineFor = (filename: string): number => {
   return 0;
 };
 
-const manualRunnerName = (callee: unknown): Option.Option<string> => {
+const manualRunnerName = (callee: ESTree.Node): Option.Option<string> => {
   const expression = unwrapExpression(callee);
-  if (Option.isNone(expression) || expression.value.type !== "MemberExpression") {
-    return Option.none();
-  }
+  if (expression.type !== "MemberExpression") return Option.none();
 
-  const object = unwrapExpression(expression.value.object);
-  const property = getPropertyName(expression.value.property);
+  const object = unwrapExpression(expression.object);
+  const property = getPropertyName(expression.property);
   if (Option.isNone(property)) return Option.none();
 
   if (isIdentifier(object, "Effect") && EFFECT_RUNTIME_METHODS.has(property.value)) {

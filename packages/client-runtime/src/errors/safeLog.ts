@@ -47,10 +47,10 @@ function readSafeStack(error: Error): string | undefined {
 
 function readErrorTag(error: unknown): string | undefined {
   try {
-    if (typeof error !== "object" || error === null) {
+    if (typeof error !== "object" || error === null || !("_tag" in error)) {
       return undefined;
     }
-    return readSafeLabel((error as { readonly _tag?: unknown })._tag);
+    return readSafeLabel(error._tag);
   } catch {
     return undefined;
   }
@@ -63,11 +63,11 @@ function readTraceId(error: unknown): string | undefined {
 
     while (typeof current === "object" && current !== null && !seen.has(current)) {
       seen.add(current);
-      const record = current as { readonly cause?: unknown; readonly traceId?: unknown };
-      if (typeof record.traceId === "string" && SAFE_TRACE_ID.test(record.traceId)) {
-        return record.traceId;
+      const traceId = "traceId" in current ? current.traceId : undefined;
+      if (typeof traceId === "string" && SAFE_TRACE_ID.test(traceId)) {
+        return traceId;
       }
-      current = record.cause;
+      current = "cause" in current ? current.cause : undefined;
     }
 
     return undefined;

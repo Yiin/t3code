@@ -31,6 +31,23 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
       : toPersistenceSqlError(sqlOperation)(cause);
 }
 
+/** SQL NULL for `sequence` means the column is absent on the read model. */
+function toProjectionThreadActivity(
+  row: Schema.Schema.Type<typeof ProjectionThreadActivityDbRowSchema>,
+): Schema.Schema.Type<typeof ProjectionThreadActivity> {
+  return {
+    activityId: row.activityId,
+    threadId: row.threadId,
+    turnId: row.turnId,
+    tone: row.tone,
+    kind: row.kind,
+    summary: row.summary,
+    payload: row.payload,
+    ...(row.sequence !== null ? { sequence: row.sequence } : {}),
+    createdAt: row.createdAt,
+  };
+}
+
 const makeProjectionThreadActivityRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -155,19 +172,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           "ProjectionThreadActivityRepository.listByThreadId:decodeRows",
         ),
       ),
-      Effect.map((rows) =>
-        rows.map((row) => ({
-          activityId: row.activityId,
-          threadId: row.threadId,
-          turnId: row.turnId,
-          tone: row.tone,
-          kind: row.kind,
-          summary: row.summary,
-          payload: row.payload,
-          ...(row.sequence !== null ? { sequence: row.sequence } : {}),
-          createdAt: row.createdAt,
-        })),
-      ),
+      Effect.map((rows) => rows.map(toProjectionThreadActivity)),
     );
 
   const deleteByThreadId: ProjectionThreadActivityRepositoryShape["deleteByThreadId"] = (input) =>
@@ -186,19 +191,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
             "ProjectionThreadActivityRepository.listUserInputByThreadId:decodeRows",
           ),
         ),
-        Effect.map((rows) =>
-          rows.map((row) => ({
-            activityId: row.activityId,
-            threadId: row.threadId,
-            turnId: row.turnId,
-            tone: row.tone,
-            kind: row.kind,
-            summary: row.summary,
-            payload: row.payload,
-            ...(row.sequence !== null ? { sequence: row.sequence } : {}),
-            createdAt: row.createdAt,
-          })),
-        ),
+        Effect.map((rows) => rows.map(toProjectionThreadActivity)),
       );
 
   return {

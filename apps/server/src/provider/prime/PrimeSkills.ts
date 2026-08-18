@@ -79,17 +79,17 @@ async function scan(directory: string): Promise<ReadonlyArray<ServerProviderSkil
  */
 export const readPrimeSkills = Effect.fn("readPrimeSkills")(function* (
   environment: NodeJS.ProcessEnv,
-) {
+): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>> {
   const directory = resolvePrimeSkillsDirectory(environment);
   if (directory === undefined) {
-    return [] as ReadonlyArray<ServerProviderSkill>;
+    return [];
   }
   return yield* Effect.tryPromise(() => scan(directory)).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("prime skills directory scan failed; reporting no skills", {
         directory,
         cause,
-      }).pipe(Effect.as([] as ReadonlyArray<ServerProviderSkill>)),
+      }).pipe(Effect.as([])),
     ),
   );
 });

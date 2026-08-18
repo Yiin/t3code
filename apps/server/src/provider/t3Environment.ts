@@ -6,7 +6,7 @@ import type { T3SessionEnvironment } from "@t3tools/contracts";
  * skills (for example `/cook-epic`) use these to detect the server and drive
  * its HTTP API.
  */
-export function toT3EnvironmentEnv(t3Environment: T3SessionEnvironment): Record<string, string> {
+export function toT3EnvironmentEnv(t3Environment: T3SessionEnvironment) {
   return {
     T3_SERVER_URL: t3Environment.serverUrl,
     T3_ENVIRONMENT_ID: t3Environment.environmentId,

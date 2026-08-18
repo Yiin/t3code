@@ -29,11 +29,16 @@ if (isElectron) {
   syncDocumentWindowControlsOverlayClass();
 }
 
-const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
+const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
 const app = <AppRoot router={router} />;
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+const rootElement = document.getElementById("root");
+if (rootElement === null) {
+  throw new Error("index.html is missing the #root element.");
+}
+
+ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     {clerkPublishableKey && hasCloudPublicConfig() ? (
       <ClerkProvider publishableKey={clerkPublishableKey}>

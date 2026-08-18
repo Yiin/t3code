@@ -282,6 +282,12 @@ export const prepareWorkerScope = Effect.fn("workerScope.prepare")(function* (
   return { scopeId, active: true };
 });
 
+/** A resolved subprocess launch: the executable plus its argument vector. */
+export interface SpawnInvocation {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+}
+
 /**
  * Wrap a worker spawn in its named scope (run.sh `fleet_run`, run-legacy.sh:792-804).
  * The unit name is the ownership seam: it lets a supervisor later ask systemd
@@ -292,7 +298,7 @@ export const wrapWorkerScopeSpawn = (
   worker: string,
   command: string,
   args: ReadonlyArray<string>,
-): { readonly command: string; readonly args: ReadonlyArray<string> } =>
+): SpawnInvocation =>
   preparation.active
     ? {
         command: "systemd-run",

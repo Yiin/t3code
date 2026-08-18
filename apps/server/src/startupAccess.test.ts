@@ -47,9 +47,10 @@ it("resolves wildcard hosts to a concrete external interface when one is availab
 });
 
 it("prefers the actual bound port when an http server address is available", () => {
-  expect(resolveListeningPort({ port: 4123 }, 3773)).toBe(4123);
-  expect(resolveListeningPort("pipe", 3773)).toBe(3773);
-  expect(resolveListeningPort(null, 3773)).toBe(3773);
+  expect(
+    resolveListeningPort({ _tag: "TcpAddress", hostname: "127.0.0.1", port: 4123 }, 3773),
+  ).toBe(4123);
+  expect(resolveListeningPort({ _tag: "UnixAddress", path: "/tmp/t3.sock" }, 3773)).toBe(3773);
 });
 
 it("builds a pairing URL that embeds the token in the hash", () => {

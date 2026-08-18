@@ -86,7 +86,9 @@ export function buildVisibleToastLayout<TToast extends object>(
 }
 
 function normalizeToastHeight(height: number | null | undefined): number {
-  return typeof height === "number" && Number.isFinite(height) && height > 0 ? height : 0;
+  return height !== null && height !== undefined && Number.isFinite(height) && height > 0
+    ? height
+    : 0;
 }
 
 export function shouldRenderThreadScopedToast(

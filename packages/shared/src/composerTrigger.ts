@@ -136,12 +136,18 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
+/** Text plus the caret offset that follows an edit. */
+export interface TextWithCursor {
+  readonly text: string;
+  readonly cursor: number;
+}
+
 export function replaceTextRange(
   text: string,
   rangeStart: number,
   rangeEnd: number,
   replacement: string,
-): { text: string; cursor: number } {
+): TextWithCursor {
   const safeStart = Math.max(0, Math.min(text.length, rangeStart));
   const safeEnd = Math.max(safeStart, Math.min(text.length, rangeEnd));
   const nextText = `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`;

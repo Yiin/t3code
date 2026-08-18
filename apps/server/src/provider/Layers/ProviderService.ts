@@ -1908,7 +1908,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ),
         ),
         Effect.orElseSucceed(
-          () => [] as Array<Option.Option<ProviderSessionDirectory.ProviderRuntimeBinding>>,
+          (): Array<Option.Option<ProviderSessionDirectory.ProviderRuntimeBinding>> => [],
         ),
       );
       const bindingsByThreadId = new Map<

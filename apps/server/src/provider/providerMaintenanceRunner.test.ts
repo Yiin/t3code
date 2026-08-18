@@ -139,11 +139,10 @@ function mockSpawnerLayer(
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
-      const childProcess = command as unknown as {
-        readonly command: string;
-        readonly args: ReadonlyArray<string>;
-      };
-      return Effect.succeed(mockHandle(handler(childProcess.command, childProcess.args)));
+      if (command._tag !== "StandardCommand") {
+        return Effect.die("the maintenance mock spawner only receives standard commands");
+      }
+      return Effect.succeed(mockHandle(handler(command.command, command.args)));
     }),
   );
 }
@@ -452,8 +451,8 @@ describe("providerMaintenanceRunner", () => {
   );
 
   it.effect("prevents concurrent updates for the same provider", () => {
-    const startedLatch: { resolve: () => void } = { resolve: () => {} };
-    const releaseLatch: { resolve: () => void } = { resolve: () => {} };
+    const startedLatch = { resolve: () => {} };
+    const releaseLatch = { resolve: () => {} };
     const started = new Promise<void>((resolve) => {
       startedLatch.resolve = resolve;
     });
@@ -499,8 +498,8 @@ describe("providerMaintenanceRunner", () => {
   });
 
   it.effect("serializes different providers that share the same update lock key", () => {
-    const firstStartedLatch: { resolve: () => void } = { resolve: () => {} };
-    const releaseFirstLatch: { resolve: () => void } = { resolve: () => {} };
+    const firstStartedLatch = { resolve: () => {} };
+    const releaseFirstLatch = { resolve: () => {} };
     const firstStarted = new Promise<void>((resolve) => {
       firstStartedLatch.resolve = resolve;
     });
@@ -620,8 +619,8 @@ describe("providerMaintenanceRunner", () => {
       Effect.gen(function* () {
         const { registry } = yield* makeRegistry(baseProvider);
         let blockQueuedState = true;
-        const queuedStateWrittenLatch: { resolve: () => void } = { resolve: () => {} };
-        const releaseQueuedStateLatch: { resolve: () => void } = { resolve: () => {} };
+        const queuedStateWrittenLatch = { resolve: () => {} };
+        const releaseQueuedStateLatch = { resolve: () => {} };
         const queuedStateWritten = new Promise<void>((resolve) => {
           queuedStateWrittenLatch.resolve = resolve;
         });
@@ -710,15 +709,13 @@ describe("providerMaintenanceRunner", () => {
           Layer.succeed(
             ChildProcessSpawner.ChildProcessSpawner,
             ChildProcessSpawner.make((command) => {
-              const childProcess = command as unknown as {
-                readonly command: string;
-                readonly args: ReadonlyArray<string>;
-                readonly options: { readonly shell?: boolean | string | undefined };
-              };
+              if (command._tag !== "StandardCommand") {
+                return Effect.die("the maintenance mock spawner only receives standard commands");
+              }
               captured.push({
-                command: childProcess.command,
-                args: childProcess.args,
-                shell: childProcess.options.shell,
+                command: command.command,
+                args: command.args,
+                shell: command.options.shell,
               });
               return Effect.succeed(mockHandle({ stdout: "updated" }));
             }),

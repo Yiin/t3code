@@ -21,10 +21,8 @@ export function resolveSessionCookieName(input: {
   return `${SESSION_COOKIE_NAME}_${input.port}`;
 }
 
-export function base64UrlEncode(input: string | Uint8Array): string {
-  return typeof input === "string"
-    ? Encoding.encodeBase64Url(new TextEncoder().encode(input))
-    : Encoding.encodeBase64Url(input);
+export function base64UrlEncode(input: string): string {
+  return Encoding.encodeBase64Url(new TextEncoder().encode(input));
 }
 
 export function base64UrlDecodeUtf8(input: string): string {
@@ -45,7 +43,7 @@ export function timingSafeEqualBase64Url(left: string, right: string): boolean {
 }
 
 function normalizeNonEmptyString(value: string | null | undefined): string | undefined {
-  if (typeof value !== "string") {
+  if (value === null || value === undefined) {
     return undefined;
   }
   const trimmed = value.trim();

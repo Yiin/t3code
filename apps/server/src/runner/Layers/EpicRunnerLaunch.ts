@@ -108,10 +108,10 @@ const formatEpicRunLockHeldError = (error: EpicRunLockHeldError): string => {
   const holder = error.holder;
   if (
     holder !== undefined &&
-    typeof holder.owner === "string" &&
-    typeof holder.host === "string" &&
-    typeof holder.pid === "number" &&
-    typeof holder.runDir === "string"
+    holder.owner !== undefined &&
+    holder.host !== undefined &&
+    holder.pid !== undefined &&
+    holder.runDir !== undefined
   ) {
     return formatEpicRunPreflightBlocker({
       _tag: "run_in_progress",

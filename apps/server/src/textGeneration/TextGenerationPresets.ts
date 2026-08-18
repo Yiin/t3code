@@ -31,11 +31,8 @@ export const customTextGenerationPolicy = (
   ...overrides,
 });
 
-export const textGenerationPresets: Record<
-  Exclude<TextGenerationPolicyKind, "custom">,
-  TextGenerationPolicy
-> = {
+export const textGenerationPresets = {
   default: defaultTextGenerationPolicy,
   conventional_commits: conventionalCommitsTextGenerationPolicy,
   repo_conventions: repositoryConventionsTextGenerationPolicy,
-};
+} satisfies Record<Exclude<TextGenerationPolicyKind, "custom">, TextGenerationPolicy>;

@@ -64,6 +64,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import {
   OrchestrationCommandInvariantError,
@@ -930,7 +931,7 @@ function createHarness(input: {
           return {
             stdout: "",
             stderr: "",
-            code: (ref.includes("cook-epic-integration-") ? 1 : 0) as never,
+            code: ChildProcessSpawner.ExitCode(ref.includes("cook-epic-integration-") ? 1 : 0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -948,7 +949,7 @@ function createHarness(input: {
               .map((worktreePath) => `worktree ${worktreePath}\n`)
               .join(""),
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -962,7 +963,7 @@ function createHarness(input: {
           return {
             stdout: `${repositoryRoot}/.git\n`,
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -985,7 +986,7 @@ function createHarness(input: {
           return {
             stdout: "",
             stderr: "",
-            code: 128 as never,
+            code: ChildProcessSpawner.ExitCode(128),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -995,7 +996,7 @@ function createHarness(input: {
           return {
             stdout: encodeUnknownJson(input.openChildren ?? []),
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1010,7 +1011,7 @@ function createHarness(input: {
           return {
             stdout: description === undefined ? "[]" : encodeEpicDescription([{ description }]),
             stderr: input.epicDescriptionExitCode === undefined ? "" : "bd unavailable",
-            code: (input.epicDescriptionExitCode ?? 0) as never,
+            code: ChildProcessSpawner.ExitCode(input.epicDescriptionExitCode ?? 0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1040,7 +1041,7 @@ function createHarness(input: {
                     },
                   ]),
             stderr: value?.exitCode === undefined ? "" : "bd unavailable",
-            code: (value?.exitCode ?? 0) as never,
+            code: ChildProcessSpawner.ExitCode(value?.exitCode ?? 0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1055,7 +1056,7 @@ function createHarness(input: {
           return {
             stdout: `[{"status":"${childStatuses.get(issueId)}"}]`,
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1067,7 +1068,7 @@ function createHarness(input: {
             stdout:
               labelledIssueId === undefined ? "" : (input.childLabels?.[labelledIssueId] ?? ""),
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1099,7 +1100,7 @@ function createHarness(input: {
               id: "epic-merge-slot",
             }),
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1125,7 +1126,7 @@ function createHarness(input: {
                 ? `${PLANTED_WORKER_SCOPE_UNIT} loaded active running\n`
                 : "",
             stderr: "",
-            code: 0 as never,
+            code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -1153,7 +1154,7 @@ function createHarness(input: {
                       ? `${landedHead}\n`
                       : `${input.repositoryHeads?.[request.cwd ?? ""] ?? head}\n`,
           stderr: "",
-          code: 0 as never,
+          code: ChildProcessSpawner.ExitCode(0),
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -6321,7 +6322,7 @@ describe("EpicRunner", () => {
   it.live("marks an iteration left running by a restart as abandoned and resumes", () => {
     const runId = "run-restart";
     const staleRun: EpicRun = {
-      runId: runId as EpicRun["runId"],
+      runId: EpicRunId.make(runId),
       epicId: "epic-1",
       projectId,
       cwd: "/tmp/epic-runner-repo",
@@ -6418,7 +6419,7 @@ describe("EpicRunner", () => {
   it.live("reclaims its own leftover worker scopes when it re-adopts a run at boot", () => {
     const runId = "run-restart-scope";
     const staleRun: EpicRun = {
-      runId: runId as EpicRun["runId"],
+      runId: EpicRunId.make(runId),
       epicId: "epic-1",
       projectId,
       cwd: "/tmp/epic-runner-repo",
@@ -6486,7 +6487,7 @@ describe("EpicRunner", () => {
       // later drain defers, and the run neither fails nor progresses.
       const runId = "run-slot";
       const staleRun: EpicRun = {
-        runId: runId as EpicRun["runId"],
+        runId: EpicRunId.make(runId),
         epicId: "epic-1",
         projectId,
         cwd: "/tmp/epic-runner-repo",
@@ -6515,7 +6516,7 @@ describe("EpicRunner", () => {
           ? null
           : {
               ...staleRun,
-              runId: slotHolder.replace("cook-epic-", "") as EpicRun["runId"],
+              runId: EpicRunId.make(slotHolder.replace("cook-epic-", "")),
               status: otherRunStatus,
               // A different repository and epic, so seeding this row exercises
               // the status lookup without the boot path also resuming it into
@@ -7513,7 +7514,7 @@ describe("EpicRunner", () => {
   it.live("abandons a synthetic running row on restart without orchestration cleanup", () => {
     const runId = "run-restart-synthetic";
     const staleRun: EpicRun = {
-      runId: runId as EpicRun["runId"],
+      runId: EpicRunId.make(runId),
       epicId: "epic-1",
       projectId,
       cwd: "/tmp/epic-runner-repo",
@@ -7653,7 +7654,7 @@ describe("EpicRunner", () => {
     // `start` has to release the run's last claimed child on its own.
     const runId = "run-lease-failure";
     const staleRun: EpicRun = {
-      runId: runId as EpicRun["runId"],
+      runId: EpicRunId.make(runId),
       epicId: "epic-1",
       projectId,
       cwd: "/tmp/epic-runner-repo",
