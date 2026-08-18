@@ -36,15 +36,17 @@ describe("pool worktree assets", () => {
 
   it.effect("resolves an absolute beads redirect", () =>
     withTempDirectory((root, fileSystem, path) =>
-      Effect.gen(function* () {
-        const beads = path.join(root, ".beads");
-        const targetRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pool-beads-" });
-        yield* fileSystem.makeDirectory(beads, { recursive: true });
-        yield* fileSystem.writeFileString(path.join(beads, "redirect"), `${targetRoot}\n`);
+      Effect.scoped(
+        Effect.gen(function* () {
+          const beads = path.join(root, ".beads");
+          const targetRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "pool-beads-" });
+          yield* fileSystem.makeDirectory(beads, { recursive: true });
+          yield* fileSystem.writeFileString(path.join(beads, "redirect"), `${targetRoot}\n`);
 
-        const resolved = yield* resolveBeadsDirectory({ fileSystem, path })(root);
-        assert.strictEqual(resolved, targetRoot);
-      }),
+          const resolved = yield* resolveBeadsDirectory({ fileSystem, path })(root);
+          assert.strictEqual(resolved, targetRoot);
+        }),
+      ),
     ).pipe(Effect.provide(testLayer)),
   );
 
