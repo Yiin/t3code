@@ -90,6 +90,7 @@ export interface WorkLogEntry {
   detail?: string;
   command?: string;
   rawCommand?: string;
+  output?: string;
   changedFiles?: ReadonlyArray<string>;
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
@@ -763,6 +764,12 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (detail) {
     entry.detail = detail;
   }
+  if (activity.kind === "tool.updated" || activity.kind === "tool.completed") {
+    const output = extractToolOutput(payload);
+    if (output && output !== detail) {
+      entry.output = output;
+    }
+  }
   if (commandPreview.command) {
     entry.command = commandPreview.command;
   }
@@ -861,6 +868,7 @@ function mergeDerivedWorkLogEntries(
   const detail = next.detail ?? previous.detail;
   const command = next.command ?? previous.command;
   const rawCommand = next.rawCommand ?? previous.rawCommand;
+  const output = next.output ?? previous.output;
   const toolTitle = next.toolTitle ?? previous.toolTitle;
   const itemType = next.itemType ?? previous.itemType;
   const requestKind = next.requestKind ?? previous.requestKind;
@@ -875,6 +883,7 @@ function mergeDerivedWorkLogEntries(
     ...(detail ? { detail } : {}),
     ...(command ? { command } : {}),
     ...(rawCommand ? { rawCommand } : {}),
+    ...(output ? { output } : {}),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
     ...(toolTitle ? { toolTitle } : {}),
     ...(itemType ? { itemType } : {}),
@@ -1702,6 +1711,60 @@ function extractToolDetail(
     if (normalizedRawOutputSummary !== normalizedHeading) {
       return rawOutputSummary;
     }
+  }
+
+  return null;
+}
+
+const MAX_TOOL_OUTPUT_LENGTH = 10000;
+
+function clampToolOutput(value: string): string {
+  return value.length > MAX_TOOL_OUTPUT_LENGTH
+    ? `${value.slice(0, MAX_TOOL_OUTPUT_LENGTH)}…`
+    : value;
+}
+
+/**
+ * Unlike `asTrimmedString`, keeps the first line's leading indent — Read
+ * results pad line numbers with leading spaces, and a full trim would knock
+ * line 1 out of alignment with the rest. Only leading blank lines and
+ * trailing whitespace go.
+ */
+function asToolOutputString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.replace(/^(?:[ \t]*\r?\n)+/u, "").trimEnd();
+  return normalized.trim().length > 0 ? normalized : null;
+}
+
+/**
+ * Full tool/command output for the work log's expanded row, as opposed to
+ * `extractToolDetail`'s truncated preview. Checked in priority order across
+ * the provider-specific shapes: Codex's `item.aggregatedOutput`, Claude's
+ * `result` (tool_result content), then ACP's `rawOutput`.
+ */
+function extractToolOutput(payload: Record<string, unknown> | null): string | null {
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const aggregatedOutput = asToolOutputString(item?.aggregatedOutput);
+  if (aggregatedOutput) {
+    return clampToolOutput(aggregatedOutput);
+  }
+
+  // Read the common string-content case indent-preservingly; fall back to the
+  // shared block-array flattening for everything else.
+  const resultText =
+    asToolOutputString(asRecord(data?.result)?.content) ?? extractSubagentResultText(data?.result);
+  if (resultText) {
+    return clampToolOutput(resultText);
+  }
+
+  const rawOutput = asRecord(data?.rawOutput);
+  const rawOutputContent =
+    asToolOutputString(rawOutput?.content) ?? asToolOutputString(rawOutput?.stdout);
+  if (rawOutputContent) {
+    return clampToolOutput(rawOutputContent);
   }
 
   return null;

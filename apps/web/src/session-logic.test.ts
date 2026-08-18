@@ -1640,6 +1640,231 @@ describe("deriveWorkLogEntries", () => {
   });
 });
 
+describe("deriveWorkLogEntries tool output extraction", () => {
+  it("extracts Claude's string tool_result content as output", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "claude-string-result",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "Ran command",
+          data: {
+            toolName: "Bash",
+            input: { command: "ls" },
+            result: {
+              tool_use_id: "toolu_1",
+              type: "tool_result",
+              content: "file1\nfile2",
+              is_error: false,
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe("file1\nfile2");
+  });
+
+  it("preserves the first line's leading indent in string tool_result content", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "claude-read-result",
+        kind: "tool.completed",
+        summary: "Read",
+        payload: {
+          detail: "apps/web/src/qa.ts",
+          data: {
+            toolName: "Read",
+            result: {
+              tool_use_id: "toolu_read",
+              type: "tool_result",
+              content: "     1→a\n     2→b\n",
+              is_error: false,
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe("     1→a\n     2→b");
+  });
+
+  it("keeps output from an errored tool_result", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "claude-error-result",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "Ran command",
+          data: {
+            toolName: "Bash",
+            input: { command: "false" },
+            result: {
+              tool_use_id: "toolu_err",
+              type: "tool_result",
+              content: "boom: exit 1",
+              is_error: true,
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe("boom: exit 1");
+  });
+
+  it("carries output from a tool.updated row into the coalesced completed entry", () => {
+    const collapseBase = {
+      summary: "Command run",
+      payload: {
+        itemType: "command_execution",
+        detail: "Bash: sleep 1",
+        data: { toolCallId: "call-merge-1" },
+      },
+    };
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        ...collapseBase,
+        id: "merge-updated",
+        kind: "tool.updated",
+        payload: {
+          ...collapseBase.payload,
+          data: {
+            ...collapseBase.payload.data,
+            rawOutput: { stdout: "done after 1s" },
+          },
+        },
+      }),
+      makeActivity({
+        ...collapseBase,
+        id: "merge-completed",
+        kind: "tool.completed",
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.output).toBe("done after 1s");
+  });
+
+  it("flattens Claude's block-array tool_result content as output", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "claude-block-result",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "Ran command",
+          data: {
+            toolName: "Bash",
+            input: { command: "ls" },
+            result: {
+              tool_use_id: "toolu_2",
+              type: "tool_result",
+              content: [{ type: "text", text: "file1\nfile2" }],
+              is_error: false,
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe("file1\nfile2");
+  });
+
+  it("extracts Codex's item.aggregatedOutput as output", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "codex-aggregated-output",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "Ran command",
+          data: {
+            item: {
+              command: "bun test",
+              aggregatedOutput: "1 passed",
+              exitCode: 0,
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe("1 passed");
+  });
+
+  it("extracts ACP's rawOutput.stdout as output", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "acp-raw-output",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "Ran command",
+          data: {
+            toolCallId: "call-1",
+            kind: "execute",
+            command: "ls",
+            rawInput: { command: "ls" },
+            rawOutput: { stdout: "file1\nfile2" },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe("file1\nfile2");
+  });
+
+  it("leaves output undefined when only detail (OpenCode style) is set", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "opencode-detail-only",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "file1\nfile2",
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBeUndefined();
+  });
+
+  it("clamps aggregatedOutput past 10000 chars", () => {
+    const longOutput = "a".repeat(10005);
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "codex-long-output",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          detail: "Ran command",
+          data: {
+            item: {
+              command: "bun test",
+              aggregatedOutput: longOutput,
+              exitCode: 0,
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.output).toBe(`${"a".repeat(10000)}…`);
+  });
+});
+
 describe("deriveTimelineEntries", () => {
   it("includes proposed plans alongside messages and work entries in chronological order", () => {
     const entries = deriveTimelineEntries(

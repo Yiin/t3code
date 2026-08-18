@@ -110,7 +110,53 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
-function buildToolCallExpandedBody(
+function normalizeBlockText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function firstNonEmptyBlockLine(value: string): string {
+  for (const line of value.split(/\r?\n/u)) {
+    const normalized = normalizeBlockText(line);
+    if (normalized.length > 0) return normalized;
+  }
+  return "";
+}
+
+/**
+ * True when `summary` adds nothing over `full`: it is `full`'s first line,
+ * either whole or truncated with a trailing ellipsis. Detail previews are built
+ * that way (`summarizeToolTextOutput`), so they repeat the output they precede.
+ */
+function blockSummarizesBlock(summary: string, full: string): boolean {
+  const candidate = normalizeBlockText(summary);
+  const target = normalizeBlockText(full);
+  if (candidate.length === 0 || candidate.length >= target.length) return false;
+  const firstLine = firstNonEmptyBlockLine(full);
+  if (candidate === firstLine) return true;
+  if (!candidate.endsWith("…")) return false;
+  const prefix = candidate.slice(0, -1).trimEnd();
+  return prefix.length > 0 && firstLine.startsWith(prefix);
+}
+
+/**
+ * Drops blocks another block already covers, keeping the original order. The
+ * same text often arrives as command, detail, and output for one tool call.
+ */
+export function dedupeExpandedBodyBlocks(blocks: ReadonlyArray<string>): Array<string> {
+  const kept: Array<string> = [];
+  for (const [index, block] of blocks.entries()) {
+    const supersededByLater = blocks
+      .slice(index + 1)
+      .some((later) => blockSummarizesBlock(block, later));
+    if (supersededByLater) continue;
+    const normalized = normalizeBlockText(block);
+    if (kept.some((earlier) => normalizeBlockText(earlier) === normalized)) continue;
+    kept.push(block);
+  }
+  return kept;
+}
+
+export function buildToolCallExpandedBody(
   workEntry: WorkLogEntry,
   workspaceRoot: string | undefined,
 ): string | null {
@@ -125,6 +171,11 @@ function buildToolCallExpandedBody(
     blocks.push(workEntry.command.trim());
   }
   if (workEntry.detail?.trim()) blocks.push(workEntry.detail.trim());
+  // No trim: the extractor already normalized edges, and a full trim would
+  // strip the first line's leading indent (Read line-number padding).
+  if (workEntry.output && workEntry.output.trim().length > 0) {
+    blocks.push(workEntry.output);
+  }
   const changedFiles = workEntry.changedFiles ?? [];
   if (changedFiles.length > 0) {
     blocks.push(
@@ -133,7 +184,8 @@ function buildToolCallExpandedBody(
         .join("\n"),
     );
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  const uniqueBlocks = dedupeExpandedBodyBlocks(blocks);
+  return uniqueBlocks.length > 0 ? uniqueBlocks.join("\n\n") : null;
 }
 
 function workEntryIconName(workEntry: WorkLogEntry): WorkEntryIconName {
