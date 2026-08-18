@@ -309,4 +309,64 @@ describe("PrimeEventMapper", () => {
     expect(events[0]?.itemId).toBe("prime-bash:turn-1:direct");
     expect(events[1]?.itemId).toBe(events[0]?.itemId);
   });
+
+  it("routes a bash tool call's command through data.command and its output through data.result", () => {
+    const fixtures = [
+      {
+        type: "tool_execution_start",
+        toolCallId: "tool-bash-1",
+        toolName: "bash",
+        args: { command: "ls -la" },
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "tool-bash-1",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "total 0" }] },
+        isError: false,
+      },
+    ];
+    let state: PrimeEventMapperState = initialPrimeEventMapperState();
+    const events = fixtures.flatMap((fixture, sequence) => {
+      const stepResult = mapPrimeRpcEvent(state, decodePrime(fixture), context(sequence));
+      state = stepResult.state;
+      return stepResult.events.map((event) => decodeRuntime(event));
+    });
+
+    const start = events.find((event) => event.type === "item.started");
+    expect(start?.payload).toMatchObject({ data: { command: "ls -la" } });
+
+    const end = events.find((event) => event.type === "item.completed");
+    expect(end?.payload).toMatchObject({
+      data: { command: "ls -la", result: { content: [{ type: "text", text: "total 0" }] } },
+    });
+    expect(
+      end?.payload && "detail" in end.payload ? end.payload.detail : undefined,
+    ).toBeUndefined();
+    expect(state.commandByToolCallId.has("tool-bash-1")).toBe(false);
+  });
+
+  it("keeps detail from the result text for a non-command tool call", () => {
+    const events = mapSequence([
+      {
+        type: "tool_execution_start",
+        toolCallId: "tool-search-1",
+        toolName: "web_search",
+        args: { query: "prime agent" },
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "tool-search-1",
+        toolName: "web_search",
+        result: { content: [{ type: "text", text: "results here" }] },
+        isError: false,
+      },
+    ]);
+
+    const end = events.find((event) => event.type === "item.completed");
+    expect(end?.payload).toMatchObject({
+      detail: "results here",
+      data: { content: [{ type: "text", text: "results here" }] },
+    });
+  });
 });

@@ -514,6 +514,15 @@ function detailFromToolPart(part: Extract<Part, { type: "tool" }>): string | und
   }
 }
 
+/** Command text for a `command_execution` tool part, e.g. the shell line a bash/exec tool ran. */
+function commandFromToolPart(part: Extract<Part, { type: "tool" }>): string | undefined {
+  if (part.state.status === "pending") {
+    return undefined;
+  }
+  const input = part.state.input.command;
+  return typeof input === "string" ? trimText(input) : undefined;
+}
+
 function toolStateCreatedAt(part: Extract<Part, { type: "tool" }>): string | undefined {
   switch (part.state.status) {
     case "running":
@@ -977,7 +986,17 @@ export function makeOpenCodeAdapter(
             const itemType = toToolLifecycleItemType(part.tool);
             const title =
               part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool;
-            const detail = detailFromToolPart(part);
+            const command =
+              itemType === "command_execution" ? commandFromToolPart(part) : undefined;
+            // Command parts show the command in `detail`/preview and route the tool's
+            // output through `data.rawOutput`, which is where the client reads it; the
+            // error case keeps `state.error` in `detail` so failures still surface.
+            const detail =
+              itemType === "command_execution" && part.state.status === "completed"
+                ? (command ?? detailFromToolPart(part))
+                : itemType === "command_execution" && part.state.status === "running" && command
+                  ? command
+                  : detailFromToolPart(part);
             const payload = {
               itemType,
               ...(part.state.status === "error"
@@ -990,6 +1009,10 @@ export function makeOpenCodeAdapter(
               data: {
                 tool: part.tool,
                 state: part.state,
+                ...(command ? { command } : {}),
+                ...(itemType === "command_execution" && part.state.status === "completed"
+                  ? { rawOutput: { content: part.state.output } }
+                  : {}),
               },
             };
             const runtimeEvent: ProviderRuntimeEvent = {
@@ -1019,7 +1042,9 @@ export function makeOpenCodeAdapter(
               const pendingTaskId = context.pendingSubtaskTaskIdByMessageId.get(part.messageID);
               if (pendingTaskId !== undefined) {
                 context.pendingSubtaskTaskIdByMessageId.delete(part.messageID);
-                const summary = trimText(detail);
+                // Task summary must stay the tool's output/error text, not the command
+                // we substitute into `detail` for command_execution parts above.
+                const summary = trimText(detailFromToolPart(part));
                 yield* emit({
                   ...(yield* buildEventBase({
                     threadId: context.session.threadId,

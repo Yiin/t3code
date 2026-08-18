@@ -1685,6 +1685,176 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       }),
   );
 
+  it.effect(
+    "routes a completed bash tool part's command/output to data.command/detail/rawOutput",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-bash-completed");
+        runtimeMock.state.subscribedEvents = [
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "http://127.0.0.1:9999/session",
+              part: {
+                id: "tool-bash-1",
+                sessionID: "http://127.0.0.1:9999/session",
+                messageID: "msg-bash-1",
+                type: "tool",
+                callID: "call-bash-1",
+                tool: "bash",
+                state: {
+                  status: "completed",
+                  input: { command: "echo hi" },
+                  output: "hi",
+                  title: "bash",
+                  metadata: {},
+                  time: { start: 1, end: 2 },
+                },
+              },
+              time: 1,
+            },
+          },
+        ];
+
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.filter((event) => event.type === "item.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        const completed = events[0];
+        NodeAssert.equal(completed?.type, "item.completed");
+        if (completed?.type === "item.completed") {
+          NodeAssert.equal(completed.payload.detail, "echo hi");
+          const data = completed.payload.data as Record<string, unknown>;
+          NodeAssert.equal(data.command, "echo hi");
+          NodeAssert.deepEqual(data.rawOutput, { content: "hi" });
+        }
+      }),
+  );
+
+  it.effect(
+    "keeps the error text in detail for a failed bash tool part while still emitting data.command",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-bash-error");
+        runtimeMock.state.subscribedEvents = [
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "http://127.0.0.1:9999/session",
+              part: {
+                id: "tool-bash-2",
+                sessionID: "http://127.0.0.1:9999/session",
+                messageID: "msg-bash-2",
+                type: "tool",
+                callID: "call-bash-2",
+                tool: "bash",
+                state: {
+                  status: "error",
+                  input: { command: "false" },
+                  error: "command failed with exit code 1",
+                  metadata: {},
+                  time: { start: 1, end: 2 },
+                },
+              },
+              time: 1,
+            },
+          },
+        ];
+
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.filter((event) => event.type === "item.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+        const completed = events[0];
+        NodeAssert.equal(completed?.type, "item.completed");
+        if (completed?.type === "item.completed") {
+          NodeAssert.equal(completed.payload.detail, "command failed with exit code 1");
+          const data = completed.payload.data as Record<string, unknown>;
+          NodeAssert.equal(data.command, "false");
+        }
+      }),
+  );
+
+  it.effect("keeps output in detail with no rawOutput for a completed non-command tool part", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-webfetch-completed");
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            part: {
+              id: "tool-webfetch-1",
+              sessionID: "http://127.0.0.1:9999/session",
+              messageID: "msg-webfetch-1",
+              type: "tool",
+              callID: "call-webfetch-1",
+              tool: "webfetch",
+              state: {
+                status: "completed",
+                input: { url: "https://example.com" },
+                output: "page contents",
+                title: "webfetch",
+                metadata: {},
+                time: { start: 1, end: 2 },
+              },
+            },
+            time: 1,
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.filter((event) => event.type === "item.completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      const completed = events[0];
+      NodeAssert.equal(completed?.type, "item.completed");
+      if (completed?.type === "item.completed") {
+        NodeAssert.equal(completed.payload.detail, "page contents");
+        const data = completed.payload.data as Record<string, unknown>;
+        NodeAssert.equal(data.command, undefined);
+        NodeAssert.equal(data.rawOutput, undefined);
+      }
+    }),
+  );
+
   it.effect("lets OpenCode own session title generation and emits title metadata updates", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

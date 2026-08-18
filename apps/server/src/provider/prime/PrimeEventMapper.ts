@@ -28,6 +28,7 @@ export interface PrimeEventMapperState {
   readonly terminalTurn: boolean;
   readonly completedItems: ReadonlySet<string>;
   readonly pendingRequestIds: ReadonlySet<string>;
+  readonly commandByToolCallId: ReadonlyMap<string, string>;
   readonly pendingTerminal?:
     | {
         readonly reason: "aborted" | "error";
@@ -46,6 +47,7 @@ export const initialPrimeEventMapperState = (): PrimeEventMapperState => ({
   terminalTurn: false,
   completedItems: new Set(),
   pendingRequestIds: new Set(),
+  commandByToolCallId: new Map(),
 });
 
 /** Settle requests when the adapter interrupts, stops, or loses the Prime process. */
@@ -91,6 +93,17 @@ const textFromResult = (value: unknown): string | undefined => {
     return typeof candidate === "string" ? [candidate] : [];
   });
   return text.length > 0 ? text.join("\n") : undefined;
+};
+
+const commandFromArgs = (args: unknown): string | undefined => {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  const record = args as Record<string, unknown>;
+  return (
+    nonEmpty(record.command) ??
+    nonEmpty(record.cmd) ??
+    nonEmpty(record.code) ??
+    nonEmpty(record.script)
+  );
 };
 
 const itemTypeForTool = (
@@ -255,8 +268,19 @@ export function mapPrimeRpcEvent(
         }),
       );
     }
-    case "tool_execution_start":
-      return unchanged(
+    case "tool_execution_start": {
+      const isCommand = itemTypeForTool(event.toolName) === "command_execution";
+      const command = isCommand ? commandFromArgs(event.args) : undefined;
+      return result(
+        command
+          ? {
+              ...state,
+              commandByToolCallId: new Map(state.commandByToolCallId).set(
+                event.toolCallId,
+                command,
+              ),
+            }
+          : state,
         emit({
           ...base,
           type: "item.started",
@@ -266,10 +290,11 @@ export function mapPrimeRpcEvent(
             itemType: itemTypeForTool(event.toolName),
             status: "inProgress",
             title: event.toolName,
-            data: { args: event.args },
+            data: { args: event.args, ...(command ? { command } : {}) },
           },
         }),
       );
+    }
     case "bash_execution_update":
       return unchanged(
         emit({
@@ -279,7 +304,8 @@ export function mapPrimeRpcEvent(
           payload: { streamKind: "command_output", delta: event.delta },
         }),
       );
-    case "tool_execution_update":
+    case "tool_execution_update": {
+      const command = state.commandByToolCallId.get(event.toolCallId);
       return unchanged(
         emit({
           ...base,
@@ -290,15 +316,23 @@ export function mapPrimeRpcEvent(
             itemType: itemTypeForTool(event.toolName),
             status: "inProgress",
             title: event.toolName,
-            data: event.partialResult,
+            data: command ? { command, partialResult: event.partialResult } : event.partialResult,
           },
         }),
       );
+    }
     case "tool_execution_end": {
       if (state.completedItems.has(event.toolCallId)) return unchanged();
       const completedItems = new Set(state.completedItems).add(event.toolCallId);
+      const command = state.commandByToolCallId.get(event.toolCallId);
+      let commandByToolCallId: ReadonlyMap<string, string> = state.commandByToolCallId;
+      if (command) {
+        const next = new Map(state.commandByToolCallId);
+        next.delete(event.toolCallId);
+        commandByToolCallId = next;
+      }
       return result(
-        { ...state, completedItems },
+        { ...state, completedItems, commandByToolCallId },
         emit({
           ...base,
           type: "item.completed",
@@ -308,8 +342,12 @@ export function mapPrimeRpcEvent(
             itemType: itemTypeForTool(event.toolName),
             status: event.isError ? "failed" : "completed",
             title: event.toolName,
-            ...(textFromResult(event.result) ? { detail: textFromResult(event.result) } : {}),
-            data: event.result,
+            ...(command
+              ? {}
+              : textFromResult(event.result)
+                ? { detail: textFromResult(event.result) }
+                : {}),
+            data: command ? { command, result: event.result } : event.result,
           },
         }),
       );
