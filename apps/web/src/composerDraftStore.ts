@@ -530,10 +530,11 @@ function modelSelectionByProviderToOptions(
 }
 
 function cloneModelSelection(selection: ModelSelection): DeepMutable<ModelSelection> {
-  return {
-    ...selection,
-    ...(selection.options ? { options: selection.options.map((option) => ({ ...option })) } : {}),
-  } as DeepMutable<ModelSelection>;
+  const clone = { ...selection } as DeepMutable<ModelSelection>;
+  if (selection.options) {
+    clone.options = selection.options.map((option) => ({ ...option }));
+  }
+  return clone;
 }
 
 function compactModelSelectionByProvider(
@@ -1759,21 +1760,21 @@ function normalizePersistedDraftsByThreadId(
                 ? normalizeLegacyComposerStorageKey(threadKeyOrId, { environmentId })
                 : threadKeyOrId;
             })();
-    nextDraftsByThreadKey[normalizedThreadKey] = {
+    const normalizedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
       prompt,
       attachments,
-      ...(terminalContexts.length > 0 ? { terminalContexts } : {}),
-      ...(elementContexts.length > 0 ? { elementContexts } : {}),
-      ...(reviewComments.length > 0 ? { reviewComments } : {}),
-      ...(hasModelData
-        ? {
-            modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
-            activeProvider,
-          }
-        : {}),
-      ...(runtimeMode ? { runtimeMode } : {}),
-      ...(interactionMode ? { interactionMode } : {}),
     };
+    if (terminalContexts.length > 0) normalizedDraft.terminalContexts = terminalContexts;
+    if (elementContexts.length > 0) normalizedDraft.elementContexts = elementContexts;
+    if (reviewComments.length > 0) normalizedDraft.reviewComments = reviewComments;
+    if (hasModelData) {
+      normalizedDraft.modelSelectionByProvider =
+        compactModelSelectionByProvider(modelSelectionByProvider);
+      normalizedDraft.activeProvider = activeProvider;
+    }
+    if (runtimeMode) normalizedDraft.runtimeMode = runtimeMode;
+    if (interactionMode) normalizedDraft.interactionMode = interactionMode;
+    nextDraftsByThreadKey[normalizedThreadKey] = normalizedDraft;
   }
 
   return nextDraftsByThreadKey;
@@ -1859,59 +1860,49 @@ function partializeComposerDraftStoreState(
     const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
       prompt: draft.prompt,
       attachments: draft.persistedAttachments,
-      ...(draft.terminalContexts.length > 0
-        ? {
-            terminalContexts: draft.terminalContexts.map((context) => ({
-              id: context.id,
-              threadId: context.threadId,
-              createdAt: context.createdAt,
-              terminalId: context.terminalId,
-              terminalLabel: context.terminalLabel,
-              lineStart: context.lineStart,
-              lineEnd: context.lineEnd,
-            })),
-          }
-        : {}),
-      ...(draft.elementContexts.length > 0
-        ? {
-            elementContexts: draft.elementContexts.map((context) => ({
-              id: context.id,
-              threadId: context.threadId,
-              pickedAt: context.pickedAt,
-              pageUrl: context.pageUrl,
-              pageTitle: context.pageTitle,
-              tagName: context.tagName,
-              selector: context.selector,
-              htmlPreview: context.htmlPreview,
-              componentName: context.componentName,
-              source: context.source,
-              styles: context.styles,
-            })),
-          }
-        : {}),
-      ...(draft.previewAnnotations.length > 0
-        ? {
-            previewAnnotations: draft.previewAnnotations.map(
-              (annotation) => ({ ...annotation }) as DeepMutable<PreviewAnnotationPayload>,
-            ),
-          }
-        : {}),
-      ...(draft.reviewComments.length > 0
-        ? {
-            reviewComments: draft.reviewComments.map((comment) => ({ ...comment })),
-          }
-        : {}),
-      ...(hasModelData
-        ? {
-            modelSelectionByProvider: compactModelSelectionByProvider(
-              draft.modelSelectionByProvider,
-            ),
-            activeProvider: draft.activeProvider,
-          }
-        : {}),
-      ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
-      ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
     };
+    if (draft.terminalContexts.length > 0) {
+      persistedDraft.terminalContexts = draft.terminalContexts.map((context) => ({
+        id: context.id,
+        threadId: context.threadId,
+        createdAt: context.createdAt,
+        terminalId: context.terminalId,
+        terminalLabel: context.terminalLabel,
+        lineStart: context.lineStart,
+        lineEnd: context.lineEnd,
+      }));
+    }
+    if (draft.elementContexts.length > 0) {
+      persistedDraft.elementContexts = draft.elementContexts.map((context) => ({
+        id: context.id,
+        threadId: context.threadId,
+        pickedAt: context.pickedAt,
+        pageUrl: context.pageUrl,
+        pageTitle: context.pageTitle,
+        tagName: context.tagName,
+        selector: context.selector,
+        htmlPreview: context.htmlPreview,
+        componentName: context.componentName,
+        source: context.source,
+        styles: context.styles,
+      }));
+    }
+    if (draft.previewAnnotations.length > 0) {
+      persistedDraft.previewAnnotations = draft.previewAnnotations.map(
+        (annotation) => ({ ...annotation }) as DeepMutable<PreviewAnnotationPayload>,
+      );
+    }
+    if (draft.reviewComments.length > 0) {
+      persistedDraft.reviewComments = draft.reviewComments.map((comment) => ({ ...comment }));
+    }
+    if (hasModelData) {
+      persistedDraft.modelSelectionByProvider = compactModelSelectionByProvider(
+        draft.modelSelectionByProvider,
+      );
+      persistedDraft.activeProvider = draft.activeProvider;
+    }
+    if (draft.runtimeMode) persistedDraft.runtimeMode = draft.runtimeMode;
+    if (draft.interactionMode) persistedDraft.interactionMode = draft.interactionMode;
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
   return {
@@ -2772,9 +2763,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
 
             const nextDraft: ComposerThreadDraftState = {
               ...base,
-              ...(options?.instanceId ? { activeProvider: instanceKey } : {}),
               modelSelectionByProvider: nextMap,
             };
+            if (options?.instanceId) {
+              nextDraft.activeProvider = instanceKey;
+            }
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
               delete nextDraftsByThreadKey[threadKey];
@@ -2782,15 +2775,14 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftsByThreadKey[threadKey] = nextDraft;
             }
 
-            return {
+            const nextState: Partial<ComposerDraftStoreState> = {
               draftsByThreadKey: nextDraftsByThreadKey,
-              ...(options?.persistSticky === true
-                ? {
-                    stickyModelSelectionByProvider: nextStickyMap,
-                    stickyActiveProvider: nextStickyActiveProvider,
-                  }
-                : {}),
             };
+            if (options?.persistSticky === true) {
+              nextState.stickyModelSelectionByProvider = nextStickyMap;
+              nextState.stickyActiveProvider = nextStickyActiveProvider;
+            }
+            return nextState;
           });
         },
         setRuntimeMode: (threadRef, runtimeMode) => {

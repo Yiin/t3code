@@ -90,8 +90,9 @@ const NpmLatestVersionResponse = Schema.Struct({
   version: Schema.optional(Schema.String),
 });
 
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+function nonEmptyString(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed !== undefined && trimmed.length > 0 ? trimmed : null;
 }
 
 export function makeProviderMaintenanceCapabilities(input: {

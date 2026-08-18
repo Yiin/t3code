@@ -1,5 +1,5 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -10,8 +10,8 @@ import {
 import { DEFAULT_THREAD_TERMINAL_ID } from "./types";
 
 const THREAD_ID = ThreadId.make("thread-1");
-const THREAD_REF = scopeThreadRef("environment-a" as never, THREAD_ID);
-const OTHER_THREAD_REF = scopeThreadRef("environment-b" as never, THREAD_ID);
+const THREAD_REF = scopeThreadRef(EnvironmentId.make("environment-a"), THREAD_ID);
+const OTHER_THREAD_REF = scopeThreadRef(EnvironmentId.make("environment-b"), THREAD_ID);
 
 describe("terminalUiStateStore actions", () => {
   beforeEach(() => {

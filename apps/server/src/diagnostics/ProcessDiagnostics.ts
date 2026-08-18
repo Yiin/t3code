@@ -237,7 +237,7 @@ function normalizeWindowsProcessRow(value: unknown): ProcessRow | null {
 function parseWindowsProcessRows(output: string): ReadonlyArray<ProcessRow> {
   if (output.trim().length === 0) return [];
   try {
-    const parsed = JSON.parse(output) as unknown;
+    const parsed: unknown = JSON.parse(output);
     const records = Array.isArray(parsed) ? parsed : [parsed];
     return records.flatMap((record) => {
       const row = normalizeWindowsProcessRow(record);

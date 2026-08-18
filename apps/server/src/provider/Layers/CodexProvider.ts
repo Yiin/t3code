@@ -72,21 +72,21 @@ export interface CodexAppServerProviderSnapshot {
 
 const EMPTY_CODEX_USAGE_READINGS: ReadonlyArray<ProviderUsageReading> = [];
 
-const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
-  none: "None",
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-  max: "Max",
-  ultra: "Ultra",
-};
+const REASONING_EFFORT_LABELS = new Map<string, string>([
+  ["none", "None"],
+  ["minimal", "Minimal"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+  ["xhigh", "Extra High"],
+  ["max", "Max"],
+  ["ultra", "Ultra"],
+]);
 
 const DEFAULT_SERVICE_TIER_ID = "default";
 
 function reasoningEffortLabel(reasoningEffort: string): string {
-  return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
+  return REASONING_EFFORT_LABELS.get(reasoningEffort) ?? reasoningEffort;
 }
 
 function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["account"]) {
@@ -336,7 +336,7 @@ export function mapCodexRateLimitsResponse(
     window: Extract<ProviderUsageReading["window"], "primary" | "secondary">,
     value: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow | null | undefined,
   ) => {
-    if (!value || typeof value.usedPercent !== "number" || !Number.isFinite(value.usedPercent)) {
+    if (!value || !Number.isFinite(value.usedPercent)) {
       return;
     }
     readings.push({
@@ -559,11 +559,15 @@ const makePendingCodexProvider = (
     });
   });
 
-function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]): {
+type CodexAccountProbeStatus = {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
-} {
+};
+
+function accountProbeStatus(
+  account: CodexAppServerProviderSnapshot["account"],
+): CodexAccountProbeStatus {
   const authLabel = codexAccountAuthLabel(account.account);
   const authEmail = codexAccountEmail(account.account);
   const auth = {

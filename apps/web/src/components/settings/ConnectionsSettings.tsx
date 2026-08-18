@@ -341,10 +341,12 @@ function parsePairingUrlFields(
   }
 }
 
-function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
+type RemotePairingFields = {
   readonly host: string;
   readonly pairingCode: string;
-} {
+};
+
+function parseRemotePairingFields(input: RemotePairingFields): RemotePairingFields {
   const parsedPairingUrl = parsePairingUrlFields(input.host);
   if (parsedPairingUrl) return parsedPairingUrl;
 

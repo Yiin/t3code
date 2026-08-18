@@ -80,11 +80,13 @@ function readNonNegativeInteger(value: string | undefined): number | null {
   return Number(value);
 }
 
-function extractReviewCommentBody(rawBody: string): {
+interface ReviewCommentBody {
   text: string;
   language: string;
   contents: string;
-} {
+}
+
+function extractReviewCommentBody(rawBody: string): ReviewCommentBody {
   const matches = Array.from(rawBody.matchAll(REVIEW_COMMENT_FENCE_PATTERN));
   const match = matches.at(-1);
   const fenceIndex = match?.index;
@@ -359,10 +361,15 @@ function findDiffReviewLineIndex(
   return lines.findIndex((line) => line[fallbackKey] === lineNumber);
 }
 
+interface DiffRange {
+  start: number;
+  count: number;
+}
+
 function getDiffRange(
   lines: ReadonlyArray<DiffReviewLine>,
   key: "oldLineNumber" | "newLineNumber",
-): { start: number; count: number } {
+): DiffRange {
   const numberedLines = lines.filter((line) => line[key] !== null);
   return {
     start: numberedLines[0]?.[key] ?? 0,

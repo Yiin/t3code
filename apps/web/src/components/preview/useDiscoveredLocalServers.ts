@@ -104,11 +104,11 @@ export function mergeServers(input: {
   }
 
   return Array.from(seen.values()).toSorted((a, b) => {
-    const sourceOrder: Record<PreviewableServer["source"], number> = {
+    const sourceOrder = {
       configured: 0,
       scanner: 1,
       recent: 2,
-    };
+    } satisfies Record<PreviewableServer["source"], number>;
     if (sourceOrder[a.source] !== sourceOrder[b.source]) {
       return sourceOrder[a.source] - sourceOrder[b.source];
     }

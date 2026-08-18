@@ -864,16 +864,18 @@ function collectTerminalContextIds(node: LexicalNode): string[] {
   return [];
 }
 
+export interface ComposerPromptEditorSnapshot {
+  value: string;
+  cursor: number;
+  expandedCursor: number;
+  terminalContextIds: string[];
+}
+
 export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
   focusAtEnd: () => void;
-  readSnapshot: () => {
-    value: string;
-    cursor: number;
-    expandedCursor: number;
-    terminalContextIds: string[];
-  };
+  readSnapshot: () => ComposerPromptEditorSnapshot;
 }
 
 interface ComposerPromptEditorProps {
@@ -1642,12 +1644,7 @@ function ComposerPromptEditorInner({
     [editor],
   );
 
-  const readSnapshot = useCallback((): {
-    value: string;
-    cursor: number;
-    expandedCursor: number;
-    terminalContextIds: string[];
-  } => {
+  const readSnapshot = useCallback((): ComposerPromptEditorSnapshot => {
     let snapshot = snapshotRef.current;
     editor.getEditorState().read(() => {
       const nextValue = $getRoot().getTextContent();

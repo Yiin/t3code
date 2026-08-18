@@ -373,13 +373,15 @@ export function resolveThreadBranchUpdate(
   };
 }
 
+type ThreadBranchMetadataPatch = {
+  branch: string | null;
+  expectedBranch: string | null;
+};
+
 export function resolveThreadBranchMetadataPatch(
   branch: string | null,
   expectedBranch: string | null,
-): {
-  branch: string | null;
-  expectedBranch: string | null;
-} {
+): ThreadBranchMetadataPatch {
   return { branch, expectedBranch };
 }
 

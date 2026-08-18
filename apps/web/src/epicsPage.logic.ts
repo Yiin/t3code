@@ -206,13 +206,13 @@ export function sortEpicRowsByActivity(
  * failed deliberately: a live run is the thing you can still act on, and a past
  * failure must not shout over it.
  */
-const RUN_STATUS_SEVERITY: Record<EpicRunStatus, number> = {
+const RUN_STATUS_SEVERITY = {
   running: 5,
   failed: 4,
   paused: 3,
   cancelled: 2,
   done: 1,
-};
+} satisfies Record<EpicRunStatus, number>;
 
 export function worstRunStatus(
   runs: ReadonlyArray<{ readonly status: EpicRunStatus } | null | undefined>,

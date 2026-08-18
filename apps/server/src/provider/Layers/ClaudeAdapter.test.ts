@@ -4939,7 +4939,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
-      assert.equal((permissionResult as PermissionResult).behavior, "allow");
+      assert.equal(permissionResult.behavior, "allow");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -5831,11 +5831,10 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
-      assert.equal((permissionResult as PermissionResult).behavior, "deny");
-      const deniedResult = permissionResult as PermissionResult & {
-        message?: string;
-      };
-      assert.equal(deniedResult.message?.includes("captured your proposed plan"), true);
+      assert.equal(permissionResult.behavior, "deny");
+      const deniedMessage =
+        permissionResult.behavior === "deny" ? permissionResult.message : undefined;
+      assert.equal(deniedMessage?.includes("captured your proposed plan"), true);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -6026,19 +6025,19 @@ describe("ClaudeAdapterLive", () => {
 
       // The canUseTool promise should resolve with the answers in SDK format.
       const permissionResult = yield* Effect.promise(() => permissionPromise);
-      assert.equal((permissionResult as PermissionResult).behavior, "allow");
-      const updatedInput = (permissionResult as { updatedInput: Record<string, unknown> })
-        .updatedInput;
-      assert.deepEqual(updatedInput.answers, { "Which framework?": "React" });
+      assert.equal(permissionResult.behavior, "allow");
+      const updatedInput =
+        permissionResult.behavior === "allow" ? permissionResult.updatedInput : undefined;
+      assert.deepEqual(updatedInput?.answers, { "Which framework?": "React" });
       // Original questions should be passed through.
-      assert.deepEqual(updatedInput.questions, askInput.questions);
+      assert.deepEqual(updatedInput?.questions, askInput.questions);
 
       // Compatibility check for #2388: the answers shape we hand to the SDK
       // must produce a non-empty rendered tool_result on BOTH SDK iteration
       // patterns we have seen, so we don't regress the issue and we don't
       // break users still on the older Claude CLI.
-      const sdkAnswers = updatedInput.answers as Record<string, unknown>;
-      const sdkQuestions = updatedInput.questions as ReadonlyArray<{
+      const sdkAnswers = updatedInput?.answers as Record<string, unknown>;
+      const sdkQuestions = updatedInput?.questions as ReadonlyArray<{
         readonly question: string;
       }>;
 
@@ -6124,10 +6123,10 @@ describe("ClaudeAdapterLive", () => {
       yield* Stream.runHead(adapter.streamEvents);
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
-      assert.equal((permissionResult as PermissionResult).behavior, "allow");
-      const updatedInput = (permissionResult as { updatedInput: Record<string, unknown> })
-        .updatedInput;
-      assert.deepEqual(updatedInput.answers, { "Deploy to which env?": "Staging" });
+      assert.equal(permissionResult.behavior, "allow");
+      const updatedInput =
+        permissionResult.behavior === "allow" ? permissionResult.updatedInput : undefined;
+      assert.deepEqual(updatedInput?.answers, { "Deploy to which env?": "Staging" });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -6218,7 +6217,7 @@ describe("ClaudeAdapterLive", () => {
         yield* Stream.runHead(adapter.streamEvents);
 
         const permissionResult = yield* Effect.promise(() => permissionPromise);
-        assert.equal((permissionResult as PermissionResult).behavior, "allow");
+        assert.equal(permissionResult.behavior, "allow");
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),

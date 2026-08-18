@@ -274,12 +274,17 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
+export interface ReplacedTextRange {
+  text: string;
+  cursor: number;
+}
+
 export function replaceTextRange(
   text: string,
   rangeStart: number,
   rangeEnd: number,
   replacement: string,
-): { text: string; cursor: number } {
+): ReplacedTextRange {
   const safeStart = Math.max(0, Math.min(text.length, rangeStart));
   const safeEnd = Math.max(safeStart, Math.min(text.length, rangeEnd));
   const nextText = `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`;

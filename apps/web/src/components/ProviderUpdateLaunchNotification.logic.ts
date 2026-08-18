@@ -719,9 +719,14 @@ export interface LocalEnvironmentUpdateGroup {
  * outdated one-click candidates with its own provider list, and report whether
  * any environment is still settling (so the caller can defer the popover).
  */
+type LocalEnvironmentUpdateGroups = {
+  groups: LocalEnvironmentUpdateGroup[];
+  isAnySettling: boolean;
+};
+
 export function buildLocalEnvironmentUpdateGroups(
   environments: ReadonlyArray<LocalEnvironmentProvidersInput>,
-): { groups: LocalEnvironmentUpdateGroup[]; isAnySettling: boolean } {
+): LocalEnvironmentUpdateGroups {
   const groups = environments.map((environment) => ({
     environmentId: environment.environmentId,
     label: environment.label,

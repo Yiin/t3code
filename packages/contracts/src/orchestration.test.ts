@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import type { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
+
 import {
   ChatAttachment,
   ClientOrchestrationCommand,
@@ -80,9 +82,9 @@ const encodeSubagentSteerDelivered = Schema.encodeEffect(SubagentSteerDeliveredA
 const encodeSubagentSteerFailed = Schema.encodeEffect(SubagentSteerFailedActivityPayload);
 
 function getOptionValue(
-  options: ReadonlyArray<{ id: string; value: unknown }> | undefined,
+  options: ReadonlyArray<ProviderOptionSelection> | undefined,
   id: string,
-): unknown {
+): ProviderOptionSelectionValue | undefined {
   return options?.find((option) => option.id === id)?.value;
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);

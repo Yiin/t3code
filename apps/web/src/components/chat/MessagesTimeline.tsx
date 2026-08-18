@@ -1396,25 +1396,25 @@ function WorkGroupToggleTimelineRow({
 
 // Dot palette mirrors the sidebar thread-status pills (resolveThreadStatusPill
 // in Sidebar.logic.ts) so one status reads the same everywhere.
-const SUBAGENT_FLEET_DOT_CLASS: Record<
-  Extract<TimelineRow, { kind: "subagent-fleet" }>["agents"][number]["status"],
-  string
-> = {
+const SUBAGENT_FLEET_DOT_CLASS = {
   running: "bg-sky-500 dark:bg-sky-300/80 animate-status-pulse motion-reduce:animate-none",
   completed: "bg-emerald-500 dark:bg-emerald-300/90",
   failed: "bg-destructive",
   stopped: "bg-muted-foreground/40",
-};
-
-const SUBAGENT_FLEET_STATUS_LABEL: Record<
+} satisfies Record<
   Extract<TimelineRow, { kind: "subagent-fleet" }>["agents"][number]["status"],
   string
-> = {
+>;
+
+const SUBAGENT_FLEET_STATUS_LABEL = {
   running: "Running",
   completed: "Done",
   failed: "Failed",
   stopped: "Stopped",
-};
+} satisfies Record<
+  Extract<TimelineRow, { kind: "subagent-fleet" }>["agents"][number]["status"],
+  string
+>;
 
 /**
  * One summary line above the unsettled turn's subagent cards when 2+ run

@@ -274,10 +274,10 @@ function ConfiguredConnectOnboardingDialog() {
   );
 }
 
-const STEP_LABELS: Record<OnboardingStep, string> = {
+const STEP_LABELS = {
   publish: "Publish",
   devices: "Connect devices",
-};
+} satisfies Record<OnboardingStep, string>;
 
 function OnboardingStepper({
   steps,

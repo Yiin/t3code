@@ -412,12 +412,13 @@ export function derivePendingApprovals(
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
 
     if (activity.kind === "approval.requested" && requestId && requestKind) {
-      openByRequestId.set(requestId, {
+      const approval: PendingApproval = {
         requestId,
         requestKind,
         createdAt: activity.createdAt,
-        ...(detail ? { detail } : {}),
-      });
+      };
+      if (detail) approval.detail = detail;
+      openByRequestId.set(requestId, approval);
       continue;
     }
 
@@ -587,14 +588,15 @@ export function deriveActivePlanState(
   if (steps.length === 0) {
     return null;
   }
-  return {
+  const plan: ActivePlanState = {
     createdAt: latest.createdAt,
     turnId: latest.turnId,
-    ...(payload && "explanation" in payload
-      ? { explanation: payload.explanation as string | null }
-      : {}),
     steps,
   };
+  if (payload && "explanation" in payload) {
+    plan.explanation = payload.explanation as string | null;
+  }
+  return plan;
 }
 
 export function findLatestProposedPlan(
@@ -877,23 +879,21 @@ function mergeDerivedWorkLogEntries(
   const parentToolUseId = next.parentToolUseId ?? previous.parentToolUseId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
-  return {
-    ...previous,
-    ...next,
-    ...(detail ? { detail } : {}),
-    ...(command ? { command } : {}),
-    ...(rawCommand ? { rawCommand } : {}),
-    ...(output ? { output } : {}),
-    ...(changedFiles.length > 0 ? { changedFiles } : {}),
-    ...(toolTitle ? { toolTitle } : {}),
-    ...(itemType ? { itemType } : {}),
-    ...(requestKind ? { requestKind } : {}),
-    ...(collapseKey ? { collapseKey } : {}),
-    ...(toolCallId ? { toolCallId } : {}),
-    ...(parentToolUseId ? { parentToolUseId } : {}),
-    ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
-    ...(toolData !== undefined ? { toolData } : {}),
-  };
+  const merged: DerivedWorkLogEntry = { ...previous, ...next };
+  if (detail) merged.detail = detail;
+  if (command) merged.command = command;
+  if (rawCommand) merged.rawCommand = rawCommand;
+  if (output) merged.output = output;
+  if (changedFiles.length > 0) merged.changedFiles = changedFiles;
+  if (toolTitle) merged.toolTitle = toolTitle;
+  if (itemType) merged.itemType = itemType;
+  if (requestKind) merged.requestKind = requestKind;
+  if (collapseKey) merged.collapseKey = collapseKey;
+  if (toolCallId) merged.toolCallId = toolCallId;
+  if (parentToolUseId) merged.parentToolUseId = parentToolUseId;
+  if (toolLifecycleStatus !== undefined) merged.toolLifecycleStatus = toolLifecycleStatus;
+  if (toolData !== undefined) merged.toolData = toolData;
+  return merged;
 }
 
 function mergeChangedFiles(
@@ -1569,10 +1569,12 @@ function toRawToolCommand(value: unknown, normalizedCommand: string | null): str
   return formatted === normalizedCommand ? null : formatted;
 }
 
-function extractToolCommand(payload: Record<string, unknown> | null): {
+interface ExtractedToolCommand {
   command: string | null;
   rawCommand: string | null;
-} {
+}
+
+function extractToolCommand(payload: Record<string, unknown> | null): ExtractedToolCommand {
   const data = asRecord(payload?.data);
   const item = asRecord(data?.item);
   const itemResult = asRecord(item?.result);
@@ -1770,10 +1772,12 @@ function extractToolOutput(payload: Record<string, unknown> | null): string | nu
   return null;
 }
 
-function stripTrailingExitCode(value: string): {
+interface StrippedExitCode {
   output: string | null;
   exitCode?: number | undefined;
-} {
+}
+
+function stripTrailingExitCode(value: string): StrippedExitCode {
   const trimmed = value.trim();
   const match = /^(?<output>[\s\S]*?)(?:\s*<exited with exit code (?<code>\d+)>)\s*$/i.exec(
     trimmed,
@@ -1785,10 +1789,13 @@ function stripTrailingExitCode(value: string): {
   }
   const exitCode = Number.parseInt(match.groups.code ?? "", 10);
   const normalizedOutput = match.groups.output?.trim() ?? "";
-  return {
+  const stripped: StrippedExitCode = {
     output: normalizedOutput.length > 0 ? normalizedOutput : null,
-    ...(Number.isInteger(exitCode) ? { exitCode } : {}),
   };
+  if (Number.isInteger(exitCode)) {
+    stripped.exitCode = exitCode;
+  }
+  return stripped;
 }
 
 function extractWorkLogItemType(

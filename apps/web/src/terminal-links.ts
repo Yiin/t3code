@@ -137,11 +137,13 @@ function inferHomeFromCwd(cwd: string): string | undefined {
   return undefined;
 }
 
-export function splitPathAndPosition(value: string): {
+export interface PathAndPosition {
   path: string;
   line: string | undefined;
   column: string | undefined;
-} {
+}
+
+export function splitPathAndPosition(value: string): PathAndPosition {
   let path = value;
   let column: string | undefined;
   let line: string | undefined;

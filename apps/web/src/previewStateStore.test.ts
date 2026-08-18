@@ -1,5 +1,5 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, type PreviewSessionSnapshot, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, type PreviewSessionSnapshot, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -19,7 +19,7 @@ import {
   updatePreviewServerSnapshot,
 } from "./previewStateStore";
 
-const environmentId = "env-1" as EnvironmentId;
+const environmentId = EnvironmentId.make("env-1");
 const ref = scopeThreadRef(environmentId, ThreadId.make("thread-1"));
 const otherRef = scopeThreadRef(environmentId, ThreadId.make("thread-2"));
 

@@ -37,6 +37,13 @@ export function reconcileTerminalLaunchContext(
   return current;
 }
 
+export interface TerminalLaunchContextState {
+  terminalUiLaunchContext: TerminalLaunchContext | null;
+  setTerminalUiLaunchContext: Dispatch<SetStateAction<TerminalLaunchContext | null>>;
+  terminalFocusRequestId: number;
+  setTerminalFocusRequestId: Dispatch<SetStateAction<number>>;
+}
+
 export function useTerminalLaunchContext(input: {
   activeThreadId: ThreadId | null;
   activeThreadKey: string | null;
@@ -44,12 +51,7 @@ export function useTerminalLaunchContext(input: {
   activeThreadWorktreePath: string | null;
   terminalOpen: boolean;
   focusComposer: () => void;
-}): {
-  terminalUiLaunchContext: TerminalLaunchContext | null;
-  setTerminalUiLaunchContext: Dispatch<SetStateAction<TerminalLaunchContext | null>>;
-  terminalFocusRequestId: number;
-  setTerminalFocusRequestId: Dispatch<SetStateAction<number>>;
-} {
+}): TerminalLaunchContextState {
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
     useState<TerminalLaunchContext | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);

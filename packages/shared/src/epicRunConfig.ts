@@ -1,3 +1,4 @@
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import {
@@ -28,9 +29,6 @@ export interface ResolveEpicRunConfigInput {
 
 const decodeEpicRunConfig = Schema.decodeUnknownSync(EpicRunConfig);
 const DEFAULT_CONFIG = decodeEpicRunConfig({});
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneValue(child)]));
@@ -38,7 +36,7 @@ function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
 
 function cloneValue(value: unknown): unknown {
   if (Array.isArray(value)) return [...value];
-  if (!isRecord(value)) return value;
+  if (!Predicate.isObject(value)) return value;
   return cloneRecord(value);
 }
 
@@ -56,9 +54,9 @@ function applyOverride(
       provenance[dottedKey] = source;
       continue;
     }
-    if (isRecord(value)) {
+    if (Predicate.isObject(value)) {
       const existing = target[key];
-      const child = isRecord(existing) ? existing : {};
+      const child = Predicate.isObject(existing) ? existing : {};
       target[key] = child;
       applyOverride(child, value, source, provenance, dottedKey);
       continue;

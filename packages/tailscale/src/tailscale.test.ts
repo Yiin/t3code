@@ -7,7 +7,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   buildTailscaleHttpsBaseUrl,
@@ -68,13 +68,11 @@ function mockSpawnerLayer(
 ) {
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make((command) => {
-      const childProcess = command as unknown as {
-        readonly command: string;
-        readonly args: ReadonlyArray<string>;
-      };
-      return Effect.succeed(mockHandle(handler(childProcess.command, childProcess.args)));
-    }),
+    ChildProcessSpawner.make((command) =>
+      ChildProcess.isStandardCommand(command)
+        ? Effect.succeed(mockHandle(handler(command.command, command.args)))
+        : Effect.die(new Error("mock spawner only handles standard commands")),
+    ),
   );
 }
 

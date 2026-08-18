@@ -36,17 +36,18 @@ export class VcsDriverRegistry extends Context.Service<
   }
 >()("t3/vcs/VcsDriverRegistry") {}
 
-function detectionCacheKey(input: {
+interface DetectionCacheKey {
   readonly cwd: string;
   readonly requestedKind: VcsDriverKind | "auto";
-}): string {
+}
+
+const DETECTION_CACHE_KINDS = ["git", "jj", "unknown", "auto"] as const;
+
+function detectionCacheKey(input: DetectionCacheKey): string {
   return `${input.requestedKind}\0${input.cwd}`;
 }
 
-function parseDetectionCacheKey(key: string): {
-  readonly cwd: string;
-  readonly requestedKind: VcsDriverKind | "auto";
-} {
+function parseDetectionCacheKey(key: string): DetectionCacheKey {
   const separatorIndex = key.indexOf("\0");
   if (separatorIndex === -1) {
     return {
@@ -54,8 +55,9 @@ function parseDetectionCacheKey(key: string): {
       requestedKind: "auto",
     };
   }
+  const encodedKind = key.slice(0, separatorIndex);
   return {
-    requestedKind: key.slice(0, separatorIndex) as VcsDriverKind | "auto",
+    requestedKind: DETECTION_CACHE_KINDS.find((kind) => kind === encodedKind) ?? "auto",
     cwd: key.slice(separatorIndex + 1),
   };
 }
@@ -97,10 +99,9 @@ export const make = Effect.gen(function* () {
     } satisfies VcsDriverHandle;
   });
 
-  const detectResolvedKind = Effect.fn("VcsDriverRegistry.detectResolvedKind")(function* (input: {
-    readonly cwd: string;
-    readonly requestedKind: VcsDriverKind | "auto";
-  }) {
+  const detectResolvedKind = Effect.fn("VcsDriverRegistry.detectResolvedKind")(function* (
+    input: DetectionCacheKey,
+  ) {
     const requestedKind = input.requestedKind;
 
     if (requestedKind !== "auto" && requestedKind !== "unknown") {

@@ -27,7 +27,7 @@ export function resolveCatalogDependencies(
 ): Record<string, string> {
   return Object.fromEntries(
     Object.entries(dependencies).map(([name, spec]) => {
-      if (typeof spec !== "string" || !spec.startsWith("catalog:")) {
+      if (!spec.startsWith("catalog:")) {
         return [name, spec];
       }
 

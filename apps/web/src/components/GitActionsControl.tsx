@@ -207,10 +207,12 @@ function isPublishProviderKind(
   return PUBLISH_PROVIDER_OPTIONS.some((option) => option.value === provider);
 }
 
+type PublishProviderReadiness = { readonly ready: boolean; readonly hint: string | null };
+
 function getPublishProviderReadiness(input: {
   provider: PublishProviderKind;
   sourceControlProviders: ReadonlyArray<SourceControlProviderDiscoveryItem>;
-}): { readonly ready: boolean; readonly hint: string | null } {
+}): PublishProviderReadiness {
   const discovered = input.sourceControlProviders.find(
     (provider) => provider.kind === input.provider,
   );

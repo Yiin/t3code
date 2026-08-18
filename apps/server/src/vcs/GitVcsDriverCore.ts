@@ -233,7 +233,7 @@ function isGitCommonStateMutation(args: readonly string[]): boolean {
   }
 }
 
-function parseBranchAb(value: string): { ahead: number; behind: number } {
+function parseBranchAb(value: string) {
   const match = value.match(/^\+(\d+)\s+-(\d+)$/);
   if (!match) return { ahead: 0, behind: 0 };
   return {
@@ -319,11 +319,7 @@ function paginateBranches(input: {
   refs: ReadonlyArray<VcsRef>;
   cursor?: number | undefined;
   limit?: number | undefined;
-}): {
-  refs: ReadonlyArray<VcsRef>;
-  nextCursor: number | null;
-  totalCount: number;
-} {
+}) {
   const cursor = input.cursor ?? 0;
   const limit = input.limit ?? GIT_LIST_BRANCHES_DEFAULT_LIMIT;
   const totalCount = input.refs.length;

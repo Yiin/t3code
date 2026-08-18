@@ -74,11 +74,11 @@ export function currentKimiModelIdFromSessionSetup(
     | EffectAcpSchema.NewSessionResponse
     | EffectAcpSchema.ResumeSessionResponse,
 ): string | undefined {
-  const currentValue = findSessionConfigOption(
-    sessionSetupResult.configOptions,
-    "model",
-  )?.currentValue;
-  return typeof currentValue === "string" ? currentValue.trim() || undefined : undefined;
+  const option = findSessionConfigOption(sessionSetupResult.configOptions, "model");
+  if (option?.type !== "select") {
+    return undefined;
+  }
+  return option.currentValue.trim() || undefined;
 }
 
 export function applyKimiAcpModelSelection<E>(input: {

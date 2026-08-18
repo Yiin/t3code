@@ -2138,11 +2138,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           | null
           | undefined,
       ) => {
-        if (
-          !value ||
-          typeof value.usedPercent !== "number" ||
-          !Number.isFinite(value.usedPercent)
-        ) {
+        if (!value || !Number.isFinite(value.usedPercent)) {
           return;
         }
         samples.push({

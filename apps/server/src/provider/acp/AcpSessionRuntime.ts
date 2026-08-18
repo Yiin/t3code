@@ -940,14 +940,10 @@ function configOptionCurrentValueMatches(
   configOption: EffectAcpSchema.SessionConfigOption,
   value: string | boolean,
 ): boolean {
-  const currentValue = configOption.currentValue;
   if (configOption.type === "boolean") {
-    return currentValue === value;
+    return configOption.currentValue === value;
   }
-  if (typeof currentValue !== "string") {
-    return false;
-  }
-  return currentValue.trim() === String(value).trim();
+  return configOption.currentValue.trim() === String(value).trim();
 }
 
 const handleSessionUpdate = ({

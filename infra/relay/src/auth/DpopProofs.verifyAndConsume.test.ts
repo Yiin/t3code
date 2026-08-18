@@ -65,7 +65,7 @@ function layer(
   ) => Effect.Effect<ReadonlyArray<{ readonly jti: string }>, { _tag: string }>,
 ) {
   const fakeDb = {
-    insert: (table: unknown) => {
+    insert: (table: typeof relayDpopProofs) => {
       expect(table).toBe(relayDpopProofs);
       return {
         values: (values: DpopProofInsertValues) => ({

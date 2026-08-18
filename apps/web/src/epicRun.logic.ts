@@ -137,11 +137,11 @@ export function epicRunIterationCountLabel(count: number): string {
   return `${count} ${count === 1 ? "iteration" : "iterations"}`;
 }
 
-const RUNTIME_MODE_LABELS: Record<RuntimeMode, string> = {
+const RUNTIME_MODE_LABELS = {
   "approval-required": "Supervised",
   "auto-accept-edits": "Auto-accept edits",
   "full-access": "Full access",
-};
+} satisfies Record<RuntimeMode, string>;
 
 export function epicRuntimeModeLabel(mode: RuntimeMode): string {
   return RUNTIME_MODE_LABELS[mode];

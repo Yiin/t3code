@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as ProcessRunner from "./processRunner.ts";
 import { EpicRunLock } from "./ports/EpicRunLock.ts";
@@ -73,7 +74,7 @@ const run = (
               return Effect.succeed({
                 stdout: nested?.stdout ?? "",
                 stderr: "",
-                code: (nested?.code ?? 0) as never,
+                code: ChildProcessSpawner.ExitCode(nested?.code ?? 0),
                 timedOut: false,
                 stdoutTruncated: false,
                 stderrTruncated: false,
@@ -83,7 +84,7 @@ const run = (
               return Effect.succeed({
                 stdout: options?.worktreeList ?? "worktree /repo\nbranch refs/heads/main\n",
                 stderr: "",
-                code: 0 as never,
+                code: ChildProcessSpawner.ExitCode(0),
                 timedOut: false,
                 stdoutTruncated: false,
                 stderrTruncated: false,
@@ -101,7 +102,7 @@ const run = (
                   ? (options?.unmergedBranchList ?? "")
                   : (options?.branchList ?? ""),
                 stderr: "",
-                code: 0 as never,
+                code: ChildProcessSpawner.ExitCode(0),
                 timedOut: false,
                 stdoutTruncated: false,
                 stderrTruncated: false,
@@ -118,7 +119,7 @@ const run = (
                     ? (bd?.ready ?? '[{"id":"child-1"}]')
                     : (bd?.list ?? "[]"),
             stderr: command === "git" ? (options?.gitStderr ?? "") : "",
-            code: (command === "git" ? (options?.gitCode ?? 0) : 0) as never,
+            code: ChildProcessSpawner.ExitCode(command === "git" ? (options?.gitCode ?? 0) : 0),
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
@@ -363,7 +364,7 @@ describe("EpicRunPreflight", () => {
                           ? '[{"id":"child-1"}]'
                           : "[]",
                   stderr: "",
-                  code: 0 as never,
+                  code: ChildProcessSpawner.ExitCode(0),
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
@@ -523,7 +524,7 @@ describe("EpicRunPreflight", () => {
                           ? '[{"id":"child-1"}]'
                           : "[]",
                     stderr: "",
-                    code: 0 as never,
+                    code: ChildProcessSpawner.ExitCode(0),
                     timedOut: false,
                     stdoutTruncated: false,
                     stderrTruncated: false,
@@ -538,7 +539,7 @@ describe("EpicRunPreflight", () => {
                           : resolve({
                               stdout,
                               stderr,
-                              code: 0 as never,
+                              code: ChildProcessSpawner.ExitCode(0),
                               timedOut: false,
                               stdoutTruncated: false,
                               stderrTruncated: false,
@@ -726,7 +727,7 @@ describe("EpicRunPreflight", () => {
         Object.freeze({
           stdout: "",
           stderr: "",
-          code: code as never,
+          code: ChildProcessSpawner.ExitCode(code),
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -1145,7 +1146,7 @@ describe("EpicRunPreflight", () => {
               ? {
                   stdout: "",
                   stderr: "",
-                  code: 1 as never,
+                  code: ChildProcessSpawner.ExitCode(1),
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
@@ -1219,7 +1220,7 @@ describe("EpicRunPreflight", () => {
     const siblingOutput = (stdout: string, code = 0): ProcessRunner.ProcessRunOutput => ({
       stdout,
       stderr: "",
-      code: code as never,
+      code: ChildProcessSpawner.ExitCode(code),
       timedOut: false,
       stdoutTruncated: false,
       stderrTruncated: false,

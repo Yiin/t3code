@@ -1,3 +1,4 @@
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -125,23 +126,12 @@ const sameValue = (left: unknown, right: unknown): boolean => {
       left.length === right.length && left.every((value, index) => sameValue(value, right[index]))
     );
   }
-  if (
-    typeof left === "object" &&
-    left !== null &&
-    typeof right === "object" &&
-    right !== null &&
-    !Array.isArray(left) &&
-    !Array.isArray(right)
-  ) {
-    const leftRecord = left as Readonly<Record<string, unknown>>;
-    const rightRecord = right as Readonly<Record<string, unknown>>;
-    const leftKeys = Object.keys(leftRecord).sort();
-    const rightKeys = Object.keys(rightRecord).sort();
+  if (Predicate.isObject(left) && Predicate.isObject(right)) {
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
     return (
       leftKeys.length === rightKeys.length &&
-      leftKeys.every(
-        (key, index) => key === rightKeys[index] && sameValue(leftRecord[key], rightRecord[key]),
-      )
+      leftKeys.every((key, index) => key === rightKeys[index] && sameValue(left[key], right[key]))
     );
   }
   return false;

@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { DraftId } from "../composerDraftStore";
+import { DraftId } from "../composerDraftStore";
 import { installInitialPromptIfEmpty } from "./useHandleNewThread";
 
 describe("installInitialPromptIfEmpty", () => {
   it("installs an initial prompt for an empty reused or new draft", () => {
     const setPrompt = vi.fn();
-    const target = "draft-12345678" as DraftId;
+    const target = DraftId.make("draft-12345678");
     installInitialPromptIfEmpty(target, "/plan-epic ", () => "", setPrompt);
     expect(setPrompt).toHaveBeenCalledWith(target, "/plan-epic ");
   });
@@ -13,7 +13,7 @@ describe("installInitialPromptIfEmpty", () => {
   it("never overwrites existing composer text", () => {
     const setPrompt = vi.fn();
     installInitialPromptIfEmpty(
-      "draft-12345678" as DraftId,
+      DraftId.make("draft-12345678"),
       "/plan-epic ",
       () => "keep this",
       setPrompt,

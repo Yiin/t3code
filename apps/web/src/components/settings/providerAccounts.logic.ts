@@ -310,7 +310,7 @@ export function buildProviderGroupReorderPatch(input: {
   };
 }
 
-const USAGE_WINDOW_LABELS: Record<ProviderUsageWindow, string> = {
+const USAGE_WINDOW_LABELS = {
   five_hour: "5h window",
   seven_day: "7d window",
   seven_day_opus: "7d Opus window",
@@ -318,15 +318,15 @@ const USAGE_WINDOW_LABELS: Record<ProviderUsageWindow, string> = {
   overage: "overage",
   primary: "primary window",
   secondary: "secondary window",
-};
+} satisfies Record<ProviderUsageWindow, string>;
 
-const LIMIT_KIND_LABELS: Record<ProviderLimitKind, string> = {
+const LIMIT_KIND_LABELS = {
   "usage-limit": "Usage limit reached",
   "spend-limit": "Spend limit reached",
   "credits-depleted": "Credits depleted",
   auth: "Sign-in required",
   unavailable: "Account unavailable",
-};
+} satisfies Record<ProviderLimitKind, string>;
 
 export interface ProviderAccountUtilization {
   readonly percent: number;

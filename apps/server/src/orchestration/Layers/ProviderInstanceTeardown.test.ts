@@ -21,6 +21,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 
 import {
   ProviderInstanceTeardown,
@@ -39,6 +40,7 @@ import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
+import { unsupportedProjectionSnapshotQuery } from "../testUtils/projectionSnapshotQueryStub.ts";
 import { ProviderInstanceTeardownLive } from "./ProviderInstanceTeardown.ts";
 
 const now = "2026-08-04T00:00:00.000Z";
@@ -102,16 +104,22 @@ function withHarness(
   const dispatched: OrchestrationCommand[] = [];
   const polls = new Map<ThreadId, number>();
 
-  const engine = {
+  const engine: OrchestrationEngineShape = {
     dispatch: (command: OrchestrationCommand) => {
       dispatched.push(command);
       return options.dispatch === undefined
         ? Effect.succeed({ sequence: dispatched.length })
         : options.dispatch(command);
     },
-  } as unknown as OrchestrationEngineShape;
+    // Teardown only dispatches. The three reads die rather than answer, so a
+    // reactor that started using one fails here by name.
+    readEvents: () => Stream.die(new Error("readEvents not expected in this test")),
+    streamDomainEvents: Stream.die(new Error("streamDomainEvents not expected in this test")),
+    latestSequence: Effect.die(new Error("latestSequence not expected in this test")),
+  };
 
-  const snapshotQuery = {
+  const snapshotQuery: ProjectionSnapshotQueryShape = {
+    ...unsupportedProjectionSnapshotQuery,
     // `getThreadSessionById` and not `getThreadShellById`: the shell read
     // filters `archived_at IS NULL`, so it goes blind exactly when an
     // archived thread's session still has to be waited on.
@@ -123,11 +131,19 @@ function withHarness(
           session(threadId, seen > (options.runningReads ?? 0) ? "stopped" : "running"),
         );
       }),
-  } as unknown as ProjectionSnapshotQueryShape;
+  };
 
-  const directory = {
+  const unsupportedDirectoryCall = (call: string) => () =>
+    Effect.die(new Error(`ProviderSessionDirectory.${call} is not stubbed in this test`));
+
+  const directory: ProviderSessionDirectoryShape = {
     listBindings: options.listBindings ?? (() => Effect.succeed(options.bindings)),
-  } as unknown as ProviderSessionDirectoryShape;
+    upsert: unsupportedDirectoryCall("upsert"),
+    touchLastSeen: unsupportedDirectoryCall("touchLastSeen"),
+    getProvider: unsupportedDirectoryCall("getProvider"),
+    getBinding: unsupportedDirectoryCall("getBinding"),
+    listThreadIds: unsupportedDirectoryCall("listThreadIds"),
+  };
 
   return Effect.gen(function* () {
     const teardown = yield* ProviderInstanceTeardown;

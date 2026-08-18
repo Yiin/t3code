@@ -21,10 +21,12 @@ export function nextFileCommentId(): string {
   return `file-comment-${Date.now()}-${fileCommentSequence}`;
 }
 
-export function normalizeFileCommentRange(range: SelectedLineRange): {
+type FileCommentLineRange = {
   startLine: number;
   endLine: number;
-} {
+};
+
+export function normalizeFileCommentRange(range: SelectedLineRange): FileCommentLineRange {
   return {
     startLine: Math.min(range.start, range.end),
     endLine: Math.max(range.start, range.end),

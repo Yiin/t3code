@@ -7,10 +7,14 @@ import {
   type AttachmentPreviewHandoff,
 } from "./ChatView.logic";
 
-export function useAttachmentPreviewHandoff(serverMessages: ReadonlyArray<ChatMessage>): {
+type AttachmentPreviewHandoffApi = {
   handoffs: AttachmentPreviewHandoff;
   handoffAttachmentPreviews: (messageId: MessageId, previewUrls: string[]) => void;
-} {
+};
+
+export function useAttachmentPreviewHandoff(
+  serverMessages: ReadonlyArray<ChatMessage>,
+): AttachmentPreviewHandoffApi {
   const [handoffs, setHandoffs] = useState<Record<string, string[]>>({});
   const handoffsRef = useRef<AttachmentPreviewHandoff>({});
   const promotionInFlightRef = useRef<Record<string, true>>({});

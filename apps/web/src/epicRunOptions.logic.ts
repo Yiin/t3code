@@ -5,13 +5,13 @@ import type {
 } from "@t3tools/contracts";
 
 /** Where a resolved config value came from, as a short chip label. */
-export const EPIC_RUN_PROVENANCE_CHIP_LABELS: Record<EpicRunConfigProvenanceSource, string> = {
+export const EPIC_RUN_PROVENANCE_CHIP_LABELS = {
   default: "default",
   file: "from .t3code/epic-run.json",
   environment: "from environment",
   override: "set for this run",
   policy: "from policy",
-};
+} satisfies Record<EpicRunConfigProvenanceSource, string>;
 
 export function epicRunProvenanceChipLabel(
   source: EpicRunConfigProvenanceSource | undefined,

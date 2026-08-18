@@ -325,7 +325,7 @@ export function buildCursorCapabilitiesFromConfigOptions(
       : []),
     ...(fastOption && isBooleanLikeConfigOption(fastOption)
       ? [
-          typeof fastCurrentValue === "boolean"
+          fastCurrentValue !== undefined
             ? buildBooleanOptionDescriptor({
                 id: "fastMode",
                 label: fastOption.name?.trim() || "Fast Mode",
@@ -339,7 +339,7 @@ export function buildCursorCapabilitiesFromConfigOptions(
       : []),
     ...(thinkingOption && isBooleanLikeConfigOption(thinkingOption)
       ? [
-          typeof thinkingCurrentValue === "boolean"
+          thinkingCurrentValue !== undefined
             ? buildBooleanOptionDescriptor({
                 id: "thinking",
                 label: thinkingOption.name?.trim() || "Thinking",
@@ -529,7 +529,7 @@ export function resolveCursorAcpConfigUpdates(
     (option) => option.category === "model_config" && isCursorFastConfigOption(option),
   );
   const requestedFastMode = getProviderOptionBooleanSelectionValue(selections, "fastMode");
-  if (fastOption && typeof requestedFastMode === "boolean") {
+  if (fastOption && requestedFastMode !== undefined) {
     const value = findCursorBooleanConfigValue(fastOption, requestedFastMode);
     if (value !== undefined) {
       updates.push({ configId: fastOption.id, value });
@@ -540,7 +540,7 @@ export function resolveCursorAcpConfigUpdates(
     (option) => option.category === "model_config" && isCursorThinkingConfigOption(option),
   );
   const requestedThinking = getProviderOptionBooleanSelectionValue(selections, "thinking");
-  if (thinkingOption && typeof requestedThinking === "boolean") {
+  if (thinkingOption && requestedThinking !== undefined) {
     const value = findCursorBooleanConfigValue(thinkingOption, requestedThinking);
     if (value !== undefined) {
       updates.push({ configId: thinkingOption.id, value });

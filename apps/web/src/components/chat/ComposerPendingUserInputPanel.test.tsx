@@ -41,11 +41,13 @@ function makePrompt(): PendingUserInput {
   };
 }
 
+type RenderedPanel = { container: HTMLDivElement; root: Root };
+
 function renderPanel(props: {
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
   onAdvance: () => void;
-}): { container: HTMLDivElement; root: Root } {
+}): RenderedPanel {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);

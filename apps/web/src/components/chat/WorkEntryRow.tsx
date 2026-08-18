@@ -71,10 +71,12 @@ function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; classN
   }
 }
 
-function workToneIcon(tone: WorkLogEntry["tone"]): {
+type WorkToneIcon = {
   iconName: WorkEntryIconName;
   className: string;
-} {
+};
+
+function workToneIcon(tone: WorkLogEntry["tone"]): WorkToneIcon {
   if (tone === "error") {
     return { iconName: "circle-alert", className: "text-foreground/92" };
   }

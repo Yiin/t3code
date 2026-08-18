@@ -1,3 +1,4 @@
+import { makeFetchMock } from "./testUtils/fetchMock.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
@@ -142,7 +143,7 @@ it.effect("reports no live mode and keeps the persisted runtime state when the p
   Effect.gen(function* () {
     const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
     // Never resolves — the only way this can settle here is the timeout.
-    const fetchMock = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const fetchMock = makeFetchMock(() => new Promise<Response>(() => {}));
     const layer = Layer.merge(
       FetchHttpClient.layer,
       Layer.succeed(FetchHttpClient.Fetch, fetchMock),
@@ -176,8 +177,7 @@ it.effect("reports no live mode and keeps the persisted runtime state when the p
 it.effect("clears the persisted runtime state on a genuine connection failure", () =>
   Effect.gen(function* () {
     const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
-    const fetchMock = (() =>
-      Promise.reject(new TypeError("fetch failed"))) as unknown as typeof fetch;
+    const fetchMock = makeFetchMock(() => Promise.reject(new TypeError("fetch failed")));
     const layer = Layer.merge(
       FetchHttpClient.layer,
       Layer.succeed(FetchHttpClient.Fetch, fetchMock),
@@ -209,12 +209,10 @@ it.effect(
       // body decodes under both OrchestrationShellSnapshot and
       // OrchestrationReadModel.
       const requestedUrls: string[] = [];
-      const fetchMock = ((input: unknown) => {
-        requestedUrls.push(
-          typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? input),
-        );
+      const fetchMock = makeFetchMock((input) => {
+        requestedUrls.push(input instanceof Request ? input.url : String(input));
         return responsePromise;
-      }) as unknown as typeof fetch;
+      });
       const layer = Layer.merge(
         FetchHttpClient.layer,
         Layer.succeed(FetchHttpClient.Fetch, fetchMock),
@@ -251,11 +249,8 @@ it.effect(
 // under both OrchestrationShellSnapshot and OrchestrationReadModel, so a
 // body-shape assertion would pass even if the full snapshot came back.
 
-const requestPathname = (input: unknown): string => {
-  const raw =
-    typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? input);
-  return new URL(raw).pathname;
-};
+const requestPathname = (input: Parameters<typeof fetch>[0]): string =>
+  new URL(input instanceof Request ? input.url : String(input)).pathname;
 
 // The wire shape of `OrchestrationProjectShell`, spelled out so the stub body
 // stays free of `unknown` (which the `preferSchemaOverJson` diagnostic rejects).
@@ -301,7 +296,7 @@ const runProjectCliWithStubbedServer = (input: {
       threads: [],
       updatedAt: "2026-08-02T00:00:00.000Z",
     });
-    const fetchMock = ((request: unknown) => {
+    const fetchMock = makeFetchMock((request) => {
       const pathname = requestPathname(request);
       input.requestedPathnames.push(pathname);
       const body =
@@ -311,7 +306,7 @@ const runProjectCliWithStubbedServer = (input: {
       return Promise.resolve(
         new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
       );
-    }) as unknown as typeof fetch;
+    });
 
     return yield* Command.runWith(projectCommand, { version: "0.0.0" })([
       ...input.args,

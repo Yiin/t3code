@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import type { SQL } from "drizzle-orm";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -19,7 +20,7 @@ describe("DpopProofReplay", () => {
       readonly createdAt: string;
     }> = [];
     const fakeDb = {
-      insert: (table: unknown) => {
+      insert: (table: typeof relayDpopProofs) => {
         expect(table).toBe(relayDpopProofs);
         calls.push("insert");
         return {
@@ -75,11 +76,11 @@ describe("DpopProofReplay", () => {
   it.effect("prunes expired proof rows from the maintenance path", () => {
     const calls: Array<string> = [];
     const fakeDb = {
-      delete: (table: unknown) => {
+      delete: (table: typeof relayDpopProofs) => {
         expect(table).toBe(relayDpopProofs);
         calls.push("delete");
         return {
-          where: (condition: unknown) => {
+          where: (condition: SQL) => {
             expect(condition).toBeDefined();
             calls.push("delete.where");
             return Effect.void;
@@ -100,7 +101,7 @@ describe("DpopProofReplay", () => {
   it.effect("retains the prune cutoff and database failure", () => {
     const cause = new Error("database unavailable");
     const fakeDb = {
-      delete: (table: unknown) => {
+      delete: (table: typeof relayDpopProofs) => {
         expect(table).toBe(relayDpopProofs);
         return {
           where: () => Effect.fail(cause),

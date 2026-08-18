@@ -14,7 +14,7 @@ describe("ManagedEndpointAllocations", () => {
     const cause = new Error("database unavailable");
     const fakeDb = {
       select: () => ({
-        from: (table: unknown) => {
+        from: (table: typeof relayManagedEndpointAllocations) => {
           expect(table).toBe(relayManagedEndpointAllocations);
           return {
             where: () => ({
@@ -44,7 +44,7 @@ describe("ManagedEndpointAllocations", () => {
 
   it.effect("reports an unresolved reservation without manufacturing a cause", () => {
     const fakeDb = {
-      insert: (table: unknown) => {
+      insert: (table: typeof relayManagedEndpointAllocations) => {
         expect(table).toBe(relayManagedEndpointAllocations);
         return {
           values: () => ({
@@ -55,7 +55,7 @@ describe("ManagedEndpointAllocations", () => {
         };
       },
       select: () => ({
-        from: (table: unknown) => {
+        from: (table: typeof relayManagedEndpointAllocations) => {
           expect(table).toBe(relayManagedEndpointAllocations);
           return {
             where: () => ({

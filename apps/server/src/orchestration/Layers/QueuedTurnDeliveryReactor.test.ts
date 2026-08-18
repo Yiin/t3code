@@ -32,6 +32,7 @@ import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
+import { unsupportedProjectionSnapshotQuery } from "../testUtils/projectionSnapshotQueryStub.ts";
 import { QueuedTurnDeliveryReactor } from "../Services/QueuedTurnDeliveryReactor.ts";
 import {
   QUEUED_DELIVERY_POLL_INTERVAL,
@@ -230,7 +231,7 @@ function withHarness(
       };
     };
 
-    const engine = {
+    const engine: OrchestrationEngineShape = {
       readEvents: () => Stream.empty,
       dispatch: (command: OrchestrationCommand) => {
         dispatched.push(command);
@@ -249,14 +250,15 @@ function withHarness(
       },
       streamDomainEvents: Stream.fromQueue(events),
       latestSequence: Effect.succeed(0),
-    } as unknown as OrchestrationEngineShape;
+    };
 
-    const snapshotQuery = {
+    const snapshotQuery: ProjectionSnapshotQueryShape = {
+      ...unsupportedProjectionSnapshotQuery,
       getThreadShellById: () => Effect.succeed(Option.fromUndefinedOr(state.shell)),
       getThreadDetailById: () => Effect.succeed(Option.fromUndefinedOr(state.thread)),
       listRunningThreadBackedSubagents: () => Effect.succeed([]),
       listThreadIdsWithQueuedMessages: () => Effect.succeed(state.queuedThreadIds),
-    } as unknown as ProjectionSnapshotQueryShape;
+    };
 
     yield* Effect.gen(function* () {
       const reactor = yield* QueuedTurnDeliveryReactor;

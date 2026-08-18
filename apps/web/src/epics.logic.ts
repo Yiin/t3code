@@ -152,10 +152,12 @@ export function selectEpicDetail(
   return null;
 }
 
-export function epicResultState(results: ReadonlyArray<BeadsStatusResult | null>): {
+export interface EpicResultState {
   readonly available: number;
   readonly unavailable: number;
-} {
+}
+
+export function epicResultState(results: ReadonlyArray<BeadsStatusResult | null>): EpicResultState {
   let available = 0;
   let unavailable = 0;
   for (const result of results) {

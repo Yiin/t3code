@@ -18,11 +18,11 @@ import {
   type ConformanceScenario,
 } from "./scenario.ts";
 import {
+  agentStartCount,
   beadCommentCounts,
   landedChildIds,
   makeConformanceWorkspace,
   releasedClaimIds,
-  type ConformanceWorkspace,
 } from "./workspace.ts";
 
 const packageDirectory = NodePath.resolve(
@@ -82,20 +82,6 @@ const maximumIterations = (scenario: ConformanceScenario): number =>
 const runGit = (cwd: string, args: ReadonlyArray<string>): void => {
   const result = NodeChildProcess.spawnSync("git", [...args], { cwd, stdio: "ignore" });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed in ${cwd}`);
-};
-
-const beadComments = (statePath: string | undefined): ReadonlyMap<string, number> => {
-  if (statePath === undefined) return new Map();
-  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
-    readonly children?: ReadonlyArray<Record<string, unknown>>;
-  };
-  return new Map(
-    (state.children ?? []).flatMap((child) =>
-      typeof child["id"] === "string" && typeof child["comment_count"] === "number"
-        ? [[child["id"], child["comment_count"]] as const]
-        : [],
-    ),
-  );
 };
 
 const synthesizePreflightFailure = (
@@ -174,13 +160,6 @@ const journalIterations = (
     })
     .sort((left, right) => left.iterationIndex - right.iterationIndex);
 };
-
-/** How many workers the fixture agent has been started for, from its transcript. */
-const agentStarts = (workspace: ConformanceWorkspace): number =>
-  workspace.readTranscript().filter((item) => {
-    if (typeof item !== "object" || item === null) return false;
-    return (item as Readonly<Record<string, unknown>>)["tool"] === "agent";
-  }).length;
 
 /**
  * Whether the run lock still has a live owner.
@@ -520,7 +499,7 @@ const runTerminalScenario = (scenario: ConformanceScenario): TerminalScenarioRes
       if (
         rows.length >= restart.cutAfterRows &&
         rows.at(-1)?.turnStatus === "running" &&
-        agentStarts(workspace) >= restart.cutAfterRows
+        agentStartCount(workspace) >= restart.cutAfterRows
       ) {
         cut = true;
         break;
@@ -627,7 +606,7 @@ const runTerminalScenario = (scenario: ConformanceScenario): TerminalScenarioRes
   }
   return {
     transcript: normalizeCoreMailbox(values, scenario.beads.epicId, {
-      comments: beadComments(workspace.env["CONFORMANCE_STATE"]),
+      comments: beadCommentCounts(workspace),
       maxIterations: maximumIterations(scenario),
     }),
     liveness,

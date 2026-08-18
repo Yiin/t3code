@@ -58,15 +58,13 @@ function logWarning(message: string, context: Record<string, unknown>): Effect.E
 }
 
 function resolveThreadSegment(raw: string | null | undefined): string {
-  const normalized = typeof raw === "string" ? toSafeThreadAttachmentSegment(raw) : null;
+  const normalized = raw === null || raw === undefined ? null : toSafeThreadAttachmentSegment(raw);
   return normalized ?? GLOBAL_THREAD_SEGMENT;
 }
 
 function formatLoggerMessage(message: unknown): string {
-  if (Array.isArray(message)) {
-    return message.map((part) => (typeof part === "string" ? part : String(part))).join(" ");
-  }
-  return typeof message === "string" ? message : String(message);
+  // `String` is identity on strings, so one call covers both arms.
+  return Array.isArray(message) ? message.map((part) => String(part)).join(" ") : String(message);
 }
 
 function makeLineLogger(streamLabel: string): Logger.Logger<unknown, string> {

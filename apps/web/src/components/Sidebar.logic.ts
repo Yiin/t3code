@@ -184,7 +184,7 @@ export function threadStatusPillText(status: ThreadStatusPill): string {
 // Subagents ranks just below Working: while the parent turn runs, Working
 // already implies activity — the subagent pill only wins when the parent is
 // otherwise idle but children still run (e.g. backgrounded Agent spawns).
-const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
+const THREAD_STATUS_PRIORITY = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
   "Run active": 3.5,
@@ -193,7 +193,7 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Subagents: 2.5,
   "Plan Ready": 2,
   Completed: 1,
-};
+} satisfies Record<ThreadStatusPill["label"], number>;
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
@@ -268,10 +268,12 @@ export function createThreadJumpHintVisibilityController(input: {
   };
 }
 
-export function useThreadJumpHintVisibility(): {
+type ThreadJumpHintVisibility = {
   showThreadJumpHints: boolean;
   updateThreadJumpHintsVisibility: (shouldShow: boolean) => void;
-} {
+};
+
+export function useThreadJumpHintVisibility(): ThreadJumpHintVisibility {
   const [showThreadJumpHints, setShowThreadJumpHints] = React.useState(false);
   const controllerRef = React.useRef<ThreadJumpHintVisibilityController | null>(null);
 
@@ -334,6 +336,13 @@ export function resolveSidebarNewThreadEnvMode(input: {
   return input.requestedEnvMode ?? input.defaultEnvMode;
 }
 
+type SidebarNewThreadSeedContext = {
+  branch?: string | null;
+  worktreePath?: string | null;
+  envMode: SidebarNewThreadEnvMode;
+  startFromOrigin?: boolean;
+};
+
 export function resolveSidebarNewThreadSeedContext(input: {
   projectId: string;
   defaultEnvMode: SidebarNewThreadEnvMode;
@@ -349,12 +358,7 @@ export function resolveSidebarNewThreadSeedContext(input: {
     envMode: SidebarNewThreadEnvMode;
     startFromOrigin: boolean;
   } | null;
-}): {
-  branch?: string | null;
-  worktreePath?: string | null;
-  envMode: SidebarNewThreadEnvMode;
-  startFromOrigin?: boolean;
-} {
+}): SidebarNewThreadSeedContext {
   if (input.defaultEnvMode === "worktree") {
     return {
       envMode: "worktree",
@@ -1059,6 +1063,11 @@ export function sidebarTraversalThreadIds<T, TId>(input: {
  * that list by hand the two drifted — the root counted 50 iterations against a
  * preview limit the panel spent on one group row.
  */
+type RenderedSidebarThreadNodes<T> = {
+  nodes: Array<SidebarThreadNode<T>>;
+  hasOverflowingThreads: boolean;
+};
+
 export function resolveRenderedSidebarThreadNodes<T extends { readonly id: string }>(input: {
   /** Already sorted and archive-filtered, exactly as the panel lists them. */
   threads: readonly T[];
@@ -1068,10 +1077,7 @@ export function resolveRenderedSidebarThreadNodes<T extends { readonly id: strin
   isThreadListExpanded: boolean;
   /** The one row a collapsed project keeps; `null` while the project is open. */
   pinnedThreadId: string | null;
-}): {
-  nodes: Array<SidebarThreadNode<T>>;
-  hasOverflowingThreads: boolean;
-} {
+}): RenderedSidebarThreadNodes<T> {
   const nodes = groupEpicRunIterationThreads({
     threads: input.threads,
     runs: input.runs,
@@ -1292,16 +1298,18 @@ export function resolveProjectStatusIndicator(
   return highestPriorityStatus;
 }
 
+type VisibleThreadsForProject<T> = {
+  hasHiddenThreads: boolean;
+  visibleThreads: T[];
+  hiddenThreads: T[];
+};
+
 export function getVisibleThreadsForProject<T extends Pick<Thread, "id">>(input: {
   threads: readonly T[];
   activeThreadId: T["id"] | undefined;
   isThreadListExpanded: boolean;
   previewLimit: number;
-}): {
-  hasHiddenThreads: boolean;
-  visibleThreads: T[];
-  hiddenThreads: T[];
-} {
+}): VisibleThreadsForProject<T> {
   const { activeThreadId, isThreadListExpanded, previewLimit, threads } = input;
   const hasHiddenThreads = threads.length > previewLimit;
 

@@ -297,10 +297,7 @@ function normalizeRepositoryCloneUrls(
   };
 }
 
-function parseRepositorySpecifier(repository: string): {
-  readonly project: string | null;
-  readonly name: string;
-} {
+function parseRepositorySpecifier(repository: string) {
   const parts: Array<string> = [];
   for (const part of repository.split("/")) {
     const trimmed = part.trim();

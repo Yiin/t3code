@@ -1,12 +1,12 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { collectActiveTerminalUiThreadKeys } from "./terminalUiStateCleanup";
 
 const threadId = (id: string): ThreadId => ThreadId.make(id);
 const threadKey = (environmentId: string, id: string): string =>
-  scopedThreadKey(scopeThreadRef(environmentId as never, threadId(id)));
+  scopedThreadKey(scopeThreadRef(EnvironmentId.make(environmentId), threadId(id)));
 
 describe("collectActiveTerminalUiThreadKeys", () => {
   it("retains non-deleted server threads", () => {

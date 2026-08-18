@@ -1,11 +1,9 @@
+import * as Predicate from "effect/Predicate";
+
 import type { ToolLifecycleItemType } from "@t3tools/contracts";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return isRecord(value) ? value : undefined;
+  return Predicate.isObject(value) ? value : undefined;
 }
 
 function asTrimmedString(value: unknown): string | undefined {

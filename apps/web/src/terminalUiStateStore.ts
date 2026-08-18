@@ -123,11 +123,14 @@ function normalizeTerminalGroups(
       group.id.trim().length > 0
         ? group.id.trim()
         : fallbackGroupId(groupTerminalIds[0] ?? terminalIds[0] ?? "");
-    nextGroups.push({
+    const nextGroup: ThreadTerminalGroup = {
       id: assignUniqueGroupId(baseGroupId, usedGroupIds),
       terminalIds: groupTerminalIds,
-      ...(group.splitDirection === "vertical" ? { splitDirection: "vertical" as const } : {}),
-    });
+    };
+    if (group.splitDirection === "vertical") {
+      nextGroup.splitDirection = "vertical";
+    }
+    nextGroups.push(nextGroup);
   }
 
   for (const terminalId of terminalIds) {
@@ -244,11 +247,16 @@ function terminalThreadKey(threadRef: ScopedThreadRef): string {
 }
 
 function copyTerminalGroups(groups: ThreadTerminalGroup[]): ThreadTerminalGroup[] {
-  return groups.map((group) => ({
-    id: group.id,
-    terminalIds: [...group.terminalIds],
-    ...(group.splitDirection === "vertical" ? { splitDirection: "vertical" as const } : {}),
-  }));
+  return groups.map((group) => {
+    const copy: ThreadTerminalGroup = {
+      id: group.id,
+      terminalIds: [...group.terminalIds],
+    };
+    if (group.splitDirection === "vertical") {
+      copy.splitDirection = "vertical";
+    }
+    return copy;
+  });
 }
 
 function upsertTerminalIntoGroups(

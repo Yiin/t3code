@@ -48,7 +48,12 @@ export function normalizeMarkdownLinkDestination(value: string): string {
   return unwrapMarkdownLinkDestination(value.trim());
 }
 
-function stripSearchAndHash(value: string): { path: string; hash: string } {
+interface PathAndHash {
+  path: string;
+  hash: string;
+}
+
+function stripSearchAndHash(value: string): PathAndHash {
   const hashIndex = value.indexOf("#");
   const pathWithSearch = hashIndex >= 0 ? value.slice(0, hashIndex) : value;
   const rawHash = hashIndex >= 0 ? value.slice(hashIndex) : "";
@@ -201,13 +206,14 @@ export function resolveMarkdownFileLinkMeta(
   const lineNumber = Number.isFinite(parsedLine) ? parsedLine : undefined;
   const columnNumber = Number.isFinite(parsedColumn) ? parsedColumn : undefined;
 
-  return {
+  const meta: MarkdownFileLinkMeta = {
     filePath: path,
     targetPath,
     displayPath: formatWorkspaceRelativePath(targetPath, cwd),
     workspaceRelativePath: workspaceRelativePath(path, cwd),
     basename: basenameOfPath(path),
-    ...(lineNumber !== undefined ? { line: lineNumber } : {}),
-    ...(columnNumber !== undefined ? { column: columnNumber } : {}),
   };
+  if (lineNumber !== undefined) meta.line = lineNumber;
+  if (columnNumber !== undefined) meta.column = columnNumber;
+  return meta;
 }

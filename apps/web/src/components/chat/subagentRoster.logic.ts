@@ -34,20 +34,20 @@ export interface SubagentRosterEntry {
 }
 
 /** Status dot colour, shared by the inspector switcher and the roster popover. */
-export const SUBAGENT_STATUS_DOT_CLASS: Record<OrchestrationThreadSubagentStatus, string> = {
+export const SUBAGENT_STATUS_DOT_CLASS = {
   running: "bg-sky-500 dark:bg-sky-300/80 animate-status-pulse motion-reduce:animate-none",
   completed: "bg-emerald-500 dark:bg-emerald-300/90",
   failed: "bg-destructive",
   stopped: "bg-muted-foreground/40",
-};
+} satisfies Record<OrchestrationThreadSubagentStatus, string>;
 
 /** Human status word, shared by every subagent surface. */
-export const SUBAGENT_STATUS_LABEL: Record<OrchestrationThreadSubagentStatus, string> = {
+export const SUBAGENT_STATUS_LABEL = {
   running: "Running",
   completed: "Done",
   failed: "Failed",
   stopped: "Stopped",
-};
+} satisfies Record<OrchestrationThreadSubagentStatus, string>;
 
 function entryFor(
   group: SubagentGroup | null,

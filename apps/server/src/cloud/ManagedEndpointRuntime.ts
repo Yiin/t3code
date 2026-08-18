@@ -56,10 +56,7 @@ export type CloudManagedEndpointRuntimeStatus =
  * Tunnel identity fields for a status payload. Both keys stay absent when the
  * config does not carry them.
  */
-function tunnelIdentity(config: RelayManagedEndpointRuntimeConfig): {
-  readonly tunnelId?: string;
-  readonly tunnelName?: string;
-} {
+function tunnelIdentity(config: RelayManagedEndpointRuntimeConfig) {
   return {
     ...(config.tunnelId ? { tunnelId: config.tunnelId } : {}),
     ...(config.tunnelName ? { tunnelName: config.tunnelName } : {}),

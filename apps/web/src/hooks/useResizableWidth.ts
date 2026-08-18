@@ -35,10 +35,12 @@ export interface ResizableWidthHandlers {
  * follows the cursor live) and only commits to localStorage when the user
  * lifts the pointer.
  */
-export function useResizableWidth(options: UseResizableWidthOptions): {
+export interface ResizableWidth {
   readonly width: number;
   readonly handlers: ResizableWidthHandlers;
-} {
+}
+
+export function useResizableWidth(options: UseResizableWidthOptions): ResizableWidth {
   const { storageKey, defaultWidth, minWidth, maxWidth, edge } = options;
 
   const clamp = useCallback(

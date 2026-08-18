@@ -587,12 +587,11 @@ function isRetryableShellSpawnError(error: PtyAdapter.PtySpawnError): boolean {
     }
 
     if (typeof current === "object") {
-      const value = current as { message?: unknown; cause?: unknown };
-      if (typeof value.message === "string") {
-        messages.push(value.message);
+      if ("message" in current && typeof current.message === "string") {
+        messages.push(current.message);
       }
-      if (value.cause) {
-        queue.push(value.cause);
+      if ("cause" in current && current.cause) {
+        queue.push(current.cause);
       }
     }
   }

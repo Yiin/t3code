@@ -107,10 +107,14 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
   );
 }
 
-export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "session">): {
+type ThreadTurnInterruptInput = {
   threadId: ThreadId;
   turnId?: TurnId;
-} {
+};
+
+export function buildThreadTurnInterruptInput(
+  thread: Pick<Thread, "id" | "session">,
+): ThreadTurnInterruptInput {
   const runningTurnId = thread.session?.status === "running" ? thread.session.activeTurnId : null;
   return {
     threadId: thread.id,
@@ -287,6 +291,13 @@ export function cloneComposerImageForRetry(
   }
 }
 
+type ComposerSendState = {
+  trimmedPrompt: string;
+  sendableTerminalContexts: TerminalContextDraft[];
+  expiredTerminalContextCount: number;
+  hasSendableContent: boolean;
+};
+
 export function deriveComposerSendState(options: {
   prompt: string;
   imageCount: number;
@@ -297,12 +308,7 @@ export function deriveComposerSendState(options: {
    * contexts do: a prompt of just element chips is still a valid send.
    */
   elementContextCount?: number;
-}): {
-  trimmedPrompt: string;
-  sendableTerminalContexts: TerminalContextDraft[];
-  expiredTerminalContextCount: number;
-  hasSendableContent: boolean;
-} {
+}): ComposerSendState {
   const trimmedPrompt = stripInlineTerminalContextPlaceholders(options.prompt).trim();
   const sendableTerminalContexts = filterTerminalContextsWithText(options.terminalContexts);
   const expiredTerminalContextCount =
@@ -408,10 +414,12 @@ export function prepareSendAction(input: {
   };
 }
 
+type ExpiredTerminalContextToastCopy = { title: string; description: string };
+
 export function buildExpiredTerminalContextToastCopy(
   expiredTerminalContextCount: number,
   variant: "omitted" | "empty",
-): { title: string; description: string } {
+): ExpiredTerminalContextToastCopy {
   const count = Math.max(1, Math.floor(expiredTerminalContextCount));
   const noun = count === 1 ? "Expired terminal context" : "Expired terminal contexts";
   if (variant === "empty") {

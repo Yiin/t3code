@@ -456,13 +456,15 @@ function resolveLatestAssistantText(previousText: string | undefined, nextText: 
   return nextText;
 }
 
+type OpenCodeAssistantTextMerge = {
+  readonly latestText: string;
+  readonly deltaToEmit: string;
+};
+
 export function mergeOpenCodeAssistantText(
   previousText: string | undefined,
   nextText: string,
-): {
-  readonly latestText: string;
-  readonly deltaToEmit: string;
-} {
+): OpenCodeAssistantTextMerge {
   const latestText = resolveLatestAssistantText(previousText, nextText);
   return {
     latestText,
@@ -470,13 +472,15 @@ export function mergeOpenCodeAssistantText(
   };
 }
 
+type OpenCodeAssistantTextAppend = {
+  readonly nextText: string;
+  readonly deltaToEmit: string;
+};
+
 export function appendOpenCodeAssistantTextDelta(
   previousText: string,
   delta: string,
-): {
-  readonly nextText: string;
-  readonly deltaToEmit: string;
-} {
+): OpenCodeAssistantTextAppend {
   return {
     nextText: previousText + delta,
     deltaToEmit: delta,

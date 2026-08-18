@@ -68,10 +68,7 @@ export function buildUnavailableProviderSnapshot(
       ...base,
       instanceId: input.instanceId,
       ...(input.accentColor ? { accentColor: input.accentColor } : {}),
-      driver:
-        typeof input.driverKind === "string"
-          ? ProviderDriverKind.make(input.driverKind)
-          : input.driverKind,
+      driver: ProviderDriverKind.make(input.driverKind),
       availability: "unavailable",
       unavailableReason: input.reason,
     };

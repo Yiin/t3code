@@ -18,6 +18,7 @@ import * as AcpSchema from "./_generated/schema.gen.ts";
 import { CLIENT_METHODS } from "./_generated/meta.gen.ts";
 import * as AcpError from "./errors.ts";
 const isAcpError = Schema.is(AcpError.AcpError);
+const isProtocolError = Schema.is(AcpSchema.Error);
 
 export interface AcpProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -590,16 +591,3 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     notify: sendNotification,
   } satisfies AcpPatchedProtocol;
 });
-
-function isProtocolError(
-  value: unknown,
-): value is { code: number; message: string; data?: unknown } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "code" in value &&
-    typeof value.code === "number" &&
-    "message" in value &&
-    typeof value.message === "string"
-  );
-}

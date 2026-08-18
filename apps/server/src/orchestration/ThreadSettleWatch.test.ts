@@ -9,7 +9,8 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
-import type { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import type { ProjectionSnapshotQueryShape } from "./Services/ProjectionSnapshotQuery.ts";
+import { unsupportedProjectionSnapshotQuery } from "./testUtils/projectionSnapshotQueryStub.ts";
 import { makeThreadSettleWatch } from "./ThreadSettleWatch.ts";
 
 const threadId = ThreadId.make("thread-settle-watch");
@@ -25,9 +26,10 @@ const shell = (turnId: TurnId, state: "running" | "completed"): OrchestrationThr
 describe("ThreadSettleWatch", () => {
   it.live("reports ownership when the first observed turn already completed", () => {
     const observed: TurnId[] = [];
-    const projectionSnapshotQuery = {
+    const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      ...unsupportedProjectionSnapshotQuery,
       getThreadShellById: () => Effect.succeed(Option.some(shell(turnOne, "completed"))),
-    } as unknown as ProjectionSnapshotQuery["Service"];
+    };
     const watch = makeThreadSettleWatch({ projectionSnapshotQuery });
 
     return Effect.gen(function* () {
@@ -44,10 +46,11 @@ describe("ThreadSettleWatch", () => {
 
   it.live("settles the first observed turn when a second turn becomes active", () => {
     const reads = [shell(turnOne, "running"), shell(turnTwo, "running")];
-    const projectionSnapshotQuery = {
+    const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      ...unsupportedProjectionSnapshotQuery,
       getThreadShellById: () =>
         Effect.succeed(Option.some(reads.shift() ?? shell(turnTwo, "running"))),
-    } as unknown as ProjectionSnapshotQuery["Service"];
+    };
     const watch = makeThreadSettleWatch({ projectionSnapshotQuery });
 
     return Effect.gen(function* () {
@@ -61,14 +64,15 @@ describe("ThreadSettleWatch", () => {
 
   it.live("does not hold prompt one open while prompt two is running", () => {
     let reads = 0;
-    const projectionSnapshotQuery = {
+    const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      ...unsupportedProjectionSnapshotQuery,
       getThreadShellById: () => {
         reads += 1;
         return Effect.succeed(
           Option.some(reads === 1 ? shell(turnOne, "running") : shell(turnTwo, "running")),
         );
       },
-    } as unknown as ProjectionSnapshotQuery["Service"];
+    };
     const watch = makeThreadSettleWatch({ projectionSnapshotQuery });
 
     return Effect.gen(function* () {
@@ -83,7 +87,8 @@ describe("ThreadSettleWatch", () => {
 
   it.live("extends a pinned completed turn wait while a newer turn is running", () => {
     let reads = 0;
-    const projectionSnapshotQuery = {
+    const projectionSnapshotQuery: ProjectionSnapshotQueryShape = {
+      ...unsupportedProjectionSnapshotQuery,
       getThreadDetailSnapshot: () => {
         reads += 1;
         const ownedMessage = {
@@ -100,7 +105,7 @@ describe("ThreadSettleWatch", () => {
         } as unknown as OrchestrationThread;
         return Effect.succeed(Option.some({ snapshotSequence: reads, thread }));
       },
-    } as unknown as ProjectionSnapshotQuery["Service"];
+    };
     const watch = makeThreadSettleWatch({ projectionSnapshotQuery });
 
     return Effect.gen(function* () {

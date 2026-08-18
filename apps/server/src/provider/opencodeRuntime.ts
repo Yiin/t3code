@@ -196,18 +196,20 @@ const AGENT_HEADER_RE = /^(.+)\s+\((\S+)\)\s*$/;
 // definitions (in the OpenCode repo: packages/opencode/src/agent/agent.ts).
 const KNOWN_HIDDEN_AGENTS = new Set(["compaction", "summary", "title"]);
 
-/** @internal */
-export function parseModelsCliOutput(stdout: string): {
-  readonly providers: ReadonlyMap<
-    string,
-    { readonly id: string; readonly name: string; readonly models: { [key: string]: Model } }
-  >;
+interface OpenCodeCliProvider {
+  id: string;
+  name: string;
+  models: { [key: string]: Model };
+}
+
+export interface OpenCodeModelsCliOutput {
+  readonly providers: ReadonlyMap<string, OpenCodeCliProvider>;
   readonly connected: ReadonlyArray<string>;
-} {
-  const providers = new Map<
-    string,
-    { id: string; name: string; models: { [key: string]: Model } }
-  >();
+}
+
+/** @internal */
+export function parseModelsCliOutput(stdout: string): OpenCodeModelsCliOutput {
+  const providers = new Map<string, OpenCodeCliProvider>();
   const lines = stdout.split("\n");
   let currentSlug: string | null = null;
   const jsonLines: Array<string> = [];
@@ -298,7 +300,7 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
 export function parseOpenCodeModelSlug(
   slug: string | null | undefined,
 ): ParsedOpenCodeModelSlug | null {
-  if (typeof slug !== "string") {
+  if (slug === undefined || slug === null) {
     return null;
   }
 

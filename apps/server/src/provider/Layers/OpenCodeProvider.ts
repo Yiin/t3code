@@ -152,11 +152,16 @@ function normalizedErrorMessage(cause: unknown): string | undefined {
   return normalizeProbeMessage(cause.message);
 }
 
+type OpenCodeProbeFailure = {
+  readonly installed: boolean;
+  readonly message: string;
+};
+
 function formatOpenCodeProbeError(input: {
   readonly cause: unknown;
   readonly isExternalServer: boolean;
   readonly serverUrl: string;
-}): { readonly installed: boolean; readonly message: string } {
+}): OpenCodeProbeFailure {
   const detail = normalizedErrorMessage(input.cause);
   const lower = detail?.toLowerCase() ?? "";
 

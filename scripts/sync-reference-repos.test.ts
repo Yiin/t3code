@@ -48,13 +48,12 @@ function mockSpawnerLayer(
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
-      const childProcess = command as unknown as {
-        readonly command: string;
-        readonly args: ReadonlyArray<string>;
-      };
+      if (command._tag !== "StandardCommand") {
+        throw new Error("The mock spawner only handles standard commands.");
+      }
       commands.push({
-        command: childProcess.command,
-        args: childProcess.args,
+        command: command.command,
+        args: command.args,
       });
       return Effect.succeed(handle);
     }),

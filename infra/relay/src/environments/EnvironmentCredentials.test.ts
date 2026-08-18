@@ -1,5 +1,6 @@
 import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
+import type { SQL } from "drizzle-orm";
 import { PgDialect, QueryBuilder } from "drizzle-orm/pg-core";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -12,13 +13,13 @@ describe("EnvironmentCredentials", () => {
   it.effect("reports the credential creation persistence stage and preserves its cause", () => {
     const cause = new Error("database unavailable");
     const fakeDb = {
-      insert: (table: unknown) => {
+      insert: (table: typeof relayEnvironmentCredentials) => {
         expect(table).toBe(relayEnvironmentCredentials);
         return {
           values: () => Effect.void,
         };
       },
-      update: (table: unknown) => {
+      update: (table: typeof relayEnvironmentCredentials) => {
         expect(table).toBe(relayEnvironmentCredentials);
         return {
           set: () => ({
@@ -60,7 +61,7 @@ describe("EnvironmentCredentials", () => {
     const token = "t3env_sensitive-credential-token";
     const fakeDb = {
       select: () => ({
-        from: (table: unknown) => {
+        from: (table: typeof relayEnvironmentCredentials) => {
           expect(table).toBe(relayEnvironmentCredentials);
           return {
             where: () => ({
@@ -105,11 +106,11 @@ describe("EnvironmentCredentials", () => {
       }> = [];
       const staleCredentialRevocations: Array<{
         readonly values: Record<string, unknown>;
-        readonly condition: unknown;
+        readonly condition: SQL;
       }> = [];
 
       const fakeDb = {
-        insert: (table: unknown) => {
+        insert: (table: typeof relayEnvironmentCredentials) => {
           expect(table).toBe(relayEnvironmentCredentials);
           return {
             values: (values: (typeof insertedValues)[number]) => {
@@ -118,11 +119,11 @@ describe("EnvironmentCredentials", () => {
             },
           };
         },
-        update: (table: unknown) => {
+        update: (table: typeof relayEnvironmentCredentials) => {
           expect(table).toBe(relayEnvironmentCredentials);
           return {
             set: (values: Record<string, unknown>) => ({
-              where: (condition: unknown) => {
+              where: (condition: SQL) => {
                 staleCredentialRevocations.push({ values, condition });
                 return Effect.void;
               },
@@ -153,11 +154,15 @@ describe("EnvironmentCredentials", () => {
         expect(insertedValues[0]?.credentialHash).not.toContain(token);
         expect(insertedValues[0]?.createdAt).toBe(insertedValues[0]?.updatedAt);
         expect(staleCredentialRevocations).toHaveLength(1);
-        expect(staleCredentialRevocations[0]?.values.revokedAt).toEqual(
-          staleCredentialRevocations[0]?.values.updatedAt,
+        const [staleCredentialRevocation] = staleCredentialRevocations;
+        if (staleCredentialRevocation === undefined) {
+          throw new Error("Expected the create flow to revoke stale credentials.");
+        }
+        expect(staleCredentialRevocation.values.revokedAt).toEqual(
+          staleCredentialRevocation.values.updatedAt,
         );
 
-        const query = new PgDialect().sqlToQuery(staleCredentialRevocations[0]?.condition as never);
+        const query = new PgDialect().sqlToQuery(staleCredentialRevocation.condition);
         expect(query.sql).toContain('"relay_environment_credentials"."environment_id" = $1');
         expect(query.sql).toContain(
           '"relay_environment_credentials"."environment_public_key" = $2',
@@ -178,16 +183,16 @@ describe("EnvironmentCredentials", () => {
 
   it.effect("revokes active credentials for an environment public key", () => {
     const updateValues: Array<Record<string, unknown>> = [];
-    const whereConditions: Array<unknown> = [];
+    const whereConditions: Array<SQL> = [];
     const fakeDb = {
       select: (fields: Parameters<QueryBuilder["select"]>[0]) => new QueryBuilder().select(fields),
-      update: (table: unknown) => {
+      update: (table: typeof relayEnvironmentCredentials) => {
         expect(table).toBe(relayEnvironmentCredentials);
         return {
           set: (values: Record<string, unknown>) => {
             updateValues.push(values);
             return {
-              where: (condition: unknown) => {
+              where: (condition: SQL) => {
                 whereConditions.push(condition);
                 return {
                   returning: (selection: unknown) => {
@@ -213,8 +218,12 @@ describe("EnvironmentCredentials", () => {
       expect(updateValues).toHaveLength(1);
       expect(updateValues[0]?.revokedAt).toEqual(updateValues[0]?.updatedAt);
       expect(whereConditions).toHaveLength(1);
+      const [whereCondition] = whereConditions;
+      if (whereCondition === undefined) {
+        throw new Error("Expected the revoke query to capture a where condition.");
+      }
 
-      const query = new PgDialect().sqlToQuery(whereConditions[0] as never);
+      const query = new PgDialect().sqlToQuery(whereCondition);
       expect(query.sql).toContain('"relay_environment_credentials"."environment_id" = $1');
       expect(query.sql).toContain('"relay_environment_credentials"."environment_public_key" = $2');
       expect(query.sql).toContain('"relay_environment_credentials"."revoked_at" is null');

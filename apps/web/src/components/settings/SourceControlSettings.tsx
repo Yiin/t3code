@@ -95,10 +95,12 @@ function isVcsNotReady(item: VcsDiscoveryItem | SourceControlProviderDiscoveryIt
   return !isProviderDiscoveryItem(item) && !item.implemented;
 }
 
-function authPresentation(auth: SourceControlProviderAuth): {
+type SourceControlAuthPresentation = {
   readonly label: string;
   readonly badge: "warning" | null;
-} {
+};
+
+function authPresentation(auth: SourceControlProviderAuth): SourceControlAuthPresentation {
   if (auth.status === "authenticated") {
     return { label: "Authenticated", badge: null };
   }

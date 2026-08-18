@@ -19,6 +19,17 @@ export function resolveDesktopUpdateButtonAction(
   return "none";
 }
 
+/** Button text for the About row: the pending action wins, then the raw status. */
+export function getDesktopUpdateButtonLabel(state: DesktopUpdateState | null): string {
+  const action = state ? resolveDesktopUpdateButtonAction(state) : "none";
+  if (action === "download") return "Download";
+  if (action === "install") return "Install";
+  if (state?.status === "checking") return "Checking…";
+  if (state?.status === "downloading") return "Downloading…";
+  if (state?.status === "up-to-date") return "Up to Date";
+  return "Check for Updates";
+}
+
 export function shouldShowDesktopUpdateButton(state: DesktopUpdateState | null): boolean {
   if (!state || !state.enabled) {
     return false;

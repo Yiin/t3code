@@ -85,6 +85,18 @@ const record = (line: string): Record<string, unknown> | null => {
   }
 };
 
+/**
+ * The one place this file turns an untyped JSON value into a readable object.
+ *
+ * Harness stdout is JSONL the provider owns, so every nested field below is
+ * narrowed here rather than at each read. Arrays are not objects for this
+ * purpose: no field this parser wants is ever carried on one.
+ */
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
 const stringsIn = (value: unknown, output: string[] = []): string[] => {
   if (output.length >= 16) return output;
   if (typeof value === "string") output.push(value);
@@ -110,12 +122,18 @@ const structuredErrorText = (item: Record<string, unknown>): string | null => {
 };
 
 const findStructuredError = (value: unknown): string | null => {
-  if (typeof value !== "object" || value === null) return null;
-  if (!Array.isArray(value)) {
-    const found = structuredErrorText(value as Record<string, unknown>);
-    if (found !== null) return found;
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      const found = findStructuredError(child);
+      if (found !== null) return found;
+    }
+    return null;
   }
-  for (const child of Array.isArray(value) ? value : Object.values(value)) {
+  const item = asRecord(value);
+  if (item === null) return null;
+  const direct = structuredErrorText(item);
+  if (direct !== null) return direct;
+  for (const child of Object.values(item)) {
     const found = findStructuredError(child);
     if (found !== null) return found;
   }
@@ -124,15 +142,14 @@ const findStructuredError = (value: unknown): string | null => {
 
 const primeAssistantText = (item: Record<string, unknown>): string | null => {
   if (item["type"] !== "message_end" && item["type"] !== "turn_end") return null;
-  const message = item["message"];
-  if (typeof message !== "object" || message === null || Array.isArray(message)) return null;
-  const messageRecord = message as Record<string, unknown>;
+  const messageRecord = asRecord(item["message"]);
+  if (messageRecord === null) return null;
   if (messageRecord["role"] !== "assistant" || !Array.isArray(messageRecord["content"]))
     return null;
   const text = messageRecord["content"]
     .flatMap((block) => {
-      if (typeof block !== "object" || block === null || Array.isArray(block)) return [];
-      const content = block as Record<string, unknown>;
+      const content = asRecord(block);
+      if (content === null) return [];
       return content["type"] === "text" && typeof content["text"] === "string"
         ? [content["text"]]
         : [];
@@ -145,8 +162,8 @@ const boundedPrimeError = (value: unknown, fallback: string): string =>
   typeof value === "string" && value.trim() !== "" ? value.trim().slice(0, 2_048) : fallback;
 
 const primeAssistantError = (value: unknown): string | null => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const message = value as Record<string, unknown>;
+  const message = asRecord(value);
+  if (message === null) return null;
   if (message["role"] !== "assistant" || message["stopReason"] !== "error") return null;
   return boundedPrimeError(message["errorMessage"], "Prime assistant stopped with an error");
 };
@@ -196,31 +213,21 @@ export const parseTerminalArtifact = (harness: TerminalHarness, text: string): P
         finalText = item["content"];
       }
     } else if (harness === "codex" && item["type"] === "item.completed") {
-      const nested = item["item"];
-      if (typeof nested === "object" && nested !== null) {
-        const value = nested as Record<string, unknown>;
-        if (value["type"] === "agent_message" && typeof value["text"] === "string") {
-          finalText = value["text"];
-        }
+      const nested = asRecord(item["item"]);
+      if (
+        nested !== null &&
+        nested["type"] === "agent_message" &&
+        typeof nested["text"] === "string"
+      ) {
+        finalText = nested["text"];
       }
     } else if (harness === "codex" && item["type"] === "thread.started") {
       if (typeof item["thread_id"] === "string") sessionId = item["thread_id"];
     } else if (harness === "opencode" && item["type"] === "text") {
-      const part = item["part"];
-      if (
-        typeof part === "object" &&
-        part !== null &&
-        typeof (part as Record<string, unknown>)["text"] === "string"
-      ) {
-        openCodeStepText.push((part as Record<string, unknown>)["text"] as string);
-      }
+      const text = asRecord(item["part"])?.["text"];
+      if (typeof text === "string") openCodeStepText.push(text);
     } else if (harness === "opencode" && item["type"] === "step_finish") {
-      const part = item["part"];
-      if (
-        typeof part === "object" &&
-        part !== null &&
-        (part as Record<string, unknown>)["reason"] === "stop"
-      ) {
+      if (asRecord(item["part"])?.["reason"] === "stop") {
         finalText = openCodeStepText.join("");
       }
       openCodeStepText = [];
@@ -564,15 +571,13 @@ const updateSubagentBookkeeping = (
     );
     return;
   }
-  if (typeof value !== "object" || value === null) return;
-  const item = value as Record<string, unknown>;
-  const agents = item["agents_states"];
-  if (typeof agents === "object" && agents !== null && !Array.isArray(agents)) {
+  const item = asRecord(value);
+  if (item === null) return;
+  const agents = asRecord(item["agents_states"]);
+  if (agents !== null) {
     for (const [id, state] of Object.entries(agents)) {
-      const status =
-        typeof state === "object" && state !== null
-          ? (state as Record<string, unknown>)["status"]
-          : state;
+      const stateRecord = asRecord(state);
+      const status = stateRecord === null ? state : stateRecord["status"];
       states.set(id, status === "running" || status === "in_progress");
     }
   }

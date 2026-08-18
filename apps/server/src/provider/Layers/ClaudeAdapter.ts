@@ -49,6 +49,7 @@ import {
   RuntimeRequestId,
   RuntimeTaskId,
   ThreadId,
+  type TurnCompletedPayload,
   TurnId,
   type UserInputQuestion,
 } from "@t3tools/contracts";
@@ -2308,6 +2309,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : undefined);
 
+    // Identical in both exit paths below; only one runs per call.
+    const turnCompletedPayload: TurnCompletedPayload = {
+      state: status,
+      ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
+      ...(result?.usage ? { usage: result.usage } : {}),
+      ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
+      ...(typeof result?.total_cost_usd === "number"
+        ? { totalCostUsd: result.total_cost_usd }
+        : {}),
+      ...(errorMessage ? { errorMessage } : {}),
+    };
+
     const turnState = context.turnState;
     if (!turnState) {
       yield* emitThreadTokenUsage(context, usageSnapshot, {
@@ -2322,16 +2335,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         provider: PROVIDER,
         createdAt: stamp.createdAt,
         threadId: context.session.threadId,
-        payload: {
-          state: status,
-          ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
-          ...(result?.usage ? { usage: result.usage } : {}),
-          ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
-          ...(typeof result?.total_cost_usd === "number"
-            ? { totalCostUsd: result.total_cost_usd }
-            : {}),
-          ...(errorMessage ? { errorMessage } : {}),
-        },
+        payload: turnCompletedPayload,
         providerRefs: {},
       });
       return;
@@ -2398,16 +2402,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       createdAt: stamp.createdAt,
       threadId: context.session.threadId,
       turnId: turnState.turnId,
-      payload: {
-        state: status,
-        ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
-        ...(result?.usage ? { usage: result.usage } : {}),
-        ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
-        ...(typeof result?.total_cost_usd === "number"
-          ? { totalCostUsd: result.total_cost_usd }
-          : {}),
-        ...(errorMessage ? { errorMessage } : {}),
-      },
+      payload: turnCompletedPayload,
       providerRefs: nativeProviderRefs(context),
     });
 

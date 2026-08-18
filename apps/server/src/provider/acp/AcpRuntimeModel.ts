@@ -158,12 +158,13 @@ export function parseSessionModeState(
   };
 }
 
-function normalizePlanStepStatus(raw: unknown): "pending" | "inProgress" | "completed" {
+function normalizePlanStepStatus(
+  raw: EffectAcpSchema.PlanEntry["status"],
+): "pending" | "inProgress" | "completed" {
   switch (raw) {
     case "completed":
       return "completed";
     case "in_progress":
-    case "inProgress":
       return "inProgress";
     default:
       return "pending";
@@ -171,14 +172,13 @@ function normalizePlanStepStatus(raw: unknown): "pending" | "inProgress" | "comp
 }
 
 function normalizeToolCallStatus(
-  raw: unknown,
+  raw: EffectAcpSchema.ToolCallStatus | null | undefined,
   fallback?: "pending" | "inProgress" | "completed" | "failed",
 ): "pending" | "inProgress" | "completed" | "failed" | undefined {
   switch (raw) {
     case "pending":
       return "pending";
     case "in_progress":
-    case "inProgress":
       return "inProgress";
     case "completed":
       return "completed";
@@ -255,8 +255,10 @@ function extractTextContentFromToolCallContent(
   return chunks.length > 0 ? chunks.join("\n") : undefined;
 }
 
-function normalizeToolKind(kind: unknown): string | undefined {
-  return typeof kind === "string" && kind.trim().length > 0 ? kind.trim() : undefined;
+function normalizeToolKind(
+  kind: EffectAcpSchema.ToolKind | null | undefined,
+): EffectAcpSchema.ToolKind | undefined {
+  return kind ?? undefined;
 }
 
 function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
@@ -374,8 +376,7 @@ export function mergeToolCallState(
   previous: AcpToolCallState | undefined,
   next: AcpToolCallState,
 ): AcpToolCallState {
-  const nextKind = typeof next.data.kind === "string" ? next.data.kind : undefined;
-  const kind = nextKind ?? previous?.kind;
+  const kind = next.kind ?? previous?.kind;
   const title = next.title ?? previous?.title;
   const status = next.status ?? previous?.status;
   const command = next.command ?? previous?.command;
@@ -412,10 +413,7 @@ export function parsePermissionRequest(
   );
   const kind = normalizeToolKind(params.toolCall.kind) ?? "unknown";
   const detail =
-    toolCall?.command ??
-    toolCall?.title ??
-    toolCall?.detail ??
-    (typeof params.sessionId === "string" ? `Session ${params.sessionId}` : undefined);
+    toolCall?.command ?? toolCall?.title ?? toolCall?.detail ?? `Session ${params.sessionId}`;
   return {
     kind,
     ...(detail ? { detail } : {}),
@@ -475,10 +473,14 @@ export function syntheticLoadSessionResponseFromInitialize(
   };
 }
 
-export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotification): {
+export interface AcpSessionUpdateParseResult {
   readonly modeId?: string;
   readonly events: ReadonlyArray<AcpParsedSessionEvent>;
-} {
+}
+
+export function parseSessionUpdateEvent(
+  params: EffectAcpSchema.SessionNotification,
+): AcpSessionUpdateParseResult {
   const upd = params.update;
   const events: Array<AcpParsedSessionEvent> = [];
   let modeId: string | undefined;

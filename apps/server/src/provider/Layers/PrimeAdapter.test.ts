@@ -28,7 +28,7 @@ import * as Stream from "effect/Stream";
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import type { PrimeAdapterShape } from "../Services/PrimeAdapter.ts";
-import { makePrimeAdapter, type PrimeResumeCursor } from "./PrimeAdapter.ts";
+import { decodePrimeResumeCursor, makePrimeAdapter } from "./PrimeAdapter.ts";
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/prime-rpc-mock.ts");
@@ -180,7 +180,7 @@ it.layer(primeLayer)("PrimeAdapter", (it) => {
         runtimeMode: "approval-required",
         resumeCursor: first.resumeCursor,
       });
-      assert.equal((resumed.resumeCursor as PrimeResumeCursor).sessionId, "prime-new");
+      assert.equal(decodePrimeResumeCursor(resumed.resumeCursor)?.sessionId, "prime-new");
       yield* adapter.sendTurn({ threadId: owner, input: "resume" });
       yield* waitForSnapshot(adapter, owner);
       assert.includeMembers(
@@ -351,7 +351,7 @@ it.layer(primeLayer)("PrimeAdapter", (it) => {
       const rolledBack = yield* adapter.rollbackThread(threadId, 1);
       assert.equal(rolledBack.turns.length, snapshot.turns.length - 1);
       assert.equal(
-        (rolledBack.resumeCursor as PrimeResumeCursor).sessionId,
+        decodePrimeResumeCursor(rolledBack.resumeCursor)?.sessionId,
         "prime-actions-forked",
       );
       const rollbackCommands = (yield* adapter.readThread(threadId)).turns.at(-1)?.items ?? [];

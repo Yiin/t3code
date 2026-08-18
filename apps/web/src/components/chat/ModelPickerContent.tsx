@@ -47,7 +47,9 @@ const EMPTY_MODEL_JUMP_LABELS = new Map<string, string>();
 // Split a `${instanceId}:${slug}` combobox key back into its pieces. Slugs
 // can contain colons (e.g. some vendor model ids), so we only split on the
 // first colon — anything after that is the slug.
-function splitInstanceModelKey(key: string): { instanceId: ProviderInstanceId; slug: string } {
+type InstanceModelKeyParts = { instanceId: ProviderInstanceId; slug: string };
+
+function splitInstanceModelKey(key: string): InstanceModelKeyParts {
   const colonIndex = key.indexOf(":");
   if (colonIndex === -1) {
     return { instanceId: key as ProviderInstanceId, slug: "" };

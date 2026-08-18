@@ -299,22 +299,22 @@ export function persistState(state: UiState): void {
         return Object.keys(nextTurns).length > 0 ? [[threadId, nextTurns]] : [];
       }),
     );
-    window.localStorage.setItem(
-      PERSISTED_STATE_KEY,
-      JSON.stringify({
-        projectExpandedById,
-        projectOrder: state.projectOrder,
-        threadLastVisitedAtById: state.threadLastVisitedAtById,
-        ...(state.epicsLastVisitedAt ? { epicsLastVisitedAt: state.epicsLastVisitedAt } : {}),
-        defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
-        threadChangedFilesExpandedById,
-        threadSubagentExpandedById: state.threadSubagentExpandedById,
-        epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
-        epicRunGroupHiddenByRunId: sanitizeDismissedRecord(state.epicRunGroupHiddenByRunId),
-        plannedEpicBannerDismissedByIdentity: state.plannedEpicBannerDismissedByIdentity,
-        epicsProjectGroupCollapsedByKey: state.epicsProjectGroupCollapsedByKey,
-      } satisfies PersistedUiState),
-    );
+    const persisted: PersistedUiState = {
+      projectExpandedById,
+      projectOrder: state.projectOrder,
+      threadLastVisitedAtById: state.threadLastVisitedAtById,
+      defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
+      threadChangedFilesExpandedById,
+      threadSubagentExpandedById: state.threadSubagentExpandedById,
+      epicRunGroupExpandedByRunId: state.epicRunGroupExpandedByRunId,
+      epicRunGroupHiddenByRunId: sanitizeDismissedRecord(state.epicRunGroupHiddenByRunId),
+      plannedEpicBannerDismissedByIdentity: state.plannedEpicBannerDismissedByIdentity,
+      epicsProjectGroupCollapsedByKey: state.epicsProjectGroupCollapsedByKey,
+    };
+    if (state.epicsLastVisitedAt) {
+      persisted.epicsLastVisitedAt = state.epicsLastVisitedAt;
+    }
+    window.localStorage.setItem(PERSISTED_STATE_KEY, JSON.stringify(persisted));
     if (!legacyKeysCleanedUp) {
       legacyKeysCleanedUp = true;
       for (const legacyKey of LEGACY_PERSISTED_STATE_KEYS) {

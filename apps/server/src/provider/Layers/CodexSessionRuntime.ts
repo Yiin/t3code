@@ -301,10 +301,12 @@ function readResumeCursorThreadId(
   return isCodexResumeCursorSchema(resumeCursor) ? resumeCursor.threadId : undefined;
 }
 
-function runtimeModeToThreadConfig(input: RuntimeMode): {
+type CodexThreadModeConfig = {
   readonly approvalPolicy: EffectCodexSchema.V2ThreadStartParams__AskForApproval;
   readonly sandbox: EffectCodexSchema.V2ThreadStartParams__SandboxMode;
-} {
+};
+
+function runtimeModeToThreadConfig(input: RuntimeMode): CodexThreadModeConfig {
   switch (input) {
     case "approval-required":
       return {
@@ -606,10 +608,12 @@ function readNotificationThreadId(notification: CodexServerNotification): string
   }
 }
 
-function readRouteFields(notification: CodexServerNotification): {
+type CodexNotificationRouteFields = {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
-} {
+};
+
+function readRouteFields(notification: CodexServerNotification): CodexNotificationRouteFields {
   switch (notification.method) {
     case "thread/started":
       return {
@@ -989,10 +993,9 @@ export const makeCodexSessionRuntime = (
         let itemId = route.itemId;
 
         if (notification.method === "serverRequest/resolved") {
-          const rawRequestId =
-            typeof notification.params.requestId === "string"
-              ? notification.params.requestId
-              : String(notification.params.requestId);
+          // The wire type is `string | number`; `String` is identity on the
+          // string arm, so one call covers both.
+          const rawRequestId = String(notification.params.requestId);
           const correlation = rawRequestId
             ? (yield* Ref.get(approvalCorrelationsRef)).get(rawRequestId)
             : undefined;

@@ -174,9 +174,11 @@ function normalizeRevealLine(line: number | undefined): number | null {
   return Math.max(1, Math.trunc(line));
 }
 
-export function migratePersistedRightPanelState(persistedState: unknown): {
+interface MigratedRightPanelState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-} {
+}
+
+export function migratePersistedRightPanelState(persistedState: unknown): MigratedRightPanelState {
   if (!persistedState || typeof persistedState !== "object") {
     return { byThreadKey: {} };
   }

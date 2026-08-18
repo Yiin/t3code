@@ -19,6 +19,7 @@ import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
+import { unsupportedProjectionSnapshotQuery } from "../testUtils/projectionSnapshotQueryStub.ts";
 import { ThreadTeardownReactor } from "../Services/ThreadTeardownReactor.ts";
 import { ThreadTeardownReactorLive } from "./ThreadTeardownReactor.ts";
 
@@ -121,7 +122,7 @@ function withHarness(
       options.sessions.map((session) => [session.threadId, session]),
     );
 
-    const engine = {
+    const engine: OrchestrationEngineShape = {
       readEvents: () => Stream.empty,
       dispatch: (command: OrchestrationCommand) => {
         dispatched.push(command);
@@ -131,9 +132,10 @@ function withHarness(
       },
       streamDomainEvents: Stream.fromQueue(events),
       latestSequence: Effect.succeed(0),
-    } as unknown as OrchestrationEngineShape;
+    };
 
-    const snapshotQuery = {
+    const snapshotQuery: ProjectionSnapshotQueryShape = {
+      ...unsupportedProjectionSnapshotQuery,
       getThreadSessionById: (threadId: ThreadId) =>
         Effect.succeed(Option.fromUndefinedOr(sessionsByThread.get(threadId))),
       // What the real query answers for an archived thread: the shell read
@@ -141,7 +143,7 @@ function withHarness(
       // teardown needs it. A reactor that guarded on the shell would stop
       // dispatching for archived threads, and these tests would catch it.
       getThreadShellById: () => Effect.succeed(Option.none()),
-    } as unknown as ProjectionSnapshotQueryShape;
+    };
 
     yield* Effect.gen(function* () {
       const reactor = yield* ThreadTeardownReactor;

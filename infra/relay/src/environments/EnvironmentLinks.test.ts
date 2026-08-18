@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import type { SQL } from "drizzle-orm";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -12,7 +13,7 @@ describe("EnvironmentLinks", () => {
     const cause = new Error("database unavailable");
     const fakeDb = {
       select: () => ({
-        from: (table: unknown) => {
+        from: (table: typeof relayEnvironmentLinks) => {
           expect(table).toBe(relayEnvironmentLinks);
           return {
             where: () => ({
@@ -44,15 +45,15 @@ describe("EnvironmentLinks", () => {
 
   it.effect("revokes only the active link owned by the requesting user", () => {
     const updateValues: Array<Record<string, unknown>> = [];
-    const whereConditions: Array<unknown> = [];
+    const whereConditions: Array<SQL> = [];
     const fakeDb = {
-      update: (table: unknown) => {
+      update: (table: typeof relayEnvironmentLinks) => {
         expect(table).toBe(relayEnvironmentLinks);
         return {
           set: (values: Record<string, unknown>) => {
             updateValues.push(values);
             return {
-              where: (condition: unknown) => {
+              where: (condition: SQL) => {
                 whereConditions.push(condition);
                 return {
                   returning: (selection: unknown) => {
@@ -79,9 +80,13 @@ describe("EnvironmentLinks", () => {
       expect(updateValues[0]?.revokedAt).toEqual(updateValues[0]?.updatedAt);
       expect(typeof updateValues[0]?.revokedAt).toBe("string");
       expect(whereConditions).toHaveLength(1);
+      const [whereCondition] = whereConditions;
+      if (whereCondition === undefined) {
+        throw new Error("Expected the revoke query to capture a where condition.");
+      }
 
       const dialect = new PgDialect();
-      const query = dialect.sqlToQuery(whereConditions[0] as never);
+      const query = dialect.sqlToQuery(whereCondition);
       expect(query.sql).toContain('"relay_environment_links"."user_id" = $1');
       expect(query.sql).toContain('"relay_environment_links"."environment_id" = $2');
       expect(query.sql).toContain('"relay_environment_links"."revoked_at" is null');

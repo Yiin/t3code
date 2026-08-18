@@ -14,6 +14,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { findReservedPrimeLaunchArg } from "../provider/prime/PrimeLaunchArgs.ts";
 import {
   makePrimeRpcTransport,
+  type PrimeRpcEvent,
   type PrimeRpcThinkingLevel,
   type PrimeRpcTransportError,
   type PrimeRpcTransportOptions,
@@ -62,16 +63,17 @@ function isThinkingLevel(value: string | undefined): value is PrimeRpcThinkingLe
   return ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value ?? "");
 }
 
-function eventError(event: Record<string, unknown>): string | undefined {
+function eventError(event: PrimeRpcEvent): string | undefined {
   if (event.type !== "message_update") return undefined;
   const update = event.assistantMessageEvent;
   if (!update || typeof update !== "object" || Array.isArray(update)) return undefined;
-  const record = update as Record<string, unknown>;
-  if (record.type !== "error" && record.type !== "abort" && record.type !== "aborted") {
+  const updateType = "type" in update ? update.type : undefined;
+  if (updateType !== "error" && updateType !== "abort" && updateType !== "aborted") {
     return undefined;
   }
-  return typeof record.reason === "string" && record.reason.trim()
-    ? `Prime Agent stopped: ${record.reason.trim()}`
+  const reason = "reason" in update ? update.reason : undefined;
+  return typeof reason === "string" && reason.trim()
+    ? `Prime Agent stopped: ${reason.trim()}`
     : "Prime Agent stopped before producing output.";
 }
 
@@ -134,28 +136,26 @@ export const makePrimeTextGeneration = Effect.fn("makePrimeTextGeneration")(func
         if (thinking) yield* transport.setThinkingLevel(thinking);
         yield* transport.prompt({ message: input.prompt });
         yield* transport.events.pipe(
-          Stream.takeUntilEffect((event) =>
-            Effect.succeed((event as Record<string, unknown>).type === "agent_settled"),
-          ),
+          Stream.takeUntilEffect((event) => Effect.succeed(event.type === "agent_settled")),
           Stream.runForEach((event) => {
-            const record = event as Record<string, unknown>;
-            if (record.type === "agent_settled") {
+            if (event.type === "agent_settled") {
               return Ref.set(settled, true);
             }
-            const error = eventError(record);
+            const error = eventError(event);
             if (error) {
               return Effect.fail(
                 new TextGenerationError({ operation: input.operation, detail: error }),
               );
             }
-            if (record.type !== "message_update") return Effect.void;
-            const update = record.assistantMessageEvent;
+            if (event.type !== "message_update") return Effect.void;
+            const update = event.assistantMessageEvent;
             if (!update || typeof update !== "object" || Array.isArray(update)) {
               return Effect.void;
             }
-            const assistant = update as Record<string, unknown>;
-            return assistant.type === "text_delta" && typeof assistant.delta === "string"
-              ? Ref.update(output, (current) => current + assistant.delta)
+            const assistantType = "type" in update ? update.type : undefined;
+            const delta = "delta" in update ? update.delta : undefined;
+            return assistantType === "text_delta" && typeof delta === "string"
+              ? Ref.update(output, (current) => current + delta)
               : Effect.void;
           }),
         );

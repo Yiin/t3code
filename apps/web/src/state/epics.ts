@@ -62,10 +62,14 @@ export function runnerOwnedIterationForThread(
 }
 
 /** The one wording every surface reuses, so the refusal reads the same everywhere. */
-export function describeRunnerOwnedIteration(owned: RunnerOwnedIteration): {
+export interface RunnerOwnedIterationNotice {
   readonly title: string;
   readonly description: string;
-} {
+}
+
+export function describeRunnerOwnedIteration(
+  owned: RunnerOwnedIteration,
+): RunnerOwnedIterationNotice {
   const work = owned.issueId ?? `iteration ${String(owned.iterationIndex)}`;
   return {
     title: `Epic run ${owned.epicId} owns this thread`,

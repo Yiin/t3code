@@ -53,6 +53,7 @@ import {
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import { activityPayloadFields } from "../testUtils/activityPayload.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -202,56 +203,23 @@ describe("ProviderCommandReactor", () => {
         model: "gpt-5-codex",
       };
       const startSessionEffect = input?.startSessionEffect;
-      const startSession = vi.fn((_: unknown, input: unknown) => {
+      const startSession = vi.fn<ProviderServiceShape["startSession"]>((_threadId, input) => {
         const sessionIndex = nextSessionIndex++;
-        const resumeCursor =
-          typeof input === "object" && input !== null && "resumeCursor" in input
-            ? input.resumeCursor
-            : undefined;
-        const threadId =
-          typeof input === "object" &&
-          input !== null &&
-          "threadId" in input &&
-          typeof input.threadId === "string"
-            ? ThreadId.make(input.threadId)
-            : ThreadId.make(`thread-${sessionIndex}`);
-        const inputModelSelection =
-          typeof input === "object" && input !== null && "modelSelection" in input
-            ? (input.modelSelection as ModelSelection | undefined)
-            : undefined;
-        const providerInstanceId =
-          typeof input === "object" && input !== null && "providerInstanceId" in input
-            ? (input.providerInstanceId as ProviderInstanceId | undefined)
-            : inputModelSelection?.instanceId;
-        const provider =
-          typeof input === "object" &&
-          input !== null &&
-          "provider" in input &&
-          typeof input.provider === "string"
-            ? (input.provider as ProviderSession["provider"])
-            : ProviderDriverKind.make(inputModelSelection?.instanceId ?? modelSelection.instanceId);
+        const inputModelSelection = input.modelSelection;
+        const providerInstanceId = input.providerInstanceId ?? inputModelSelection?.instanceId;
         const session: ProviderSession = {
-          provider,
+          provider:
+            input.provider ??
+            ProviderDriverKind.make(inputModelSelection?.instanceId ?? modelSelection.instanceId),
           ...(providerInstanceId ? { providerInstanceId } : {}),
           status: "ready" as const,
-          runtimeMode:
-            typeof input === "object" &&
-            input !== null &&
-            "runtimeMode" in input &&
-            (input.runtimeMode === "approval-required" || input.runtimeMode === "full-access")
-              ? input.runtimeMode
-              : "full-access",
-          ...(typeof input === "object" &&
-          input !== null &&
-          "cwd" in input &&
-          typeof input.cwd === "string"
-            ? { cwd: input.cwd }
-            : {}),
+          runtimeMode: input.runtimeMode,
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
           ...((inputModelSelection?.model ?? modelSelection.model)
             ? { model: inputModelSelection?.model ?? modelSelection.model }
             : {}),
-          threadId,
-          resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
+          threadId: input.threadId,
+          resumeCursor: input.resumeCursor ?? { opaque: `resume-${sessionIndex}` },
           createdAt: now,
           updatedAt: now,
         };
@@ -263,44 +231,29 @@ describe("ProviderCommandReactor", () => {
           ),
         );
       });
-      const sendTurn = vi.fn(
+      const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>(
         input?.sendTurnEffect ??
-          ((_: unknown) =>
+          (() =>
             Effect.succeed({
               threadId: ThreadId.make("thread-1"),
               turnId: asTurnId("turn-1"),
             })),
       );
-      const interruptTurn = vi.fn((_: unknown) => Effect.void);
+      const interruptTurn = vi.fn<ProviderServiceShape["interruptTurn"]>(() => Effect.void);
       const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
       const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(
         () => Effect.void,
       );
-      const stopSession = vi.fn((input: unknown) =>
+      const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(({ threadId }) =>
         Effect.sync(() => {
-          const threadId =
-            typeof input === "object" && input !== null && "threadId" in input
-              ? (input as { threadId?: ThreadId }).threadId
-              : undefined;
-          if (!threadId) {
-            return;
-          }
           const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
           if (index >= 0) {
             runtimeSessions.splice(index, 1);
           }
         }),
       );
-      const renameBranch = vi.fn((input: unknown) =>
-        Effect.succeed({
-          branch:
-            typeof input === "object" &&
-            input !== null &&
-            "newBranch" in input &&
-            typeof input.newBranch === "string"
-              ? input.newBranch
-              : "renamed-branch",
-        }),
+      const renameBranch = vi.fn<GitWorkflowService.GitWorkflowService["Service"]["renameBranch"]>(
+        (input) => Effect.succeed({ branch: input.newBranch }),
       );
       const refreshStatus = vi.fn((_: string) =>
         Effect.succeed({
@@ -348,12 +301,12 @@ describe("ProviderCommandReactor", () => {
 
       const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
       const service: ProviderServiceShape = {
-        startSession: startSession as ProviderServiceShape["startSession"],
-        sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
-        interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
-        respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
-        respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
-        stopSession: stopSession as ProviderServiceShape["stopSession"],
+        startSession,
+        sendTurn,
+        interruptTurn,
+        respondToRequest,
+        respondToUserInput,
+        stopSession,
         listSessions: () => Effect.succeed(runtimeSessions),
         hasLiveSession: (threadId) =>
           Effect.succeed(runtimeSessions.some((session) => session.threadId === threadId)),
@@ -1679,7 +1632,7 @@ describe("ProviderCommandReactor", () => {
           modelSelection,
           interactionMode: "plan",
         });
-        expect(String((harness.sendTurn.mock.calls[0]![0] as { input: string }).input)).toContain(
+        expect(String(harness.sendTurn.mock.calls[0]![0].input)).toContain(
           "ARGUMENTS: t3code-vst.17",
         );
         const thread = (yield* harness.readModel()).threads.find(
@@ -1816,7 +1769,7 @@ describe("ProviderCommandReactor", () => {
         });
 
         yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
-        const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+        const sent = harness.sendTurn.mock.calls[0]![0];
         expect(sent.input).toContain(
           "The user invoked the /cook-it skill. Follow its instructions below.",
         );
@@ -1895,7 +1848,7 @@ describe("ProviderCommandReactor", () => {
       });
 
       yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+      const sent = harness.sendTurn.mock.calls[0]![0];
       expect(sent.input).toContain(
         "The user invoked the /cook-it skill. Follow its instructions below.",
       );
@@ -1957,7 +1910,7 @@ describe("ProviderCommandReactor", () => {
       });
 
       yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+      const sent = harness.sendTurn.mock.calls[0]![0];
       expect(sent.input).toContain("Project instructions.");
       expect(sent.input).not.toContain("Global instructions.");
     }),
@@ -2126,7 +2079,7 @@ describe("ProviderCommandReactor", () => {
       });
 
       yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
-      const sent = harness.sendTurn.mock.calls[0]![0] as { input: string };
+      const sent = harness.sendTurn.mock.calls[0]![0];
       expect(sent.input).toContain(
         "The user invoked the /cook-it skill. Follow its instructions below.",
       );
@@ -2471,19 +2424,8 @@ describe("ProviderCommandReactor", () => {
         worktreePath: HARNESS_WORKTREE_PATH,
       });
 
-      harness.generateBranchName.mockImplementation((input: unknown) =>
-        Effect.succeed({
-          branch:
-            typeof input === "object" &&
-            input !== null &&
-            "modelSelection" in input &&
-            typeof input.modelSelection === "object" &&
-            input.modelSelection !== null &&
-            "model" in input.modelSelection &&
-            typeof input.modelSelection.model === "string"
-              ? `feature/${input.modelSelection.model}`
-              : "feature/generated",
-        }),
+      harness.generateBranchName.mockImplementation((input) =>
+        Effect.succeed({ branch: `feature/${input.modelSelection.model}` }),
       );
 
       yield* dispatch(harness.engine, {
@@ -3306,7 +3248,7 @@ describe("ProviderCommandReactor", () => {
       yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
       harness.startSession.mockImplementationOnce(
-        (_: unknown, __: unknown) => Effect.fail("simulated restart failure") as never,
+        () => Effect.fail("simulated restart failure") as never,
       );
 
       yield* dispatch(harness.engine, {
@@ -3889,9 +3831,7 @@ describe("ProviderCommandReactor", () => {
         const resolvedActivity = thread?.activities.find(
           (activity) =>
             activity.kind === "approval.resolved" &&
-            typeof activity.payload === "object" &&
-            activity.payload !== null &&
-            (activity.payload as Record<string, unknown>).requestId === "approval-request-1",
+            activityPayloadFields(activity.payload)?.requestId === "approval-request-1",
         );
         expect(resolvedActivity).toBeUndefined();
       }),
@@ -3996,9 +3936,7 @@ describe("ProviderCommandReactor", () => {
       const resolvedActivity = thread?.activities.find(
         (activity) =>
           activity.kind === "user-input.resolved" &&
-          typeof activity.payload === "object" &&
-          activity.payload !== null &&
-          (activity.payload as Record<string, unknown>).requestId === "user-input-request-1",
+          activityPayloadFields(activity.payload)?.requestId === "user-input-request-1",
       );
       expect(resolvedActivity).toBeUndefined();
     }),

@@ -78,6 +78,7 @@ import {
   type ConformanceScenario,
 } from "./scenario.ts";
 import {
+  agentStartCount,
   beadCommentCounts,
   landedChildIds,
   makeConformanceWorkspace,
@@ -900,11 +901,6 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
         const first = yield* invokeLoop({ resumedWorkers: [], crashes: true }).pipe(
           Effect.forkChild,
         );
-        const agentStarts = (): number =>
-          workspace.readTranscript().filter((item) => {
-            if (typeof item !== "object" || item === null) return false;
-            return (item as Readonly<Record<string, unknown>>)["tool"] === "agent";
-          }).length;
         /**
          * The row alone is not enough. `allocateIteration` writes it inside the
          * transition, before `beginTurn` spawns anything, so a cut that only
@@ -918,7 +914,7 @@ const runCoreParallelScenario = Effect.fn("runCoreParallelScenario")(function* (
             if (
               rows.length >= restart.cutAfterRows &&
               rows.at(-1)?.turnStatus === "running" &&
-              agentStarts() >= restart.cutAfterRows
+              agentStartCount(workspace) >= restart.cutAfterRows
             ) {
               return;
             }

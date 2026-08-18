@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 
 import type { ProviderInstanceEntry } from "../../providerInstances";
 
-const EPIC_ROLE_DETAILS: Record<EpicRoleId, { label: string; description: string }> = {
+const EPIC_ROLE_DETAILS = {
   "iteration-worker": {
     label: "Iteration worker",
     description: "Builds one ready child during each epic iteration.",
@@ -32,7 +32,7 @@ const EPIC_ROLE_DETAILS: Record<EpicRoleId, { label: string; description: string
     label: "Merge-fix child",
     description: "Repairs a child after its branch fails the merge gate.",
   },
-};
+} satisfies Record<EpicRoleId, { label: string; description: string }>;
 
 const isEpicTierId = Schema.is(EpicTierId);
 const isInSessionRoleName = Schema.is(EpicInSessionRoleName);

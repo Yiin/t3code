@@ -69,6 +69,7 @@ import {
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { activityPayloadFields } from "../testUtils/activityPayload.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1770,18 +1771,9 @@ describe("ProviderRuntimeIngestion", () => {
       const activity = thread.activities.find(
         (entry: ProviderRuntimeTestActivity) => entry.id === "evt-tool-completed-with-data",
       );
-      const payload =
-        activity?.payload && typeof activity.payload === "object"
-          ? (activity.payload as Record<string, unknown>)
-          : undefined;
-      const data =
-        payload?.data && typeof payload.data === "object"
-          ? (payload.data as Record<string, unknown>)
-          : undefined;
-      const rawOutput =
-        data?.rawOutput && typeof data.rawOutput === "object"
-          ? (data.rawOutput as Record<string, unknown>)
-          : undefined;
+      const payload = activityPayloadFields(activity?.payload);
+      const data = activityPayloadFields(payload?.data);
+      const rawOutput = activityPayloadFields(data?.rawOutput);
 
       expect(activity?.kind).toBe("tool.completed");
       expect(activity?.summary).toBe("Read file");
@@ -1827,10 +1819,7 @@ describe("ProviderRuntimeIngestion", () => {
       const activity = thread.activities.find(
         (entry: ProviderRuntimeTestActivity) => entry.id === "evt-command-completed",
       );
-      const payload =
-        activity?.payload && typeof activity.payload === "object"
-          ? (activity.payload as Record<string, unknown>)
-          : undefined;
+      const payload = activityPayloadFields(activity?.payload);
 
       expect(activity?.summary).toBe("Ran command");
       expect(payload?.detail).toBe("bun run lint");
@@ -1871,10 +1860,7 @@ describe("ProviderRuntimeIngestion", () => {
       const activity = thread.activities.find(
         (entry: ProviderRuntimeTestActivity) => entry.id === "evt-read-path-completed",
       );
-      const payload =
-        activity?.payload && typeof activity.payload === "object"
-          ? (activity.payload as Record<string, unknown>)
-          : undefined;
+      const payload = activityPayloadFields(activity?.payload);
 
       expect(activity?.summary).toBe("Read file");
       expect(payload?.detail).toBe("/tmp/app.ts");
@@ -3701,20 +3687,14 @@ describe("ProviderRuntimeIngestion", () => {
       const requested = thread?.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-request-opened",
       );
-      const requestedPayload =
-        requested?.payload && typeof requested.payload === "object"
-          ? (requested.payload as Record<string, unknown>)
-          : undefined;
+      const requestedPayload = activityPayloadFields(requested?.payload);
       expect(requestedPayload?.requestKind).toBe("command");
       expect(requestedPayload?.requestType).toBe("command_execution_approval");
 
       const resolved = thread?.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-request-resolved",
       );
-      const resolvedPayload =
-        resolved?.payload && typeof resolved.payload === "object"
-          ? (resolved.payload as Record<string, unknown>)
-          : undefined;
+      const resolvedPayload = activityPayloadFields(resolved?.payload);
       expect(resolvedPayload?.requestKind).toBe("command");
       expect(resolvedPayload?.requestType).toBe("command_execution_approval");
     }),
@@ -3772,10 +3752,7 @@ describe("ProviderRuntimeIngestion", () => {
       const activity = thread.activities.find(
         (entry: ProviderRuntimeTestActivity) => entry.id === "evt-runtime-error-activity",
       );
-      const activityPayload =
-        activity?.payload && typeof activity.payload === "object"
-          ? (activity.payload as Record<string, unknown>)
-          : undefined;
+      const activityPayload = activityPayloadFields(activity?.payload);
 
       expect(activity?.kind).toBe("runtime.error");
       expect(activityPayload?.message).toBe("runtime activity exploded");
@@ -3981,10 +3958,7 @@ describe("ProviderRuntimeIngestion", () => {
       const planActivity = thread.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-turn-plan-updated",
       );
-      const planPayload =
-        planActivity?.payload && typeof planActivity.payload === "object"
-          ? (planActivity.payload as Record<string, unknown>)
-          : undefined;
+      const planPayload = activityPayloadFields(planActivity?.payload);
       expect(planActivity?.kind).toBe("turn.plan.updated");
       expect(Array.isArray(planPayload?.plan)).toBe(true);
 
@@ -3995,10 +3969,7 @@ describe("ProviderRuntimeIngestion", () => {
         (activity: ProviderRuntimeTestActivity) =>
           activity.id === "tool-updated:thread-1:item-p1-tool",
       );
-      const toolUpdatePayload =
-        toolUpdate?.payload && typeof toolUpdate.payload === "object"
-          ? (toolUpdate.payload as Record<string, unknown>)
-          : undefined;
+      const toolUpdatePayload = activityPayloadFields(toolUpdate?.payload);
       expect(toolUpdate?.kind).toBe("tool.updated");
       expect(toolUpdatePayload?.itemType).toBe("command_execution");
       expect(toolUpdatePayload?.status).toBe("in_progress");
@@ -4006,10 +3977,7 @@ describe("ProviderRuntimeIngestion", () => {
       const warning = thread.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-runtime-warning",
       );
-      const warningPayload =
-        warning?.payload && typeof warning.payload === "object"
-          ? (warning.payload as Record<string, unknown>)
-          : undefined;
+      const warningPayload = activityPayloadFields(warning?.payload);
       expect(warning?.kind).toBe("runtime.warning");
       expect(warningPayload?.message).toBe("Provider got slow");
 
@@ -4293,14 +4261,8 @@ describe("ProviderRuntimeIngestion", () => {
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-completed",
       );
 
-      const progressPayload =
-        progress?.payload && typeof progress.payload === "object"
-          ? (progress.payload as Record<string, unknown>)
-          : undefined;
-      const completedPayload =
-        completed?.payload && typeof completed.payload === "object"
-          ? (completed.payload as Record<string, unknown>)
-          : undefined;
+      const progressPayload = activityPayloadFields(progress?.payload);
+      const completedPayload = activityPayloadFields(completed?.payload);
 
       expect(started?.kind).toBe("task.started");
       expect(started?.summary).toBe("Plan task started");
@@ -4389,10 +4351,7 @@ describe("ProviderRuntimeIngestion", () => {
       const completed = thread.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-bash-task-completed",
       );
-      const completedPayload =
-        completed?.payload && typeof completed.payload === "object"
-          ? (completed.payload as Record<string, unknown>)
-          : undefined;
+      const completedPayload = activityPayloadFields(completed?.payload);
       expect(completedPayload?.taskType).toBe("local_bash");
       expect(completedPayload?.title).toBe("Sleep 120 seconds then echo, in background");
     }),
@@ -4459,14 +4418,8 @@ describe("ProviderRuntimeIngestion", () => {
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-named-task-completed",
       );
 
-      const progressPayload =
-        progress?.payload && typeof progress.payload === "object"
-          ? (progress.payload as Record<string, unknown>)
-          : undefined;
-      const completedPayload =
-        completed?.payload && typeof completed.payload === "object"
-          ? (completed.payload as Record<string, unknown>)
-          : undefined;
+      const progressPayload = activityPayloadFields(progress?.payload);
+      const completedPayload = activityPayloadFields(completed?.payload);
 
       expect(progress?.summary).toBe("Typecheck mobile app");
       expect(progressPayload?.title).toBe("Typecheck mobile app");
@@ -4518,10 +4471,7 @@ describe("ProviderRuntimeIngestion", () => {
       const completed = thread.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-fast-task-completed",
       );
-      const completedPayload =
-        completed?.payload && typeof completed.payload === "object"
-          ? (completed.payload as Record<string, unknown>)
-          : undefined;
+      const completedPayload = activityPayloadFields(completed?.payload);
 
       expect(completedPayload?.title).toBe("wait for codex review to finish");
     }),
@@ -4589,10 +4539,7 @@ describe("ProviderRuntimeIngestion", () => {
         const completed = thread.activities.find(
           (activity: ProviderRuntimeTestActivity) => activity.id === "evt-swept-task-completed",
         );
-        const completedPayload =
-          completed?.payload && typeof completed.payload === "object"
-            ? (completed.payload as Record<string, unknown>)
-            : undefined;
+        const completedPayload = activityPayloadFields(completed?.payload);
 
         expect(completedPayload?.title).toBe("Watch round-3 CI and bots");
       }),
@@ -4662,7 +4609,7 @@ describe("ProviderRuntimeIngestion", () => {
         );
         expect(progressRows).toHaveLength(1);
         expect(progressRows[0]?.id).toBe("task-progress:thread-1:chatty-task-1");
-        const progressPayload = progressRows[0]?.payload as Record<string, unknown>;
+        const progressPayload = activityPayloadFields(progressRows[0]?.payload);
         // The upsert replaced the row in place: the payload reflects the last event.
         expect(progressPayload?.summary).toBe("Checked 50 files so far.");
 
@@ -4841,7 +4788,7 @@ describe("ProviderRuntimeIngestion", () => {
         entry.activities.some(
           (activity: ProviderRuntimeTestActivity) =>
             activity.kind === "tool.progress" &&
-            (activity.payload as Record<string, unknown> | undefined)?.elapsedSeconds === 50,
+            activityPayloadFields(activity.payload)?.elapsedSeconds === 50,
         ),
       );
 
@@ -4965,10 +4912,7 @@ describe("ProviderRuntimeIngestion", () => {
       const resolved = thread.activities.find(
         (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-resolved",
       );
-      const resolvedPayload =
-        resolved?.payload && typeof resolved.payload === "object"
-          ? (resolved.payload as Record<string, unknown>)
-          : undefined;
+      const resolvedPayload = activityPayloadFields(resolved?.payload);
       expect(resolved?.kind).toBe("user-input.resolved");
       expect(resolvedPayload?.answers).toEqual({
         sandbox_mode: "workspace-write",
@@ -5140,7 +5084,7 @@ describe("ProviderRuntimeIngestion", () => {
           entry.activities.some(
             (activity: ProviderRuntimeTestActivity) =>
               activity.id === "subagent-text:thread-1:toolu-subagent-burst:0" &&
-              (activity.payload as Record<string, unknown>).text === "one two three",
+              activityPayloadFields(activity.payload)?.text === "one two three",
           ),
         );
         const rows = thread.activities.filter(
@@ -5245,7 +5189,7 @@ describe("ProviderRuntimeIngestion", () => {
             entry.activities.some(
               (activity: ProviderRuntimeTestActivity) =>
                 activity.id === "subagent-text:thread-1:toolu-subagent-exit:0" &&
-                (activity.payload as Record<string, unknown>).text === "first second",
+                activityPayloadFields(activity.payload)?.text === "first second",
             ),
         );
         expect(thread.session?.status).toBe("stopped");
@@ -5283,7 +5227,7 @@ describe("ProviderRuntimeIngestion", () => {
           entry.activities.some(
             (activity: ProviderRuntimeTestActivity) =>
               activity.id === "subagent-text:thread-1:toolu-subagent-task-flush:0" &&
-              (activity.payload as Record<string, unknown>).text === "first second",
+              activityPayloadFields(activity.payload)?.text === "first second",
           ),
         );
       }),
@@ -5303,11 +5247,14 @@ describe("ProviderRuntimeIngestion", () => {
             (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.text",
           ),
         );
-        const payload = thread.activities.find(
-          (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.text",
-        )?.payload as Record<string, unknown>;
-        expect(payload.truncated).toBe(true);
-        expect((payload.text as string).length).toBeLessThanOrEqual(4_000);
+        const payload = activityPayloadFields(
+          thread.activities.find(
+            (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.text",
+          )?.payload,
+        );
+        expect(payload?.truncated).toBe(true);
+        expect(payload?.text).toBeTypeOf("string");
+        expect(String(payload?.text).length).toBeLessThanOrEqual(4_000);
       }),
     );
   });
@@ -5365,10 +5312,10 @@ describe("ProviderRuntimeIngestion", () => {
           const thread = yield* waitForThread(
             harness.readModel,
             (entry) =>
-              (
+              activityPayloadFields(
                 entry.activities.find(
                   (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
-                )?.payload as Record<string, unknown> | undefined
+                )?.payload,
               )?.detail === "chunk-5",
           );
 
@@ -5377,9 +5324,7 @@ describe("ProviderRuntimeIngestion", () => {
           );
           expect(toolUpdates).toHaveLength(1);
           expect(toolUpdates[0]?.kind).toBe("tool.updated");
-          expect((toolUpdates[0]?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-            "chunk-5",
-          );
+          expect(activityPayloadFields(toolUpdates[0]?.payload)?.detail).toBe("chunk-5");
         }),
     );
 
@@ -5415,12 +5360,16 @@ describe("ProviderRuntimeIngestion", () => {
         });
 
         const thread = yield* waitForThread(harness.readModel, (entry) => {
-          const a = entry.activities.find(
-            (activity: ProviderRuntimeTestActivity) => activity.id === activityIdA,
-          )?.payload as Record<string, unknown> | undefined;
-          const b = entry.activities.find(
-            (activity: ProviderRuntimeTestActivity) => activity.id === activityIdB,
-          )?.payload as Record<string, unknown> | undefined;
+          const a = activityPayloadFields(
+            entry.activities.find(
+              (activity: ProviderRuntimeTestActivity) => activity.id === activityIdA,
+            )?.payload,
+          );
+          const b = activityPayloadFields(
+            entry.activities.find(
+              (activity: ProviderRuntimeTestActivity) => activity.id === activityIdB,
+            )?.payload,
+          );
           return a?.detail === "a-chunk-2" && b?.detail === "b-chunk-2";
         });
 
@@ -5430,12 +5379,8 @@ describe("ProviderRuntimeIngestion", () => {
         const activityB = thread.activities.find(
           (activity: ProviderRuntimeTestActivity) => activity.id === activityIdB,
         );
-        expect((activityA?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-          "a-chunk-2",
-        );
-        expect((activityB?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-          "b-chunk-2",
-        );
+        expect(activityPayloadFields(activityA?.payload)?.detail).toBe("a-chunk-2");
+        expect(activityPayloadFields(activityB?.payload)?.detail).toBe("b-chunk-2");
       }),
     );
 
@@ -5468,9 +5413,7 @@ describe("ProviderRuntimeIngestion", () => {
             (candidate: ProviderRuntimeTestActivity) => candidate.id === "evt-throttle-no-item-id",
           );
           expect(activity?.kind).toBe("tool.updated");
-          expect((activity?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-            "only-chunk",
-          );
+          expect(activityPayloadFields(activity?.payload)?.detail).toBe("only-chunk");
         }),
     );
 
@@ -5537,8 +5480,8 @@ describe("ProviderRuntimeIngestion", () => {
           expect(started?.kind).toBe("tool.started");
           expect(updated?.kind).toBe("tool.updated");
           expect(completed?.kind).toBe("tool.completed");
-          expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe("running");
-          expect((completed?.payload as Record<string, unknown> | undefined)?.detail).toBe("done");
+          expect(activityPayloadFields(updated?.payload)?.detail).toBe("running");
+          expect(activityPayloadFields(completed?.payload)?.detail).toBe("done");
         }),
     );
 
@@ -5589,9 +5532,7 @@ describe("ProviderRuntimeIngestion", () => {
           const updated = thread?.activities.find(
             (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
           );
-          expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-            "chunk-2-held",
-          );
+          expect(activityPayloadFields(updated?.payload)?.detail).toBe("chunk-2-held");
         }),
     );
 
@@ -5634,9 +5575,7 @@ describe("ProviderRuntimeIngestion", () => {
           const updated = thread?.activities.find(
             (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
           );
-          expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-            "chunk-2-held",
-          );
+          expect(activityPayloadFields(updated?.payload)?.detail).toBe("chunk-2-held");
         }),
     );
 
@@ -5676,9 +5615,7 @@ describe("ProviderRuntimeIngestion", () => {
           const updated = thread?.activities.find(
             (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
           );
-          expect((updated?.payload as Record<string, unknown> | undefined)?.detail).toBe(
-            "chunk-2-held",
-          );
+          expect(activityPayloadFields(updated?.payload)?.detail).toBe("chunk-2-held");
         }),
     );
 
@@ -5743,10 +5680,10 @@ describe("ProviderRuntimeIngestion", () => {
           const thread1 = yield* waitForThread(
             harness.readModel,
             (entry) =>
-              (
+              activityPayloadFields(
                 entry.activities.find(
                   (activity: ProviderRuntimeTestActivity) => activity.id === activityId,
-                )?.payload as Record<string, unknown> | undefined
+                )?.payload,
               )?.detail === "thread-1-detail",
             2000,
             asThreadId("thread-1"),
@@ -5754,10 +5691,10 @@ describe("ProviderRuntimeIngestion", () => {
           const thread2 = yield* waitForThread(
             harness.readModel,
             (entry) =>
-              (
+              activityPayloadFields(
                 entry.activities.find(
                   (activity: ProviderRuntimeTestActivity) => activity.id === otherActivityId,
-                )?.payload as Record<string, unknown> | undefined
+                )?.payload,
               )?.detail === "thread-2-detail",
             2000,
             otherThreadId,

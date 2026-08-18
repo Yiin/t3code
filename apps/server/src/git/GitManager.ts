@@ -407,11 +407,7 @@ function sanitizeCommitMessage(generated: {
   subject: string;
   body: string;
   branch?: string | undefined;
-}): {
-  subject: string;
-  body: string;
-  branch?: string | undefined;
-} {
+}) {
   const rawSubject = generated.subject.trim().split(/\r?\n/g)[0]?.trim() ?? "";
   const subject = rawSubject.replace(/[.]+$/g, "").trim();
   const safeSubject = subject.length > 0 ? subject.slice(0, 72).trimEnd() : "Update project files";
@@ -480,14 +476,7 @@ function appendUnique(values: string[], next: string | null | undefined): void {
   values.push(trimmed);
 }
 
-function toStatusPr(pr: PullRequestInfo): {
-  number: number;
-  title: string;
-  url: string;
-  baseRef: string;
-  headRef: string;
-  state: "open" | "closed" | "merged";
-} {
+function toStatusPr(pr: PullRequestInfo) {
   return {
     number: pr.number,
     title: pr.title,

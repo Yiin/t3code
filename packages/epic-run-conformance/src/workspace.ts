@@ -254,6 +254,18 @@ export const releasedClaimIds = (workspace: ConformanceWorkspace): ReadonlySet<s
 };
 
 /**
+ * How many workers the fixture agent has been started for, from its transcript.
+ *
+ * Both drivers cut a restart on this count, so it lives beside the transcript
+ * reader rather than once per driver test.
+ */
+export const agentStartCount = (workspace: ConformanceWorkspace): number =>
+  workspace.readTranscript().filter((item) => {
+    if (typeof item !== "object" || item === null) return false;
+    return (item as Readonly<Record<string, unknown>>)["tool"] === "agent";
+  }).length;
+
+/**
  * Bead comment counts after the run, by issue id.
  *
  * The no-commit evidence rule reads them, so every driver needs the same view.

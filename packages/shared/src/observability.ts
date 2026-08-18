@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import type * as Exit from "effect/Exit";
 import * as ExitRuntime from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Tracer from "effect/Tracer";
 import { OtlpResource, OtlpTracer } from "effect/unstable/observability";
 
@@ -144,10 +145,6 @@ interface SerializableSpan {
   >;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function markSeen(value: object, seen: WeakSet<object>): boolean {
   if (seen.has(value)) {
     return true;
@@ -156,7 +153,16 @@ function markSeen(value: object, seen: WeakSet<object>): boolean {
   return false;
 }
 
-function normalizeJsonValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+/** JSON-safe shape that {@link normalizeJsonValue} guarantees for every branch. */
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ReadonlyArray<JsonValue>
+  | { readonly [key: string]: JsonValue };
+
+function normalizeJsonValue(value: unknown, seen: WeakSet<object> = new WeakSet()): JsonValue {
   if (
     value === null ||
     value === undefined ||
@@ -202,7 +208,7 @@ function normalizeJsonValue(value: unknown, seen: WeakSet<object> = new WeakSet(
     }
     return Array.from(value.values(), (entry) => normalizeJsonValue(entry, seen));
   }
-  if (!isPlainObject(value)) {
+  if (!Predicate.isObject(value)) {
     return String(value);
   }
   if (markSeen(value, seen)) {

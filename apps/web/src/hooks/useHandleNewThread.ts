@@ -43,6 +43,41 @@ export function installInitialPromptIfEmpty(
   }
 }
 
+interface NewThreadOptions {
+  branch?: string | null;
+  worktreePath?: string | null;
+  envMode?: DraftThreadEnvMode;
+  startFromOrigin?: boolean;
+  replace?: boolean;
+  initialPrompt?: string;
+}
+
+/**
+ * The subset of `options` that overrides draft-thread context. Keys stay
+ * absent when the caller did not pass them, so an unset key never clears
+ * stored draft state.
+ */
+interface DraftThreadContextOverrides {
+  branch?: string | null;
+  worktreePath?: string | null;
+  envMode?: DraftThreadEnvMode;
+  startFromOrigin?: boolean;
+}
+
+function draftThreadContextOverrides(
+  options: NewThreadOptions | undefined,
+): DraftThreadContextOverrides {
+  const overrides: DraftThreadContextOverrides = {};
+  if (options === undefined) {
+    return overrides;
+  }
+  if (options.branch !== undefined) overrides.branch = options.branch;
+  if (options.worktreePath !== undefined) overrides.worktreePath = options.worktreePath;
+  if (options.envMode !== undefined) overrides.envMode = options.envMode;
+  if (options.startFromOrigin !== undefined) overrides.startFromOrigin = options.startFromOrigin;
+  return overrides;
+}
+
 export function useNewThreadHandler() {
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
@@ -54,17 +89,7 @@ export function useNewThreadHandler() {
   }, [router]);
 
   return useCallback(
-    (
-      projectRef: ScopedProjectRef,
-      options?: {
-        branch?: string | null;
-        worktreePath?: string | null;
-        envMode?: DraftThreadEnvMode;
-        startFromOrigin?: boolean;
-        replace?: boolean;
-        initialPrompt?: string;
-      },
-    ): Promise<void> => {
+    (projectRef: ScopedProjectRef, options?: NewThreadOptions): Promise<void> => {
       const {
         getDraftSessionByLogicalProjectKey,
         getDraftSession,
@@ -94,10 +119,8 @@ export function useNewThreadHandler() {
       const logicalProjectKey = project
         ? deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)
         : scopedProjectKey(projectRef);
-      const hasBranchOption = options?.branch !== undefined;
-      const hasWorktreePathOption = options?.worktreePath !== undefined;
-      const hasEnvModeOption = options?.envMode !== undefined;
-      const hasStartFromOriginOption = options?.startFromOrigin !== undefined;
+      const contextOverrides = draftThreadContextOverrides(options);
+      const hasContextOverrides = Object.keys(contextOverrides).length > 0;
       const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
       const storedDraftThreadRef = storedDraftThread
         ? scopeThreadRef(storedDraftThread.environmentId, storedDraftThread.threadId)
@@ -116,18 +139,8 @@ export function useNewThreadHandler() {
         : null;
       if (reusableStoredDraftThread) {
         return (async () => {
-          if (
-            hasBranchOption ||
-            hasWorktreePathOption ||
-            hasEnvModeOption ||
-            hasStartFromOriginOption
-          ) {
-            setDraftThreadContext(reusableStoredDraftThread.draftId, {
-              ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-              ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-              ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-              ...(hasStartFromOriginOption ? { startFromOrigin: options?.startFromOrigin } : {}),
-            });
+          if (hasContextOverrides) {
+            setDraftThreadContext(reusableStoredDraftThread.draftId, contextOverrides);
           }
           setLogicalProjectDraftThreadId(
             logicalProjectKey,
@@ -158,28 +171,15 @@ export function useNewThreadHandler() {
         latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
         latestActiveDraftThread.promotedTo == null
       ) {
-        if (
-          hasBranchOption ||
-          hasWorktreePathOption ||
-          hasEnvModeOption ||
-          hasStartFromOriginOption
-        ) {
-          setDraftThreadContext(currentRouteTarget.draftId, {
-            ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-            ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-            ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-            ...(hasStartFromOriginOption ? { startFromOrigin: options?.startFromOrigin } : {}),
-          });
+        if (hasContextOverrides) {
+          setDraftThreadContext(currentRouteTarget.draftId, contextOverrides);
         }
         setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, currentRouteTarget.draftId, {
           threadId: latestActiveDraftThread.threadId,
           createdAt: latestActiveDraftThread.createdAt,
           runtimeMode: latestActiveDraftThread.runtimeMode,
           interactionMode: latestActiveDraftThread.interactionMode,
-          ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-          ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-          ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-          ...(hasStartFromOriginOption ? { startFromOrigin: options?.startFromOrigin } : {}),
+          ...contextOverrides,
         });
         installInitialPrompt(currentRouteTarget.draftId);
         return Promise.resolve();

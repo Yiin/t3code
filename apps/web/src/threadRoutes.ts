@@ -18,19 +18,23 @@ type DraftThreadRouteState = {
   promotedTo?: ScopedThreadRef | null;
 };
 
-export function buildThreadRouteParams(ref: ScopedThreadRef): {
+export interface ThreadRouteParams {
   environmentId: EnvironmentId;
   threadId: ThreadId;
-} {
+}
+
+export interface DraftThreadRouteParams {
+  draftId: DraftId;
+}
+
+export function buildThreadRouteParams(ref: ScopedThreadRef): ThreadRouteParams {
   return {
     environmentId: ref.environmentId,
     threadId: ref.threadId,
   };
 }
 
-export function buildDraftThreadRouteParams(draftId: DraftId): {
-  draftId: DraftId;
-} {
+export function buildDraftThreadRouteParams(draftId: DraftId): DraftThreadRouteParams {
   return { draftId };
 }
 

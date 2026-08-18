@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  EnvironmentId,
-  ProjectId,
-  type BeadsStatusResult,
-  type EpicRun,
-  type EpicRunStatus,
-} from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type BeadsStatusResult, type EpicRun } from "@t3tools/contracts";
 
 import type { EpicProjectSource } from "./epics.logic";
 import {
@@ -57,7 +51,7 @@ function run(overrides: RunOverrides = {}): EpicRun {
     epicId: "t3code-j8s",
     projectId: source.projectId,
     cwd: source.workspaceRoot,
-    status: "done" as EpicRunStatus,
+    status: "done",
     updatedAt: "2026-08-03T00:00:00.000Z",
     threadRefs: [],
     ...overrides,

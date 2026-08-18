@@ -26,12 +26,16 @@ export function refreshArchivedThreadsForEnvironment(environmentId: EnvironmentI
   appAtomRegistry.refresh(archivedSnapshotAtom(environmentId));
 }
 
-export function useArchivedThreadSnapshots(environmentIds: ReadonlyArray<EnvironmentId>): {
+export interface ArchivedThreadSnapshotsResult {
   readonly snapshots: ReadonlyArray<ArchivedSnapshotEntry>;
   readonly error: string | null;
   readonly isLoading: boolean;
   readonly refresh: () => void;
-} {
+}
+
+export function useArchivedThreadSnapshots(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+): ArchivedThreadSnapshotsResult {
   const environmentKey = useMemo(
     () => makeArchivedThreadsEnvironmentKey(environmentIds),
     [environmentIds],

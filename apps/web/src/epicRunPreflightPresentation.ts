@@ -72,10 +72,12 @@ export function epicRunPreflightWarningText(warning: EpicRunPreflightWarning): s
   }
 }
 
-export function presentEpicRunPreflight(result: EpicRunPreflightResult): {
+export interface PresentedEpicRunPreflight {
   readonly blockers: readonly string[];
   readonly warnings: readonly string[];
-} {
+}
+
+export function presentEpicRunPreflight(result: EpicRunPreflightResult): PresentedEpicRunPreflight {
   return {
     blockers: result.blockers.map(epicRunPreflightBlockerText),
     warnings: result.warnings.map(epicRunPreflightWarningText),

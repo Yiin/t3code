@@ -16,10 +16,15 @@ export function needsPreviewAutomationSessionSync(
   );
 }
 
+type PreviewAutomationTarget = {
+  readonly tabId: string | null;
+  readonly snapshot: PreviewSessionSnapshot | null;
+};
+
 export function resolvePreviewAutomationTarget(
   state: PreviewAutomationSessionIndex,
   requestedTabId: string | null,
-): { readonly tabId: string | null; readonly snapshot: PreviewSessionSnapshot | null } {
+): PreviewAutomationTarget {
   const snapshot = requestedTabId ? (state.sessions[requestedTabId] ?? null) : state.snapshot;
   return { tabId: snapshot?.tabId ?? null, snapshot };
 }

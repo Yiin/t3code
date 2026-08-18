@@ -1,3 +1,4 @@
+import { makeFetchMock } from "./testUtils/fetchMock.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
@@ -208,12 +209,10 @@ it.effect("discovers a live server even when the probe outlasts the old 1s timeo
     // if the probe reverts to the full `snapshot` call, because the mocked body
     // decodes under both OrchestrationShellSnapshot and OrchestrationReadModel.
     const requestedUrls: string[] = [];
-    const fetchMock = ((input: unknown) => {
-      requestedUrls.push(
-        typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? input),
-      );
+    const fetchMock = makeFetchMock((input) => {
+      requestedUrls.push(input instanceof Request ? input.url : String(input));
       return responsePromise;
-    }) as unknown as typeof fetch;
+    });
     const layer = Layer.merge(
       FetchHttpClient.layer,
       Layer.succeed(FetchHttpClient.Fetch, fetchMock),
@@ -244,7 +243,7 @@ it.effect("keeps the persisted runtime state when the probe times out", () =>
   Effect.gen(function* () {
     const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
     // Never resolves — the only way discovery can fail here is the timeout.
-    const fetchMock = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+    const fetchMock = makeFetchMock(() => new Promise<Response>(() => {}));
     const layer = Layer.merge(
       FetchHttpClient.layer,
       Layer.succeed(FetchHttpClient.Fetch, fetchMock),
@@ -275,8 +274,7 @@ it.effect("keeps the persisted runtime state when the probe times out", () =>
 it.effect("clears the persisted runtime state on a genuine connection failure", () =>
   Effect.gen(function* () {
     const { statePath, config } = yield* setUpRuntimeState("http://127.0.0.1:1");
-    const fetchMock = (() =>
-      Promise.reject(new TypeError("fetch failed"))) as unknown as typeof fetch;
+    const fetchMock = makeFetchMock(() => Promise.reject(new TypeError("fetch failed")));
     const layer = Layer.merge(
       FetchHttpClient.layer,
       Layer.succeed(FetchHttpClient.Fetch, fetchMock),
@@ -336,8 +334,7 @@ it.effect("shares the discovery session with the command that follows it", () =>
   Effect.gen(function* () {
     const { config } = yield* setUpRuntimeState("http://127.0.0.1:1");
     const { auth, issued } = makeFakeAuth();
-    const fetchMock = (() =>
-      Promise.resolve(emptyShellSnapshotResponse())) as unknown as typeof fetch;
+    const fetchMock = makeFetchMock(() => Promise.resolve(emptyShellSnapshotResponse()));
     const layer = Layer.merge(
       FetchHttpClient.layer,
       Layer.succeed(FetchHttpClient.Fetch, fetchMock),

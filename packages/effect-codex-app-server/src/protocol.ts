@@ -93,10 +93,6 @@ function isIncomingNotification(value: unknown): value is CodexAppServerIncoming
   return isObject(value) && typeof value.method === "string" && !("id" in value);
 }
 
-function isIncomingResponse(value: unknown): value is typeof JsonRpcResponseEnvelope.Type {
-  return isJsonRpcResponseEnvelope(value);
-}
-
 const encodeWireMessage = (
   message: Record<string, unknown>,
 ): Effect.Effect<string, CodexError.CodexAppServerProtocolParseError> =>
@@ -310,7 +306,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       if (isIncomingNotification(message)) {
         return handleNotification(message);
       }
-      if (isIncomingResponse(message)) {
+      if (isJsonRpcResponseEnvelope(message)) {
         return handleResponse(message);
       }
       return Effect.fail(

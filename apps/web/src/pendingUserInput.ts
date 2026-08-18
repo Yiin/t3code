@@ -71,10 +71,11 @@ export function setPendingUserInputCustomAnswer(
       ? undefined
       : normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
 
-  return {
-    customAnswer,
-    ...(selectedOptionLabels && selectedOptionLabels.length > 0 ? { selectedOptionLabels } : {}),
-  };
+  const next: PendingUserInputDraftAnswer = { customAnswer };
+  if (selectedOptionLabels && selectedOptionLabels.length > 0) {
+    next.selectedOptionLabels = selectedOptionLabels;
+  }
+  return next;
 }
 
 export function togglePendingUserInputOptionSelection(
@@ -88,12 +89,11 @@ export function togglePendingUserInputOptionSelection(
       ? selectedOptionLabels.filter((label) => label !== optionLabel)
       : [...selectedOptionLabels, optionLabel];
 
-    return {
-      customAnswer: "",
-      ...(nextSelectedOptionLabels.length > 0
-        ? { selectedOptionLabels: nextSelectedOptionLabels }
-        : {}),
-    };
+    const next: PendingUserInputDraftAnswer = { customAnswer: "" };
+    if (nextSelectedOptionLabels.length > 0) {
+      next.selectedOptionLabels = nextSelectedOptionLabels;
+    }
+    return next;
   }
 
   return {

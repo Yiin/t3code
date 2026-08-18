@@ -424,6 +424,12 @@ function readPersistedCwd(
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+type PersistedSessionOverrides = {
+  resumeCursor?: ProviderSession["resumeCursor"];
+  runtimeMode?: ProviderSession["runtimeMode"];
+  providerInstanceId?: ProviderSession["providerInstanceId"];
+};
+
 const dieOnMissingBindingInstanceId = (
   operation: string,
   payload: {
@@ -1613,9 +1619,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           provider: sessionWithInstance.provider,
           runtimeMode: input.runtimeMode,
           hasResumeCursor: sessionWithInstance.resumeCursor !== undefined,
-          hasCwd: typeof effectiveCwd === "string" && effectiveCwd.trim().length > 0,
+          hasCwd: effectiveCwd !== undefined && effectiveCwd.trim().length > 0,
           hasModel:
-            typeof input.modelSelection?.model === "string" &&
+            input.modelSelection?.model !== undefined &&
             input.modelSelection.model.trim().length > 0,
         });
 
@@ -1699,7 +1705,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         model: input.modelSelection?.model,
         interactionMode: input.interactionMode,
         attachmentCount: input.attachments.length,
-        hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+        hasInput: input.input !== undefined && input.input.trim().length > 0,
       });
       return turn;
     }).pipe(
@@ -1930,11 +1936,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           continue;
         }
 
-        const overrides: {
-          resumeCursor?: ProviderSession["resumeCursor"];
-          runtimeMode?: ProviderSession["runtimeMode"];
-          providerInstanceId?: ProviderSession["providerInstanceId"];
-        } = {};
+        const overrides: PersistedSessionOverrides = {};
         overrides.providerInstanceId = dieOnMissingBindingInstanceId(
           "ProviderService.listSessions",
           binding,

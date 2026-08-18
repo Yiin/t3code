@@ -548,22 +548,23 @@ function claudeAuthMetadata(input: {
   return undefined;
 }
 
+const API_PROVIDER_LABELS = new Map<string, string>([
+  ["anthropicaws", "Anthropic on AWS"],
+  ["bedrock", "Amazon Bedrock"],
+  ["firstparty", "Anthropic"],
+  ["foundry", "Azure AI Foundry"],
+  ["gateway", "Anthropic Gateway"],
+  ["mantle", "Mantle"],
+  ["vertex", "Google Vertex AI"],
+]);
+
 function apiProviderAuthMetadata(
   apiProvider: string | undefined,
 ): { readonly type: string; readonly label: string } | undefined {
   const type = apiProvider ? nonEmptyProbeString(apiProvider) : undefined;
   if (!type) return undefined;
   const normalized = type.toLowerCase().replace(/[\s_-]+/g, "");
-  const labels: Readonly<Record<string, string>> = {
-    anthropicaws: "Anthropic on AWS",
-    bedrock: "Amazon Bedrock",
-    firstparty: "Anthropic",
-    foundry: "Azure AI Foundry",
-    gateway: "Anthropic Gateway",
-    mantle: "Mantle",
-    vertex: "Google Vertex AI",
-  };
-  return { type, label: labels[normalized] ?? toTitleCaseWords(type) };
+  return { type, label: API_PROVIDER_LABELS.get(normalized) ?? toTitleCaseWords(type) };
 }
 
 function claudeAccountAuthMetadata(input: {
@@ -612,11 +613,13 @@ const ClaudeAuthStatusJson = Schema.fromJsonString(
 );
 const decodeClaudeAuthStatusJson = Schema.decodeUnknownOption(ClaudeAuthStatusJson);
 
-function parseClaudeAuthStatusFromOutput(result: CommandResult): {
+type ClaudeAuthStatusProbe = {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProviderAuth;
   readonly message?: string;
-} {
+};
+
+function parseClaudeAuthStatusFromOutput(result: CommandResult): ClaudeAuthStatusProbe {
   const parsedOption = decodeClaudeAuthStatusJson(result.stdout.trim());
   if (Option.isNone(parsedOption)) {
     return {

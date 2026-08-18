@@ -70,15 +70,17 @@ export function enumerateCommandPaletteItems(
 
 export type CommandPaletteMode = "root" | "root-browse" | "submenu" | "submenu-browse";
 
+type BrowseEntrySelection = {
+  filteredEntries: FilesystemBrowseEntry[];
+  highlightedEntry: FilesystemBrowseEntry | null;
+  exactEntry: FilesystemBrowseEntry | null;
+};
+
 export function filterBrowseEntries(input: {
   browseEntries: ReadonlyArray<FilesystemBrowseEntry>;
   browseFilterQuery: string;
   highlightedItemValue: string | null;
-}): {
-  filteredEntries: FilesystemBrowseEntry[];
-  highlightedEntry: FilesystemBrowseEntry | null;
-  exactEntry: FilesystemBrowseEntry | null;
-} {
+}): BrowseEntrySelection {
   const lowerFilter = input.browseFilterQuery.toLowerCase();
   const showHidden = input.browseFilterQuery.startsWith(".");
 

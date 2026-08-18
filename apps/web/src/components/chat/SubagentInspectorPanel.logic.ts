@@ -109,10 +109,15 @@ export function summarizeSubagentUsage(usage: unknown): SubagentUsageSummary {
  * yet resolves to `null`, and a null driver skips the capability gate rather
  * than refusing a file on a guess.
  */
+type ChildThreadAttachmentProvider = {
+  readonly driver: ProviderDriverKind | null;
+  readonly label: string;
+};
+
 export function resolveChildThreadAttachmentProvider(
   providers: ReadonlyArray<ServerProvider>,
   instanceId: ProviderInstanceId | undefined,
-): { readonly driver: ProviderDriverKind | null; readonly label: string } {
+): ChildThreadAttachmentProvider {
   const match =
     instanceId === undefined
       ? undefined

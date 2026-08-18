@@ -142,8 +142,7 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
     });
 }
 
-const noClaudeCapabilities = () =>
-  Effect.sync(() => undefined as TestClaudeCapabilities | undefined);
+const noClaudeCapabilities = () => Effect.sync((): TestClaudeCapabilities | undefined => undefined);
 
 function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   return ChildProcessSpawner.makeHandle({

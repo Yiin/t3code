@@ -17,11 +17,7 @@ const TRANSPORT_ERROR_PATTERNS = [
  * business-logic error.
  */
 export function isTransportConnectionErrorMessage(message: string | null | undefined): boolean {
-  if (typeof message !== "string") {
-    return false;
-  }
-
-  const normalizedMessage = message.trim();
+  const normalizedMessage = message?.trim() ?? "";
   if (normalizedMessage.length === 0) {
     return false;
   }

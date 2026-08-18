@@ -122,28 +122,54 @@ function withHarness(
     const effects: string[] = [];
     const events = yield* Queue.unbounded<OrchestrationEvent>();
 
-    const engine = {
+    const engine: OrchestrationEngineShape = {
       readEvents: () => Stream.empty,
       dispatch: () => Effect.die(new Error("dispatch not expected in this test")),
       streamDomainEvents: Stream.fromQueue(events),
       latestSequence: Effect.succeed(0),
-    } as unknown as OrchestrationEngineShape;
+    };
 
-    const providerService = {
+    const unsupportedProviderCall = (call: string) => () =>
+      Effect.die(new Error(`ProviderService.${call} is not stubbed in this test`));
+
+    const providerService: ProviderServiceShape = {
       stopSession: (input: ProviderStopSessionInput) =>
         Effect.suspend(() => {
           effects.push(`provider.stopSession:${input.threadId}`);
           return options.stopSession?.(input) ?? Effect.void;
         }),
-    } as unknown as ProviderServiceShape;
+      startSession: unsupportedProviderCall("startSession"),
+      sendTurn: unsupportedProviderCall("sendTurn"),
+      interruptTurn: unsupportedProviderCall("interruptTurn"),
+      respondToRequest: unsupportedProviderCall("respondToRequest"),
+      respondToUserInput: unsupportedProviderCall("respondToUserInput"),
+      listSessions: unsupportedProviderCall("listSessions"),
+      hasLiveSession: unsupportedProviderCall("hasLiveSession"),
+      describeSessionResume: unsupportedProviderCall("describeSessionResume"),
+      getCapabilities: unsupportedProviderCall("getCapabilities"),
+      getInstanceInfo: unsupportedProviderCall("getInstanceInfo"),
+      rollbackConversation: unsupportedProviderCall("rollbackConversation"),
+      streamEvents: Stream.die(new Error("ProviderService.streamEvents is not stubbed")),
+    };
 
-    const terminalManager = {
+    const unsupportedTerminalCall = (call: string) => () =>
+      Effect.die(new Error(`TerminalManager.${call} is not stubbed in this test`));
+
+    const terminalManager: TerminalManager.TerminalManager["Service"] = {
       close: (input: TerminalCloseInput) =>
         Effect.suspend(() => {
           effects.push(`terminal.close:${input.threadId}:${input.deleteHistory === true}`);
           return options.closeTerminals?.(input) ?? Effect.void;
         }),
-    } as unknown as TerminalManager.TerminalManager["Service"];
+      open: unsupportedTerminalCall("open"),
+      attachStream: unsupportedTerminalCall("attachStream"),
+      write: unsupportedTerminalCall("write"),
+      resize: unsupportedTerminalCall("resize"),
+      clear: unsupportedTerminalCall("clear"),
+      restart: unsupportedTerminalCall("restart"),
+      subscribe: unsupportedTerminalCall("subscribe"),
+      subscribeMetadata: unsupportedTerminalCall("subscribeMetadata"),
+    };
 
     yield* Effect.gen(function* () {
       const reactor = yield* ThreadDeletionReactor;

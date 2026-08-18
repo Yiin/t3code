@@ -311,17 +311,15 @@ function applyRequestedSessionConfiguration<E>(input: {
 function selectAutoApprovedPermissionOption(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): string | undefined {
-  const allowAlwaysOption = request.options.find((option) => option.kind === "allow_always");
-  if (typeof allowAlwaysOption?.optionId === "string" && allowAlwaysOption.optionId.trim()) {
-    return allowAlwaysOption.optionId.trim();
+  const allowAlways = request.options
+    .find((option) => option.kind === "allow_always")
+    ?.optionId.trim();
+  if (allowAlways) {
+    return allowAlways;
   }
 
-  const allowOnceOption = request.options.find((option) => option.kind === "allow_once");
-  if (typeof allowOnceOption?.optionId === "string" && allowOnceOption.optionId.trim()) {
-    return allowOnceOption.optionId.trim();
-  }
-
-  return undefined;
+  const allowOnce = request.options.find((option) => option.kind === "allow_once")?.optionId.trim();
+  return allowOnce ? allowOnce : undefined;
 }
 
 export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapterLiveOptions) {

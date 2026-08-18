@@ -37,10 +37,10 @@ import { cn } from "../lib/utils";
 /** Stable empty array so a still-loading environment does not rebuild every row. */
 const NO_RUNS: ReadonlyArray<EpicRun> = [];
 
-const GROUPING_MODE_ANNOUNCEMENT: Record<EpicsGroupingMode, string> = {
+const GROUPING_MODE_ANNOUNCEMENT = {
   recency: "Epics sorted by recent activity",
   project: "Epics grouped by project",
-};
+} satisfies Record<EpicsGroupingMode, string>;
 
 function ProjectEpicQuery({
   source,

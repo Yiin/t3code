@@ -5,7 +5,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
-import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -14,10 +13,7 @@ class OxlintFixtureFailure extends Data.TaggedError("OxlintFixtureFailure")<{
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
-}> {
-  static readonly is = (u: unknown): u is OxlintFixtureFailure =>
-    Predicate.isTagged(u, "OxlintFixtureFailure");
-}
+}> {}
 
 class OxlintFixtureExpectedFailure extends Data.TaggedError("OxlintFixtureExpectedFailure")<{
   readonly ruleName: string;
@@ -131,7 +127,7 @@ export const createOxlintRuleHarness = (
     run(source).pipe(
       Effect.matchEffect({
         onFailure: (error) =>
-          OxlintFixtureFailure.is(error)
+          error._tag === "OxlintFixtureFailure"
             ? Effect.succeed(
                 `oxlint fixture failed with exit code ${error.exitCode}\n${error.stdout}\n${error.stderr}`,
               )

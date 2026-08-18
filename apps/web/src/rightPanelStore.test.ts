@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -12,8 +12,8 @@ import {
   useRightPanelStore,
 } from "./rightPanelStore";
 
-const refA = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-A"));
-const refB = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-B"));
+const refA = scopeThreadRef(EnvironmentId.make("env-1"), ThreadId.make("thread-A"));
+const refB = scopeThreadRef(EnvironmentId.make("env-1"), ThreadId.make("thread-B"));
 
 beforeEach(() => {
   useRightPanelStore.setState({ byThreadKey: {} });

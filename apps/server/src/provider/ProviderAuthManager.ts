@@ -24,7 +24,6 @@ import {
   type ProviderAuthLogoutResult,
   type ProviderAuthRunState,
   ProviderDriverKind,
-  type ProviderInstanceEnvironment,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -307,9 +306,7 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
       return yield* authError("The provider account does not exist.");
     }
     const driver = yield* assertSupportedDriver(envelope.driver);
-    const instanceEnvironment = mergeProviderInstanceEnvironment(
-      envelope.environment as ProviderInstanceEnvironment | undefined,
-    );
+    const instanceEnvironment = mergeProviderInstanceEnvironment(envelope.environment);
 
     switch (driver) {
       case "claudeAgent": {
@@ -712,10 +709,7 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
       .realPath(lexicalTarget)
       .pipe(Effect.mapError(() => authError("The account home path is missing or unsafe.")));
     const canonicalSharedHomes = yield* Effect.forEach(sharedHomes, (sharedHome) =>
-      fileSystem.realPath(sharedHome).pipe(
-        Effect.map((value) => value as string | null),
-        Effect.orElseSucceed(() => null),
-      ),
+      fileSystem.realPath(sharedHome).pipe(Effect.orElseSucceed((): string | null => null)),
     );
     if (canonicalSharedHomes.includes(canonicalTarget)) {
       return yield* authError("The shared provider home cannot be deleted.");

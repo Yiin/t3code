@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as ProcessRunner from "./processRunner.ts";
@@ -24,7 +25,7 @@ const identity = {
 const output = (stdout: string, code = 0, stderr = ""): ProcessRunner.ProcessRunOutput => ({
   stdout,
   stderr,
-  code: code as never,
+  code: ChildProcessSpawner.ExitCode(code),
   timedOut: false,
   stdoutTruncated: false,
   stderrTruncated: false,

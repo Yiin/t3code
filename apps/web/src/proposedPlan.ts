@@ -74,10 +74,15 @@ export function buildPlanImplementationPrompt(planMarkdown: string): string {
   return `PLEASE IMPLEMENT THIS PLAN:\n${planMarkdown.trim()}`;
 }
 
-export function resolvePlanFollowUpSubmission(input: { draftText: string; planMarkdown: string }): {
+export interface PlanFollowUpSubmission {
   text: string;
   interactionMode: "default" | "plan";
-} {
+}
+
+export function resolvePlanFollowUpSubmission(input: {
+  draftText: string;
+  planMarkdown: string;
+}): PlanFollowUpSubmission {
   const trimmedDraftText = input.draftText.trim();
   if (trimmedDraftText.length > 0) {
     return {

@@ -125,19 +125,16 @@ const isIterationAllocationConflict = (cause: unknown): boolean => {
   let current = cause;
   for (let depth = 0; depth < 6; depth += 1) {
     if (typeof current !== "object" || current === null) return false;
-    const value = current as {
-      readonly message?: unknown;
-      cause?: unknown;
-    };
     if (
-      typeof value.message === "string" &&
-      value.message.includes(
+      "message" in current &&
+      typeof current.message === "string" &&
+      current.message.includes(
         "UNIQUE constraint failed: epic_run_iterations.run_id, epic_run_iterations.iteration_index",
       )
     ) {
       return true;
     }
-    current = value.cause;
+    current = "cause" in current ? current.cause : undefined;
   }
   return false;
 };

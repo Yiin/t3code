@@ -219,12 +219,14 @@ function getTerminalSelectionRect(mountElement: HTMLElement): DOMRect | null {
   return boundingRect.width > 0 || boundingRect.height > 0 ? boundingRect : null;
 }
 
+type TerminalSelectionActionPosition = { x: number; y: number };
+
 export function resolveTerminalSelectionActionPosition(options: {
   bounds: { left: number; top: number; width: number; height: number };
   selectionRect: { right: number; bottom: number } | null;
   pointer: { x: number; y: number } | null;
   viewport?: { width: number; height: number } | null;
-}): { x: number; y: number } {
+}): TerminalSelectionActionPosition {
   const { bounds, selectionRect, pointer, viewport } = options;
   const viewportWidth =
     viewport?.width ??
