@@ -11,45 +11,18 @@
  *
  * @module PoolWorkspace
  */
-import {
-  CommandId,
-  DEFAULT_PROVIDER_INTERACTION_MODE,
-  EpicRunId,
-  MessageId,
-  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
-  PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
-  ProviderDriverKind,
-  ProviderSessionResumeSettledActivityPayload,
-  ThreadId,
-  decodeProviderTurnSteerAttributedActivityPayload,
-  type EpicSubagentMap,
-  type ProviderSessionResumeOutcome,
-  type TurnId,
-} from "@t3tools/contracts";
 import { EpicRunnerDispatchError, EpicRunnerStoreError } from "@t3tools/epic-core/Errors";
 import type * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import { resolveRunBaseBranch } from "@t3tools/epic-core/runBaseBranch";
 import { RERERE_CONFIG_ARGS } from "@t3tools/epic-core/rerere";
-import type { PoolTimings } from "@t3tools/epic-core/ParallelEpicLoop";
-import type { PoolDispatchShape } from "@t3tools/epic-core/ports/PoolDispatch";
-import {
-  type AgentDispatchCapabilities,
-  type AgentSelection,
-  DispatchError,
-  type FinalMessageRead,
-  type IterationHandle,
-  type IterationSettle,
-} from "@t3tools/epic-core/ports/AgentDispatch";
 import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 
 import {
-  decideGraceStep,
   integrationBranch as integrationBranchName,
   parseIntegrationFixTitle,
   parseMergeFixTitle,
   runBaseBranch as runBaseBranchName,
 } from "@t3tools/epic-core/policy";
-import { hasRalphBlocked, hasRalphDone, parseRalphReport } from "@t3tools/epic-core/ralphProtocol";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
 import {
   makeSiblingResolver,
@@ -58,7 +31,6 @@ import {
   siblingRuleSequential,
   type SiblingRef,
 } from "@t3tools/epic-core/siblings";
-import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -66,60 +38,16 @@ import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 
-import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
-import type { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
-import type { EpicCommitterRegistry } from "../../provider/epicCommitter.ts";
-import type { EpicWorkerScopeRegistry } from "../../provider/workerScope.ts";
-import { countFreshRunningSubagents } from "../../orchestration/subagentLiveness.ts";
-import {
-  makeThreadSettleWatch,
-  resolveFinalAssistantMessage,
-  resolveTurnAssistantMessage,
-  threadTurnState,
-  type SettledTurn,
-} from "../../orchestration/ThreadSettleWatch.ts";
 import type { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { EpicRunStore, type EpicRun } from "../../persistence/Services/EpicRuns.ts";
 import type { ServerConfig } from "../../config.ts";
-import type { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
 import type { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
 import type { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
-import { nowIso, storeError } from "./poolPortErrors.ts";
+import { storeError } from "./poolPortErrors.ts";
 import { setupWorktreeAssets, writeBeadsRedirect } from "./poolWorktreeAssets.ts";
 
 const GIT_HEAD_TIMEOUT_MS = 15_000;
-
-/**
- * How long to wait for a resume request to settle before calling it an infra
- * fault. The handler answers in one provider session start, so anything past
- * this is the reactor not running, not a slow provider.
- */
-const RESUME_SETTLE_TIMEOUT_MS = 120_000;
-
-/**
- * How often a forced stop re-reads the turn it is waiting on inside the run's
- * stop grace. Short enough that a turn closing early costs almost nothing, and
- * the whole wait is bounded by the grace regardless.
- */
-const FORCED_STOP_POLL_INTERVAL_MS = 250;
-
-const decodeResumeSettledActivity = Schema.decodeUnknownOption(
-  ProviderSessionResumeSettledActivityPayload,
-);
-/**
- * How many projection reads a nudge waits for its steer attribution.
- *
- * The activity is written when the provider answers the send, so this is
- * provider latency, not projection lag. Ten reads at the run's quiet period is
- * ten seconds by default — long enough that a slow steer still counts as
- * absorbed, short enough that a driver which never steers is written off
- * inside one radar tick.
- */
-const NUDGE_ABSORPTION_READS = 10;
-
-/** The one driver whose adapter passes injected subagent definitions through. */
-const CLAUDE_SUBAGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 
 const isEpicRunnerDispatchError = Schema.is(EpicRunnerDispatchError);
 

@@ -26,10 +26,8 @@ import {
   type ProviderSessionResumeOutcome,
   type TurnId,
 } from "@t3tools/contracts";
-import { EpicRunnerDispatchError, EpicRunnerStoreError } from "@t3tools/epic-core/Errors";
+import { EpicRunnerDispatchError } from "@t3tools/epic-core/Errors";
 import type * as ProcessRunner from "@t3tools/epic-core/processRunner";
-import { resolveRunBaseBranch } from "@t3tools/epic-core/runBaseBranch";
-import { RERERE_CONFIG_ARGS } from "@t3tools/epic-core/rerere";
 import type { PoolTimings } from "@t3tools/epic-core/ParallelEpicLoop";
 import type { PoolDispatchShape } from "@t3tools/epic-core/ports/PoolDispatch";
 import {
@@ -40,30 +38,14 @@ import {
   type IterationHandle,
   type IterationSettle,
 } from "@t3tools/epic-core/ports/AgentDispatch";
-import type { WorkspaceShape } from "@t3tools/epic-core/ports/Workspace";
 
-import {
-  decideGraceStep,
-  integrationBranch as integrationBranchName,
-  parseIntegrationFixTitle,
-  parseMergeFixTitle,
-  runBaseBranch as runBaseBranchName,
-} from "@t3tools/epic-core/policy";
+import { decideGraceStep } from "@t3tools/epic-core/policy";
 import { hasRalphBlocked, hasRalphDone, parseRalphReport } from "@t3tools/epic-core/ralphProtocol";
 import { makeProcessPoolVcs } from "@t3tools/epic-core/adapters/ProcessPoolVcs";
-import {
-  makeSiblingResolver,
-  mirrorPath,
-  siblingRuleLayout,
-  siblingRuleSequential,
-  type SiblingRef,
-} from "@t3tools/epic-core/siblings";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
-import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
@@ -79,16 +61,8 @@ import {
   type SettledTurn,
 } from "../../orchestration/ThreadSettleWatch.ts";
 import type { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { EpicRunStore, type EpicRun } from "../../persistence/Services/EpicRuns.ts";
-import type { ServerConfig } from "../../config.ts";
 import type { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptRunner.ts";
-import type { WorktreeProvisioner } from "../../vcs/WorktreeProvisioner.ts";
-import type { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
-import { makeEpicRunMergeGit } from "../EpicRunMergeGit.ts";
-import { nowIso, storeError } from "./poolPortErrors.ts";
-import { setupWorktreeAssets, writeBeadsRedirect } from "./poolWorktreeAssets.ts";
-
-const GIT_HEAD_TIMEOUT_MS = 15_000;
+import { nowIso } from "./poolPortErrors.ts";
 
 /**
  * How long to wait for a resume request to settle before calling it an infra
@@ -120,8 +94,6 @@ const NUDGE_ABSORPTION_READS = 10;
 
 /** The one driver whose adapter passes injected subagent definitions through. */
 const CLAUDE_SUBAGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
-
-const isEpicRunnerDispatchError = Schema.is(EpicRunnerDispatchError);
 
 /** Preserve the pre-extraction dispatch error's persisted message shape. */
 const dispatchErrorFromRunner = (error: EpicRunnerDispatchError) =>
