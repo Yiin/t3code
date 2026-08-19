@@ -116,7 +116,7 @@ const currentState = (
 const HARNESS_HOME_VARIABLES = [
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
-  "KIMI_CODE_HOME",
+  "KIMI_SHARE_DIR",
   "XDG_DATA_HOME",
 ] as const;
 
@@ -245,7 +245,7 @@ describe("ProviderAuthManager", () => {
               HOME: input.env.HOME,
               CLAUDE_CONFIG_DIR: input.env.CLAUDE_CONFIG_DIR,
               CODEX_HOME: input.env.CODEX_HOME,
-              KIMI_CODE_HOME: input.env.KIMI_CODE_HOME,
+              KIMI_SHARE_DIR: input.env.KIMI_SHARE_DIR,
               XDG_DATA_HOME: input.env.XDG_DATA_HOME,
             })),
             [
@@ -253,28 +253,28 @@ describe("ProviderAuthManager", () => {
                 HOME: "/unchanged",
                 CLAUDE_CONFIG_DIR: harness.homes.claudeAgent,
                 CODEX_HOME: undefined,
-                KIMI_CODE_HOME: undefined,
+                KIMI_SHARE_DIR: undefined,
                 XDG_DATA_HOME: undefined,
               },
               {
                 HOME: "/unchanged",
                 CLAUDE_CONFIG_DIR: undefined,
                 CODEX_HOME: harness.homes.codex,
-                KIMI_CODE_HOME: undefined,
+                KIMI_SHARE_DIR: undefined,
                 XDG_DATA_HOME: undefined,
               },
               {
                 HOME: "/unchanged",
                 CLAUDE_CONFIG_DIR: undefined,
                 CODEX_HOME: undefined,
-                KIMI_CODE_HOME: harness.homes.kimi,
+                KIMI_SHARE_DIR: harness.homes.kimi,
                 XDG_DATA_HOME: undefined,
               },
               {
                 HOME: "/unchanged",
                 CLAUDE_CONFIG_DIR: undefined,
                 CODEX_HOME: undefined,
-                KIMI_CODE_HOME: undefined,
+                KIMI_SHARE_DIR: undefined,
                 XDG_DATA_HOME: harness.homes.opencode,
               },
             ],

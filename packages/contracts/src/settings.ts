@@ -351,9 +351,9 @@ export const KimiSettings = makeProviderSettingsSchema(
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "KIMI_CODE_HOME path",
+        title: "KIMI_SHARE_DIR path",
         description: "Custom Kimi data directory for credentials and account state.",
-        providerSettingsForm: { placeholder: "~/.kimi-code", clearWhenEmpty: "omit" },
+        providerSettingsForm: { placeholder: "~/.kimi", clearWhenEmpty: "omit" },
       }),
     ),
     shadowHomePath: TrimmedString.pipe(

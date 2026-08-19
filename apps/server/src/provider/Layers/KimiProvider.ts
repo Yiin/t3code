@@ -89,8 +89,8 @@ export function kimiAuthFromCredentialsJson(raw: string, label = "Kimi OAuth"): 
 }
 
 /**
- * Read the Kimi CLI OAuth credentials from `$KIMI_CODE_HOME/credentials/`
- * (default `~/.kimi-code/credentials/`). A missing or unreadable file means
+ * Read the Kimi CLI OAuth credentials from `$KIMI_SHARE_DIR/credentials/`
+ * (default `~/.kimi/credentials/`). A missing or unreadable file means
  * the user has not completed `kimi login`.
  */
 const probeKimiAuth = Effect.fn("probeKimiAuth")(function* (
@@ -99,7 +99,7 @@ const probeKimiAuth = Effect.fn("probeKimiAuth")(function* (
 ): Effect.fn.Return<ServerProviderAuth, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const kimiHome = environment.KIMI_CODE_HOME?.trim() || path.join(NodeOS.homedir(), ".kimi-code");
+  const kimiHome = environment.KIMI_SHARE_DIR?.trim() || path.join(NodeOS.homedir(), ".kimi");
   const credentialsPath = path.join(kimiHome, "credentials", "kimi-code.json");
   const raw = yield* fileSystem
     .readFileString(credentialsPath)

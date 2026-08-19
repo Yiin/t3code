@@ -241,7 +241,7 @@ export const runManagedAccountHomeMigration = Effect.fn("runManagedAccountHomeMi
           : driver === "codex"
             ? path.join(NodeOS.homedir(), ".codex")
             : driver === "kimi"
-              ? path.join(NodeOS.homedir(), ".kimi-code")
+              ? path.join(NodeOS.homedir(), ".kimi")
               : path.join(NodeOS.homedir(), ".local", "share"),
     );
     for (const move of plan.moves) {

@@ -689,6 +689,7 @@ const make = Effect.fn("ProviderAuthManager.make")(function* () {
       // now that managed accounts use credentials-only shadow homes.
       path.join(NodeOS.homedir(), ".claude"),
       path.join(NodeOS.homedir(), ".codex"),
+      path.join(NodeOS.homedir(), ".kimi"),
       path.join(NodeOS.homedir(), ".kimi-code"),
       path.join(NodeOS.homedir(), ".local", "share", "opencode"),
       path.join(NodeOS.homedir(), ".local", "share"),

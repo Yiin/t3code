@@ -14,7 +14,7 @@ import {
   type HarnessHomeManifest,
 } from "./harnessHomeOverlay.ts";
 
-const DEFAULT_KIMI_HOME_NAME = ".kimi-code";
+const DEFAULT_KIMI_HOME_NAME = ".kimi";
 
 export const KIMI_HOME_MANIFEST: HarnessHomeManifest = {
   driverKind: ProviderDriverKind.make("kimi"),
@@ -93,14 +93,14 @@ export const makeKimiEnvironment = Effect.fn("makeKimiEnvironment")(function* (
   const resolvedBaseEnv = baseEnv ?? process.env;
   const layout = yield* resolveKimiHomeLayout(config);
   if (layout.effectiveHomePath === undefined) return resolvedBaseEnv;
-  return { ...resolvedBaseEnv, KIMI_CODE_HOME: layout.effectiveHomePath };
+  return { ...resolvedBaseEnv, KIMI_SHARE_DIR: layout.effectiveHomePath };
 });
 
 export const makeKimiContinuationGroupKey = Effect.fn("makeKimiContinuationGroupKey")(function* (
   environment: NodeJS.ProcessEnv = process.env,
 ): Effect.fn.Return<string, never, Path.Path> {
   const path = yield* Path.Path;
-  const configuredHome = environment.KIMI_CODE_HOME?.trim();
+  const configuredHome = environment.KIMI_SHARE_DIR?.trim();
   const resolvedHome = path.resolve(
     configuredHome
       ? expandHomePath(configuredHome)

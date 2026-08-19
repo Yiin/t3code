@@ -77,14 +77,14 @@ describe("checkKimiProviderStatus", () => {
       const settings = decodeKimiSettings({ binaryPath });
       const environment = { ...process.env };
       if (kimiHome !== null) {
-        environment.KIMI_CODE_HOME = kimiHome;
+        environment.KIMI_SHARE_DIR = kimiHome;
       } else {
-        delete environment.KIMI_CODE_HOME;
+        delete environment.KIMI_SHARE_DIR;
       }
       return yield* checkKimiProviderStatus(settings, environment, accountLabel);
     });
 
-  it.effect("reports authenticated when KIMI_CODE_HOME holds OAuth credentials", () =>
+  it.effect("reports authenticated when KIMI_SHARE_DIR holds OAuth credentials", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -199,7 +199,7 @@ describe("checkKimiProviderStatus", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       // Use an isolated stand-in for the default home. The test must never
-      // read or write the developer's real ~/.kimi-code credentials.
+      // read or write the developer's real ~/.kimi credentials.
       const defaultHome = yield* fileSystem.makeTempDirectory({
         directory: NodeOS.tmpdir(),
         prefix: "kimi-default-home-",
@@ -219,13 +219,13 @@ describe("checkKimiProviderStatus", () => {
       const settings = decodeKimiSettings({ binaryPath, homePath: customHome });
       const environment = yield* makeKimiEnvironment(settings, {
         ...process.env,
-        KIMI_CODE_HOME: defaultHome,
+        KIMI_SHARE_DIR: defaultHome,
       });
       const snapshot = yield* checkKimiProviderStatus(settings, environment);
 
       expect(snapshot.status).toBe("ready");
       expect(snapshot.auth).toEqual({ status: "unauthenticated" });
-      expect(environment.KIMI_CODE_HOME).toBe(customHome);
+      expect(environment.KIMI_SHARE_DIR).toBe(customHome);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

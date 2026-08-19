@@ -62,7 +62,7 @@ it.layer(NodeServices.layer)("KimiHome", (it) => {
 
     it.effect("keeps the base environment unchanged when no home override is configured", () =>
       Effect.gen(function* () {
-        const baseEnv = { HOME: "/home/test", KIMI_CODE_HOME: "/accounts/explicit" };
+        const baseEnv = { HOME: "/home/test", KIMI_SHARE_DIR: "/accounts/explicit" };
 
         expect(yield* makeKimiEnvironment({ homePath: "" }, baseEnv)).toBe(baseEnv);
       }),
@@ -74,23 +74,23 @@ it.layer(NodeServices.layer)("KimiHome", (it) => {
         const resolved = path.resolve(NodeOS.homedir(), ".kimi-code-work");
         const environment = yield* makeKimiEnvironment(
           { homePath: "~/.kimi-code-work" },
-          { HOME: "/home/unchanged", KIMI_CODE_HOME: "/accounts/explicit" },
+          { HOME: "/home/unchanged", KIMI_SHARE_DIR: "/accounts/explicit" },
         );
 
         expect(yield* resolveKimiHomePath({ homePath: "~/.kimi-code-work" })).toBe(resolved);
         expect(environment).toEqual({
           HOME: "/home/unchanged",
-          KIMI_CODE_HOME: resolved,
+          KIMI_SHARE_DIR: resolved,
         });
       }),
     );
 
     it.effect("uses the final effective environment for continuation identity", () =>
       Effect.gen(function* () {
-        const explicitEnvironment = { KIMI_CODE_HOME: "./accounts/kimi-work" };
+        const explicitEnvironment = { KIMI_SHARE_DIR: "./accounts/kimi-work" };
         const configuredEnvironment = yield* makeKimiEnvironment(
           { homePath: "./accounts/kimi-work" },
-          { KIMI_CODE_HOME: "/ignored" },
+          { KIMI_SHARE_DIR: "/ignored" },
         );
 
         expect(yield* makeKimiContinuationGroupKey(explicitEnvironment)).toBe(
@@ -104,8 +104,8 @@ it.layer(NodeServices.layer)("KimiHome", (it) => {
         const path = yield* Path.Path;
         const resolved = path.resolve("accounts/kimi-work");
 
-        expect(yield* makeKimiContinuationGroupKey({ KIMI_CODE_HOME: resolved })).toBe(
-          yield* makeKimiContinuationGroupKey({ KIMI_CODE_HOME: "accounts/kimi-work" }),
+        expect(yield* makeKimiContinuationGroupKey({ KIMI_SHARE_DIR: resolved })).toBe(
+          yield* makeKimiContinuationGroupKey({ KIMI_SHARE_DIR: "accounts/kimi-work" }),
         );
       }),
     );

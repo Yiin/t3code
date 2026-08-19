@@ -492,7 +492,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           enabled: false,
           environment: [
             {
-              name: "KIMI_CODE_HOME",
+              name: "KIMI_SHARE_DIR",
               value: "/home/julius/.kimi-explicit",
               sensitive: false,
             },
