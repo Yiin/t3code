@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { assert, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
@@ -44,7 +45,23 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 
-const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+// The host running the tests may export T3CODE_* server config (for example a
+// t3code systemd service exports T3CODE_OPEN_ACCESS=1, which makes the auth
+// layer issue an extra open-access session). Strip those variables so the CLI
+// under test only sees configuration the tests pass explicitly.
+// SAFETY: the filter drops undefined values, so every remaining entry is a string.
+const hermeticEnv = Object.fromEntries(
+  Object.entries(process.env).filter(
+    ([key, value]) =>
+      value !== undefined && !key.startsWith("T3CODE_") && key !== "VITE_DEV_SERVER_URL",
+  ),
+) as Record<string, string>;
+
+const CliRuntimeLayer = Layer.mergeAll(
+  NodeServices.layer,
+  NetService.layer,
+  ConfigProvider.layer(ConfigProvider.fromEnv({ env: hermeticEnv })),
+);
 class ProjectCliHttpApi extends HttpApi.make("environment").add(EnvironmentOrchestrationHttpApi) {}
 
 const connectCli = makeCli({ cloudEnabled: true });
