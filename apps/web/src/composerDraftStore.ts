@@ -2,7 +2,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
-  type EnvironmentId,
+  EnvironmentId,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -28,6 +28,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { useMemo } from "react";
@@ -211,7 +212,7 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
 
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
-  environmentId: Schema.String,
+  environmentId: EnvironmentId,
   projectId: ProjectId,
   logicalProjectKey: Schema.optionalKey(Schema.String),
   createdAt: Schema.String,
@@ -224,17 +225,25 @@ const PersistedDraftThreadState = Schema.Struct({
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
       Schema.Struct({
-        environmentId: Schema.String,
-        threadId: Schema.String,
+        environmentId: EnvironmentId,
+        threadId: ThreadId,
       }),
     ),
   ),
 });
 type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
 
+// Legacy storage wrote `environmentId` as a plain string, so localStorage can
+// still hold entries the branded decode rejects (empty or whitespace-only
+// ids). Dropping the one bad entry keeps the rest of the storage readable
+// instead of failing the whole decode.
+const MigrationSafePersistedDraftThreadState = PersistedDraftThreadState.pipe(
+  Schema.catchDecoding(() => Effect.succeed(Option.none())),
+);
+
 const PersistedComposerDraftStoreState = Schema.Struct({
   draftsByThreadKey: Schema.Record(Schema.String, PersistedComposerThreadDraftState),
-  draftThreadsByThreadKey: Schema.Record(Schema.String, PersistedDraftThreadState),
+  draftThreadsByThreadKey: Schema.Record(Schema.String, MigrationSafePersistedDraftThreadState),
   logicalProjectDraftThreadKeyByLogicalProjectKey: Schema.Record(Schema.String, Schema.String),
   stickyModelSelectionByProvider: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ModelSelection),
@@ -690,6 +699,24 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
 
 function normalizeProviderDriverKind(value: unknown): ProviderDriverKind | null {
   return isProviderDriverKind(value) ? value : null;
+}
+
+const decodeEnvironmentIdOption = Schema.decodeUnknownOption(EnvironmentId);
+const decodeThreadIdOption = Schema.decodeUnknownOption(ThreadId);
+
+/**
+ * Decode a persisted value into a branded `EnvironmentId`. Legacy storage
+ * wrote this field as a plain string, so empty or whitespace-only values
+ * exist in the wild; those return `undefined` and the caller drops the
+ * entry or degrades the field.
+ */
+function normalizeEnvironmentId(value: unknown): EnvironmentId | undefined {
+  return Option.getOrUndefined(decodeEnvironmentIdOption(value));
+}
+
+/** See {@link normalizeEnvironmentId}; same contract for `ThreadId`. */
+function normalizeThreadId(value: unknown): ThreadId | undefined {
+  return Option.getOrUndefined(decodeThreadIdOption(value));
 }
 
 /**
@@ -1500,10 +1527,8 @@ function normalizePersistedDraftThreads(
           : (threadKeyOrId as ThreadId));
       const environmentId =
         parsedThreadRef?.environmentId ??
-        (typeof candidateDraftThread.environmentId === "string" &&
-        candidateDraftThread.environmentId.length > 0
-          ? (candidateDraftThread.environmentId as EnvironmentId)
-          : environmentIdByThreadId.get(threadKeyOrId as ThreadId));
+        normalizeEnvironmentId(candidateDraftThread.environmentId) ??
+        environmentIdByThreadId.get(threadKeyOrId as ThreadId);
       const projectId = candidateDraftThread.projectId;
       const createdAt = candidateDraftThread.createdAt;
       const branch = candidateDraftThread.branch;
@@ -1515,31 +1540,25 @@ function normalizePersistedDraftThreads(
         promotedToCandidate && typeof promotedToCandidate === "object"
           ? (promotedToCandidate as Record<string, unknown>)
           : null;
+      const promotedToEnvironmentId = normalizeEnvironmentId(promotedToRecord?.environmentId);
+      const promotedToThreadId = normalizeThreadId(promotedToRecord?.threadId);
       const promotedTo =
-        promotedToRecord &&
-        typeof promotedToRecord.environmentId === "string" &&
-        promotedToRecord.environmentId.length > 0 &&
-        typeof promotedToRecord.threadId === "string" &&
-        promotedToRecord.threadId.length > 0
-          ? scopeThreadRef(
-              promotedToRecord.environmentId as EnvironmentId,
-              promotedToRecord.threadId as ThreadId,
-            )
+        promotedToEnvironmentId !== undefined && promotedToThreadId !== undefined
+          ? scopeThreadRef(promotedToEnvironmentId, promotedToThreadId)
           : null;
       if (typeof projectId !== "string" || projectId.length === 0 || environmentId === undefined) {
         continue;
       }
-      const normalizedEnvironmentId = environmentId as EnvironmentId;
       draftThreadsByThreadKey[threadKey] = {
         threadId,
-        environmentId: normalizedEnvironmentId,
+        environmentId,
         projectId: projectId as ProjectId,
         logicalProjectKey:
           typeof candidateDraftThread.logicalProjectKey === "string" &&
           candidateDraftThread.logicalProjectKey.length > 0
             ? candidateDraftThread.logicalProjectKey
             : parsedThreadRef
-              ? projectDraftKey(scopeProjectRef(normalizedEnvironmentId, projectId as ProjectId))
+              ? projectDraftKey(scopeProjectRef(environmentId, projectId as ProjectId))
               : threadKeyOrId,
         createdAt:
           typeof createdAt === "string" && createdAt.length > 0
@@ -1637,10 +1656,7 @@ function normalizePersistedDraftsByThreadId(
     if (!parsedThreadRef) {
       continue;
     }
-    environmentIdByThreadId.set(
-      parsedThreadRef.threadId,
-      draftThread.environmentId as EnvironmentId,
-    );
+    environmentIdByThreadId.set(parsedThreadRef.threadId, draftThread.environmentId);
   }
 
   const nextDraftsByThreadKey: DeepMutable<PersistedComposerDraftStoreState["draftsByThreadKey"]> =
@@ -2147,15 +2163,12 @@ function toHydratedDraftThreadState(
 ): DraftThreadState {
   return {
     threadId: persistedDraftThread.threadId,
-    environmentId: persistedDraftThread.environmentId as EnvironmentId,
+    environmentId: persistedDraftThread.environmentId,
     projectId: persistedDraftThread.projectId,
     logicalProjectKey:
       persistedDraftThread.logicalProjectKey ??
       projectDraftKey(
-        scopeProjectRef(
-          persistedDraftThread.environmentId as EnvironmentId,
-          persistedDraftThread.projectId,
-        ),
+        scopeProjectRef(persistedDraftThread.environmentId, persistedDraftThread.projectId),
       ),
     createdAt: persistedDraftThread.createdAt,
     runtimeMode: persistedDraftThread.runtimeMode,
@@ -2166,8 +2179,8 @@ function toHydratedDraftThreadState(
     startFromOrigin: persistedDraftThread.startFromOrigin,
     promotedTo: persistedDraftThread.promotedTo
       ? scopeThreadRef(
-          persistedDraftThread.promotedTo.environmentId as EnvironmentId,
-          persistedDraftThread.promotedTo.threadId as ThreadId,
+          persistedDraftThread.promotedTo.environmentId,
+          persistedDraftThread.promotedTo.threadId,
         )
       : null,
   };

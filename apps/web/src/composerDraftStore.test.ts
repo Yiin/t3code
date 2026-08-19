@@ -346,6 +346,134 @@ describe("composerDraftStore syncPersistedAttachments", () => {
   });
 });
 
+describe("composerDraftStore branded environmentId migration safety", () => {
+  function mergePersisted(persistedState: unknown) {
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    return persistApi.getOptions().merge(persistedState, useComposerDraftStore.getInitialState());
+  }
+
+  function persistedDraftThread(overrides: Record<string, unknown>): Record<string, unknown> {
+    return {
+      threadId: "thread-mig",
+      environmentId: TEST_ENVIRONMENT_ID,
+      projectId: "project-mig",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+      startFromOrigin: false,
+      ...overrides,
+    };
+  }
+
+  it("drops a draft thread whose stored environmentId is whitespace-only + keeps siblings", () => {
+    const mergedState = mergePersisted({
+      draftsByThreadKey: {},
+      draftThreadsByThreadKey: {
+        "draft-bad": persistedDraftThread({ threadId: "thread-bad", environmentId: "   " }),
+        "draft-good": persistedDraftThread({ threadId: "thread-good" }),
+      },
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+    });
+
+    expect(mergedState.draftThreadsByThreadKey["draft-bad"]).toBeUndefined();
+    expect(mergedState.draftThreadsByThreadKey["draft-good"]?.environmentId).toBe(
+      TEST_ENVIRONMENT_ID,
+    );
+  });
+
+  it("trims an untrimmed stored environmentId into the branded id", () => {
+    const mergedState = mergePersisted({
+      draftsByThreadKey: {},
+      draftThreadsByThreadKey: {
+        "draft-untrimmed": persistedDraftThread({ environmentId: `  ${TEST_ENVIRONMENT_ID} ` }),
+      },
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+    });
+
+    expect(mergedState.draftThreadsByThreadKey["draft-untrimmed"]?.environmentId).toBe(
+      TEST_ENVIRONMENT_ID,
+    );
+  });
+
+  it("degrades an invalid promotedTo to null without dropping the draft thread", () => {
+    const mergedState = mergePersisted({
+      draftsByThreadKey: {},
+      draftThreadsByThreadKey: {
+        "draft-promoted": persistedDraftThread({
+          promotedTo: { environmentId: "   ", threadId: "thread-real" },
+        }),
+      },
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+    });
+
+    const draftThread = mergedState.draftThreadsByThreadKey["draft-promoted"];
+    expect(draftThread?.environmentId).toBe(TEST_ENVIRONMENT_ID);
+    expect(draftThread?.promotedTo).toBeNull();
+  });
+
+  it("keeps attachment reads working when storage holds a corrupt legacy draft thread", async () => {
+    vi.useFakeTimers();
+    try {
+      removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+      resetComposerDraftStore();
+
+      const threadId = ThreadId.make("thread-corrupt-sibling");
+      const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+      const threadKey = scopedThreadKey(threadRef);
+      const image = makeImage({ id: "img-tolerant", previewUrl: "blob:tolerant" });
+      useComposerDraftStore.getState().addImage(threadRef, image);
+      // Let the store's debounced persist write land before injecting storage,
+      // so syncPersistedAttachments' flush cannot overwrite the injected value.
+      vi.advanceTimersByTime(300);
+
+      const attachment = {
+        type: "image",
+        id: image.id,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        dataUrl: image.previewUrl,
+      } as const;
+      setLocalStorageItem(
+        COMPOSER_DRAFT_STORAGE_KEY,
+        {
+          version: 8,
+          state: {
+            draftsByThreadKey: { [threadKey]: { prompt: "hello", attachments: [attachment] } },
+            draftThreadsByThreadKey: {
+              // Written while environmentId was a plain string; the branded
+              // decode must drop this entry, not the whole storage payload.
+              "draft-corrupt": persistedDraftThread({ environmentId: "   " }),
+            },
+            logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+          },
+        },
+        Schema.Unknown,
+      );
+
+      useComposerDraftStore.getState().syncPersistedAttachments(threadRef, [attachment]);
+      await Promise.resolve();
+
+      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.persistedAttachments).toEqual([attachment]);
+      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.nonPersistedImageIds).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      removeLocalStorageItem(COMPOSER_DRAFT_STORAGE_KEY);
+      resetComposerDraftStore();
+    }
+  });
+});
+
 describe("composerDraftStore attachment types", () => {
   const threadId = ThreadId.make("thread-attachment-types");
 
