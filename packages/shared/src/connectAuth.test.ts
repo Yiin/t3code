@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import * as Result from "effect/Result";
+
 import {
   buildConnectAuthorizeRequestUrl,
   buildConnectClerkAuthorizeUrl,
+  checkConnectAuthCode,
   connectCallbackUrl,
   encodeConnectAuthCode,
   parseConnectAuthCode,
@@ -74,5 +77,25 @@ describe("connectAuth", () => {
     expect(parseConnectAuthCode("no-separator")).toBeNull();
     expect(parseConnectAuthCode(".leading")).toBeNull();
     expect(parseConnectAuthCode("trailing.")).toBeNull();
+  });
+
+  it("checks an out-of-band authorization code against the expected state", () => {
+    const blob = encodeConnectAuthCode({ code: "clerk-code-123", state: "state-uuid" });
+    expect(checkConnectAuthCode(blob, "state-uuid")).toEqual(
+      Result.succeed({ code: "clerk-code-123", state: "state-uuid" }),
+    );
+  });
+
+  it("fails the check with a user-facing message for malformed codes", () => {
+    const checked = checkConnectAuthCode("no-separator", "state-uuid");
+    if (!Result.isFailure(checked)) throw new Error("expected a failed check");
+    expect(checked.failure).toContain("does not look like a T3 Connect code");
+  });
+
+  it("fails the check when the code belongs to a different connect request", () => {
+    const blob = encodeConnectAuthCode({ code: "clerk-code-123", state: "other-state" });
+    const checked = checkConnectAuthCode(blob, "state-uuid");
+    if (!Result.isFailure(checked)) throw new Error("expected a failed check");
+    expect(checked.failure).toContain("different connect request");
   });
 });

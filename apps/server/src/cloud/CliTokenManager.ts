@@ -14,6 +14,7 @@ import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Terminal from "effect/Terminal";
@@ -293,10 +294,11 @@ export const outOfBandOAuthLogin = Effect.fn("cloud.cli_token.out_of_band_oauth_
 
   const authorizationCode = yield* promptForCode({
     authorizeUrl: buildConnectAuthorizeRequestUrl({ hostedAppUrl, state, challenge }),
-    validate: (value) => {
-      const checked = checkConnectAuthCode(value, state);
-      return typeof checked === "string" ? Effect.fail(checked) : Effect.succeed(value);
-    },
+    validate: (value) =>
+      Result.match(checkConnectAuthCode(value, state), {
+        onFailure: Effect.fail,
+        onSuccess: () => Effect.succeed(value),
+      }),
   }).pipe(
     // Clerk authorization codes expire on this horizon anyway; matching the
     // loopback flow's timeout turns an abandoned prompt into a clear error.
@@ -307,10 +309,10 @@ export const outOfBandOAuthLogin = Effect.fn("cloud.cli_token.out_of_band_oauth_
   );
   // promptForCode is caller-supplied, so re-check the returned value rather
   // than trusting that the prompt ran validate.
-  const authCode = checkConnectAuthCode(authorizationCode, state);
-  if (typeof authCode === "string") {
-    return yield* new CloudCliAuthorizationError({ cause: authCode });
-  }
+  const authCode = yield* Result.match(checkConnectAuthCode(authorizationCode, state), {
+    onFailure: (cause) => Effect.fail(new CloudCliAuthorizationError({ cause })),
+    onSuccess: Effect.succeed,
+  });
 
   return yield* exchangeToken(metadata, {
     grant_type: "authorization_code",
