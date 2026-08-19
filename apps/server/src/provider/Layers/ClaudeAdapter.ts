@@ -390,12 +390,30 @@ function normalizeClaudeStreamMessages(
   return squashed.length > 0 ? [squashed] : [];
 }
 
-function getEffectiveClaudeAgentEffort(
+const CLAUDE_SDK_EFFORTS: ReadonlySet<string> = new Set([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] satisfies ReadonlyArray<ClaudeSdkEffort>);
+
+function isClaudeSdkEffort(value: string): value is ClaudeSdkEffort {
+  return CLAUDE_SDK_EFFORTS.has(value);
+}
+
+/**
+ * Resolve the effort value to pass to the Claude Agent SDK, or `null` to
+ * omit it. `normalizeClaudeCliEffort` echoes values it does not recognize,
+ * so anything outside the SDK's effort union falls back to `null` here and
+ * the SDK applies its own default instead of receiving an invalid value.
+ */
+export function getEffectiveClaudeAgentEffort(
   effort: string | null | undefined,
   model: string | null | undefined,
 ): ClaudeSdkEffort | null {
   const normalized = normalizeClaudeCliEffort(effort, model);
-  return normalized ? (normalized as ClaudeSdkEffort) : null;
+  return normalized !== undefined && isClaudeSdkEffort(normalized) ? normalized : null;
 }
 
 // Control-channel calls go over the subprocess's stdin/stdout control

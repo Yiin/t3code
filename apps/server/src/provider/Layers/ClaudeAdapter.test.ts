@@ -53,6 +53,7 @@ import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { describeSessionLifecycleConformance } from "../testUtils/sessionLifecycleConformance.ts";
 import {
   CLAUDE_ADAPTER_CAPABILITIES,
+  getEffectiveClaudeAgentEffort,
   makeClaudeAdapter,
   type ClaudeAdapterLiveOptions,
 } from "./ClaudeAdapter.ts";
@@ -386,6 +387,25 @@ const readSystemPromptAppend = (
 
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
+
+describe("getEffectiveClaudeAgentEffort", () => {
+  it("returns null for an effort value outside the SDK union", () => {
+    assert.isNull(getEffectiveClaudeAgentEffort("turbo", "claude-opus-5"));
+  });
+
+  it("returns null for missing effort and for prompt-injected ultrathink", () => {
+    assert.isNull(getEffectiveClaudeAgentEffort(undefined, "claude-opus-5"));
+    assert.isNull(getEffectiveClaudeAgentEffort(null, "claude-opus-5"));
+    assert.isNull(getEffectiveClaudeAgentEffort("ultrathink", "claude-opus-5"));
+  });
+
+  it("keeps normalized values that are in the SDK union", () => {
+    assert.equal(getEffectiveClaudeAgentEffort("max", "claude-opus-4-6"), "max");
+    assert.equal(getEffectiveClaudeAgentEffort("ultracode", "claude-opus-5"), "xhigh");
+    assert.equal(getEffectiveClaudeAgentEffort("xhigh", "claude-opus-4-7"), "max");
+    assert.equal(getEffectiveClaudeAgentEffort("max", "claude-sonnet-4-6"), "high");
+  });
+});
 
 describe("ClaudeAdapterLive", () => {
   it.effect("returns validation error for non-claude provider on startSession", () => {
