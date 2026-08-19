@@ -133,11 +133,20 @@ export default defineConfig({
       ],
       // Anti-slop policy after the 2026-08 cleanup (8110 -> 5221 findings):
       // rules at "error" report zero findings today and gate regressions.
-      // Rules at "warn" mostly flag correct code — the exactOptionalPropertyTypes
-      // omission spread, typeof guards on genuinely-unknown payloads, deliberate
-      // test-fixture casts — so they inform without failing the gate.
+      // Rules at "warn" mostly flag correct code — typeof guards on
+      // genuinely-unknown payloads, deliberate test-fixture casts — so they
+      // inform without failing the gate. Rules whose findings are entirely
+      // correct code go to "off" with the reason inline.
       "anti-slop/no-chained-type-assertions": "warn",
-      "anti-slop/no-conditional-empty-object-spread": "warn",
+      // Off: the flagged ternary (`...(x !== undefined ? { k: x } : {})`) is the
+      // omission idiom exactOptionalPropertyTypes requires at readonly contract
+      // boundaries, so the rule's target and correct code coincide here (1412
+      // findings, all required). A shared `optionalProp` helper was considered
+      // and rejected (t3code-crx): ~550 sites omit on truthiness, not undefined,
+      // so a `!== undefined` helper changes semantics and the migration is not
+      // mechanical; a `when(cond, obj)` form just renames the same conditional
+      // spread. Keep the idiom.
+      "anti-slop/no-conditional-empty-object-spread": "off",
       "anti-slop/no-known-value-widening": "warn",
       "anti-slop/no-module-mocking": "error",
       // Off: `object` is the right contract for WeakSet keys and structural guards.
