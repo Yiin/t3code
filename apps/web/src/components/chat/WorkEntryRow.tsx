@@ -11,6 +11,7 @@ import {
   MinusIcon,
   SquarePenIcon,
   TerminalIcon,
+  TriangleAlertIcon,
   WrenchIcon,
   XIcon,
   ZapIcon,
@@ -38,6 +39,7 @@ type WorkEntryIconName =
   | "message-circle"
   | "square-pen"
   | "terminal"
+  | "triangle-alert"
   | "wrench"
   | "x"
   | "zap";
@@ -62,6 +64,8 @@ function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; classN
       return <SquarePenIcon className={className} aria-hidden />;
     case "terminal":
       return <TerminalIcon className={className} aria-hidden />;
+    case "triangle-alert":
+      return <TriangleAlertIcon className={className} aria-hidden />;
     case "wrench":
       return <WrenchIcon className={className} aria-hidden />;
     case "x":
@@ -243,7 +247,7 @@ export const WorkEntryRow = memo(function WorkEntryRow({
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
-  const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
+  const entryIconName = showWarningIndicator ? "triangle-alert" : workEntryIconName(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
   const rawPreview = workEntryPreview(workEntry, workspaceRoot);
   const preview =
@@ -262,7 +266,7 @@ export const WorkEntryRow = memo(function WorkEntryRow({
   const iconWrapperClass = cn(
     "flex size-5 shrink-0 items-center justify-center",
     showWarningIndicator
-      ? "text-destructive"
+      ? "text-warning"
       : showDestructiveRowStyle
         ? "text-destructive"
         : workEntry.tone === "tool" || showFailedIndicator

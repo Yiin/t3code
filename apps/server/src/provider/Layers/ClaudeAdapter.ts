@@ -3688,6 +3688,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
 
+    // Claude Code ≥2.1.x wraps injected slash commands (wakeups, /commands) in
+    // command_lifecycle messages the pinned SDK type union predates. They have
+    // no T3 surface; consumed deliberately (still in the NDJSON log above).
+    const rawMessageType: string = message.type;
+    if (rawMessageType === "command_lifecycle") {
+      return;
+    }
+
     switch (message.type) {
       case "stream_event":
         yield* handleStreamEvent(context, message);

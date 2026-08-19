@@ -3859,6 +3859,20 @@ describe("ClaudeAdapterLive", () => {
         { type: "system", subtype: "elicitation_complete", session_id: "session", uuid: "ec" },
         { type: "prompt_suggestion", suggestion: "try this", session_id: "session", uuid: "ps" },
         {
+          type: "command_lifecycle",
+          command_uuid: "cmd-1",
+          state: "started",
+          session_id: "session",
+          uuid: "cl-start",
+        },
+        {
+          type: "command_lifecycle",
+          command_uuid: "cmd-1",
+          state: "completed",
+          session_id: "session",
+          uuid: "cl-done",
+        },
+        {
           type: "system",
           subtype: "notification",
           key: "context",
