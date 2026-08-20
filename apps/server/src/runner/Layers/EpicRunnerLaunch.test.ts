@@ -79,6 +79,7 @@ const makeLaunch = (input: {
       }),
   };
   return makeEpicRunnerLaunch({
+    processRunner: undefined as never,
     store: undefined as never,
     preflight,
     configSource: undefined as never,
@@ -197,6 +198,17 @@ const makeLaunchHarness = (
 ) => {
   const saved: EpicRun[] = [];
   const launch = makeEpicRunnerLaunch({
+    processRunner: {
+      run: () =>
+        Effect.succeed({
+          stdout: "/home/yiin/Projects/t3code/.git\n",
+          stderr: "",
+          code: 0 as never,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+    } as never,
     store: {
       listRuns: () => Effect.succeed([]),
     } as unknown as Parameters<typeof makeEpicRunnerLaunch>[0]["store"],
@@ -269,6 +281,16 @@ const makeLaunchHarness = (
 };
 
 describe("EpicRunnerLaunch inheritOriginModelSelection", () => {
+  it.effect("forces an owned base for a same-repository worktree launch", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness({});
+      const run = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree" }));
+      expect(run.cwd).toBe("/worktree");
+      expect(run.config.vcs.runOwnedBaseBranch).toBe(true);
+      expect(run.configProvenance["vcs.runOwnedBaseBranch"]).toBe("policy");
+    }),
+  );
+
   it.effect("keeps the project default when the option is absent", () =>
     Effect.gen(function* () {
       const harness = makeLaunchHarness({

@@ -823,6 +823,7 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
       );
 
     const launch = makeEpicRunnerLaunch({
+      processRunner,
       store,
       preflight,
       configSource,

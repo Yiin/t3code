@@ -38,6 +38,8 @@ import {
   type EpicRunLockHeldError,
   type EpicRunLockLease,
 } from "@t3tools/epic-core/ports/EpicRunLock";
+import { sameRepository } from "@t3tools/epic-core/sameRepository";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import {
   epicFallbackCandidateInstanceIds,
   epicRoleFallbackChain,
@@ -125,6 +127,7 @@ const formatEpicRunLockHeldError = (error: EpicRunLockHeldError): string => {
 };
 
 export const makeEpicRunnerLaunch = (deps: {
+  readonly processRunner: ProcessRunner.ProcessRunner["Service"];
   readonly store: EpicRunStore["Service"];
   readonly preflight: EpicRunPreflight["Service"];
   readonly configSource: EpicRunConfigSource["Service"];
@@ -159,6 +162,7 @@ export const makeEpicRunnerLaunch = (deps: {
   readonly readAccountLimits: Effect.Effect<ReadonlyArray<ProviderAccountLimit>>;
 }) => {
   const {
+    processRunner,
     store,
     preflight,
     configSource,
@@ -605,10 +609,29 @@ export const makeEpicRunnerLaunch = (deps: {
       if (Option.isNone(project)) {
         return yield* new EpicRunLaunchError({ reason: "project_not_found" });
       }
-      if (project.value.workspaceRoot !== input.cwd) {
+      const isWorktreeLaunch =
+        project.value.workspaceRoot !== input.cwd &&
+        (yield* sameRepository(project.value.workspaceRoot, input.cwd).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+        ));
+      if (project.value.workspaceRoot !== input.cwd && !isWorktreeLaunch) {
         return yield* new EpicRunLaunchError({ reason: "cwd_mismatch" });
       }
-      const configSnapshot = yield* readConfigSnapshot(input);
+      const loadedConfigSnapshot = yield* readConfigSnapshot(input);
+      const configSnapshot =
+        isWorktreeLaunch && !loadedConfigSnapshot.config.vcs.runOwnedBaseBranch
+          ? {
+              ...loadedConfigSnapshot,
+              config: {
+                ...loadedConfigSnapshot.config,
+                vcs: { ...loadedConfigSnapshot.config.vcs, runOwnedBaseBranch: true },
+              },
+              provenance: {
+                ...loadedConfigSnapshot.provenance,
+                "vcs.runOwnedBaseBranch": "policy" as const,
+              },
+            }
+          : loadedConfigSnapshot;
       const configuredModelSelection = configSnapshot.config.provider.modelSelection;
       // Per-launch input is the most specific signal there is, so inheriting
       // the origin outranks the repo file, which in turn outranks the
