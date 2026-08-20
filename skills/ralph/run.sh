@@ -259,7 +259,20 @@ run_lock_dir() { # -> directory the lock file belongs in (fails when there is no
         /*) ;;
         *) redirect="$(dirname "$beads")/$redirect" ;;
       esac
-      [ -n "$redirect" ] && [ -d "$redirect" ] && beads=$(cd "$redirect" && pwd -P)
+      if [ -n "$redirect" ] && [ -d "$redirect" ]; then
+        beads=$(cd "$redirect" && pwd -P)
+        printf '%s\n' "$beads"
+        return 0
+      fi
+    fi
+    # Linked worktrees have their own .beads directory, but run locks must be
+    # shared by every checkout of one repository. The common git directory
+    # names the main checkout when this is a linked worktree.
+    local common root
+    common=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || common=''
+    root=$(pwd -P)
+    if [ -n "$common" ] && [ "$common" != "$root/.git" ]; then
+      [ -d "$(dirname "$common")/.beads" ] && beads=$(cd "$(dirname "$common")/.beads" && pwd -P)
     fi
     printf '%s\n' "$beads"
     return 0

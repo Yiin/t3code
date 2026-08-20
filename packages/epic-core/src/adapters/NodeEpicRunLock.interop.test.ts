@@ -28,6 +28,7 @@ const unsupportedReason =
 interface Fixture {
   readonly root: string;
   readonly repo: string;
+  readonly worktree: string;
   readonly bin: string;
   readonly state: string;
   readonly lockFile: string;
@@ -56,6 +57,13 @@ const makeFixture = async (): Promise<Fixture> => {
   await NodeFSP.writeFile(NodePath.join(repo, "base.txt"), "base\n");
   await execFile("git", ["add", "base.txt"], repo);
   await execFile("git", ["commit", "-qm", "base"], repo);
+  const worktree = NodePath.join(root, "worktree");
+  await execFile(
+    "git",
+    ["worktree", "add", "-q", "-b", "fixture-worktree", worktree, "HEAD"],
+    repo,
+  );
+  await NodeFSP.mkdir(NodePath.join(worktree, ".beads"));
   await NodeFSP.writeFile(NodePath.join(state, "status"), "open");
   await NodeFSP.writeFile(
     NodePath.join(bin, "bd"),
@@ -106,17 +114,18 @@ printf '%s\\n' '{"type":"result","result":"RALPH_DONE","session_id":"fixture","t
   return {
     root,
     repo,
+    worktree,
     bin,
     state,
     lockFile: NodePath.join(repo, ".beads", "run-lock.epic.json"),
   };
 };
 
-const spawnRalph = (fixture: Fixture, runDir: string, workerSleep: number) => {
+const spawnRalph = (fixture: Fixture, runDir: string, workerSleep: number, cwd = fixture.repo) => {
   NodeFS.mkdirSync(runDir, { recursive: true });
   NodeFS.writeFileSync(NodePath.join(runDir, "prompt.md"), "Epic: epic\nDo the work.\n");
   return NodeChildProcess.spawn("bash", [ralphRunner, runDir], {
-    cwd: fixture.repo,
+    cwd,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -238,6 +247,47 @@ it.live.skipIf(unsupportedReason !== null)(
             staleLayer,
           ),
         ).toBeUndefined();
+      }),
+    ),
+);
+
+it.live.skipIf(unsupportedReason !== null)(
+  `shares locks between a main checkout and linked worktree (${unsupportedReason ?? "supported"})`,
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* fixtureScope;
+        const locks = yield* runLock(EpicRunLock);
+
+        const mainLease = yield* locks.acquire({
+          workspaceRoot: fixture.repo,
+          epicId: "epic",
+          owner: "t3code",
+          runDir: fixture.root,
+        });
+        const bashBlocked = yield* Effect.promise(() =>
+          waitForExit(
+            spawnRalph(fixture, NodePath.join(fixture.root, "bash-blocked"), 0, fixture.worktree),
+          ),
+        );
+        expect(bashBlocked.code).toBe(75);
+        expect(bashBlocked.output).toContain('"owner":"t3code"');
+        yield* mainLease.release;
+
+        const bashOwner = yield* processScope(() =>
+          spawnRalph(fixture, NodePath.join(fixture.root, "bash-owner"), 60, fixture.worktree),
+        );
+        yield* Effect.promise(() => waitForFile(fixture.lockFile));
+        const tsBlocked = yield* Effect.flip(
+          locks.acquire({
+            workspaceRoot: fixture.repo,
+            epicId: "epic",
+            owner: "t3code",
+            runDir: fixture.root,
+          }),
+        );
+        expect(tsBlocked).toBeInstanceOf(EpicRunLockHeldError);
+        yield* Effect.promise(() => killGroup(bashOwner, "SIGKILL"));
       }),
     ),
 );
