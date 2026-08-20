@@ -39,6 +39,10 @@
       "types": "./src/processRunner.ts",
       "import": "./src/processRunner.ts"
     },
+    "./sameRepository": {
+      "types": "./src/sameRepository.ts",
+      "import": "./src/sameRepository.ts"
+    },
     "./EpicRunPreflight": {
       "types": "./src/EpicRunPreflight.ts",
       "import": "./src/EpicRunPreflight.ts"
