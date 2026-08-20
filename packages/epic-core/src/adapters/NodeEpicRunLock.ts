@@ -132,6 +132,24 @@ const lockDirectory = async (workspaceRoot: string): Promise<string> => {
     } catch {
       // A normal .beads directory has no redirect.
     }
+
+    // Linked worktrees have their own .beads directory, but run locks must be
+    // shared by every checkout of one repository. The common git directory
+    // names the main checkout when this is a linked worktree.
+    try {
+      const common = await NodeFSP.realpath(
+        NodePath.resolve(
+          workspaceRoot,
+          (await runGit(workspaceRoot, ["rev-parse", "--git-common-dir"])).trim(),
+        ),
+      );
+      const mainBeads = NodePath.join(NodePath.dirname(common), ".beads");
+      if (common !== NodePath.join(await NodeFSP.realpath(workspaceRoot), ".git")) {
+        return await NodeFSP.realpath(mainBeads);
+      }
+    } catch {
+      // Fall back to the checkout's beads directory when Git cannot resolve it.
+    }
     return beadsReal;
   } catch {
     const common = await runGit(workspaceRoot, ["rev-parse", "--git-common-dir"]);

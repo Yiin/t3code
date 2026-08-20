@@ -528,4 +528,87 @@ describe("EpicRunLock", () => {
       }).pipe(Effect.provide(testLayer)),
     );
   });
+  it.live("shares locks between a main checkout and a linked worktree", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const directory = yield* fixture;
+        yield* initialize(directory);
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) =>
+              NodeFSP.writeFile(NodePath.join(directory, "base.txt"), "base\n")
+                .then(() =>
+                  NodeChildProcess.execFile(
+                    "git",
+                    ["add", "base.txt"],
+                    { cwd: directory },
+                    (error) => (error ? reject(error) : resolve()),
+                  ),
+                )
+                .catch(reject),
+            ),
+        );
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) =>
+              NodeChildProcess.execFile(
+                "git",
+                [
+                  "-c",
+                  "user.name=lock-test",
+                  "-c",
+                  "user.email=lock@test",
+                  "commit",
+                  "-qm",
+                  "base",
+                ],
+                { cwd: directory },
+                (error) => (error ? reject(error) : resolve()),
+              ),
+            ),
+        );
+        const worktree = NodePath.join(directory, "linked-worktree");
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) =>
+              NodeChildProcess.execFile(
+                "git",
+                ["worktree", "add", "-q", "-b", "linked", worktree],
+                { cwd: directory },
+                (error) => (error ? reject(error) : resolve()),
+              ),
+            ),
+        );
+        yield* Effect.promise(() => NodeFSP.mkdir(NodePath.join(worktree, ".beads")));
+
+        const locks = yield* EpicRunLock;
+        const mainLease = yield* locks.acquire({
+          workspaceRoot: directory,
+          epicId: "epic",
+          owner: "t3code",
+          runDir: directory,
+        });
+        expect((yield* locks.inspect({ workspaceRoot: worktree, epicId: "epic" }))?.owner).toBe(
+          "t3code",
+        );
+        const held = yield* Effect.flip(
+          locks.acquire({
+            workspaceRoot: worktree,
+            epicId: "epic",
+            owner: "terminal",
+            runDir: worktree,
+          }),
+        );
+        expect(held._tag).toBe("EpicRunLockHeldError");
+        const independent = yield* locks.acquire({
+          workspaceRoot: worktree,
+          epicId: "other-epic",
+          owner: "terminal",
+          runDir: worktree,
+        });
+        yield* independent.release;
+        yield* mainLease.release;
+      }).pipe(Effect.provide(layer)),
+    ),
+  );
 });
