@@ -17,6 +17,7 @@ import type {
   EpicRunPreflightShape,
 } from "@t3tools/epic-core/EpicRunPreflight";
 import type { EpicRunLockShape } from "@t3tools/epic-core/ports/EpicRunLock";
+import * as ProcessRunner from "@t3tools/epic-core/processRunner";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -195,20 +196,25 @@ const makeLaunchHarness = (
     string,
     { readonly projectId: ProjectId; readonly modelSelection: ModelSelection }
   >,
+  options?: {
+    readonly processRunner?: ProcessRunner.ProcessRunner["Service"];
+  },
 ) => {
   const saved: EpicRun[] = [];
   const launch = makeEpicRunnerLaunch({
-    processRunner: {
-      run: () =>
-        Effect.succeed({
-          stdout: "/home/yiin/Projects/t3code/.git\n",
-          stderr: "",
-          code: 0 as never,
-          timedOut: false,
-          stdoutTruncated: false,
-          stderrTruncated: false,
-        }),
-    } as never,
+    processRunner:
+      options?.processRunner ??
+      ({
+        run: () =>
+          Effect.succeed({
+            stdout: "/home/yiin/Projects/t3code/.git\n",
+            stderr: "",
+            code: 0 as never,
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }),
+      } as ProcessRunner.ProcessRunner["Service"]),
     store: {
       listRuns: () => Effect.succeed([]),
     } as unknown as Parameters<typeof makeEpicRunnerLaunch>[0]["store"],
@@ -281,13 +287,109 @@ const makeLaunchHarness = (
 };
 
 describe("EpicRunnerLaunch inheritOriginModelSelection", () => {
-  it.effect("forces an owned base for a same-repository worktree launch", () =>
+  it.effect("accepts a worktree cwd from the same repository", () =>
     Effect.gen(function* () {
-      const harness = makeLaunchHarness({});
+      const calls: string[] = [];
+      const harness = makeLaunchHarness(
+        {},
+        {
+          processRunner: {
+            run: ({ cwd }) => {
+              calls.push(cwd ?? "");
+              return Effect.succeed({
+                stdout: "/home/yiin/Projects/t3code/.git\n",
+                stderr: "",
+                code: 0 as never,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            },
+          },
+        },
+      );
       const run = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree" }));
       expect(run.cwd).toBe("/worktree");
       expect(run.config.vcs.runOwnedBaseBranch).toBe(true);
       expect(run.configProvenance["vcs.runOwnedBaseBranch"]).toBe("policy");
+      expect(calls).toEqual(["/repo", "/worktree"]);
+    }),
+  );
+
+  it.effect("rejects a cwd from a foreign repository", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness(
+        {},
+        {
+          processRunner: {
+            run: ({ cwd }) =>
+              Effect.succeed({
+                stdout:
+                  cwd === "/repo" ? "/home/yiin/Projects/t3code/.git\n" : "/home/yiin/Projects\n",
+                stderr: "",
+                code: 0 as never,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              }),
+          },
+        },
+      );
+      const error = yield* Effect.flip(
+        harness.launch.launchRun(harness.input({ cwd: "/foreign" })),
+      );
+      expect(error).toMatchObject({ _tag: "EpicRunLaunchError", reason: "cwd_mismatch" });
+      expect(harness.saved).toHaveLength(0);
+    }),
+  );
+
+  it.effect("rejects a non-git cwd when repository resolution fails", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness(
+        {},
+        {
+          processRunner: {
+            run: ({ cwd }) =>
+              cwd === "/repo"
+                ? Effect.succeed({
+                    stdout: "/home/yiin/Projects/t3code/.git\n",
+                    stderr: "",
+                    code: 0 as never,
+                    timedOut: false,
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                  })
+                : Effect.fail(
+                    new ProcessRunner.ProcessSpawnError({
+                      command: "git",
+                      argumentCount: 4,
+                      cwd,
+                      cause: new Error("not a git repository"),
+                    }),
+                  ),
+          },
+        },
+      );
+      const error = yield* Effect.flip(
+        harness.launch.launchRun(harness.input({ cwd: "/not-git" })),
+      );
+      expect(error).toMatchObject({ _tag: "EpicRunLaunchError", reason: "cwd_mismatch" });
+      expect(harness.saved).toHaveLength(0);
+    }),
+  );
+
+  it.effect("does not resolve the repository for the exact workspace root", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness(
+        {},
+        {
+          processRunner: {
+            run: () => Effect.die("same-repository must not run for an exact cwd match"),
+          },
+        },
+      );
+      const run = yield* harness.launch.launchRun(harness.input({ cwd: "/repo" }));
+      expect(run.cwd).toBe("/repo");
     }),
   );
 
