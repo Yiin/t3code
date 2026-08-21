@@ -73,6 +73,7 @@ import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import { collapseExpandedComposerCursor } from "../composer-logic";
 import { useTimelineScrollSync } from "./chat/useTimelineScrollSync";
+import { epicRunLaunchErrorMessage } from "../epicRunLaunch";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -1030,6 +1031,8 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
 type LocalThreadErrorEntry = import("./ChatView.logic").DraftErrorEntry;
 
 function chatActionErrorMessage(error: unknown): string {
+  const epicMessage = epicRunLaunchErrorMessage(error);
+  if (epicMessage !== null) return epicMessage;
   return error instanceof Error ? error.message : "An error occurred.";
 }
 

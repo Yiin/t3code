@@ -8,6 +8,7 @@ import {
 import {
   epicRunPreflightBlockersFromError,
   epicRunPreflightModeForConfig,
+  epicRunLaunchErrorMessage,
   preflightAndLaunchEpicRun,
 } from "./epicRunLaunch";
 
@@ -37,6 +38,21 @@ describe("epicRunPreflightModeForConfig", () => {
   it("maps the legacy execution flag the launch carries", () => {
     expect(epicRunPreflightModeForConfig({ execution: { sequential: true } })).toBe("sequential");
     expect(epicRunPreflightModeForConfig({ execution: { sequential: false } })).toBe("parallel");
+  });
+});
+
+describe("epicRunLaunchErrorMessage", () => {
+  it("explains a launch from an unrelated checkout", () => {
+    expect(epicRunLaunchErrorMessage({ _tag: "EpicRunLaunchError", reason: "cwd_mismatch" })).toBe(
+      "This folder is not the registered project repository. Open the project from its repository or a linked worktree, then try again.",
+    );
+  });
+
+  it("leaves other errors for their existing message handling", () => {
+    expect(
+      epicRunLaunchErrorMessage({ _tag: "EpicRunLaunchError", reason: "project_not_found" }),
+    ).toBeNull();
+    expect(epicRunLaunchErrorMessage(new Error("offline"))).toBeNull();
   });
 });
 

@@ -78,6 +78,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import {
   epicRunPreflightBlockersFromError,
   epicRunPreflightModeForConfig,
+  epicRunLaunchErrorMessage,
   preflightAndLaunchEpicRun,
 } from "../epicRunLaunch";
 import { presentEpicRunPreflight } from "../epicRunPreflightPresentation";
@@ -391,15 +392,14 @@ function EpicRunSection(props: {
     if (result._tag === "Success") return;
     const error = squashAtomCommandFailure(result);
     const blockers = epicRunPreflightBlockersFromError(error);
+    const launchError = epicRunLaunchErrorMessage(error);
     toastManager.add(
       stackedThreadToast({
         type: "error",
         title,
         description:
           blockers === null
-            ? error instanceof Error
-              ? error.message
-              : "An error occurred."
+            ? (launchError ?? (error instanceof Error ? error.message : "An error occurred."))
             : blockers.join("\n\n"),
       }),
     );

@@ -10,6 +10,13 @@ type CommandResult<T> =
   | { readonly _tag: "Failure"; readonly error?: unknown }
   | { readonly _tag: "Interrupted" };
 
+export function epicRunLaunchErrorMessage(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("_tag" in error)) return null;
+  if (error._tag !== "EpicRunLaunchError" || !("reason" in error)) return null;
+  if (error.reason !== "cwd_mismatch") return null;
+  return "This folder is not the registered project repository. Open the project from its repository or a linked worktree, then try again.";
+}
+
 export function epicRunPreflightBlockersFromError(error: unknown): readonly string[] | null {
   if (typeof error !== "object" || error === null || !("_tag" in error)) return null;
   if (error._tag !== "EpicRunPreflightBlockedError" || !("blockers" in error)) return null;
