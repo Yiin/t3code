@@ -200,7 +200,13 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { describeRunnerOwnedIteration, epicsEnvironment } from "../state/epics";
-import { launchPlannedEpic, plannedEpicIdentity, plannedEpicRoute } from "../plannedEpicFollowUp";
+import {
+  launchPlannedEpic,
+  plannedEpicIdentity,
+  plannedEpicRoute,
+  resolvePlannedEpicBanner,
+} from "../plannedEpicFollowUp";
+import { isTerminalEpicRunStatus, type EpicRunPendingAction } from "../epicRun.logic";
 import {
   epicRunPreflightBlockersFromError,
   epicRunPreflightModeForConfig,
@@ -264,6 +270,16 @@ import { RightPanelSheet } from "./RightPanelSheet";
 import { skillsEnvironment } from "../state/skills";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "./ui/alert-dialog";
 import { ServerUpdateAction } from "./ServerUpdateAction";
 import {
   buildVersionMismatchDismissalKey,
@@ -1106,6 +1122,9 @@ function ChatViewContent(props: ChatViewProps) {
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const launchEpicRun = useAtomCommand(epicsEnvironment.launchRun, { reportFailure: false });
   const preflightEpicRun = useAtomCommand(epicsEnvironment.preflightRun, { reportFailure: false });
+  const pauseEpicRun = useAtomCommand(epicsEnvironment.pauseRun, { reportFailure: false });
+  const resumeEpicRun = useAtomCommand(epicsEnvironment.resumeRun, { reportFailure: false });
+  const stopEpicRun = useAtomCommand(epicsEnvironment.stopRun, { reportFailure: false });
   const environmentById = useMemo(
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
@@ -1412,6 +1431,114 @@ function ChatViewContent(props: ChatViewProps) {
   const setPlannedEpicBannerDismissed = useUiStateStore(
     (store) => store.setPlannedEpicBannerDismissed,
   );
+  const plannedEpicRunsQuery = useEnvironmentQuery(
+    plannedEpic
+      ? epicsEnvironment.allRuns({ environmentId: plannedEpic.environmentId, input: {} })
+      : null,
+  );
+  const plannedEpicBanner = useMemo(
+    () =>
+      resolvePlannedEpicBanner({
+        plannedEpic,
+        runs: plannedEpicRunsQuery.data ?? undefined,
+        dismissed: plannedEpicDismissed,
+        activeEpicRun,
+      }),
+    [plannedEpic, plannedEpicRunsQuery.data, plannedEpicDismissed, activeEpicRun],
+  );
+  const [plannedEpicRunPending, setPlannedEpicRunPending] = useState<EpicRunPendingAction | null>(
+    null,
+  );
+  const plannedEpicRun = plannedEpicBanner.run;
+  useEffect(() => {
+    // Pause and resume clear as soon as the run leaves the state they acted
+    // on, including when it ends underneath them. Stopping clears on terminal.
+    if (plannedEpicRunPending === "pausing" && plannedEpicRun?.status !== "running") {
+      setPlannedEpicRunPending(null);
+    }
+    if (plannedEpicRunPending === "resuming" && plannedEpicRun?.status !== "paused") {
+      setPlannedEpicRunPending(null);
+    }
+    if (
+      plannedEpicRunPending === "stopping" &&
+      plannedEpicRun !== null &&
+      isTerminalEpicRunStatus(plannedEpicRun.status)
+    ) {
+      setPlannedEpicRunPending(null);
+    }
+  }, [plannedEpicRun, plannedEpicRunPending]);
+  const reportPlannedEpicRunFailure = useCallback(
+    (title: string, result: AtomCommandResult<unknown, unknown>) => {
+      if (isAtomCommandInterrupted(result)) return;
+      if (result._tag === "Success") return;
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title,
+          description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+        }),
+      );
+    },
+    [],
+  );
+  const pausePlannedEpicRun = useCallback(() => {
+    const run = plannedEpicBanner.run;
+    if (!plannedEpic || !run || run.status !== "running" || plannedEpicRunPending !== null) return;
+    setPlannedEpicRunPending("pausing");
+    void pauseEpicRun({
+      environmentId: plannedEpic.environmentId,
+      input: { runId: run.runId },
+    }).then((result) => {
+      if (result._tag === "Success") return;
+      setPlannedEpicRunPending(null);
+      reportPlannedEpicRunFailure("Could not pause run", result);
+    });
+  }, [
+    plannedEpic,
+    plannedEpicBanner,
+    plannedEpicRunPending,
+    pauseEpicRun,
+    reportPlannedEpicRunFailure,
+  ]);
+  const resumePlannedEpicRun = useCallback(() => {
+    const run = plannedEpicBanner.run;
+    if (!plannedEpic || !run || run.status !== "paused" || plannedEpicRunPending !== null) return;
+    setPlannedEpicRunPending("resuming");
+    void resumeEpicRun({
+      environmentId: plannedEpic.environmentId,
+      input: { runId: run.runId },
+    }).then((result) => {
+      if (result._tag === "Success") return;
+      setPlannedEpicRunPending(null);
+      reportPlannedEpicRunFailure("Could not resume run", result);
+    });
+  }, [
+    plannedEpic,
+    plannedEpicBanner,
+    plannedEpicRunPending,
+    resumeEpicRun,
+    reportPlannedEpicRunFailure,
+  ]);
+  const stopPlannedEpicRun = useCallback(() => {
+    const run = plannedEpicBanner.run;
+    if (!plannedEpic || !run || isTerminalEpicRunStatus(run.status)) return;
+    if (plannedEpicRunPending === "stopping") return;
+    setPlannedEpicRunPending("stopping");
+    void stopEpicRun({
+      environmentId: plannedEpic.environmentId,
+      input: { runId: run.runId },
+    }).then((result) => {
+      if (result._tag === "Success") return;
+      setPlannedEpicRunPending(null);
+      reportPlannedEpicRunFailure("Could not stop run", result);
+    });
+  }, [
+    plannedEpic,
+    plannedEpicBanner,
+    plannedEpicRunPending,
+    stopEpicRun,
+    reportPlannedEpicRunFailure,
+  ]);
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
@@ -1772,99 +1899,163 @@ function ChatViewContent(props: ChatViewProps) {
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
   const systemComposerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
-    if (plannedEpic && !activeEpicRun && !plannedEpicDismissed) {
+    if (plannedEpicBanner.visible && plannedEpic) {
       const plannedEpicKey = plannedEpicIdentity(plannedEpic);
       const epicRoute = plannedEpicRoute(plannedEpic);
       const isLaunching = pendingPlannedEpicKey === plannedEpicKey;
+      const stopButton = (
+        <AlertDialog>
+          <AlertDialogTrigger
+            render={
+              <Button
+                size="xs"
+                variant="destructive-outline"
+                disabled={plannedEpicRunPending === "stopping"}
+              />
+            }
+          >
+            {plannedEpicRunPending === "stopping" ? "Stopping…" : "Stop"}
+          </AlertDialogTrigger>
+          <AlertDialogPopup>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Stop this run?</AlertDialogTitle>
+              <AlertDialogDescription>
+                The current orchestration turn is interrupted and cannot be resumed. Completed
+                iterations and their threads are kept.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogClose render={<Button variant="outline" />}>
+                Keep running
+              </AlertDialogClose>
+              <AlertDialogClose
+                render={<Button variant="destructive" onClick={stopPlannedEpicRun} />}
+              >
+                Stop run
+              </AlertDialogClose>
+            </AlertDialogFooter>
+          </AlertDialogPopup>
+        </AlertDialog>
+      );
       items.push({
         id: `planned-epic:${plannedEpic.epicId}:${plannedEpic.projectId}`,
-        variant: "success",
+        variant: plannedEpicBanner.variant,
         icon: <ChefHatIcon />,
-        title: `Epic ${plannedEpic.epicId} planned`,
+        title: plannedEpicBanner.title,
         actions: (
           <>
             <Button size="xs" variant="outline" onClick={() => void navigate(epicRoute)}>
               View epic
             </Button>
-            <Button
-              size="xs"
-              disabled={isLaunching}
-              onClick={() => {
-                if (isLaunching) return;
-                setPendingPlannedEpicKey(plannedEpicKey);
-                void preflightAndLaunchEpicRun({
-                  preflightInput: {
-                    environmentId: plannedEpic.environmentId,
-                    input: {
-                      workspaceRoot: plannedEpic.cwd,
-                      epicId: plannedEpic.epicId,
-                      // The banner launches with no config override, so the
-                      // run takes the resolved default.
-                      mode: epicRunPreflightModeForConfig(undefined),
-                    },
-                  },
-                  launchInput: plannedEpic,
-                  preflight: preflightEpicRun,
-                  launch: async (correlation) =>
-                    launchPlannedEpic({
-                      correlation,
-                      launch: launchEpicRun,
-                      navigate,
-                      onSettled: () => setPendingPlannedEpicKey(null),
-                      onFailure: (result) => {
-                        if (!isAtomCommandInterrupted(result)) {
-                          const error = squashAtomCommandFailure(result);
-                          const blockers = epicRunPreflightBlockersFromError(error);
-                          toastManager.add(
-                            stackedThreadToast({
-                              type: "error",
-                              title: "Could not start unattended run",
-                              description:
-                                blockers === null
-                                  ? chatActionErrorMessage(error)
-                                  : blockers.join("\n\n"),
-                            }),
-                          );
-                        }
+            {plannedEpicBanner.control === "pause" ? (
+              <>
+                <Button
+                  size="xs"
+                  disabled={plannedEpicRunPending !== null}
+                  onClick={pausePlannedEpicRun}
+                >
+                  {plannedEpicRunPending === "pausing" ? "Pausing…" : "Pause"}
+                </Button>
+                {stopButton}
+              </>
+            ) : null}
+            {plannedEpicBanner.control === "resume" ? (
+              <>
+                <Button
+                  size="xs"
+                  disabled={plannedEpicRunPending !== null}
+                  onClick={resumePlannedEpicRun}
+                >
+                  {plannedEpicRunPending === "resuming" ? "Resuming…" : "Resume"}
+                </Button>
+                {stopButton}
+              </>
+            ) : null}
+            {plannedEpicBanner.control === "start" || plannedEpicBanner.control === "restart" ? (
+              <Button
+                size="xs"
+                disabled={isLaunching}
+                onClick={() => {
+                  if (isLaunching) return;
+                  setPendingPlannedEpicKey(plannedEpicKey);
+                  void preflightAndLaunchEpicRun({
+                    preflightInput: {
+                      environmentId: plannedEpic.environmentId,
+                      input: {
+                        workspaceRoot: plannedEpic.cwd,
+                        epicId: plannedEpic.epicId,
+                        // The banner launches with no config override, so the
+                        // run takes the resolved default.
+                        mode: epicRunPreflightModeForConfig(undefined),
                       },
-                    }),
-                  onPreflightFailure: (result) => {
-                    setPendingPlannedEpicKey(null);
-                    const failure = result as unknown as AtomCommandResult<unknown, unknown>;
-                    if (failure._tag === "Failure" && !isAtomCommandInterrupted(failure)) {
+                    },
+                    launchInput: plannedEpic,
+                    preflight: preflightEpicRun,
+                    launch: async (correlation) =>
+                      launchPlannedEpic({
+                        correlation,
+                        launch: launchEpicRun,
+                        navigate,
+                        onSettled: () => setPendingPlannedEpicKey(null),
+                        onFailure: (result) => {
+                          if (!isAtomCommandInterrupted(result)) {
+                            const error = squashAtomCommandFailure(result);
+                            const blockers = epicRunPreflightBlockersFromError(error);
+                            toastManager.add(
+                              stackedThreadToast({
+                                type: "error",
+                                title: "Could not start unattended run",
+                                description:
+                                  blockers === null
+                                    ? chatActionErrorMessage(error)
+                                    : blockers.join("\n\n"),
+                              }),
+                            );
+                          }
+                        },
+                      }),
+                    onPreflightFailure: (result) => {
+                      setPendingPlannedEpicKey(null);
+                      const failure = result as unknown as AtomCommandResult<unknown, unknown>;
+                      if (failure._tag === "Failure" && !isAtomCommandInterrupted(failure)) {
+                        toastManager.add(
+                          stackedThreadToast({
+                            type: "error",
+                            title: "Could not check unattended run",
+                            description: chatActionErrorMessage(squashAtomCommandFailure(failure)),
+                          }),
+                        );
+                      }
+                    },
+                    onBlocked: (result) => {
+                      setPendingPlannedEpicKey(null);
                       toastManager.add(
                         stackedThreadToast({
                           type: "error",
-                          title: "Could not check unattended run",
-                          description: chatActionErrorMessage(squashAtomCommandFailure(failure)),
+                          title: "Unattended run is blocked",
+                          description: presentEpicRunPreflight(result).blockers.join("\n\n"),
                         }),
                       );
-                    }
-                  },
-                  onBlocked: (result) => {
-                    setPendingPlannedEpicKey(null);
-                    toastManager.add(
-                      stackedThreadToast({
-                        type: "error",
-                        title: "Unattended run is blocked",
-                        description: presentEpicRunPreflight(result).blockers.join("\n\n"),
-                      }),
-                    );
-                  },
-                  onWarnings: (result) => {
-                    toastManager.add(
-                      stackedThreadToast({
-                        type: "warning",
-                        title: "Unattended run warnings",
-                        description: presentEpicRunPreflight(result).warnings.join("\n\n"),
-                      }),
-                    );
-                  },
-                });
-              }}
-            >
-              {isLaunching ? "Starting..." : "Start unattended run"}
-            </Button>
+                    },
+                    onWarnings: (result) => {
+                      toastManager.add(
+                        stackedThreadToast({
+                          type: "warning",
+                          title: "Unattended run warnings",
+                          description: presentEpicRunPreflight(result).warnings.join("\n\n"),
+                        }),
+                      );
+                    },
+                  });
+                }}
+              >
+                {isLaunching
+                  ? "Starting…"
+                  : plannedEpicBanner.control === "restart"
+                    ? "Start new run"
+                    : "Start unattended run"}
+              </Button>
+            ) : null}
           </>
         ),
         dismissLabel: "Dismiss planned epic notice",
@@ -1945,12 +2136,15 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return items;
   }, [
-    activeEpicRun,
     launchEpicRun,
     preflightEpicRun,
     pendingPlannedEpicKey,
     plannedEpic,
-    plannedEpicDismissed,
+    plannedEpicBanner,
+    plannedEpicRunPending,
+    pausePlannedEpicRun,
+    resumePlannedEpicRun,
+    stopPlannedEpicRun,
     setPlannedEpicBannerDismissed,
     activeEnvironmentUnavailableState,
     handleReconnectActiveEnvironment,
@@ -5076,7 +5270,7 @@ function ChatViewContent(props: ChatViewProps) {
                             : "pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
                         )}
                       >
-                        {activeEpicRun ? (
+                        {activeEpicRun && !plannedEpicBanner.suppressRunPill ? (
                           <div className="mx-auto flex w-full max-w-3xl px-2.5 pt-1.5 sm:px-3">
                             <EpicRunPill
                               run={activeEpicRun}
