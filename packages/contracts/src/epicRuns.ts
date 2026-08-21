@@ -136,6 +136,11 @@ export const EpicRun = Schema.Struct({
   runId: EpicRunId,
   epicId: TrimmedNonEmptyString,
   projectId: ProjectId,
+  /**
+   * The exact checkout used by this run. Keep this path verbatim. The runner
+   * reads git and bd state from this checkout, including a linked worktree.
+   * Repository identity comes from the project's canonical git common dir.
+   */
   cwd: TrimmedNonEmptyString,
   prompt: Schema.String,
   orientationFile: Schema.NullOr(Schema.String),

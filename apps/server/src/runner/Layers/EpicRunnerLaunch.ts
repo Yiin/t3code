@@ -189,12 +189,25 @@ export const makeEpicRunnerLaunch = (deps: {
     readonly cwd: string;
   }) {
     const runs = yield* store.listRuns({}).pipe(Effect.mapError(storeError("listRuns")));
-    return runs.find(
-      (run) =>
-        (run.status === "running" || run.status === "paused") &&
-        run.epicId === input.epicId &&
-        run.cwd === input.cwd,
-    );
+    for (const run of runs) {
+      if ((run.status !== "running" && run.status !== "paused") || run.epicId !== input.epicId) {
+        continue;
+      }
+
+      // `cwd` stays verbatim because the runner must execute git and bd in the
+      // launching checkout. The identity is therefore (epic, repository,
+      // checkout), not just a repository. This lets a repeated launch from
+      // one worktree attach, while another worktree reaches the shared lock.
+      if (run.cwd === input.cwd) return run;
+
+      // Resolve the repository before rejecting the candidate. This keeps the
+      // identity repository-aware and fails soft when either path is no longer
+      // a usable git checkout. A different checkout must never attach here.
+      yield* sameRepository(run.cwd, input.cwd).pipe(
+        Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+      );
+    }
+    return undefined;
   });
 
   const awaitActiveRun = Effect.fn("EpicRunner.awaitActiveRun")(function* (input: {

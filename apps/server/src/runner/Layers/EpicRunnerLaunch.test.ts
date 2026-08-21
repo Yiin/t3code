@@ -201,6 +201,7 @@ const makeLaunchHarness = (
   },
 ) => {
   const saved: EpicRun[] = [];
+  const activeRuns: EpicRun[] = [];
   const launch = makeEpicRunnerLaunch({
     processRunner:
       options?.processRunner ??
@@ -216,7 +217,7 @@ const makeLaunchHarness = (
           }),
       } as ProcessRunner.ProcessRunner["Service"]),
     store: {
-      listRuns: () => Effect.succeed([]),
+      listRuns: () => Effect.succeed(activeRuns),
     } as unknown as Parameters<typeof makeEpicRunnerLaunch>[0]["store"],
     preflight: {
       check: () => Effect.succeed(stubPreflightResult()),
@@ -283,10 +284,67 @@ const makeLaunchHarness = (
     cwd: "/repo",
     ...overrides,
   });
-  return { launch, saved, input };
+  return { launch, saved, activeRuns, input };
 };
 
 describe("EpicRunnerLaunch inheritOriginModelSelection", () => {
+  it.effect("attaches a repeat launch from the same worktree to the active run", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness({});
+      const first = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree" }));
+      harness.activeRuns.push(first as unknown as EpicRun);
+
+      const repeat = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree" }));
+
+      expect(repeat.runId).toBe(first.runId);
+      expect(harness.saved).toHaveLength(1);
+    }),
+  );
+
+  it.effect("does not attach a launch from another checkout of the same repository", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness(
+        {},
+        {
+          processRunner: {
+            run: () =>
+              Effect.succeed({
+                stdout: "/home/yiin/Projects/t3code/.git\n",
+                stderr: "",
+                code: 0 as never,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              }),
+          },
+        },
+      );
+      const first = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree-a" }));
+      harness.activeRuns.push(first as unknown as EpicRun);
+
+      const second = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree-b" }));
+
+      expect(second.runId).toBe(first.runId);
+      expect(harness.saved).toHaveLength(2);
+      expect(harness.saved[1]?.cwd).toBe("/worktree-b");
+    }),
+  );
+
+  it.effect("starts a fresh run for a different epic in the same checkout", () =>
+    Effect.gen(function* () {
+      const harness = makeLaunchHarness({});
+      const first = yield* harness.launch.launchRun(harness.input({ cwd: "/worktree" }));
+      harness.activeRuns.push(first as unknown as EpicRun);
+
+      const second = yield* harness.launch.launchRun(
+        harness.input({ cwd: "/worktree", epicId: "epic-2" }),
+      );
+
+      expect(second.runId).toBe(first.runId);
+      expect(harness.saved).toHaveLength(2);
+    }),
+  );
+
   it.effect("accepts a worktree cwd from the same repository", () =>
     Effect.gen(function* () {
       const calls: string[] = [];
