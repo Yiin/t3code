@@ -215,7 +215,7 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    stable across dispatches. No action needed —
    this is automatic for claude/ccx and a no-op for prime/kimi/codex/opencode.
 
-6. **Resolve the runner from this skill, then launch from the project root.** Derive `SKILL_DIR` from the directory containing the `SKILL.md` you loaded. Use `${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}`; this lets callers pin a specific copy with `COOKEPIC_RUNNER`. Only when the loaded skill path is unavailable or ambiguous, fall back to `~/.agents/skills/cook-epic/run.sh`.
+6. **Resolve the runner from this skill, then launch from the selected checkout.** The checkout may be the registered project root or a linked worktree. Derive `SKILL_DIR` from the directory containing the `SKILL.md` you loaded. Use `${COOKEPIC_RUNNER:-"$SKILL_DIR/run.sh"}`; this lets callers pin a specific copy with `COOKEPIC_RUNNER`. Only when the loaded skill path is unavailable or ambiguous, fall back to `~/.agents/skills/cook-epic/run.sh`.
 
    In a server or remote harness, detach the coordinator by default so the OS
    owns it after the chat session closes:
@@ -294,7 +294,10 @@ probe `GET $T3_SERVER_URL/.well-known/t3/environment` (unauthenticated).
 Unreachable → terminal fallback, and the launch report must say why (the probe
 failed, not just that you fell back).
 
-**Launch.** When the probe answers:
+**Launch.** When the probe answers, send the launcher's execution cwd.
+The cwd may be a linked Git worktree of the registered project.
+The server accepts it when its canonical Git common directory matches the
+project workspace root's canonical Git common directory.
 
 ```bash
 curl -sS -X POST "$T3_SERVER_URL/api/epic-runs/launch" \
@@ -302,6 +305,13 @@ curl -sS -X POST "$T3_SERVER_URL/api/epic-runs/launch" \
   -H "Content-Type: application/json" \
   -d "{\"epicId\": \"<beads epic id>\", \"projectId\": \"$T3_PROJECT_ID\", \"cwd\": \"$T3_WORKSPACE_ROOT\", \"originThreadId\": \"$T3_THREAD_ID\", \"inheritOriginModelSelection\": true}"
 ```
+
+The server stores this cwd as `run.cwd`. It does not replace it with the
+project workspace root. It uses the repository identity for run deduplication
+and the shared run lock. A worktree launch gets an owned base branch named
+`epic/<epicId>/base`, seeded from the worktree's checked-out branch. Merge
+queue landing then updates that ref and does not advance the live worktree.
+Main-checkout launches keep their existing base-branch behavior.
 
 `originThreadId` is your own thread. The server groups the run's iteration
 threads under it in the sidebar. Drop the field when `T3_THREAD_ID` is unset —
@@ -333,9 +343,10 @@ starts on Prime Agent can finish its later iterations on Claude.
 - `200` → server-owned run. Launch is idempotent: when a run is already
   active for the epic, the server returns the existing run. Note that in the
   report and start nothing else.
-- `400`/`401`/`403`/`404`/`409` → HARD STOP. Report the server's error. You
-  reached the server, so never fall back to the terminal coordinator — a
-  fallback would fork run ownership.
+- `400`/`401`/`403`/`404`/`409` → HARD STOP. Report the server's error. A `409`
+  after the worktree and lock checks means a real launch conflict, such as an
+  active run or a foreign repository. You reached the server, so never fall
+  back to the terminal coordinator. The fallback would fork run ownership.
 - `500` or any other `5xx` → HARD STOP, same rule: the server was reached, so
   never fall back. Report the error.
 - Network failure (connect refused, timeout, DNS) → terminal fallback,

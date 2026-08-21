@@ -55,6 +55,20 @@ narrows it to one scenario. Editing one scenario means running all three.
 - `apps/server/src/runner/Layers/EpicRunner.ts` owns lifecycle and restart recovery.
 - `EpicRunnerLaunch.ts` owns preflight, the lease, and run creation.
   `EpicRunnerLifecycle.ts` owns pause, resume, cancel, and the worker cap.
+- Epic launches accept a `cwd` in a linked worktree when its canonical Git
+  common directory matches the project's `workspaceRoot` repository.
+  `run.cwd` keeps the exact execution path. Run identity and deduplication use
+  the repository identity, so the main checkout and worktrees share a run lock.
+- A worktree launch uses `epic/<epicId>/base`, seeded from its checked-out
+  branch. Merge landing updates that owned ref and does not advance the live
+  worktree. Main-checkout launches retain their existing base behavior.
+- The HTTP launch surface is the `epicRuns` group in
+  `packages/contracts/src/environmentHttp.ts:504-560`. The WebSocket launch
+  surface is `epicRun.launch` in `packages/contracts/src/rpc.ts:554-558`.
+- `EpicRunnerLaunch.test.ts` has the stub harness. The real-Git launch fixture
+  is `makeFixture` in `apps/server/integration/epicRunner.integration.test.ts`.
+  Real lock coverage is in `NodeEpicRunLock` tests. The linked-worktree helper
+  is `gitWorktreeFixture`.
 - `PoolWorkspace.ts` and `PoolDispatch.ts` adapt server workspace and dispatch ports.
 - Provisioning is per surface. Mirror every change between
   `PoolWorkspace.ensureIntegrationWorkspace` and
@@ -65,7 +79,11 @@ narrows it to one scenario. Editing one scenario means running all three.
 - `packages/epic-core/src/EpicRunPreflight.ts` gates both launch and resume. Its
   `blockerPolicy` branches on `mode` and `intent`; it moved out of `apps/server/src/beads`.
 - `packages/epic-core/src/adapters/NodeEpicRunLock.ts` owns the run lock. It shares
-  its file format with `skills/ralph/run.sh`.
+  its file format with `skills/ralph/run.sh`. Both resolve the lock through the
+  repository's common Git directory, so linked worktrees contend with the main
+  checkout.
+- The terminal `t3 epic start` CLI still matches projects by exact cwd. This is
+  a known limitation outside the worktree launch scope.
 - `packages/epic-core/src/workerScope.ts` puts workers in `cook-epic.slice`, so they
   survive a service restart.
 - Restart recovery continues each interrupted iteration in its own row. A row
