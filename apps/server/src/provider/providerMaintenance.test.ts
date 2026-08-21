@@ -9,6 +9,9 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { HttpClient } from "effect/unstable/http";
+import { ClaudeProviderMaintenanceResolver } from "./Drivers/ClaudeDriver.ts";
+import { CodexProviderMaintenanceResolver } from "./Drivers/CodexDriver.ts";
+import { OpenCodeProviderMaintenanceResolver } from "./Drivers/OpenCodeDriver.ts";
 import {
   createProviderVersionAdvisory,
   enrichProviderSnapshotWithVersionAdvisory,
@@ -33,12 +36,14 @@ const isNativeTestCommandPath =
     normalizeCommandPath(commandPath).includes(expectedPathSegment);
 const packageToolUpdate = makePackageManagedProviderMaintenanceResolver({
   provider: driver("packageTool"),
+  miseToolName: "package-tool-cli",
   npmPackageName: "@example/package-tool",
   homebrewFormula: "package-tool",
   nativeUpdate: null,
 });
 const nativePackageToolUpdate = makePackageManagedProviderMaintenanceResolver({
   provider: driver("nativePackageTool"),
+  miseToolName: "native-package-tool-cli",
   npmPackageName: "@example/native-package-tool",
   homebrewFormula: "native-package-tool",
   nativeUpdate: {
@@ -50,6 +55,7 @@ const nativePackageToolUpdate = makePackageManagedProviderMaintenanceResolver({
 });
 const scopedPackageToolUpdate = makePackageManagedProviderMaintenanceResolver({
   provider: driver("scopedPackageTool"),
+  miseToolName: "scoped-package-tool-cli",
   npmPackageName: "@example/scoped-package-tool",
   homebrewFormula: "example/tap/scoped-package-tool",
   nativeUpdate: {
@@ -197,6 +203,125 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       },
     });
   });
+
+  it.effect("switches package-managed providers to mise updates for .local/share/mise shims", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* makeTempDir("t3-mise-local-share-capabilities");
+      const miseShimsDir = NodePath.join(tempDir, ".local", "share", "mise", "shims");
+      NodeFS.mkdirSync(miseShimsDir, { recursive: true });
+      const packageToolPath = NodePath.join(miseShimsDir, "package-tool");
+      NodeFS.writeFileSync(packageToolPath, "#!/bin/sh\n");
+      NodeFS.chmodSync(packageToolPath, 0o755);
+
+      const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
+        binaryPath: "package-tool",
+        env: {
+          PATH: miseShimsDir,
+        },
+      }).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+
+      expect(capabilities).toEqual({
+        provider: driver("packageTool"),
+        packageName: "@example/package-tool",
+        update: {
+          command: "mise upgrade package-tool-cli",
+
+          executable: "mise",
+
+          args: ["upgrade", "package-tool-cli"],
+
+          lockKey: "mise-global",
+        },
+      });
+    }),
+  );
+
+  it.effect("switches package-managed providers to mise updates for .mise shims", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* makeTempDir("t3-mise-home-capabilities");
+      const miseShimsDir = NodePath.join(tempDir, ".mise", "shims");
+      NodeFS.mkdirSync(miseShimsDir, { recursive: true });
+      const scopedPackageToolPath = NodePath.join(miseShimsDir, "scoped-package-tool");
+      NodeFS.writeFileSync(scopedPackageToolPath, "#!/bin/sh\n");
+      NodeFS.chmodSync(scopedPackageToolPath, 0o755);
+
+      const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+        scopedPackageToolUpdate,
+        {
+          binaryPath: "scoped-package-tool",
+          env: {
+            PATH: miseShimsDir,
+          },
+        },
+      ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+
+      expect(capabilities).toEqual({
+        provider: driver("scopedPackageTool"),
+        packageName: "@example/scoped-package-tool",
+        update: {
+          command: "mise upgrade scoped-package-tool-cli",
+
+          executable: "mise",
+
+          args: ["upgrade", "scoped-package-tool-cli"],
+
+          lockKey: "mise-global",
+        },
+      });
+    }),
+  );
+
+  it.effect("uses each provider's explicit mise tool name", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* makeTempDir("t3-provider-mise-names");
+      const miseShimsDir = NodePath.join(tempDir, ".local", "share", "mise", "shims");
+      NodeFS.mkdirSync(miseShimsDir, { recursive: true });
+
+      const cases = [
+        {
+          binaryName: "claude",
+          resolver: ClaudeProviderMaintenanceResolver,
+          expectedCommand: "mise upgrade claude",
+          expectedArgs: ["upgrade", "claude"],
+        },
+        {
+          binaryName: "codex",
+          resolver: CodexProviderMaintenanceResolver,
+          expectedCommand: "mise upgrade codex",
+          expectedArgs: ["upgrade", "codex"],
+        },
+        {
+          binaryName: "opencode",
+          resolver: OpenCodeProviderMaintenanceResolver,
+          expectedCommand: "mise upgrade opencode",
+          expectedArgs: ["upgrade", "opencode"],
+        },
+      ] as const;
+
+      for (const testCase of cases) {
+        const binaryPath = NodePath.join(miseShimsDir, testCase.binaryName);
+        NodeFS.writeFileSync(binaryPath, "#!/bin/sh\n");
+        NodeFS.chmodSync(binaryPath, 0o755);
+
+        const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          testCase.resolver,
+          {
+            binaryPath: testCase.binaryName,
+            env: {
+              PATH: miseShimsDir,
+            },
+          },
+        ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+
+        expect(capabilities.update).toEqual({
+          command: testCase.expectedCommand,
+          executable: "mise",
+          args: testCase.expectedArgs,
+          lockKey: "mise-global",
+        });
+      }
+    }),
+  );
 
   it.effect(
     "switches package-managed providers to vite-plus updates when the resolved binary lives in vite-plus global bin",
@@ -366,6 +491,38 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           },
         });
       }),
+  );
+
+  it.effect("keeps native updates ahead of mise shim detection", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* makeTempDir("t3-native-before-mise-capabilities");
+      const nativeBinDir = NodePath.join(tempDir, ".local", "bin");
+      const miseShimsDir = NodePath.join(tempDir, ".local", "share", "mise", "shims");
+      NodeFS.mkdirSync(nativeBinDir, { recursive: true });
+      NodeFS.mkdirSync(miseShimsDir, { recursive: true });
+      const nativePackageToolPath = NodePath.join(nativeBinDir, "native-package-tool");
+      const miseShimPath = NodePath.join(miseShimsDir, "native-package-tool");
+      NodeFS.writeFileSync(nativePackageToolPath, "#!/bin/sh\n");
+      NodeFS.chmodSync(nativePackageToolPath, 0o755);
+      NodeFS.symlinkSync(nativePackageToolPath, miseShimPath);
+
+      const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+        nativePackageToolUpdate,
+        {
+          binaryPath: "native-package-tool",
+          env: {
+            PATH: miseShimsDir,
+          },
+        },
+      ).pipe(Effect.provideService(HostProcessPlatform, "darwin"));
+
+      expect(capabilities.update).toEqual({
+        command: "native-package-tool update",
+        executable: "native-package-tool",
+        args: ["update"],
+        lockKey: "native-package-tool-native",
+      });
+    }),
   );
 
   it.effect(

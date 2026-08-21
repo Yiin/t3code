@@ -77,8 +77,9 @@ function isClaudeNativeCommandPath(commandPath: string): boolean {
   );
 }
 
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
+export const ClaudeProviderMaintenanceResolver = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
+  miseToolName: "claude",
   npmPackageName: "@anthropic-ai/claude-code",
   homebrewFormula: "claude-code",
   nativeUpdate: {
@@ -159,10 +160,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         enabled,
         homePath: layout.mode === "authOverlay" ? layout.effectiveHomePath! : config.homePath,
       } satisfies ClaudeSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      });
+      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+        ClaudeProviderMaintenanceResolver,
+        {
+          binaryPath: effectiveConfig.binaryPath,
+          env: processEnv,
+        },
+      );
       const continuationGroupKey = layout.continuationKey;
       // Legacy keys derive from the ORIGINAL config: its homePath is the
       // shared home, which is the continuation key's basis. `effectiveConfig`

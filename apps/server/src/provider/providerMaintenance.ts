@@ -65,6 +65,7 @@ export interface ProviderMaintenanceCapabilitiesResolver {
 
 export interface PackageManagedProviderMaintenanceDefinition {
   readonly provider: ProviderDriverKind;
+  readonly miseToolName: string;
   readonly npmPackageName: string;
   readonly homebrewFormula: string | null;
   readonly nativeUpdate: {
@@ -140,6 +141,18 @@ function makeNpmGlobalProviderMaintenanceCapabilities(
     updateExecutable: "npm",
     updateArgs: ["install", "-g", `${definition.npmPackageName}@latest`],
     updateLockKey: "npm-global",
+  });
+}
+
+function makeMiseProviderMaintenanceCapabilities(
+  definition: PackageManagedProviderMaintenanceDefinition,
+): ProviderMaintenanceCapabilities {
+  return makeProviderMaintenanceCapabilities({
+    provider: definition.provider,
+    packageName: definition.npmPackageName,
+    updateExecutable: "mise",
+    updateArgs: ["upgrade", definition.miseToolName],
+    updateLockKey: "mise-global",
   });
 }
 
@@ -250,6 +263,11 @@ function isNpmGlobalCommandPath(commandPath: string): boolean {
   );
 }
 
+function isMiseShimCommandPath(commandPath: string): boolean {
+  const normalized = normalizeCommandPath(commandPath);
+  return normalized.includes("/.local/share/mise/shims/") || normalized.includes("/.mise/shims/");
+}
+
 function isHomebrewCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
   return (
@@ -291,6 +309,9 @@ export function resolvePackageManagedProviderMaintenance(
         makeNativeProviderMaintenanceCapabilities(definition) ??
         makeNpmGlobalProviderMaintenanceCapabilities(definition)
       );
+    }
+    if (commandPaths.some(isMiseShimCommandPath)) {
+      return makeMiseProviderMaintenanceCapabilities(definition);
     }
     if (commandPaths.some(isVitePlusGlobalCommandPath)) {
       return makeVitePlusGlobalProviderMaintenanceCapabilities(definition);
