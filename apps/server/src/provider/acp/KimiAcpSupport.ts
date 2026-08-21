@@ -13,6 +13,7 @@ import { type AcpToolCallState, findSessionConfigOption } from "./AcpRuntimeMode
 
 const KIMI_DRIVER_KIND = ProviderDriverKind.make("kimi");
 const KIMI_DEFAULT_MODEL = "kimi-code/k3";
+const KIMI_DEFAULT_MODEL_ID = resolveKimiAcpBaseModelId(undefined);
 
 type KimiAcpRuntimeKimiSettings = Pick<KimiSettings, "binaryPath">;
 
@@ -86,9 +87,11 @@ export function applyKimiAcpModelSelection<E>(input: {
   readonly model: string | null | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<void, E> {
-  return input.runtime
-    .setModel(resolveKimiAcpBaseModelId(input.model))
-    .pipe(Effect.mapError(input.mapError), Effect.asVoid);
+  const model = resolveKimiAcpBaseModelId(input.model);
+  if (model === KIMI_DEFAULT_MODEL_ID) {
+    return Effect.void;
+  }
+  return input.runtime.setModel(model).pipe(Effect.mapError(input.mapError), Effect.asVoid);
 }
 
 // --- Subagent detection heuristic (kimi-specific) ---------------------------

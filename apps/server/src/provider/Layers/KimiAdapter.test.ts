@@ -10,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import { KimiSettings, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
+import { KimiSettings, ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
 import {
@@ -80,6 +80,7 @@ const AcpRequestLogLine = Schema.Struct({
   params: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
+        configId: Schema.optional(Schema.String),
         prompt: Schema.optional(Schema.Array(Schema.Unknown)),
       }),
     ),
@@ -369,6 +370,40 @@ it.layer(kimiAdapterTestLayer)("KimiAdapterLive", (it) => {
       // The refusal must not fall back to a fresh session behind the caller's
       // back: a resumed epic worker would lose the turn it was continuing.
       assert.deepStrictEqual(yield* readAcpSessionSetupMethods(requestLogPath), []);
+    }),
+  );
+
+  it.effect("does not fail when Kimi rejects setting its default model", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("kimi-default-model-no-config-write");
+      const { adapter, requestLogPath } = yield* makeLoggedAdapter({
+        T3_ACP_FAIL_SET_CONFIG_OPTION: "1",
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kimi"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("kimi"),
+          model: "kimi-code/k3",
+          options: [],
+        },
+      });
+      const turn = yield* adapter.sendTurn({ threadId, input: "hello" });
+
+      assert.equal(turn.threadId, threadId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(
+        requests.some(
+          (request) =>
+            request.method === "session/set_config_option" && request.params?.configId === "model",
+        ),
+        false,
+      );
+
+      yield* adapter.stopSession(threadId);
     }),
   );
 
