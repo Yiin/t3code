@@ -193,18 +193,24 @@ const make = Effect.gen(function* () {
       // Deleted, archived, or unreadable since `collect`. Nothing to wake.
       return;
     }
-    // Some other turn is already running on this thread: a human typed while
-    // the boot pass worked through an earlier thread, or the queued-delivery
-    // sweep released a parked message. Either way the thread is no longer
-    // waiting on the restart, and a nudge would talk over live work.
-    if (
-      shell.latestTurn !== null &&
-      shell.latestTurn.state === "running" &&
-      shell.latestTurn.turnId !== candidate.latestTurnId
-    ) {
-      yield* Effect.logInfo("provider.session.restart-nudge.skipped-busy", {
+    // A turn this pass did not collect now sits on the thread: a human typed
+    // while the boot pass worked through an earlier thread, or the
+    // queued-delivery sweep released a parked message. Either way the thread
+    // has moved on from the restart and is no longer waiting on it.
+    //
+    // Any different turn disqualifies the nudge, not just a running one. The
+    // fan-out is four wide and a resume can hold a slot for the full 120s
+    // bound, which is ample time for a turn to start AND finish ahead of this
+    // one — and stopping a healthy session to tell it that it was "cut off"
+    // is the worst outcome this pass can produce. Nothing legitimate is lost
+    // by the wider test: both restart shapes leave the dead turn's own id in
+    // place, so a thread that really is waiting still matches.
+    if (shell.latestTurn !== null && shell.latestTurn.turnId !== candidate.latestTurnId) {
+      yield* Effect.logInfo("provider.session.restart-nudge.skipped-moved-on", {
         threadId,
-        runningTurnId: shell.latestTurn.turnId,
+        interruptedTurnId: candidate.latestTurnId,
+        latestTurnId: shell.latestTurn.turnId,
+        latestTurnState: shell.latestTurn.state,
       });
       return;
     }

@@ -316,6 +316,43 @@ describe("InterruptedTurnNudger", () => {
     }),
   );
 
+  it.effect("stands down when another turn came and went since the restart", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({
+        // The fan-out is four wide and a resume can hold a slot for the full
+        // settle bound, so a whole turn can start and finish while this
+        // candidate waits its turn. Stopping that healthy session to tell it
+        // it was "cut off" is the worst thing this pass could do.
+        shellAtNudge: shell({
+          turnId: TurnId.make("turn-a-human-already-finished"),
+          turnState: "completed",
+        }),
+      });
+
+      yield* runBootPass(layer);
+
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("still nudges when the interrupted turn itself is all that changed state", () =>
+    Effect.gen(function* () {
+      // The SIGKILL shape: the reaper settled the very turn that died, so the
+      // id still matches and the thread is genuinely waiting.
+      const { layer, dispatched } = harness({
+        shellAtNudge: shell({ turnState: "interrupted", activeTurnId: null }),
+      });
+
+      yield* runBootPass(layer);
+
+      expect(commandTypes(dispatched)).toEqual([
+        "thread.session.stop",
+        "thread.session.resume",
+        "thread.turn.start",
+      ]);
+    }),
+  );
+
   it.effect("gives each restart its own message row", () =>
     Effect.gen(function* () {
       const first = harness();
