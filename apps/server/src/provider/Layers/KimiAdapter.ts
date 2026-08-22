@@ -154,6 +154,9 @@ interface KimiSessionContext {
   readonly subagentTracker: KimiSubagentTaskTracker;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
+  autonomousTurnId: TurnId | undefined;
+  autonomousCompletionFiber: Fiber.Fiber<void, never> | undefined;
+  pendingPrompt: boolean;
   /** Prompt content blocks this agent advertised at `initialize`; decides how
    * a non-image attachment is encoded. */
   readonly promptCapabilities: EffectAcpSchema.PromptCapabilities | undefined;
@@ -394,6 +397,62 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
 
+    const completeAutonomousTurn = (
+      ctx: KimiSessionContext,
+      state: "completed" | "cancelled" = "completed",
+    ) =>
+      Effect.gen(function* () {
+        const turnId = ctx.autonomousTurnId;
+        if (!turnId || ctx.activeTurnId !== turnId) return;
+        ctx.autonomousTurnId = undefined;
+        ctx.activeTurnId = undefined;
+        ctx.autonomousCompletionFiber = undefined;
+        const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
+        ctx.session = { ...readySession, updatedAt: yield* nowIso };
+        yield* offerRuntimeEvent({
+          type: "turn.completed",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          payload: { state, stopReason: state === "cancelled" ? "cancelled" : null },
+        });
+      });
+
+    const scheduleAutonomousCompletion = (ctx: KimiSessionContext) =>
+      Effect.gen(function* () {
+        if (ctx.autonomousCompletionFiber) {
+          yield* Fiber.interrupt(ctx.autonomousCompletionFiber);
+        }
+        ctx.autonomousCompletionFiber = yield* Effect.sleep("250 millis").pipe(
+          Effect.andThen(completeAutonomousTurn(ctx).pipe(Effect.ignore)),
+          Effect.forkDetach,
+        );
+      });
+
+    const beginAutonomousTurn = (ctx: KimiSessionContext) =>
+      Effect.gen(function* () {
+        if (ctx.activeTurnId || ctx.pendingPrompt || ctx.stopped) return;
+        const turnId = TurnId.make(yield* randomUUIDv4);
+        ctx.activeTurnId = turnId;
+        ctx.autonomousTurnId = turnId;
+        ctx.session = {
+          ...ctx.session,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: yield* nowIso,
+        };
+        yield* offerRuntimeEvent({
+          type: "turn.started",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          payload: { model: ctx.session.model },
+        });
+        yield* scheduleAutonomousCompletion(ctx);
+      });
+
     const logNative = (threadId: ThreadId, method: string, payload: unknown) =>
       Effect.gen(function* () {
         if (!nativeEventLogger) return;
@@ -463,6 +522,10 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
+        if (ctx.autonomousCompletionFiber) {
+          yield* Fiber.interrupt(ctx.autonomousCompletionFiber);
+          ctx.autonomousCompletionFiber = undefined;
+        }
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
         if (ctx.notificationFiber) {
@@ -710,6 +773,9 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
             subagentTracker: makeKimiSubagentTaskTracker(),
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
+            autonomousTurnId: undefined,
+            autonomousCompletionFiber: undefined,
+            pendingPrompt: false,
             promptCapabilities: started.initializeResult.agentCapabilities?.promptCapabilities,
             stopped: false,
           };
@@ -724,6 +790,8 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                   case "ModeChanged":
                     return;
                   case "AssistantItemStarted":
+                    yield* beginAutonomousTurn(ctx);
+                    yield* scheduleAutonomousCompletion(ctx);
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp: yield* makeEventStamp(),
@@ -736,6 +804,8 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                     );
                     return;
                   case "AssistantItemCompleted":
+                    yield* beginAutonomousTurn(ctx);
+                    yield* scheduleAutonomousCompletion(ctx);
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp: yield* makeEventStamp(),
@@ -748,10 +818,14 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                     );
                     return;
                   case "PlanUpdated":
+                    yield* beginAutonomousTurn(ctx);
+                    yield* scheduleAutonomousCompletion(ctx);
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* emitPlanUpdate(ctx, event.payload, event.rawPayload, "session/update");
                     return;
                   case "ToolCallUpdated": {
+                    yield* beginAutonomousTurn(ctx);
+                    yield* scheduleAutonomousCompletion(ctx);
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     const subagentSignals = trackKimiSubagentToolCall(
                       ctx.subagentTracker,
@@ -810,6 +884,8 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                     return;
                   }
                   case "ContentDelta":
+                    yield* beginAutonomousTurn(ctx);
+                    yield* scheduleAutonomousCompletion(ctx);
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
@@ -893,6 +969,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
           });
         }
 
+        ctx.pendingPrompt = true;
         let turnStarted = false;
         return yield* ctx.acp
           .prompt(
@@ -910,6 +987,8 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                       threadId: input.threadId,
                     });
                   }
+                  yield* completeAutonomousTurn(ctx);
+                  ctx.pendingPrompt = false;
                   yield* applyRequestedSessionConfiguration({
                     runtime: ctx.acp,
                     runtimeMode: ctx.session.runtimeMode,
@@ -975,11 +1054,14 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
                 input.threadId,
                 Effect.gen(function* () {
                   if (!turnStarted || sessions.get(input.threadId) !== ctx || ctx.stopped) {
+                    ctx.pendingPrompt = false;
                     return;
                   }
                   if (ctx.activeTurnId !== turnId) {
+                    ctx.pendingPrompt = false;
                     return;
                   }
+                  ctx.pendingPrompt = false;
                   const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
                   ctx.activeTurnId = undefined;
                   ctx.session = { ...readySession, updatedAt: yield* nowIso };
@@ -1019,6 +1101,7 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
               ),
             ),
           );
+          yield* completeAutonomousTurn(ctx, "cancelled");
         }),
       );
 
