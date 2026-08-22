@@ -27,7 +27,14 @@ import { ProviderService } from "../Services/ProviderService.ts";
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const BOOT_RECONCILE_STOP_TIMEOUT = Duration.seconds(15);
 const BOOT_RECONCILE_STOP_POLL_INTERVAL = Duration.millis(50);
-const BOOT_RECONCILE_STOP_REASON =
+/**
+ * Why a boot-time stop happened. Exported because `InterruptedTurnNudger`
+ * stops the same way for the threads this pass cannot see: on a graceful
+ * SIGTERM `runStopAll` (ProviderService.ts) already wrote `stopped` bindings,
+ * so `reconcileBootBindings` skips them even though their projected turn is
+ * still running. One string keeps both paths reading identically on a thread.
+ */
+export const BOOT_RECONCILE_STOP_REASON =
   "session interrupted: server restarted while the session was running";
 
 const periodicStopReason = (reason: SessionReapReason): string => {

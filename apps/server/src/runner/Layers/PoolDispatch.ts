@@ -16,14 +16,11 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EpicRunId,
   MessageId,
-  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
   PROVIDER_TURN_STEER_ATTRIBUTED_ACTIVITY_KIND,
   ProviderDriverKind,
-  ProviderSessionResumeSettledActivityPayload,
   ThreadId,
   decodeProviderTurnSteerAttributedActivityPayload,
   type EpicSubagentMap,
-  type ProviderSessionResumeOutcome,
   type TurnId,
 } from "@t3tools/contracts";
 import { EpicRunnerDispatchError } from "@t3tools/epic-core/Errors";
@@ -46,7 +43,6 @@ import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 
 import type { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { EpicSubagentRegistry } from "../../provider/epicSubagents.ts";
@@ -65,22 +61,12 @@ import type { ProjectSetupScriptRunner } from "../../project/ProjectSetupScriptR
 import { nowIso } from "./poolPortErrors.ts";
 
 /**
- * How long to wait for a resume request to settle before calling it an infra
- * fault. The handler answers in one provider session start, so anything past
- * this is the reactor not running, not a slow provider.
- */
-const RESUME_SETTLE_TIMEOUT_MS = 120_000;
-
-/**
  * How often a forced stop re-reads the turn it is waiting on inside the run's
  * stop grace. Short enough that a turn closing early costs almost nothing, and
  * the whole wait is bounded by the grace regardless.
  */
 const FORCED_STOP_POLL_INTERVAL_MS = 250;
 
-const decodeResumeSettledActivity = Schema.decodeUnknownOption(
-  ProviderSessionResumeSettledActivityPayload,
-);
 /**
  * How many projection reads a nudge waits for its steer attribution.
  *
@@ -250,51 +236,15 @@ export const makeServerPoolDispatch = (deps: {
       ? Effect.void
       : committerRegistry.bindThread({ runId, threadId });
 
-  const { readThreadDetail, awaitTurnEnd, readSettledFinalMessage } = makeThreadSettleWatch({
-    projectionSnapshotQuery,
-    logPrefix: "epic.runner",
-  });
-
-  /**
-   * Wait for the `thread.session.resume` this call dispatched to settle.
-   *
-   * The resume answer travels as a durable activity rather than as the
-   * dispatch's own result: the handler runs in the reactor, long after
-   * `dispatch` returns. Polling the projection is the same trade
-   * `awaitTurnEnd` documents — a subscription cannot be proved live before
-   * the dispatch, while a projection read cannot miss a committed answer.
-   *
-   * Matching on `requestCommandId` is what keeps an earlier resume's outcome
-   * from answering this one on a thread that has been resumed before.
-   */
-  const awaitResumeOutcome = (input: {
-    readonly threadId: ThreadId;
-    readonly requestCommandId: CommandId;
-    readonly policy: PoolTimings;
-  }): Effect.Effect<ProviderSessionResumeOutcome> =>
-    Effect.gen(function* () {
-      while (true) {
-        const snapshot = yield* readThreadDetail(input.threadId);
-        for (const activity of snapshot?.thread.activities ?? []) {
-          if (activity.kind !== PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND) continue;
-          const payload = decodeResumeSettledActivity(activity.payload);
-          if (Option.isNone(payload)) continue;
-          if (payload.value.requestCommandId !== input.requestCommandId) continue;
-          return payload.value.outcome;
-        }
-        yield* Effect.sleep(Duration.millis(input.policy.pollIntervalMs));
-      }
-    }).pipe(
-      Effect.timeoutOption(Duration.millis(RESUME_SETTLE_TIMEOUT_MS)),
-      Effect.map(
-        Option.getOrElse(
-          (): ProviderSessionResumeOutcome => ({
-            _tag: "failed",
-            detail: `No resume outcome was recorded for thread '${input.threadId}' within ${String(RESUME_SETTLE_TIMEOUT_MS)}ms.`,
-          }),
-        ),
-      ),
-    );
+  // `awaitResumeOutcome` is shared with the boot nudger
+  // (`provider/Layers/InterruptedTurnNudger.ts`), which resumes an interactive
+  // thread the same way this resumes an iteration thread. It lives on the
+  // settle watch because it polls the same `readThreadDetail`.
+  const { readThreadDetail, awaitTurnEnd, awaitResumeOutcome, readSettledFinalMessage } =
+    makeThreadSettleWatch({
+      projectionSnapshotQuery,
+      logPrefix: "epic.runner",
+    });
 
   /**
    * Wait for the thread to have no FRESH running subagents, bounded by
@@ -919,7 +869,7 @@ export const makeServerPoolDispatch = (deps: {
         const outcome = yield* awaitResumeOutcome({
           threadId,
           requestCommandId: resumeCommandId,
-          policy: input.policy,
+          pollIntervalMs: input.policy.pollIntervalMs,
         });
         yield* Effect.logInfo("epic.runner.resume-outcome", {
           runId: input.runId,

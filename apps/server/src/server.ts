@@ -34,6 +34,7 @@ import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { EpicSubagentRegistry } from "./provider/epicSubagents.ts";
 import { EpicCommitterRegistry } from "./provider/epicCommitter.ts";
 import { EpicWorkerScopeRegistry } from "./provider/workerScope.ts";
+import { InterruptedTurnNudgerLive } from "./provider/Layers/InterruptedTurnNudger.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import { ProviderUsagePollerLive } from "./provider/Layers/ProviderUsagePoller.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
@@ -400,6 +401,11 @@ const ProviderUsagePollerLayerLive = ProviderUsagePollerLive.pipe(
 
 const ProviderRuntimeLayerLive = Layer.mergeAll(
   ProviderSessionReaperLive,
+  // Resumes the interactive threads a restart cut off mid-turn. Sits here
+  // rather than with the reactors because `startBootReactors` drives it around
+  // them: it reads the projection before the reaper reconciles it and sends
+  // its prompt after EpicRunner has adopted its own iterations.
+  InterruptedTurnNudgerLive,
   EpicRunnerLayerLive,
   ProviderUsagePollerLayerLive,
 ).pipe(Layer.provideMerge(ProviderLayerLive), Layer.provideMerge(OrchestrationLayerLive));

@@ -33,6 +33,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as InterruptedTurnNudger from "./provider/Services/InterruptedTurnNudger.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import { diagnoseProviderCommandPath } from "./provider/ProviderCommandPathDiagnostic.ts";
 import * as EpicRunner from "./runner/Services/EpicRunner.ts";
@@ -294,7 +295,8 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
 
 /**
  * Start the three reactors that reconcile what a restart left behind, in the
- * one order that works.
+ * one order that works, wrapped in the two halves of the interrupted-turn
+ * nudge.
  *
  * The reaper's synchronous boot pass stops every binding whose process died
  * with the last server, and EpicRunner must observe their honest state, so the
@@ -303,23 +305,38 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
  * agent session instead of starting a blank one. Reordering these three would
  * quietly destroy state the runner is about to use.
  *
+ * `interruptedTurnNudger.collect` runs before all of them and
+ * `interruptedTurnNudger.nudge` after, for the same reason in both directions.
+ * The signal it reads — an interactive thread still projected mid-turn — is
+ * what the reaper is about to reconcile away, and after that pass an
+ * interrupted turn looks exactly like one a human pressed Stop on. Reading
+ * first is also what makes "running" unambiguous: no turn of this process has
+ * started yet, so anything running belongs to the dead one. The nudge itself
+ * goes last, so it resumes on top of settled state rather than racing it.
+ *
  * Extracted so the order is assertable. "starts the boot reactors in
  * reconciliation-safe order" in `serverRuntimeStartup.test.ts` guards it.
  *
- * The first two own scoped fibers and take `reactorScope`. EpicRunner owns its
- * own layer-scoped fibers, so it needs no scope here — it only reconciles run
- * state and relaunches the loops the old process was interrupted with.
+ * The reaper, the orchestration reactor and the nudge own scoped fibers and
+ * take `reactorScope`. EpicRunner owns its own layer-scoped fibers, so it needs
+ * no scope here — it only reconciles run state and relaunches the loops the old
+ * process was interrupted with.
  */
 export const startBootReactors = (input: {
   readonly orchestrationReactor: OrchestrationReactor.OrchestrationReactorShape;
   readonly providerSessionReaper: ProviderSessionReaper.ProviderSessionReaperShape;
   readonly epicRunner: EpicRunner.EpicRunnerShape;
+  readonly interruptedTurnNudger: InterruptedTurnNudger.InterruptedTurnNudgerShape;
   readonly reactorScope: Scope.Scope;
 }) =>
   Effect.gen(function* () {
+    const interruptedThreads = yield* input.interruptedTurnNudger.collect();
     yield* input.orchestrationReactor.start().pipe(Scope.provide(input.reactorScope));
     yield* input.providerSessionReaper.start().pipe(Scope.provide(input.reactorScope));
     yield* input.epicRunner.start();
+    yield* input.interruptedTurnNudger
+      .nudge(interruptedThreads)
+      .pipe(Scope.provide(input.reactorScope));
   });
 
 export const make = Effect.gen(function* () {
@@ -327,6 +344,7 @@ export const make = Effect.gen(function* () {
   const keybindings = yield* Keybindings.Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+  const interruptedTurnNudger = yield* InterruptedTurnNudger.InterruptedTurnNudger;
   const epicRunner = yield* EpicRunner.EpicRunner;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -376,7 +394,13 @@ export const make = Effect.gen(function* () {
     yield* Effect.logDebug("startup phase: starting orchestration reactors");
     yield* runStartupPhase(
       "reactors.start",
-      startBootReactors({ orchestrationReactor, providerSessionReaper, epicRunner, reactorScope }),
+      startBootReactors({
+        orchestrationReactor,
+        providerSessionReaper,
+        epicRunner,
+        interruptedTurnNudger,
+        reactorScope,
+      }),
     );
 
     const welcomeBase = yield* resolveWelcomeBase;

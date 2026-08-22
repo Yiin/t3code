@@ -238,6 +238,11 @@ it.effect("enqueueCommand fails queued work when readiness fails", () =>
 // EpicRunner has to read that settled state — plus the resume cursors the stop
 // preserves — before it reconciles a run. Reordering these would destroy state
 // the runner is about to use, so the order is asserted rather than reviewed.
+//
+// The nudge brackets all three (t3code-6wa). Its `collect` reads the projection
+// the reaper is about to reconcile away, so it must go first; its `nudge`
+// resumes on top of settled state, so it must go last. Both ends are asserted
+// because either one moving inward would silently stop the feature working.
 it.effect("starts the boot reactors in reconciliation-safe order", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -263,14 +268,58 @@ it.effect("starts the boot reactors in reconciliation-safe order", () =>
               started.push("epicRunner");
             }),
         } as never,
+        interruptedTurnNudger: {
+          collect: () =>
+            Effect.sync(() => {
+              started.push("interruptedTurnNudger.collect");
+              return [];
+            }),
+          nudge: () =>
+            Effect.sync(() => {
+              started.push("interruptedTurnNudger.nudge");
+            }),
+        },
         reactorScope,
       });
 
       assert.deepStrictEqual(started, [
+        "interruptedTurnNudger.collect",
         "orchestrationReactor",
         "providerSessionReaper",
         "epicRunner",
+        "interruptedTurnNudger.nudge",
       ]);
+    }),
+  ),
+);
+
+// `collect` and `nudge` are two calls precisely so the candidates cross the
+// reconciliation that would erase them. A refactor that re-read the projection
+// inside `nudge` would type-check and find nothing, so the hand-off is pinned.
+it.effect("hands the collected threads to the nudge that runs after reconciliation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const collected = [
+        { threadId: ThreadId.make("thread-mid-turn"), latestTurnId: null },
+      ] as const;
+      let nudged: ReadonlyArray<{ readonly threadId: ThreadId }> | null = null;
+      const reactorScope = yield* Scope.make("sequential");
+
+      yield* ServerRuntimeStartup.startBootReactors({
+        orchestrationReactor: { start: () => Effect.void },
+        providerSessionReaper: { start: () => Effect.void },
+        epicRunner: { start: () => Effect.void } as never,
+        interruptedTurnNudger: {
+          collect: () => Effect.succeed(collected),
+          nudge: (candidates) =>
+            Effect.sync(() => {
+              nudged = candidates;
+            }),
+        },
+        reactorScope,
+      });
+
+      assert.deepStrictEqual(nudged, collected);
     }),
   ),
 );

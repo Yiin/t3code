@@ -15,16 +15,21 @@
  *
  * @module ThreadSettleWatch
  */
-import type {
-  OrchestrationSessionStatus,
-  OrchestrationThread,
-  MessageId,
-  ThreadId,
-  TurnId,
+import {
+  PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND,
+  ProviderSessionResumeSettledActivityPayload,
+  type CommandId,
+  type OrchestrationSessionStatus,
+  type OrchestrationThread,
+  type MessageId,
+  type ProviderSessionResumeOutcome,
+  type ThreadId,
+  type TurnId,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import type { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
@@ -37,6 +42,17 @@ const MAX_SETTLE_READS = 20;
  * a pending message a missing one.
  */
 const MAX_ABSENT_MESSAGE_SETTLE_READS = 120;
+
+/**
+ * How long to wait for a resume request to settle before calling it an infra
+ * fault. The handler answers in one provider session start, so anything past
+ * this is the reactor not running, not a slow provider.
+ */
+export const RESUME_SETTLE_TIMEOUT_MS = 120_000;
+
+const decodeResumeSettledActivity = Schema.decodeUnknownOption(
+  ProviderSessionResumeSettledActivityPayload,
+);
 
 /** The polling cadence a settle watch needs. `PoolTimings` satisfies this. */
 export interface ThreadSettleTimings {
@@ -429,10 +445,55 @@ export const makeThreadSettleWatch = (deps: ThreadSettleWatchDeps) => {
       };
     });
 
+  /**
+   * Wait for a dispatched `thread.session.resume` to settle.
+   *
+   * The resume answer travels as a durable activity rather than as the
+   * dispatch's own result: the handler runs in the reactor, long after
+   * `dispatch` returns. Polling the projection is the same trade `awaitTurnEnd`
+   * documents — a subscription cannot be proved live before the dispatch, while
+   * a projection read cannot miss a committed answer.
+   *
+   * Matching on `requestCommandId` is what keeps an earlier resume's outcome
+   * from answering this one on a thread that has been resumed before.
+   *
+   * Never fails. A timeout answers `failed`, which every caller already treats
+   * as "the agent heard nothing" rather than as a broken machine.
+   */
+  const awaitResumeOutcome = (input: {
+    readonly threadId: ThreadId;
+    readonly requestCommandId: CommandId;
+    readonly pollIntervalMs: number;
+  }): Effect.Effect<ProviderSessionResumeOutcome> =>
+    Effect.gen(function* () {
+      while (true) {
+        const snapshot = yield* readThreadDetail(input.threadId);
+        for (const activity of snapshot?.thread.activities ?? []) {
+          if (activity.kind !== PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND) continue;
+          const payload = decodeResumeSettledActivity(activity.payload);
+          if (Option.isNone(payload)) continue;
+          if (payload.value.requestCommandId !== input.requestCommandId) continue;
+          return payload.value.outcome;
+        }
+        yield* Effect.sleep(Duration.millis(input.pollIntervalMs));
+      }
+    }).pipe(
+      Effect.timeoutOption(Duration.millis(RESUME_SETTLE_TIMEOUT_MS)),
+      Effect.map(
+        Option.getOrElse(
+          (): ProviderSessionResumeOutcome => ({
+            _tag: "failed",
+            detail: `No resume outcome was recorded for thread '${input.threadId}' within ${String(RESUME_SETTLE_TIMEOUT_MS)}ms.`,
+          }),
+        ),
+      ),
+    );
+
   return {
     readThreadShell,
     readThreadDetail,
     awaitTurnEnd,
+    awaitResumeOutcome,
     readSettledFinalMessage,
     threadTurnState,
     resolveFinalAssistantMessage,
