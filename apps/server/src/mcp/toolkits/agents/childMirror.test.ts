@@ -152,6 +152,7 @@ const provide =
         getSubagentActivities: () => Effect.die("unused"),
         listChildThreadIds: () => Effect.succeed([]),
         listRunningThreadBackedSubagents: () => Effect.succeed([]),
+        listRunningInProcessSubagents: () => Effect.succeed([]),
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
         getThreadDetailById: () => Ref.get(harness.child),
         getThreadDetailSnapshot: () => Effect.die("unused"),

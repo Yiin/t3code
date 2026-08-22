@@ -83,6 +83,23 @@ export interface ProjectionRunningThreadBackedSubagent {
   readonly description: string | null;
 }
 
+/**
+ * One parent-side subagent row that is still `running` and names no child
+ * thread: an in-process Task subagent. It lives inside the parent's provider
+ * session, so a restart kills it with that session. `startedAt` is left out
+ * on purpose: the sweep only closes the row, and the `task.completed` fold
+ * keeps the existing row's own timestamps.
+ */
+export interface ProjectionRunningInProcessSubagent {
+  /** The thread carrying the roster row. */
+  readonly parentThreadId: ThreadId;
+  readonly subagentId: string;
+  /** The parent turn the row belongs to, or null when none was projected. */
+  readonly turnId: TurnId | null;
+  readonly agentType: string | null;
+  readonly description: string | null;
+}
+
 export interface ProjectionFullThreadDiffContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
@@ -306,6 +323,20 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly listRunningThreadBackedSubagents: () => Effect.Effect<
     ReadonlyArray<ProjectionRunningThreadBackedSubagent>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * List every parent-side subagent row still `running` with no child thread,
+   * oldest first per parent.
+   *
+   * The boot reconciliation reads this once (`spawnReconciliation.ts`). An
+   * in-process subagent lives inside the parent's provider session, which a
+   * restart kills, so without the sweep each row claims work nothing can
+   * finish.
+   */
+  readonly listRunningInProcessSubagents: () => Effect.Effect<
+    ReadonlyArray<ProjectionRunningInProcessSubagent>,
     ProjectionRepositoryError
   >;
 

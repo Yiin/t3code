@@ -95,8 +95,12 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
  * Follows `dispatchBestEffort` in `PoolDispatch.ts`: `catchCause`
  * recovers defects too, so a broken projection cannot escape as an unhandled
  * cause into the tool call.
+ *
+ * Exported for the boot reconciliation (`spawnReconciliation.ts`), which
+ * appends the same `task.*` shapes for rows that have no child thread to key
+ * the mirror helpers on.
  */
-const appendActivity = (input: {
+export const appendActivity = (input: {
   readonly parentThreadId: ThreadId;
   readonly commandId: string;
   readonly activity: Omit<OrchestrationThreadActivity, "createdAt" | "turnId"> & {

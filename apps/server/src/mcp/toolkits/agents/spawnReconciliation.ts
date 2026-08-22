@@ -26,9 +26,14 @@
  *   waiting. The human can still open the drawer and talk to it.
  * - Anything else -> close the row with `task.completed { status: "stopped" }`.
  *
+ * In-process rows (`child_thread_id IS NULL`, e.g. Claude/Codex Task spawns)
+ * get only the second outcome: they live inside the parent's provider session,
+ * so a restart kills them with it. They are closed unless the parent session
+ * is live in this process.
+ *
  * @module agents/spawnReconciliation
  */
-import type { ThreadId } from "@t3tools/contracts";
+import { EventId, type ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -37,10 +42,17 @@ import * as Option from "effect/Option";
 
 import {
   ProjectionSnapshotQuery,
+  type ProjectionRunningInProcessSubagent,
   type ProjectionRunningThreadBackedSubagent,
 } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import { ProviderService } from "../../../provider/Services/ProviderService.ts";
-import { appendChildProgress, appendChildSettled, type ChildMirrorTarget } from "./childMirror.ts";
+import {
+  appendActivity,
+  appendChildProgress,
+  appendChildSettled,
+  type ChildMirrorTarget,
+} from "./childMirror.ts";
 import { findSpawnByChild } from "./SpawnRegistry.ts";
 
 /** The progress line for a child that outlived the parent waiting on it. */
@@ -94,7 +106,68 @@ const childIsLive = (
   );
 
 /**
- * Make every stranded thread-backed subagent row honest, once.
+ * Is this parent thread's provider session live in this process?
+ *
+ * Same read as `childIsLive` minus the thread-shell check: the sweep query
+ * already joined the live parent thread. A live parent means a possibly-live
+ * in-process subagent — only reachable if the layer is rebuilt mid-life, but
+ * closing a live spawn's row underneath it is the exact bug the guard exists
+ * against. A read that fails answers `false`, as in `childIsLive`.
+ */
+const parentIsLive = (parentThreadId: ThreadId): Effect.Effect<boolean, never, ProviderService> =>
+  Effect.gen(function* () {
+    const providerService = yield* ProviderService;
+    return yield* providerService.hasLiveSession(parentThreadId);
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning("subagent.spawn.reconcile-parent-liveness-failed", {
+            parentThreadId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(false)),
+    ),
+  );
+
+/**
+ * Close an in-process subagent row the restart took with the parent's session.
+ *
+ * `appendChildSettled` cannot serve here: it keys `taskId` on the child
+ * thread id, which an in-process row does not have. Same activity shape
+ * otherwise — the `task.completed` fold (`applySubagentActivity`) matches the
+ * existing row by `taskId` regardless of `childThreadId`.
+ */
+const appendInProcessStopped = (
+  row: ProjectionRunningInProcessSubagent,
+  stamp: string,
+): Effect.Effect<void, never, OrchestrationEngineService> => {
+  const title =
+    row.description !== null && row.description.trim().length > 0
+      ? row.description.trim().slice(0, 120)
+      : undefined;
+  return appendActivity({
+    parentThreadId: row.parentThreadId,
+    commandId: `server:subagent-reconcile-stopped:${row.parentThreadId}:${row.subagentId}:${stamp}`,
+    activity: {
+      id: EventId.make(`task-completed:${row.parentThreadId}:${row.subagentId}`),
+      tone: "info",
+      kind: "task.completed",
+      summary: "Subagent stopped",
+      payload: {
+        taskId: row.subagentId,
+        status: "stopped",
+        subagentType: row.agentType ?? "subagent",
+        ...(title !== undefined ? { title } : {}),
+        summary: ORPHANED_SPAWN_STOPPED_SUMMARY,
+        detail: ORPHANED_SPAWN_STOPPED_SUMMARY,
+      },
+      turnId: row.turnId,
+    },
+  });
+};
+
+/**
+ * Make every stranded subagent row honest, once.
  *
  * Runs at layer build. It needs no ordering against the session reaper's own
  * boot pass: `hasLiveSession` reads in-process adapter state, which a restart
@@ -103,11 +176,15 @@ const childIsLive = (
 export const reconcileOrphanedSpawns = Effect.gen(function* () {
   const projection = yield* ProjectionSnapshotQuery;
   const orphans = yield* projection.listRunningThreadBackedSubagents();
-  if (orphans.length === 0) return;
+  const inProcessRows = yield* projection.listRunningInProcessSubagents();
+  if (orphans.length === 0 && inProcessRows.length === 0) return;
   // Varies the command ids, so a second boot over the same row is a second
   // append rather than a receipt-deduplicated no-op.
   const stamp = yield* Effect.map(DateTime.now, DateTime.formatIso);
-  yield* Effect.logInfo("subagent.spawn.reconcile-start", { orphanCount: orphans.length });
+  yield* Effect.logInfo("subagent.spawn.reconcile-start", {
+    orphanCount: orphans.length,
+    inProcessCount: inProcessRows.length,
+  });
   for (const orphan of orphans) {
     // A row this process is already waiting on is not an orphan. Only reachable
     // if the layer is rebuilt mid-life, but cheap insurance against closing a
@@ -134,6 +211,17 @@ export const reconcileOrphanedSpawns = Effect.gen(function* () {
       status: "stopped",
       summary: ORPHANED_SPAWN_STOPPED_SUMMARY,
     });
+  }
+  for (const row of inProcessRows) {
+    // An in-process subagent dies with its parent's provider session. A live
+    // parent session means a possibly-live subagent, so skip it — the guard
+    // is only reachable if the layer is rebuilt mid-life.
+    if (yield* parentIsLive(row.parentThreadId)) continue;
+    yield* Effect.logInfo("subagent.spawn.reconcile-stopped-in-process", {
+      parentThreadId: row.parentThreadId,
+      subagentId: row.subagentId,
+    });
+    yield* appendInProcessStopped(row, stamp);
   }
 }).pipe(
   // Total on purpose: a sweep that cannot read the projection leaves every row

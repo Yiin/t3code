@@ -5485,6 +5485,66 @@ describe("ProviderRuntimeIngestion", () => {
         }),
     );
 
+    it.live("carries itemId into item.started and item.completed payload data as toolCallId", () =>
+      Effect.gen(function* () {
+        const harness = yield* createHarness();
+        const now = "2026-01-01T00:00:00.000Z";
+        const itemId = "item-lifecycle-tool-call-id";
+
+        harness.emit({
+          type: "item.started",
+          eventId: asEventId("evt-lifecycle-tcid-started"),
+          provider: ProviderDriverKind.make("opencode"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-lifecycle-tcid"),
+          itemId: asItemId(itemId),
+          payload: {
+            itemType: "collab_agent_tool_call",
+            title: "Subagent task",
+          },
+        });
+        harness.emit({
+          type: "item.completed",
+          eventId: asEventId("evt-lifecycle-tcid-completed"),
+          provider: ProviderDriverKind.make("opencode"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-lifecycle-tcid"),
+          itemId: asItemId(itemId),
+          payload: {
+            itemType: "collab_agent_tool_call",
+            title: "Subagent task",
+            data: {
+              tool: "Task",
+              state: { status: "completed", metadata: { sessionId: "ses_task_1" } },
+            },
+          },
+        });
+
+        yield* harness.drain();
+        const readModel = yield* harness.readModel();
+        const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+        const started = thread?.activities.find(
+          (activity: ProviderRuntimeTestActivity) => activity.id === "evt-lifecycle-tcid-started",
+        );
+        const completed = thread?.activities.find(
+          (activity: ProviderRuntimeTestActivity) => activity.id === "evt-lifecycle-tcid-completed",
+        );
+
+        // The exact shape the client's extractToolCallId reads
+        // (`payload.data.toolCallId`), so the id-less lifecycle rows join
+        // one subagent group. The adapter's own data survives the merge.
+        const startedData = activityPayloadFields(activityPayloadFields(started?.payload)?.data);
+        expect(startedData?.toolCallId).toBe(itemId);
+        const completedData = activityPayloadFields(
+          activityPayloadFields(completed?.payload)?.data,
+        );
+        expect(completedData?.toolCallId).toBe(itemId);
+        expect(completedData?.tool).toBe("Task");
+      }),
+    );
+
     it.live(
       "flushes a throttled tool.updated immediately when item.completed arrives for the same item",
       () =>

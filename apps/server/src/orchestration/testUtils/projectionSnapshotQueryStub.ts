@@ -45,6 +45,7 @@ export const unsupportedProjectionSnapshotQuery: ProjectionSnapshotQueryShape = 
   getSubagentActivities: unsupported("getSubagentActivities"),
   listChildThreadIds: unsupported("listChildThreadIds"),
   listRunningThreadBackedSubagents: unsupported("listRunningThreadBackedSubagents"),
+  listRunningInProcessSubagents: unsupported("listRunningInProcessSubagents"),
   listThreadIdsWithQueuedMessages: unsupported("listThreadIdsWithQueuedMessages"),
   getThreadDetailById: unsupported("getThreadDetailById"),
   getThreadDetailSnapshot: unsupported("getThreadDetailSnapshot"),

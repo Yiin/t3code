@@ -19,6 +19,7 @@ import * as Stream from "effect/Stream";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
+  type ProjectionRunningInProcessSubagent,
   type ProjectionRunningThreadBackedSubagent,
 } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -35,6 +36,7 @@ import {
 const PARENT_THREAD_ID = ThreadId.make("thread-parent");
 const CHILD_THREAD_ID = ThreadId.make("subagent-thread-parent-abc");
 const PARENT_TURN_ID = TurnId.make("turn-parent");
+const IN_PROCESS_SUBAGENT_ID = "task-in-process-1";
 
 const orphanRow = (
   overrides: Partial<ProjectionRunningThreadBackedSubagent> = {},
@@ -42,6 +44,17 @@ const orphanRow = (
   parentThreadId: PARENT_THREAD_ID,
   subagentId: CHILD_THREAD_ID,
   childThreadId: CHILD_THREAD_ID,
+  turnId: PARENT_TURN_ID,
+  agentType: "Explore",
+  description: "Audit the settings migrations",
+  ...overrides,
+});
+
+const inProcessRow = (
+  overrides: Partial<ProjectionRunningInProcessSubagent> = {},
+): ProjectionRunningInProcessSubagent => ({
+  parentThreadId: PARENT_THREAD_ID,
+  subagentId: IN_PROCESS_SUBAGENT_ID,
   turnId: PARENT_TURN_ID,
   agentType: "Explore",
   description: "Audit the settings migrations",
@@ -74,10 +87,14 @@ const childShell = (childThreadId: ThreadId): OrchestrationThreadShell => ({
 
 interface HarnessOptions {
   readonly orphans?: ReadonlyArray<ProjectionRunningThreadBackedSubagent>;
+  /** In-process running rows (child_thread_id IS NULL) the projection holds. */
+  readonly inProcessRows?: ReadonlyArray<ProjectionRunningInProcessSubagent>;
   /** Child threads the projection still knows about. */
   readonly existingChildIds?: ReadonlySet<ThreadId>;
   /** Child threads whose provider session is live in this process. */
   readonly liveChildIds?: ReadonlySet<ThreadId>;
+  /** Parent threads whose provider session is live in this process. */
+  readonly liveParentIds?: ReadonlySet<ThreadId>;
   /** Make the liveness read fail, to prove an unjudgeable orphan still closes. */
   readonly livenessFails?: boolean;
   /** Make the orphan read fail, to prove the sweep never escapes. */
@@ -90,6 +107,7 @@ const runSweep = (options: HarnessOptions = {}) =>
     const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
     const existing = options.existingChildIds ?? new Set([CHILD_THREAD_ID]);
     const live = options.liveChildIds ?? new Set<ThreadId>();
+    const liveParents = options.liveParentIds ?? new Set<ThreadId>();
 
     const providerService = {
       startSession: () => Effect.die("unused"),
@@ -102,7 +120,7 @@ const runSweep = (options: HarnessOptions = {}) =>
       hasLiveSession: (threadId: ThreadId) =>
         options.livenessFails === true
           ? Effect.die("provider offline")
-          : Effect.succeed(live.has(threadId)),
+          : Effect.succeed(live.has(threadId) || liveParents.has(threadId)),
       getCapabilities: () => Effect.die("unused"),
       getInstanceInfo: () => Effect.die("unused"),
       rollbackConversation: () => Effect.die("unused"),
@@ -146,6 +164,7 @@ const runSweep = (options: HarnessOptions = {}) =>
           options.listFails === true
             ? Effect.die("projection offline")
             : Effect.succeed(options.orphans ?? [orphanRow()]),
+        listRunningInProcessSubagents: () => Effect.succeed(options.inProcessRows ?? []),
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
@@ -293,6 +312,90 @@ describe("orphaned thread-backed spawn reconciliation", () => {
       deregisterSpawn(PARENT_THREAD_ID, CHILD_THREAD_ID);
 
       assert.deepStrictEqual(commands, []);
+    }),
+  );
+});
+
+/** The stranded in-process row as the projection already holds it: running, no child thread. */
+const strandedInProcessSubagent = (): OrchestrationThreadSubagent => ({
+  subagentId: IN_PROCESS_SUBAGENT_ID,
+  turnId: PARENT_TURN_ID,
+  agentType: "Explore",
+  description: "Audit the settings migrations",
+  status: "running",
+  startedAt: "2026-08-11T00:00:00.000Z",
+  updatedAt: "2026-08-11T00:00:00.000Z",
+  completedAt: null,
+});
+
+describe("orphaned in-process spawn reconciliation", () => {
+  it.effect("closes an in-process row whose parent session died with the restart", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({ orphans: [], inProcessRows: [inProcessRow()] });
+
+      assert.deepStrictEqual(
+        commands.map((command) => command.type),
+        ["thread.activity.append"],
+      );
+      const command = commands[0];
+      if (command?.type !== "thread.activity.append") {
+        assert.fail("expected a thread.activity.append command");
+      }
+      // The command id carries the stamp so a second boot re-appends; the
+      // activity id is fixed per row so a re-append upserts the same row.
+      assert.match(
+        command.commandId,
+        new RegExp(
+          `^server:subagent-reconcile-stopped:${PARENT_THREAD_ID}:${IN_PROCESS_SUBAGENT_ID}:`,
+        ),
+      );
+      const activities = appended(commands);
+      assert.strictEqual(
+        activities[0]?.id,
+        `task-completed:${PARENT_THREAD_ID}:${IN_PROCESS_SUBAGENT_ID}`,
+      );
+      assert.strictEqual(activities[0]?.kind, "task.completed");
+      assert.deepStrictEqual(activities[0]?.payload, {
+        taskId: IN_PROCESS_SUBAGENT_ID,
+        status: "stopped",
+        subagentType: "Explore",
+        title: "Audit the settings migrations",
+        summary: ORPHANED_SPAWN_STOPPED_SUMMARY,
+        detail: ORPHANED_SPAWN_STOPPED_SUMMARY,
+      });
+
+      const folded = foldSubagents(activities, [strandedInProcessSubagent()]);
+      assert.strictEqual(folded.length, 1);
+      assert.strictEqual(folded[0]?.status, "stopped");
+      assert.strictEqual(folded[0]?.childThreadId, undefined);
+      assert.strictEqual(
+        countFreshRunningSubagents(folded, Date.parse(activities[0]?.createdAt ?? "")),
+        0,
+      );
+    }),
+  );
+
+  it.effect("preserves an in-process row whose parent session is live", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({
+        orphans: [],
+        inProcessRows: [inProcessRow()],
+        liveParentIds: new Set([PARENT_THREAD_ID]),
+      });
+
+      assert.deepStrictEqual(commands, []);
+    }),
+  );
+
+  it.effect("closes an in-process row whose parent liveness read fails", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({
+        orphans: [],
+        inProcessRows: [inProcessRow()],
+        livenessFails: true,
+      });
+
+      assert.strictEqual(appended(commands)[0]?.kind, "task.completed");
     }),
   );
 });

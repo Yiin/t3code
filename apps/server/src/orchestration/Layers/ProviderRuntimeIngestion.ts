@@ -438,6 +438,23 @@ function requestKindFromCanonicalRequestType(
 }
 
 /**
+ * Carry `event.itemId` into the activity payload as `data.toolCallId`, the
+ * exact shape the client's `extractToolCallId` reads. item.updated rows
+ * recover the id from their coalesced activity id, but item.started and
+ * item.completed keep their per-event ids, so without this the client cannot
+ * join a spawn's lifecycle rows into one group (opencode's Task spawn lands
+ * as exactly those three id-less rows). An adapter's own `data.toolCallId`
+ * always wins.
+ */
+function withItemIdToolCallId(data: unknown, itemId: string | undefined): unknown {
+  if (itemId === undefined) {
+    return data;
+  }
+  const base = data !== null && typeof data === "object" ? data : {};
+  return { toolCallId: itemId, ...base };
+}
+
+/**
  * A provider driver may attach a monotonic `sessionSequence` next to the
  * declared event fields. The runtime-event contract does not carry it, so read
  * it off the value instead of asserting a wider event type.
@@ -915,6 +932,7 @@ export function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const data = withItemIdToolCallId(event.payload.data, event.itemId);
       return [
         {
           id: event.eventId,
@@ -925,7 +943,7 @@ export function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(data !== undefined ? { data } : {}),
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
@@ -941,6 +959,7 @@ export function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const data = withItemIdToolCallId(event.payload.data, event.itemId);
       return [
         {
           id: event.eventId,
@@ -951,6 +970,7 @@ export function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(data !== undefined ? { data } : {}),
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),

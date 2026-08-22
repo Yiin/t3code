@@ -202,6 +202,7 @@ describe("OrchestrationEngine", () => {
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           listChildThreadIds: () => Effect.succeed([]),
           listRunningThreadBackedSubagents: () => Effect.succeed([]),
+          listRunningInProcessSubagents: () => Effect.succeed([]),
           listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getFullThreadDiffContext: () => Effect.succeed(Option.none()),

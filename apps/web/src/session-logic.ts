@@ -1104,6 +1104,12 @@ export function deriveSubagentGroups(
     turnSettled: boolean;
     /** `thread.subagents` read model for this thread, when available. */
     subagents?: ReadonlyArray<OrchestrationThreadSubagent>;
+    /**
+     * Start of the live turn (`latestTurn.startedAt`), when one is running. An
+     * activity-derived group older than the turn belongs to a dead run and
+     * renders `stopped`; null keeps `turnSettled` as the only staleness rule.
+     */
+    activeTurnStartedAt?: string | null;
   },
 ): SubagentGroup[] {
   const workEntryOrder = new Map(workEntries.map((entry, index) => [entry.id, index]));
@@ -1135,6 +1141,14 @@ export function deriveSubagentGroups(
   // the pair — dedupe those into one group. (Claude's completed row carries
   // no recoverable id, so an escaped pair there still yields two groups.)
   const groupIndexByToolCallId = new Map<string, number>();
+  // opencode's Task spawn lands as separate tool.started/tool.updated/
+  // tool.completed activities whose payloads share no toolCallId; the session
+  // id under `data.state.metadata` (or, as a last resort, the task title) is
+  // the join key the pair does share. These maps are consulted only for rows
+  // with no toolCallId, and live apart from the toolCallId map, so the key
+  // spaces can never collide.
+  const groupIndexBySessionId = new Map<string, number>();
+  const groupIndicesByTitle = new Map<string, number[]>();
   for (const entry of workEntries) {
     if (entry.itemType !== "collab_agent_tool_call") {
       continue;
@@ -1160,18 +1174,94 @@ export function deriveSubagentGroups(
       workEntryOrder,
       options,
     );
+    const pairing = subagentSpawnPairing(entry);
+    let existingIndex: number | undefined;
+    // toolCallId is checked first and exclusively: a row that carries one
+    // never falls through to the sessionId/title keys. That trusts the
+    // provider to keep one itemId across a tool's lifecycle (opencode does).
     if (group.toolCallId !== null) {
-      const existingIndex = groupIndexByToolCallId.get(group.toolCallId);
-      const existing = existingIndex === undefined ? undefined : groups[existingIndex];
-      if (existingIndex !== undefined && existing !== undefined) {
-        groups[existingIndex] = mergeSubagentGroups(existing, group);
-        continue;
-      }
-      groupIndexByToolCallId.set(group.toolCallId, groups.length);
+      existingIndex = groupIndexByToolCallId.get(group.toolCallId);
+    } else if (pairing.sessionId !== null) {
+      existingIndex = groupIndexBySessionId.get(pairing.sessionId);
+    } else if (pairing.title !== null) {
+      existingIndex = unambiguousSubagentTitleMatch(
+        group,
+        groupIndicesByTitle.get(pairing.title) ?? [],
+        groups,
+      );
     }
+    const existing = existingIndex === undefined ? undefined : groups[existingIndex];
+    if (existingIndex !== undefined && existing !== undefined) {
+      groups[existingIndex] = mergeSubagentGroups(existing, group, workEntryOrder);
+      continue;
+    }
+    const index = groups.length;
     groups.push(group);
+    if (group.toolCallId !== null) {
+      groupIndexByToolCallId.set(group.toolCallId, index);
+    }
+    if (pairing.sessionId !== null) {
+      groupIndexBySessionId.set(pairing.sessionId, index);
+    }
+    if (pairing.title !== null) {
+      const bucket = groupIndicesByTitle.get(pairing.title);
+      if (bucket) {
+        bucket.push(index);
+      } else {
+        groupIndicesByTitle.set(pairing.title, [index]);
+      }
+    }
   }
   return groups;
+}
+
+/**
+ * Pairing keys for spawn rows that carry no toolCallId. opencode emits a Task
+ * spawn as separate tool.started/tool.updated/tool.completed activities; the
+ * payloads share no id, but `data.state.metadata.sessionId` (and the task
+ * title) match across the pair.
+ */
+function subagentSpawnPairing(entry: WorkLogEntry): {
+  sessionId: string | null;
+  title: string | null;
+} {
+  const state = asRecord(asRecord(entry.toolData)?.state);
+  const sessionId = asTrimmedString(asRecord(state?.metadata)?.sessionId);
+  const title =
+    asTrimmedString(state?.title) ?? asTrimmedString(asRecord(state?.input)?.description);
+  return {
+    sessionId,
+    title: title === null ? null : normalizeInlinePreview(title).toLowerCase(),
+  };
+}
+
+/**
+ * Title pairing is a last resort: two parallel spawns routinely share a
+ * title, so a merge happens only against exactly one open-ended group.
+ *
+ * Only a terminal row may join by title, and only into a group that has not
+ * already settled (running, or stopped by the stale/turn rules — the stale
+ * downgrade must not orphan the completing half of the same spawn). An open
+ * row never joins by title: a fresh same-title spawn is a new subagent, and
+ * merging it into the previous run's group would hide it. Any ambiguity
+ * (two same-title spawns still open) refuses the merge.
+ */
+function unambiguousSubagentTitleMatch(
+  group: SubagentGroup,
+  candidateIndices: ReadonlyArray<number>,
+  groups: ReadonlyArray<SubagentGroup>,
+): number | undefined {
+  if (group.status === "running") {
+    return undefined;
+  }
+  const matches = candidateIndices.filter((index) => {
+    const candidate = groups[index];
+    if (candidate === undefined) {
+      return false;
+    }
+    return candidate.status === "running" || candidate.status === "stopped";
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 /** The T3 MCP server every adapter registers, and its thread-backed spawn tool. */
@@ -1242,17 +1332,23 @@ function toSubagentGroup(
   options: {
     turnSettled: boolean;
     subagents?: ReadonlyArray<OrchestrationThreadSubagent>;
+    activeTurnStartedAt?: string | null;
   },
 ): SubagentGroup {
   const toolCallId = entry.toolCallId ?? null;
   const data = asRecord(entry.toolData);
   const codexItem = asRecord(data?.item);
   const input = asRecord(data?.input);
+  // opencode nests the Task input under `data.state.input`, not `data.input`.
+  const stateInput = asRecord(asRecord(data?.state)?.input);
   const readModel =
     toolCallId !== null
       ? options.subagents?.find((subagent) => subagent.spawnedByItemId === toolCallId)
       : undefined;
-  const prompt = asTrimmedString(input?.prompt) ?? asTrimmedString(codexItem?.prompt);
+  const prompt =
+    asTrimmedString(input?.prompt) ??
+    asTrimmedString(stateInput?.prompt) ??
+    asTrimmedString(codexItem?.prompt);
   const directResult =
     extractSubagentResultText(data?.result) ?? codexCollabResult(codexItem, readModel?.subagentId);
   const resultText =
@@ -1281,12 +1377,17 @@ function toSubagentGroup(
       asTrimmedString(input?.subagent_type) ??
       asTrimmedString(codexItem?.model) ??
       "Subagent",
-    description: readModel?.description ?? asTrimmedString(input?.description) ?? prompt,
+    description:
+      readModel?.description ??
+      asTrimmedString(input?.description) ??
+      asTrimmedString(stateInput?.description) ??
+      prompt,
     status: deriveSubagentGroupStatus(
       entry,
       readModel,
       options.turnSettled,
       subagentCollabOperation(entry) !== null,
+      options.activeTurnStartedAt ?? null,
     ),
     startedAt: readModel?.startedAt ?? entry.createdAt,
     completedAt: readModel?.completedAt ?? null,
@@ -1301,6 +1402,7 @@ function deriveSubagentGroupStatus(
   readModel: OrchestrationThreadSubagent | undefined,
   turnSettled: boolean,
   spawnCompletesBeforeTask: boolean,
+  activeTurnStartedAt: string | null,
 ): OrchestrationThreadSubagentStatus {
   // A settled read-model status is authoritative; a row still "running"
   // may just lag the tool result that already arrived on the activity side.
@@ -1318,7 +1420,20 @@ function deriveSubagentGroupStatus(
   }
   // Still in progress after the turn settled: the run was interrupted before
   // the provider reported completion.
-  return turnSettled ? "stopped" : "running";
+  if (turnSettled) {
+    return "stopped";
+  }
+  // An activity-only row older than the live turn belongs to a run a previous
+  // turn abandoned. A read-model row keeps its own freshness handling instead,
+  // and a turn without a startedAt yet must not mislabel a live spawn.
+  if (
+    readModel === undefined &&
+    activeTurnStartedAt !== null &&
+    entry.createdAt < activeTurnStartedAt
+  ) {
+    return "stopped";
+  }
+  return "running";
 }
 
 function subagentStatusFromEntry(entry: WorkLogEntry): OrchestrationThreadSubagentStatus {
@@ -1381,7 +1496,11 @@ function collectSubagentResultText(value: unknown, depth: number): string | null
   return null;
 }
 
-function mergeSubagentGroups(first: SubagentGroup, second: SubagentGroup): SubagentGroup {
+function mergeSubagentGroups(
+  first: SubagentGroup,
+  second: SubagentGroup,
+  workEntryOrder: ReadonlyMap<string, number>,
+): SubagentGroup {
   return {
     ...first,
     name: second.name !== "Subagent" ? second.name : first.name,
@@ -1390,6 +1509,9 @@ function mergeSubagentGroups(first: SubagentGroup, second: SubagentGroup): Subag
     completedAt: second.completedAt ?? first.completedAt,
     resultText: second.resultText ?? first.resultText,
     prompt: second.prompt ?? first.prompt,
+    // The duplicate rows can own different children (the open row its tool
+    // calls, the completed row its task events); keeping one side drops them.
+    children: uniqueOrderedWorkEntries([...first.children, ...second.children], workEntryOrder),
   };
 }
 

@@ -257,6 +257,7 @@ function withHarness(
       getThreadShellById: () => Effect.succeed(Option.fromUndefinedOr(state.shell)),
       getThreadDetailById: () => Effect.succeed(Option.fromUndefinedOr(state.thread)),
       listRunningThreadBackedSubagents: () => Effect.succeed([]),
+      listRunningInProcessSubagents: () => Effect.succeed([]),
       listThreadIdsWithQueuedMessages: () => Effect.succeed(state.queuedThreadIds),
     };
 

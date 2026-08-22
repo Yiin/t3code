@@ -2173,8 +2173,9 @@ function ChatViewContent(props: ChatViewProps) {
       deriveSubagentGroups(workLogEntries, {
         turnSettled: latestTurnSettled,
         subagents: activeThreadSubagents,
+        activeTurnStartedAt: activeLatestTurn?.startedAt ?? null,
       }),
-    [activeThreadSubagents, latestTurnSettled, workLogEntries],
+    [activeLatestTurn?.startedAt, activeThreadSubagents, latestTurnSettled, workLogEntries],
   );
   // One list for the banner and the drawer: groups die with the capped
   // activity window, read-model rows do not, and the merge keeps both.

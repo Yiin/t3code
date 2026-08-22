@@ -87,6 +87,15 @@ const ProjectionRunningThreadBackedSubagentRowSchema = Schema.Struct({
   agentType: Schema.NullOr(TrimmedNonEmptyString),
   description: Schema.NullOr(TrimmedNonEmptyString),
 });
+// Same NullOr mapping, minus the child join: in-process subagent rows own no
+// child thread, so there is no child_thread_id to select.
+const ProjectionRunningInProcessSubagentRowSchema = Schema.Struct({
+  parentThreadId: ProjectionThreadSubagent.fields.threadId,
+  subagentId: ProjectionThreadSubagent.fields.subagentId,
+  turnId: ProjectionThreadSubagent.fields.turnId,
+  agentType: Schema.NullOr(TrimmedNonEmptyString),
+  description: Schema.NullOr(TrimmedNonEmptyString),
+});
 const ProjectionCheckpoint = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
@@ -1136,6 +1145,29 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ON threads.thread_id = subagents.thread_id
         WHERE subagents.status = 'running'
           AND subagents.child_thread_id IS NOT NULL
+          AND threads.deleted_at IS NULL
+        ORDER BY subagents.thread_id ASC, subagents.started_at ASC, subagents.subagent_id ASC
+      `,
+  });
+
+  // Bounded by concurrent in-process subagent use, not by workspace size.
+  // Rides idx_projection_thread_subagents_thread_status.
+  const listRunningInProcessSubagentRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionRunningInProcessSubagentRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          subagents.thread_id AS "parentThreadId",
+          subagents.subagent_id AS "subagentId",
+          subagents.turn_id AS "turnId",
+          subagents.agent_type AS "agentType",
+          subagents.description
+        FROM projection_thread_subagents AS subagents
+        JOIN projection_threads AS threads
+          ON threads.thread_id = subagents.thread_id
+        WHERE subagents.status = 'running'
+          AND subagents.child_thread_id IS NULL
           AND threads.deleted_at IS NULL
         ORDER BY subagents.thread_id ASC, subagents.started_at ASC, subagents.subagent_id ASC
       `,
@@ -2462,6 +2494,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+  const listRunningInProcessSubagents: ProjectionSnapshotQueryShape["listRunningInProcessSubagents"] =
+    () =>
+      listRunningInProcessSubagentRows().pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listRunningInProcessSubagents:query",
+            "ProjectionSnapshotQuery.listRunningInProcessSubagents:decodeRow",
+          ),
+        ),
+      );
+
   const listThreadIdsWithQueuedMessages: ProjectionSnapshotQueryShape["listThreadIdsWithQueuedMessages"] =
     () =>
       listThreadIdsWithQueuedMessageRows().pipe(
@@ -2963,6 +3006,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     listChildThreadIds,
     listRunningThreadBackedSubagents,
+    listRunningInProcessSubagents,
     listThreadIdsWithQueuedMessages,
     getThreadCheckpointContext,
     getFullThreadDiffContext,

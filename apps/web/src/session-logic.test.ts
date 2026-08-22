@@ -2667,6 +2667,219 @@ describe("deriveSubagentGroups", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0]?.toolCallId).toBe("toolu_other");
   });
+
+  /**
+   * opencode-shaped spawn: a coalesced tool.updated row and an eventId-keyed
+   * tool.completed row that share no toolCallId but carry the same
+   * `data.state.metadata.sessionId` (verified against state.sqlite for
+   * t3code-dpq). The bare tool.started row never reaches the work log.
+   */
+  function makeOpenCodeSubagentSpawnActivities(overrides: {
+    callId: string;
+    sessionId: string;
+    title: string;
+    includeSessionId?: boolean;
+    /** Distinct summary/detail for the updated row, to dodge the adjacency collapse. */
+    updatedLabel?: string;
+    /** Activity id override for the updated row; defaults to the coalesced shape. */
+    updatedId?: string;
+    /** Timestamp/sequence overrides for the updated row (sequential spawns). */
+    updatedCreatedAt?: string;
+    updatedSequence?: number;
+  }): OrchestrationThreadActivity[] {
+    const state = (status: string) => ({
+      title: overrides.title,
+      status,
+      input: { description: overrides.title, prompt: `Do: ${overrides.title}` },
+      ...(overrides.includeSessionId === false
+        ? {}
+        : { metadata: { sessionId: overrides.sessionId } }),
+    });
+    const updatedLabel = overrides.updatedLabel ?? overrides.title;
+    return [
+      makeActivity({
+        id: overrides.updatedId ?? `tool-updated:thread-1:${overrides.callId}`,
+        createdAt: overrides.updatedCreatedAt ?? "2026-02-23T00:00:05.000Z",
+        kind: "tool.updated",
+        summary: updatedLabel,
+        sequence: overrides.updatedSequence ?? 5,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          detail: updatedLabel,
+          data: { tool: "task", state: state("running") },
+        },
+      }),
+      makeActivity({
+        id: `completed-${overrides.callId}`,
+        createdAt: "2026-02-23T00:03:00.000Z",
+        kind: "tool.completed",
+        summary: overrides.title,
+        sequence: 6,
+        payload: {
+          itemType: "collab_agent_tool_call",
+          detail: `<task id="${overrides.sessionId}" state="completed">`,
+          data: { tool: "task", state: state("completed") },
+        },
+      }),
+    ];
+  }
+
+  it("joins an opencode spawn's id-less updated/completed rows into one group via sessionId", () => {
+    const groups = deriveSubagentGroups(
+      deriveWorkLogEntries(
+        makeOpenCodeSubagentSpawnActivities({
+          callId: "call_1",
+          sessionId: "ses_1",
+          title: "Investigate prod host state",
+        }),
+      ),
+      { turnSettled: false, activeTurnStartedAt: "2026-02-23T00:00:00.000Z" },
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.toolCallId).toBe("call_1");
+    expect(groups[0]?.status).toBe("completed");
+    expect(groups[0]?.description).toBe("Investigate prod host state");
+  });
+
+  it("joins an id-less pair on title when the match is unambiguous", () => {
+    const activities = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_1",
+      sessionId: "ses_1",
+      title: "Unique title",
+      includeSessionId: false,
+      // Strip the coalesced activity id so no toolCallId is recoverable either.
+      updatedId: "updated-no-id",
+    });
+
+    const groups = deriveSubagentGroups(deriveWorkLogEntries(activities), {
+      turnSettled: false,
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.status).toBe("completed");
+  });
+
+  it("keeps two parallel same-title id-less spawns separate", () => {
+    const first = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_1",
+      sessionId: "ses_1",
+      title: "Audit test relevance",
+      includeSessionId: false,
+      updatedId: "updated-no-id-1",
+      // Distinct summaries/details keep the adjacency collapse from merging the
+      // pair at the work-log level; the shared data.state.title is what the
+      // pairing fallback would have to join on, and it must refuse.
+      updatedLabel: "Audit test relevance (server)",
+    });
+    const second = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_2",
+      sessionId: "ses_2",
+      title: "Audit test relevance",
+      includeSessionId: false,
+      updatedId: "updated-no-id-2",
+      updatedLabel: "Audit test relevance (web)",
+    });
+    const activities = [first[0]!, second[0]!, first[1]!, second[1]!];
+
+    const groups = deriveSubagentGroups(deriveWorkLogEntries(activities), {
+      turnSettled: false,
+    });
+
+    // Both completions were ambiguous (two open same-title groups), so nothing
+    // merged: two running + two completed, never one wrongly-merged group.
+    expect(groups).toHaveLength(4);
+    expect(groups.filter((group) => group.status === "completed")).toHaveLength(2);
+  });
+
+  it("does not merge a fresh same-title spawn into the previous run's settled group", () => {
+    const first = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_1",
+      sessionId: "ses_1",
+      title: "Audit test relevance",
+      includeSessionId: false,
+      updatedId: "updated-no-id-1",
+      updatedLabel: "Audit test relevance (first)",
+    });
+    // Sequential re-run of the same-titled task: only the open half exists so
+    // far. It must render as its own running group, not vanish into the
+    // previous run's completed group.
+    const rerun = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_2",
+      sessionId: "ses_2",
+      title: "Audit test relevance",
+      includeSessionId: false,
+      updatedId: "updated-no-id-2",
+      updatedLabel: "Audit test relevance (rerun)",
+      updatedCreatedAt: "2026-02-23T00:05:00.000Z",
+      updatedSequence: 7,
+    })[0]!;
+
+    const groups = deriveSubagentGroups(deriveWorkLogEntries([...first, rerun]), {
+      turnSettled: false,
+    });
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.status).toBe("completed");
+    expect(groups[1]?.status).toBe("running");
+  });
+
+  it("stops a stale group that predates the live turn, even before the turn settles", () => {
+    const activities = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_1",
+      sessionId: "ses_1",
+      title: "Investigate prod host state",
+    });
+    const lingering = activities[0]!;
+
+    const entries = deriveWorkLogEntries([lingering]);
+    // No activeTurnStartedAt: today's behavior, turnSettled is the only rule.
+    expect(deriveSubagentGroups(entries, { turnSettled: false })[0]?.status).toBe("running");
+    // The entry predates the live turn: a previous run abandoned it.
+    expect(
+      deriveSubagentGroups(entries, {
+        turnSettled: false,
+        activeTurnStartedAt: "2026-02-23T01:00:00.000Z",
+      })[0]?.status,
+    ).toBe("stopped");
+    // Born inside the live turn: genuinely running.
+    expect(
+      deriveSubagentGroups(entries, {
+        turnSettled: false,
+        activeTurnStartedAt: "2026-02-22T23:00:00.000Z",
+      })[0]?.status,
+    ).toBe("running");
+  });
+
+  it("keeps a running read-model row authoritative over the stale-entry rule", () => {
+    const activities = makeOpenCodeSubagentSpawnActivities({
+      callId: "call_1",
+      sessionId: "ses_1",
+      title: "Investigate prod host state",
+    });
+    const readModelRow: OrchestrationThreadSubagent = {
+      subagentId: "task-1",
+      turnId: null,
+      agentType: "Explore",
+      description: "Investigate prod host state",
+      status: "running",
+      spawnedByItemId: "call_1",
+      startedAt: "2026-02-23T00:00:05.000Z",
+      updatedAt: "2026-02-23T00:00:06.000Z",
+      completedAt: null,
+    };
+
+    const groups = deriveSubagentGroups(deriveWorkLogEntries([activities[0]!]), {
+      turnSettled: false,
+      subagents: [readModelRow],
+      activeTurnStartedAt: "2026-02-23T01:00:00.000Z",
+    });
+
+    // The read model has its own freshness handling; the stale-entry rule must
+    // not downgrade it.
+    expect(groups[0]?.status).toBe("running");
+  });
 });
 
 describe("extractSubagentResultText", () => {

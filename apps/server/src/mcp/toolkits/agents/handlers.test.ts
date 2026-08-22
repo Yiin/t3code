@@ -275,6 +275,7 @@ const run = (
         getSubagentActivities: () => Effect.die("unused"),
         listChildThreadIds: () => Effect.succeed(fixture.childThreadIds ?? []),
         listRunningThreadBackedSubagents: () => Effect.succeed([]),
+        listRunningInProcessSubagents: () => Effect.succeed([]),
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
         getThreadDetailById: (threadId) => {
           const found = spawnedChild(threadId);
