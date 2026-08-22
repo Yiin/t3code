@@ -12,6 +12,7 @@ import * as EffectAcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
 import type * as AcpSchema from "effect-acp/schema";
 
+// Test-only flags. Set a flag to enable the corresponding mock behavior.
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
@@ -27,6 +28,10 @@ const hangFirstPromptForever = process.env.T3_ACP_HANG_FIRST_PROMPT_FOREVER === 
 const rejectOverlappingPrompts = process.env.T3_ACP_REJECT_OVERLAPPING_PROMPTS === "1";
 const cancelProcessingDelayMs = Number(process.env.T3_ACP_CANCEL_PROCESSING_DELAY_MS ?? "0");
 const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANCEL === "1";
+// Emits autonomous session updates after session/new. Delay defaults to 300 ms.
+const emitUnsolicitedUpdatesAfterNew =
+  process.env.T3_ACP_EMIT_UNSOLICITED_UPDATES_AFTER_NEW === "1";
+const unsolicitedUpdateDelayMs = Number(process.env.T3_ACP_UNSOLICITED_UPDATE_DELAY_MS ?? "300");
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
@@ -326,13 +331,64 @@ const program = Effect.gen(function* () {
 
   yield* agent.handleAuthenticate(() => Effect.succeed({}));
 
+  const emitUnsolicitedUpdates = (requestedSessionId: string) =>
+    Effect.gen(function* () {
+      if (Number.isFinite(unsolicitedUpdateDelayMs) && unsolicitedUpdateDelayMs > 0) {
+        yield* Effect.sleep(`${unsolicitedUpdateDelayMs} millis`);
+      }
+
+      yield* agent.client.sessionUpdate({
+        sessionId: requestedSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "unsolicited autonomous hello" },
+        },
+      });
+
+      yield* agent.client.sessionUpdate({
+        sessionId: requestedSessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "unsolicited-tool-call-1",
+          title: "Read",
+          kind: "read",
+          status: "pending",
+          rawInput: { path: "autonomous.txt" },
+        },
+      });
+
+      yield* agent.client.sessionUpdate({
+        sessionId: requestedSessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "unsolicited-tool-call-1",
+          status: "completed",
+          rawOutput: { content: "autonomous content" },
+        },
+      });
+
+      yield* agent.client.sessionUpdate({
+        sessionId: requestedSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "unsolicited autonomous goodbye" },
+        },
+      });
+    });
+
   yield* agent.handleCreateSession(() =>
-    Effect.succeed({
-      sessionId,
-      modes: modeState(),
-      models: modelState(),
-      configOptions: configOptions(),
-    }),
+    Effect.tap(
+      Effect.succeed({
+        sessionId,
+        modes: modeState(),
+        models: modelState(),
+        configOptions: configOptions(),
+      }),
+      () =>
+        emitUnsolicitedUpdatesAfterNew
+          ? Effect.asVoid(Effect.forkDetach(emitUnsolicitedUpdates(sessionId)))
+          : Effect.void,
+    ),
   );
 
   const emitLoadReplayNotifications = (requestedSessionId: string) => {
