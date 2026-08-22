@@ -24,6 +24,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -188,6 +189,13 @@ function settlePendingUserInputsAsEmptyAnswers(
     },
   );
 }
+
+const waitForAutonomousTurn = (ctx: KimiSessionContext) =>
+  Effect.gen(function* () {
+    while (ctx.autonomousTurnId) {
+      yield* Effect.sleep("25 millis");
+    }
+  }).pipe(Effect.as(true), Effect.timeoutOption(Duration.seconds(10)), Effect.map(Option.isSome));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -969,6 +977,10 @@ export function makeKimiAdapter(kimiSettings: KimiSettings, options?: KimiAdapte
           });
         }
 
+        // ACP notifications can start a Kimi turn without acquiring the
+        // prompt semaphore. Wait for that turn to settle before claiming the
+        // user turn, or a strict agent can reject the overlapping prompt.
+        yield* waitForAutonomousTurn(ctx);
         ctx.pendingPrompt = true;
         let turnStarted = false;
         return yield* ctx.acp
