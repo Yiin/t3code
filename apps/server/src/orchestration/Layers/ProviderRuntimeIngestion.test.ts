@@ -1598,6 +1598,53 @@ describe("ProviderRuntimeIngestion", () => {
     }),
   );
 
+  it.live("persists autonomous assistant text without a turn", () =>
+    Effect.gen(function* () {
+      const harness = yield* createHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId("evt-autonomous-message-delta"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        itemId: asItemId("item-autonomous"),
+        payload: {
+          streamKind: "assistant_text",
+          delta: "background reminder",
+        },
+      });
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId("evt-autonomous-message-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        itemId: asItemId("item-autonomous"),
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+        },
+      });
+
+      const thread = yield* waitForThread(harness.readModel, (entry) =>
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-autonomous" && !message.streaming,
+        ),
+      );
+      const message = thread.messages.find(
+        (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-autonomous",
+      );
+      expect(message?.turnId).toBeNull();
+      expect(message?.text).toBe("background reminder");
+      expect(message?.streaming).toBe(false);
+      expect(thread.session?.status).toBe("ready");
+      expect(thread.session?.activeTurnId).toBeNull();
+    }),
+  );
+
   it.live(
     "correlates terminal epic markers across projected streaming and rejects malformed markers",
     () =>
