@@ -6,8 +6,9 @@ import {
   type ErrorComponentProps,
   useLocation,
   useNavigate,
+  useRouter,
 } from "@tanstack/react-router";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
@@ -186,7 +187,8 @@ function HostedStaticEnvironmentBootstrap() {
   return null;
 }
 
-function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
+function RootRouteErrorView({ error }: ErrorComponentProps) {
+  const router = useRouter();
   const message = errorMessage(error);
   const details = errorDetails(error);
 
@@ -206,14 +208,7 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
         </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{message}</p>
 
-        <div className="mt-5 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => reset()}>
-            Try again
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
-            Reload app
-          </Button>
-        </div>
+        <RootRouteErrorActions router={router} />
 
         <details className="group mt-5 overflow-hidden rounded-lg border border-border/70 bg-background/55">
           <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-muted-foreground">
@@ -225,6 +220,40 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
           </pre>
         </details>
       </section>
+    </div>
+  );
+}
+
+export function RootRouteErrorActions({
+  router,
+}: {
+  readonly router: Pick<ReturnType<typeof useRouter>, "invalidate">;
+}) {
+  const [isTrying, setIsTrying] = useState(false);
+  const retryInFlightRef = useRef(false);
+  const tryAgain = useCallback(async () => {
+    if (retryInFlightRef.current) {
+      return;
+    }
+
+    retryInFlightRef.current = true;
+    setIsTrying(true);
+    try {
+      await router.invalidate();
+    } finally {
+      retryInFlightRef.current = false;
+      setIsTrying(false);
+    }
+  }, [router]);
+
+  return (
+    <div className="mt-5 flex flex-wrap gap-2">
+      <Button size="sm" disabled={isTrying} onClick={() => void tryAgain()}>
+        {isTrying ? "Trying again..." : "Try again"}
+      </Button>
+      <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
+        Reload app
+      </Button>
     </div>
   );
 }

@@ -91,6 +91,36 @@ function sequence<A>(...values: ReadonlyArray<A>) {
   return () => values[Math.min(index++, values.length - 1)]!;
 }
 
+function transportError(url: string): HttpClientError.HttpClientError {
+  const request = HttpClientRequest.get(url);
+  return new HttpClientError.HttpClientError({
+    reason: new HttpClientError.TransportError({
+      request,
+      cause: new TypeError("Failed to fetch"),
+    }),
+  });
+}
+
+function statusCodeError(url: string, status: number): HttpClientError.HttpClientError {
+  const request = HttpClientRequest.get(url);
+  const response = HttpClientResponse.fromWeb(request, new Response(null, { status }));
+  return new HttpClientError.HttpClientError({
+    reason: new HttpClientError.StatusCodeError({ request, response }),
+  });
+}
+
+function decodeError(url: string): HttpClientError.HttpClientError {
+  const request = HttpClientRequest.get(url);
+  const response = HttpClientResponse.fromWeb(request, new Response("not-json", { status: 200 }));
+  return new HttpClientError.HttpClientError({
+    reason: new HttpClientError.DecodeError({
+      request,
+      response,
+      cause: new SyntaxError("Invalid JSON"),
+    }),
+  });
+}
+
 let disposeHttpTest: (() => Promise<void>) | undefined;
 
 async function installAuthApi(input: {
@@ -269,6 +299,79 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(attempts).toBe(4);
   });
 
+  it("retries transport failures while fetching the auth session", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const failure = transportError("http://localhost/api/auth/session");
+    const runner: PrimaryHttpEffectRunner = async <A>() => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw failure;
+      }
+      return unauthenticatedSession(LOOPBACK_AUTH) as A;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+
+    const gateStatePromise = resolveInitialServerAuthGateState();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(gateStatePromise).resolves.toEqual({
+      status: "requires-auth",
+      auth: LOOPBACK_AUTH,
+    });
+    expect(attempts).toBe(3);
+  });
+
+  it("does not retry an HTTP 500 response", async () => {
+    let attempts = 0;
+    const failure = statusCodeError("http://localhost/api/auth/session", 500);
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw failure;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+
+    const error = await resolveInitialServerAuthGateState().then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      _tag: "PrimaryEnvironmentRequestError",
+      failure: { _tag: "http-status", status: 500 },
+      message: "The server request failed (HTTP 500).",
+    });
+    expect(attempts).toBe(1);
+  });
+
+  it("does not retry an unknown TypeError", async () => {
+    let attempts = 0;
+    const failure = new TypeError("Unknown client failure");
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw failure;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+
+    const error = await resolveInitialServerAuthGateState().then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      _tag: "PrimaryEnvironmentRequestError",
+      failure: { _tag: "client" },
+      message: "The app could not complete the server request. Try again.",
+    });
+    expect(attempts).toBe(1);
+  });
+
   it("takes a pairing token from the location hash and strips it immediately", async () => {
     const testWindow = installTestBrowser("http://localhost/#token=pairing-token");
     const { takePairingTokenFromUrl } = await import("./environments/primary");
@@ -362,20 +465,210 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(testApi.calls.browserSession).toEqual([{ credential: "bad-token" }]);
   });
 
-  it("derives primary request messages from structural request context", async () => {
-    const cause = new Error("private transport detail");
+  it("keeps the status and message for a true HTTP status failure", async () => {
+    const request = HttpClientRequest.get("http://localhost/api/auth/session");
+    const response = HttpClientResponse.fromWeb(
+      request,
+      new Response("Service Unavailable", { status: 503 }),
+    );
+    const cause = new HttpClientError.HttpClientError({
+      reason: new HttpClientError.StatusCodeError({ request, response }),
+    });
+    const { PrimaryEnvironmentRequestError } = await import("./environments/primary");
+    const error = PrimaryEnvironmentRequestError.fromCause({
+      operation: "fetch-session-state",
+      cause,
+    });
+
+    expect(error).toMatchObject({
+      failure: { _tag: "http-status", status: 503 },
+      message: "The server request failed (HTTP 503).",
+    });
+    expect(error.cause).toBe(cause);
+  });
+
+  it("does not invent an HTTP status for an unknown client failure", async () => {
+    const cause = new TypeError("private client detail");
     const { PrimaryEnvironmentRequestError } = await import("./environments/primary");
     const error = PrimaryEnvironmentRequestError.fromCause({
       operation: "list-pairing-links",
       cause,
     });
 
-    expect(error.status).toBe(500);
+    expect(error.failure).toEqual({ _tag: "client" });
     expect(error.cause).toBe(cause);
-    expect(error.message).toBe(
-      "Primary environment request failed during list-pairing-links (HTTP 500).",
-    );
+    expect(error.message).toBe("The app could not complete the server request. Try again.");
     expect(error.message).not.toContain(cause.message);
+  });
+
+  it("reports an uncertain one-time credential outcome after one transport failure", async () => {
+    let attempts = 0;
+    const failure = transportError("http://localhost/api/auth/browser-session");
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw failure;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { submitServerAuthCredential } = await import("./environments/primary");
+
+    const error = await submitServerAuthCredential("one-time-token").then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      _tag: "PrimaryEnvironmentPairingCredentialOutcomeUnknownError",
+      providedLength: 14,
+      message: "The server might have used this pairing token. Create a new token and try again.",
+      cause: {
+        _tag: "PrimaryEnvironmentRequestError",
+        operation: "exchange-bootstrap-credential",
+        failure: { _tag: "transport" },
+        message: "Could not reach the server. Check your connection and try again.",
+      },
+    });
+    expect(attempts).toBe(1);
+  });
+
+  it("reports an uncertain one-time credential outcome after one HTTP 500 response", async () => {
+    let attempts = 0;
+    const failure = statusCodeError("http://localhost/api/auth/browser-session", 500);
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw failure;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { submitServerAuthCredential } = await import("./environments/primary");
+
+    const error = await submitServerAuthCredential("one-time-token").then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      _tag: "PrimaryEnvironmentPairingCredentialOutcomeUnknownError",
+      message: "The server might have used this pairing token. Create a new token and try again.",
+      cause: {
+        _tag: "PrimaryEnvironmentRequestError",
+        operation: "exchange-bootstrap-credential",
+        failure: { _tag: "http-status", status: 500 },
+        message: "The server request failed (HTTP 500).",
+      },
+    });
+    expect(attempts).toBe(1);
+  });
+
+  it("reports an uncertain one-time credential outcome after one decode failure", async () => {
+    let attempts = 0;
+    const failure = decodeError("http://localhost/api/auth/browser-session");
+    const runner: PrimaryHttpEffectRunner = async () => {
+      attempts += 1;
+      throw failure;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { submitServerAuthCredential } = await import("./environments/primary");
+
+    const error = await submitServerAuthCredential("one-time-token").then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toMatchObject({
+      _tag: "PrimaryEnvironmentPairingCredentialOutcomeUnknownError",
+      message: "The server might have used this pairing token. Create a new token and try again.",
+      cause: {
+        _tag: "PrimaryEnvironmentRequestError",
+        operation: "exchange-bootstrap-credential",
+        failure: { _tag: "client" },
+        message: "The app could not complete the server request. Try again.",
+      },
+    });
+    expect(attempts).toBe(1);
+  });
+
+  it("stops retrying transport failures after 15 seconds", async () => {
+    vi.useFakeTimers();
+    const cause = transportError("http://localhost/api/auth/session");
+    const { PrimaryEnvironmentRequestError, retryTransientBootstrap } =
+      await import("./environments/primary/auth");
+    const failure = PrimaryEnvironmentRequestError.fromCause({
+      operation: "fetch-session-state",
+      cause,
+    });
+    let attempts = 0;
+
+    const resultPromise = retryTransientBootstrap(() => {
+      attempts += 1;
+      return Promise.reject(failure);
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await expect(resultPromise).resolves.toBe(failure);
+    expect(attempts).toBe(30);
+  });
+
+  it("does not start a retry when a slow failure reaches the deadline", async () => {
+    vi.useFakeTimers();
+    const cause = transportError("http://localhost/api/auth/session");
+    const { PrimaryEnvironmentRequestError, retryTransientBootstrap } =
+      await import("./environments/primary/auth");
+    const failure = PrimaryEnvironmentRequestError.fromCause({
+      operation: "fetch-session-state",
+      cause,
+    });
+    let attempts = 0;
+
+    const resultPromise = retryTransientBootstrap(async () => {
+      attempts += 1;
+      await new Promise<void>((_resolve, reject) => {
+        setTimeout(() => reject(failure), 14_900);
+      });
+    }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    await vi.advanceTimersByTimeAsync(14_900);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(resultPromise).resolves.toBe(failure);
+    expect(attempts).toBe(1);
+  });
+
+  it("retries a reusable desktop credential after a transport failure", async () => {
+    vi.useFakeTimers();
+    installDesktopBootstrap();
+    let attempts = 0;
+    const failure = transportError("http://localhost/api/auth/browser-session");
+    const runner: PrimaryHttpEffectRunner = async <A>() => {
+      attempts += 1;
+      switch (attempts) {
+        case 1:
+          return unauthenticatedSession(DESKTOP_AUTH) as A;
+        case 2:
+          throw failure;
+        case 3:
+          return browserSession(["orchestration:read", "access:write"]) as A;
+        default:
+          return authenticatedSession(DESKTOP_AUTH) as A;
+      }
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+
+    const gateStatePromise = resolveInitialServerAuthGateState();
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(gateStatePromise).resolves.toEqual({ status: "authenticated" });
+    expect(attempts).toBe(4);
   });
 
   it("waits for the authenticated session to become observable after silent desktop bootstrap", async () => {

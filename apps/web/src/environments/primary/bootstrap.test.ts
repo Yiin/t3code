@@ -1,5 +1,6 @@
 import { EnvironmentId, type ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { HttpClientError, HttpClientRequest } from "effect/unstable/http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -14,6 +15,7 @@ import {
   writePrimaryEnvironmentDescriptor,
 } from ".";
 import { installEnvironmentHttpTest } from "../../../test/environmentHttpTest";
+import { __setPrimaryHttpRunnerForTests, type PrimaryHttpEffectRunner } from "../../lib/runtime";
 
 const BASE_ENVIRONMENT = {
   environmentId: EnvironmentId.make("environment-local"),
@@ -67,6 +69,7 @@ describe("environmentBootstrap", () => {
     await disposeHttpTest?.();
     disposeHttpTest = undefined;
     resetPrimaryEnvironmentDescriptorForTests();
+    __setPrimaryHttpRunnerForTests();
     vi.unstubAllEnvs();
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -114,6 +117,32 @@ describe("environmentBootstrap", () => {
     ]);
 
     expect(testApi.calls.descriptor).toBe(1);
+  });
+
+  it("retries a transport failure while fetching the environment descriptor", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const request = HttpClientRequest.get("http://localhost/.well-known/t3/environment");
+    const failure = new HttpClientError.HttpClientError({
+      reason: new HttpClientError.TransportError({
+        request,
+        cause: new TypeError("Failed to fetch"),
+      }),
+    });
+    const runner: PrimaryHttpEffectRunner = async <A>() => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw failure;
+      }
+      return BASE_ENVIRONMENT as A;
+    };
+    __setPrimaryHttpRunnerForTests(runner);
+
+    const descriptorPromise = resolveInitialPrimaryEnvironmentDescriptor();
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(descriptorPromise).resolves.toEqual(BASE_ENVIRONMENT);
+    expect(attempts).toBe(2);
   });
 
   it("uses https descriptor urls when the primary environment uses wss", async () => {

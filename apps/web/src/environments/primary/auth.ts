@@ -35,11 +35,18 @@ const PrimaryEnvironmentRequestOperation = Schema.Literals([
 ]);
 type PrimaryEnvironmentRequestOperation = typeof PrimaryEnvironmentRequestOperation.Type;
 
+const PrimaryEnvironmentRequestFailure = Schema.Union([
+  Schema.TaggedStruct("transport", {}),
+  Schema.TaggedStruct("http-status", { status: Schema.Number }),
+  Schema.TaggedStruct("client", {}),
+]);
+type PrimaryEnvironmentRequestFailure = typeof PrimaryEnvironmentRequestFailure.Type;
+
 export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<PrimaryEnvironmentRequestError>()(
   "PrimaryEnvironmentRequestError",
   {
     operation: PrimaryEnvironmentRequestOperation,
-    status: Schema.Number,
+    failure: PrimaryEnvironmentRequestFailure,
     pairingLinkId: Schema.optional(Schema.String),
     sessionId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
@@ -51,10 +58,10 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
     readonly pairingLinkId?: string;
     readonly sessionId?: string;
   }): PrimaryEnvironmentRequestError {
-    const status = readHttpApiStatus(input.cause) ?? 500;
+    const failure = classifyPrimaryEnvironmentRequestFailure(input.cause);
     return new PrimaryEnvironmentRequestError({
       operation: input.operation,
-      status,
+      failure,
       ...(input.pairingLinkId !== undefined ? { pairingLinkId: input.pairingLinkId } : {}),
       ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
       cause: input.cause,
@@ -62,7 +69,14 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
   }
 
   override get message(): string {
-    return `Primary environment request failed during ${this.operation} (HTTP ${this.status}).`;
+    switch (this.failure._tag) {
+      case "transport":
+        return "Could not reach the server. Check your connection and try again.";
+      case "http-status":
+        return `The server request failed (HTTP ${this.failure.status}).`;
+      case "client":
+        return "The app could not complete the server request. Try again.";
+    }
   }
 }
 
@@ -113,6 +127,22 @@ export class PrimaryEnvironmentPairingCredentialRequiredError extends Schema.Tag
 
 export const isPrimaryEnvironmentPairingCredentialRequiredError = Schema.is(
   PrimaryEnvironmentPairingCredentialRequiredError,
+);
+
+export class PrimaryEnvironmentPairingCredentialOutcomeUnknownError extends Schema.TaggedErrorClass<PrimaryEnvironmentPairingCredentialOutcomeUnknownError>()(
+  "PrimaryEnvironmentPairingCredentialOutcomeUnknownError",
+  {
+    providedLength: Schema.Number,
+    cause: PrimaryEnvironmentRequestError,
+  },
+) {
+  override get message(): string {
+    return "The server might have used this pairing token. Create a new token and try again.";
+  }
+}
+
+export const isPrimaryEnvironmentPairingCredentialOutcomeUnknownError = Schema.is(
+  PrimaryEnvironmentPairingCredentialOutcomeUnknownError,
 );
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
@@ -203,13 +233,31 @@ export async function fetchSessionState(): Promise<AuthSessionState> {
   });
 }
 
-function readHttpApiStatus(error: unknown): number | null {
+function classifyPrimaryEnvironmentRequestFailure(
+  error: unknown,
+): PrimaryEnvironmentRequestFailure {
   if (isEnvironmentHttpCommonError(error)) {
-    return readEnvironmentHttpErrorStatus(error);
+    return {
+      _tag: "http-status",
+      status: readEnvironmentHttpErrorStatus(error),
+    };
   }
-  return HttpClientError.isHttpClientError(error) && error.response !== undefined
-    ? error.response.status
-    : null;
+
+  if (!HttpClientError.isHttpClientError(error)) {
+    return { _tag: "client" };
+  }
+
+  switch (error.reason._tag) {
+    case "TransportError":
+      return { _tag: "transport" };
+    case "StatusCodeError":
+      return { _tag: "http-status", status: error.reason.response.status };
+    case "EncodeError":
+    case "InvalidUrlError":
+    case "DecodeError":
+    case "EmptyBodyError":
+      return { _tag: "client" };
+  }
 }
 
 function readEnvironmentHttpErrorStatus(error: EnvironmentHttpCommonErrorType): number {
@@ -229,30 +277,28 @@ function readEnvironmentHttpErrorStatus(error: EnvironmentHttpCommonErrorType): 
 }
 
 async function exchangeBootstrapCredential(credential: string): Promise<AuthBrowserSessionResult> {
-  return retryTransientBootstrap(async () => {
-    try {
-      return await runPrimaryHttp(
-        PrimaryEnvironmentHttpClient.pipe(
-          Effect.flatMap((client) => client.auth.browserSession({ payload: { credential } })),
-        ),
-      );
-    } catch (error) {
-      if (
-        isEnvironmentHttpCommonError(error) &&
-        error._tag === "EnvironmentAuthInvalidError" &&
-        error.reason === "invalid_credential"
-      ) {
-        throw new PrimaryEnvironmentPairingCredentialRejectedError({
-          providedLength: credential.length,
-          cause: error,
-        });
-      }
-      throw PrimaryEnvironmentRequestError.fromCause({
-        operation: "exchange-bootstrap-credential",
+  try {
+    return await runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) => client.auth.browserSession({ payload: { credential } })),
+      ),
+    );
+  } catch (error) {
+    if (
+      isEnvironmentHttpCommonError(error) &&
+      error._tag === "EnvironmentAuthInvalidError" &&
+      error.reason === "invalid_credential"
+    ) {
+      throw new PrimaryEnvironmentPairingCredentialRejectedError({
+        providedLength: credential.length,
         cause: error,
       });
     }
-  });
+    throw PrimaryEnvironmentRequestError.fromCause({
+      operation: "exchange-bootstrap-credential",
+      cause: error,
+    });
+  }
 }
 
 async function waitForAuthenticatedSessionAfterBootstrap(): Promise<AuthSessionState> {
@@ -281,7 +327,7 @@ const BOOTSTRAP_RETRY_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_RETRY_STEP_MS = 500;
 
 export async function retryTransientBootstrap<T>(operation: () => Promise<T>): Promise<T> {
-  const startedAt = Date.now();
+  const deadline = Date.now() + BOOTSTRAP_RETRY_TIMEOUT_MS;
   while (true) {
     try {
       return await operation();
@@ -290,11 +336,15 @@ export async function retryTransientBootstrap<T>(operation: () => Promise<T>): P
         throw error;
       }
 
-      if (Date.now() - startedAt >= BOOTSTRAP_RETRY_TIMEOUT_MS) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
         throw error;
       }
 
-      await waitForBootstrapRetry(BOOTSTRAP_RETRY_STEP_MS);
+      await waitForBootstrapRetry(Math.min(BOOTSTRAP_RETRY_STEP_MS, remainingMs));
+      if (Date.now() >= deadline) {
+        throw error;
+      }
     }
   }
 }
@@ -306,15 +356,18 @@ function waitForBootstrapRetry(delayMs: number): Promise<void> {
 }
 
 function isTransientBootstrapError(error: unknown): boolean {
-  if (isPrimaryEnvironmentRequestError(error)) {
-    return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
+  if (!isPrimaryEnvironmentRequestError(error)) {
+    return false;
   }
 
-  if (error instanceof TypeError) {
+  if (error.failure._tag === "transport") {
     return true;
   }
 
-  return error instanceof DOMException && error.name === "AbortError";
+  return (
+    error.failure._tag === "http-status" &&
+    TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.failure.status)
+  );
 }
 
 async function bootstrapServerAuth(): Promise<ServerAuthGateState> {
@@ -332,7 +385,7 @@ async function bootstrapServerAuth(): Promise<ServerAuthGateState> {
   }
 
   try {
-    await exchangeBootstrapCredential(bootstrapCredential);
+    await retryTransientBootstrap(() => exchangeBootstrapCredential(bootstrapCredential));
     await waitForAuthenticatedSessionAfterBootstrap();
     return { status: "authenticated" };
   } catch (error) {
@@ -353,7 +406,17 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
   }
 
   resolvedAuthenticatedGateState = null;
-  await exchangeBootstrapCredential(trimmedCredential);
+  try {
+    await exchangeBootstrapCredential(trimmedCredential);
+  } catch (error) {
+    if (isPrimaryEnvironmentRequestError(error)) {
+      throw new PrimaryEnvironmentPairingCredentialOutcomeUnknownError({
+        providedLength: trimmedCredential.length,
+        cause: error,
+      });
+    }
+    throw error;
+  }
   bootstrapPromise = null;
   stripPairingTokenFromUrl();
 }
