@@ -8,6 +8,7 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   type TurnId,
+  type UploadChatAttachment,
 } from "@t3tools/contracts";
 import { type ChatMessage, type SessionPhase, type Thread } from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
@@ -268,6 +269,26 @@ export function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+/**
+ * The wire shape for one attachment on send: the `uploadId` a completed
+ * `POST /api/attachments` staged (`apps/web/src/lib/attachmentUpload.ts`),
+ * never the file bytes. `null` when the attachment has not finished
+ * uploading yet — `deriveComposerSendState` blocks sending in that case, so
+ * a `null` here means the caller ignored that gate.
+ */
+export function composerAttachmentToUploadRef(
+  attachment: ComposerImageAttachment,
+): UploadChatAttachment | null {
+  if (attachment.upload.status !== "done") {
+    return null;
+  }
+  const { name, mimeType, sizeBytes } = attachment;
+  const uploadId = attachment.upload.uploadId;
+  return attachment.type === "image"
+    ? { type: "image", name, mimeType, sizeBytes, uploadId }
+    : { type: "file", name, mimeType, sizeBytes, uploadId };
+}
+
 export function resolveSendEnvMode(input: {
   requestedEnvMode: DraftThreadEnvMode;
   isGitRepo: boolean;
@@ -275,20 +296,58 @@ export function resolveSendEnvMode(input: {
   return input.isGitRepo ? input.requestedEnvMode : "local";
 }
 
+/**
+ * True when a turn-start failure says the server could not find a staged
+ * upload. The Normalizer keeps consumed uploads on disk until the whole batch
+ * commits, so this only fires once the hourly sweep has expired one.
+ */
+export function isExpiredUploadFailureMessage(message: string): boolean {
+  return /upload expired/i.test(message);
+}
+
+export const EXPIRED_UPLOAD_RETRY_ERROR = "Upload expired. Retry.";
+
+/**
+ * Restores one attachment onto the draft after a failed send. The blob
+ * preview URL is remade because the optimistic message that owned the old one
+ * is being revoked.
+ *
+ * `uploadExpired` resets a completed upload to `failed`, so the chip shows
+ * Retry and re-uploads from `image.file`. Without it a dead `uploadId` would
+ * read as `done` and every further send would fail the same way.
+ */
 export function cloneComposerImageForRetry(
   image: ComposerImageAttachment,
+  options?: { readonly uploadExpired?: boolean },
 ): ComposerImageAttachment {
+  const upload: ComposerImageAttachment["upload"] =
+    options?.uploadExpired === true && image.upload.status === "done"
+      ? { status: "failed", error: EXPIRED_UPLOAD_RETRY_ERROR }
+      : image.upload;
   if (typeof URL === "undefined" || !image.previewUrl.startsWith("blob:")) {
-    return image;
+    return upload === image.upload ? image : { ...image, upload };
   }
   try {
     return {
       ...image,
+      upload,
       previewUrl: URL.createObjectURL(image.file),
     };
   } catch {
-    return image;
+    return upload === image.upload ? image : { ...image, upload };
   }
+}
+
+/**
+ * Why attachment upload state blocks a send, or `null` when it does not.
+ * Every composer calls this so the block reads with one wording.
+ */
+export function attachmentUploadBlockedReason(
+  statuses: ReadonlyArray<"uploading" | "done" | "failed">,
+): string | null {
+  if (statuses.some((status) => status === "uploading")) return "Send blocked: upload in progress";
+  if (statuses.some((status) => status === "failed")) return "Send blocked: an upload failed";
+  return null;
 }
 
 type ComposerSendState = {
@@ -296,6 +355,12 @@ type ComposerSendState = {
   sendableTerminalContexts: TerminalContextDraft[];
   expiredTerminalContextCount: number;
   hasSendableContent: boolean;
+  /**
+   * Why a send is blocked by attachment upload state, or `null` when none
+   * is. Independent of `hasSendableContent`: a prompt can have plenty of
+   * content and still not be sendable while a file is uploading or failed.
+   */
+  attachmentUploadBlockedReason: string | null;
 };
 
 export function deriveComposerSendState(options: {
@@ -308,12 +373,15 @@ export function deriveComposerSendState(options: {
    * contexts do: a prompt of just element chips is still a valid send.
    */
   elementContextCount?: number;
+  /** Upload status of every attachment currently on the draft. */
+  attachmentUploadStatuses?: ReadonlyArray<"uploading" | "done" | "failed"> | undefined;
 }): ComposerSendState {
   const trimmedPrompt = stripInlineTerminalContextPlaceholders(options.prompt).trim();
   const sendableTerminalContexts = filterTerminalContextsWithText(options.terminalContexts);
   const expiredTerminalContextCount =
     options.terminalContexts.length - sendableTerminalContexts.length;
   const elementContextCount = options.elementContextCount ?? 0;
+  const attachmentUploadStatuses = options.attachmentUploadStatuses ?? [];
   return {
     trimmedPrompt,
     sendableTerminalContexts,
@@ -323,6 +391,7 @@ export function deriveComposerSendState(options: {
       options.imageCount > 0 ||
       sendableTerminalContexts.length > 0 ||
       elementContextCount > 0,
+    attachmentUploadBlockedReason: attachmentUploadBlockedReason(attachmentUploadStatuses),
   };
 }
 
@@ -339,6 +408,7 @@ export type PrepareSendAction =
   | { readonly _tag: "empty"; readonly expiredTerminalContextCount: number }
   | { readonly _tag: "missing-project" }
   | { readonly _tag: "missing-base-branch" }
+  | { readonly _tag: "attachment-upload-blocked"; readonly reason: string }
   | {
       readonly _tag: "send";
       readonly trimmedPrompt: string;
@@ -359,13 +429,26 @@ export function prepareSendAction(input: {
   sendEnvMode: DraftThreadEnvMode;
   activeThreadWorktreePath: string | null;
   activeThreadBranch: string | null;
+  attachmentUploadStatuses?: ReadonlyArray<"uploading" | "done" | "failed"> | undefined;
 }): PrepareSendAction {
   const sendState = deriveComposerSendState({
     prompt: input.draftText,
     imageCount: input.imageCount,
     terminalContexts: input.terminalContexts,
     elementContextCount: input.elementContextCount,
+    attachmentUploadStatuses: input.attachmentUploadStatuses,
   });
+
+  // The upload gate applies to slash commands too: they run through this same
+  // send path, and a draft can hold a failed attachment while one is typed.
+  // Only a plan follow-up prompt skips it, since it sends the plan text alone.
+  if (
+    !input.showPlanFollowUpPrompt &&
+    sendState.hasSendableContent &&
+    sendState.attachmentUploadBlockedReason !== null
+  ) {
+    return { _tag: "attachment-upload-blocked", reason: sendState.attachmentUploadBlockedReason };
+  }
 
   if (input.showPlanFollowUpPrompt && input.planMarkdown !== null) {
     const followUp = resolvePlanFollowUpSubmission({

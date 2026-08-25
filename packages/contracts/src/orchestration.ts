@@ -156,6 +156,16 @@ const ChatAttachmentId = TrimmedNonEmptyString.check(
 );
 export type ChatAttachmentId = typeof ChatAttachmentId.Type;
 
+const UPLOAD_ID_MAX_CHARS = 128;
+
+// Identifies a staged HTTP-uploaded attachment (`POST /api/attachments`)
+// before it is normalized into a persisted `ChatAttachmentId`.
+export const UploadId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(UPLOAD_ID_MAX_CHARS),
+  Schema.isPattern(/^[A-Za-z0-9_-]+$/),
+);
+export type UploadId = typeof UploadId.Type;
+
 export const ChatImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   id: ChatAttachmentId,
@@ -179,7 +189,7 @@ export const ChatFileAttachment = Schema.Struct({
 });
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
-const UploadChatImageAttachment = Schema.Struct({
+const UploadChatImageAttachmentDataUrl = Schema.Struct({
   type: Schema.Literal("image"),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
   mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100), Schema.isPattern(/^image\//i)),
@@ -188,9 +198,25 @@ const UploadChatImageAttachment = Schema.Struct({
     Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS),
   ),
 });
+
+// Sent once the file has already been streamed to `POST /api/attachments`.
+// The server resolves `uploadId` against the staging area instead of reading
+// an inline data URL, so a multi-hundred-MB turn never rides the WS frame.
+const UploadChatImageAttachmentRef = Schema.Struct({
+  type: Schema.Literal("image"),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100), Schema.isPattern(/^image\//i)),
+  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES)),
+  uploadId: UploadId,
+});
+
+export const UploadChatImageAttachment = Schema.Union([
+  UploadChatImageAttachmentDataUrl,
+  UploadChatImageAttachmentRef,
+]);
 export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 
-const UploadChatFileAttachment = Schema.Struct({
+const UploadChatFileAttachmentDataUrl = Schema.Struct({
   type: Schema.Literal("file"),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
   mimeType: TrimmedNonEmptyString.check(
@@ -205,10 +231,38 @@ const UploadChatFileAttachment = Schema.Struct({
   ),
 });
 
+const UploadChatFileAttachmentRef = Schema.Struct({
+  type: Schema.Literal("file"),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(100),
+    Schema.isPattern(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i),
+  ),
+  sizeBytes: NonNegativeInt.check(
+    Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES),
+  ),
+  uploadId: UploadId,
+});
+
+export const UploadChatFileAttachment = Schema.Union([
+  UploadChatFileAttachmentDataUrl,
+  UploadChatFileAttachmentRef,
+]);
+export type UploadChatFileAttachment = typeof UploadChatFileAttachment.Type;
+
 export const ChatAttachment = Schema.Union([ChatImageAttachment, ChatFileAttachment]);
 export type ChatAttachment = typeof ChatAttachment.Type;
 const UploadChatAttachment = Schema.Union([UploadChatImageAttachment, UploadChatFileAttachment]);
 export type UploadChatAttachment = typeof UploadChatAttachment.Type;
+
+// Reply body for `POST /api/attachments` once the upload has been staged.
+export const AttachmentUploadResponse = Schema.Struct({
+  uploadId: UploadId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  sizeBytes: NonNegativeInt,
+});
+export type AttachmentUploadResponse = typeof AttachmentUploadResponse.Type;
 
 export const ProjectScriptIcon = Schema.Literals([
   "play",

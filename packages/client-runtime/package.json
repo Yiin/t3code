@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./attachments": {
+      "types": "./src/attachments/upload.ts",
+      "default": "./src/attachments/upload.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "default": "./src/connection/index.ts"

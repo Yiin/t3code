@@ -9,7 +9,8 @@ import {
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { useComposerDraftStore } from "~/composerDraftStore";
+import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
+import { startComposerAttachmentUpload } from "~/lib/attachmentUpload";
 import { previewAnnotationScreenshotFile } from "~/lib/previewAnnotation";
 import { ensureLocalApi } from "~/localApi";
 import {
@@ -75,6 +76,7 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
   const previewState = useThreadPreviewState(threadRef);
   const addPreviewAnnotation = useComposerDraftStore((store) => store.addPreviewAnnotation);
   const addImage = useComposerDraftStore((store) => store.addImage);
+  const updateImageUpload = useComposerDraftStore((store) => store.updateImageUpload);
   const environment = useEnvironment(threadRef.environmentId);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(threadRef.environmentId);
   const open = usePreviewOpenCommand();
@@ -499,7 +501,7 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
         addPreviewAnnotation(threadRef, annotation);
         const screenshotFile = await previewAnnotationScreenshotFile(annotation);
         if (screenshotFile && annotation.screenshot) {
-          addImage(threadRef, {
+          const image: ComposerImageAttachment = {
             type: "image",
             id: annotation.id,
             name: screenshotFile.name,
@@ -507,6 +509,24 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
             sizeBytes: screenshotFile.size,
             previewUrl: annotation.screenshot.dataUrl,
             file: screenshotFile,
+            upload: { status: "uploading", loaded: 0, total: screenshotFile.size },
+          };
+          addImage(threadRef, image);
+          // Uploads that started here join the same composer draft the main
+          // composer renders, so removing the chip there (ChatComposer.tsx)
+          // does not cancel this XHR; it just completes and is ignored.
+          startComposerAttachmentUpload({
+            environmentId: threadRef.environmentId,
+            file: screenshotFile,
+            onProgress: (loaded, total) => {
+              updateImageUpload(threadRef, image.id, { status: "uploading", loaded, total });
+            },
+            onDone: (uploadId) => {
+              updateImageUpload(threadRef, image.id, { status: "done", uploadId });
+            },
+            onFailed: (message) => {
+              updateImageUpload(threadRef, image.id, { status: "failed", error: message });
+            },
           });
         }
       } catch {

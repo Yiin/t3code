@@ -1,6 +1,7 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 
 import type { ChatAttachment } from "@t3tools/contracts";
 
@@ -121,4 +122,184 @@ export function parseAttachmentIdFromRelativePath(relativePath: string): string 
   }
   const id = normalized.slice(0, extensionIndex);
   return id.length > 0 && !id.includes(".") ? id : null;
+}
+
+// --- HTTP upload staging area ---------------------------------------------
+//
+// `POST /api/attachments` streams a file to `<attachmentsDir>/uploads/` ahead
+// of the turn that references it, so a multi-hundred-MB attachment never
+// rides the WebSocket send-turn frame. Each upload gets a `.bin` (the bytes)
+// and a sibling `.json` (the metadata the Normalizer needs to persist it the
+// same way the legacy dataUrl path does).
+
+const UPLOAD_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const UPLOADS_SUBDIR = "uploads";
+
+export interface UploadMeta {
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly createdAt: string;
+}
+
+export function isValidUploadId(uploadId: string): boolean {
+  return UPLOAD_ID_PATTERN.test(uploadId);
+}
+
+export function createUploadId(): string {
+  return NodeCrypto.randomUUID();
+}
+
+/**
+ * Resolves the staged `.bin` (bytes) or `.json` (metadata) path for an
+ * uploadId. Returns null for an id that fails `UPLOAD_ID_PATTERN` or that
+ * would escape `attachmentsDir`, so a client-supplied id cannot traverse.
+ */
+export function resolveUploadPath(input: {
+  readonly attachmentsDir: string;
+  readonly uploadId: string;
+  readonly extension: "bin" | "json";
+}): string | null {
+  if (!isValidUploadId(input.uploadId)) {
+    return null;
+  }
+  return resolveAttachmentRelativePath({
+    attachmentsDir: input.attachmentsDir,
+    relativePath: `${UPLOADS_SUBDIR}/${input.uploadId}.${input.extension}`,
+  });
+}
+
+export function resolveUploadsDir(attachmentsDir: string): string {
+  return NodePath.join(attachmentsDir, UPLOADS_SUBDIR);
+}
+
+/**
+ * Writes the `.json` sidecar once the `.bin` upload has finished streaming
+ * (see http.ts's `POST /api/attachments` route). Throws on an invalid
+ * uploadId or a filesystem error; callers wrap this in `Effect.try`.
+ */
+export function writeUploadMeta(input: {
+  readonly attachmentsDir: string;
+  readonly uploadId: string;
+  readonly meta: UploadMeta;
+}): void {
+  const metaPath = resolveUploadPath({ ...input, extension: "json" });
+  if (!metaPath) {
+    throw new Error(`Invalid upload id '${input.uploadId}'.`);
+  }
+  NodeFS.mkdirSync(NodePath.dirname(metaPath), { recursive: true });
+  NodeFS.writeFileSync(metaPath, JSON.stringify(input.meta));
+}
+
+export function readUploadMeta(input: {
+  readonly attachmentsDir: string;
+  readonly uploadId: string;
+}): UploadMeta | null {
+  const metaPath = resolveUploadPath({ ...input, extension: "json" });
+  if (!metaPath) {
+    return null;
+  }
+  try {
+    const raw = NodeFS.readFileSync(metaPath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<UploadMeta>;
+    if (
+      typeof parsed.name !== "string" ||
+      typeof parsed.mimeType !== "string" ||
+      typeof parsed.sizeBytes !== "number" ||
+      typeof parsed.createdAt !== "string"
+    ) {
+      return null;
+    }
+    return {
+      name: parsed.name,
+      mimeType: parsed.mimeType,
+      sizeBytes: parsed.sizeBytes,
+      createdAt: parsed.createdAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function removeUpload(input: {
+  readonly attachmentsDir: string;
+  readonly uploadId: string;
+}): void {
+  const binPath = resolveUploadPath({ ...input, extension: "bin" });
+  const metaPath = resolveUploadPath({ ...input, extension: "json" });
+  for (const path of [binPath, metaPath]) {
+    if (!path) {
+      continue;
+    }
+    try {
+      NodeFS.rmSync(path, { force: true });
+    } catch {
+      // Best-effort cleanup; a leftover file is swept later by sweepExpiredUploads.
+    }
+  }
+}
+
+/**
+ * Removes staged uploads whose metadata is older than `maxAgeMs`. The `.json`
+ * file is written last (after the `.bin` finishes streaming), so its mtime
+ * marks completion, not the start of an in-flight upload.
+ *
+ * A `.bin` without a sibling `.json` is an upload that never finished: the
+ * client aborted mid-body, or the server died before writing the meta. Those
+ * are swept on the same age rule, otherwise they would sit on disk forever.
+ * The age check keeps an in-flight `.bin` (which also has no `.json` yet)
+ * safe, since `maxAgeMs` is an hour and no single upload runs that long.
+ */
+export function sweepExpiredUploads(input: {
+  readonly attachmentsDir: string;
+  readonly maxAgeMs: number;
+}): void {
+  const uploadsDir = resolveUploadsDir(input.attachmentsDir);
+  let entries: Array<NodeFS.Dirent>;
+  try {
+    entries = NodeFS.readdirSync(uploadsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  const uploadIdsWithMeta = new Set<string>();
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".json")) {
+      uploadIdsWithMeta.add(entry.name.slice(0, -".json".length));
+    }
+  }
+
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    const isMeta = entry.name.endsWith(".json");
+    const isOrphanBin =
+      entry.name.endsWith(".bin") && !uploadIdsWithMeta.has(entry.name.slice(0, -".bin".length));
+    if (!isMeta && !isOrphanBin) {
+      continue;
+    }
+    const uploadId = entry.name.slice(0, -(isMeta ? ".json" : ".bin").length);
+    if (!isValidUploadId(uploadId)) {
+      continue;
+    }
+    const agePath = resolveUploadPath({
+      attachmentsDir: input.attachmentsDir,
+      uploadId,
+      extension: isMeta ? "json" : "bin",
+    });
+    if (!agePath) {
+      continue;
+    }
+    let mtimeMs: number;
+    try {
+      mtimeMs = NodeFS.statSync(agePath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (now - mtimeMs >= input.maxAgeMs) {
+      removeUpload({ attachmentsDir: input.attachmentsDir, uploadId });
+    }
+  }
 }

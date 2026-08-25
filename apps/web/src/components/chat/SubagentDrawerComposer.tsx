@@ -26,12 +26,16 @@ import { FileIcon, PaperclipIcon, SendIcon, XIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
-import { randomUUID } from "~/lib/utils";
-import { readFileAsDataUrl } from "../ChatView.logic";
+import { startComposerAttachmentUpload } from "~/lib/attachmentUpload";
+import { cn, randomUUID } from "~/lib/utils";
+import type { ComposerAttachmentUploadState } from "../../composerDraftStore";
+import { attachmentUploadBlockedReason, composerAttachmentToUploadRef } from "../ChatView.logic";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import {
   attachmentExtensionLabel,
+  attachmentUploadPercent,
   formatAttachmentSize,
+  formatAttachmentUploadProgress,
   screenComposerAttachments,
 } from "./chatAttachments";
 import type { SubagentCommandFailure } from "./SubagentInspectorFooter";
@@ -48,11 +52,7 @@ export const SUBAGENT_DRAWER_IDLE_NOTICE = "Starts a new turn on this subagent's
 export const SUBAGENT_DRAWER_ATTACHMENT_ONLY_PROMPT =
   "[Files were attached with no additional text. Use the attached file(s).]";
 
-/** Shown when a file cannot be read off disk, so the send never fails silently. */
-export const SUBAGENT_DRAWER_ATTACHMENT_READ_ERROR =
-  "Could not read one of the attached files. Nothing was sent.";
-
-/** A file staged on the drawer's draft, before it is read into a data URL. */
+/** A file staged on the drawer's draft, uploading (or uploaded) in place. */
 interface DrawerAttachment {
   readonly id: string;
   readonly type: "image" | "file";
@@ -61,6 +61,7 @@ interface DrawerAttachment {
   readonly sizeBytes: number;
   readonly previewUrl: string;
   readonly file: File;
+  readonly upload: ComposerAttachmentUploadState;
 }
 
 /**
@@ -144,12 +145,63 @@ export function SubagentDrawerComposer({
   const editorRef = useRef<ComposerPromptEditorHandle>(null);
   const filePickerRef = useRef<HTMLInputElement>(null);
   const nextSentIdRef = useRef(0);
+  // Tracks the in-flight XHR per attachment id so Remove can cancel it.
+  const uploadAbortRef = useRef(new Map<string, () => void>());
   const [draft, setDraft] = useState("");
   const [cursor, setCursor] = useState(0);
   const [attachments, setAttachments] = useState<ReadonlyArray<DrawerAttachment>>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sent, setSent] = useState<ReadonlyArray<SentMessage>>([]);
   const delivery = resolveSubagentDrawerDelivery(childLatestTurn);
+  const environmentId = childThreadRef.environmentId;
+
+  const beginAttachmentUpload = (attachment: DrawerAttachment) => {
+    const { abort } = startComposerAttachmentUpload({
+      environmentId,
+      file: attachment.file,
+      onProgress: (loaded, total) => {
+        setAttachments((current) =>
+          current.map((entry) =>
+            entry.id === attachment.id
+              ? { ...entry, upload: { status: "uploading", loaded, total } }
+              : entry,
+          ),
+        );
+      },
+      onDone: (uploadId) => {
+        uploadAbortRef.current.delete(attachment.id);
+        setAttachments((current) =>
+          current.map((entry) =>
+            entry.id === attachment.id ? { ...entry, upload: { status: "done", uploadId } } : entry,
+          ),
+        );
+      },
+      onFailed: (message) => {
+        uploadAbortRef.current.delete(attachment.id);
+        setAttachments((current) =>
+          current.map((entry) =>
+            entry.id === attachment.id
+              ? { ...entry, upload: { status: "failed", error: message } }
+              : entry,
+          ),
+        );
+      },
+    });
+    uploadAbortRef.current.set(attachment.id, abort);
+  };
+
+  const retryAttachmentUpload = (attachmentId: string) => {
+    const attachment = attachments.find((entry) => entry.id === attachmentId);
+    if (!attachment) return;
+    setAttachments((current) =>
+      current.map((entry) =>
+        entry.id === attachmentId
+          ? { ...entry, upload: { status: "uploading", loaded: 0, total: entry.sizeBytes } }
+          : entry,
+      ),
+    );
+    beginAttachmentUpload(attachment);
+  };
 
   const attachFiles = (files: ReadonlyArray<File>) => {
     if (files.length === 0) return;
@@ -159,18 +211,20 @@ export function SubagentDrawerComposer({
       attachedCount: attachments.length,
     });
     if (accepted.length > 0) {
-      setAttachments((current) => [
-        ...current,
-        ...accepted.map(({ file, kind }) => ({
-          id: randomUUID(),
-          type: kind,
-          name: file.name || (kind === "image" ? "image" : "file"),
-          mimeType: file.type || "application/octet-stream",
-          sizeBytes: file.size,
-          previewUrl: URL.createObjectURL(file),
-          file,
-        })),
-      ]);
+      const nextAttachments: DrawerAttachment[] = accepted.map(({ file, kind }) => ({
+        id: randomUUID(),
+        type: kind,
+        name: file.name || (kind === "image" ? "image" : "file"),
+        mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size,
+        previewUrl: URL.createObjectURL(file),
+        file,
+        upload: { status: "uploading", loaded: 0, total: file.size },
+      }));
+      setAttachments((current) => [...current, ...nextAttachments]);
+      for (const attachment of nextAttachments) {
+        beginAttachmentUpload(attachment);
+      }
     }
     setSendError(error);
   };
@@ -181,6 +235,8 @@ export function SubagentDrawerComposer({
   };
 
   const removeAttachment = (attachmentId: string) => {
+    uploadAbortRef.current.get(attachmentId)?.();
+    uploadAbortRef.current.delete(attachmentId);
     releasePreviews(attachments.filter((attachment) => attachment.id === attachmentId));
     setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
   };
@@ -189,23 +245,24 @@ export function SubagentDrawerComposer({
     const staged = attachments;
     const text = resolveSubagentDrawerMessageText(draft, staged.length);
     if (text === null) return;
-    const id = nextSentIdRef.current++;
-    setSendError(null);
-    let uploads: ReadonlyArray<UploadChatAttachment>;
-    try {
-      uploads = await Promise.all(
-        staged.map(async (attachment) => ({
-          type: attachment.type,
-          name: attachment.name,
-          mimeType: attachment.mimeType,
-          sizeBytes: attachment.sizeBytes,
-          dataUrl: await readFileAsDataUrl(attachment.file),
-        })),
-      );
-    } catch {
-      setSendError(SUBAGENT_DRAWER_ATTACHMENT_READ_ERROR);
+    // Same wording as the main composer, so a blocked send reads the same
+    // whichever composer the human is looking at.
+    const uploadBlockedReason = attachmentUploadBlockedReason(
+      staged.map((attachment) => attachment.upload.status),
+    );
+    if (uploadBlockedReason !== null) {
+      setSendError(uploadBlockedReason);
       return;
     }
+    const id = nextSentIdRef.current++;
+    setSendError(null);
+    // `DrawerAttachment` is structurally a `ComposerImageAttachment`, so the
+    // main composer's wire mapping applies unchanged. The guard above already
+    // proved every upload is done, so no ref can be null here.
+    const uploads: ReadonlyArray<UploadChatAttachment> = staged.flatMap((attachment) => {
+      const ref = composerAttachmentToUploadRef(attachment);
+      return ref ? [ref] : [];
+    });
     setSent((current) => [
       ...current,
       {
@@ -233,7 +290,9 @@ export function SubagentDrawerComposer({
     setSendError(failure.message);
   };
 
-  const hasSendableContent = resolveSubagentDrawerMessageText(draft, attachments.length) !== null;
+  const hasSendableContent =
+    resolveSubagentDrawerMessageText(draft, attachments.length) !== null &&
+    attachments.every((attachment) => attachment.upload.status === "done");
 
   return (
     <div className="space-y-2" data-subagent-drawer-composer={childThreadRef.threadId}>
@@ -266,7 +325,7 @@ export function SubagentDrawerComposer({
         <div className="flex flex-wrap gap-2">
           {attachments.map((attachment) => (
             <div
-              className="relative flex max-w-56 items-center gap-2 rounded-lg border border-border/80 bg-background py-1.5 pe-7 ps-2"
+              className="relative flex max-w-56 items-center gap-2 overflow-hidden rounded-lg border border-border/80 bg-background py-1.5 pe-8 ps-2"
               key={attachment.id}
             >
               {attachment.type === "image" ? (
@@ -282,18 +341,63 @@ export function SubagentDrawerComposer({
                 <span className="truncate text-xs" title={attachment.name}>
                   {attachment.name}
                 </span>
-                <span className="text-[10px] text-muted-foreground/70">
-                  {subagentDrawerAttachmentMeta(attachment.name, attachment.sizeBytes)}
-                </span>
+                {attachment.upload.status === "failed" ? (
+                  <span
+                    className="line-clamp-2 text-[11px] leading-tight text-destructive"
+                    role="alert"
+                    title={attachment.upload.error}
+                  >
+                    {attachment.upload.error}
+                  </span>
+                ) : (
+                  <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                    {attachment.upload.status === "uploading"
+                      ? formatAttachmentUploadProgress(attachment.upload)
+                      : subagentDrawerAttachmentMeta(attachment.name, attachment.sizeBytes)}
+                  </span>
+                )}
               </div>
-              <button
+              {attachment.upload.status === "failed" ? (
+                <Button
+                  aria-label={`Retry uploading ${attachment.name}`}
+                  className="me-1 shrink-0 px-1.5 text-xs text-primary"
+                  onClick={() => retryAttachmentUpload(attachment.id)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  Retry
+                </Button>
+              ) : null}
+              <Button
                 aria-label={`Remove ${attachment.name}`}
-                className="absolute right-1 top-1 rounded p-0.5 text-muted-foreground/70 hover:text-foreground"
+                className={cn(
+                  "absolute right-1 bg-background/80 hover:bg-background/90",
+                  // Matches the main composer: on a failed chip Retry sits on
+                  // the centre line, so Remove does too and they never overlap.
+                  attachment.upload.status === "failed" ? "top-1/2 -translate-y-1/2" : "top-1",
+                )}
                 onClick={() => removeAttachment(attachment.id)}
-                type="button"
+                size="icon-xs"
+                variant="ghost"
               >
-                <XIcon aria-hidden className="size-3" />
-              </button>
+                <XIcon aria-hidden />
+              </Button>
+              {attachment.upload.status === "uploading" ? (
+                <div
+                  aria-label={`Uploading ${attachment.name}`}
+                  aria-valuemax={100}
+                  aria-valuemin={0}
+                  aria-valuenow={attachmentUploadPercent(attachment.upload)}
+                  aria-valuetext={formatAttachmentUploadProgress(attachment.upload)}
+                  className="absolute inset-x-0 bottom-0 h-0.5 bg-border/60"
+                  role="progressbar"
+                >
+                  <div
+                    className="h-full bg-primary transition-[width] motion-reduce:transition-none"
+                    style={{ width: `${attachmentUploadPercent(attachment.upload)}%` }}
+                  />
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

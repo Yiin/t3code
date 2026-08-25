@@ -2,6 +2,8 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - only Node's raw client can lie about Content-Length; see the 413 test below.
+import * as NodeHttp from "node:http";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
@@ -28,6 +30,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
   ResolvedKeybindingRule,
   ThreadId,
   WS_METHODS,
@@ -1321,6 +1324,7 @@ const assertBrowserApiCorsPreflightHeaders = (
     "content-type",
     "dpop",
     "traceparent",
+    "x-attachment-name",
   ]);
 };
 const crossOriginClientOrigin = "http://remote-client.test:3773";
@@ -4049,7 +4053,190 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "content-type",
         "dpop",
         "traceparent",
+        "x-attachment-name",
       ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("responds to attachment upload preflight requests with CORS headers", () =>
+    Effect.gen(function* () {
+      // The renderer (`t3code://app`) and every remote environment are
+      // cross-origin, so the browser preflights the custom
+      // `X-Attachment-Name` header before it will send the POST.
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.options("/api/attachments", {
+        headers: {
+          origin: "http://localhost:5733",
+          "access-control-request-method": "POST",
+          "access-control-request-headers": "content-type, x-attachment-name",
+        },
+      });
+
+      assert.equal(response.status, 204);
+      assert.equal(response.headers["access-control-allow-origin"], "*");
+      assert.deepEqual(splitHeaderTokens(response.headers["access-control-allow-methods"]), [
+        "GET",
+        "OPTIONS",
+        "POST",
+      ]);
+      assert.deepEqual(splitHeaderTokens(response.headers["access-control-allow-headers"]), [
+        "authorization",
+        "b3",
+        "content-type",
+        "dpop",
+        "traceparent",
+        "x-attachment-name",
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects an attachment upload without authentication", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/api/attachments", {
+        headers: { "x-attachment-name": "notes.txt", "content-type": "text/plain" },
+        body: HttpBody.text("hello"),
+      });
+
+      assert.equal(response.status, 401);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects an attachment upload with a malformed Content-Type", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/api/attachments", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "x-attachment-name": "notes.txt",
+          "content-type": "not a mime type",
+        },
+        body: HttpBody.text("hello", "not a mime type"),
+      });
+
+      assert.equal(response.status, 415);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects an attachment upload missing the X-Attachment-Name header", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/api/attachments", {
+        headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+        body: HttpBody.text("hello", "text/plain"),
+      });
+
+      assert.equal(response.status, 400);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects an empty attachment upload", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/api/attachments", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "x-attachment-name": "empty.txt",
+        },
+        body: HttpBody.text("", "text/plain"),
+      });
+
+      assert.equal(response.status, 400);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects an attachment upload whose declared Content-Length exceeds the cap", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const uploadUrl = yield* getHttpServerUrl("/api/attachments");
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+
+      // `fetch` (and the effect HttpClient built on it) refuses to let a
+      // caller override Content-Length, so this test drops to Node's raw
+      // http client to send an honestly-lying header, the same way a
+      // buggy or hostile client could.
+      const status = yield* Effect.callback<number>((resume) => {
+        const request = NodeHttp.request(
+          uploadUrl,
+          {
+            method: "POST",
+            headers: {
+              cookie,
+              "x-attachment-name": "huge.bin",
+              "content-type": "application/octet-stream",
+              "content-length": PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES + 1,
+            },
+          },
+          (response) => {
+            response.resume();
+            resume(Effect.succeed(response.statusCode ?? -1));
+          },
+        );
+        request.on("error", (cause) => resume(Effect.die(cause)));
+        request.end("hello");
+      });
+
+      // The route rejects on the declared Content-Length before it ever
+      // reads a byte of this (much smaller) test body, exercising the same
+      // cap the byte-counting mid-stream guard enforces once bytes arrive.
+      assert.equal(status, 413);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("stages an attachment upload and returns its metadata", () =>
+    Effect.gen(function* () {
+      const config = yield* buildAppUnderTest();
+      const fileSystem = yield* FileSystem.FileSystem;
+      const content = "hello from an uploaded attachment";
+
+      const response = yield* HttpClient.post("/api/attachments", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "x-attachment-name": "notes.txt",
+        },
+        body: HttpBody.text(content, "text/plain"),
+      });
+
+      assert.equal(response.status, 201);
+      const body = yield* responseJsonEffect<{
+        readonly uploadId: string;
+        readonly name: string;
+        readonly mimeType: string;
+        readonly sizeBytes: number;
+      }>(response);
+      assert.equal(body.name, "notes.txt");
+      assert.equal(body.mimeType, "text/plain");
+      assert.equal(body.sizeBytes, Buffer.byteLength(content, "utf8"));
+      assertTrue(body.uploadId.length > 0);
+
+      const stagedPath = `${config.attachmentsDir}/uploads/${body.uploadId}.bin`;
+      assert.equal(yield* fileSystem.readFileString(stagedPath), content);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // `X-Attachment-Name` is a ByteString on the wire, so the browser client
+  // percent-encodes it. A file named with a non-Latin-1 character has to
+  // survive the round trip.
+  it.effect("decodes a percent-encoded X-Attachment-Name header", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/api/attachments", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "x-attachment-name": encodeURIComponent("ataskaita_ž.txt"),
+        },
+        body: HttpBody.text("hello", "text/plain"),
+      });
+
+      assert.equal(response.status, 201);
+      const body = yield* responseJsonEffect<{ readonly name: string }>(response);
+      assert.equal(body.name, "ataskaita_ž.txt");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -8385,3 +8572,55 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 });
+
+// The web Remove button aborts the XHR mid-body. That interrupts the request
+// fiber rather than failing it, so only `Effect.onInterrupt` cleans up the
+// half-written `.bin`. Lives outside the `it.layer` suite above because it
+// needs `it.live`: the server fiber runs its finalizer on wall-clock time,
+// which the suite's test clock never advances.
+it.live("removes the staged .bin when the client aborts mid-body", () =>
+  Effect.gen(function* () {
+    const config = yield* buildAppUnderTest();
+    const uploadUrl = yield* getHttpServerUrl("/api/attachments");
+    const cookie = yield* getAuthenticatedSessionCookieHeader();
+    const fileSystem = yield* FileSystem.FileSystem;
+    const uploadsDir = `${config.attachmentsDir}/uploads`;
+
+    const request = yield* Effect.sync(() => {
+      const pending = NodeHttp.request(uploadUrl, {
+        method: "POST",
+        headers: {
+          cookie,
+          "x-attachment-name": "aborted.bin",
+          "content-type": "application/octet-stream",
+          // Promise far more than we send, then walk away.
+          "content-length": 4 * 1024 * 1024,
+        },
+      });
+      // Tearing the socket down is the point of the test, so its error is
+      // expected and must not fail the run.
+      pending.on("error", () => {});
+      pending.write(Buffer.alloc(64 * 1024));
+      return pending;
+    });
+
+    yield* Effect.sleep("250 millis");
+    yield* Effect.sync(() => request.destroy());
+
+    const stagedBinCount = Effect.gen(function* () {
+      const entries = yield* fileSystem
+        .readDirectory(uploadsDir)
+        .pipe(Effect.orElseSucceed((): Array<string> => []));
+      return entries.filter((entry) => entry.endsWith(".bin")).length;
+    });
+
+    let remaining = 0;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      remaining = yield* stagedBinCount;
+      if (remaining === 0) break;
+      yield* Effect.sleep("50 millis");
+    }
+
+    assert.equal(remaining, 0);
+  }).pipe(Effect.provide(Layer.merge(NodeHttpServer.layerTest, NodeServices.layer))),
+);

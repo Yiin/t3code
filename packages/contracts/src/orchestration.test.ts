@@ -7,6 +7,7 @@ import type { ProviderOptionSelection, ProviderOptionSelectionValue } from "./mo
 
 import {
   ChatAttachment,
+  UploadChatFileAttachment,
   ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -59,6 +60,7 @@ const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateComma
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
 const decodeProjectMetaUpdatedPayload = Schema.decodeUnknownEffect(ProjectMetaUpdatedPayload);
 const decodeChatAttachment = Schema.decodeUnknownEffect(ChatAttachment);
+const decodeUploadChatFileAttachment = Schema.decodeUnknownEffect(UploadChatFileAttachment);
 const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeThreadTurnStartCommand = Schema.decodeUnknownEffect(ThreadTurnStartCommand);
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
@@ -453,6 +455,71 @@ it.effect("rejects file attachments with malformed MIME types", () =>
     );
     assert.strictEqual(result._tag, "Failure");
   }),
+);
+
+it.effect("accepts a staged upload attachment referenced by uploadId", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeUploadChatFileAttachment({
+      type: "file",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 128,
+      uploadId: "upload-1",
+    });
+    assert.strictEqual("uploadId" in parsed ? parsed.uploadId : undefined, "upload-1");
+  }),
+);
+
+it.effect("accepts a legacy dataUrl upload attachment", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeUploadChatFileAttachment({
+      type: "file",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 128,
+      dataUrl: "data:text/plain;base64,QQ==",
+    });
+    assert.strictEqual(
+      "dataUrl" in parsed ? parsed.dataUrl : undefined,
+      "data:text/plain;base64,QQ==",
+    );
+  }),
+);
+
+it.effect("rejects an upload attachment with neither dataUrl nor uploadId", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeUploadChatFileAttachment({
+        type: "file",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 128,
+      }),
+    );
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect(
+  "decodes an upload attachment carrying both dataUrl and uploadId via the dataUrl branch",
+  () =>
+    Effect.gen(function* () {
+      // The union tries the dataUrl variant first, so a payload carrying both
+      // fields (which a well-behaved client never sends) still decodes rather
+      // than erroring, matching how the rest of this file's unions behave.
+      const parsed = yield* decodeUploadChatFileAttachment({
+        type: "file",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 128,
+        dataUrl: "data:text/plain;base64,QQ==",
+        uploadId: "upload-1",
+      });
+      assert.strictEqual(
+        "dataUrl" in parsed ? parsed.dataUrl : undefined,
+        "data:text/plain;base64,QQ==",
+      );
+    }),
 );
 
 it.effect("rejects more than the attachment limit in server and client turn commands", () =>

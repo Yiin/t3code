@@ -93,9 +93,21 @@ export const PersistedComposerImageAttachment = Schema.Struct({
 });
 export type PersistedComposerImageAttachment = typeof PersistedComposerImageAttachment.Type;
 
+/**
+ * Upload progress for one composer attachment against `POST /api/attachments`
+ * (see `apps/web/src/lib/attachmentUpload.ts`). The send path
+ * (`ChatView.tsx`, `SubagentDrawerComposer.tsx`) only reads `uploadId` once
+ * `status` is `"done"`; `deriveComposerSendState` blocks sending otherwise.
+ */
+export type ComposerAttachmentUploadState =
+  | { readonly status: "uploading"; readonly loaded: number; readonly total: number }
+  | { readonly status: "done"; readonly uploadId: string }
+  | { readonly status: "failed"; readonly error: string };
+
 export interface ComposerImageAttachment extends Omit<ChatAttachment, "previewUrl"> {
   previewUrl: string;
   file: File;
+  upload: ComposerAttachmentUploadState;
 }
 
 const PersistedTerminalContextDraft = Schema.Struct({
@@ -451,6 +463,11 @@ interface ComposerDraftStoreState {
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => void;
   addImages: (threadRef: ComposerThreadTarget, images: ComposerImageAttachment[]) => void;
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
+  updateImageUpload: (
+    threadRef: ComposerThreadTarget,
+    imageId: string,
+    upload: ComposerAttachmentUploadState,
+  ) => void;
   insertTerminalContext: (
     threadRef: ComposerThreadTarget,
     prompt: string,
@@ -2121,6 +2138,10 @@ function hydrateImagesFromPersisted(
         sizeBytes: attachment.sizeBytes,
         previewUrl: attachment.dataUrl,
         file,
+        // A reloaded draft only carries the local dataUrl bytes, never a
+        // server uploadId (uploads never persist across a reload), so the
+        // attachment needs a fresh upload before it can be sent again.
+        upload: { status: "failed", error: "Reattach this file after reload." },
       } satisfies ComposerImageAttachment,
     ];
   });
@@ -2939,6 +2960,35 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftsByThreadKey[threadKey] = nextDraft;
             }
             return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        updateImageUpload: (threadRef, imageId, upload) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current) {
+              return state;
+            }
+            let changed = false;
+            const images = current.images.map((image) => {
+              if (image.id !== imageId || image.upload === upload) {
+                return image;
+              }
+              changed = true;
+              return { ...image, upload };
+            });
+            if (!changed) {
+              return state;
+            }
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: { ...current, images },
+              },
+            };
           });
         },
         insertTerminalContext: (threadRef, prompt, context, index) => {

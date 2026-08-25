@@ -253,8 +253,9 @@ import {
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
+  composerAttachmentToUploadRef,
   deriveLockedProvider,
-  readFileAsDataUrl,
+  isExpiredUploadFailureMessage,
   reconcileMountedTerminalThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
@@ -3817,7 +3818,12 @@ function ChatViewContent(props: ChatViewProps) {
       sendEnvMode,
       activeThreadWorktreePath: activeThread.worktreePath,
       activeThreadBranch,
+      attachmentUploadStatuses: composerImages.map((image) => image.upload.status),
     });
+    if (sendAction._tag === "attachment-upload-blocked") {
+      setThreadError(activeThread.id, sendAction.reason);
+      return;
+    }
     if (sendAction._tag === "plan-follow-up") {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -3919,15 +3925,19 @@ function ChatViewContent(props: ChatViewProps) {
       effort: ctxSelectedPromptEffort,
       text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
     });
-    const turnAttachmentsPromise = Promise.all(
-      composerAttachmentsSnapshot.map(async (attachment) => ({
-        type: attachment.type,
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-        dataUrl: await readFileAsDataUrl(attachment.file),
-      })),
-    );
+    // The upload gate above (`attachment-upload-blocked`) guarantees every
+    // attachment is `status: "done"` by the time a send reaches here, so
+    // this never rides a data URL over the WebSocket. Wrapped in an async
+    // IIFE (rather than a bare `.map`) so a violated invariant becomes a
+    // rejected promise `settlePromise` can catch, not a synchronous throw.
+    const turnAttachmentsPromise = (async () =>
+      composerAttachmentsSnapshot.map((attachment) => {
+        const uploadRef = composerAttachmentToUploadRef(attachment);
+        if (!uploadRef) {
+          throw new Error(`Attachment '${attachment.name}' has not finished uploading.`);
+        }
+        return uploadRef;
+      }))();
     const optimisticAttachments = composerAttachmentsSnapshot.map((attachment) => ({
       type: attachment.type,
       id: attachment.id,
@@ -4096,6 +4106,16 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     if (failure !== null) {
+      // The Normalizer keeps a staged upload on disk until the whole turn
+      // commits, so a restored `uploadId` is normally still good. It is not
+      // when the server says the upload expired, and then the chip has to
+      // fall back to Retry instead of showing a done state that can never
+      // send.
+      const failureError = isAtomCommandInterrupted(failure)
+        ? null
+        : squashAtomCommandFailure(failure);
+      const uploadExpired =
+        failureError instanceof Error && isExpiredUploadFailureMessage(failureError.message);
       if (
         promptForSend.length === 0 &&
         composerImages.length === 0 &&
@@ -4115,7 +4135,9 @@ function ChatViewContent(props: ChatViewProps) {
           return next.length === existing.length ? existing : next;
         });
         promptRef.current = promptForSend;
-        const retryComposerImages = composerAttachmentsSnapshot.map(cloneComposerImageForRetry);
+        const retryComposerImages = composerAttachmentsSnapshot.map((attachment) =>
+          cloneComposerImageForRetry(attachment, { uploadExpired }),
+        );
         setComposerDraftPrompt(composerDraftTarget, promptForSend);
         addComposerDraftImages(composerDraftTarget, retryComposerImages);
         setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
@@ -4128,11 +4150,10 @@ function ChatViewContent(props: ChatViewProps) {
           detectTrigger: true,
         });
       }
-      if (!isAtomCommandInterrupted(failure)) {
-        const error = squashAtomCommandFailure(failure);
+      if (failureError !== null) {
         setThreadError(
           threadIdForSend,
-          error instanceof Error ? error.message : "Failed to send message.",
+          failureError instanceof Error ? failureError.message : "Failed to send message.",
         );
       }
     }

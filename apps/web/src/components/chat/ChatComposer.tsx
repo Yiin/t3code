@@ -38,6 +38,7 @@ import {
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
+import { startComposerAttachmentUpload } from "~/lib/attachmentUpload";
 import { planImagePersistence, toPersistedComposerImage } from "./ChatComposer.logic";
 import {
   dataTransferHasComposerMention,
@@ -139,7 +140,9 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 import {
   attachmentExtensionLabel,
+  attachmentUploadPercent,
   formatAttachmentSize,
+  formatAttachmentUploadProgress,
   screenComposerAttachments,
 } from "./chatAttachments";
 
@@ -373,6 +376,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
   runnerOwnedReason: string | null;
+  attachmentUploadBlockedReason: string | null;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -401,6 +405,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
         runnerOwnedReason={props.runnerOwnedReason}
+        attachmentUploadBlockedReason={props.attachmentUploadBlockedReason}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
@@ -661,10 +666,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // complete draft from the store at the point of dispatch.
   promptRef.current = prompt;
 
+  // `getSendContext` is handed out through a memoized imperative handle, so it
+  // must not close over draft state directly: a field the memo does not list as
+  // a dependency would be sent at the value it had when the handle was last
+  // rebuilt. Attaching a file after typing did exactly that and sent
+  // `attachments: []`. Reading the draft through a ref keeps send on the value
+  // of the current render regardless of the memo's dependencies.
+  const composerDraftRef = useRef(composerDraft);
+  composerDraftRef.current = composerDraft;
+
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
+  const updateComposerDraftImageUpload = useComposerDraftStore((store) => store.updateImageUpload);
   const insertComposerDraftTerminalContext = useComposerDraftStore(
     (store) => store.insertTerminalContext,
   );
@@ -958,10 +973,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           composerElementContexts.length +
           composerPreviewAnnotations.length +
           composerReviewComments.length,
+        attachmentUploadStatuses: composerAttachments.map((attachment) => attachment.upload.status),
       }),
     [
       composerElementContexts.length,
-      composerAttachments.length,
+      composerAttachments,
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       composerTerminalContexts,
@@ -1209,7 +1225,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectSelectionRequired ||
     environmentUnavailable !== null ||
     runnerOwnedReason !== null ||
-    !composerSendState.hasSendableContent;
+    !composerSendState.hasSendableContent ||
+    composerSendState.attachmentUploadBlockedReason !== null;
   const collapsedComposerPrimaryActionLabel = "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
@@ -1816,6 +1833,62 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Callbacks: attachments
   // ------------------------------------------------------------------
+  // Tracks the in-flight XHR per attachment id so Remove can cancel it
+  // instead of leaving an orphaned upload running against a chip that no
+  // longer exists.
+  const attachmentUploadAbortRef = useRef(new Map<string, () => void>());
+
+  const beginComposerAttachmentUpload = useCallback(
+    (attachment: ComposerImageAttachment) => {
+      const { abort } = startComposerAttachmentUpload({
+        environmentId,
+        file: attachment.file,
+        onProgress: (loaded, total) => {
+          updateComposerDraftImageUpload(composerDraftTarget, attachment.id, {
+            status: "uploading",
+            loaded,
+            total,
+          });
+        },
+        onDone: (uploadId) => {
+          attachmentUploadAbortRef.current.delete(attachment.id);
+          updateComposerDraftImageUpload(composerDraftTarget, attachment.id, {
+            status: "done",
+            uploadId,
+          });
+        },
+        onFailed: (message) => {
+          attachmentUploadAbortRef.current.delete(attachment.id);
+          updateComposerDraftImageUpload(composerDraftTarget, attachment.id, {
+            status: "failed",
+            error: message,
+          });
+        },
+      });
+      attachmentUploadAbortRef.current.set(attachment.id, abort);
+    },
+    [composerDraftTarget, environmentId, updateComposerDraftImageUpload],
+  );
+
+  const retryComposerAttachmentUpload = useCallback(
+    (attachmentId: string) => {
+      const attachment = composerAttachments.find((image) => image.id === attachmentId);
+      if (!attachment) return;
+      updateComposerDraftImageUpload(composerDraftTarget, attachmentId, {
+        status: "uploading",
+        loaded: 0,
+        total: attachment.sizeBytes,
+      });
+      beginComposerAttachmentUpload(attachment);
+    },
+    [
+      beginComposerAttachmentUpload,
+      composerAttachments,
+      composerDraftTarget,
+      updateComposerDraftImageUpload,
+    ],
+  );
+
   const addComposerAttachments = (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
     if (pendingUserInputs.length > 0) {
@@ -1838,16 +1911,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       sizeBytes: file.size,
       previewUrl: URL.createObjectURL(file),
       file,
+      upload: { status: "uploading", loaded: 0, total: file.size },
     }));
     if (nextAttachments.length === 1 && nextAttachments[0]) {
       addComposerAttachment(nextAttachments[0]);
     } else if (nextAttachments.length > 1) {
       addComposerAttachmentsToDraft(nextAttachments);
     }
+    for (const attachment of nextAttachments) {
+      beginComposerAttachmentUpload(attachment);
+    }
     setThreadError(activeThreadId, error);
   };
 
   const removeComposerAttachment = (attachmentId: string) => {
+    attachmentUploadAbortRef.current.get(attachmentId)?.();
+    attachmentUploadAbortRef.current.delete(attachmentId);
     removeComposerAttachmentFromDraft(attachmentId);
   };
 
@@ -2096,11 +2175,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       },
       getSendContext: () => ({
         prompt: promptRef.current,
-        images: composerAttachments,
-        terminalContexts: composerTerminalContexts,
-        elementContexts: composerElementContexts,
-        previewAnnotations: composerPreviewAnnotations,
-        reviewComments: composerReviewComments,
+        images: composerDraftRef.current.images,
+        terminalContexts: composerDraftRef.current.terminalContexts,
+        elementContexts: composerDraftRef.current.elementContexts,
+        previewAnnotations: composerDraftRef.current.previewAnnotations,
+        reviewComments: composerDraftRef.current.reviewComments,
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -2117,8 +2196,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerTerminalContexts,
       insertComposerDraftTerminalContext,
       promptRef,
-      composerPreviewAnnotations,
-      composerReviewComments,
       isConnecting,
       isComposerApprovalState,
       pendingUserInputs.length,
@@ -2417,96 +2494,160 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               pendingUserInputs.length === 0 &&
               chippedComposerAttachments.length > 0 && (
                 <div className="mb-3 flex flex-wrap gap-2">
-                  {chippedComposerAttachments.map((attachment) => (
-                    <div
-                      key={attachment.id}
-                      className={cn(
-                        "relative h-16 overflow-hidden rounded-lg border border-border/80 bg-background",
-                        attachment.type === "image"
-                          ? "w-16"
-                          : "flex max-w-56 items-center gap-2 py-2 pe-8 ps-2.5",
-                      )}
-                    >
-                      {attachment.type === "image" ? (
-                        attachment.previewUrl ? (
-                          <button
-                            type="button"
-                            className="h-full w-full cursor-zoom-in"
-                            aria-label={`Preview ${attachment.name}`}
-                            onClick={() => {
-                              const preview = buildExpandedImagePreview(
-                                composerImageAttachments,
-                                attachment.id,
-                              );
-                              if (!preview) return;
-                              onExpandImage(preview);
-                            }}
-                          >
-                            <img
-                              src={attachment.previewUrl}
-                              alt={attachment.name}
-                              className="h-full w-full object-cover"
-                            />
-                          </button>
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-muted-foreground/70">
-                            {attachment.name}
-                          </div>
-                        )
-                      ) : (
-                        <>
-                          <FileIcon className="size-5 shrink-0 text-muted-foreground/70" />
-                          <div className="flex min-w-0 flex-col">
-                            <span className="truncate text-xs" title={attachment.name}>
-                              {attachment.name}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground/70">
-                              {[
-                                attachmentExtensionLabel(attachment.name),
-                                formatAttachmentSize(attachment.sizeBytes),
-                              ]
-                                .filter((part) => part.length > 0)
-                                .join(" · ")}
-                            </span>
-                          </div>
-                        </>
-                      )}
-                      {nonPersistedComposerAttachmentIdSet.has(attachment.id) && (
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <span
-                                role="img"
-                                aria-label="Draft attachment may not persist"
-                                className={cn(
-                                  "absolute inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600",
-                                  attachment.type === "image" ? "left-1 top-1" : "bottom-1 right-1",
-                                )}
-                              >
-                                <CircleAlertIcon className="size-3" />
-                              </span>
-                            }
-                          />
-                          <TooltipPopup
-                            side="top"
-                            className="max-w-64 whitespace-normal leading-tight"
-                          >
-                            Draft attachment could not be saved locally and may be lost on
-                            navigation.
-                          </TooltipPopup>
-                        </Tooltip>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
-                        onClick={() => removeComposerAttachment(attachment.id)}
-                        aria-label={`Remove ${attachment.name}`}
+                  {chippedComposerAttachments.map((attachment) => {
+                    // Only a settled image gets the 64px square tile. While it
+                    // uploads or after it fails the chip takes the wide layout,
+                    // because a 64px square has nowhere to put the percent, the
+                    // failure reason, or a Retry button that can be tapped.
+                    const showsImageTile =
+                      attachment.type === "image" && attachment.upload.status === "done";
+                    return (
+                      <div
+                        key={attachment.id}
+                        className={cn(
+                          "relative h-16 overflow-hidden rounded-lg border border-border/80 bg-background",
+                          showsImageTile
+                            ? "w-16"
+                            : "flex max-w-56 items-center gap-2 py-2 pe-8 ps-2.5",
+                        )}
                       >
-                        <XIcon />
-                      </Button>
-                    </div>
-                  ))}
+                        {showsImageTile ? (
+                          attachment.previewUrl ? (
+                            <button
+                              type="button"
+                              className="h-full w-full cursor-zoom-in"
+                              aria-label={`Preview ${attachment.name}`}
+                              onClick={() => {
+                                const preview = buildExpandedImagePreview(
+                                  composerImageAttachments,
+                                  attachment.id,
+                                );
+                                if (!preview) return;
+                                onExpandImage(preview);
+                              }}
+                            >
+                              <img
+                                src={attachment.previewUrl}
+                                alt={attachment.name}
+                                className="h-full w-full object-cover"
+                              />
+                            </button>
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-muted-foreground/70">
+                              {attachment.name}
+                            </div>
+                          )
+                        ) : (
+                          <>
+                            {attachment.type === "image" && attachment.previewUrl ? (
+                              <img
+                                src={attachment.previewUrl}
+                                alt=""
+                                aria-hidden
+                                className="size-8 shrink-0 rounded object-cover"
+                              />
+                            ) : (
+                              <FileIcon className="size-5 shrink-0 text-muted-foreground/70" />
+                            )}
+                            <div className="flex min-w-0 flex-col">
+                              <span className="truncate text-xs" title={attachment.name}>
+                                {attachment.name}
+                              </span>
+                              {attachment.upload.status === "failed" ? (
+                                <span
+                                  className="line-clamp-2 text-[11px] leading-tight text-destructive"
+                                  role="alert"
+                                  title={attachment.upload.error}
+                                >
+                                  {attachment.upload.error}
+                                </span>
+                              ) : (
+                                <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                                  {attachment.upload.status === "uploading"
+                                    ? formatAttachmentUploadProgress(attachment.upload)
+                                    : [
+                                        attachmentExtensionLabel(attachment.name),
+                                        formatAttachmentSize(attachment.sizeBytes),
+                                      ]
+                                        .filter((part) => part.length > 0)
+                                        .join(" · ")}
+                                </span>
+                              )}
+                            </div>
+                            {attachment.upload.status === "failed" ? (
+                              <Button
+                                variant="ghost"
+                                size="xs"
+                                className="me-1 shrink-0 px-1.5 text-xs text-primary"
+                                onClick={() => retryComposerAttachmentUpload(attachment.id)}
+                                aria-label={`Retry uploading ${attachment.name}`}
+                              >
+                                Retry
+                              </Button>
+                            ) : null}
+                          </>
+                        )}
+                        {attachment.upload.status === "uploading" && (
+                          <div
+                            className="absolute inset-x-0 bottom-0 h-0.5 bg-border/60"
+                            role="progressbar"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={attachmentUploadPercent(attachment.upload)}
+                            aria-valuetext={formatAttachmentUploadProgress(attachment.upload)}
+                            aria-label={`Uploading ${attachment.name}`}
+                          >
+                            <div
+                              className="h-full bg-primary transition-[width] motion-reduce:transition-none"
+                              style={{ width: `${attachmentUploadPercent(attachment.upload)}%` }}
+                            />
+                          </div>
+                        )}
+                        {nonPersistedComposerAttachmentIdSet.has(attachment.id) && (
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <span
+                                  role="img"
+                                  aria-label="Draft attachment may not persist"
+                                  className={cn(
+                                    "absolute inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600",
+                                    showsImageTile ? "left-1 top-1" : "bottom-1 right-1",
+                                  )}
+                                >
+                                  <CircleAlertIcon className="size-3" />
+                                </span>
+                              }
+                            />
+                            <TooltipPopup
+                              side="top"
+                              className="max-w-64 whitespace-normal leading-tight"
+                            >
+                              Draft attachment could not be saved locally and may be lost on
+                              navigation.
+                            </TooltipPopup>
+                          </Tooltip>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className={cn(
+                            "absolute right-1 bg-background/80 hover:bg-background/90",
+                            // The failed layout puts Retry on the chip's centre
+                            // line, so Remove centres too and the two hit areas
+                            // stay side by side instead of stacking.
+                            attachment.upload.status === "failed"
+                              ? "top-1/2 -translate-y-1/2"
+                              : "top-1",
+                          )}
+                          onClick={() => removeComposerAttachment(attachment.id)}
+                          aria-label={`Remove ${attachment.name}`}
+                        >
+                          <XIcon />
+                        </Button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
@@ -2732,6 +2873,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isPreparingWorktree={isPreparingWorktree}
                   hasSendableContent={composerSendState.hasSendableContent}
                   runnerOwnedReason={runnerOwnedReason}
+                  attachmentUploadBlockedReason={composerSendState.attachmentUploadBlockedReason}
                   preserveComposerFocusOnPointerDown={isMobileViewport}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}

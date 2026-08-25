@@ -65,6 +65,7 @@ import {
   markPromotedDraftThreadByRef,
   markPromotedDraftThreads,
   markPromotedDraftThreadsByRef,
+  type ComposerAttachmentUploadState,
   type ComposerImageAttachment,
   useComposerDraftStore,
   DraftId,
@@ -84,6 +85,7 @@ function makeImage(input: {
   mimeType?: string;
   sizeBytes?: number;
   lastModified?: number;
+  upload?: ComposerAttachmentUploadState;
 }): ComposerImageAttachment {
   const name = input.name ?? "image.png";
   const mimeType = input.mimeType ?? "image/png";
@@ -101,6 +103,7 @@ function makeImage(input: {
     sizeBytes: file.size,
     previewUrl: input.previewUrl,
     file,
+    upload: input.upload ?? { status: "done", uploadId: input.id },
   };
 }
 
@@ -254,6 +257,71 @@ describe("composerDraftStore addImages", () => {
     const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
     expect(draft?.images.map((image) => image.id)).toEqual(["img-shared"]);
     expect(revokeSpy).not.toHaveBeenCalledWith("blob:shared");
+  });
+});
+
+describe("composerDraftStore updateImageUpload", () => {
+  const threadId = ThreadId.make("thread-upload");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("updates the upload state of the matching attachment only", () => {
+    const target = makeImage({
+      id: "img-uploading",
+      previewUrl: "blob:target",
+      name: "target.png",
+      upload: { status: "uploading", loaded: 0, total: 100 },
+    });
+    const other = makeImage({ id: "img-other", previewUrl: "blob:other", name: "other.png" });
+    useComposerDraftStore.getState().addImages(threadRef, [target, other]);
+
+    useComposerDraftStore.getState().updateImageUpload(threadRef, "img-uploading", {
+      status: "uploading",
+      loaded: 40,
+      total: 100,
+    });
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.images.find((image) => image.id === "img-uploading")?.upload).toEqual({
+      status: "uploading",
+      loaded: 40,
+      total: 100,
+    });
+    expect(draft?.images.find((image) => image.id === "img-other")?.upload).toEqual({
+      status: "done",
+      uploadId: "img-other",
+    });
+  });
+
+  it("transitions an attachment to done with its uploadId", () => {
+    const target = makeImage({
+      id: "img-uploading",
+      previewUrl: "blob:target",
+      upload: { status: "uploading", loaded: 0, total: 100 },
+    });
+    useComposerDraftStore.getState().addImage(threadRef, target);
+
+    useComposerDraftStore
+      .getState()
+      .updateImageUpload(threadRef, "img-uploading", { status: "done", uploadId: "upload-123" });
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.images[0]?.upload).toEqual({ status: "done", uploadId: "upload-123" });
+  });
+
+  it("does nothing for an attachment id that is not on the draft", () => {
+    const target = makeImage({ id: "img-real", previewUrl: "blob:real" });
+    useComposerDraftStore.getState().addImage(threadRef, target);
+
+    useComposerDraftStore
+      .getState()
+      .updateImageUpload(threadRef, "img-missing", { status: "failed", error: "nope" });
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.images[0]?.upload).toEqual({ status: "done", uploadId: "img-real" });
   });
 });
 

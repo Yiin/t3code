@@ -3,8 +3,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   attachmentExtensionLabel,
+  attachmentUploadPercent,
   composerAttachmentKind,
   formatAttachmentSize,
+  formatAttachmentUploadProgress,
   screenComposerAttachment,
   screenComposerAttachments,
 } from "./chatAttachments";
@@ -109,6 +111,20 @@ describe("formatAttachmentSize", () => {
   });
 });
 
+describe("attachmentUploadPercent", () => {
+  it("rounds to a whole percent", () => {
+    expect(attachmentUploadPercent({ loaded: 1, total: 3 })).toBe(33);
+    expect(attachmentUploadPercent({ loaded: 0, total: 100 })).toBe(0);
+    expect(attachmentUploadPercent({ loaded: 100, total: 100 })).toBe(100);
+  });
+
+  it("clamps to [0, 100] and treats a zero or non-finite total as 0%", () => {
+    expect(attachmentUploadPercent({ loaded: 150, total: 100 })).toBe(100);
+    expect(attachmentUploadPercent({ loaded: 5, total: 0 })).toBe(0);
+    expect(attachmentUploadPercent({ loaded: 5, total: Number.NaN })).toBe(0);
+  });
+});
+
 describe("attachmentExtensionLabel", () => {
   it("reads the trailing extension", () => {
     expect(attachmentExtensionLabel("report.pdf")).toBe("PDF");
@@ -183,5 +199,21 @@ describe("screenComposerAttachments", () => {
     });
     expect(result.accepted).toHaveLength(2);
     expect(result.error).toBe("You can attach up to 8 files per message.");
+  });
+});
+
+describe("formatAttachmentUploadProgress", () => {
+  it("shows both halves in the total's unit", () => {
+    expect(
+      formatAttachmentUploadProgress({ loaded: 1.3 * 1024 * 1024, total: 3.1 * 1024 * 1024 }),
+    ).toBe("42% · 1.3 / 3.1 MB");
+  });
+
+  it("rounds bytes to whole numbers", () => {
+    expect(formatAttachmentUploadProgress({ loaded: 512, total: 1000 })).toBe("51% · 512 / 1000 B");
+  });
+
+  it("falls back to the percent alone when the total is unknown", () => {
+    expect(formatAttachmentUploadProgress({ loaded: 0, total: 0 })).toBe("0%");
   });
 });

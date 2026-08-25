@@ -14,11 +14,13 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
   buildThreadTurnInterruptInput,
+  cloneComposerImageForRetry,
   decideAttachmentPreviewPromotions,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
+  isExpiredUploadFailureMessage,
   migrateDraftErrorEntry,
   prepareSendAction,
   reconcileMountedTerminalThreadIds,
@@ -265,6 +267,45 @@ describe("deriveComposerSendState", () => {
       }).hasSendableContent,
     ).toBe(false);
   });
+
+  it("blocks sending with an upload-in-progress reason while any attachment uploads", () => {
+    const state = deriveComposerSendState({
+      prompt: "hello",
+      imageCount: 1,
+      terminalContexts: [],
+      attachmentUploadStatuses: ["done", "uploading"],
+    });
+    expect(state.attachmentUploadBlockedReason).toBe("Send blocked: upload in progress");
+  });
+
+  it("blocks sending with an upload-failed reason when none are uploading but one failed", () => {
+    const state = deriveComposerSendState({
+      prompt: "hello",
+      imageCount: 1,
+      terminalContexts: [],
+      attachmentUploadStatuses: ["done", "failed"],
+    });
+    expect(state.attachmentUploadBlockedReason).toBe("Send blocked: an upload failed");
+  });
+
+  it("does not block sending once every attachment is done", () => {
+    const state = deriveComposerSendState({
+      prompt: "hello",
+      imageCount: 2,
+      terminalContexts: [],
+      attachmentUploadStatuses: ["done", "done"],
+    });
+    expect(state.attachmentUploadBlockedReason).toBeNull();
+  });
+
+  it("does not block sending when no attachments are staged", () => {
+    const state = deriveComposerSendState({
+      prompt: "hello",
+      imageCount: 0,
+      terminalContexts: [],
+    });
+    expect(state.attachmentUploadBlockedReason).toBeNull();
+  });
 });
 
 describe("prepareSendAction", () => {
@@ -360,6 +401,41 @@ describe("prepareSendAction", () => {
       sendableTerminalContexts: [],
       expiredTerminalContextCount: 0,
       baseBranchForWorktree: "main",
+    });
+  });
+
+  it("blocks the send while an attachment uploads, ahead of the project/branch checks", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        activeProject: false,
+        attachmentUploadStatuses: ["uploading"],
+      }),
+    ).toEqual({ _tag: "attachment-upload-blocked", reason: "Send blocked: upload in progress" });
+  });
+
+  it("blocks the send when an attachment upload failed", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        attachmentUploadStatuses: ["failed"],
+      }),
+    ).toEqual({ _tag: "attachment-upload-blocked", reason: "Send blocked: an upload failed" });
+  });
+
+  it("does not block a plan follow-up on attachment upload state", () => {
+    expect(
+      prepareSendAction({
+        ...baseInput,
+        draftText: "",
+        showPlanFollowUpPrompt: true,
+        planMarkdown: "- Do the work",
+        attachmentUploadStatuses: ["uploading"],
+      }),
+    ).toEqual({
+      _tag: "plan-follow-up",
+      text: "PLEASE IMPLEMENT THIS PLAN:\n- Do the work",
+      interactionMode: "default",
     });
   });
 });
@@ -697,5 +773,54 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+describe("cloneComposerImageForRetry", () => {
+  const attachment = {
+    type: "file" as const,
+    id: "attachment-1",
+    name: "notes.txt",
+    mimeType: "text/plain",
+    sizeBytes: 5,
+    previewUrl: "",
+    file: { name: "notes.txt" } as unknown as File,
+    upload: { status: "done" as const, uploadId: "upload-1" },
+  };
+
+  it("keeps a completed upload when the send failed for another reason", () => {
+    expect(cloneComposerImageForRetry(attachment).upload).toEqual({
+      status: "done",
+      uploadId: "upload-1",
+    });
+  });
+
+  // A dead uploadId that still reads as "done" shows no Retry button, so the
+  // user can only remove and re-add the file. Reset it to failed instead.
+  it("resets a completed upload to failed when the server said it expired", () => {
+    expect(cloneComposerImageForRetry(attachment, { uploadExpired: true }).upload).toEqual({
+      status: "failed",
+      error: "Upload expired. Retry.",
+    });
+  });
+
+  it("leaves an already-failed upload untouched", () => {
+    const failed = { ...attachment, upload: { status: "failed" as const, error: "Nope." } };
+    expect(cloneComposerImageForRetry(failed, { uploadExpired: true }).upload).toEqual({
+      status: "failed",
+      error: "Nope.",
+    });
+  });
+});
+
+describe("isExpiredUploadFailureMessage", () => {
+  it("matches the Normalizer's expired-upload error", () => {
+    expect(
+      isExpiredUploadFailureMessage("Attachment 'notes.txt' upload expired, attach it again."),
+    ).toBe(true);
+  });
+
+  it("does not match an unrelated send failure", () => {
+    expect(isExpiredUploadFailureMessage("Failed to persist attachment 'notes.txt'.")).toBe(false);
   });
 });

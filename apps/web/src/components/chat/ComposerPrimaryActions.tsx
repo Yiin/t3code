@@ -30,6 +30,12 @@ interface ComposerPrimaryActionsProps {
    * server refuses them anyway.
    */
   runnerOwnedReason?: string | null;
+  /**
+   * Why an attachment upload blocks sending, or `null`. Doubles as the send
+   * button's accessible name, so the copy names the blocked action:
+   * "Send blocked: upload in progress".
+   */
+  attachmentUploadBlockedReason?: string | null;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -70,6 +76,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isPreparingWorktree,
   hasSendableContent,
   runnerOwnedReason = null,
+  attachmentUploadBlockedReason = null,
   preserveComposerFocusOnPointerDown = false,
   onPreviousPendingQuestion,
   onInterrupt,
@@ -223,21 +230,24 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         isConnecting ||
         isEnvironmentUnavailable ||
         runnerOwnedReason !== null ||
+        attachmentUploadBlockedReason !== null ||
         !hasSendableContent
       }
-      title={runnerOwnedReason ?? undefined}
+      title={runnerOwnedReason ?? attachmentUploadBlockedReason ?? undefined}
       aria-label={
         runnerOwnedReason !== null
           ? "Epic run owns this thread"
-          : isEnvironmentUnavailable
-            ? "Environment disconnected"
-            : isConnecting
-              ? "Connecting"
-              : isPreparingWorktree
-                ? "Preparing worktree"
-                : isSendBusy
-                  ? "Sending"
-                  : "Send message"
+          : attachmentUploadBlockedReason !== null
+            ? attachmentUploadBlockedReason
+            : isEnvironmentUnavailable
+              ? "Environment disconnected"
+              : isConnecting
+                ? "Connecting"
+                : isPreparingWorktree
+                  ? "Preparing worktree"
+                  : isSendBusy
+                    ? "Sending"
+                    : "Send message"
       }
     >
       {isConnecting || isSendBusy ? (

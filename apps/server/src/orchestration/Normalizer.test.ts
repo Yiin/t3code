@@ -8,12 +8,19 @@ import {
   type ClientOrchestrationCommand,
   MessageId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 
-import { resolveAttachmentPath } from "../attachmentStore.ts";
+import {
+  createUploadId,
+  readUploadMeta,
+  resolveAttachmentPath,
+  resolveUploadPath,
+  writeUploadMeta,
+} from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import {
@@ -310,6 +317,275 @@ describe("normalizeDispatchCommand attachments", () => {
       yield* removeNormalizedCommandAttachments(normalized);
 
       expect(yield* fileSystem.exists(attachmentPath)).toBe(false);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  const stageUpload = (input: {
+    readonly name: string;
+    readonly mimeType: string;
+    readonly text: string;
+    /** Lets a test claim a size the staged bytes do not have. */
+    readonly sizeBytesOverride?: number;
+  }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const uploadId = createUploadId();
+      const binPath = resolveUploadPath({
+        attachmentsDir: config.attachmentsDir,
+        uploadId,
+        extension: "bin",
+      });
+      if (!binPath) {
+        throw new Error("Expected a resolved upload bin path");
+      }
+      const bytes = Buffer.from(input.text, "utf8");
+      yield* fileSystem.makeDirectory(binPath.slice(0, binPath.lastIndexOf("/")), {
+        recursive: true,
+      });
+      yield* fileSystem.writeFile(binPath, bytes);
+      writeUploadMeta({
+        attachmentsDir: config.attachmentsDir,
+        uploadId,
+        meta: {
+          name: input.name,
+          mimeType: input.mimeType,
+          sizeBytes: input.sizeBytesOverride ?? bytes.byteLength,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      });
+      return { uploadId, binPath };
+    });
+
+  it.effect("persists an uploadId attachment by copying the staged file into place", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const { uploadId, binPath } = yield* stageUpload({
+        name: "notes.txt",
+        mimeType: "text/plain",
+        text: "staged via http upload",
+      });
+
+      const attachments = yield* normalizedAttachments(
+        turnStartWith("cmd-upload", {
+          type: "file",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: Buffer.byteLength("staged via http upload", "utf8"),
+          uploadId,
+        }),
+      );
+
+      expect(attachments).toHaveLength(1);
+      const attachment = attachments[0];
+      if (!attachment) {
+        throw new Error("Expected one normalized attachment");
+      }
+      expect(attachment.type).toBe("file");
+      expect(attachment.mimeType).toBe("text/plain");
+
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir: config.attachmentsDir,
+        attachment,
+      });
+      if (!attachmentPath) {
+        throw new Error("Expected a resolved attachment path");
+      }
+      expect(yield* fileSystem.readFileString(attachmentPath)).toBe("staged via http upload");
+      // A committed turn clears both staged files.
+      expect(yield* fileSystem.exists(binPath)).toBe(false);
+      expect(readUploadMeta({ attachmentsDir: config.attachmentsDir, uploadId })).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("reports an expired uploadId with a clear, retryable error", () =>
+    Effect.gen(function* () {
+      const error = yield* normalizedAttachments(
+        turnStartWith("cmd-upload-expired", {
+          type: "file",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: 5,
+          uploadId: "does-not-exist",
+        }),
+      ).pipe(Effect.flip);
+
+      expect(error.message).toBe("Attachment 'notes.txt' upload expired, attach it again.");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("reports a staged upload whose bytes vanished as expired", () =>
+    Effect.gen(function* () {
+      // The sweep (or a concurrent removeUpload) can delete the `.bin` after
+      // the `.json` was read. The user must be told to attach again, not
+      // shown a persist failure: the web reset path keys on /upload expired/.
+      const fileSystem = yield* FileSystem.FileSystem;
+      const { uploadId, binPath } = yield* stageUpload({
+        name: "notes.txt",
+        mimeType: "text/plain",
+        text: "these bytes go away",
+      });
+      yield* fileSystem.remove(binPath, { force: true });
+
+      const error = yield* normalizedAttachments(
+        turnStartWith("cmd-upload-bin-missing", {
+          type: "file",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: Buffer.byteLength("these bytes go away", "utf8"),
+          uploadId,
+        }),
+      ).pipe(Effect.flip);
+
+      expect(error.message).toBe("Attachment 'notes.txt' upload expired, attach it again.");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps a consumed upload replayable when a later attachment fails", () =>
+    Effect.gen(function* () {
+      // The uploadId branch copies rather than moves, so attachment 1's
+      // staged files outlive the failure of attachment 2. The rollback
+      // deletes only the persisted copy, and the user's retry re-reads the
+      // same uploadId instead of having to attach the file again.
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const { uploadId } = yield* stageUpload({
+        name: "good.log",
+        mimeType: "text/plain",
+        text: "first attachment survives only if the turn does",
+      });
+
+      const command: ClientTurnStartCommand = {
+        ...turnStartWith("cmd-upload-partial", {
+          type: "file",
+          name: "good.log",
+          mimeType: "text/plain",
+          sizeBytes: 42,
+          uploadId,
+        }),
+        message: {
+          messageId: MessageId.make("message-cmd-upload-partial"),
+          role: "user",
+          text: "Take these",
+          attachments: [
+            {
+              type: "file",
+              name: "good.log",
+              mimeType: "text/plain",
+              sizeBytes: Buffer.byteLength(
+                "first attachment survives only if the turn does",
+                "utf8",
+              ),
+              uploadId,
+            },
+            {
+              type: "file",
+              name: "broken.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 3,
+              dataUrl: "not-a-data-url",
+            },
+          ],
+        },
+      };
+
+      yield* normalizeDispatchCommand(command).pipe(Effect.flip);
+
+      // Only the `uploads/` staging directory is left; no persisted
+      // attachment file survives the rollback.
+      const persistedEntries = yield* fileSystem
+        .readDirectory(config.attachmentsDir)
+        .pipe(Effect.orElseSucceed((): Array<string> => []));
+      expect(persistedEntries).toEqual(["uploads"]);
+      // Both staged files survive, so the same uploadId still resolves.
+      expect(readUploadMeta({ attachmentsDir: config.attachmentsDir, uploadId })).not.toBeNull();
+      const binPath = resolveUploadPath({
+        attachmentsDir: config.attachmentsDir,
+        uploadId,
+        extension: "bin",
+      });
+      if (!binPath) {
+        throw new Error("Expected a resolved upload bin path");
+      }
+      expect(yield* fileSystem.exists(binPath)).toBe(true);
+
+      // The retry sends the surviving uploadId alone and now succeeds.
+      const retried = yield* normalizedAttachments(
+        turnStartWith("cmd-upload-partial-retry", {
+          type: "file",
+          name: "good.log",
+          mimeType: "text/plain",
+          sizeBytes: Buffer.byteLength("first attachment survives only if the turn does", "utf8"),
+          uploadId,
+        }),
+      );
+      expect(retried).toHaveLength(1);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  // Parity guard: the persisted `type` follows the staged mime type, not the
+  // `type` the client put on the wire, exactly as the dataUrl branch does.
+  it.effect("persists an image uploadId as type image", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const { uploadId } = yield* stageUpload({
+        name: "shot.png",
+        mimeType: "image/png",
+        text: "not really a png, but the mime decides the type",
+      });
+
+      const attachments = yield* normalizedAttachments(
+        turnStartWith("cmd-upload-image", {
+          // The client claims "file"; the staged mime says otherwise.
+          type: "file",
+          name: "shot.png",
+          mimeType: "image/png",
+          sizeBytes: 10,
+          uploadId,
+        }),
+      );
+
+      const attachment = attachments[0];
+      if (!attachment) {
+        throw new Error("Expected one normalized attachment");
+      }
+      expect(attachment.type).toBe("image");
+      expect(attachment.mimeType).toBe("image/png");
+      const attachmentPath = resolveAttachmentPath({
+        attachmentsDir: config.attachmentsDir,
+        attachment,
+      });
+      if (!attachmentPath) {
+        throw new Error("Expected a resolved attachment path");
+      }
+      expect(yield* fileSystem.exists(attachmentPath)).toBe(true);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects an oversize staged upload by its recorded size", () =>
+    Effect.gen(function* () {
+      const { uploadId } = yield* stageUpload({
+        name: "huge.png",
+        mimeType: "image/png",
+        text: "x",
+        sizeBytesOverride: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES + 1,
+      });
+
+      const error = yield* normalizedAttachments(
+        turnStartWith("cmd-upload-oversize", {
+          type: "image",
+          name: "huge.png",
+          mimeType: "image/png",
+          sizeBytes: 1,
+          uploadId,
+        }),
+      ).pipe(Effect.flip);
+
+      expect(error.message).toBe(
+        `Attachment 'huge.png' is larger than ${PROVIDER_SEND_TURN_MAX_IMAGE_BYTES} bytes.`,
+      );
     }).pipe(Effect.provide(testLayer)),
   );
 });

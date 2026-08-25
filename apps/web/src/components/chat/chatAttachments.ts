@@ -58,6 +58,41 @@ export const formatAttachmentSize = (bytes: number): string => {
   return `${rounded} ${units[unitIndex]}`;
 };
 
+/** Whole-number upload percent for a progress bar; clamped to [0, 100]. */
+export function attachmentUploadPercent(progress: {
+  readonly loaded: number;
+  readonly total: number;
+}): number {
+  if (!Number.isFinite(progress.total) || progress.total <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((progress.loaded / progress.total) * 100)));
+}
+
+const ATTACHMENT_SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
+
+/**
+ * Chip label while an attachment uploads: `42% · 1.3 / 3.1 MB`. Both
+ * halves share the total's unit, so the pair reads as a ratio rather than two
+ * unrelated sizes.
+ */
+export function formatAttachmentUploadProgress(progress: {
+  readonly loaded: number;
+  readonly total: number;
+}): string {
+  const percent = attachmentUploadPercent(progress);
+  if (!Number.isFinite(progress.total) || progress.total <= 0) return `${percent}%`;
+  let unitIndex = 0;
+  let scale = 1;
+  while (progress.total / scale >= 1024 && unitIndex < ATTACHMENT_SIZE_UNITS.length - 1) {
+    scale *= 1024;
+    unitIndex += 1;
+  }
+  const scaled = (bytes: number): number => {
+    const value = Math.max(0, bytes) / scale;
+    return value >= 10 || unitIndex === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  };
+  return `${percent}% · ${scaled(progress.loaded)} / ${scaled(progress.total)} ${ATTACHMENT_SIZE_UNITS[unitIndex]}`;
+}
+
 /** Uppercase extension for a chip label, empty when the name carries none. */
 export const attachmentExtensionLabel = (name: string): string => {
   const dotIndex = name.lastIndexOf(".");

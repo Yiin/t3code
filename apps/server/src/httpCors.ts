@@ -5,6 +5,9 @@ export const browserApiCorsAllowedHeaders = [
   "traceparent",
   "content-type",
   "dpop",
+  // `POST /api/attachments` sends the file name in this custom header, which
+  // makes the request preflighted from the renderer and every remote origin.
+  "x-attachment-name",
 ] as const;
 
 export const browserApiCorsHeaders = {
