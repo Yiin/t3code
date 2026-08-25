@@ -82,10 +82,10 @@ describe("screenComposerAttachment", () => {
   });
 
   it("rejects an oversized file against the attachment limit", () => {
-    const result = screen({ name: "big.pdf", type: "application/pdf", size: 11 * 1024 * 1024 });
+    const result = screen({ name: "big.pdf", type: "application/pdf", size: 101 * 1024 * 1024 });
     expect(result.outcome).toBe("reject");
     if (result.outcome !== "reject") return;
-    expect(result.message).toContain("10MB");
+    expect(result.message).toContain("100MB");
   });
 
   it("stops once the message is full, and says files not images", () => {
