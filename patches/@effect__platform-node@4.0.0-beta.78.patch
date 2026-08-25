@@ -1,0 +1,16 @@
+diff --git a/dist/NodeHttpServer.js b/dist/NodeHttpServer.js
+index 4ca746097f782fccc6b595e4d772f98d764278b5..efbd61bc685591e1a936441db0a0cbaeb5193f4c 100644
+--- a/dist/NodeHttpServer.js
++++ b/dist/NodeHttpServer.js
+@@ -101,7 +101,10 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
+   });
+   const address = server.address();
+   const wss = yield* Effect.acquireRelease(Effect.sync(() => new NodeWS.WebSocketServer({
+-    noServer: true
++    noServer: true,
++    // t3code: chat attachments are sent base64-inline over the RPC socket;
++    // ws defaults to 100 MiB and would close the connection for large files.
++    maxPayload: 512 * 1024 * 1024
+   })), wss => Effect.callback(resume => {
+     wss.close(() => resume(Effect.void));
+   })).pipe(Scope.provide(scope), Effect.cached);
