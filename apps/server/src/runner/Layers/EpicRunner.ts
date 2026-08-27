@@ -748,8 +748,44 @@ const makeEpicRunner = (options?: EpicRunnerLiveOptions) =>
         ),
       );
 
+    /**
+     * A loop that exits cleanly (the success channel) can still leave sibling
+     * workers' rows `running`: the merge-drain fatal path and both
+     * `checkStall` returns in the core loop exit while other workers are
+     * still active, before their `abandonRunningIterations` call would ever
+     * run — that call lives on the error/defect channels below, which a
+     * clean exit never enters. Sweep those rows here once the loop has
+     * genuinely stopped, but only for a run whose status the resume/boot
+     * path never re-adopts: `paused` rows are resumable workers, and
+     * `cancelled` rows are `cancelRun`'s own cleanup to avoid racing.
+     */
+    const sweepTerminalRun = (runId: EpicRunId) =>
+      store.getRun({ runId }).pipe(
+        Effect.mapError(storeError("getRun")),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (run) =>
+              run.status !== "failed" && run.status !== "done"
+                ? Effect.void
+                : cancelCleanupOwned.has(runId)
+                  ? Effect.void
+                  : abandonRunningIterations(
+                      runId,
+                      "abandoned when the run reached a terminal status",
+                      "infra:run-terminal-sweep",
+                      "terminal-sweep",
+                    ),
+          }),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("epic.runner.terminal-sweep-failed", { runId, cause }),
+        ),
+      );
+
     const supervisedLoop = (runId: EpicRunId, options?: EpicRunLoopOptions): Effect.Effect<void> =>
       runLoop(runId, options).pipe(
+        Effect.tap(() => sweepTerminalRun(runId)),
         Effect.catch((error: EpicRunnerError) =>
           Effect.logError("epic.runner.loop-failed", { runId, detail: error.message }).pipe(
             Effect.flatMap(() =>

@@ -1107,6 +1107,25 @@ function createHarness(input: {
             stderrTruncated: false,
           };
         }
+        // A held slot must also fail a live `acquire`, not just report itself
+        // on `check` — the reclaim tests above never exercise `acquire`
+        // themselves (their scripted runs never queue a merge), so this only
+        // starts mattering for a run that actually drains a queued branch.
+        if (
+          request.command === "bd" &&
+          subcommand === "merge-slot" &&
+          request.args[1] === "acquire" &&
+          input.mergeSlotHolder !== undefined
+        ) {
+          return {
+            stdout: "",
+            stderr: `merge slot held by ${input.mergeSlotHolder}`,
+            code: ChildProcessSpawner.ExitCode(1),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }
         // The run loop prepares one systemd worker scope per run
         // (prepareWorkerScope): the probe succeeds, no pre-existing units
         // collide unless the test plants one, and slice limits are accepted.
@@ -9013,5 +9032,46 @@ describe("EpicRunner", () => {
       yield* startRun().pipe(Effect.provide(harness.layer));
       assert.strictEqual(released, 1);
     });
+  });
+
+  // ─── Terminal sweep (t3code-753) ────────────────────────────────────────
+  //
+  // A parallel run can go terminal from inside the loop itself — here, the
+  // merge-slot `checkStall` return — while a sibling worker is still active.
+  // That return is a clean exit of `runLoop`, so it never reaches the
+  // error/defect channels that already sweep orphaned rows; only the
+  // post-exit sweep in `supervisedLoop` catches it.
+  it.live("abandons a sibling's running row when the loop stalls out on a held merge slot", () => {
+    const harness = createHarness({
+      readyChildren: ["child-a", "child-b"],
+      script: [
+        { text: 'RALPH_MSG: {"summary":"done","why":"needed"}', head: "head-a" },
+        { text: null, head: "head-0", stall: true },
+      ],
+      // Held by a run this server has never heard of, so every drain attempt
+      // for the completed child's queued merge defers forever.
+      mergeSlotHolder: "cook-epic-someone-else",
+      options: { runStallTimeoutMs: 40, pollIntervalMs: 10, iterationTimeoutMs: 60_000 },
+    });
+
+    return Effect.gen(function* () {
+      const run = yield* startRunWithWorkers(2, 10);
+      yield* waitFor(() => harness.store.runs.get(run.runId)?.status === "failed");
+
+      assert.include(
+        harness.store.runs.get(run.runId)?.lastError ?? "",
+        "merge slot held by cook-epic-someone-else",
+      );
+      // The stalled sibling's row leaked as `running` past the run's own
+      // terminal write; the post-exit sweep is what finally settles it, on
+      // whichever issue its script step happened to land on.
+      yield* waitFor(() =>
+        harness.store.iterations.every((iteration) => iteration.turnStatus !== "running"),
+      );
+      const swept = harness.store.iterations.find(
+        (iteration) => iteration.failureReason === "infra:run-terminal-sweep",
+      );
+      assert.strictEqual(swept?.turnStatus, "abandoned");
+    }).pipe(Effect.provide(harness.layer));
   });
 });

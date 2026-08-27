@@ -289,6 +289,7 @@ describe("epicRunFailureReasonLabel", () => {
     [EPIC_RUN_FAILURE_RESUME_UNSUPPORTED, "provider cannot resume a session"],
     [EPIC_RUN_FAILURE_RESUME_BLOCKED, "session could not be resumed"],
     [EPIC_RUN_FAILURE_RESUME_FAILED, "resume failed"],
+    ["infra:run-terminal-sweep", "abandoned when the run went terminal"],
   ])("explains %s", (reason, label) => {
     expect(epicRunFailureReasonLabel(reason)).toBe(label);
   });

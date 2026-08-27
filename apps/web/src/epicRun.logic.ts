@@ -201,6 +201,7 @@ const RESUME_FAILURE_LABELS: Record<string, string> = {
   [EPIC_RUN_FAILURE_RESUME_UNSUPPORTED]: "provider cannot resume a session",
   [EPIC_RUN_FAILURE_RESUME_BLOCKED]: "session could not be resumed",
   [EPIC_RUN_FAILURE_RESUME_FAILED]: "resume failed",
+  "infra:run-terminal-sweep": "abandoned when the run went terminal",
 };
 
 export function epicRunFailureReasonLabel(reason: string): string | null {
