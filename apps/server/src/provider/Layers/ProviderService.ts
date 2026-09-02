@@ -40,6 +40,7 @@ import {
 } from "@t3tools/epic-core/epicSubagents";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -106,6 +107,8 @@ export interface ProviderServiceLiveOptions {
    * Provider-specific thresholds override the 30m fallback.
    */
   readonly idleWatchdog?: ProviderIdleWatchdogOptions;
+  /** Maximum time spent discovering a new session's model catalog. */
+  readonly modelDiscoveryTimeoutMs?: number;
 }
 
 export interface ProviderIdleWatchdogOptions {
@@ -134,6 +137,7 @@ export const PROVIDER_IDLE_WATCHDOG_DEFAULT_THRESHOLD_MS = 30 * 60_000;
 export const PROVIDER_IDLE_WATCHDOG_SWEEP_INTERVAL_MS = 30_000;
 export const PROVIDER_IDLE_WATCHDOG_CONTROL_TIMEOUT_MS = 30_000;
 export const PROVIDER_IDLE_WATCHDOG_COMPLETION_GRACE_MS = 60_000;
+export const PROVIDER_MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 
 interface OpenTurnWatchdogState {
   readonly threadId: ThreadId;
@@ -501,6 +505,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               accentColor: instance.accentColor,
               enabled: instance.enabled,
               continuationIdentity: instance.continuationIdentity,
+              ...(instance.modelCatalogKey ? { modelCatalogKey: instance.modelCatalogKey } : {}),
             }),
       ),
     );
@@ -523,6 +528,45 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // in `resolvePersistedCwd`.
   const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  const modelDiscoveryTimeoutMs =
+    options?.modelDiscoveryTimeoutMs ?? PROVIDER_MODEL_DISCOVERY_TIMEOUT_MS;
+
+  const discoverSessionModels = Effect.fn("ProviderService.discoverSessionModels")(
+    function* (input: {
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+      readonly threadId: ThreadId;
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly catalogKey: string | undefined;
+    }) {
+      if (input.adapter.discoverSessionModels === undefined) {
+        return;
+      }
+
+      yield* input.adapter.discoverSessionModels(input.threadId).pipe(
+        Effect.timeout(`${modelDiscoveryTimeoutMs} millis`),
+        Effect.flatMap((models) =>
+          models.length > 0 && input.catalogKey !== undefined && Option.isSome(providerRegistry)
+            ? providerRegistry.value.recordModelCatalog({
+                catalogKey: input.catalogKey,
+                models,
+              })
+            : Effect.void,
+        ),
+        Effect.asVoid,
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.interrupt;
+          }
+          return Effect.logWarning("provider.session.model-discovery-failed", {
+            threadId: input.threadId,
+            provider: input.adapter.provider,
+            providerInstanceId: input.providerInstanceId,
+            cause: Cause.pretty(cause),
+          });
+        }),
+      );
+    },
+  );
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
   /**
@@ -1583,6 +1627,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...session,
           providerInstanceId: resolvedInstanceId,
         };
+        yield* discoverSessionModels({
+          adapter,
+          threadId,
+          providerInstanceId: resolvedInstanceId,
+          catalogKey: instanceInfo.modelCatalogKey,
+        }).pipe(
+          Effect.onInterrupt(() =>
+            adapter.stopSession(threadId).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider.session.interrupted-start-cleanup-failed", {
+                  threadId,
+                  provider: adapter.provider,
+                  stage: "adapter",
+                  cause,
+                }),
+              ),
+              Effect.andThen(
+                clearMcpSession(threadId).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("provider.session.interrupted-start-cleanup-failed", {
+                      threadId,
+                      provider: adapter.provider,
+                      stage: "mcp",
+                      cause,
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
         yield* Effect.annotateCurrentSpan({
           "provider.session_origin": sessionOriginLabel(session),
         });

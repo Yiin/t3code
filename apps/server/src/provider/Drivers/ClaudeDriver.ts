@@ -22,6 +22,8 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 
 import { readSpawnPolicyFrom } from "../../mcp/toolkits/agents/spawnPolicySource.ts";
 import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGeneration.ts";
@@ -67,6 +69,28 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
+
+export const makeClaudeModelCatalogKey = (
+  binaryPath: string,
+  platform: NodeJS.Platform,
+): string => {
+  const trimmed = binaryPath.trim();
+  const normalized = platform === "win32" ? trimmed.replaceAll("\\", "/").toLowerCase() : trimmed;
+  return `${DRIVER_KIND}:executable:${normalized}`;
+};
+
+export const resolveClaudeModelCatalogKey = Effect.fn("resolveClaudeModelCatalogKey")(function* (
+  binaryPath: string,
+  environment: NodeJS.ProcessEnv,
+) {
+  const platform = yield* HostProcessPlatform;
+  const resolveExecutable = yield* SpawnExecutableResolution;
+  const resolvedPath = yield* Effect.try({
+    try: () => resolveExecutable(binaryPath, platform, environment),
+    catch: () => "resolution-failed" as const,
+  }).pipe(Effect.orElseSucceed(() => undefined));
+  return makeClaudeModelCatalogKey(resolvedPath ?? binaryPath, platform);
+});
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -160,6 +184,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         enabled,
         homePath: layout.mode === "authOverlay" ? layout.effectiveHomePath! : config.homePath,
       } satisfies ClaudeSettings;
+      const modelCatalogKey = yield* resolveClaudeModelCatalogKey(
+        effectiveConfig.binaryPath,
+        processEnv,
+      );
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
         ClaudeProviderMaintenanceResolver,
         {
@@ -250,6 +278,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       return {
         instanceId,
         driverKind: DRIVER_KIND,
+        modelCatalogKey,
         continuationIdentity: {
           ...fallbackContinuationIdentity,
           continuationKey: continuationGroupKey,

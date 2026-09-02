@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -40,9 +41,11 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
 import { NoOpProviderInstanceTeardownLive } from "../Services/ProviderInstanceTeardown.ts";
 import {
+  applyProviderModelCatalog,
   haveProvidersChanged,
   mergeProviderSnapshot,
   mergeProviderSnapshots,
+  modelCatalogsFromCachedProviders,
   ProviderRegistryLive,
   selectProvidersByKind,
 } from "./ProviderRegistry.ts";
@@ -942,6 +945,537 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             assert.strictEqual(yield* Ref.get(refreshCalls), 0);
           }).pipe(Effect.provide(runtimeServices));
         }),
+      );
+
+      it.effect("shares discovered model catalogs by harness executable", () =>
+        Effect.gen(function* () {
+          const claudeDriver = ProviderDriverKind.make("claudeAgent");
+          const codexDriver = ProviderDriverKind.make("codex");
+          const sharedCatalogKey = "claudeAgent:executable:/opt/claude";
+          const otherCatalogKey = "claudeAgent:executable:/usr/bin/claude";
+          const accountAId = ProviderInstanceId.make("claude_personal");
+          const accountBId = ProviderInstanceId.make("claude_work");
+          const otherBinaryId = ProviderInstanceId.make("claude_other_binary");
+          const codexId = ProviderInstanceId.make("codex");
+          const provider = (
+            instanceId: ProviderInstanceId,
+            driver: ProviderDriverKind,
+            customSlug: string,
+          ): ServerProvider => ({
+            instanceId,
+            driver,
+            status: "ready",
+            enabled: true,
+            installed: true,
+            auth: { status: "authenticated" },
+            checkedAt: "2026-09-02T00:00:00.000Z",
+            version: "2.1.258",
+            models: [
+              {
+                slug: "stale-built-in",
+                name: "Stale Built-in",
+                isCustom: false,
+                capabilities: null,
+              },
+              {
+                slug: customSlug,
+                name: customSlug,
+                isCustom: true,
+                capabilities: null,
+              },
+            ],
+            slashCommands: [],
+            skills: [],
+          });
+          const accountABaseProvider = provider(accountAId, claudeDriver, "custom-a");
+          const accountAProvider = {
+            ...accountABaseProvider,
+            models: [
+              ...accountABaseProvider.models,
+              {
+                slug: "claude-opus-5",
+                name: "Custom Opus Collision",
+                isCustom: true,
+                capabilities: null,
+              },
+            ],
+          } satisfies ServerProvider;
+          const accountBProvider = provider(accountBId, claudeDriver, "custom-b");
+          const otherBinaryProvider = provider(otherBinaryId, claudeDriver, "custom-other-binary");
+          const codexProvider = provider(codexId, codexDriver, "custom-codex");
+
+          const makeInstance = (
+            snapshot: ServerProvider,
+            snapshotRef: Ref.Ref<ServerProvider>,
+            modelCatalogKey: string,
+            snapshotChanges: PubSub.PubSub<ServerProvider>,
+            refresh: Effect.Effect<ServerProvider> = Ref.get(snapshotRef),
+          ): ProviderInstance => {
+            return {
+              instanceId: snapshot.instanceId,
+              driverKind: snapshot.driver,
+              modelCatalogKey,
+              continuationIdentity: {
+                driverKind: snapshot.driver,
+                continuationKey: `${snapshot.driver}:instance:${snapshot.instanceId}`,
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: snapshot.driver,
+                  packageName: null,
+                }),
+                getSnapshot: Ref.get(snapshotRef),
+                refresh,
+                streamChanges: Stream.fromPubSub(snapshotChanges),
+              },
+              // SAFETY: This registry test never calls the adapter.
+              adapter: {} as ProviderInstance["adapter"],
+              // SAFETY: This registry test never calls text generation.
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            };
+          };
+
+          const accountARef = yield* Ref.make<ServerProvider>(accountAProvider);
+          const accountBRef = yield* Ref.make<ServerProvider>(accountBProvider);
+          const otherBinaryRef = yield* Ref.make<ServerProvider>(otherBinaryProvider);
+          const codexRef = yield* Ref.make<ServerProvider>(codexProvider);
+          const accountAChanges = yield* PubSub.unbounded<ServerProvider>();
+          const accountBChanges = yield* PubSub.unbounded<ServerProvider>();
+          const otherBinaryChanges = yield* PubSub.unbounded<ServerProvider>();
+          const codexChanges = yield* PubSub.unbounded<ServerProvider>();
+          const oldRefreshStarted = yield* Deferred.make<void>();
+          const oldRefreshRelease = yield* Deferred.make<ServerProvider>();
+          const accountA = makeInstance(
+            accountAProvider,
+            accountARef,
+            sharedCatalogKey,
+            accountAChanges,
+            Deferred.succeed(oldRefreshStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(oldRefreshRelease)),
+            ),
+          );
+          const accountB = makeInstance(
+            accountBProvider,
+            accountBRef,
+            sharedCatalogKey,
+            accountBChanges,
+          );
+          const otherBinary = makeInstance(
+            otherBinaryProvider,
+            otherBinaryRef,
+            otherCatalogKey,
+            otherBinaryChanges,
+          );
+          const codex = makeInstance(
+            codexProvider,
+            codexRef,
+            "codex:executable:/opt/claude",
+            codexChanges,
+          );
+          const instancesRef = yield* Ref.make<ReadonlyArray<ProviderInstance>>([
+            accountA,
+            accountB,
+            otherBinary,
+            codex,
+          ]);
+          const instanceChanges = yield* PubSub.unbounded<void>();
+          const instanceRegistryLayer = Layer.succeed(
+            ProviderInstanceRegistry.ProviderInstanceRegistry,
+            {
+              getInstance: (instanceId) =>
+                Ref.get(instancesRef).pipe(
+                  Effect.map((instances) =>
+                    instances.find((instance) => instance.instanceId === instanceId),
+                  ),
+                ),
+              listInstances: Ref.get(instancesRef),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.fromPubSub(instanceChanges),
+              subscribeChanges: PubSub.subscribe(instanceChanges),
+            },
+          );
+          const catalog = [
+            {
+              slug: "claude-opus-5",
+              name: "Claude Opus 5",
+              isCustom: false,
+              isDefault: true,
+              capabilities: null,
+            },
+            {
+              slug: "claude-fable-5-1",
+              name: "Claude Fable 5.1",
+              isCustom: false,
+              capabilities: null,
+            },
+          ] as const;
+
+          yield* Effect.gen(function* () {
+            const registry = yield* ProviderRegistry.ProviderRegistry;
+            yield* registry.recordModelCatalog({ catalogKey: sharedCatalogKey, models: catalog });
+
+            const afterDiscovery = yield* registry.getProviders;
+            const modelsFor = (instanceId: ProviderInstanceId) =>
+              afterDiscovery.find((entry) => entry.instanceId === instanceId)?.models ?? [];
+            assert.deepEqual(
+              modelsFor(accountAId).map((model) => model.slug),
+              ["claude-opus-5", "claude-fable-5-1", "custom-a"],
+            );
+            assert.deepEqual(
+              modelsFor(accountBId).map((model) => model.slug),
+              ["claude-opus-5", "claude-fable-5-1", "custom-b"],
+            );
+            assert.deepEqual(
+              modelsFor(otherBinaryId).map((model) => model.slug),
+              ["stale-built-in", "custom-other-binary"],
+            );
+            assert.deepEqual(
+              modelsFor(codexId).map((model) => model.slug),
+              ["stale-built-in", "custom-codex"],
+            );
+
+            const periodicAccountAProvider = {
+              ...accountAProvider,
+              checkedAt: "2026-09-02T00:01:00.000Z",
+            } satisfies ServerProvider;
+            yield* Ref.set(accountARef, periodicAccountAProvider);
+            yield* PubSub.publish(accountAChanges, periodicAccountAProvider);
+            for (let index = 0; index < 8; index += 1) yield* Effect.yieldNow;
+            assert.deepEqual(
+              (yield* registry.getProviders)
+                .find((entry) => entry.instanceId === accountAId)
+                ?.models.map((model) => model.slug),
+              ["claude-opus-5", "claude-fable-5-1", "custom-a"],
+            );
+
+            const accountCId = ProviderInstanceId.make("claude_new");
+            const accountCProvider = provider(accountCId, claudeDriver, "custom-c");
+            const accountCRef = yield* Ref.make<ServerProvider>(accountCProvider);
+            const accountCChanges = yield* PubSub.unbounded<ServerProvider>();
+            const accountC = makeInstance(
+              accountCProvider,
+              accountCRef,
+              sharedCatalogKey,
+              accountCChanges,
+            );
+            yield* Ref.update(instancesRef, (instances) => [...instances, accountC]);
+            const accountCUpdate = yield* registry.streamChanges.pipe(
+              Stream.filter((providers) =>
+                providers.some((entry) => entry.instanceId === accountCId),
+              ),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            yield* Effect.yieldNow;
+            yield* PubSub.publish(instanceChanges, undefined);
+            yield* Fiber.join(accountCUpdate);
+            assert.deepEqual(
+              (yield* registry.getProviders)
+                .find((entry) => entry.instanceId === accountCId)
+                ?.models.map((model) => model.slug),
+              ["claude-opus-5", "claude-fable-5-1", "custom-c"],
+            );
+
+            const staleRefresh = yield* registry.refreshInstance(accountAId).pipe(Effect.forkChild);
+            yield* Deferred.await(oldRefreshStarted);
+
+            const replacementProvider = provider(accountAId, claudeDriver, "custom-a-new-binary");
+            const replacementRef = yield* Ref.make<ServerProvider>(replacementProvider);
+            const replacementChanges = yield* PubSub.unbounded<ServerProvider>();
+            const replacement = makeInstance(
+              replacementProvider,
+              replacementRef,
+              otherCatalogKey,
+              replacementChanges,
+            );
+            yield* Ref.update(instancesRef, (instances) =>
+              instances.map((instance) =>
+                instance.instanceId === accountAId ? replacement : instance,
+              ),
+            );
+            const replacementUpdate = yield* registry.streamChanges.pipe(
+              Stream.filter((providers) =>
+                providers.some(
+                  (entry) =>
+                    entry.instanceId === accountAId &&
+                    entry.models.some((model) => model.slug === "custom-a-new-binary"),
+                ),
+              ),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            yield* Effect.yieldNow;
+            yield* PubSub.publish(instanceChanges, undefined);
+            yield* Fiber.join(replacementUpdate);
+            const replacementModels = (yield* registry.getProviders).find(
+              (entry) => entry.instanceId === accountAId,
+            )?.models;
+            assert.deepEqual(
+              replacementModels?.map((model) => model.slug),
+              ["stale-built-in", "custom-a-new-binary"],
+            );
+            yield* Deferred.succeed(oldRefreshRelease, {
+              ...accountAProvider,
+              checkedAt: "2026-09-02T00:02:00.000Z",
+              models: [
+                {
+                  slug: "late-old-model",
+                  name: "Late Old Model",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+            });
+            yield* Fiber.join(staleRefresh);
+            assert.deepEqual(
+              (yield* registry.getProviders)
+                .find((entry) => entry.instanceId === accountAId)
+                ?.models.map((model) => model.slug),
+              ["stale-built-in", "custom-a-new-binary"],
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceRegistryLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(process.cwd(), {
+                    prefix: "t3-provider-registry-model-catalog-",
+                  }),
+                ),
+                Layer.provideMerge(NodeServices.layer),
+              ),
+            ),
+          );
+        }),
+      );
+
+      it("seeds the newest cached harness catalog for sibling accounts", () => {
+        const driver = ProviderDriverKind.make("claudeAgent");
+        const catalogKey = "claudeAgent:executable:/opt/claude";
+        const accountAId = ProviderInstanceId.make("claude_cached_personal");
+        const accountBId = ProviderInstanceId.make("claude_cached_work");
+        const bootInstances = [
+          { instanceId: accountAId, modelCatalogKey: catalogKey },
+          { instanceId: accountBId, modelCatalogKey: catalogKey },
+        ] as unknown as ReadonlyArray<ProviderInstance>;
+        const provider = (
+          instanceId: ProviderInstanceId,
+          checkedAt: string,
+          builtInSlug: string,
+          customSlug: string,
+        ): ServerProvider => ({
+          instanceId,
+          driver,
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt,
+          version: "2.1.258",
+          models: [
+            { slug: builtInSlug, name: builtInSlug, isCustom: false, capabilities: null },
+            { slug: customSlug, name: customSlug, isCustom: true, capabilities: null },
+          ],
+          slashCommands: [],
+          skills: [],
+        });
+        const olderSiblingCache = provider(
+          accountBId,
+          "2026-09-01T00:00:00.000Z",
+          "older-static",
+          "cached-custom-b",
+        );
+        const discoveredAccountCache = provider(
+          accountAId,
+          "2026-09-02T00:00:00.000Z",
+          "claude-fable-5-1",
+          "cached-custom-a",
+        );
+        const catalogs = modelCatalogsFromCachedProviders(bootInstances, [
+          olderSiblingCache,
+          discoveredAccountCache,
+        ]);
+        const currentSibling = provider(
+          accountBId,
+          "2026-09-03T00:00:00.000Z",
+          "stale-built-in",
+          "current-custom-b",
+        );
+
+        assert.deepEqual(
+          catalogs.get(catalogKey)?.map((model) => model.slug),
+          ["claude-fable-5-1"],
+        );
+        assert.deepEqual(
+          applyProviderModelCatalog(currentSibling, catalogs.get(catalogKey)!).models.map(
+            (model) => model.slug,
+          ),
+          ["claude-fable-5-1", "current-custom-b"],
+        );
+      });
+
+      it.effect(
+        "commits concurrent model catalogs through persistence and publication in order",
+        () =>
+          Effect.gen(function* () {
+            const driver = ProviderDriverKind.make("claudeAgent");
+            const instanceId = ProviderInstanceId.make("claude_ordered_catalog");
+            const catalogKey = "claudeAgent:executable:/opt/ordered-claude";
+            const initialProvider = {
+              instanceId,
+              driver,
+              status: "ready",
+              enabled: true,
+              installed: true,
+              auth: { status: "authenticated" },
+              checkedAt: "2026-09-02T00:00:00.000Z",
+              version: "2.1.258",
+              models: [
+                {
+                  slug: "static-model",
+                  name: "Static Model",
+                  isCustom: false,
+                  capabilities: null,
+                },
+                {
+                  slug: "custom-model",
+                  name: "Custom Model",
+                  isCustom: true,
+                  capabilities: null,
+                },
+              ],
+              slashCommands: [],
+              skills: [],
+            } satisfies ServerProvider;
+            const instance = {
+              instanceId,
+              driverKind: driver,
+              modelCatalogKey: catalogKey,
+              continuationIdentity: {
+                driverKind: driver,
+                continuationKey: `${driver}:instance:${instanceId}`,
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: driver,
+                  packageName: null,
+                }),
+                getSnapshot: Effect.succeed(initialProvider),
+                refresh: Effect.succeed(initialProvider),
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            } satisfies ProviderInstance;
+            const instanceRegistryLayer = Layer.succeed(
+              ProviderInstanceRegistry.ProviderInstanceRegistry,
+              {
+                getInstance: (candidateId) =>
+                  Effect.succeed(candidateId === instanceId ? instance : undefined),
+                listInstances: Effect.succeed([instance]),
+                listUnavailable: Effect.succeed([]),
+                streamChanges: Stream.empty,
+                subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+              },
+            );
+            const delayedUpdateEntered = yield* Deferred.make<void>();
+            const releaseDelayedUpdate = yield* Deferred.make<void>();
+            let delayNextRead = false;
+            let didDelayRead = false;
+            const controlledUsageLayer = Layer.succeed(ProviderUsageLedgerStore, {
+              recordSamples: () => Effect.void,
+              listForInstance: () =>
+                delayNextRead && !didDelayRead
+                  ? Effect.sync(() => {
+                      didDelayRead = true;
+                    }).pipe(
+                      Effect.andThen(Deferred.succeed(delayedUpdateEntered, undefined)),
+                      Effect.andThen(Deferred.await(releaseDelayedUpdate)),
+                      Effect.as([]),
+                    )
+                  : Effect.succeed([]),
+              listAll: Effect.succeed([]),
+              pruneObservedBefore: () => Effect.void,
+            });
+            const catalogA = [
+              {
+                slug: "catalog-a",
+                name: "Catalog A",
+                isCustom: false,
+                capabilities: null,
+              },
+            ] as const;
+            const catalogB = [
+              {
+                slug: "catalog-b",
+                name: "Catalog B",
+                isCustom: false,
+                capabilities: null,
+              },
+            ] as const;
+
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry.ProviderRegistry;
+              const config = yield* ServerConfig.ServerConfig;
+              const emissionsFiber = yield* registry.streamChanges.pipe(
+                Stream.take(2),
+                Stream.runCollect,
+                Effect.forkChild,
+              );
+              yield* Effect.yieldNow;
+              delayNextRead = true;
+              const catalogAFiber = yield* registry
+                .recordModelCatalog({ catalogKey, models: catalogA })
+                .pipe(Effect.forkChild);
+              yield* Deferred.await(delayedUpdateEntered);
+              const catalogBFiber = yield* registry
+                .recordModelCatalog({ catalogKey, models: catalogB })
+                .pipe(Effect.forkChild);
+              yield* Effect.yieldNow;
+              yield* Deferred.succeed(releaseDelayedUpdate, undefined);
+              yield* Fiber.join(catalogAFiber);
+              yield* Fiber.join(catalogBFiber);
+              const emissions = Array.from(yield* Fiber.join(emissionsFiber));
+              const filePath = yield* resolveProviderStatusCachePath({
+                cacheDir: config.providerStatusCacheDir,
+                instanceId,
+              });
+              const persisted = yield* readProviderStatusCache(filePath);
+              const slugs = (provider: ServerProvider | undefined) =>
+                provider?.models.map((model) => model.slug);
+
+              assert.deepEqual(
+                slugs(
+                  (yield* registry.getProviders).find(
+                    (provider) => provider.instanceId === instanceId,
+                  ),
+                ),
+                ["catalog-b", "custom-model"],
+              );
+              assert.deepEqual(slugs(persisted), ["catalog-b", "custom-model"]);
+              assert.deepEqual(
+                slugs(emissions.at(-1)?.find((provider) => provider.instanceId === instanceId)),
+                ["catalog-b", "custom-model"],
+              );
+            }).pipe(
+              Effect.provide(
+                ProviderRegistryLive.pipe(
+                  Layer.provideMerge(instanceRegistryLayer),
+                  Layer.provideMerge(controlledUsageLayer),
+                  Layer.provideMerge(
+                    ServerConfig.layerTest(process.cwd(), {
+                      prefix: "t3-provider-registry-ordered-catalog-",
+                    }),
+                  ),
+                  Layer.provideMerge(NodeServices.layer),
+                ),
+              ),
+            );
+          }),
       );
 
       it.effect("joins live usage windows and the current limit onto assembled snapshots", () =>
@@ -2159,6 +2693,52 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   stderr: "",
                   code: 0,
                 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("gates Claude Fable 5.1 at Claude Code 2.1.258", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          );
+          assert.strictEqual(
+            status.models.find((model) => model.slug === "claude-fable-5-1")?.name,
+            "Claude Fable 5.1",
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.258\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("hides Claude Fable 5.1 before Claude Code 2.1.258", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          );
+          assert.strictEqual(
+            status.models.some((model) => model.slug === "claude-fable-5-1"),
+            false,
+          );
+          assert.strictEqual(
+            status.message,
+            "Claude Code v2.1.257 is too old for Claude Fable 5.1. Upgrade to v2.1.258 or newer to access it.",
+          );
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "2.1.257\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),

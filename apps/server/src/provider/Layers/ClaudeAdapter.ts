@@ -22,6 +22,7 @@ import {
   type SettingSource,
   type SDKUserMessage,
   type ModelUsage,
+  type ModelInfo as ClaudeModelInfo,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import {
@@ -105,6 +106,7 @@ import {
   resolveClaudeContextWindow,
   resolveClaudeEffort,
   mapClaudeRateLimitInfo,
+  serverProviderModelsFromClaudeModelInfo,
 } from "./ClaudeProvider.ts";
 import { classifyClaudeRateLimitInfo, classifyProviderErrorText } from "../providerLimitSignal.ts";
 import {
@@ -318,6 +320,7 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
   readonly getContextUsage?: () => Promise<SDKControlGetContextUsageResponse>;
+  readonly supportedModels: () => Promise<ClaudeModelInfo[]>;
   readonly close: () => void;
 }
 
@@ -522,6 +525,8 @@ function selectedClaudeContextWindow(
   modelSelection: ModelSelection | undefined,
 ): number | undefined {
   switch (modelSelection?.model) {
+    case "claude-opus-5":
+    case "claude-fable-5-1":
     case "claude-opus-4-8":
     case "claude-opus-4-7":
       // Always 1M at the API; these models expose no contextWindow option.
@@ -3533,6 +3538,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "commands_changed":
       case "memory_recall":
       case "elicitation_complete":
+      case "background_tasks_changed":
+      case "control_request_progress":
+      case "worker_shutting_down":
+        return;
+      case "informational":
+        if (message.level === "warning") {
+          yield* emitRuntimeWarning(context, message.content, message);
+        }
+        return;
+      case "model_refusal_no_fallback":
+        yield* emitRuntimeError(context, message.content, message);
         return;
       case "permission_denied":
         yield* offerRuntimeEvent({
@@ -3738,6 +3754,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       // Composer prompt suggestions have no T3 surface; consumed deliberately.
       case "prompt_suggestion":
+      // Conversation resets have no separate T3 event today. The following
+      // SDK messages still carry the new conversation id.
+      case "conversation_reset":
         return;
       default: {
         // Exhaustiveness guard (see handleSystemMessage): new SDK top-level
@@ -4888,6 +4907,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return context !== undefined && !context.stopped;
     });
 
+  const discoverSessionModels: NonNullable<ClaudeAdapterShape["discoverSessionModels"]> = Effect.fn(
+    "discoverSessionModels",
+  )(function* (threadId) {
+    const context = yield* requireSession(threadId);
+    const models = yield* Effect.tryPromise({
+      try: () => context.query.supportedModels(),
+      catch: (cause) => toRequestError(threadId, "models/list", cause),
+    });
+    return serverProviderModelsFromClaudeModelInfo(models);
+  });
+
   const stopAll: ClaudeAdapterShape["stopAll"] = () =>
     Effect.forEach(
       sessions,
@@ -4918,6 +4948,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: CLAUDE_ADAPTER_CAPABILITIES,
     startSession,
+    discoverSessionModels,
     sendTurn,
     interruptTurn,
     readThread,

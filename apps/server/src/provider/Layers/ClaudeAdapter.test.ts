@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
   Options as ClaudeQueryOptions,
+  ModelInfo as ClaudeModelInfo,
   PermissionMode,
   PermissionResult,
   SDKControlGetContextUsageResponse,
@@ -77,6 +78,8 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public readonly supportedModelsCalls: Array<void> = [];
+  public supportedModelRows: ClaudeModelInfo[] = [];
   public closeCalls = 0;
   /** When set, interrupt() returns this instead of resolving immediately. */
   public interruptResult: Promise<void> | undefined;
@@ -134,6 +137,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
+  };
+
+  readonly supportedModels = async (): Promise<ClaudeModelInfo[]> => {
+    this.supportedModelsCalls.push(undefined);
+    return this.supportedModelRows;
   };
 
   readonly close = (): void => {
@@ -700,7 +708,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("preserves xhigh effort for Claude Fable 5", () => {
+  it.effect("preserves xhigh effort for Claude Fable 5.1", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -709,7 +717,7 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
-          "claude-fable-5",
+          "claude-fable-5-1",
           [{ id: "effort", value: "xhigh" }],
         ),
         runtimeMode: "full-access",
@@ -717,6 +725,48 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.effort, "xhigh");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("discovers supported models from the live Claude session", () => {
+    const harness = makeHarness();
+    harness.query.supportedModelRows = [
+      {
+        value: "default",
+        resolvedModel: "claude-opus-5[1m]",
+        displayName: "Default (recommended)",
+        description: "Opus 5 with 1M context",
+        supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
+        supportsFastMode: true,
+      },
+      {
+        value: "haiku",
+        resolvedModel: "claude-haiku-4-5-20251001",
+        displayName: "Haiku",
+        description: "Fastest for quick answers",
+      },
+    ];
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const models = yield* adapter.discoverSessionModels!(THREAD_ID);
+
+      assert.equal(harness.query.supportedModelsCalls.length, 1);
+      assert.deepEqual(
+        models.map((model) => ({ slug: model.slug, isDefault: model.isDefault })),
+        [
+          { slug: "claude-opus-5", isDefault: true },
+          { slug: "claude-haiku-4-5", isDefault: undefined },
+        ],
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4930,6 +4980,7 @@ describe("ClaudeAdapterLive", () => {
             },
           ],
           toolUseID: "tool-use-1",
+          requestId: "request-tool-use-1",
         },
       );
 
@@ -4973,6 +5024,10 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
+      if (permissionResult === null) {
+        assert.fail("Expected an approval result");
+        return;
+      }
       assert.equal(permissionResult.behavior, "allow");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -5006,6 +5061,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-agent-1",
+          requestId: "request-tool-agent-1",
         },
       );
 
@@ -5030,6 +5086,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-grep-approval-1",
+          requestId: "request-tool-grep-approval-1",
         },
       );
 
@@ -5080,6 +5137,7 @@ describe("ClaudeAdapterLive", () => {
           signal: new AbortController().signal,
           toolUseID: "toolu-sub-approval-1",
           agentID: "agent-42",
+          requestId: "request-toolu-sub-approval-1",
         },
       );
 
@@ -5847,6 +5905,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-exit-1",
+          requestId: "request-tool-exit-1",
         },
       );
 
@@ -5865,6 +5924,10 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
+      if (permissionResult === null) {
+        assert.fail("Expected an ExitPlanMode result");
+        return;
+      }
       assert.equal(permissionResult.behavior, "deny");
       const deniedMessage =
         permissionResult.behavior === "deny" ? permissionResult.message : undefined;
@@ -6012,6 +6075,7 @@ describe("ClaudeAdapterLive", () => {
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
         toolUseID: "tool-ask-1",
+        requestId: "request-tool-ask-1",
       });
 
       // The adapter should emit a user-input.requested event.
@@ -6059,6 +6123,10 @@ describe("ClaudeAdapterLive", () => {
 
       // The canUseTool promise should resolve with the answers in SDK format.
       const permissionResult = yield* Effect.promise(() => permissionPromise);
+      if (permissionResult === null) {
+        assert.fail("Expected a user-input result");
+        return;
+      }
       assert.equal(permissionResult.behavior, "allow");
       const updatedInput =
         permissionResult.behavior === "allow" ? permissionResult.updatedInput : undefined;
@@ -6138,6 +6206,7 @@ describe("ClaudeAdapterLive", () => {
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
         toolUseID: "tool-ask-2",
+        requestId: "request-tool-ask-2",
       });
 
       // Should still get user-input.requested even in full-access mode.
@@ -6157,6 +6226,10 @@ describe("ClaudeAdapterLive", () => {
       yield* Stream.runHead(adapter.streamEvents);
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
+      if (permissionResult === null) {
+        assert.fail("Expected a user-input result");
+        return;
+      }
       assert.equal(permissionResult.behavior, "allow");
       const updatedInput =
         permissionResult.behavior === "allow" ? permissionResult.updatedInput : undefined;
@@ -6220,6 +6293,7 @@ describe("ClaudeAdapterLive", () => {
         const permissionPromise = canUseTool("AskUserQuestion", askInput, {
           signal: new AbortController().signal,
           toolUseID: "tool-ask-multiselect",
+          requestId: "request-tool-ask-multiselect",
         });
 
         const requestedEvent = yield* Stream.runHead(adapter.streamEvents);
@@ -6251,6 +6325,10 @@ describe("ClaudeAdapterLive", () => {
         yield* Stream.runHead(adapter.streamEvents);
 
         const permissionResult = yield* Effect.promise(() => permissionPromise);
+        if (permissionResult === null) {
+          assert.fail("Expected a user-input result");
+          return;
+        }
         assert.equal(permissionResult.behavior, "allow");
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -6295,6 +6373,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: controller.signal,
           toolUseID: "tool-ask-abort",
+          requestId: "request-tool-ask-abort",
         },
       );
 

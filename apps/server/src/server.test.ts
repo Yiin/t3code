@@ -608,6 +608,7 @@ const buildAppUnderTest = (options?: {
                 makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
               ),
             setProviderMaintenanceActionState: () => Effect.succeed([]),
+            recordModelCatalog: () => Effect.succeed([]),
             streamChanges: Stream.empty,
             ...options?.layers?.providerRegistry,
           }),

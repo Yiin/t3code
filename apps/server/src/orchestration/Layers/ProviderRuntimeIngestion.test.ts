@@ -355,6 +355,7 @@ describe("ProviderRuntimeIngestion", () => {
         refreshInstance: () => Effect.succeed(providers),
         getProviderMaintenanceCapabilitiesForInstance: () => unsupported(),
         setProviderMaintenanceActionState: () => Effect.succeed(providers),
+        recordModelCatalog: () => Effect.succeed(providers),
         streamChanges: Stream.empty,
       };
       const accountLimitsStore: ProviderAccountLimitsStoreShape = {

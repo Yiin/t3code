@@ -11,6 +11,7 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionOrigin,
+  ServerProviderModel,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import {
@@ -33,6 +34,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, vi } from "@effect/vitest";
 
 import * as Clock from "effect/Clock";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -63,6 +65,7 @@ import type {
 } from "../Services/ProviderAdapter.ts";
 import { decideSessionReap } from "../sessionReapPolicy.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
+import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive } from "./ProviderService.ts";
@@ -93,6 +96,7 @@ import {
   makeAdapterRegistryMock,
   makeMockProviderInstance,
 } from "../testUtils/providerAdapterRegistryMock.ts";
+import { makeProviderRegistryMock } from "../testUtils/providerRegistryMock.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 
@@ -396,6 +400,175 @@ function makeProviderServiceLayer(
     layer,
   };
 }
+
+function makeModelDiscoveryTestHarness(input: {
+  readonly discover: () => Effect.Effect<ReadonlyArray<ServerProviderModel>, ProviderAdapterError>;
+  readonly timeoutMs?: number;
+}) {
+  const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const discoverSessionModels = vi.fn(input.discover);
+  const adapter = {
+    ...claude.adapter,
+    discoverSessionModels,
+  } satisfies ProviderAdapterShape<ProviderAdapterError>;
+  const registry = makeAdapterRegistryMock(
+    { [CLAUDE_AGENT_DRIVER]: adapter },
+    {
+      [CLAUDE_AGENT_DRIVER]: {
+        modelCatalogKey: "claudeAgent:executable:/opt/claude",
+      },
+    },
+  );
+  const recordModelCatalog = vi.fn(
+    (_input: {
+      readonly catalogKey: string;
+      readonly models: ReadonlyArray<ServerProviderModel>;
+    }) => Effect.succeed([]),
+  );
+  const providerRegistry = {
+    ...makeProviderRegistryMock(),
+    recordModelCatalog,
+  };
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = makeProviderServiceLiveForTest({
+    modelDiscoveryTimeoutMs: input.timeoutMs ?? 50,
+  }).pipe(
+    Layer.provide(Layer.succeed(ProviderInstanceRegistry, registry)),
+    Layer.provide(Layer.succeed(ProviderRegistry, providerRegistry)),
+    Layer.provide(directoryLayer),
+    Layer.provide(defaultServerSettingsLayer),
+    Layer.provideMerge(AnalyticsService.layerTest),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+
+  return {
+    claude,
+    discoverSessionModels,
+    recordModelCatalog,
+    layer: Layer.mergeAll(
+      providerLayer,
+      directoryLayer,
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    ),
+  };
+}
+
+const discoveredClaudeModels = [
+  {
+    slug: "claude-opus-5",
+    name: "Claude Opus 5",
+    isCustom: false,
+    isDefault: true,
+    capabilities: null,
+  },
+] as const satisfies ReadonlyArray<ServerProviderModel>;
+
+it.effect("ProviderServiceLive records non-empty session model discovery", () => {
+  const harness = makeModelDiscoveryTestHarness({
+    discover: () => Effect.succeed(discoveredClaudeModels),
+  });
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService.ProviderService;
+    const threadId = asThreadId("thread-model-discovery");
+    yield* provider.startSession(threadId, {
+      provider: CLAUDE_AGENT_DRIVER,
+      providerInstanceId: claudeAgentInstanceId,
+      threadId,
+      runtimeMode: "full-access",
+    });
+
+    assert.equal(harness.discoverSessionModels.mock.calls.length, 1);
+    assert.deepEqual(harness.recordModelCatalog.mock.calls[0]?.[0], {
+      catalogKey: "claudeAgent:executable:/opt/claude",
+      models: discoveredClaudeModels,
+    });
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("ProviderServiceLive ignores rejected and empty model discovery", () => {
+  const rejected = makeModelDiscoveryTestHarness({
+    discover: () =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: CLAUDE_AGENT_DRIVER,
+          method: "models/list",
+          detail: "discovery failed",
+        }),
+      ),
+  });
+  const empty = makeModelDiscoveryTestHarness({ discover: () => Effect.succeed([]) });
+  const start = (threadId: ThreadId) =>
+    Effect.flatMap(ProviderService.ProviderService, (provider) =>
+      provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      }),
+    );
+
+  return Effect.gen(function* () {
+    yield* start(asThreadId("thread-model-discovery-rejected")).pipe(
+      Effect.provide(rejected.layer),
+    );
+    yield* start(asThreadId("thread-model-discovery-empty")).pipe(Effect.provide(empty.layer));
+    assert.equal(rejected.recordModelCatalog.mock.calls.length, 0);
+    assert.equal(empty.recordModelCatalog.mock.calls.length, 0);
+  });
+});
+
+it.effect("ProviderServiceLive times out model discovery", () => {
+  const harness = makeModelDiscoveryTestHarness({ discover: () => Effect.never, timeoutMs: 25 });
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService.ProviderService;
+    const threadId = asThreadId("thread-model-discovery-timeout");
+    const startFiber = yield* provider
+      .startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      })
+      .pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust("25 millis");
+    yield* Fiber.join(startFiber);
+
+    assert.equal(harness.discoverSessionModels.mock.calls.length, 1);
+    assert.equal(harness.recordModelCatalog.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("ProviderServiceLive preserves interruption during model discovery", () => {
+  const harness = makeModelDiscoveryTestHarness({ discover: () => Effect.interrupt });
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService.ProviderService;
+    const threadId = asThreadId("thread-model-discovery-interrupt");
+    const exit = yield* Effect.exit(
+      provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      }),
+    );
+
+    assert.equal(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause), true);
+    assert.equal(harness.recordModelCatalog.mock.calls.length, 0);
+    assert.equal(harness.claude.stopSession.mock.calls.length, 1);
+    assert.equal(yield* harness.claude.hasSession(threadId), false);
+    assert.equal(McpProviderSession.readMcpProviderSession(threadId), undefined);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   Effect.gen(function* () {

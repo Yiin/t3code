@@ -41,6 +41,7 @@ export interface ProviderInstanceRoutingInfo {
   readonly accentColor?: string | undefined;
   readonly enabled: boolean;
   readonly continuationIdentity: ProviderContinuationIdentity;
+  readonly modelCatalogKey?: string | undefined;
 }
 
 /**

@@ -17,6 +17,7 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ServerProviderModel,
   ThreadId,
   ProviderTurnStartResult,
   TurnId,
@@ -97,6 +98,11 @@ export interface ProviderAdapterShape<TError> {
   readonly startSession: (
     input: ProviderSessionStartInput,
   ) => Effect.Effect<ProviderSession, TError>;
+
+  /** Discover the models available to a live provider session. */
+  readonly discoverSessionModels?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<ServerProviderModel>, TError>;
 
   /**
    * Send a turn to an active provider session.

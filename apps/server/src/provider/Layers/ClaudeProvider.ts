@@ -5,6 +5,7 @@ import {
   type ProviderUsageReading,
   type ProviderUsageSource,
   type ProviderUsageWindow,
+  ProviderDriverKind,
   type ServerProviderModel,
   type ServerProviderAuth,
   type ServerProviderState,
@@ -23,11 +24,13 @@ import {
   getModelSelectionStringOptionValue,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
+  normalizeModelSlug,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   query as claudeQuery,
+  type ModelInfo as ClaudeModelInfo,
   type Options as ClaudeQueryOptions,
   type SlashCommand as ClaudeSlashCommand,
   type SDKUserMessage,
@@ -61,6 +64,7 @@ const CLAUDE_PRESENTATION = {
   displayName: "Claude",
   showInteractionModeToggle: true,
 } as const;
+const MINIMUM_CLAUDE_FABLE_5_1_VERSION = "2.1.258";
 const MINIMUM_CLAUDE_FABLE_5_VERSION = "2.1.169";
 const MINIMUM_CLAUDE_OPUS_4_8_VERSION = "2.1.154";
 const MINIMUM_CLAUDE_OPUS_4_7_VERSION = "2.1.111";
@@ -89,6 +93,29 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
         buildBooleanOptionDescriptor({
           id: "fastMode",
           label: "Fast Mode",
+        }),
+      ],
+    }),
+  },
+  {
+    slug: "claude-fable-5-1",
+    name: "Claude Fable 5.1",
+    isCustom: false,
+    capabilities: createModelCapabilities({
+      optionDescriptors: [
+        buildSelectOptionDescriptor({
+          id: "effort",
+          label: "Reasoning",
+          options: [
+            { value: "low", label: "Low" },
+            { value: "medium", label: "Medium" },
+            { value: "high", label: "High", isDefault: true },
+            { value: "xhigh", label: "Extra High" },
+            { value: "max", label: "Max" },
+            { value: "ultracode", label: "Ultracode" },
+            { value: "ultrathink", label: "Ultrathink" },
+          ],
+          promptInjectedValues: ["ultrathink"],
         }),
       ],
     }),
@@ -309,6 +336,96 @@ const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   },
 ];
 
+const stripClaudeModelContextSuffix = (value: string): string =>
+  value.replace(/\s*\[[^\]]+\]\s*$/u, "").trim();
+
+const formatUnknownClaudeModelName = (slug: string): string => {
+  const tokens = slug
+    .replace(/^claude-/u, "")
+    .split("-")
+    .filter(Boolean);
+  const formatted: string[] = [];
+  for (const token of tokens) {
+    if (/^\d+$/u.test(token) && /^\d+$/u.test(formatted.at(-1) ?? "")) {
+      formatted[formatted.length - 1] = `${formatted.at(-1)}.${token}`;
+    } else {
+      formatted.push(
+        /^\d+$/u.test(token) ? token : `${token[0]?.toUpperCase() ?? ""}${token.slice(1)}`,
+      );
+    }
+  }
+  return `Claude ${formatted.join(" ")}`;
+};
+
+const effortLabel = (effort: string): string =>
+  effort === "xhigh" ? "Extra High" : `${effort[0]?.toUpperCase() ?? ""}${effort.slice(1)}`;
+
+const capabilitiesFromClaudeModelInfo = (model: ClaudeModelInfo): ModelCapabilities => {
+  const optionDescriptors = [];
+  if (model.supportedEffortLevels && model.supportedEffortLevels.length > 0) {
+    optionDescriptors.push(
+      buildSelectOptionDescriptor({
+        id: "effort",
+        label: "Reasoning",
+        options: model.supportedEffortLevels.map((effort) => ({
+          value: effort,
+          label: effortLabel(effort),
+        })),
+      }),
+    );
+  }
+  if (model.supportsFastMode) {
+    optionDescriptors.push(
+      buildBooleanOptionDescriptor({
+        id: "fastMode",
+        label: "Fast Mode",
+      }),
+    );
+  }
+  return createModelCapabilities({ optionDescriptors });
+};
+
+/** Convert the Claude SDK's per-session model inventory into T3 model rows. */
+export function serverProviderModelsFromClaudeModelInfo(
+  models: ReadonlyArray<ClaudeModelInfo>,
+): ReadonlyArray<ServerProviderModel> {
+  const bySlug = new Map<string, ServerProviderModel>();
+
+  for (const model of models) {
+    const rawSlug = stripClaudeModelContextSuffix(model.resolvedModel ?? model.value);
+    const slug = normalizeModelSlug(rawSlug, ProviderDriverKind.make("claudeAgent"));
+    if (!slug) {
+      continue;
+    }
+
+    const isDefault = model.value === "default";
+    const existing = bySlug.get(slug);
+    if (existing) {
+      if (isDefault && !existing.isDefault) {
+        bySlug.set(slug, { ...existing, isDefault: true });
+      }
+      continue;
+    }
+
+    const known = BUILT_IN_MODELS.find((candidate) => candidate.slug === slug);
+    bySlug.set(slug, {
+      ...(known ?? {
+        slug,
+        name: formatUnknownClaudeModelName(slug),
+        isCustom: false,
+        capabilities: capabilitiesFromClaudeModelInfo(model),
+      }),
+      ...(isDefault ? { isDefault: true } : {}),
+    });
+  }
+
+  return [...bySlug.values()];
+}
+
+function supportsClaudeFable51(version: string | null | undefined): boolean {
+  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_5_1_VERSION) >= 0 : false;
+}
+
 function supportsClaudeFable5(version: string | null | undefined): boolean {
   return version ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_5_VERSION) >= 0 : false;
 }
@@ -325,6 +442,9 @@ function getBuiltInClaudeModelsForVersion(
   version: string | null | undefined,
 ): ReadonlyArray<ServerProviderModel> {
   return BUILT_IN_MODELS.filter((model) => {
+    if (model.slug === "claude-fable-5-1") {
+      return supportsClaudeFable51(version);
+    }
     if (model.slug === "claude-fable-5") {
       return supportsClaudeFable5(version);
     }
@@ -336,6 +456,11 @@ function getBuiltInClaudeModelsForVersion(
     }
     return true;
   });
+}
+
+function formatClaudeFable51UpgradeMessage(version: string | null): string {
+  const versionLabel = version ? `v${version}` : "the installed version";
+  return `Claude Code ${versionLabel} is too old for Claude Fable 5.1. Upgrade to v${MINIMUM_CLAUDE_FABLE_5_1_VERSION} or newer to access it.`;
 }
 
 function formatClaudeFable5UpgradeMessage(version: string | null): string {
@@ -397,6 +522,7 @@ export function normalizeClaudeCliEffort(
   if (
     effort === "xhigh" &&
     model !== "claude-opus-5" &&
+    model !== "claude-fable-5-1" &&
     model !== "claude-fable-5" &&
     model !== "claude-opus-4-8" &&
     model !== "claude-sonnet-5"
@@ -749,9 +875,11 @@ function normalizeClaudeUsageReading(
 }
 
 export function mapClaudeRateLimitInfo(info: SDKRateLimitInfo): ProviderUsageReading | undefined {
+  const window =
+    info.rateLimitType === "seven_day_overage_included" ? undefined : info.rateLimitType;
   return normalizeClaudeUsageReading(
     {
-      window: info.rateLimitType,
+      window,
       utilization: info.utilization,
       resetsAt: info.resetsAt,
     },
@@ -1153,13 +1281,15 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
-  const versionUpgradeMessage = supportsClaudeFable5(parsedVersion)
+  const versionUpgradeMessage = supportsClaudeFable51(parsedVersion)
     ? undefined
-    : supportsClaudeOpus48(parsedVersion)
-      ? formatClaudeFable5UpgradeMessage(parsedVersion)
-      : supportsClaudeOpus47(parsedVersion)
-        ? formatClaudeOpus48UpgradeMessage(parsedVersion)
-        : formatClaudeOpus47UpgradeMessage(parsedVersion);
+    : supportsClaudeFable5(parsedVersion)
+      ? formatClaudeFable51UpgradeMessage(parsedVersion)
+      : supportsClaudeOpus48(parsedVersion)
+        ? formatClaudeFable5UpgradeMessage(parsedVersion)
+        : supportsClaudeOpus47(parsedVersion)
+          ? formatClaudeOpus48UpgradeMessage(parsedVersion)
+          : formatClaudeOpus47UpgradeMessage(parsedVersion);
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))

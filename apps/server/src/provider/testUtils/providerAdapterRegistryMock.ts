@@ -21,6 +21,7 @@ export interface AdapterRegistryInstanceOverrides {
   readonly enabled?: boolean;
   readonly continuationKey?: string;
   readonly legacyContinuationKeys?: ReadonlyArray<string>;
+  readonly modelCatalogKey?: string;
 }
 
 export const makeMockProviderInstance = (
@@ -34,6 +35,7 @@ export const makeMockProviderInstance = (
     driverKind,
     displayName: undefined,
     enabled: overrides.enabled ?? true,
+    ...(overrides.modelCatalogKey ? { modelCatalogKey: overrides.modelCatalogKey } : {}),
     continuationIdentity: {
       driverKind,
       continuationKey: overrides.continuationKey ?? `${adapter.provider}:instance:${instanceId}`,

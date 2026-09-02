@@ -191,6 +191,7 @@ function makeRegistry(
       getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
         Effect.succeed(lifecycleFor(provider)),
       setProviderMaintenanceActionState,
+      recordModelCatalog: () => Ref.get(providersRef),
       streamChanges: Stream.empty,
     };
 

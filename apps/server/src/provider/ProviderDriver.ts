@@ -66,6 +66,8 @@ export interface ProviderInstance {
   readonly instanceId: ProviderInstanceId;
   readonly driverKind: ProviderDriverKind;
   readonly continuationIdentity: ProviderContinuationIdentity;
+  /** Key for model catalogs shared by instances using the same harness executable. */
+  readonly modelCatalogKey?: string | undefined;
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
   readonly enabled: boolean;

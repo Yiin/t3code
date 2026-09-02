@@ -193,6 +193,7 @@ const makeHarness = Effect.fn("ProviderAuthManager.test.makeHarness")(function* 
       Ref.update(refreshes, (values) => [...values, instanceId]).pipe(Effect.as(providers)),
     getProviderMaintenanceCapabilitiesForInstance: () => Effect.die("unused"),
     setProviderMaintenanceActionState: () => Effect.succeed(providers),
+    recordModelCatalog: () => Effect.succeed(providers),
     streamChanges: Stream.empty,
   });
   const settingsLayer = ServerSettings.layerTest({ providerInstances });

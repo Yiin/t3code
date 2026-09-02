@@ -10,6 +10,7 @@ import type {
   ProviderInstanceId,
   ProviderDriverKind,
   ServerProvider,
+  ServerProviderModel,
   ServerProviderUpdateState,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -67,6 +68,12 @@ export interface ProviderRegistryShape {
     readonly instanceId: ProviderInstanceId;
     readonly action: ProviderMaintenanceActionKind;
     readonly state: ServerProviderUpdateState | null;
+  }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+  /** Record a non-empty model catalog discovered from one harness executable. */
+  readonly recordModelCatalog: (input: {
+    readonly catalogKey: string;
+    readonly models: ReadonlyArray<ServerProviderModel>;
   }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
