@@ -1,6 +1,7 @@
 ---
 name: plan-epic
-description: Plan a large piece of work as a beads epic — investigate the subject in depth with a fan-out of agents, create the epic and its child issues, then write a self-contained handoff protocol into the epic itself so /cook-epic runs it end-to-end without a separate HANDOFF.md. Use when the user types /plan-epic, or asks to plan, scope, or break down an epic, feature, or large task into beads issues.
+disable-model-invocation: true
+description: "Investigate with fan-out agents, then create a beads epic with child issues and a handoff protocol for /cook-epic. Use when the user types /plan-epic."
 user-invocable: true
 argument-hint: <subject to plan — a feature, refactor, migration, or prose goal>
 ---

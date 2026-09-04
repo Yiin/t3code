@@ -1,6 +1,6 @@
 ---
 name: ralph
-description: Run a fresh-context agent loop (Ralph pattern) using the same CLI harness that invoked the skill—Codex launches `codex exec`, Claude Code and ccx launch `claude -p`, Kimi Code launches `kimi -p`, and OpenCode launches `opencode run`. Each iteration starts with empty context; state lives in the repo (handoff file, beads, git). Use when the user types /ralph followed by a loop prompt.
+description: "Fresh-context loop of headless sessions (claude -p, codex exec, kimi -p, opencode run) with state in the repo. Use when the user types /ralph <prompt>."
 ---
 
 # ralph — fresh-context loop

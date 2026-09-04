@@ -1,6 +1,6 @@
 ---
 name: cook-epic
-description: Execute a beads epic unattended with fresh-context workers on the shared epic core: a three-worker pool with per-worker worktrees and a merge queue by default, or one worker at a time on the base branch. Use when the user types /cook-epic followed by an epic id, or asks to run/execute a beads epic.
+description: "Run a beads epic unattended with fresh-context workers via t3 epic (server) or run.sh (fallback). Use when the user types /cook-epic <epic id>."
 ---
 
 # cook-epic — epic executor

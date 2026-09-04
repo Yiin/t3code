@@ -1,6 +1,6 @@
 ---
 name: cook-it
-description: Cook a task end-to-end — plan when the instructions leave choices open → critique the plan when it warrants it → implement → review the implementation at a depth matched to its size and nature → quality gate → commit & push. Use when the user types `/cook-it <task>` (e.g. `/cook-it vangrd-uqi2`, `/cook-it fix the cascade in foo.ts`). Suitable for well-scoped engineering tasks where the path is clear enough to commit to but worth double-checking via independent agents. Given a beads epic id, it instead runs one iteration of that epic's Handoff Protocol — cook the top ready child, then update the epic.
+description: "Plan, implement, review, gate, commit and push one bounded task. Use when the user types /cook-it <task or issue id>; an epic id runs one Handoff Protocol iteration."
 user-invocable: true
 argument-hint: <issue id, epic id, or short task description>
 ---

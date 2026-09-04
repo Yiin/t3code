@@ -1,6 +1,7 @@
 ---
 name: deploy
-description: Commit, push, build, and restart the self-hosted T3 Code checkout on yiin-lt, travel-laptop, and main-laptop. Use when the user says `/deploy`, asks to deploy T3 Code, requests a rebuild and restart, or wants every available T3 Code host synchronized to the same `mine` commit.
+disable-model-invocation: true
+description: "Commit, push, build, restart the self-hosted T3 Code checkout (~/Projects/t3code, branch mine) on yiin-lt, travel-laptop, main-laptop. Use when the user types /deploy."
 ---
 
 # Deploy T3 Code

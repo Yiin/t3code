@@ -1,0 +1,5 @@
+interface:
+  display_name: "Plan Epic"
+  short_description: "Investigate, then create a beads epic with a handoff protocol"
+policy:
+  allow_implicit_invocation: false
