@@ -1192,6 +1192,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             itemId: "item-user-input-1",
             threadId: "thread-1",
             turnId: "turn-1",
+            isBlocking: true,
             questions: [
               {
                 id: "sandbox_mode",
@@ -1837,15 +1838,68 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("keeps root subAgentActivity events flat for every lifecycle kind", () =>
+  it.effect("maps a completed subAgentActivity to a completed task", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
-      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
         Stream.runCollect,
         Effect.forkChild,
       );
 
-      for (const [index, kind] of (["started", "interacted", "interrupted"] as const).entries()) {
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-activity-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("child-activity-4"),
+        payload: {
+          startedAtMs: 1_777_999_999_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "subAgentActivity",
+            id: "child-activity-4",
+            kind: "completed",
+            agentPath: "root/reviewer",
+            agentThreadId: "child-thread-4",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      NodeAssert.deepStrictEqual(
+        runtimeEvents.map((event) => event.type),
+        ["item.started", "task.completed"],
+      );
+      const completed = runtimeEvents[1];
+      if (completed?.type === "task.completed") {
+        NodeAssert.equal(completed.payload.taskId, "child-thread-4");
+        NodeAssert.equal(completed.payload.status, "completed");
+      }
+      const item = runtimeEvents[0];
+      if (item?.type === "item.started") {
+        NodeAssert.equal(
+          (item.payload.data as { collabTool?: string } | undefined)?.collabTool,
+          "wait",
+        );
+      }
+    }),
+  );
+
+  it.effect("keeps root subAgentActivity events flat for every lifecycle kind", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 4).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      for (const [index, kind] of (
+        ["started", "interacted", "interrupted", "completed"] as const
+      ).entries()) {
         yield* runtime.emit({
           id: asEventId(`evt-root-${kind}`),
           kind: "notification",
@@ -1874,7 +1928,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
       NodeAssert.deepStrictEqual(
         runtimeEvents.map((event) => event.type),
-        ["item.started", "item.started", "item.started"],
+        ["item.started", "item.started", "item.started", "item.started"],
       );
       for (const event of runtimeEvents) {
         if (event.type === "item.started") {

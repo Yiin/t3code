@@ -55,6 +55,20 @@ function handleRequest(message: Record<string, unknown>): void {
       });
       return;
     case "account/read":
+      if (scenario === "account-business-premium") {
+        // codex-cli 0.153 answers this way for a ChatGPT Business Premium
+        // workspace login: a newer plan type, and `requiresOpenaiAuth` true
+        // even though the account is present.
+        respond(id, {
+          account: {
+            type: "chatgpt",
+            email: "probe@example.com",
+            planType: "self_serve_business_prolite",
+          },
+          requiresOpenaiAuth: true,
+        });
+        return;
+      }
       respond(id, {
         account: { type: "chatgpt", email: "probe@example.com", planType: "pro" },
         requiresOpenaiAuth: false,

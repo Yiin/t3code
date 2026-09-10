@@ -22,7 +22,7 @@ import {
   normalizeNullableTypes,
 } from "../../effect-jsonrpc-stdio/scripts/generator.ts";
 
-const UPSTREAM_REF = "678157acaa819d5510adfe359abb5d0392cfe461";
+const UPSTREAM_REF = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";

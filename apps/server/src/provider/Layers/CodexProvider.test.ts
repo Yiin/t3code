@@ -381,6 +381,25 @@ it.layer(NodeServices.layer, { excludeTestServices: true })(
       }),
     );
 
+    it.effect("decodes a Business Premium account as authenticated", () =>
+      Effect.gen(function* () {
+        const { snapshot } = yield* runProbe("account-business-premium");
+
+        assert.deepStrictEqual(snapshot.account, {
+          account: {
+            type: "chatgpt",
+            email: "probe@example.com",
+            planType: "self_serve_business_prolite",
+          },
+          requiresOpenaiAuth: true,
+        });
+        assert.deepStrictEqual(
+          snapshot.models.map((model) => model.slug),
+          ["gpt-mock"],
+        );
+      }),
+    );
+
     it.effect("keeps the capability snapshot when an older binary lacks the method", () =>
       Effect.gen(function* () {
         const { snapshot } = yield* runProbe("rate-limits-method-not-found");

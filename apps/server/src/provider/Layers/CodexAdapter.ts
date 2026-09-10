@@ -562,6 +562,7 @@ const SUB_AGENT_ACTIVITY_COLLAB_TOOL = {
   started: "spawnAgent",
   interacted: "sendInput",
   interrupted: "closeAgent",
+  completed: "wait",
 } as const satisfies Record<SubAgentActivityItem["kind"], string>;
 
 function subAgentActivityType(item: SubAgentActivityItem): string {
@@ -620,14 +621,14 @@ function mapSubAgentActivityTaskEvents(
       },
     ];
   }
-  if (item.kind === "interrupted") {
+  if (item.kind === "interrupted" || item.kind === "completed") {
     return [
       {
         ...base,
         type: "task.completed",
         payload: {
           taskId,
-          status: "stopped",
+          status: item.kind === "completed" ? "completed" : "stopped",
           toolUseId: item.id,
         },
       },
