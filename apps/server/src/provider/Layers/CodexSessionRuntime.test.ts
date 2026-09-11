@@ -8,6 +8,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId, TurnId } from "@t3tools/contracts";
@@ -515,10 +516,13 @@ describe("isRecoverableThreadResumeError", () => {
 describe("openCodexThread", () => {
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const calls: Array<{
+        method: "thread/start" | "thread/resume" | "thread/fork";
+        payload: unknown;
+      }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
           method: M,
           payload: CodexRpc.ClientRequestParamsByMethod[M],
         ) => {
@@ -556,13 +560,57 @@ describe("openCodexThread", () => {
     }),
   );
 
+  it.effect("forks the thread when another process holds its writer lock", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const forked = makeThreadOpenResponse("forked-thread");
+      const client = {
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push({ method, payload });
+          if (method === "thread/resume") {
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32603,
+                errorMessage: "thread held-thread already has an active writer",
+              }),
+            );
+          }
+          return Effect.succeed(forked as CodexRpc.ClientRequestResponsesByMethod[M]);
+        },
+      };
+
+      const opened = yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "held-thread",
+      });
+
+      NodeAssert.equal(opened.response.thread.id, "forked-thread");
+      NodeAssert.equal(opened.origin, "forked");
+      NodeAssert.deepStrictEqual(
+        calls.map((call) => call.method),
+        ["thread/resume", "thread/fork"],
+      );
+      const forkPayload = calls[1]?.payload as { threadId?: string; cwd?: string };
+      NodeAssert.equal(forkPayload.threadId, "held-thread");
+      NodeAssert.equal(forkPayload.cwd, "/tmp/project");
+    }),
+  );
+
   it.effect("reports a successful resume as resumed", () =>
     Effect.gen(function* () {
-      const calls: Array<"thread/start" | "thread/resume"> = [];
+      const calls: Array<"thread/start" | "thread/resume" | "thread/fork"> = [];
       const resumed = makeThreadOpenResponse("live-thread");
       const opened = yield* openCodexThread({
         client: {
-          request: <M extends "thread/start" | "thread/resume">(
+          request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
             method: M,
             _payload: CodexRpc.ClientRequestParamsByMethod[M],
           ) => {
@@ -585,11 +633,11 @@ describe("openCodexThread", () => {
 
   it.effect("reports a cursorless open as started", () =>
     Effect.gen(function* () {
-      const calls: Array<"thread/start" | "thread/resume"> = [];
+      const calls: Array<"thread/start" | "thread/resume" | "thread/fork"> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const opened = yield* openCodexThread({
         client: {
-          request: <M extends "thread/start" | "thread/resume">(
+          request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
             method: M,
             _payload: CodexRpc.ClientRequestParamsByMethod[M],
           ) => {
@@ -613,7 +661,7 @@ describe("openCodexThread", () => {
   it.effect("propagates non-recoverable resume failures", () =>
     Effect.gen(function* () {
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
           method: M,
           _payload: CodexRpc.ClientRequestParamsByMethod[M],
         ) => {
@@ -669,6 +717,10 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
     );
     yield* fileSystem.chmod(wrapperPath, 0o755);
 
+    // The runtime closes the scope it was built in. Give it a child scope so
+    // `runtime.close` does not also remove the temp dir holding the request
+    // log, which a test may still read after closing.
+    const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
     const runtime = yield* makeCodexSessionRuntime({
       threadId: ThreadId.make("thread-1"),
       binaryPath: wrapperPath,
@@ -680,7 +732,7 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
         T3_CODEX_RUNTIME_REQUEST_LOG_PATH: requestLogPath,
         T3_CODEX_RUNTIME_SCENARIO: scenario,
       },
-    });
+    }).pipe(Effect.provideService(Scope.Scope, runtimeScope));
     const started = yield* runtime.start();
 
     return {
@@ -913,6 +965,33 @@ it.layer(NodeServices.layer)("CodexSessionRuntime turns", (it) => {
       NodeAssert.equal(started.sessionOrigin, "started-fresh");
       NodeAssert.deepStrictEqual(started.resumeCursor, { threadId: "provider-thread-1" });
       yield* runtime.close;
+    }),
+  );
+
+  it.effect("reports forked when another process still owns the resumed thread", () =>
+    Effect.gen(function* () {
+      const { runtime, started } = yield* makeHarness("resume-active-writer", {
+        threadId: "resumed-thread-1",
+      });
+
+      NodeAssert.equal(started.status, "ready");
+      NodeAssert.equal(started.sessionOrigin, "forked");
+      // The cursor now names the thread this process owns.
+      NodeAssert.deepStrictEqual(started.resumeCursor, { threadId: "forked-thread-1" });
+      yield* runtime.close;
+    }),
+  );
+
+  it.effect("unsubscribes the thread when the session closes", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeHarness();
+      yield* runtime.close;
+
+      const requests = yield* readRequests;
+      NodeAssert.deepStrictEqual(requests.at(-1), {
+        method: "thread/unsubscribe",
+        params: { threadId: "provider-thread-1" },
+      });
     }),
   );
 

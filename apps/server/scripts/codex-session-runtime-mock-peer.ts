@@ -6,6 +6,7 @@ const requestLogPath = process.env.T3_CODEX_RUNTIME_REQUEST_LOG_PATH;
 const scenario = process.env.T3_CODEX_RUNTIME_SCENARIO ?? "steer-success";
 const providerThreadId = "provider-thread-1";
 const resumedThreadId = "resumed-thread-1";
+const forkedThreadId = "forked-thread-1";
 const startedTurnId = "started-turn-1";
 let turnStartCount = 0;
 
@@ -25,6 +26,7 @@ function makeThreadOpenResult(threadId: string) {
       id: threadId,
       modelProvider: "openai",
       preview: "",
+      projectId: null,
       sessionId: "session-1",
       source: "cli",
       turns: [],
@@ -201,7 +203,18 @@ function handleRequest(message: Record<string, unknown>): void {
         respondError(id, -32603, "timed out waiting for server");
         return;
       }
+      if (scenario === "resume-active-writer") {
+        respondError(id, -32603, `thread ${resumedThreadId} already has an active writer`);
+        return;
+      }
       respond(id, makeThreadOpenResult(resumedThreadId));
+      return;
+    case "thread/fork":
+      respond(id, makeThreadOpenResult(forkedThreadId));
+      return;
+    case "thread/unsubscribe":
+      logRequest(method, message.params);
+      respond(id, { status: "unsubscribed" });
       return;
     case "turn/start": {
       logRequest(method, message.params);

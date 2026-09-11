@@ -23,6 +23,7 @@ import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -332,7 +333,10 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
-}): EffectCodexSchema.V2ThreadStartParams {
+}): Pick<
+  EffectCodexSchema.V2ThreadStartParams,
+  "cwd" | "approvalPolicy" | "sandbox" | "model" | "serviceTier"
+> {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
     cwd: input.cwd,
@@ -486,20 +490,33 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
   return RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS.some((snippet) => message.includes(snippet));
 }
 
+/**
+ * The rollout writer lock is per thread and per Codex home, and provider
+ * instances that share a home (shadow homes symlink the lock directory) run
+ * separate app-server processes. When another instance's process still has
+ * the thread loaded, `thread/resume` here is refused with this message. The
+ * app server reports it as a generic internal error, so the text is the only
+ * signal.
+ */
+export function isActiveWriterThreadResumeError(error: unknown): boolean {
+  return (
+    isCodexAppServerRequestError(error) &&
+    error.errorMessage.toLowerCase().includes("already has an active writer")
+  );
+}
+
 type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
+  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"]
+  | CodexRpc.ClientRequestResponsesByMethod["thread/fork"];
 
-type CodexThreadOpenMethod = "thread/start" | "thread/resume";
+type CodexThreadOpenMethod = "thread/start" | "thread/resume" | "thread/fork";
 
 /**
- * Which branch `openCodexThread` took. Codex never forks, so `forked` is not
- * reachable here; the `Extract` keeps this tied to the contract's vocabulary.
+ * Which branch `openCodexThread` took. `forked` means another process still
+ * owned the thread, so the conversation continued under a new Codex thread id.
  */
-export type CodexThreadOpenOrigin = Extract<
-  ProviderSessionOrigin,
-  "started" | "resumed" | "started-fresh"
->;
+export type CodexThreadOpenOrigin = ProviderSessionOrigin;
 
 export interface CodexThreadOpenResult {
   readonly response: CodexThreadOpenResponse;
@@ -543,6 +560,23 @@ export const openCodexThread = (input: {
     })
     .pipe(
       Effect.map((response) => ({ response, origin: "resumed" }) as const),
+      // Another instance's app server still holds the writer lock, and Codex
+      // only drops it on idle unload (30 minutes after unsubscribe) or exit.
+      // Forking reads the shared rollout and continues the conversation under
+      // a thread id this process owns.
+      Effect.catchIf(isActiveWriterThreadResumeError, (error) =>
+        Effect.logWarning("codex app-server thread resume forked past an active writer", {
+          threadId: input.threadId,
+          requestedRuntimeMode: input.runtimeMode,
+          resumeThreadId,
+          cause: error,
+        }).pipe(
+          Effect.andThen(
+            input.client.request("thread/fork", { threadId: resumeThreadId, ...startParams }),
+          ),
+          Effect.map((response) => ({ response, origin: "forked" }) as const),
+        ),
+      ),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
         Effect.logWarning("codex app-server thread resume fell back to fresh start", {
           threadId: input.threadId,
@@ -1381,7 +1415,8 @@ export const makeCodexSessionRuntime = (
         resumeCursor: { threadId: providerThreadId },
         // Says whether this session continued the conversation the cursor
         // named. `started-fresh` is the recoverable-resume fallback owning up
-        // to handing back an empty thread.
+        // to handing back an empty thread; `forked` continued it under a new
+        // thread id because another process still owned the old one.
         sessionOrigin: opened.origin,
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
@@ -1417,6 +1452,16 @@ export const makeCodexSessionRuntime = (
           Effect.logError("Failed to emit Codex session closed event.", { cause }),
         ),
       );
+      // The app server outlives this session and keeps the thread loaded, with
+      // its rollout writer lock held, until nobody subscribes to it. Tell it we
+      // are gone so the thread can unload and another instance can take it.
+      // Best effort: the process may already be dead.
+      const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+      if (providerThreadId) {
+        yield* client
+          .request("thread/unsubscribe", { threadId: providerThreadId })
+          .pipe(Effect.timeoutOption(Duration.seconds(2)), Effect.ignore);
+      }
       yield* Scope.close(runtimeScope, Exit.void);
       yield* Queue.shutdown(serverNotifications);
       yield* Queue.shutdown(events);
