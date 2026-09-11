@@ -87,10 +87,13 @@ preflight must confirm all of these facts:
 - The current commit is an ancestor of `origin/mine`.
 - `t3code.service` is loaded.
 
-For each clean destination, run this sequence through SSH:
+For each clean destination, run this sequence through SSH. Run it under
+`set -eo pipefail`, and do not pipe `bun run build` through `tail` or any
+other filter: a pipe hides a missing `bun` and lets the restart proceed on the
+old build.
 
 ```bash
-export PATH="$HOME/.local/bin:$HOME/.vite-plus/bin:$HOME/.local/share/mise/shims:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.vite-plus/bin:$HOME/.local/share/mise/shims:$HOME/.bun/bin:$PATH"
 repo="$HOME/Projects/t3code"
 cd "$repo"
 old_sha="$(git rev-parse HEAD)"
@@ -131,7 +134,7 @@ links from `~/.agents/skills` to the canonical repository skills.
 Run the same dependency, installer, and build commands locally:
 
 ```bash
-export PATH="$HOME/.local/bin:$HOME/.vite-plus/bin:$HOME/.local/share/mise/shims:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.vite-plus/bin:$HOME/.local/share/mise/shims:$HOME/.bun/bin:$PATH"
 vp i --frozen-lockfile
 ./skills/install.sh
 bun run build
