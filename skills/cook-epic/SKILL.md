@@ -18,13 +18,24 @@ up front. `run.sh` execs `t3 epic cook`, the same shared orchestration core the
 T3 Code server runner drives.
 
 **Launch server-hosted first. `run.sh` is the fallback, not the default.**
-When a T3 Code server is running (check: `t3 epic list` answers), start the run
-on it so it is owned by a root session and visible in t3code chat and the epic
-dashboards:
+Detect the server from its own signals, never from whether a `t3` binary is on
+`PATH`. Agent shells often lack that binary while `t3code.service` runs.
+
+- Inside a t3code session, `T3_SERVER_URL` is set. Probe
+  `GET $T3_SERVER_URL/.well-known/t3/environment` and, when it answers, launch
+  through the server's EpicRunner as **Running inside t3code** shows.
+- Outside one, resolve the t3 CLI the way `run.sh` does: `$COOKEPIC_T3_BIN`,
+  then `t3` on `PATH`, then the built CLI in the checkout this skill links into.
+  The server is up when `epic list` answers:
 
 ```bash
-t3 epic start --epic <EPIC> --cwd "$(pwd)"   # then: t3 epic watch / status / pause / cancel
+T3="$(command -v t3 || echo "node $(cd -P "$SKILL_DIR/../.." && pwd -P)/apps/server/dist/bin.mjs")"
+$T3 epic list                                   # answers → a server is running
+$T3 epic start --epic <EPIC> --cwd "$(pwd)"     # then: $T3 epic watch / status / pause / cancel
 ```
+
+A run on the server is owned by a root session and shows in t3code chat and
+the epic dashboards.
 
 A `bash run.sh <run-dir>` launch execs `t3 epic cook`, a foreground serverless
 run detached from every session. Nothing shows in t3code chat and the run dies

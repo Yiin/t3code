@@ -130,7 +130,12 @@ tells you which headless command shape below to use. Skip a hop whose harness yo
 cannot name, and skip one whose binary is missing. Never copy a model name out of
 that output into this file. Reading the policy at run time is the whole point.
 
-Use this one-way order when `t3` is absent, the policy has no tiers, or no hop
+`t3` is often missing from an agent shell's `PATH` even while the server runs.
+Resolve it the way `skills/cook-epic/run.sh` does: `t3` on `PATH`, else
+`node <t3code checkout>/apps/server/dist/bin.mjs`, where the checkout is the
+physical parent of this skill directory (`cd -P <skill dir>/../.. && pwd -P`).
+
+Use this one-way order when no t3 CLI resolves, the policy has no tiers, or no hop
 resolves to an installed harness:
 
 1. The harness you are running in stays primary, with its configured model.
