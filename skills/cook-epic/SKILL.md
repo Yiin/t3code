@@ -1,6 +1,6 @@
 ---
 name: cook-epic
-description: "Run a beads epic unattended with fresh-context workers via t3 epic (server) or run.sh (fallback). Use when the user types /cook-epic <epic id>."
+description: "Run a beads epic unattended with fresh-context workers on the forge server, the t3code server, or run.sh (fallback), whichever hosts the session. Use when the user types /cook-epic <epic id>."
 ---
 
 # cook-epic — epic executor
@@ -20,13 +20,17 @@ T3 Code server runner drives.
 **Launch server-hosted first. `run.sh` is the fallback, not the default.**
 Detect the server from its own signals, never from whether a `t3` binary is on
 `PATH`. Agent shells often lack that binary while `t3code.service` runs.
+Pick exactly one engine, in this order:
 
-- Inside a t3code session, `T3_SERVER_URL` is set. Probe
-  `GET $T3_SERVER_URL/.well-known/t3/environment` and, when it answers, launch
-  through the server's EpicRunner as **Running inside t3code** shows.
-- Outside one, resolve the t3 CLI the way `run.sh` does: `$COOKEPIC_T3_BIN`,
-  then `t3` on `PATH`, then the built CLI in the checkout this skill links into.
-  The server is up when `epic list` answers:
+1. Forge: `FORGE_SERVER_URL` is set. The session runs inside forge. Launch
+   through forge's EpicRunner as **Running inside forge** shows. Never send
+   the run to t3code from a forge session, even when `T3_*` vars leak in.
+2. t3code: `T3_SERVER_URL` is set. Probe
+   `GET $T3_SERVER_URL/.well-known/t3/environment` and, when it answers, launch
+   through the server's EpicRunner as **Running inside t3code** shows.
+3. Neither: resolve the t3 CLI the way `run.sh` does: `$COOKEPIC_T3_BIN`,
+   then `t3` on `PATH`, then the built CLI in the checkout this skill links into.
+   The server is up when `epic list` answers:
 
 ```bash
 T3="$(command -v t3 || echo "node $(cd -P "$SKILL_DIR/../.." && pwd -P)/apps/server/dist/bin.mjs")"
@@ -34,8 +38,8 @@ $T3 epic list                                   # answers → a server is runnin
 $T3 epic start --epic <EPIC> --cwd "$(pwd)"     # then: $T3 epic watch / status / pause / cancel
 ```
 
-A run on the server is owned by a root session and shows in t3code chat and
-the epic dashboards.
+A run on a server shows in that server's UI only. A forge run never shows in
+t3code, and a t3code run never shows in forge. Name the engine in every report.
 
 A `bash run.sh <run-dir>` launch execs `t3 epic cook`, a foreground serverless
 run detached from every session. Nothing shows in t3code chat and the run dies
@@ -241,6 +245,9 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    interactive CLI, a non-detached launch is still fine
    when the user is watching it live.
 
+   Inside forge (`FORGE_SERVER_URL` set), use forge's EpicRunner. See
+   **Running inside forge** below.
+
    Inside t3code, prefer its server-owned EpicRunner. It persists run state,
    survives client disconnects, and supports reattachment through the Epics UI
    and `t3 epic` CLI. See **Running inside t3code** below for how to detect
@@ -292,6 +299,69 @@ suites retired with the legacy Bash coordinator (t3code-06s.42).
    A run that ended with exit 75 dispatched nothing: report the holding run
    instead (see step 6) and stop there. The loop does not close the epic
    bead — close it yourself once the summary checks out.
+
+## Running inside forge
+
+Forge sets `FORGE_SERVER_URL` (for example `http://127.0.0.1:3900`) in every
+harness it spawns. When it is set, the run belongs on forge. Forge's API has no
+token. It accepts loopback calls without an `Origin` header.
+
+**Find the project.** Forge stores projects by the path of the main checkout.
+Resolve it from any worktree, then match it against `GET /api/projects`:
+
+```bash
+ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+PROJECT_ID="$(curl -fsS "$FORGE_SERVER_URL/api/projects" \
+  | jq -r --arg root "$ROOT" '.[] | select(.path == $root) | .id')"
+```
+
+No match → HARD STOP. Tell the user to add the project in forge first. Do not
+fall back to t3code or `run.sh`.
+
+**Check for an active run first.** Forge takes the run lock after it answers,
+so a second start does not fail fast. It creates a run that fails later.
+
+```bash
+curl -fsS "$FORGE_SERVER_URL/api/epics" | jq --arg epic <EPIC> \
+  '.[] | select(.epicBeadId == $epic and (.status == "running" or .status == "paused"))'
+```
+
+An active run → report it with its link and start nothing.
+
+**Launch.**
+
+```bash
+curl -sS -X POST "$FORGE_SERVER_URL/api/epics/start" \
+  -H "Content-Type: application/json" \
+  -d "{\"projectId\": \"$PROJECT_ID\", \"epicBeadId\": \"<EPIC>\", \"mode\": \"pool\", \"workerCount\": 3, \"baseBranch\": \"$(git -C "$ROOT" branch --show-current)\"}"
+```
+
+- `mode`: `pool` (default), `serial` for one worker at a time, or `auto`.
+  The user's "sequential" means `serial` with `workerCount` 1.
+- `config`: optional. It takes `gateCommand`, `installCommand`, `workerCount`,
+  `mode`, and `rolePolicy`. The launch input wins over the repo's
+  `.forge/epic-run.json`, and that file wins over forge's defaults. Send only
+  what the user asked for. The `.t3code/epic-run.json` file and `COOKEPIC_*`
+  variables do not apply to forge.
+
+**Response handling.** `202` → the body is the run. Its `id` is the run ID.
+Any other status → HARD STOP and report the error. You reached forge, so never
+fall back. A network failure → HARD STOP too. `FORGE_SERVER_URL` says the
+session belongs to forge, and a t3code or `run.sh` run would not show in it.
+
+**Launch report.** Say "forge EpicRunner". Give the run ID and the forge page
+`/runs/<run id>` on the URL the user opens forge at.
+
+**Control commands.**
+
+```bash
+curl -fsS "$FORGE_SERVER_URL/api/epics/<run id>"                  # status, iterations, frontier
+curl -fsS -X POST "$FORGE_SERVER_URL/api/epics/<run id>/pause"
+curl -fsS -X POST "$FORGE_SERVER_URL/api/epics/<run id>/resume"   # optional JSON {"skipBead": "<id>"}
+curl -fsS -X POST "$FORGE_SERVER_URL/api/epics/<run id>/cancel"
+```
+
+Run statuses are `running`, `paused`, `completed`, `failed`, and `cancelled`.
 
 ## Running inside t3code
 
