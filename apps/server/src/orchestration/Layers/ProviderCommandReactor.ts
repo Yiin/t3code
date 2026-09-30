@@ -715,19 +715,25 @@ const make = Effect.gen(function* () {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      providerService.startSession(threadId, {
-        threadId,
-        ...(preferredProvider ? { provider: preferredProvider } : {}),
-        providerInstanceId: desiredInstanceId,
-        ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-        modelSelection: desiredModelSelection,
-        ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        runtimeMode: desiredRuntimeMode,
-        // Project context lets ProviderService build the T3_* environment
-        // injection for in-t3code agent sessions; omitted when the project is
-        // not resolvable.
-        ...(project ? { projectId: thread.projectId, workspaceRoot: project.workspaceRoot } : {}),
-      });
+      providerService
+        .startSession(threadId, {
+          threadId,
+          ...(preferredProvider ? { provider: preferredProvider } : {}),
+          providerInstanceId: desiredInstanceId,
+          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+          modelSelection: desiredModelSelection,
+          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+          runtimeMode: desiredRuntimeMode,
+          // Project context lets ProviderService build the T3_* environment
+          // injection for in-t3code agent sessions; omitted when the project is
+          // not resolvable.
+          ...(project ? { projectId: thread.projectId, workspaceRoot: project.workspaceRoot } : {}),
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => threadModelSelections.set(threadId, desiredModelSelection)),
+          ),
+        );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -773,10 +779,23 @@ const make = Effect.gen(function* () {
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
       const previousModelSelection = threadModelSelections.get(threadId);
+      // An unknown baseline means some path started this session without
+      // recording its selection, so a mismatch proves nothing. Restarting
+      // anyway once tore down a healthy, idle session on the first human
+      // message after a server restart, and the teardown stalled for 10
+      // minutes (t3code-c7ho). Every reactor start site records the baseline.
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
+        previousModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
+      if (
+        preferredProvider === "claudeAgent" &&
+        requestedModelSelection !== undefined &&
+        previousModelSelection === undefined
+      ) {
+        yield* Effect.logInfo("model selection baseline unknown; not restarting", { threadId });
+      }
 
       if (
         !runtimeModeChanged &&
@@ -1797,6 +1816,9 @@ const make = Effect.gen(function* () {
         runtimeMode: thread.runtimeMode,
         ...(project ? { projectId: thread.projectId, workspaceRoot: project.workspaceRoot } : {}),
       });
+      // Record the baseline the live session runs, so the next turn start
+      // does not see an unknown selection and restart it.
+      threadModelSelections.set(threadId, { ...thread.modelSelection, instanceId });
 
       // Bind before judging the origin. The session is live either way, and
       // an unprojected session cannot be stopped through the command path.

@@ -278,6 +278,10 @@ it.effect("starts the boot reactors in reconciliation-safe order", () =>
             Effect.sync(() => {
               started.push("interruptedTurnNudger.nudge");
             }),
+          watchProcessExits: () =>
+            Effect.sync(() => {
+              started.push("interruptedTurnNudger.watchProcessExits");
+            }),
         },
         reactorScope,
       });
@@ -288,6 +292,7 @@ it.effect("starts the boot reactors in reconciliation-safe order", () =>
         "providerSessionReaper",
         "epicRunner",
         "interruptedTurnNudger.nudge",
+        "interruptedTurnNudger.watchProcessExits",
       ]);
     }),
   ),
@@ -315,6 +320,7 @@ it.effect("hands the collected threads to the nudge that runs after reconciliati
             Effect.sync(() => {
               nudged = candidates;
             }),
+          watchProcessExits: () => Effect.void,
         },
         reactorScope,
       });

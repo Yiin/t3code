@@ -1805,4 +1805,56 @@ describe("ProviderSessionReaper", () => {
       expect(harness.stopSession).not.toHaveBeenCalled();
     }).pipe(Effect.provide(harness.layer));
   });
+
+  it.live("spares a dead binding while its projected session is starting", () => {
+    const threadId = ThreadId.make("thread-reaper-starting-session");
+    let livenessReadCount = 0;
+    const harness = createHarness({
+      readModel: makeReadModel([
+        {
+          id: threadId,
+          session: {
+            threadId,
+            status: "starting",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: DateTime.formatIso(DateTime.nowUnsafe()),
+          },
+        },
+      ]),
+      // Live for boot reconciliation, dead for the sweep: a restart whose old
+      // session is torn down before the new one exists.
+      hasLiveSessionImplementation: () => Effect.sync(() => livenessReadCount++ === 0),
+      reaperOptions: {
+        inactivityThresholdMs: 60_000,
+        deadSessionGraceMs: 1_000,
+      },
+    });
+
+    return Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      yield* repository.upsert({
+        threadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: yield* idleForFiveSeconds,
+        resumeCursor: { opaque: "resume-starting" },
+        runtimePayload: null,
+      });
+
+      const reaper = yield* ProviderSessionReaper;
+      yield* startReaperScope(reaper);
+      yield* drainFibers;
+
+      expect(livenessReadCount).toBeGreaterThanOrEqual(2);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(harness.layer));
+  });
 });

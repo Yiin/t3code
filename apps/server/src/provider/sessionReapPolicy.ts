@@ -46,6 +46,14 @@ export const DEFAULT_ACTIVE_TURN_SKIP_CAP_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_DEAD_SESSION_GRACE_MS = 2 * 60 * 1000;
 
 /**
+ * How long a projected `starting` session keeps a binding with no in-memory
+ * adapter session alive. A restart tears the old session down before the new
+ * one exists, and that teardown once stalled for 10 minutes. Reaping inside
+ * that gap queued stops that then killed the fresh turn (t3code-c7ho).
+ */
+export const STARTING_SESSION_GRACE_MS = 30 * 60 * 1000;
+
+/**
  * How recently a `running` subagent row must have been touched for the session
  * to count as actively working. Sourced from the shared liveness bound so
  * "still working" means the same thing to lifecycle guards and the reaper.
@@ -85,6 +93,8 @@ export type SessionReapReason =
   | "active_turn"
   /** Keep: a fresh running subagent is still working the thread, inside the skip cap. */
   | "active_subagent"
+  /** Keep: the projected session is still `starting`, inside the starting grace. */
+  | "session_starting"
   /** Reap: a turn is still attached, but it outlived the skip cap, so it is dead. */
   | "stale_active_turn"
   /** Reap: the binding has no corresponding in-memory adapter session. */
@@ -125,6 +135,12 @@ export interface SessionReapInput {
    * simply reads fresh, matching `countFreshRunningSubagents`.
    */
   readonly newestRunningSubagentAgeMs?: number | null;
+  /**
+   * Age of the projected thread session (now minus its `updatedAt`) while its
+   * status is `starting`, else null. Computed by the caller, like the subagent
+   * age, so the policy stays clock-free.
+   */
+  readonly startingAgeMs?: number | null;
   readonly thresholds?: SessionReapThresholds;
 }
 
@@ -190,6 +206,15 @@ export const decideSessionReap = (input: SessionReapInput): SessionReapDecision 
   }
 
   if (!input.hasLiveAdapterSession) {
+    const startingAgeMs = input.startingAgeMs ?? null;
+    if (startingAgeMs !== null && startingAgeMs < STARTING_SESSION_GRACE_MS) {
+      return {
+        reap: false,
+        reason: "session_starting",
+        threadKind,
+        thresholdMs: STARTING_SESSION_GRACE_MS,
+      };
+    }
     return input.idleDurationMs < thresholds.deadSessionGraceMs
       ? {
           reap: false,

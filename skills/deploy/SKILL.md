@@ -144,7 +144,15 @@ If the current session does not use the local T3 Code server, restart normally
 and verify it with the same service and HTTP checks.
 
 If the current session uses `t3code.service`, a direct restart will terminate
-the session. Make the restart the final tool action. Schedule it through the
+the session. It also kills everything the session started: background shell
+tasks, Monitors, and any child process, even one started with `nohup`, `setsid`,
+or `disown`. They all live in the service's cgroup, and systemd stops the whole
+cgroup. Before you restart, move work that must survive into its own transient
+unit with `systemd-run --user --unit=<name> --setenv=VAR=value <command>`. Tell
+the user which watchers will die and need re-arming after the restart. The
+server resumes a turn it cut off, but it does not re-arm watchers.
+
+Make the restart the final tool action. Schedule it through the
 user manager so it survives the session shutdown:
 
 ```bash

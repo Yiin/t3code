@@ -314,10 +314,16 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
  * started yet, so anything running belongs to the dead one. The nudge itself
  * goes last, so it resumes on top of settled state rather than racing it.
  *
+ * `interruptedTurnNudger.watchProcessExits` starts right after the nudge. It
+ * reacts to processes this server starts, so it has no reconciliation to wait
+ * on; it goes after the reactors only so that every exit it hears has an
+ * ingestion subscriber recording the same event into the projection it polls.
+ *
  * Extracted so the order is assertable. "starts the boot reactors in
  * reconciliation-safe order" in `serverRuntimeStartup.test.ts` guards it.
  *
- * The reaper, the orchestration reactor and the nudge own scoped fibers and
+ * The reaper, the orchestration reactor, the nudge and the exit watcher own
+ * scoped fibers and
  * take `reactorScope`. EpicRunner owns its own layer-scoped fibers, so it needs
  * no scope here — it only reconciles run state and relaunches the loops the old
  * process was interrupted with.
@@ -337,6 +343,7 @@ export const startBootReactors = (input: {
     yield* input.interruptedTurnNudger
       .nudge(interruptedThreads)
       .pipe(Scope.provide(input.reactorScope));
+    yield* input.interruptedTurnNudger.watchProcessExits().pipe(Scope.provide(input.reactorScope));
   });
 
 export const make = Effect.gen(function* () {

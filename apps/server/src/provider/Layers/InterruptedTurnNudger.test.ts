@@ -17,13 +17,18 @@ import {
   epicRunIterationThreadId,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
+  type ProviderRuntimeEvent,
   type ProviderSessionResumeOutcome,
+  type RuntimeOrphanedTask,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   OrchestrationEngineService,
@@ -34,9 +39,13 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { InterruptedTurnNudger } from "../Services/InterruptedTurnNudger.ts";
+import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import {
   InterruptedTurnNudgerLive,
+  PROCESS_EXIT_STOP_REASON,
   RESTART_NUDGE_PROMPT,
+  isNudgeEligibleThread,
+  processExitNudgePrompt,
   selectInterruptedThreads,
 } from "./InterruptedTurnNudger.ts";
 
@@ -57,6 +66,7 @@ interface ShellOverrides {
   readonly activeTurnId?: TurnId | null;
   readonly parentThreadId?: ThreadId | null;
   readonly settledOverride?: "settled" | "active" | null;
+  readonly sessionStatus?: "stopped" | "ready" | "running";
 }
 
 // SAFETY: a partial shell. Only the fields the nudge reads are set; the rest
@@ -74,7 +84,8 @@ const shell = (overrides: ShellOverrides = {}): OrchestrationThreadShell =>
       assistantMessageId: null,
     },
     session: {
-      status: overrides.turnState === "running" ? "running" : "stopped",
+      status:
+        overrides.sessionStatus ?? (overrides.turnState === "running" ? "running" : "stopped"),
       activeTurnId:
         overrides.activeTurnId === undefined
           ? overrides.turnState === "running" || overrides.turnState === undefined
@@ -88,9 +99,15 @@ interface HarnessOptions {
   readonly outcome?: ProviderSessionResumeOutcome;
   readonly threads?: ReadonlyArray<OrchestrationThreadShell>;
   readonly queuedMessageThreadIds?: ReadonlyArray<ThreadId>;
+  /** What every queued-message read after the first returns, when it differs. */
+  readonly queuedMessageThreadIdsLater?: ReadonlyArray<ThreadId>;
   /** The shell `nudge` re-reads, when it must differ from the collected one. */
   readonly shellAtNudge?: OrchestrationThreadShell;
+  /** Shells returned by successive shell reads; the last one repeats. */
+  readonly shellReads?: ReadonlyArray<OrchestrationThreadShell>;
   readonly failDispatch?: (command: OrchestrationCommand) => boolean;
+  /** What `ProviderService.streamEvents` replays to the exit watcher. */
+  readonly providerEvents?: ReadonlyArray<ProviderRuntimeEvent>;
 }
 
 /**
@@ -128,14 +145,25 @@ function harness(options: HarnessOptions = {}) {
   } as unknown as OrchestrationEngineShape;
 
   const threads = options.threads ?? [shell()];
+  let queuedReads = 0;
+  let shellReads = 0;
 
   // SAFETY: a partial query. These four reads are the whole surface the nudge
   // and its settle watch touch.
   const projectionSnapshotQuery = {
     getShellSnapshot: () => Effect.succeed({ threads, projects: [], snapshotSequence: 1 }),
-    listThreadIdsWithQueuedMessages: () => Effect.succeed(options.queuedMessageThreadIds ?? []),
+    listThreadIdsWithQueuedMessages: () =>
+      Effect.sync(() => {
+        queuedReads += 1;
+        return queuedReads > 1 && options.queuedMessageThreadIdsLater !== undefined
+          ? options.queuedMessageThreadIdsLater
+          : (options.queuedMessageThreadIds ?? []);
+      }),
     getThreadShellById: (threadId: ThreadId) => {
-      const found = options.shellAtNudge ?? threads.find((candidate) => candidate.id === threadId);
+      const scripted = options.shellReads?.[Math.min(shellReads, options.shellReads.length - 1)];
+      shellReads += 1;
+      const found =
+        scripted ?? options.shellAtNudge ?? threads.find((candidate) => candidate.id === threadId);
       return Effect.succeed(found === undefined ? Option.none() : Option.some(found));
     },
     getThreadDetailSnapshot: (threadId: ThreadId) =>
@@ -155,8 +183,14 @@ function harness(options: HarnessOptions = {}) {
     }),
   );
 
+  // SAFETY: a partial provider service. The exit watcher only subscribes.
+  const providerService = {
+    streamEvents: Stream.fromIterable(options.providerEvents ?? []),
+  } as unknown as ProviderServiceShape;
+
   const layer = InterruptedTurnNudgerLive.pipe(
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
+    Layer.provide(Layer.succeed(ProviderService, providerService)),
     Layer.provide(Layer.succeed(ProjectionSnapshotQuery, projectionSnapshotQuery)),
     Layer.provide(cryptoLayer),
   );
@@ -189,6 +223,51 @@ const runBootPass = (layer: Layer.Layer<InterruptedTurnNudger>) =>
     );
     return candidates;
   }).pipe(Effect.provide(layer));
+
+/** Replay the harness's provider events through the exit watcher. */
+const runExitWatcher = (
+  layer: Layer.Layer<InterruptedTurnNudger>,
+  afterDrain: Effect.Effect<void> = Effect.void,
+) =>
+  Effect.gen(function* () {
+    const nudger = yield* InterruptedTurnNudger;
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* nudger.watchProcessExits();
+        yield* drainFibers;
+        yield* afterDrain;
+        yield* drainFibers;
+      }),
+    );
+  }).pipe(Effect.provide(layer));
+
+const MONITOR: RuntimeOrphanedTask = {
+  taskId: "bash_monitor_1",
+  taskType: "local_bash",
+  description: "tail the deploy log",
+};
+
+// SAFETY: a partial event. The watcher reads type, threadId and payload only.
+const exitEvent = (
+  payload: {
+    readonly exitKind?: "graceful" | "error";
+    readonly midTurn?: boolean;
+    readonly orphanedTasks?: ReadonlyArray<RuntimeOrphanedTask>;
+  },
+  threadId: ThreadId = MID_TURN_THREAD,
+): ProviderRuntimeEvent =>
+  ({
+    type: "session.exited",
+    eventId: "event-exit",
+    provider: "claudeAgent",
+    threadId,
+    createdAt: "2026-09-30T23:10:00.000Z",
+    payload: { reason: "Claude Code process exited unexpectedly", ...payload },
+  }) as unknown as ProviderRuntimeEvent;
+
+/** A thread whose process died while idle: turn settled, session stopped. */
+const idleStoppedShell = (overrides: ShellOverrides = {}) =>
+  shell({ turnState: "completed", activeTurnId: null, ...overrides });
 
 const commandTypes = (commands: ReadonlyArray<OrchestrationCommand>) =>
   commands.map((command) => command.type);
@@ -353,6 +432,39 @@ describe("InterruptedTurnNudger", () => {
     }),
   );
 
+  it.effect("settles a dead turn the projection still shows running", () =>
+    Effect.gen(function* () {
+      // The SIGTERM shape: the dead session still projects `running`. The
+      // restart path must settle it anyway, unlike the exit path.
+      const { layer, dispatched } = harness({ threads: [shell({ turnState: "running" })] });
+
+      yield* runBootPass(layer);
+
+      expect(commandTypes(dispatched)).toEqual([
+        "thread.session.stop",
+        "thread.session.resume",
+        "thread.turn.start",
+      ]);
+    }),
+  );
+
+  it.effect("settles but never resumes when a message was parked after collect", () =>
+    Effect.gen(function* () {
+      // The settle is what releases the delivery poller for the parked
+      // message, so it must still happen. The parked message is the next
+      // turn, so no resume and no nudge follow.
+      const { layer, dispatched } = harness({
+        threads: [shell({ turnState: "running" })],
+        queuedMessageThreadIdsLater: [MID_TURN_THREAD],
+      });
+
+      const candidates = yield* runBootPass(layer);
+
+      expect(candidates).toHaveLength(1);
+      expect(commandTypes(dispatched)).toEqual(["thread.session.stop"]);
+    }),
+  );
+
   it.effect("gives each restart its own message row", () =>
     Effect.gen(function* () {
       const first = harness();
@@ -386,6 +498,202 @@ describe("InterruptedTurnNudger", () => {
       const started = turnStarts(dispatched);
       expect(started).toHaveLength(1);
       expect(started[0]?.threadId).toBe(healthy);
+    }),
+  );
+});
+
+describe("processExitNudgePrompt", () => {
+  it("names every orphaned task by id and tells the agent to re-arm them", () => {
+    const prompt = processExitNudgePrompt({
+      midTurn: false,
+      orphanedTasks: [MONITOR, { taskId: "bash_2" }],
+    });
+    expect(prompt).toContain("Your Claude Code process exited unexpectedly");
+    expect(prompt).toContain("- `bash_monitor_1` (local_bash): tail the deploy log");
+    expect(prompt).toContain("- `bash_2`");
+    expect(prompt).toContain("re-arm the ones you still need");
+    // Idle at exit: no in-flight tool call to go looking for.
+    expect(prompt).not.toContain("in flight");
+  });
+
+  it("adds the cut-off lines only when a turn was in flight", () => {
+    const prompt = processExitNudgePrompt({ midTurn: true, orphanedTasks: [] });
+    expect(prompt).toContain("Any tool call that was in flight never returned");
+    expect(prompt).not.toContain("died with it");
+  });
+
+  it("points both prompts at a transient systemd unit", () => {
+    const systemdRun = "systemd-run --user --unit=<name> --setenv=VAR=value <command>";
+    expect(processExitNudgePrompt({ midTurn: true, orphanedTasks: [] })).toContain(systemdRun);
+    expect(RESTART_NUDGE_PROMPT).toContain(systemdRun);
+    expect(RESTART_NUDGE_PROMPT).toContain("Monitors started before the restart died with it");
+  });
+});
+
+describe("isNudgeEligibleThread", () => {
+  const eligible = (thread: OrchestrationThreadShell, queued: Array<ThreadId> = []) =>
+    isNudgeEligibleThread(thread, new Set(queued));
+
+  it("accepts an ordinary interactive thread, whatever its turn state", () => {
+    expect(eligible(idleStoppedShell())).toBe(true);
+  });
+
+  it("rejects the four kinds both triggers must leave alone", () => {
+    const iterationThread = ThreadId.make(
+      epicRunIterationThreadId({ runId: "run-1", iterationIndex: 2 }),
+    );
+    expect(eligible(shell({ id: iterationThread }))).toBe(false);
+    expect(eligible(shell({ parentThreadId: ThreadId.make("thread-parent") }))).toBe(false);
+    expect(eligible(shell({ settledOverride: "settled" }))).toBe(false);
+    expect(eligible(shell(), [MID_TURN_THREAD])).toBe(false);
+  });
+});
+
+describe("InterruptedTurnNudger.watchProcessExits", () => {
+  it.effect("resumes an idle thread whose Monitors died and names them in the nudge", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({
+        threads: [idleStoppedShell()],
+        providerEvents: [
+          exitEvent({ exitKind: "error", midTurn: false, orphanedTasks: [MONITOR] }),
+        ],
+      });
+
+      yield* runExitWatcher(layer);
+
+      expect(commandTypes(dispatched)).toEqual([
+        "thread.session.stop",
+        "thread.session.resume",
+        "thread.turn.start",
+      ]);
+      expect(dispatched[0]).toMatchObject({ reason: PROCESS_EXIT_STOP_REASON });
+      const start = turnStarts(dispatched)[0];
+      expect(start).toMatchObject({ origin: "agent", message: { role: "user" } });
+      const text = start?.type === "thread.turn.start" ? start.message.text : "";
+      expect(text).toContain("bash_monitor_1");
+      expect(text).not.toContain("in flight");
+    }),
+  );
+
+  it.effect("resumes a thread whose process died mid-turn", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({
+        threads: [shell({ turnState: "interrupted", activeTurnId: null })],
+        providerEvents: [exitEvent({ exitKind: "error", midTurn: true })],
+      });
+
+      yield* runExitWatcher(layer);
+
+      const start = turnStarts(dispatched)[0];
+      const text = start?.type === "thread.turn.start" ? start.message.text : "";
+      expect(text).toContain("Any tool call that was in flight never returned");
+    }),
+  );
+
+  const ignored: ReadonlyArray<{
+    readonly name: string;
+    readonly thread: OrchestrationThreadShell;
+    readonly event: ProviderRuntimeEvent;
+    readonly queued?: ReadonlyArray<ThreadId>;
+  }> = [
+    {
+      name: "a graceful exit",
+      thread: idleStoppedShell(),
+      event: exitEvent({ exitKind: "graceful", orphanedTasks: [MONITOR] }),
+    },
+    {
+      name: "an idle, task-free exit",
+      thread: idleStoppedShell(),
+      event: exitEvent({ exitKind: "error", midTurn: false }),
+    },
+    (() => {
+      const id = ThreadId.make(epicRunIterationThreadId({ runId: "run-1", iterationIndex: 0 }));
+      return {
+        name: "an epic-run iteration",
+        thread: idleStoppedShell({ id }),
+        event: exitEvent({ exitKind: "error", midTurn: true }, id),
+      };
+    })(),
+    {
+      name: "a subagent child",
+      thread: idleStoppedShell({ parentThreadId: ThreadId.make("thread-parent") }),
+      event: exitEvent({ exitKind: "error", midTurn: true }),
+    },
+    {
+      name: "a settled thread",
+      thread: idleStoppedShell({ settledOverride: "settled" }),
+      event: exitEvent({ exitKind: "error", midTurn: true }),
+    },
+    {
+      name: "a thread with a parked message",
+      thread: idleStoppedShell(),
+      event: exitEvent({ exitKind: "error", midTurn: true }),
+      queued: [MID_TURN_THREAD],
+    },
+  ];
+  for (const testCase of ignored) {
+    it.effect(`ignores ${testCase.name}`, () =>
+      Effect.gen(function* () {
+        const { layer, dispatched } = harness({
+          threads: [testCase.thread],
+          providerEvents: [testCase.event],
+          queuedMessageThreadIds: testCase.queued ?? [],
+        });
+
+        yield* runExitWatcher(layer);
+
+        expect(dispatched).toEqual([]);
+      }),
+    );
+  }
+
+  it.effect("skips a second exit on the same thread within ten minutes", () =>
+    Effect.gen(function* () {
+      const event = exitEvent({ exitKind: "error", midTurn: true });
+      const { layer, dispatched } = harness({
+        threads: [idleStoppedShell()],
+        providerEvents: [event, event],
+      });
+
+      yield* runExitWatcher(layer);
+
+      expect(turnStarts(dispatched)).toHaveLength(1);
+      expect(commandTypes(dispatched).filter((type) => type === "thread.session.resume")).toEqual([
+        "thread.session.resume",
+      ]);
+    }),
+  );
+
+  it.effect("never settles a session a human started after the exit wait", () =>
+    Effect.gen(function* () {
+      const stopped = idleStoppedShell();
+      const restarted = idleStoppedShell({ sessionStatus: "ready" });
+      const { layer, dispatched } = harness({
+        threads: [stopped],
+        // Exit read, settle wait, nudge read, then the re-check before the
+        // settle sees the human's new session.
+        shellReads: [stopped, stopped, stopped, restarted],
+        providerEvents: [exitEvent({ exitKind: "error", midTurn: true })],
+      });
+
+      yield* runExitWatcher(layer);
+
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("never resumes while the projection still shows the dead session running", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({
+        // Still projected running: resuming now would let the late `stopped`
+        // overwrite the resumed session.
+        threads: [shell({ turnState: "running" })],
+        providerEvents: [exitEvent({ exitKind: "error", midTurn: true })],
+      });
+
+      yield* runExitWatcher(layer, TestClock.adjust(Duration.seconds(16)));
+
+      expect(dispatched).toEqual([]);
     }),
   );
 });

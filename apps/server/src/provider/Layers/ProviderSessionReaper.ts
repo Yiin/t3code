@@ -55,6 +55,7 @@ const periodicStopReason = (reason: SessionReapReason): string => {
     case "within_idle_threshold":
     case "active_turn":
     case "active_subagent":
+    case "session_starting":
       throw new Error(`Cannot create a stop reason for non-reap decision: ${reason}`);
   }
 };
@@ -324,6 +325,12 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           newestRunningSubagentAgeMs = Number.isNaN(newestMs) ? null : now - newestMs;
         }
 
+        const startingMs =
+          thread?.session?.status === "starting"
+            ? Date.parse(thread.session.updatedAt)
+            : Number.NaN;
+        const startingAgeMs = Number.isNaN(startingMs) ? null : now - startingMs;
+
         const decision = decideSessionReap({
           threadId: binding.threadId,
           status: binding.status,
@@ -333,6 +340,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           activeTurnId: thread?.session?.activeTurnId ?? null,
           activeSubagentCount,
           newestRunningSubagentAgeMs,
+          startingAgeMs,
           thresholds,
         });
 

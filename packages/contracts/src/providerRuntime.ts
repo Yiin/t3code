@@ -284,10 +284,19 @@ const SessionStateChangedPayload = Schema.Struct({
 });
 export type SessionStateChangedPayload = typeof SessionStateChangedPayload.Type;
 
+export const RuntimeOrphanedTask = Schema.Struct({
+  taskId: TrimmedNonEmptyStringSchema,
+  taskType: Schema.optional(TrimmedNonEmptyStringSchema),
+  description: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type RuntimeOrphanedTask = typeof RuntimeOrphanedTask.Type;
+
 const SessionExitedPayload = Schema.Struct({
   reason: Schema.optional(TrimmedNonEmptyStringSchema),
   recoverable: Schema.optional(Schema.Boolean),
   exitKind: Schema.optional(RuntimeSessionExitKind),
+  midTurn: Schema.optional(Schema.Boolean),
+  orphanedTasks: Schema.optional(Schema.Array(RuntimeOrphanedTask)),
 });
 export type SessionExitedPayload = typeof SessionExitedPayload.Type;
 

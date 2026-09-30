@@ -4144,5 +4144,132 @@ describe("ProviderCommandReactor", () => {
         expect(thread?.session?.providerInstanceId).toBe("codex");
       }),
     );
+
+    const claudeInstance = ProviderInstanceId.make("claudeAgent");
+    const claudeEffort = (value: string) =>
+      createModelSelection(claudeInstance, "claude-sonnet-4-6", [{ id: "effort", value }]);
+
+    // The web client persists the selection before it starts the turn.
+    const startTurn = (
+      harness: Effect.Success<ReturnType<typeof createHarness>>,
+      id: string,
+      modelSelection: ModelSelection,
+    ) =>
+      Effect.gen(function* () {
+        yield* dispatch(harness.engine, {
+          type: "thread.meta.update",
+          commandId: CommandId.make(`cmd-meta-${id}`),
+          threadId: ThreadId.make("thread-1"),
+          modelSelection,
+        });
+        yield* dispatch(harness.engine, {
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-start-${id}`),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId(`user-message-${id}`),
+            role: "user",
+            text: id,
+            attachments: [],
+          },
+          modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      });
+
+    it.live("restarts claude when the first turn after a resume changes the selection", () =>
+      Effect.gen(function* () {
+        const mediumEffort = claudeEffort("medium");
+        const maxEffort = claudeEffort("max");
+        const harness = yield* createHarness({
+          threadModelSelection: mediumEffort,
+          startSessionEffect: (session) =>
+            Effect.succeed({ ...session, sessionOrigin: "resumed" as const }),
+        });
+
+        const settled = yield* requestResume(harness, "cmd-resume-claude-changed");
+        expect(settled.outcome).toEqual({ _tag: "resumed" });
+
+        // No same-selection turn in between: only the baseline recorded at the
+        // resume site can tell this selection apart from the live one.
+        yield* startTurn(harness, "changed-after-resume", maxEffort);
+        yield* waitFor(() => harness.startSession.mock.calls.length === 2);
+        yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          modelSelection: maxEffort,
+        });
+      }),
+    );
+
+    it.live("never restarts a live claude session whose selection was never recorded", () =>
+      Effect.gen(function* () {
+        const mediumEffort = claudeEffort("medium");
+        const harness = yield* createHarness({ threadModelSelection: mediumEffort });
+        const seededAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+        // A live session no reactor start path created, as boot bindings or
+        // the epic runner leave one: the reactor has no baseline for it.
+        harness.runtimeSessions.push({
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: claudeInstance,
+          status: "ready",
+          runtimeMode: "approval-required",
+          cwd: "/tmp/provider-project",
+          model: "claude-sonnet-4-6",
+          threadId: ThreadId.make("thread-1"),
+          resumeCursor: { opaque: "resume-unrecorded" },
+          createdAt: seededAt,
+          updatedAt: seededAt,
+        });
+        yield* harness.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-unrecorded"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "ready",
+            providerName: "claudeAgent",
+            providerInstanceId: claudeInstance,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: seededAt,
+          },
+          createdAt: seededAt,
+        });
+
+        yield* startTurn(harness, "changed-unrecorded", claudeEffort("max"));
+        yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(harness.startSession).not.toHaveBeenCalled();
+      }),
+    );
+
+    it.live("records the resumed selection so an unchanged turn does not restart claude", () =>
+      Effect.gen(function* () {
+        const mediumEffort = claudeEffort("medium");
+        const maxEffort = claudeEffort("max");
+        const harness = yield* createHarness({
+          threadModelSelection: mediumEffort,
+          startSessionEffect: (session) =>
+            Effect.succeed({ ...session, sessionOrigin: "resumed" as const }),
+        });
+
+        const settled = yield* requestResume(harness, "cmd-resume-claude-baseline");
+        expect(settled.outcome).toEqual({ _tag: "resumed" });
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+
+        yield* startTurn(harness, "same-selection", mediumEffort);
+        yield* waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+
+        yield* startTurn(harness, "changed-options", maxEffort);
+        yield* waitFor(() => harness.startSession.mock.calls.length === 2);
+        yield* waitFor(() => harness.sendTurn.mock.calls.length === 2);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          modelSelection: maxEffort,
+        });
+      }),
+    );
   });
 });

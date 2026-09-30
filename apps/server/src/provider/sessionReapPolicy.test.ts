@@ -8,6 +8,7 @@ import {
   DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
   DEFAULT_SETTLED_IDLE_THRESHOLD_MS,
   DEFAULT_SUBAGENT_FRESHNESS_WINDOW_MS,
+  STARTING_SESSION_GRACE_MS,
   decideSessionReap,
   minSessionReapThresholdMs,
   sessionReapThreadKind,
@@ -38,6 +39,7 @@ const decide = (overrides: Partial<SessionReapInput>): SessionReapDecision =>
     idleDurationMs: 0,
     settledOverride: null,
     activeTurnId: null,
+    startingAgeMs: null,
     ...overrides,
   });
 
@@ -448,6 +450,41 @@ describe("decideSessionReap", () => {
       },
       reap: false,
       reason: "session_stopped",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+    },
+    {
+      name: "keeps a dead binding while the projected session is starting, inside the grace",
+      input: {
+        hasLiveAdapterSession: false,
+        idleDurationMs: DEFAULT_DEAD_SESSION_GRACE_MS * 10,
+        startingAgeMs: STARTING_SESSION_GRACE_MS - 1,
+      },
+      reap: false,
+      reason: "session_starting",
+      threadKind: "interactive",
+      thresholdMs: STARTING_SESSION_GRACE_MS,
+    },
+    {
+      name: "reaps a dead binding whose session has been starting past the grace",
+      input: {
+        hasLiveAdapterSession: false,
+        idleDurationMs: DEFAULT_DEAD_SESSION_GRACE_MS * 10,
+        startingAgeMs: STARTING_SESSION_GRACE_MS,
+      },
+      reap: true,
+      reason: "no_live_session",
+      threadKind: "interactive",
+      thresholdMs: DEFAULT_DEAD_SESSION_GRACE_MS,
+    },
+    {
+      name: "ignores the starting age while the adapter session is live",
+      input: {
+        idleDurationMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
+        startingAgeMs: 0,
+      },
+      reap: true,
+      reason: "interactive_idle_threshold",
       threadKind: "interactive",
       thresholdMs: DEFAULT_INTERACTIVE_IDLE_THRESHOLD_MS,
     },

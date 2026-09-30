@@ -2769,6 +2769,145 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("closes the query before interrupting a stream whose iterator never yields", () => {
+    // Real SDK async generators queue iter.return() behind the pending next(),
+    // so an idle CLI blocks the stream fiber's interrupt until the process is
+    // killed. stopSession must close the query first or it hangs.
+    const harness = makeHarness();
+    const order: Array<string> = [];
+    let markClosed: () => void = () => {};
+    const closed = new Promise<void>((resolve) => {
+      markClosed = resolve;
+    });
+    (harness.query as { close: () => void }).close = () => {
+      harness.query.closeCalls += 1;
+      order.push("close");
+      markClosed();
+    };
+    (harness.query as { [Symbol.asyncIterator]: () => AsyncIterator<SDKMessage> })[
+      Symbol.asyncIterator
+    ] = () => ({
+      next: () => new Promise<IteratorResult<SDKMessage>>(() => {}),
+      return: async () => {
+        order.push("return");
+        await closed;
+        return { done: true, value: undefined };
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.stopSession(THREAD_ID);
+
+      assert.deepEqual(order, ["close", "return"]);
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reports an unexpected stream end as an error exit with orphaned tasks", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "session.exited",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      const backgroundTasks = (tasks: ReadonlyArray<Record<string, unknown>>) =>
+        ({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks,
+          session_id: "sdk-session-bg",
+          uuid: `bg-${tasks.length}`,
+        }) as unknown as SDKMessage;
+      harness.query.emit(
+        backgroundTasks([{ task_id: "stale", task_type: "local_bash", description: "old" }]),
+      );
+      // REPLACE semantics: the second snapshot wins; ambient tasks are dropped.
+      harness.query.emit(
+        backgroundTasks([
+          { task_id: "bxyz", task_type: "local_bash", description: "Monitor CI" },
+          { task_id: "watcher", task_type: "local_bash", description: "live", ambient: true },
+        ]),
+      );
+      harness.query.finish();
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.equal(
+        runtimeEvents.some((event) => event.raw?.messageType === "system:background_tasks_changed"),
+        false,
+      );
+      const exited = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(exited?.type, "session.exited");
+      if (exited?.type === "session.exited") {
+        assert.deepEqual(exited.payload, {
+          reason: "Claude Code process exited unexpectedly",
+          exitKind: "error",
+          midTurn: true,
+          orphanedTasks: [{ taskId: "bxyz", taskType: "local_bash", description: "Monitor CI" }],
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps a requested stopSession graceful without orphaned tasks", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "session.exited",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [{ task_id: "bxyz", task_type: "local_bash", description: "Monitor CI" }],
+        session_id: "sdk-session-bg",
+        uuid: "bg-1",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      yield* adapter.stopSession(THREAD_ID);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const exited = runtimeEvents[runtimeEvents.length - 1];
+      assert.equal(exited?.type, "session.exited");
+      if (exited?.type === "session.exited") {
+        assert.deepEqual(exited.payload, { reason: "Session stopped", exitKind: "graceful" });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("keeps Claude stream failure events structural", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

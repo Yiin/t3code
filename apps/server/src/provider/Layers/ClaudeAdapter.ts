@@ -15,6 +15,7 @@ import {
   type PermissionMode,
   type PermissionResult,
   type PermissionUpdate,
+  type SDKBackgroundTasksChangedMessage,
   type SDKCompactBoundaryMessage,
   type SDKMessage,
   type SDKControlGetContextUsageResponse,
@@ -42,11 +43,13 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type SessionExitedPayload,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
   type RuntimeMode,
   RuntimeItemId,
+  type RuntimeOrphanedTask,
   RuntimeRequestId,
   RuntimeTaskId,
   ThreadId,
@@ -311,7 +314,32 @@ interface ClaudeSessionContext {
    * 'failed'. Cleared when a turn starts or completes.
    */
   interruptRequested: boolean;
+  /**
+   * Non-ambient background tasks (Monitors arrive as `local_bash`) from the
+   * last `background_tasks_changed` snapshot. Reported as orphaned when the
+   * CLI process exits unexpectedly.
+   */
+  liveBackgroundTasks: ReadonlyArray<RuntimeOrphanedTask>;
   stopped: boolean;
+}
+
+/** Maps a background_tasks_changed snapshot (REPLACE semantics) to the live, non-ambient task set. */
+function liveBackgroundTasksFromSnapshot(
+  tasks: SDKBackgroundTasksChangedMessage["tasks"],
+): ReadonlyArray<RuntimeOrphanedTask> {
+  return tasks.flatMap((task) => {
+    const taskId = task.task_id?.trim();
+    if (task.ambient || !taskId) return [];
+    const taskType = task.task_type?.trim();
+    const description = task.description?.trim();
+    return [
+      {
+        taskId,
+        ...(taskType ? { taskType } : {}),
+        ...(description ? { description } : {}),
+      },
+    ];
+  });
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
@@ -3299,17 +3327,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       },
     };
 
-    // Undeclared-but-real subtypes (absent from the SDK's union, so they can't
-    // be switch cases): consumed intentionally without emitting, otherwise
-    // they fall through to the unknown-subtype warning and surface as spurious
-    // error rows in client work logs. `background_tasks_changed` is a roster
-    // snapshot ({tasks: [...]}) — the task_* lifecycle events carry the
-    // authoritative per-agent data and the typed background_tasks control
-    // request is the reconciliation source.
-    if ((message.subtype as string) === "background_tasks_changed") {
-      return;
-    }
-
     switch (message.subtype) {
       case "init":
         yield* offerRuntimeEvent({
@@ -3538,9 +3555,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "commands_changed":
       case "memory_recall":
       case "elicitation_complete":
-      case "background_tasks_changed":
       case "control_request_progress":
       case "worker_shutting_down":
+        return;
+      // A roster snapshot ({tasks: [...]}). The task_* lifecycle events carry
+      // the authoritative per-agent data and the typed background_tasks
+      // control request is the reconciliation source, so nothing is emitted.
+      // The snapshot is only stored, so an unexpected process exit can report
+      // which tasks died with it.
+      case "background_tasks_changed":
+        context.liveBackgroundTasks = liveBackgroundTasksFromSnapshot(message.tasks ?? []);
         return;
       case "informational":
         if (message.level === "warning") {
@@ -3810,6 +3834,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    // Capture before completeTurn clears turnState / interruptRequested.
+    const midTurn = context.turnState !== undefined;
+    const graceful =
+      context.interruptRequested || (Exit.isFailure(exit) && isClaudeInterruptedCause(exit.cause));
+
     if (Exit.isFailure(exit)) {
       if (isClaudeInterruptedCause(exit.cause)) {
         if (context.turnState) {
@@ -3840,14 +3869,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
+    const orphanedTasks = context.liveBackgroundTasks;
     yield* stopSessionInternal(context, {
       emitExitEvent: true,
+      ...(graceful
+        ? {}
+        : {
+            exitPayload: {
+              reason: "Claude Code process exited unexpectedly",
+              exitKind: "error",
+              midTurn,
+              ...(orphanedTasks.length > 0 ? { orphanedTasks: [...orphanedTasks] } : {}),
+            },
+          }),
     });
   });
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     context: ClaudeSessionContext,
-    options?: { readonly emitExitEvent?: boolean },
+    options?: {
+      readonly emitExitEvent?: boolean;
+      /** Overrides the default graceful `session.exited` payload. */
+      readonly exitPayload?: SessionExitedPayload;
+    },
   ) {
     if (context.stopped) return;
 
@@ -3879,12 +3923,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* Queue.shutdown(context.promptQueue);
 
-    const streamFiber = context.streamFiber;
-    context.streamFiber = undefined;
-    if (streamFiber && streamFiber.pollUnsafe() === undefined) {
-      yield* Fiber.interrupt(streamFiber);
-    }
-
+    // Close the query (kills the CLI process) BEFORE interrupting the stream
+    // fiber. The fiber's finalizer calls iter.return() on the SDK async
+    // generator, which queues behind the pending next(); an idle CLI sends
+    // nothing, so the interrupt blocked until the CLI exited on its own. That
+    // stalled a live server's global reactor for ~600s.
     yield* Effect.try({
       try: () => context.query.close(),
       catch: (cause) =>
@@ -3905,6 +3948,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ),
     );
 
+    const streamFiber = context.streamFiber;
+    context.streamFiber = undefined;
+    if (streamFiber && streamFiber.pollUnsafe() === undefined) {
+      yield* Fiber.interrupt(streamFiber);
+    }
+
     const updatedAt = yield* nowIso;
     context.session = {
       ...context.session,
@@ -3921,7 +3970,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         provider: PROVIDER,
         createdAt: stamp.createdAt,
         threadId: context.session.threadId,
-        payload: {
+        payload: options?.exitPayload ?? {
           reason: "Session stopped",
           exitKind: "graceful",
         },
@@ -4620,6 +4669,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastThreadStartedId: undefined,
         lastProviderError: undefined,
         interruptRequested: false,
+        liveBackgroundTasks: [],
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
