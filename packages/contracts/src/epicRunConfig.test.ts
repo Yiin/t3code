@@ -20,7 +20,7 @@ const decodeOverride = Schema.decodeUnknownSync(EpicRunConfigOverride);
 const DEFAULT_CONFIG = {
   engine: "core",
   budget: { usd: null },
-  gate: { command: null, disabled: false },
+  gate: { command: null, disabled: false, lockWaitSeconds: 900 },
   supervision: {
     idleThresholdSeconds: 1_800,
     inspectorTimeoutSeconds: 120,
@@ -96,6 +96,7 @@ const PUBLIC_FIELD_SCOPES = {
   "budget.usd": "core-partial",
   "gate.command": "core",
   "gate.disabled": "core",
+  "gate.lockWaitSeconds": "core",
   "supervision.idleThresholdSeconds": "core",
   "supervision.inspectorTimeoutSeconds": "core",
   "supervision.inspectMaxDelaySeconds": "core",
@@ -192,6 +193,22 @@ describe("EpicRunConfig", () => {
     expect(() => decodeConfig({ retry: { rateLimitBackoffSeconds: -1 } })).toThrow();
     expect(() => decodeConfig({ server: { pollIntervalMs: 0 } })).toThrow();
     expect(() => decodeConfig({ server: { providerDegradationTtlMs: -1 } })).toThrow();
+  });
+
+  it("reads gate.lockWaitSeconds as a positive integer defaulting to 900", () => {
+    expect(decodeConfig({}).gate.lockWaitSeconds).toBe(900);
+    expect(decodeConfig({ gate: { lockWaitSeconds: 3_600 } }).gate).toEqual({
+      command: null,
+      disabled: false,
+      lockWaitSeconds: 3_600,
+    });
+    expect(decodeOverride({ gate: { lockWaitSeconds: 60 } })).toEqual({
+      gate: { lockWaitSeconds: 60 },
+    });
+    for (const lockWaitSeconds of [0, -1, 1.5, "900"]) {
+      expect(() => decodeConfig({ gate: { lockWaitSeconds } })).toThrow();
+      expect(() => decodeOverride({ gate: { lockWaitSeconds } })).toThrow();
+    }
   });
 
   it("accepts only known epic engines", () => {

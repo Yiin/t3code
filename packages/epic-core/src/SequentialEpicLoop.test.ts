@@ -554,7 +554,7 @@ it.live("records its gate receipt and where the iteration's wall time went", () 
   Effect.gen(function* () {
     const resolved = fixture({
       attempts: [{ commit: true, close: true }],
-      config: config({ gate: { command: "gate", disabled: false } }),
+      config: config({ gate: { command: "gate", disabled: false, lockWaitSeconds: 900 } }),
     });
     yield* resolved.run();
 
@@ -898,7 +898,7 @@ it.live("keeps a closed child unchanged after a gate failure", () =>
       attempts: [{ claim: true, commit: true, close: true }],
       config: config({
         limits: { ...DEFAULT_EPIC_RUN_CONFIG.limits, maxAttemptsPerChild: 1, maxIterations: 2 },
-        gate: { command: "gate", disabled: false },
+        gate: { command: "gate", disabled: false, lockWaitSeconds: 900 },
       }),
       gatePasses: false,
     });

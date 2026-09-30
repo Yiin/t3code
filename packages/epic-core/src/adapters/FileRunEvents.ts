@@ -29,6 +29,9 @@ const summary = (event: RunEvent): string => {
     const item = event.iteration;
     return `- ${String(item.iterationIndex)} ${item.issueId ?? "-"}: ${item.turnStatus}${item.summary === null ? "" : ` — ${item.summary}`}\n`;
   }
+  if (event.type === "gate-lock-wait") {
+    return `- gate-lock-wait #${String(event.attempt)}: retry in ${String(Math.round(event.retryInMs / 1000))}s\n`;
+  }
   return `- ${String(event.iterationIndex)}: ${event.type}\n`;
 };
 

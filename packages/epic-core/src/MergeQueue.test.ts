@@ -553,6 +553,7 @@ const drain = (
       pushEnabled: true,
       verified: true,
       maxGateOutputBytes: 1024,
+      gateLockWaitSeconds: 900,
       ...overrides,
     },
     ports,
@@ -780,8 +781,8 @@ describe("MergeQueue", () => {
           run: () =>
             Effect.fail(
               new GateError({
-                operation: "lock",
-                detail: "Could not take the shared gate lock within 900s",
+                operation: "run",
+                detail: "Could not run the gate in /worktrees/integration",
               }),
             ),
         },
@@ -795,7 +796,7 @@ describe("MergeQueue", () => {
 
       // The failure is re-raised unchanged, but the two hours it may have
       // cost are on the record either way.
-      expect(error.operation).toBe("lock");
+      expect(error.operation).toBe("run");
       expect(gateReceipts).toHaveLength(1);
       expect(gateReceipts[0]).toMatchObject({
         phase: "entry",
@@ -804,9 +805,95 @@ describe("MergeQueue", () => {
         // Nothing ran, so nothing was tested: no head may be claimed.
         inputHeads: [],
       });
-      expect(gateReceipts[0]?.output).toContain("Could not take the shared gate lock");
+      expect(gateReceipts[0]?.output).toContain("Could not run the gate");
     }),
   );
+
+  describe("gate lock contention (t3code-chia)", () => {
+    const lockBusy = new GateError({
+      operation: "lock",
+      detail:
+        "Could not take the shared gate lock /run/user/1000/t3code/cook-epic-heavy.lock within 900s",
+    });
+
+    it.effect("waits instead of failing, and puts the entry back in the queue", () =>
+      Effect.gen(function* () {
+        const gateReceipts: Array<PersistedGateReceipt> = [];
+        const gateInputs: Array<Parameters<MergeQueuePorts["gate"]["run"]>[0]> = [];
+        const harness = makeHarness({});
+        const ports: MergeQueuePorts = {
+          ...harness.ports,
+          gate: {
+            run: (gateInput) =>
+              Effect.suspend(() => {
+                gateInputs.push(gateInput);
+                return Effect.fail(lockBusy);
+              }),
+          },
+          gateReceipts: {
+            record: (receipt) => Effect.sync(() => void gateReceipts.push(receipt)),
+            list: () => Effect.succeed(gateReceipts),
+          },
+        };
+
+        const result = yield* drain(ports, { gateLockWaitSeconds: 1_800 });
+
+        expect(result).toEqual({
+          _tag: "gate-lock-wait",
+          detail: lockBusy.message,
+          queueLength: 1,
+        });
+        // The configured wait reaches the gate adapter.
+        expect(gateInputs.map((input) => input.lockWaitSeconds)).toEqual([1_800]);
+        // Nothing ran, so nothing is blamed: no park, no fix child, no landing.
+        expect(harness.fixes).toEqual([]);
+        expect(harness.completions).toEqual([]);
+        expect(harness.snapshot().entries.map((item) => item.status)).toEqual(["queued"]);
+        expect(harness.calls.slice(-2)).toEqual(["restore:0", "slot-release:cook-epic-run-1"]);
+        // The wait still leaves evidence.
+        expect(gateReceipts).toHaveLength(1);
+        expect(gateReceipts[0]).toMatchObject({ phase: "entry", outcome: "error" });
+      }),
+    );
+
+    it.effect("lands the entry on the next drain once the lock is free", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({});
+        let lockBusyFor = 1;
+        const ports: MergeQueuePorts = {
+          ...harness.ports,
+          gate: {
+            run: (gateInput) =>
+              lockBusyFor-- > 0 ? Effect.fail(lockBusy) : harness.ports.gate.run(gateInput),
+          },
+        };
+
+        expect((yield* drain(ports))._tag).toBe("gate-lock-wait");
+        expect(yield* drain(ports)).toEqual({ _tag: "drained", merged: 1, parked: 0 });
+        expect(harness.completions.map((completion) => completion.sequence)).toEqual([0]);
+        expect(harness.fixes).toEqual([]);
+      }),
+    );
+
+    it.effect("waits when the control gate is the one that cannot take the lock", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ gatePasses: false });
+        let gateCalls = 0;
+        const ports: MergeQueuePorts = {
+          ...harness.ports,
+          gate: {
+            run: (gateInput) =>
+              ++gateCalls === 2 ? Effect.fail(lockBusy) : harness.ports.gate.run(gateInput),
+          },
+        };
+
+        expect((yield* drain(ports))._tag).toBe("gate-lock-wait");
+        // A red entry gate with an unanswered control question blames nobody.
+        expect(harness.fixes).toEqual([]);
+        expect(harness.snapshot().entries.map((item) => item.status)).toEqual(["queued"]);
+      }),
+    );
+  });
 
   it.effect("blames the environment, not the branch, when the base fails the same gate", () =>
     Effect.gen(function* () {

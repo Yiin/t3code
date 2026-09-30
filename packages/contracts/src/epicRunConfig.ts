@@ -43,6 +43,7 @@ const RepositoryContainedPath = RelativePath.check(
 const BudgetUsd = Schema.NullOr(PositiveFiniteNumber);
 const GateCommand = Schema.NullOr(TrimmedNonEmptyString);
 const GateDisabled = Schema.Boolean;
+const GateLockWaitSeconds = PositiveInt;
 const IdleThresholdSeconds = PositiveInt;
 const InspectorTimeoutSeconds = PositiveInt;
 const InspectMaxDelaySeconds = PositiveInt;
@@ -90,6 +91,7 @@ const BudgetConfig = Schema.Struct({
 const GateConfig = Schema.Struct({
   command: defaultTo(GateCommand, null),
   disabled: defaultTo(GateDisabled, false),
+  lockWaitSeconds: defaultTo(GateLockWaitSeconds, 900),
 });
 
 const SupervisionConfig = Schema.Struct({
@@ -196,6 +198,7 @@ export const EpicRunConfigOverride = Schema.Struct({
     Schema.Struct({
       command: Schema.optionalKey(GateCommand),
       disabled: Schema.optionalKey(GateDisabled),
+      lockWaitSeconds: Schema.optionalKey(GateLockWaitSeconds),
     }),
   ),
   supervision: Schema.optionalKey(
@@ -320,6 +323,13 @@ export const EPIC_RUN_CONFIG_FIELDS: readonly EpicRunConfigField[] = [
     label: "Disable gate",
     doc: "Allows unverified landing when the operator explicitly requests it.",
     control: "toggle",
+  },
+  {
+    key: "gate.lockWaitSeconds",
+    scope: "core",
+    label: "Gate lock wait",
+    doc: "Waits this many seconds for the host-wide gate lock before one attempt gives up. The merge queue then retries with backoff; the run never fails on it.",
+    control: "number",
   },
   {
     key: "supervision.idleThresholdSeconds",

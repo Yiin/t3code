@@ -193,7 +193,6 @@ describe("ProcessGate", () => {
           processRunner,
           uid: 1000,
           environment: {},
-          lockWaitSeconds: 60,
         });
 
         const error = yield* gate
@@ -202,6 +201,7 @@ describe("ProcessGate", () => {
             repositories: [repository("/repo")],
             cwd: "/integration",
             maxOutputBytes: 2048,
+            lockWaitSeconds: 60,
           })
           .pipe(Effect.flip);
 
@@ -230,7 +230,6 @@ describe("ProcessGate", () => {
           processRunner,
           uid: 1000,
           environment: {},
-          lockWaitSeconds: 42,
         });
 
         yield* gate.run({
@@ -238,6 +237,7 @@ describe("ProcessGate", () => {
           repositories: [repository("/repo")],
           cwd: "/integration",
           maxOutputBytes: 2048,
+          lockWaitSeconds: 42,
         });
 
         expect(calls.find((call) => call.command === "flock")?.args.slice(0, 4)).toEqual([

@@ -9,7 +9,13 @@ import * as Option from "effect/Option";
 
 import { awaitQuietHost, sampleHostLoad } from "../hostContention.ts";
 import { ProcessRunner } from "../processRunner.ts";
-import { GateError, gateCommandDigest, type GateInputHead, type GateShape } from "../ports/Gate.ts";
+import {
+  GATE_LOCK_UNAVAILABLE_OPERATION,
+  GateError,
+  gateCommandDigest,
+  type GateInputHead,
+  type GateShape,
+} from "../ports/Gate.ts";
 
 /** Single-quote one path for `bash -c`. Runtime directories can hold anything. */
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
@@ -67,12 +73,14 @@ export const heavyGateLockPath = (input: {
 const LOCK_UNAVAILABLE_EXIT_CODE = 75;
 
 /**
- * How long to wait for the shared heavy-work lock before giving up.
+ * How long to wait for the shared heavy-work lock before giving up, when the
+ * caller does not pass `gate.lockWaitSeconds`.
  *
  * Far below the process timeout on purpose. The lock is machine-global, so a
  * run in another repository can hold it; waiting the full process budget turns
  * that into an indistinguishable two-hour stall, which is what happened to
- * three epic runs on 2026-08-09/10.
+ * three epic runs on 2026-08-09/10. Giving up is not failing: the merge queue
+ * reports it as a lock wait and retries (t3code-chia).
  */
 const DEFAULT_LOCK_WAIT_SECONDS = 15 * 60;
 
@@ -81,7 +89,6 @@ export const makeProcessGate = (input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly uid: number;
   readonly timeoutMs?: number;
-  readonly lockWaitSeconds?: number;
   /** See `hostContention.ts`. Zero `quietHostWaitSeconds` disables the wait. */
   readonly quietHostWaitSeconds?: number;
   readonly quietHostPollSeconds?: number;
@@ -92,6 +99,7 @@ export const makeProcessGate = (input: {
     repositories,
     cwd,
     maxOutputBytes,
+    lockWaitSeconds: requestedLockWaitSeconds,
   }) {
     const env = cleanEnvironment(input.environment);
     const lockPath = heavyGateLockPath(input);
@@ -116,7 +124,7 @@ export const makeProcessGate = (input: {
       });
     }
 
-    const lockWaitSeconds = input.lockWaitSeconds ?? DEFAULT_LOCK_WAIT_SECONDS;
+    const lockWaitSeconds = requestedLockWaitSeconds ?? DEFAULT_LOCK_WAIT_SECONDS;
     const startedAt = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
 
     // The commits the command is about to read, resolved before it starts.
@@ -263,7 +271,7 @@ export const makeProcessGate = (input: {
 
     if (output.code === LOCK_UNAVAILABLE_EXIT_CODE) {
       return yield* new GateError({
-        operation: "lock",
+        operation: GATE_LOCK_UNAVAILABLE_OPERATION,
         detail: `Could not take the shared gate lock ${lockPath} within ${String(lockWaitSeconds)}s; another epic run on this host holds it`,
       });
     }

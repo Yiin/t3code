@@ -171,6 +171,7 @@ export const makeServerMergeDrain = (deps: {
           pushEnabled: !run.config.vcs.noPush,
           verified: !run.config.gate.disabled,
           maxGateOutputBytes: 1024 * 1024,
+          gateLockWaitSeconds: run.config.gate.lockWaitSeconds,
         },
         {
           store: mergeQueueStore,
@@ -208,6 +209,8 @@ export const makeServerMergeDrain = (deps: {
       if (result._tag === "fatal" && "detail" in result)
         return { _tag: "fatal", detail: result.detail } as const;
       if (result._tag === "deferred") return { _tag: "deferred", holder: result.holder } as const;
+      if (result._tag === "gate-lock-wait")
+        return { _tag: "gate-lock-wait", detail: result.detail } as const;
       if (result._tag === "drained")
         return {
           _tag: "drained",

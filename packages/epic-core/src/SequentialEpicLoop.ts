@@ -714,6 +714,7 @@ export const runSequentialEpicLoop = Effect.fn("runSequentialEpicLoop")(function
               repositories: [input.repository],
               cwd: input.cwd,
               maxOutputBytes: 1024 * 1024,
+              lockWaitSeconds: config.gate.lockWaitSeconds,
             });
             gateMs = sinceMs(gateStartMs);
             // Persisted before the verdict changes the outcome, so a crash

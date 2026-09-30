@@ -30,6 +30,9 @@ import {
   reclassifyTimeoutOnConfirmedStop,
   runParallelEpicLoop,
   type IterationSettleResult,
+  GATE_LOCK_RETRY_BASE_MS,
+  gateLockRetryDelayMs,
+  type MergeDrainResult,
   type MergeDrainShape,
   type ParallelEpicLoopPorts,
   type PoolBacklogShape,
@@ -190,6 +193,11 @@ const fixture = (input: {
   readonly drainDefersForever?: boolean;
   /** Who a deferred drain reports as holding the merge slot. */
   readonly drainHolder?: string;
+  /**
+   * What each merge drain answers, by 1-based call number. Setting it also
+   * seeds a queued entry, so the loop drains before its first dispatch.
+   */
+  readonly drainResults?: (call: number) => MergeDrainResult;
   /** Supply the liveness evidence port; absent means supervision is off. */
   readonly workerEvidence?: WorkerEvidenceShape;
   /** Drive the supervision cadence off a fake clock. */
@@ -510,7 +518,12 @@ const fixture = (input: {
           ? null
           : // A queued entry makes the loop drain before it dispatches, which
             // is the path an unavailable merge slot defers on.
-            { entries: input.drainDefersForever ? [{ status: "queued" as const }] : [] },
+            {
+              entries:
+                input.drainDefersForever || input.drainResults !== undefined
+                  ? [{ status: "queued" as const }]
+                  : [],
+            },
       ),
     adopt: (_runCtx, adoptInput) =>
       Effect.suspend(() => {
@@ -701,6 +714,7 @@ const fixture = (input: {
       Effect.sync(() => {
         drainCalls += 1;
         ordering.push("merge:drain");
+        if (input.drainResults !== undefined) return input.drainResults(drainCalls);
         return input.drainDefersForever
           ? ({ _tag: "deferred", holder: input.drainHolder ?? null } as const)
           : ({ _tag: "drained" } as const);
@@ -863,6 +877,10 @@ const fixture = (input: {
   return {
     run,
     runRecord: () => persistedRun,
+    /** Flip the persisted status the way a pause or cancel transition does. */
+    setRunStatus: (status: PersistedEpicRun["status"]) => {
+      persistedRun = { ...persistedRun, status };
+    },
     child: () => child,
     iterations,
     events,
@@ -1150,6 +1168,128 @@ it.effect("keeps deferring to a live holder inside the stall window", () =>
     yield* TestClock.adjust(Duration.minutes(6));
     yield* Fiber.join(fiber);
     assert.equal(test.runRecord().status, "failed");
+  }),
+);
+
+const GATE_LOCK_BUSY: MergeDrainResult = {
+  _tag: "gate-lock-wait",
+  detail: "Could not take the shared gate lock within 900s; another epic run on this host holds it",
+};
+
+const gateLockWaits = (events: ReadonlyArray<RunEvent>) =>
+  events.flatMap((event) =>
+    event.type === "gate-lock-wait" ? [{ attempt: event.attempt, retryInMs: event.retryInMs }] : [],
+  );
+
+it("backs gate lock retries off from one minute, doubling to ten", () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 6, 20].map(gateLockRetryDelayMs),
+    [60_000, 120_000, 240_000, 480_000, 600_000, 600_000, 600_000],
+  );
+});
+
+it.effect("retries a merge that cannot take the gate lock instead of failing the run", () =>
+  Effect.gen(function* () {
+    // Runs 1b8b5f04, be784d88, c92c3c58 and 26310fbc each failed outright
+    // when another run's gate held the host-wide lock past 900s (t3code-chia).
+    const test = fixture({
+      sequential: false,
+      drainResults: (call) => (call === 1 ? GATE_LOCK_BUSY : { _tag: "drained" }),
+      attempts: [{ commit: true, close: true }],
+      policy: policy({ pollIntervalMs: 1_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.seconds(30));
+
+    // Waiting: not failed, not re-drained yet, nothing dispatched past the
+    // pending merge.
+    assert.equal(test.runRecord().status, "running");
+    assert.equal(test.drainCalls(), 1);
+    assert.equal(test.dispatchCount(), 0);
+    assert.deepEqual(gateLockWaits(test.events), [
+      { attempt: 1, retryInMs: GATE_LOCK_RETRY_BASE_MS },
+    ]);
+
+    yield* TestClock.adjust(Duration.seconds(31));
+    yield* Fiber.join(fiber);
+
+    // The retry landed the merge, and the run went on to finish its work.
+    const run = test.runRecord();
+    assert.equal(run.status, "done");
+    assert.isNull(run.lastError);
+    assert.isAtLeast(test.drainCalls(), 2);
+    assert.equal(test.dispatchCount(), 1);
+  }),
+);
+
+it.effect("never stalls a run on a gate lock wait, however long another gate runs", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      drainResults: () => GATE_LOCK_BUSY,
+      policy: policy({ pollIntervalMs: 1_000, runStallTimeoutMs: 600_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    // Far past the stall window, with no worker running.
+    yield* TestClock.adjust(Duration.minutes(40));
+
+    assert.equal(test.runRecord().status, "running");
+    assert.equal(test.dispatchCount(), 0);
+    assert.deepEqual(
+      gateLockWaits(test.events).map((wait) => wait.retryInMs),
+      [60_000, 120_000, 240_000, 480_000, 600_000, 600_000, 600_000].slice(
+        0,
+        gateLockWaits(test.events).length,
+      ),
+    );
+    assert.isAtLeast(gateLockWaits(test.events).length, 5);
+
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
+it.effect("stops cleanly when a run is paused during a gate lock wait", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      drainResults: () => GATE_LOCK_BUSY,
+      policy: policy({ pollIntervalMs: 1_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.seconds(5));
+    assert.equal(test.drainCalls(), 1);
+
+    test.setRunStatus("paused");
+    // One poll interval, not the rest of the one-minute backoff.
+    yield* TestClock.adjust(Duration.seconds(2));
+    const exit = yield* Fiber.await(fiber);
+
+    assert.isTrue(exit._tag === "Success");
+    assert.equal(test.runRecord().status, "paused");
+    assert.isNull(test.runRecord().lastError);
+    // A paused run does not retry the drain; resume drains the queue it left.
+    assert.equal(test.drainCalls(), 1);
+  }),
+);
+
+it.effect("ends promptly when a cancel interrupts the loop during a gate lock wait", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      drainResults: () => GATE_LOCK_BUSY,
+      policy: policy({ pollIntervalMs: 1_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.seconds(5));
+
+    // The server's cancel saves `cancelled`, then interrupts the loop fiber.
+    test.setRunStatus("cancelled");
+    yield* Fiber.interrupt(fiber);
+
+    assert.equal(test.runRecord().status, "cancelled");
+    assert.isNull(test.runRecord().lastError);
+    assert.equal(test.drainCalls(), 1);
+    assert.equal(test.integrationReleased(), "cancelled");
   }),
 );
 
@@ -3196,5 +3336,32 @@ it.live("stops nudging an iteration whose provider did not absorb the message", 
 
     assert.lengthOf(test.nudges, 1);
     assert.lengthOf(test.conflictProbes, 1);
+  }),
+);
+
+it.effect("keeps running workers alive and settles them while a merge waits on the gate lock", () =>
+  Effect.gen(function* () {
+    const test = fixture({
+      sequential: false,
+      resumedWorkers: [resumedWorker()],
+      drainResults: (call) => (call === 1 ? GATE_LOCK_BUSY : { _tag: "drained" }),
+      attempts: [{ commit: true, close: true, comment: true }],
+      policy: policy({ pollIntervalMs: 1_000 }),
+    });
+    const fiber = yield* test.run.pipe(Effect.forkChild);
+    yield* TestClock.adjust(Duration.seconds(30));
+
+    // The worker finished its turn during the wait and was settled, not
+    // abandoned, and the run is still waiting to retry the merge.
+    assert.equal(test.runRecord().status, "running");
+    assert.equal(test.drainCalls(), 1);
+    assert.equal(test.iterations[0]?.turnStatus, "completed");
+    assert.isNull(test.iterations[0]?.failureReason);
+    assert.deepEqual(test.stopForcedCalls, []);
+
+    yield* TestClock.adjust(Duration.seconds(31));
+    yield* Fiber.join(fiber);
+    assert.equal(test.runRecord().status, "done");
+    assert.isAtLeast(test.drainCalls(), 2);
   }),
 );

@@ -15,6 +15,7 @@ import {
   EPIC_RUN_FAILURE_RESUME_UNSUPPORTED,
   EpicRunId,
   type ModelSelection,
+  NonNegativeInt,
   type ProviderDriverKind,
   type ProviderInstanceId,
   ThreadId,
@@ -194,7 +195,25 @@ export type MergeDrainResult =
       /** Who holds the merge slot, or `null` when it is unreadable. */
       readonly holder: string | null;
     }
+  | {
+      /**
+       * A gate could not take the host-wide heavy gate lock: another epic
+       * run's gate holds it. The entries are queued again and the loop
+       * retries with backoff (t3code-chia).
+       */
+      readonly _tag: "gate-lock-wait";
+      readonly detail: string;
+    }
   | { readonly _tag: "fatal"; readonly detail: string };
+
+/** First retry after a gate lock wait; doubles per consecutive wait. */
+export const GATE_LOCK_RETRY_BASE_MS = 60_000;
+/** Ceiling for the gate lock retry backoff. */
+export const GATE_LOCK_RETRY_MAX_MS = 600_000;
+
+/** Delay before retry `attempt` (1-based) of a merge that waits on the gate lock. */
+export const gateLockRetryDelayMs = (attempt: number): number =>
+  Math.min(GATE_LOCK_RETRY_MAX_MS, GATE_LOCK_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
 
 /** Merge-queue writes and the queued-branch drain the scheduler runs. */
 export interface MergeDrainShape {
@@ -2373,6 +2392,13 @@ export const runParallelEpicLoop = (
     const active = new Map<string, ActiveIteration>();
     /** The workers the conflict radar may probe, keyed like {@link active}. */
     const radar = new Map<string, ConflictRadarTarget>();
+    /**
+     * Set while a merge waits for another run's gate to free the host-wide
+     * heavy gate lock (t3code-chia). `drainBeforeDispatch` stays true for the
+     * whole wait, so nothing new is dispatched, but the loop keeps settling
+     * the workers already running and only re-drains once `retryAt` passes.
+     */
+    let gateLockWait: { readonly attempt: number; readonly retryAt: number } | null = null;
     let drainBeforeDispatch =
       initialMergeState?.entries.some(
         (entry) => entry.status === "queued" || entry.status === "draining",
@@ -2729,7 +2755,13 @@ export const runParallelEpicLoop = (
         (worker) => worker.isIntegrationFix || worker.inPlace,
       );
 
-      if (drainBeforeDispatch && !baseBranchWriterActive) {
+      // A paused run does not retry a lock wait: it winds down its workers
+      // and stops, and resume drains the queue it left.
+      const gateLockRetryDue =
+        gateLockWait === null ||
+        (run.status === "running" && (yield* Clock.currentTimeMillis) >= gateLockWait.retryAt);
+
+      if (drainBeforeDispatch && !baseBranchWriterActive && gateLockRetryDue) {
         const result = yield* ports.mergeDrain.drain(runCtx);
         if (result._tag === "fatal") {
           yield* withTransition(
@@ -2747,25 +2779,49 @@ export const runParallelEpicLoop = (
           );
           return;
         }
-        if (result._tag === "deferred") {
-          // Deferring to a live holder stays correct. Deferring past the stall
-          // window does not: an absent or stale slot defers every attempt, and
-          // without a bound the loop spins on it for as long as the process
-          // lives while still heartbeating its run lock.
-          if (yield* checkStall({ _tag: "merge-slot", holder: result.holder })) return;
-          yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
-          continue;
-        }
-        // A drain that took the slot moved the run, whether or not this pass
-        // had anything left to land.
-        yield* noteProgress;
-        drainBeforeDispatch = false;
-        lastDrainBlocked = result._tag === "drained" ? (result.blocked ?? 0) : 0;
-        if (lastDrainBlocked > 0) {
-          yield* Effect.logWarning("epic.runner.merge-drain-blocked", {
+        if (result._tag === "gate-lock-wait") {
+          // Another run's gate holds the host-wide lock. That is contention,
+          // not a failure: keep the workers running, keep the merge queued,
+          // and try again later. Falling through lets the loop settle workers
+          // while `drainBeforeDispatch` still holds new dispatch back.
+          const attempt: number = (gateLockWait?.attempt ?? 0) + 1;
+          const retryInMs = gateLockRetryDelayMs(attempt);
+          gateLockWait = { attempt, retryAt: (yield* Clock.currentTimeMillis) + retryInMs };
+          yield* Effect.logWarning("epic.runner.gate-lock-wait", {
             runId,
-            blocked: lastDrainBlocked,
+            attempt,
+            retryInMs,
+            detail: result.detail,
           });
+          yield* ports.events.publish({
+            type: "gate-lock-wait",
+            runId,
+            attempt: NonNegativeInt.make(attempt),
+            retryInMs: NonNegativeInt.make(retryInMs),
+            detail: result.detail,
+          });
+        } else {
+          gateLockWait = null;
+          if (result._tag === "deferred") {
+            // Deferring to a live holder stays correct. Deferring past the stall
+            // window does not: an absent or stale slot defers every attempt, and
+            // without a bound the loop spins on it for as long as the process
+            // lives while still heartbeating its run lock.
+            if (yield* checkStall({ _tag: "merge-slot", holder: result.holder })) return;
+            yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
+            continue;
+          }
+          // A drain that took the slot moved the run, whether or not this pass
+          // had anything left to land.
+          yield* noteProgress;
+          drainBeforeDispatch = false;
+          lastDrainBlocked = result._tag === "drained" ? (result.blocked ?? 0) : 0;
+          if (lastDrainBlocked > 0) {
+            yield* Effect.logWarning("epic.runner.merge-drain-blocked", {
+              runId,
+              blocked: lastDrainBlocked,
+            });
+          }
         }
       }
       if (active.size === 0 && terminalWorkerError !== null) {
@@ -2775,7 +2831,8 @@ export const runParallelEpicLoop = (
         const fallback = pendingFallback;
         pendingFallback = null;
         yield* applyPendingProviderFallback(fallback);
-        drainBeforeDispatch = false;
+        // The drain above already ran, unless it is waiting on the gate lock.
+        drainBeforeDispatch = gateLockWait !== null;
         continue;
       }
 
@@ -2883,21 +2940,44 @@ export const runParallelEpicLoop = (
         }
       }
 
+      /** How long until a gate lock wait is due for its retry, if one is pending. */
+      const gateLockRetryInMs =
+        gateLockWait === null
+          ? null
+          : Math.max(0, gateLockWait.retryAt - (yield* Clock.currentTimeMillis));
+
       if (active.size === 0) {
         // Nothing is running and this pass dispatched nothing, so the next one
         // reads the same state and does the same thing. Sleeping the poll
         // interval keeps that from becoming a hot spin, and the watchdog gives
-        // it an end.
-        if (yield* checkStall({ _tag: "scheduler" })) return;
-        yield* Effect.sleep(Duration.millis(policy.pollIntervalMs));
+        // it an end. A gate lock wait is never terminal, and the poll interval
+        // still bounds how late a pause is noticed.
+        if (
+          yield* checkStall(gateLockWait === null ? { _tag: "scheduler" } : { _tag: "gate-lock" })
+        )
+          return;
+        yield* Effect.sleep(
+          Duration.millis(
+            gateLockRetryInMs === null
+              ? policy.pollIntervalMs
+              : Math.max(1, Math.min(policy.pollIntervalMs, gateLockRetryInMs)),
+          ),
+        );
         continue;
       }
 
       // Bounded so a worker that never settles cannot hold the loop here in
       // silence. Workers are never failed from here — the timeout expires,
-      // `checkStall` warns, and the loop goes back to waiting.
+      // `checkStall` warns, and the loop goes back to waiting. A pending gate
+      // lock retry shortens the wait so the retry is not late.
       const taken = yield* Queue.take(events).pipe(
-        Effect.timeoutOption(Duration.millis(policy.runStallTimeoutMs)),
+        Effect.timeoutOption(
+          Duration.millis(
+            gateLockRetryInMs === null
+              ? policy.runStallTimeoutMs
+              : Math.min(policy.runStallTimeoutMs, gateLockRetryInMs),
+          ),
+        ),
       );
       if (Option.isNone(taken)) {
         yield* checkStall({ _tag: "workers", issueIds: [...active.keys()] });

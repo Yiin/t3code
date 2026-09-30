@@ -110,6 +110,18 @@ export const RunEvent = Schema.Union([
     toDriver: ProviderDriverKind,
     toModel: Schema.String,
   }),
+  /**
+   * A merge could not take the host-wide heavy gate lock because another epic
+   * run's gate holds it. The merge stays queued and is retried after
+   * `retryInMs`; workers keep running. Published once per wait (t3code-chia).
+   */
+  Schema.Struct({
+    type: Schema.Literal("gate-lock-wait"),
+    runId: EpicRunId,
+    attempt: NonNegativeInt,
+    retryInMs: NonNegativeInt,
+    detail: Schema.String,
+  }),
 ]);
 export type RunEvent = typeof RunEvent.Type;
 

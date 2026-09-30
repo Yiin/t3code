@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import type { BacklogShape } from "./ports/Backlog.ts";
-import { gateCommandDigest, type GateShape } from "./ports/Gate.ts";
+import { gateCommandDigest, isGateLockUnavailable, type GateShape } from "./ports/Gate.ts";
 import {
   persistedGateReceipt,
   type GateReceiptJournalShape,
@@ -47,6 +47,8 @@ export interface DrainMergeQueueInput {
   readonly pushEnabled: boolean;
   readonly verified: boolean;
   readonly maxGateOutputBytes: number;
+  /** `gate.lockWaitSeconds`: one gate's bound on the shared heavy-work lock. */
+  readonly gateLockWaitSeconds: number;
 }
 
 export type DrainMergeQueueResult =
@@ -74,6 +76,17 @@ export type DrainMergeQueueResult =
        * unaffected drain still holds.
        */
       readonly blocked?: number;
+    }
+  | {
+      /**
+       * A gate could not take the host-wide heavy-work lock in time: another
+       * epic run's gate holds it. Nothing was tested, so nothing is blamed.
+       * Every entry this drain had not landed is back to `queued` and the
+       * caller retries later (t3code-chia).
+       */
+      readonly _tag: "gate-lock-wait";
+      readonly detail: string;
+      readonly queueLength: number;
     }
   | { readonly _tag: "fatal"; readonly detail: string; readonly queueLength: number };
 
@@ -1032,6 +1045,7 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
           ],
           cwd: snapshot.integrationWorktreePath,
           maxOutputBytes: input.maxGateOutputBytes,
+          lockWaitSeconds: input.gateLockWaitSeconds,
         };
         const gate = yield* runGate(ports, {
           runId: input.runId,
@@ -1369,5 +1383,20 @@ export const drainMergeQueue = Effect.fn("MergeQueue.drainMergeQueue")(function*
     }
 
     return { _tag: "drained" as const, merged, parked };
-  }).pipe(Effect.ensuring(ports.slot.release(input.holder).pipe(Effect.ignore)));
+  }).pipe(
+    // Lock contention is a wait, not a verdict: the gate never ran. Put every
+    // entry this drain had not settled back in the queue and let the caller
+    // retry, instead of failing the run over another run's long gate.
+    Effect.catchIf(isGateLockUnavailable, (error) =>
+      Effect.gen(function* () {
+        yield* ports.store.restoreTail({ runId: input.runId, fromSequence: 0 });
+        return {
+          _tag: "gate-lock-wait" as const,
+          detail: error.message,
+          queueLength: beforeDrain.length,
+        };
+      }),
+    ),
+    Effect.ensuring(ports.slot.release(input.holder).pipe(Effect.ignore)),
+  );
 });

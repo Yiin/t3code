@@ -20,6 +20,12 @@
 export type RunWait =
   /** A merge drain that cannot take the merge slot, so no branch can land. */
   | { readonly _tag: "merge-slot"; readonly holder: string | null }
+  /**
+   * A merge waits for another epic run's gate to free the host-wide heavy
+   * gate lock. Never terminal: that run's gate is making progress, and this
+   * run lands the moment it can (t3code-chia).
+   */
+  | { readonly _tag: "gate-lock" }
   /** Workers are running. Never terminal; the worker layer owns their fate. */
   | { readonly _tag: "workers"; readonly issueIds: ReadonlyArray<string> }
   /** No worker runs and the scheduler dispatched nothing. */
@@ -58,6 +64,8 @@ const waitDetail = (wait: RunWait): string => {
       return wait.issueIds.length === 0
         ? "workers are running"
         : `workers are running (${wait.issueIds.join(", ")})`;
+    case "gate-lock":
+      return "a merge is waiting for another epic run's gate to free the host-wide gate lock";
     case "scheduler":
       return "no worker is running and the scheduler dispatched nothing";
   }
@@ -68,6 +76,7 @@ const waitRemedy = (wait: RunWait): string => {
     case "merge-slot":
       return "Check `bd merge-slot check`; an absent or stale slot defers every attempt.";
     case "workers":
+    case "gate-lock":
       return "";
     case "scheduler":
       return "Check the ready frontier and the run's remaining dispatch budget.";
@@ -101,7 +110,7 @@ export const evaluateRunStall = (input: {
 }): RunStallVerdict => {
   const stalledForMs = Math.max(0, input.now - input.lastProgressAt);
   if (stalledForMs < input.timeoutMs) return { _tag: "ok" };
-  if (input.wait._tag === "workers") {
+  if (input.wait._tag === "workers" || input.wait._tag === "gate-lock") {
     return { _tag: "warn", stalledForMs, detail: waitDetail(input.wait) };
   }
   return {

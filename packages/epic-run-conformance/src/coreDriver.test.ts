@@ -187,7 +187,7 @@ const poolProvenance = Object.fromEntries(
 
 const compressedConfig = (scenario: ConformanceScenario): EpicRunConfig => ({
   ...DEFAULT_EPIC_RUN_CONFIG,
-  gate: { command: "true", disabled: false },
+  gate: { ...DEFAULT_EPIC_RUN_CONFIG.gate, command: "true", disabled: false },
   vcs: { noPush: true, runOwnedBaseBranch: false },
   execution: isParallelScenario(scenario)
     ? { mode: "parallel", sequential: false }

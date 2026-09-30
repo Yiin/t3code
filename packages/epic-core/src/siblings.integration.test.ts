@@ -388,6 +388,7 @@ const drain = (fixture: DrainFixture, gate?: MergeQueuePorts["gate"]) =>
       holder: "cook-epic-run-1",
       gateCommand: "gate",
       pushEnabled: false,
+      gateLockWaitSeconds: 900,
       verified: true,
       maxGateOutputBytes: 1024,
     },

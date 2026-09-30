@@ -59,6 +59,13 @@ it("only warns while workers are running, whatever the elapsed time", () => {
   assert.include(verdict.detail, "epic.1, epic.2");
 });
 
+it("only warns while a merge waits on another run's gate lock (t3code-chia)", () => {
+  const verdict = evaluate({ wait: { _tag: "gate-lock" }, sinceMs: 4 * 3_600_000 });
+  assert.equal(verdict._tag, "warn");
+  if (verdict._tag !== "warn") return;
+  assert.include(verdict.detail, "host-wide gate lock");
+});
+
 it("keeps the failure class under infra: so a stall never charges a child", () => {
   const lastError = describeRunStall({ wait: { _tag: "scheduler" }, stalledForMs: 900_000 });
   assert.isTrue(lastError.startsWith("infra:"));

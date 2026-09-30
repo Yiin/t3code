@@ -19,6 +19,21 @@ export class GateError extends Schema.TaggedErrorClass<GateError>()("GateError",
   }
 }
 
+/**
+ * `GateError.operation` for "another epic run on this host holds the heavy-work
+ * lock". Nothing ran and nothing failed, so callers treat it as a wait, not a
+ * verdict.
+ */
+export const GATE_LOCK_UNAVAILABLE_OPERATION = "lock";
+
+const isGateError = Schema.is(GateError);
+
+/** Whether a drain failure is lock contention rather than a gate verdict. */
+export const isGateLockUnavailable = <E extends { readonly _tag: string }>(
+  error: E,
+): error is E & GateError =>
+  isGateError(error) && error.operation === GATE_LOCK_UNAVAILABLE_OPERATION;
+
 /** What one gate run decided. `error` means the adapter never got an exit code. */
 export type GateOutcome = "passed" | "failed" | "error";
 
@@ -108,5 +123,11 @@ export interface GateShape {
     readonly repositories: ReadonlyArray<RepoRef>;
     readonly cwd: string;
     readonly maxOutputBytes: number;
+    /**
+     * How long to wait for the shared heavy-work lock, in seconds.
+     * `gate.lockWaitSeconds` in `.t3code/epic-run.json`; adapters default to
+     * the same 900s when a caller has no config to read it from.
+     */
+    readonly lockWaitSeconds?: number;
   }) => Effect.Effect<GateResult, GateError>;
 }

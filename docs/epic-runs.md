@@ -349,6 +349,21 @@ test run, so the gate reads the host load itself
 A gate that fails while the host is contended is still reported as a gate
 failure. Read the load in the surrounding log lines before blaming the child.
 
+The heavy gate lock is shared by every epic run on the host, so one run's gate
+can hold it for a long time. A gate waits `gate.lockWaitSeconds` for it (in
+`.t3code/epic-run.json`, default 900). If the lock is still busy, the gate gives
+up with nothing run, and the merge queue treats that as a wait, not a failure:
+
+- The entries go back to `queued`. Nothing is parked and no child is blamed.
+- Workers keep running and settle as usual. No new worker is dispatched until
+  the merge lands, the same as for any pending merge.
+- The drain is retried after 1 minute, then 2, 4, 8, and every 10 minutes after
+  that, for as long as the lock stays busy. The run never fails on it.
+- Each wait logs `epic.runner.gate-lock-wait` and publishes a `gate-lock-wait`
+  run event (the terminal cook writes it to `mailbox.jsonl`).
+- Pause and cancel still work during the wait. A paused run stops retrying and
+  exits once its workers settle. Resume drains the queue it left.
+
 ## Lifecycle
 
 - Closing a browser or mobile client does not stop work. WebSocket cleanup only
