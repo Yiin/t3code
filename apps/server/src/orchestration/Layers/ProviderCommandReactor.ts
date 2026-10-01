@@ -40,7 +40,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeKeyedDrainableWorker } from "@t3tools/shared/KeyedDrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
@@ -1689,6 +1689,26 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const ifSessionStartedBefore = event.payload.ifSessionStartedBefore;
+    if (ifSessionStartedBefore !== undefined) {
+      const liveSession = (yield* providerService.listSessions()).find(
+        (session) => session.threadId === thread.id,
+      );
+      if (
+        liveSession !== undefined &&
+        Date.parse(liveSession.createdAt) > Date.parse(ifSessionStartedBefore)
+      ) {
+        yield* Effect.logInfo("provider command reactor dropped stale conditional stop", {
+          threadId: thread.id,
+          eventId: event.eventId,
+          commandId: event.commandId,
+          ifSessionStartedBefore,
+          sessionCreatedAt: liveSession.createdAt,
+        });
+        return;
+      }
+    }
+
     const now = event.payload.createdAt;
     if (thread.session && thread.session.status !== "stopped") {
       yield* providerService.stopSession({ threadId: thread.id });
@@ -1940,7 +1960,14 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  // One serial lane per thread, so a slow provider call stalls only its own
+  // thread. Subagent steer/stop items key to the parent thread they arrive on:
+  // they act on the parent session, or reach the child through orchestration
+  // commands whose events land on the child's own lane.
+  const worker = yield* makeKeyedDrainableWorker({
+    key: (input: ProviderIntent) => ("event" in input ? input.event : input).payload.threadId,
+    process: processDomainEventSafely,
+  });
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {

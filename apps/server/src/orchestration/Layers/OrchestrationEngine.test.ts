@@ -204,6 +204,7 @@ describe("OrchestrationEngine", () => {
           listRunningThreadBackedSubagents: () => Effect.succeed([]),
           listRunningInProcessSubagents: () => Effect.succeed([]),
           listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
+          listOpenBackgroundTasks: () => Effect.succeed(new Map()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getFullThreadDiffContext: () => Effect.succeed(Option.none()),
           listSubagentTurnContributions: () => Effect.succeed([]),

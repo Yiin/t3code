@@ -326,6 +326,27 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       if (unreasonedEvents[0]?.type === "thread.session-stop-requested") {
         expect(unreasonedEvents[0].payload.reason).toBeUndefined();
         expect(unreasonedEvents[0].payload).not.toHaveProperty("reason");
+        expect(unreasonedEvents[0].payload).not.toHaveProperty("ifSessionStartedBefore");
+      }
+    }),
+  );
+
+  it.effect("copies ifSessionStartedBefore into session-stop-requested events", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-conditional"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+          ifSessionStartedBefore: NOW,
+        },
+        readModel: makeReadModel(null),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events[0]?.type).toBe("thread.session-stop-requested");
+      if (events[0]?.type === "thread.session-stop-requested") {
+        expect(events[0].payload.ifSessionStartedBefore).toBe(NOW);
       }
     }),
   );

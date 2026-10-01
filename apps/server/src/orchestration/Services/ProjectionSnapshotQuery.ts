@@ -22,6 +22,7 @@ import type {
   MessageId,
   OrchestrationLatestTurn,
   ProjectId,
+  RuntimeOrphanedTask,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -350,6 +351,23 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly listThreadIdsWithQueuedMessages: () => Effect.Effect<
     ReadonlyArray<ThreadId>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * List the background tasks each given thread started and never completed,
+   * keyed by thread id. Threads with none are absent.
+   *
+   * The restart nudger reads this at boot (`InterruptedTurnNudger.collect`). A
+   * restart kills every background task and Monitor, but their `task.started`
+   * rows outlive it, so this is the only record of what an idle thread was
+   * watching. Subagent tasks are excluded, and the list is capped to tasks
+   * started in the last 7 days, at most 20 per thread (newest kept).
+   */
+  readonly listOpenBackgroundTasks: (
+    threadIds: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<
+    ReadonlyMap<ThreadId, ReadonlyArray<RuntimeOrphanedTask>>,
     ProjectionRepositoryError
   >;
 

@@ -5,9 +5,9 @@
  * Two things are load-bearing. Nothing reaches the agent until the provider
  * proves the session continued, because a "carry on where you left off" prompt
  * in front of a blank session is worse than the silence it replaces. And a
- * thread that was not mid-turn is never collected at all, because waking a
- * finished conversation would be indistinguishable, to the user, from the app
- * talking to itself.
+ * thread that was not mid-turn is collected only when its live session had
+ * background tasks open, because waking any other finished conversation would
+ * be indistinguishable, to the user, from the app talking to itself.
  */
 import {
   MessageId,
@@ -43,9 +43,9 @@ import { ProviderService, type ProviderServiceShape } from "../Services/Provider
 import {
   InterruptedTurnNudgerLive,
   PROCESS_EXIT_STOP_REASON,
-  RESTART_NUDGE_PROMPT,
   isNudgeEligibleThread,
   processExitNudgePrompt,
+  restartNudgePrompt,
   selectInterruptedThreads,
 } from "./InterruptedTurnNudger.ts";
 
@@ -108,6 +108,8 @@ interface HarnessOptions {
   readonly failDispatch?: (command: OrchestrationCommand) => boolean;
   /** What `ProviderService.streamEvents` replays to the exit watcher. */
   readonly providerEvents?: ReadonlyArray<ProviderRuntimeEvent>;
+  /** Open background tasks per thread, as the projection reports them. */
+  readonly openTasks?: ReadonlyMap<ThreadId, ReadonlyArray<RuntimeOrphanedTask>>;
 }
 
 /**
@@ -148,10 +150,18 @@ function harness(options: HarnessOptions = {}) {
   let queuedReads = 0;
   let shellReads = 0;
 
-  // SAFETY: a partial query. These four reads are the whole surface the nudge
+  // SAFETY: a partial query. These five reads are the whole surface the nudge
   // and its settle watch touch.
   const projectionSnapshotQuery = {
     getShellSnapshot: () => Effect.succeed({ threads, projects: [], snapshotSequence: 1 }),
+    listOpenBackgroundTasks: (threadIds: ReadonlyArray<ThreadId>) =>
+      Effect.succeed(
+        new Map(
+          [...(options.openTasks ?? new Map())].filter(([threadId]) =>
+            threadIds.includes(threadId),
+          ),
+        ),
+      ),
     listThreadIdsWithQueuedMessages: () =>
       Effect.sync(() => {
         queuedReads += 1;
@@ -344,7 +354,7 @@ describe("InterruptedTurnNudger", () => {
       const start = turnStarts(dispatched)[0];
       expect(start).toMatchObject({
         origin: "agent",
-        message: { role: "user", text: RESTART_NUDGE_PROMPT },
+        message: { role: "user", text: restartNudgePrompt({ midTurn: true, orphanedTasks: [] }) },
       });
       // The thread's own selection stays in charge of the resumed turn.
       expect(start?.type === "thread.turn.start" && "modelSelection" in start).toBe(false);
@@ -500,6 +510,103 @@ describe("InterruptedTurnNudger", () => {
       expect(started[0]?.threadId).toBe(healthy);
     }),
   );
+
+  /** Idle at restart, with a session that was still live when the server died. */
+  const idleLiveShell = (overrides: ShellOverrides = {}) =>
+    shell({ turnState: "completed", activeTurnId: null, sessionStatus: "ready", ...overrides });
+
+  it.effect("nudges an idle thread whose Monitors the restart killed, naming them", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({
+        threads: [idleLiveShell()],
+        openTasks: new Map([[MID_TURN_THREAD, [MONITOR]]]),
+      });
+
+      const candidates = yield* runBootPass(layer);
+
+      expect(candidates).toEqual([
+        {
+          threadId: MID_TURN_THREAD,
+          latestTurnId: DEAD_TURN,
+          idle: true,
+          orphanedTasks: [MONITOR],
+        },
+      ]);
+      expect(commandTypes(dispatched)).toEqual([
+        "thread.session.stop",
+        "thread.session.resume",
+        "thread.turn.start",
+      ]);
+      const start = turnStarts(dispatched)[0];
+      const text = start?.type === "thread.turn.start" ? start.message.text : "";
+      expect(text).toContain("The T3 Code server restarted while this session was idle.");
+      expect(text).toContain("- `bash_monitor_1` (local_bash): tail the deploy log");
+      expect(text).toContain("re-arm the ones you still need");
+      // Idle at restart: no in-flight tool call to go looking for.
+      expect(text).not.toContain("in flight");
+    }),
+  );
+
+  it.effect("never collects an idle thread with no open background tasks", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({ threads: [idleLiveShell()] });
+
+      expect(yield* runBootPass(layer)).toEqual([]);
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("never collects an idle thread whose session was already stopped", () =>
+    Effect.gen(function* () {
+      // The reaper or a user ended this session before the restart.
+      const { layer, dispatched } = harness({
+        threads: [idleLiveShell({ sessionStatus: "stopped" })],
+        openTasks: new Map([[MID_TURN_THREAD, [MONITOR]]]),
+      });
+
+      expect(yield* runBootPass(layer)).toEqual([]);
+      expect(dispatched).toEqual([]);
+    }),
+  );
+
+  it.effect("names a mid-turn thread's open tasks next to the cut-off lines", () =>
+    Effect.gen(function* () {
+      const { layer, dispatched } = harness({
+        threads: [shell({ turnState: "running" })],
+        openTasks: new Map([[MID_TURN_THREAD, [MONITOR]]]),
+      });
+
+      yield* runBootPass(layer);
+
+      const start = turnStarts(dispatched)[0];
+      const text = start?.type === "thread.turn.start" ? start.message.text : "";
+      expect(text).toContain("your turn was cut off mid-way");
+      expect(text).toContain("Any tool call that was in flight never returned");
+      expect(text).toContain("- `bash_monitor_1` (local_bash): tail the deploy log");
+    }),
+  );
+
+  it.effect("never collects an idle epic iteration or subagent child with open tasks", () =>
+    Effect.gen(function* () {
+      const iteration = ThreadId.make(
+        epicRunIterationThreadId({ runId: "run-1", iterationIndex: 0 }),
+      );
+      const child = ThreadId.make("thread-child");
+      const { layer, dispatched } = harness({
+        threads: [
+          idleLiveShell({ id: iteration }),
+          idleLiveShell({ id: child, parentThreadId: ThreadId.make("thread-parent") }),
+        ],
+        openTasks: new Map([
+          [iteration, [MONITOR]],
+          [child, [MONITOR]],
+        ]),
+      });
+
+      expect(yield* runBootPass(layer)).toEqual([]);
+      expect(dispatched).toEqual([]);
+    }),
+  );
 });
 
 describe("processExitNudgePrompt", () => {
@@ -525,8 +632,10 @@ describe("processExitNudgePrompt", () => {
   it("points both prompts at a transient systemd unit", () => {
     const systemdRun = "systemd-run --user --unit=<name> --setenv=VAR=value <command>";
     expect(processExitNudgePrompt({ midTurn: true, orphanedTasks: [] })).toContain(systemdRun);
-    expect(RESTART_NUDGE_PROMPT).toContain(systemdRun);
-    expect(RESTART_NUDGE_PROMPT).toContain("Monitors started before the restart died with it");
+    const restartPrompt = restartNudgePrompt({ midTurn: true, orphanedTasks: [] });
+    expect(restartPrompt).toContain(systemdRun);
+    expect(restartPrompt).toContain("Monitors started before the restart died with it");
+    expect(restartNudgePrompt({ midTurn: false, orphanedTasks: [MONITOR] })).toContain(systemdRun);
   });
 });
 

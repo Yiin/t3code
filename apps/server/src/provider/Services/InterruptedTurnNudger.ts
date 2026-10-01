@@ -10,6 +10,10 @@
  * session and, only once the provider proves the conversation continued, sends
  * one turn telling the agent what happened and what to re-verify.
  *
+ * An idle thread is picked up too when its session was live and it had
+ * background tasks open, because a restart kills those tasks and Monitors and
+ * nothing else would wake an agent that was waiting on one.
+ *
  * Deliberately two calls rather than one `start()`. The signal it reads —
  * a projected session still mid-turn — is destroyed by the very reconciliation
  * that has to run before a resume is safe, and after that pass an interrupted
@@ -31,26 +35,40 @@
  *
  * @module InterruptedTurnNudger
  */
-import type { ThreadId, TurnId } from "@t3tools/contracts";
+import type { RuntimeOrphanedTask, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 
 /**
- * One interactive thread the dead process left mid-turn.
+ * One interactive thread the dead process left mid-turn, or idle with
+ * background tasks still open.
  *
- * `latestTurnId` is the turn that died, kept so the nudge can tell "nothing has
+ * `latestTurnId` is the turn on the thread at collect time (for a mid-turn
+ * thread, the turn that died), kept so the nudge can tell "nothing has
  * happened here since the restart" from "something else already drove this
  * thread while I was resuming an earlier one".
+ *
+ * `idle` marks a thread that was not mid-turn. It is collected only because
+ * a restart killed its background tasks and Monitors, so its prompt must not
+ * talk about a cut-off turn. Absent means mid-turn.
+ *
+ * `orphanedTasks` lists the background tasks and Monitors the thread started
+ * and never saw complete, read from the projected `task.started` rows. The
+ * restart killed all of them, and the prompt names them so the agent can
+ * re-arm the ones it still needs.
  */
 export interface InterruptedThreadCandidate {
   readonly threadId: ThreadId;
   readonly latestTurnId: TurnId | null;
+  readonly idle?: boolean;
+  readonly orphanedTasks?: ReadonlyArray<RuntimeOrphanedTask>;
 }
 
 export interface InterruptedTurnNudgerShape {
   /**
-   * Read the threads that were mid-turn when the last process died.
+   * Read the threads that were mid-turn when the last process died, plus the
+   * idle threads whose session was live and had background tasks open.
    *
    * Must be called before anything reconciles the projection. Never fails: a
    * projection read that breaks leaves every thread exactly where the restart

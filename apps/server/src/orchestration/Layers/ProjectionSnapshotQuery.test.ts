@@ -2811,6 +2811,130 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("lists the open background tasks of the given threads, capped per thread", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* seedActivityCapFixture;
+      // The query compares against SQLite's own clock, so the rows are dated
+      // by that clock too.
+      const insertTaskActivity = (input: {
+        readonly activityId: string;
+        readonly threadId: string;
+        readonly kind: "task.started" | "task.completed";
+        readonly payload: Record<string, string>;
+        readonly minutesAgo: number;
+      }) => sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          created_at
+        )
+        VALUES (
+          ${input.activityId},
+          ${input.threadId},
+          NULL,
+          'info',
+          ${input.kind},
+          ${input.kind},
+          ${JSON.stringify(input.payload)},
+          strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${input.minutesAgo} minutes`})
+        )
+      `;
+
+      // thread-1: one open Monitor, started twice; one completed task; one open
+      // subagent; one open task older than the 7-day window.
+      yield* insertTaskActivity({
+        activityId: "monitor-start-1",
+        threadId: "thread-1",
+        kind: "task.started",
+        payload: { taskId: "monitor", taskType: "local_bash", detail: "tail the deploy log" },
+        minutesAgo: 30,
+      });
+      yield* insertTaskActivity({
+        activityId: "monitor-start-2",
+        threadId: "thread-1",
+        kind: "task.started",
+        payload: { taskId: "monitor", taskType: "local_bash", detail: "tail the deploy log" },
+        minutesAgo: 29,
+      });
+      yield* insertTaskActivity({
+        activityId: "done-start",
+        threadId: "thread-1",
+        kind: "task.started",
+        payload: { taskId: "done", taskType: "local_bash", detail: "run the tests" },
+        minutesAgo: 20,
+      });
+      yield* insertTaskActivity({
+        activityId: "done-complete",
+        threadId: "thread-1",
+        kind: "task.completed",
+        payload: { taskId: "done", status: "completed" },
+        minutesAgo: 10,
+      });
+      yield* insertTaskActivity({
+        activityId: "agent-start",
+        threadId: "thread-1",
+        kind: "task.started",
+        payload: { taskId: "agent", taskType: "local_agent", detail: "Explore" },
+        minutesAgo: 15,
+      });
+      yield* insertTaskActivity({
+        activityId: "stale-start",
+        threadId: "thread-1",
+        kind: "task.started",
+        payload: { taskId: "stale", taskType: "local_bash" },
+        minutesAgo: 8 * 24 * 60,
+      });
+      // thread-2: 22 open tasks with no type or description.
+      for (let index = 0; index < 22; index += 1) {
+        yield* insertTaskActivity({
+          activityId: `bulk-start-${index}`,
+          threadId: "thread-2",
+          kind: "task.started",
+          payload: { taskId: `bulk-${String(index).padStart(2, "0")}` },
+          minutesAgo: 100 - index,
+        });
+      }
+      // thread-3 is not asked for.
+      yield* insertTaskActivity({
+        activityId: "other-start",
+        threadId: "thread-3",
+        kind: "task.started",
+        payload: { taskId: "other", taskType: "local_bash" },
+        minutesAgo: 5,
+      });
+
+      const openTasks = yield* snapshotQuery.listOpenBackgroundTasks([
+        ThreadId.make("thread-1"),
+        ThreadId.make("thread-2"),
+        ThreadId.make("thread-empty"),
+      ]);
+
+      assert.deepEqual(
+        [...openTasks.keys()],
+        [ThreadId.make("thread-1"), ThreadId.make("thread-2")],
+      );
+      assert.deepEqual(openTasks.get(ThreadId.make("thread-1")), [
+        { taskId: "monitor", taskType: "local_bash", description: "tail the deploy log" },
+      ]);
+      // The newest 20 survive the cap, oldest first.
+      assert.deepEqual(
+        openTasks.get(ThreadId.make("thread-2")),
+        Array.from({ length: 20 }, (_, offset) => ({
+          taskId: `bulk-${String(offset + 2).padStart(2, "0")}`,
+        })),
+      );
+      assert.equal((yield* snapshotQuery.listOpenBackgroundTasks([])).size, 0);
+    }),
+  );
+
   it.effect("counts pinned request rows as returned, not omitted", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

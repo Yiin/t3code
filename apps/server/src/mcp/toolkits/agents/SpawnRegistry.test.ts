@@ -235,6 +235,7 @@ const startSpawn = (options: RunOptions = {}) =>
       listRunningThreadBackedSubagents: () => Effect.succeed([]),
       listRunningInProcessSubagents: () => Effect.succeed([]),
       listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
+      listOpenBackgroundTasks: () => Effect.succeed(new Map()),
       getThreadDetailById: (threadId) =>
         Effect.succeed(
           isChild(threadId) ? Option.some(runningChildThread(threadId, turnState)) : Option.none(),

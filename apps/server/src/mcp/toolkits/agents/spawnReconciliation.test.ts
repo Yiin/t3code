@@ -166,6 +166,7 @@ const runSweep = (options: HarnessOptions = {}) =>
             : Effect.succeed(options.orphans ?? [orphanRow()]),
         listRunningInProcessSubagents: () => Effect.succeed(options.inProcessRows ?? []),
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
+        listOpenBackgroundTasks: () => Effect.succeed(new Map()),
         getThreadDetailById: () => Effect.die("unused"),
         getThreadDetailSnapshot: () => Effect.die("unused"),
       }),

@@ -972,6 +972,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           createdAt: command.createdAt,
           ...(command.reason !== undefined ? { reason: command.reason } : {}),
+          ...(command.ifSessionStartedBefore !== undefined
+            ? { ifSessionStartedBefore: command.ifSessionStartedBefore }
+            : {}),
         },
       };
     }

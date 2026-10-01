@@ -283,6 +283,7 @@ const makeHarness = (fixture: Fixture, mode: "commit" | "no-commit") => {
     listRunningThreadBackedSubagents: () => Effect.die("unused"),
     listRunningInProcessSubagents: () => Effect.die("unused"),
     listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
+    listOpenBackgroundTasks: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
     listSubagentTurnContributions: () => Effect.succeed([]),

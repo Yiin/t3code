@@ -1142,6 +1142,61 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  it.live("starts a turn on one thread while another thread's provider call is blocked", () =>
+    Effect.gen(function* () {
+      const releaseThreadOne = yield* Deferred.make<void>();
+      const harness = yield* createHarness({
+        startSessionEffect: (session) =>
+          session.threadId === ThreadId.make("thread-1")
+            ? Deferred.await(releaseThreadOne).pipe(Effect.as(session))
+            : Effect.succeed(session),
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-create-2"),
+        threadId: ThreadId.make("thread-2"),
+        projectId: asProjectId("project-1"),
+        title: "Thread 2",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      });
+
+      for (const threadId of ["thread-1", "thread-2"]) {
+        yield* dispatch(harness.engine, {
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-start-${threadId}`),
+          threadId: ThreadId.make(threadId),
+          message: {
+            messageId: asMessageId(`user-message-${threadId}`),
+            role: "user",
+            text: "hello reactor",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }
+
+      yield* waitFor(() =>
+        harness.sendTurn.mock.calls.some(([call]) => call.threadId === ThreadId.make("thread-2")),
+      );
+      expect(
+        harness.sendTurn.mock.calls.some(([call]) => call.threadId === ThreadId.make("thread-1")),
+      ).toBe(false);
+
+      yield* Deferred.succeed(releaseThreadOne, undefined);
+      yield* waitFor(() =>
+        harness.sendTurn.mock.calls.some(([call]) => call.threadId === ThreadId.make("thread-1")),
+      );
+    }),
+  );
+
   it.live("parks turn-boundary delivery until the active turn completes", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread-1");
@@ -4022,6 +4077,108 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.session?.lastError).toBe("session reaped: no live provider process");
     }),
   );
+
+  describe("conditional thread.session.stop", () => {
+    const stopAt = "2026-01-01T00:00:00.000Z";
+
+    const prepareLiveSession = (
+      harness: Effect.Success<ReturnType<typeof createHarness>>,
+      sessionCreatedAt: string,
+    ) =>
+      Effect.gen(function* () {
+        harness.runtimeSessions.push({
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "ready",
+          runtimeMode: "approval-required",
+          threadId: ThreadId.make("thread-1"),
+          createdAt: sessionCreatedAt,
+          updatedAt: sessionCreatedAt,
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-for-conditional-stop"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: sessionCreatedAt,
+          },
+          createdAt: sessionCreatedAt,
+        });
+      });
+
+    it.live("drops a conditional stop when the live session started after it", () =>
+      Effect.gen(function* () {
+        const harness = yield* createHarness();
+        yield* prepareLiveSession(harness, "2026-01-01T00:00:05.000Z");
+
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop-stale"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: stopAt,
+          reason: "session reaped: no live provider process",
+          ifSessionStartedBefore: stopAt,
+        });
+        yield* harness.drain();
+
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        const thread = (yield* harness.readModel()).threads.find(
+          (entry) => entry.id === ThreadId.make("thread-1"),
+        );
+        expect(thread?.session?.status).toBe("ready");
+        expect(thread?.session?.lastError).toBeNull();
+      }),
+    );
+
+    it.live("applies a conditional stop when the live session started before it", () =>
+      Effect.gen(function* () {
+        const harness = yield* createHarness();
+        yield* prepareLiveSession(harness, "2025-12-31T23:59:55.000Z");
+
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop-current"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: stopAt,
+          ifSessionStartedBefore: stopAt,
+        });
+
+        yield* waitFor(() => harness.stopSession.mock.calls.length === 1);
+        const thread = (yield* harness.readModel()).threads.find(
+          (entry) => entry.id === ThreadId.make("thread-1"),
+        );
+        expect(thread?.session?.status).toBe("stopped");
+      }),
+    );
+
+    it.live("applies an unconditional stop even when the live session is newer", () =>
+      Effect.gen(function* () {
+        const harness = yield* createHarness();
+        yield* prepareLiveSession(harness, "2026-01-01T00:00:05.000Z");
+
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop-user"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: stopAt,
+        });
+
+        yield* waitFor(() => harness.stopSession.mock.calls.length === 1);
+        const thread = (yield* harness.readModel()).threads.find(
+          (entry) => entry.id === ThreadId.make("thread-1"),
+        );
+        expect(thread?.session?.status).toBe("stopped");
+      }),
+    );
+  });
+
   describe("thread.session.resume", () => {
     const RESUME_KIND = PROVIDER_SESSION_RESUME_SETTLED_ACTIVITY_KIND;
     const now = "2026-01-01T00:00:00.000Z";

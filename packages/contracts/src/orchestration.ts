@@ -1552,6 +1552,11 @@ const ThreadSessionStopCommand = Schema.Struct({
   createdAt: IsoDateTime,
   preserveRunningSubagents: Schema.optionalKey(Schema.Literal(true)),
   reason: OptionalThreadSessionStopReason,
+  /**
+   * A conditional stop is dropped when the live provider session was created
+   * after this instant. User stops never set it.
+   */
+  ifSessionStartedBefore: Schema.optionalKey(IsoDateTime),
 });
 
 /**
@@ -1900,6 +1905,11 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   createdAt: IsoDateTime,
   reason: OptionalThreadSessionStopReason,
+  /**
+   * A conditional stop is dropped when the live provider session was created
+   * after this instant. User stops never set it.
+   */
+  ifSessionStartedBefore: Schema.optionalKey(IsoDateTime),
 });
 
 export const ThreadSessionResumeRequestedPayload = Schema.Struct({

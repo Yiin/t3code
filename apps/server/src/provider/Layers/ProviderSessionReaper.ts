@@ -174,6 +174,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       readonly reason: string;
     }) {
       const { binding, commandId, now, reason } = input;
+      const createdAt = DateTime.formatIso(DateTime.makeUnsafe(now));
       // Stop through the `thread.session.stop` command path (decider ->
       // thread.session-stop-requested -> ProviderCommandReactor). Only that
       // path also stops the projected session and settles its active turn. A
@@ -184,8 +185,11 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           type: "thread.session.stop",
           commandId: CommandId.make(commandId),
           threadId: binding.threadId,
-          createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          createdAt,
           reason,
+          // A session started after this stop was decided is a replacement,
+          // not the dead one the reaper saw. The reactor drops the stop then.
+          ifSessionStartedBefore: createdAt,
         })
         .pipe(
           Effect.asVoid,

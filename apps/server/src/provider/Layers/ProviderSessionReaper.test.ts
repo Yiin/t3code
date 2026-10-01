@@ -297,6 +297,7 @@ describe("ProviderSessionReaper", () => {
           listRunningThreadBackedSubagents: () => Effect.die("unused"),
           listRunningInProcessSubagents: () => Effect.die("unused"),
           listThreadIdsWithQueuedMessages: () => Effect.die("unused"),
+          listOpenBackgroundTasks: () => Effect.die("unused"),
           getThreadCheckpointContext: () => Effect.die("unused"),
           getFullThreadDiffContext: () => Effect.die("unused"),
           listSubagentTurnContributions: () => Effect.succeed([]),
@@ -913,6 +914,8 @@ describe("ProviderSessionReaper", () => {
       expect(stop.threadId).toBe(threadId);
       expect(String(stop.commandId).startsWith(`session-stop-for-reap:${threadId}:`)).toBe(true);
       expect(stop.reason).toBe("session reaped: interactive session exceeded its idle limit");
+      // The stop only applies to a session that started before it was decided.
+      expect(stop.ifSessionStartedBefore).toBe(stop.createdAt);
       // The command path owns the stop; the direct call is only a fallback.
       expect(harness.stopSession).not.toHaveBeenCalled();
     }).pipe(Effect.provide(harness.layer));
@@ -1742,6 +1745,7 @@ describe("ProviderSessionReaper", () => {
         new RegExp(`^session-stop-for-reap:${deadThreadId}:\\d+$`),
       );
       expect(stops[0]?.reason).toBe("session reaped: no live provider process");
+      expect(stops[0]?.ifSessionStartedBefore).toBe(stops[0]?.createdAt);
       expect(harness.stopSession).not.toHaveBeenCalled();
 
       const deadBinding = yield* repository.getByThreadId({ threadId: deadThreadId });

@@ -154,6 +154,7 @@ const provide =
         listRunningThreadBackedSubagents: () => Effect.succeed([]),
         listRunningInProcessSubagents: () => Effect.succeed([]),
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
+        listOpenBackgroundTasks: () => Effect.succeed(new Map()),
         getThreadDetailById: () => Ref.get(harness.child),
         getThreadDetailSnapshot: () => Effect.die("unused"),
       }),

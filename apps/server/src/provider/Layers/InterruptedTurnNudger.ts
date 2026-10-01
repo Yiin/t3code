@@ -7,6 +7,21 @@
  * See `../Services/InterruptedTurnNudger.ts` for why each exists and why the
  * boot pass is two calls.
  *
+ * The boot pass also wakes an idle thread whose session was live and had
+ * background tasks open. Those tasks and Monitors died with the server, and
+ * their unmatched `task.started` rows (`listOpenBackgroundTasks`) are the only
+ * durable record of them, since the adapter's own task list lived in memory.
+ *
+ * The nudge consumes what it reports without writing anything itself. The
+ * resume it performs starts a Claude Code process on the same conversation,
+ * and that process reports every task the previous process left behind as a
+ * `task_notification` ("Orphaned by a previous Claude Code process exit"),
+ * which ingestion records as `task.completed`. So the rows close on the first
+ * successful resume, and the next restart does not list them again. On
+ * 2026-10-01 production held 55 such completions from the past week and only
+ * two open non-epic tasks. A refused resume sends no turn, so tasks that stay
+ * open only cost another silent resume attempt at the next restart.
+ *
  * The per-thread path here is the same handshake
  * `PoolDispatch.resumeIteration` (runner/Layers/PoolDispatch.ts) uses for an
  * epic iteration: dispatch `thread.session.resume`, wait for the durable
@@ -88,22 +103,6 @@ const CUT_OFF_TURN_LINES = [
   "Then finish the work you were on. If it was already done and only your report was lost, send that report again.",
 ];
 
-/**
- * What the agent is told after a server restart cut its turn off.
- *
- * The first line says the turn ended because the process died, not because
- * anything finished. The background-task line is unconditional: the boot pass
- * has no record of which tasks the dead process was running (that list lived
- * in the old server's memory), but a restart kills every one of them, so the
- * agent is told to assume the worst and re-arm what it still needs.
- */
-export const RESTART_NUDGE_PROMPT = [
-  "The T3 Code server restarted while you were working, so your turn was cut off mid-way.",
-  ...CUT_OFF_TURN_LINES,
-  "Background shell tasks and Monitors started before the restart died with it; re-arm the ones you still need.",
-  PROCESS_LIFETIME_NOTE,
-].join(" ");
-
 const describeOrphanedTask = (task: RuntimeOrphanedTask): string =>
   [
     `- \`${task.taskId}\``,
@@ -112,37 +111,74 @@ const describeOrphanedTask = (task: RuntimeOrphanedTask): string =>
   ].join("");
 
 /**
- * What the agent is told after its own Claude Code process died.
- *
- * Unlike a restart, the adapter knows exactly what was lost, so the prompt
- * names it instead of hedging. The cut-off lines appear only when a turn was
- * actually in flight: an idle agent told its "tool call never returned" would
- * go hunting for a call that never existed. The task list is by id because an
- * agent re-arms a Monitor from its own transcript, and the id is what it can
- * search for there.
+ * The task list both prompts share, by id because an agent re-arms a Monitor
+ * from its own transcript, and the id is what it can search for there.
  */
-export const processExitNudgePrompt = (input: {
+const orphanedTaskSections = (tasks: ReadonlyArray<RuntimeOrphanedTask>): Array<string> =>
+  tasks.length === 0
+    ? []
+    : [
+        [
+          "These background tasks and Monitors died with it:",
+          ...tasks.map(describeOrphanedTask),
+        ].join("\n"),
+        "Re-check the state they were watching and re-arm the ones you still need.",
+      ];
+
+/**
+ * What the agent is told after a server restart.
+ *
+ * The task list comes from the projected `task.started` rows that never
+ * completed, because the dead server's in-memory task state is gone. A
+ * mid-turn thread with no recorded tasks still gets the generic background
+ * line: a restart kills every task, and a provider may not record them. An
+ * idle thread is only collected when it had tasks, so it always gets the list
+ * and never the cut-off lines, which would send it hunting for a tool call
+ * that never existed.
+ */
+export const restartNudgePrompt = (input: {
   readonly midTurn: boolean;
   readonly orphanedTasks: ReadonlyArray<RuntimeOrphanedTask>;
 }): string => {
   const sections: Array<string> = [
-    [
-      "Your Claude Code process exited unexpectedly, so the T3 Code server resumed this session.",
-      ...(input.midTurn ? ["Your turn was cut off mid-way.", ...CUT_OFF_TURN_LINES] : []),
-    ].join(" "),
+    input.midTurn
+      ? [
+          "The T3 Code server restarted while you were working, so your turn was cut off mid-way.",
+          ...CUT_OFF_TURN_LINES,
+        ].join(" ")
+      : "The T3 Code server restarted while this session was idle.",
   ];
   if (input.orphanedTasks.length > 0) {
+    sections.push(...orphanedTaskSections(input.orphanedTasks));
+  } else if (input.midTurn) {
     sections.push(
-      [
-        "These background tasks and Monitors died with it:",
-        ...input.orphanedTasks.map(describeOrphanedTask),
-      ].join("\n"),
-      "Re-check the state they were watching and re-arm the ones you still need.",
+      "Background shell tasks and Monitors started before the restart died with it; re-arm the ones you still need.",
     );
   }
   sections.push(PROCESS_LIFETIME_NOTE);
   return sections.join("\n\n");
 };
+
+/**
+ * What the agent is told after its own Claude Code process died.
+ *
+ * Unlike a restart, the adapter knows exactly what was lost, so the prompt
+ * names it instead of hedging. The cut-off lines appear only when a turn was
+ * actually in flight: an idle agent told its "tool call never returned" would
+ * go hunting for a call that never existed.
+ */
+export const processExitNudgePrompt = (input: {
+  readonly midTurn: boolean;
+  readonly orphanedTasks: ReadonlyArray<RuntimeOrphanedTask>;
+}): string =>
+  [
+    [
+      "Your Claude Code process exited unexpectedly, so the T3 Code server resumed this session.",
+      ...(input.midTurn ? ["Your turn was cut off mid-way.", ...CUT_OFF_TURN_LINES] : []),
+    ].join(" "),
+    ...orphanedTaskSections(input.orphanedTasks),
+    PROCESS_LIFETIME_NOTE,
+  ].join("\n\n");
 
 /**
  * The stop reason the process-exit path settles the dead turn with. Distinct
@@ -302,8 +338,7 @@ const make = Effect.gen(function* () {
     logPrefix: "provider.session.exit-nudge",
   });
 
-  const restartNudgeKind: NudgeKind = {
-    prompt: RESTART_NUDGE_PROMPT,
+  const restartNudgeKind: Omit<NudgeKind, "prompt"> = {
     stopReason: BOOT_RECONCILE_STOP_REASON,
     commandTag: "restart-nudge",
     messageIdTag: "restart-nudge",
@@ -360,6 +395,10 @@ const make = Effect.gen(function* () {
           commandId: stopCommandId,
           threadId,
           reason: kind.stopReason,
+          // The stop targets the dead session only. A session that starts
+          // while this command waits in the thread's lane belongs to someone
+          // else, so the reactor drops the stop for it (t3code-i0rt).
+          ifSessionStartedBefore: createdAt,
           createdAt,
         }),
       ),
@@ -517,23 +556,70 @@ const make = Effect.gen(function* () {
       Effect.as(noCandidates),
     );
 
-  const collect: InterruptedTurnNudgerShape["collect"] = () =>
-    Effect.all({
-      snapshot: projectionSnapshotQuery.getShellSnapshot(),
-      queuedMessageThreadIds: projectionSnapshotQuery.listThreadIdsWithQueuedMessages(),
-    }).pipe(
-      Effect.map(({ snapshot, queuedMessageThreadIds }) =>
-        selectInterruptedThreads({
-          threads: snapshot.threads,
-          queuedMessageThreadIds: new Set(queuedMessageThreadIds),
-        }),
+  /**
+   * The open background tasks of these threads, or none when the read fails.
+   * A broken task read must not cost the mid-turn threads their nudge.
+   */
+  const readOpenBackgroundTasks = (threadIds: ReadonlyArray<ThreadId>) =>
+    projectionSnapshotQuery.listOpenBackgroundTasks(threadIds).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("provider.session.restart-nudge.open-tasks-read-failed", {
+          cause: error,
+        }).pipe(Effect.as(new Map<ThreadId, ReadonlyArray<RuntimeOrphanedTask>>())),
       ),
+    );
+
+  const collect: InterruptedTurnNudgerShape["collect"] = () =>
+    Effect.gen(function* () {
+      const { snapshot, queuedMessageThreadIds } = yield* Effect.all({
+        snapshot: projectionSnapshotQuery.getShellSnapshot(),
+        queuedMessageThreadIds: projectionSnapshotQuery.listThreadIdsWithQueuedMessages(),
+      });
+      const queued = new Set(queuedMessageThreadIds);
+      const midTurn = selectInterruptedThreads({
+        threads: snapshot.threads,
+        queuedMessageThreadIds: queued,
+      });
+      // Idle threads whose session was live when the server died. A `stopped`
+      // session was ended by the reaper or a user, so it is left alone, and a
+      // thread with no session never ran anything to lose.
+      const midTurnIds = new Set(midTurn.map((candidate) => candidate.threadId));
+      const idleLive = snapshot.threads.filter(
+        (thread) =>
+          !midTurnIds.has(thread.id) &&
+          isNudgeEligibleThread(thread, queued) &&
+          thread.session !== null &&
+          thread.session.status !== "stopped",
+      );
+      const openTasks = yield* readOpenBackgroundTasks([
+        ...midTurnIds,
+        ...idleLive.map((thread) => thread.id),
+      ]);
+      const withTasks = (candidate: InterruptedThreadCandidate): InterruptedThreadCandidate => {
+        const orphanedTasks = openTasks.get(candidate.threadId) ?? [];
+        return orphanedTasks.length === 0 ? candidate : { ...candidate, orphanedTasks };
+      };
+      const idle = idleLive
+        .filter((thread) => (openTasks.get(thread.id) ?? []).length > 0)
+        .map(
+          (thread): InterruptedThreadCandidate =>
+            withTasks({
+              threadId: thread.id,
+              latestTurnId: thread.latestTurn?.turnId ?? null,
+              idle: true,
+            }),
+        );
+      return [...midTurn.map(withTasks), ...idle];
+    }).pipe(
       Effect.tap((candidates) =>
         candidates.length === 0
           ? Effect.void
           : Effect.logInfo("provider.session.restart-nudge.collected", {
               threadCount: candidates.length,
               threadIds: candidates.map((candidate) => candidate.threadId),
+              idleThreadIds: candidates
+                .filter((candidate) => candidate.idle === true)
+                .map((candidate) => candidate.threadId),
             }),
       ),
       // Total on purpose: `collect` runs before anything else at boot, and a
@@ -550,10 +636,18 @@ const make = Effect.gen(function* () {
       : Effect.forkScoped(
           // Unbounded here because the shared semaphore inside `nudgeThread`
           // is the real bound.
-          Effect.forEach(candidates, (candidate) => nudgeThread(candidate, restartNudgeKind), {
-            concurrency: "unbounded",
-            discard: true,
-          }),
+          Effect.forEach(
+            candidates,
+            (candidate) =>
+              nudgeThread(candidate, {
+                ...restartNudgeKind,
+                prompt: restartNudgePrompt({
+                  midTurn: candidate.idle !== true,
+                  orphanedTasks: candidate.orphanedTasks ?? [],
+                }),
+              }),
+            { concurrency: "unbounded", discard: true },
+          ),
         ).pipe(Effect.asVoid);
 
   /**

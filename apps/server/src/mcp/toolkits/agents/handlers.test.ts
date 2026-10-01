@@ -277,6 +277,7 @@ const run = (
         listRunningThreadBackedSubagents: () => Effect.succeed([]),
         listRunningInProcessSubagents: () => Effect.succeed([]),
         listThreadIdsWithQueuedMessages: () => Effect.succeed([]),
+        listOpenBackgroundTasks: () => Effect.succeed(new Map()),
         getThreadDetailById: (threadId) => {
           const found = spawnedChild(threadId);
           return Effect.succeed(found === undefined ? Option.none() : Option.some(found));

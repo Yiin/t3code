@@ -26,6 +26,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type OrchestrationThreadSubagent,
+  type RuntimeOrphanedTask,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -155,9 +156,30 @@ const ParentThreadIdLookupInput = Schema.Struct({
   parentThreadId: ThreadId,
 });
 
+const ThreadIdsLookupInput = Schema.Struct({
+  threadIds: Schema.Array(ThreadId),
+});
+
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
   threadId: ThreadId,
+});
+/**
+ * Caps on the open background task read. A task row only completes when its
+ * process reports back, so a thread whose process died before any resume keeps
+ * open rows forever. Seven days and twenty per thread keep that residue out of
+ * a restart prompt.
+ */
+const OPEN_BACKGROUND_TASK_MAX_AGE_DAYS = 7;
+const OPEN_BACKGROUND_TASK_LIMIT = 20;
+// Text columns read raw: `detail` is free text from the provider, so it is
+// trimmed in code rather than failing the whole read on a stray space.
+const ProjectionOpenBackgroundTaskRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  taskId: Schema.String,
+  taskType: Schema.NullOr(Schema.String),
+  description: Schema.NullOr(Schema.String),
+  openCount: Schema.Number,
 });
 const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
@@ -1186,6 +1208,71 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE messages.delivery_state = 'queued'
           AND threads.deleted_at IS NULL
         ORDER BY messages.thread_id ASC
+      `,
+  });
+
+  /**
+   * Background tasks started on these threads and never completed, newest
+   * `OPEN_BACKGROUND_TASK_LIMIT` per thread, oldest first.
+   *
+   * A task is open while no `task.completed` row shares its thread and task id.
+   * The provider can emit `task.started` twice for one task, so the inner rank
+   * keeps the newest start per task. Subagents (`local_agent`) are left out:
+   * the roster and the spawn reconciliation own them. `openCount` is the
+   * uncapped count, so the caller can tell a truncated list. The outer scan
+   * rides `idx_projection_thread_activities_thread_created`; the NOT EXISTS
+   * rides `idx_projection_thread_activities_thread_task`.
+   *
+   * `thread_id IN (...)` binds one parameter per id. The boot pass sends only
+   * threads with a live projected session, which stays far below SQLite's
+   * variable limit.
+   */
+  const listOpenBackgroundTaskRows = SqlSchema.findAll({
+    Request: ThreadIdsLookupInput,
+    Result: ProjectionOpenBackgroundTaskRowSchema,
+    execute: ({ threadIds }) =>
+      sql`
+        SELECT "threadId", "taskId", "taskType", "description", "openCount"
+        FROM (
+          SELECT
+            *,
+            COUNT(*) OVER (PARTITION BY "threadId") AS "openCount",
+            ROW_NUMBER() OVER (
+              PARTITION BY "threadId"
+              ORDER BY "createdAt" DESC, "taskId" DESC
+            ) AS recency_rank
+          FROM (
+            SELECT
+              started.thread_id AS "threadId",
+              started.task_id AS "taskId",
+              json_extract(started.payload_json, '$.taskType') AS "taskType",
+              COALESCE(
+                json_extract(started.payload_json, '$.title'),
+                json_extract(started.payload_json, '$.detail')
+              ) AS "description",
+              started.created_at AS "createdAt",
+              ROW_NUMBER() OVER (
+                PARTITION BY started.thread_id, started.task_id
+                ORDER BY started.created_at DESC, started.activity_id DESC
+              ) AS start_rank
+            FROM projection_thread_activities AS started
+            WHERE ${sql.in("started.thread_id", threadIds)}
+              AND started.kind = 'task.started'
+              AND started.task_id IS NOT NULL
+              AND started.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${OPEN_BACKGROUND_TASK_MAX_AGE_DAYS} days`})
+              AND COALESCE(json_extract(started.payload_json, '$.taskType'), '') <> 'local_agent'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM projection_thread_activities AS completed
+                WHERE completed.thread_id = started.thread_id
+                  AND completed.task_id = started.task_id
+                  AND completed.kind = 'task.completed'
+              )
+          )
+          WHERE start_rank = 1
+        )
+        WHERE recency_rank <= ${OPEN_BACKGROUND_TASK_LIMIT}
+        ORDER BY "threadId" ASC, "createdAt" ASC, "taskId" ASC
       `,
   });
 
@@ -2517,6 +2604,53 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.map((rows) => rows.map((row) => row.threadId)),
       );
 
+  const listOpenBackgroundTasks: ProjectionSnapshotQueryShape["listOpenBackgroundTasks"] = (
+    threadIds,
+  ) =>
+    threadIds.length === 0
+      ? Effect.succeed(new Map())
+      : listOpenBackgroundTaskRows({ threadIds }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.listOpenBackgroundTasks:query",
+              "ProjectionSnapshotQuery.listOpenBackgroundTasks:decodeRow",
+            ),
+          ),
+          Effect.tap((rows) => {
+            const truncated = new Map<ThreadId, number>();
+            for (const row of rows) {
+              if (row.openCount > OPEN_BACKGROUND_TASK_LIMIT) {
+                truncated.set(row.threadId, row.openCount);
+              }
+            }
+            return truncated.size === 0
+              ? Effect.void
+              : Effect.logWarning("ProjectionSnapshotQuery.listOpenBackgroundTasks.truncated", {
+                  limit: OPEN_BACKGROUND_TASK_LIMIT,
+                  openCounts: Object.fromEntries(truncated),
+                });
+          }),
+          Effect.map((rows) => {
+            const tasksByThread = new Map<ThreadId, Array<RuntimeOrphanedTask>>();
+            for (const row of rows) {
+              const taskType = row.taskType?.trim() ?? "";
+              const description = row.description?.trim() ?? "";
+              const task: RuntimeOrphanedTask = {
+                taskId: row.taskId,
+                ...(taskType.length > 0 ? { taskType } : {}),
+                ...(description.length > 0 ? { description } : {}),
+              };
+              const tasks = tasksByThread.get(row.threadId);
+              if (tasks === undefined) {
+                tasksByThread.set(row.threadId, [task]);
+              } else {
+                tasks.push(task);
+              }
+            }
+            return tasksByThread;
+          }),
+        );
+
   const getThreadCheckpointContext: ProjectionSnapshotQueryShape["getThreadCheckpointContext"] = (
     threadId,
   ) =>
@@ -3008,6 +3142,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     listRunningThreadBackedSubagents,
     listRunningInProcessSubagents,
     listThreadIdsWithQueuedMessages,
+    listOpenBackgroundTasks,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     listSubagentTurnContributions,
