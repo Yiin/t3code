@@ -22,6 +22,7 @@ const instance = (driver: string, config: Record<string, unknown>) => ({
 
 it("classifies Claude sessions as shadow-local and transcripts as shared", () => {
   expect(classifyAccountEntry("claudeAgent", "sessions")).toBe("shadow-local");
+  expect(classifyAccountEntry("claudeAgent", "state")).toBe("shadow-local");
   expect(classifyAccountEntry("claudeAgent", "projects")).toBe("shared");
   expect(classifyAccountEntry("claudeAgent", ".credentials.json")).toBe("private");
 });
@@ -63,6 +64,29 @@ it.layer(NodeServices.layer)("managed account home migration on a real filesyste
     accountPath,
     sharedPath,
   });
+
+  it.effect("keeps account runtime state local when the shared home has matching state", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-migration-state-" });
+      const account = path.join(root, "account");
+      const shared = path.join(root, "shared");
+      for (const home of [account, shared]) {
+        yield* fs.makeDirectory(path.join(home, "state"), { recursive: true });
+      }
+      const accountState = path.join(account, "state", "mcp-discover-verdicts.json");
+      const sharedState = path.join(shared, "state", "mcp-discover-verdicts.json");
+      yield* fs.writeFileString(accountState, "account");
+      yield* fs.writeFileString(sharedState, "shared");
+
+      expect(yield* migrateAccountHome(plan(account, shared), fs, path)).toBe(true);
+
+      expect(yield* fs.readFileString(accountState)).toBe("account");
+      expect(yield* fs.readFileString(sharedState)).toBe("shared");
+      expect(yield* fs.exists(path.join(account, ".t3-migration-conflicts", "state"))).toBe(false);
+    }),
+  );
 
   it.effect("merges a transcript tree into the shared home and removes the emptied source", () =>
     Effect.gen(function* () {

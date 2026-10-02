@@ -142,5 +142,76 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         );
       }),
     );
+
+    it.effect("preserves account runtime state when the shared home also has state", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-state-" });
+        const sharedHome = path.join(root, "shared");
+        const shadowHome = path.join(root, "account");
+        for (const home of [sharedHome, shadowHome]) {
+          yield* fileSystem.makeDirectory(path.join(home, "state"), { recursive: true });
+        }
+        const sharedState = path.join(sharedHome, "state", "mcp-discover-verdicts.json");
+        const accountState = path.join(shadowHome, "state", "mcp-discover-verdicts.json");
+        yield* fileSystem.writeFileString(sharedState, "shared");
+        yield* fileSystem.writeFileString(accountState, "account");
+        yield* fileSystem.writeFileString(path.join(shadowHome, ".credentials.json"), "private");
+        const layout = yield* resolveClaudeHomeLayout(
+          decodeClaudeSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+        );
+
+        yield* materializeClaudeShadowHome(layout);
+        yield* materializeClaudeShadowHome(layout);
+
+        expect(yield* fileSystem.readFileString(accountState)).toBe("account");
+        expect(yield* fileSystem.readFileString(sharedState)).toBe("shared");
+        expect(yield* fileSystem.readFileString(path.join(shadowHome, ".credentials.json"))).toBe(
+          "private",
+        );
+        expect(yield* fileSystem.readLink(path.join(shadowHome, "projects"))).toBe(
+          path.join(sharedHome, "projects"),
+        );
+      }),
+    );
+
+    it.effect("unlinks shared runtime state without removing the shared data", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-state-link-" });
+        const sharedHome = path.join(root, "shared");
+        const shadowHome = path.join(root, "account");
+        const sharedState = path.join(sharedHome, "state");
+        const accountState = path.join(shadowHome, "state");
+        yield* fileSystem.makeDirectory(sharedState, { recursive: true });
+        yield* fileSystem.makeDirectory(shadowHome);
+        yield* fileSystem.writeFileString(
+          path.join(sharedState, "mcp-discover-verdicts.json"),
+          "shared",
+        );
+        yield* fileSystem.symlink(sharedState, accountState);
+        const layout = yield* resolveClaudeHomeLayout(
+          decodeClaudeSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+        );
+
+        yield* materializeClaudeShadowHome(layout);
+        expect(yield* fileSystem.exists(accountState)).toBe(false);
+        yield* fileSystem.makeDirectory(accountState);
+        yield* fileSystem.writeFileString(
+          path.join(accountState, "mcp-discover-verdicts.json"),
+          "account",
+        );
+        yield* materializeClaudeShadowHome(layout);
+
+        expect(
+          yield* fileSystem.readFileString(path.join(accountState, "mcp-discover-verdicts.json")),
+        ).toBe("account");
+        expect(
+          yield* fileSystem.readFileString(path.join(sharedState, "mcp-discover-verdicts.json")),
+        ).toBe("shared");
+      }),
+    );
   });
 });

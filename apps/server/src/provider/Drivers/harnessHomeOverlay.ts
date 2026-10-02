@@ -298,6 +298,8 @@ export const materializeHarnessHomeOverlay = Effect.fn("materializeHarnessHomeOv
     (entry) => !manifest.credentialEntries.includes(entry),
   ))
     yield* removeEntry({ fileSystem, layout: activeLayout, entryName });
+  for (const entryName of manifest.shadowLocalEntries)
+    yield* removeEntry({ fileSystem, layout: activeLayout, entryName });
   for (const entryName of entries)
     yield* ensureSymlink({
       fileSystem,

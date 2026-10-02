@@ -48,6 +48,7 @@ export const CLAUDE_HOME_MANIFEST: HarnessHomeManifest = {
   credentialEntries: [".credentials.json", ".claude.json"],
   shadowLocalEntries: [
     "sessions",
+    "state",
     ".last-cleanup",
     ".last-update-result.json",
     "daemon",
