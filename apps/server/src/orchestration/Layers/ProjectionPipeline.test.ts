@@ -4915,6 +4915,37 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-suba
         `;
         assert.equal(runningCountAfterError[0]?.runningCount, 0);
 
+        // A settled subagent that resumes (Claude `task_updated` with status
+        // running) reopens its row.
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-subagents-resume"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-subagents"),
+          occurredAt: "2026-03-01T10:00:07.500Z",
+          commandId: CommandId.make("cmd-subagents-resume"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-subagents-resume"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-subagents"),
+            activity: {
+              id: EventId.make("activity-subagents-resumed"),
+              tone: "info",
+              kind: "task.updated",
+              summary: "Task running",
+              payload: { taskId: "task-sub-1", status: "running" },
+              turnId: TurnId.make("turn-subagents-1"),
+              createdAt: "2026-03-01T10:00:07.500Z",
+            },
+          },
+        });
+        const rowsAfterResume = yield* readSubagentRows;
+        assert.equal(rowsAfterResume[0]?.subagentId, "task-sub-1");
+        assert.equal(rowsAfterResume[0]?.status, "running");
+        assert.equal(rowsAfterResume[0]?.updatedAt, "2026-03-01T10:00:07.500Z");
+        assert.equal(rowsAfterResume[0]?.completedAt, null);
+
         yield* appendAndProject({
           type: "thread.deleted",
           eventId: EventId.make("evt-subagents-6"),

@@ -687,6 +687,18 @@ export const SubagentTaskCompletedActivityPayload = Schema.Struct({
 export type SubagentTaskCompletedActivityPayload = typeof SubagentTaskCompletedActivityPayload.Type;
 
 /**
+ * The part of a `task.updated` activity the fold reads. Claude emits
+ * `task_updated` with `patch.status: "running"` when a settled subagent
+ * resumes (it settles with `completed` while its own background work is still
+ * live, then runs again when that work reports).
+ */
+export const SubagentTaskUpdatedActivityPayload = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  status: Schema.optional(TrimmedNonEmptyString),
+});
+export type SubagentTaskUpdatedActivityPayload = typeof SubagentTaskUpdatedActivityPayload.Type;
+
+/**
  * Task kinds that mean "a subagent is running".
  *
  * Providers report other background work over the same `task.*` events: the
@@ -865,6 +877,9 @@ const decodeSubagentTaskProgressPayload = Schema.decodeUnknownOption(
 const decodeSubagentTaskCompletedPayload = Schema.decodeUnknownOption(
   SubagentTaskCompletedActivityPayload,
 );
+const decodeSubagentTaskUpdatedPayload = Schema.decodeUnknownOption(
+  SubagentTaskUpdatedActivityPayload,
+);
 export const decodeSubagentTranscriptActivityPayload = Schema.decodeUnknownOption(
   SubagentTranscriptActivityPayload,
 );
@@ -883,6 +898,20 @@ const replaceSubagentAt = (
 };
 
 /**
+ * True when a task activity is newer than the row's settlement. A subagent
+ * can settle and later resume under the same task id, so new activity after
+ * `completedAt` reopens the row. Activity older than `completedAt` is replay
+ * of the run that settled it and must not revive the row.
+ */
+const isActivityAfterSettle = (
+  existing: OrchestrationThreadSubagent,
+  activity: OrchestrationThreadActivity,
+): boolean =>
+  existing.status !== "running" &&
+  existing.completedAt !== null &&
+  activity.createdAt > existing.completedAt;
+
+/**
  * Fold one thread activity into the subagent read model, upserting by
  * `subagentId`. The SQL projector, the in-memory projector, and the client
  * reducer all call this one function so their views cannot drift (precedent:
@@ -891,8 +920,9 @@ const replaceSubagentAt = (
  * Total and replay-safe: non-`task.*` kinds, non-subagent task kinds (see
  * `SUBAGENT_TASK_TYPES`) and undecodable payloads return
  * the input array unchanged (same reference), applying the same activity
- * twice is a no-op the second time, and a `task.progress` arriving after the
- * row settled (reconnect replay) is ignored rather than reviving the row.
+ * twice is a no-op the second time, and task activity older than the row's
+ * settlement (reconnect replay) is ignored rather than reviving the row. Task
+ * activity newer than the settlement reopens the row: the subagent resumed.
  */
 export const applySubagentActivity = (
   subagents: ReadonlyArray<OrchestrationThreadSubagent>,
@@ -924,9 +954,13 @@ export const applySubagentActivity = (
       }
       // A row can pre-exist a replayed `task.started` (duplicate delivery, or
       // a `task.progress` that arrived first). Fill start metadata without
-      // downgrading a settled status or rolling `updatedAt` back.
+      // downgrading a settled status or rolling `updatedAt` back. A start
+      // newer than the settlement is a resume and reopens the row.
       return replaceSubagentAt(subagents, index, {
         ...existing,
+        ...(isActivityAfterSettle(existing, activity)
+          ? { status: "running" as const, updatedAt: activity.createdAt, completedAt: null }
+          : {}),
         turnId: existing.turnId ?? activity.turnId,
         ...(existing.agentType === undefined && payload.subagentType !== undefined
           ? { agentType: payload.subagentType }
@@ -965,11 +999,14 @@ export const applySubagentActivity = (
           },
         ];
       }
-      // Progress after settlement is replay noise; reviving the row would
-      // flip a completed card back to running on reconnect.
-      if (existing.status !== "running") return subagents;
+      // Progress older than the settlement is replay noise; reviving the row
+      // would flip a completed card back to running on reconnect. Progress
+      // newer than the settlement means the subagent resumed.
+      const resumed = isActivityAfterSettle(existing, activity);
+      if (existing.status !== "running" && !resumed) return subagents;
       return replaceSubagentAt(subagents, index, {
         ...existing,
+        ...(resumed ? { status: "running" as const, completedAt: null } : {}),
         ...(progressSummary !== undefined ? { lastProgressSummary: progressSummary } : {}),
         ...(payload.lastToolName !== undefined ? { lastToolName: payload.lastToolName } : {}),
         ...(payload.usage !== undefined ? { usage: payload.usage } : {}),
@@ -1014,6 +1051,26 @@ export const applySubagentActivity = (
         ...(payload.usage !== undefined ? { usage: payload.usage } : {}),
         updatedAt: activity.createdAt,
         completedAt: activity.createdAt,
+      });
+    }
+
+    case "task.updated": {
+      // Only a resume changes the row here. Settling stays with
+      // `task.completed`, which carries the final summary and usage, and a
+      // `task.updated` never creates a row: it carries no task kind, so it
+      // cannot tell a subagent from a backgrounded shell job.
+      const decoded = decodeSubagentTaskUpdatedPayload(activity.payload);
+      if (Option.isNone(decoded)) return subagents;
+      const payload = decoded.value;
+      if (payload.status !== "running") return subagents;
+      const index = subagents.findIndex((entry) => entry.subagentId === payload.taskId);
+      const existing = index === -1 ? undefined : subagents[index];
+      if (existing === undefined || !isActivityAfterSettle(existing, activity)) return subagents;
+      return replaceSubagentAt(subagents, index, {
+        ...existing,
+        status: "running",
+        updatedAt: activity.createdAt,
+        completedAt: null,
       });
     }
 

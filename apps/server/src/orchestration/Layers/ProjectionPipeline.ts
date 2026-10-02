@@ -1081,6 +1081,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (
             kind !== "task.started" &&
             kind !== "task.progress" &&
+            kind !== "task.updated" &&
             kind !== "task.completed" &&
             kind !== SUBAGENT_CHILD_THREAD_LINKED_ACTIVITY_KIND
           ) {

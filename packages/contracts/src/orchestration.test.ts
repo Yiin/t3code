@@ -47,6 +47,7 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  type OrchestrationThreadSubagent,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -1270,6 +1271,84 @@ it("applies subagent activities idempotently for reconnect replay", () => {
     afterCompleted,
   );
   assert.deepStrictEqual(replayed, afterCompleted);
+});
+
+it("reopens a settled subagent when task activity arrives after the settlement", () => {
+  // Claude settles a subagent with `completed` when it ends its turn while its
+  // own background work still runs, then resumes it under the same task id.
+  const settled = [subagentStarted, subagentProgress, subagentCompleted].reduce(
+    applySubagentActivity,
+    [] as ReadonlyArray<OrchestrationThreadSubagent>,
+  );
+  const resumeActivities = [
+    subagentActivity({
+      id: "evt-task-updated-running",
+      kind: "task.updated",
+      payload: { taskId: "a027ffbeca4f867d2", status: "running" },
+      createdAt: "2026-01-01T00:00:20.000Z",
+    }),
+    subagentActivity({
+      id: "evt-task-progress-resumed",
+      kind: "task.progress",
+      payload: { taskId: "a027ffbeca4f867d2", title: "Reading results" },
+      createdAt: "2026-01-01T00:00:20.000Z",
+    }),
+    subagentActivity({
+      id: "evt-task-started-resumed",
+      kind: "task.started",
+      payload: { taskId: "a027ffbeca4f867d2", taskType: "local_agent" },
+      createdAt: "2026-01-01T00:00:20.000Z",
+    }),
+  ];
+  for (const activity of resumeActivities) {
+    const [row] = applySubagentActivity(settled, activity);
+    assert.ok(row, activity.kind);
+    assert.strictEqual(row.status, "running", activity.kind);
+    assert.strictEqual(row.completedAt, null, activity.kind);
+    assert.strictEqual(row.updatedAt, "2026-01-01T00:00:20.000Z", activity.kind);
+  }
+
+  // A later notification settles the resumed row again.
+  const [resettled] = [
+    resumeActivities[0]!,
+    subagentActivity({
+      id: "evt-task-completed-again",
+      kind: "task.completed",
+      payload: { taskId: "a027ffbeca4f867d2", status: "completed", summary: "Done for real" },
+      createdAt: "2026-01-01T00:00:30.000Z",
+    }),
+  ].reduce(applySubagentActivity, settled);
+  assert.ok(resettled);
+  assert.strictEqual(resettled.status, "completed");
+  assert.strictEqual(resettled.completedAt, "2026-01-01T00:00:30.000Z");
+});
+
+it("keeps a settled subagent settled for non-resume task updates", () => {
+  const settled = [subagentStarted, subagentCompleted].reduce(
+    applySubagentActivity,
+    [] as ReadonlyArray<OrchestrationThreadSubagent>,
+  );
+  for (const payload of [
+    { taskId: "a027ffbeca4f867d2", status: "completed" },
+    { taskId: "a027ffbeca4f867d2", status: "paused" },
+    { taskId: "a027ffbeca4f867d2" },
+  ]) {
+    const update = subagentActivity({
+      id: "evt-task-updated",
+      kind: "task.updated",
+      payload,
+      createdAt: "2026-01-01T00:00:20.000Z",
+    });
+    assert.strictEqual(applySubagentActivity(settled, update), settled);
+  }
+  // A running update for an unknown task (a shell job) never opens a row.
+  const unknown = subagentActivity({
+    id: "evt-task-updated-unknown",
+    kind: "task.updated",
+    payload: { taskId: "bash-task", status: "running" },
+    createdAt: "2026-01-01T00:00:20.000Z",
+  });
+  assert.strictEqual(applySubagentActivity(settled, unknown), settled);
 });
 
 it("ignores non-task activity kinds and undecodable task payloads", () => {
