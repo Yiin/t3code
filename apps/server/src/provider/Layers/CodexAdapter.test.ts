@@ -2082,6 +2082,52 @@ const scopedLifecycleLayer = it.layer(
 );
 
 scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
+  it.effect("forwards replies after the startup request fiber ends", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-request-lifetime");
+      const startupFiber = yield* adapter
+        .startSession({ threadId, runtimeMode: "full-access" })
+        .pipe(Effect.forkChild);
+      yield* Fiber.join(startupFiber);
+
+      const runtime = scopedLifecycleRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const replyFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit({
+        id: asEventId("evt-after-startup"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("turn-after-startup"),
+        itemId: asItemId("reply-after-startup"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-after-startup",
+          item: { type: "agentMessage", id: "reply-after-startup", text: "I am here." },
+        },
+      });
+      const reply = yield* Fiber.join(replyFiber);
+      NodeAssert.equal(reply._tag, "Some");
+      if (reply._tag === "Some") {
+        NodeAssert.equal(reply.value.type, "item.completed");
+        if (reply.value.type === "item.completed") {
+          NodeAssert.equal(reply.value.payload.itemType, "assistant_message");
+          NodeAssert.deepStrictEqual(reply.value.payload.data, {
+            completedAtMs: 1_778_000_000_000,
+            threadId: "provider-thread-1",
+            turnId: "turn-after-startup",
+            item: { type: "agentMessage", id: "reply-after-startup", text: "I am here." },
+          });
+        }
+      }
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("closes the externally owned session scope on stopSession", () =>
     Effect.gen(function* () {
       scopedLifecycleRuntimeFactory.releasedThreadIds.length = 0;
