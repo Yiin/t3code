@@ -55,6 +55,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as TurnSilenceWatchdog from "./TurnSilenceWatchdog.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
@@ -559,6 +560,7 @@ export const layer: Layer.Layer<
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
+    const turnActivity = yield* TurnSilenceWatchdog.TurnActivity;
 
     const writeFinalRunEvents = (input: {
       readonly run: OrchestrationV2Run;
@@ -1185,12 +1187,18 @@ export const layer: Layer.Layer<
             return true;
           });
           const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode);
+          yield* turnActivity.begin({
+            threadId: input.run.threadId,
+            runId: input.run.id,
+            attemptId: input.attempt.id,
+          });
           const providerEventFiber = yield* eventSubscription.events.pipe(
             Stream.filterEffect((event) =>
               Ref.modify(eventRouting, (state) => routeProviderEvent(event, routeIdentity, state)),
             ),
             Stream.tap((event) =>
               Effect.gen(function* () {
+                yield* turnActivity.observe(input.attempt.id, event);
                 let storedEventCount = 0;
                 const deliveredEvent = filterAssistantEvent(
                   event,
@@ -1265,6 +1273,8 @@ export const layer: Layer.Layer<
                 if (event.type === "turn.terminal") {
                   yield* Ref.set(terminalEvent, event);
                   yield* Ref.set(rootTerminalSeen, true);
+                  // Only background work is left; the turn is no longer open.
+                  yield* turnActivity.end(input.attempt.id);
                   yield* finalizeRootRun(event);
                 }
                 yield* trackChildLifecycle(event, deliveredEvent !== null);
@@ -1340,6 +1350,7 @@ export const layer: Layer.Layer<
               ),
             ),
             Effect.ensuring(eventSubscription.close),
+            Effect.ensuring(turnActivity.end(input.attempt.id)),
             Effect.forkDetach,
           );
 
