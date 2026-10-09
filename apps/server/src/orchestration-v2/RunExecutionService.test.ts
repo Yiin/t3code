@@ -34,6 +34,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
@@ -56,6 +57,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as TurnSilenceWatchdog from "./TurnSilenceWatchdog.ts";
 
 const driver = ProviderDriverKind.make("codex");
 
@@ -4156,5 +4158,114 @@ it.effect("releases ingestion after idle subagent rows and items settle", () =>
       "turn_item:idle",
       "root-finalized",
     ]);
+  }),
+);
+
+it.effect("reports the open turn's provider activity to the silence watchdog", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:run-execution-turn-activity");
+    const runId = RunId.make("run:run-execution-turn-activity");
+    const attemptId = RunAttemptId.make("attempt:run-execution-turn-activity");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const providerThreadId = ProviderThreadId.make("provider-thread:run-execution-turn-activity");
+    const rootProviderTurnId = ProviderTurnId.make("provider-turn:run-execution-turn-activity");
+    const rootNodeId = NodeId.make("node:run-execution-turn-activity");
+    const providerEvents = yield* Queue.unbounded<ProviderAdapterV2Event>();
+    const ingested = yield* Queue.unbounded<ProviderAdapterV2Event["type"]>();
+    const layerTest = RunExecutionService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          McpAppModelContext.layerEmpty,
+          Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          Layer.mock(EventSink.EventSinkV2)({
+            write: () => Effect.succeed([]),
+            writeWithEffects: () => Effect.succeed([]),
+            writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+          }),
+          IdAllocator.layer,
+          Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            ingestNormalized: (input) =>
+              Queue.offer(ingested, input.event.type).pipe(Effect.as([])),
+          }),
+          ServerSettings.layerTest(),
+        ),
+      ),
+      Layer.provideMerge(TurnSilenceWatchdog.layerTurnActivity),
+    );
+
+    yield* Effect.gen(function* () {
+      const activity = yield* TurnSilenceWatchdog.TurnActivity;
+      const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+      yield* runExecution.startRootRun({
+        commandId: CommandId.make("command:run-execution-turn-activity"),
+        appThread: { id: threadId } as OrchestrationV2AppThread,
+        providerSessionId: ProviderSessionId.make("session:run-execution-turn-activity"),
+        session: {
+          events: Stream.fromQueue(providerEvents),
+          startTurn: () => Effect.void,
+        } as unknown as ProviderAdapterV2SessionRuntime,
+        run: { id: runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
+        rootNode: { id: rootNodeId } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make("checkpoint-scope:run-execution-turn-activity"),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: { id: providerThreadId, driver } as OrchestrationV2ProviderThread,
+        attempt: { id: attemptId, providerTurnId: rootProviderTurnId } as OrchestrationV2RunAttempt,
+        attemptId,
+        providerTurnOrdinal: 1,
+        message: {
+          messageId: MessageId.make("message:run-execution-turn-activity"),
+          text: "Run the test suite.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "readOnly",
+            access: { type: "fullAccess" },
+            networkAccess: false,
+          },
+        },
+      });
+      const [started] = yield* activity.snapshot;
+      assert.equal(started?.runId, runId);
+      assert.equal(started?.attemptId, attemptId);
+      assert.isFalse(started?.toolOpen);
+
+      yield* Queue.offer(providerEvents, {
+        type: "turn_item.updated",
+        driver,
+        turnItem: {
+          id: TurnItemId.make("turn-item:run-execution-turn-activity:bash"),
+          threadId,
+          runId,
+          providerTurnId: rootProviderTurnId,
+          type: "command_execution",
+          status: "running",
+          ordinal: 1,
+        },
+      } as ProviderAdapterV2Event);
+      assert.equal(yield* Queue.take(ingested), "turn_item.updated");
+      assert.isTrue((yield* activity.snapshot)[0]?.toolOpen);
+
+      yield* Queue.offer(providerEvents, {
+        type: "turn.terminal",
+        driver,
+        providerThreadId,
+        providerTurnId: rootProviderTurnId,
+        runOrdinal: 1,
+        status: "interrupted",
+        failure: null,
+        threadDisposition: "reusable",
+      });
+      assert.equal(yield* Queue.take(ingested), "turn.terminal");
+      while ((yield* activity.snapshot).length > 0) yield* Effect.yieldNow;
+    }).pipe(Effect.provide(layerTest), Effect.timeout("2 seconds"));
   }),
 );
