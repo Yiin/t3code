@@ -21,7 +21,7 @@ import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
-import { resolveServerConfig } from "./config.ts";
+import { resolveCliAuthConfig, resolveServerConfig } from "./config.ts";
 
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
@@ -145,6 +145,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: Option.none<boolean>(),
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
+        openAccess: Option.none<boolean>(),
       };
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromEnv({
@@ -189,6 +190,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: Option.none<boolean>(),
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
+        openAccess: Option.none<boolean>(),
       };
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromEnv({ env: { T3CODE_DEV_AUTH_TOKEN: secret } }),
@@ -236,6 +238,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -309,6 +312,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.some(true),
           tailscaleServeEnabled: Option.some(true),
           tailscaleServePort: Option.some(8443),
+          openAccess: Option.none<boolean>(),
         },
         Option.some("Debug"),
       ).pipe(
@@ -387,6 +391,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.some(false),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -467,6 +472,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -536,6 +542,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -597,6 +604,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.some("Debug"),
       ).pipe(
@@ -673,6 +681,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -744,6 +753,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -793,6 +803,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -833,6 +844,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
         {
@@ -895,6 +907,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -938,6 +951,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -983,6 +997,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -1023,6 +1038,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          openAccess: Option.none<boolean>(),
         },
         Option.none(),
       ).pipe(
@@ -1055,7 +1071,45 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     logWebSocketEvents: Option.none<boolean>(),
     tailscaleServeEnabled: Option.none<boolean>(),
     tailscaleServePort: Option.none<number>(),
+    openAccess: Option.none<boolean>(),
   });
+
+  it.effect("enables open access from the flag or env, but never for CLI commands", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* FileSystem.FileSystem.pipe(
+        Effect.flatMap((fs) => fs.makeTempDirectoryScoped({ prefix: "t3-cli-open-access-" })),
+      );
+      const withEnv = (env: Record<string, string>) =>
+        Effect.provide(
+          Layer.merge(NetService.layer, ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+        );
+
+      const unset = yield* resolveServerConfig(minimalWebFlags(baseDir), Option.none()).pipe(
+        withEnv({}),
+      );
+      const fromEnv = yield* resolveServerConfig(minimalWebFlags(baseDir), Option.none()).pipe(
+        withEnv({ T3CODE_OPEN_ACCESS: "1" }),
+      );
+      const fromFlag = yield* resolveServerConfig(
+        { ...minimalWebFlags(baseDir), openAccess: Option.some(true) },
+        Option.none(),
+      ).pipe(withEnv({}));
+      const flagOverridesEnv = yield* resolveServerConfig(
+        { ...minimalWebFlags(baseDir), openAccess: Option.some(false) },
+        Option.none(),
+      ).pipe(withEnv({ T3CODE_OPEN_ACCESS: "1" }));
+      const cliCommand = yield* resolveCliAuthConfig(
+        { baseDir: Option.some(baseDir) },
+        Option.none(),
+      ).pipe(withEnv({ T3CODE_OPEN_ACCESS: "1" }));
+
+      expect(unset.openAccess).toBeUndefined();
+      expect(fromEnv.openAccess).toBe(true);
+      expect(fromFlag.openAccess).toBe(true);
+      expect(flagOverridesEnv.openAccess).toBeUndefined();
+      expect(cliCommand.openAccess).toBeUndefined();
+    }),
+  );
 
   it.effect(
     "resolves each signal's endpoint through T3CODE_OTLP_*_URL, an OTEL endpoint, the bootstrap envelope, and persisted Settings, in that order",

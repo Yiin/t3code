@@ -624,4 +624,83 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         ),
       ),
   );
+  it.effect("authenticates every request as the administrative owner when open access is on", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const invalidCredential = makeBearerRequest("not-a-session-token");
+      const request = { cookies: {}, headers: {} } as unknown as Parameters<
+        EnvironmentAuth.EnvironmentAuth["Service"]["authenticateHttpRequest"]
+      >[0];
+
+      const verified = yield* serverAuth.authenticateHttpRequest(request);
+      const repeated = yield* serverAuth.authenticateHttpRequest(invalidCredential);
+      const browser = yield* serverAuth.authenticateBrowserSession(request);
+      const sessionState = yield* serverAuth.getSessionState(request);
+      const ticket = yield* serverAuth.issueWebSocketTicket(verified);
+      // The session is stored, so its WebSocket tickets verify like a paired client's.
+      const ticketSession = yield* sessions.verifyWebSocketToken(ticket.ticket);
+
+      // The open-access owner holds every scope a startup-paired owner gets.
+      const pairingUrl = yield* serverAuth.issueStartupPairingUrl("http://127.0.0.1:3773");
+      const token = new URLSearchParams(new URL(pairingUrl).hash.slice(1)).get("token") ?? "";
+      const paired = yield* serverAuth.createBrowserSession(token, requestMetadata);
+
+      expect(verified.subject).toBe(EnvironmentAuth.OPEN_ACCESS_SUBJECT);
+      expect(verified.scopes).toEqual(AuthAdministrativeScopes);
+      expect(verified.scopes).toContain("orchestration:operate");
+      expect(paired.response.permissions).toEqual(verified.scopes);
+      expect(repeated.sessionId).toBe(verified.sessionId);
+      expect(browser.sessionId).toBe(verified.sessionId);
+      expect(sessionState).toMatchObject({
+        authenticated: true,
+        ...authScopeResponse(AuthAdministrativeScopes),
+      });
+      expect(ticketSession.sessionId).toBe(verified.sessionId);
+    }).pipe(Effect.provide(layerEnvironmentAuth({ openAccess: true }))),
+  );
+
+  it.effect("replaces the previous open-access session on restart", () => {
+    // Each fresh build is one server start over the same database.
+    const start = EnvironmentAuth.layer.pipe(
+      Layer.provide(ServerSecretStore.layer),
+      Layer.provide(ServerEnvironment.layerIdentity),
+      Layer.provide(layerServerConfig({ openAccess: true })),
+      Layer.fresh,
+    );
+    const request = { cookies: {}, headers: {} } as unknown as Parameters<
+      EnvironmentAuth.EnvironmentAuth["Service"]["authenticateHttpRequest"]
+    >[0];
+    return Effect.gen(function* () {
+      const firstSession = yield* Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        return yield* serverAuth.authenticateHttpRequest(request);
+      }).pipe(Effect.provide(start));
+      const { secondSession, openAccessSessions } = yield* Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const secondSession = yield* serverAuth.authenticateHttpRequest(request);
+        const openAccessSessions = (yield* serverAuth.listSessions()).filter(
+          (session) => session.subject === EnvironmentAuth.OPEN_ACCESS_SUBJECT,
+        );
+        return { secondSession, openAccessSessions };
+      }).pipe(Effect.provide(start));
+
+      expect(secondSession.sessionId).not.toBe(firstSession.sessionId);
+      expect(openAccessSessions.map((session) => session.sessionId)).toEqual([
+        secondSession.sessionId,
+      ]);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory));
+  });
+
+  it.effect("still requires a credential when open access is off", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessionState = yield* serverAuth.getSessionState({
+        cookies: {},
+        headers: {},
+      } as unknown as Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["getSessionState"]>[0]);
+
+      expect(sessionState.authenticated).toBe(false);
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
 });

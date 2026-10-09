@@ -46,6 +46,8 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
+export const OPEN_ACCESS_SUBJECT = "open-access";
+const OPEN_ACCESS_SESSION_TTL = Duration.days(365);
 
 export interface IssuedPairingLink {
   readonly id: string;
@@ -686,6 +688,39 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const devAuth = resolveReusableDevAuth(config);
 
+  /**
+   * With open access on, every request resolves to this one session. It is
+   * stored like a paired session so WebSocket tickets, client listing and the
+   * MCP approval page work unchanged. Issuing it replaces the session from the
+   * previous start, so restarts do not pile up rows.
+   */
+  const openAccessSession: AuthenticatedSession | undefined = config.openAccess
+    ? yield* sessions
+        .issue({
+          subject: OPEN_ACCESS_SUBJECT,
+          method: "browser-session-cookie",
+          scopes: AuthAdministrativeScopes,
+          ttl: OPEN_ACCESS_SESSION_TTL,
+          replaceActiveForSubjectAndMethod: true,
+          client: { label: "Open access", deviceType: "unknown" },
+        })
+        .pipe(
+          Effect.map((issued) => ({
+            sessionId: issued.sessionId,
+            subject: OPEN_ACCESS_SUBJECT,
+            method: issued.method,
+            scopes: issued.scopes,
+            expiresAt: issued.expiresAt,
+          })),
+          Effect.tap(() =>
+            Effect.logWarning(
+              "Open access is on. Every request is authenticated as an administrative session.",
+            ),
+          ),
+          Effect.orDie,
+        )
+    : undefined;
+
   const authenticateToken = (
     token: string,
   ): Effect.Effect<
@@ -717,6 +752,9 @@ export const make = Effect.gen(function* () {
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
+    if (openAccessSession) {
+      return Effect.succeed(openAccessSession);
+    }
     const selectedCredential = selectRequestCredential(
       request,
       sessions.cookieName,
@@ -1236,6 +1274,9 @@ export const make = Effect.gen(function* () {
   const authenticateBrowserSession: EnvironmentAuth["Service"]["authenticateBrowserSession"] = (
     request,
   ) => {
+    if (openAccessSession) {
+      return Effect.succeed(openAccessSession);
+    }
     const token =
       request.cookies[sessions.cookieName] ??
       (sessions.legacyCookieName ? request.cookies[sessions.legacyCookieName] : undefined) ??

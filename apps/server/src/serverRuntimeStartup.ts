@@ -322,7 +322,7 @@ const resolveStartupBrowserTarget = Effect.gen(function* () {
       ? `http://${formatHostForUrl(serverConfig.host)}:${serverConfig.port}`
       : localUrl;
   const baseTarget = serverConfig.devUrl?.toString() ?? bindUrl;
-  return serverConfig.mode === "desktop"
+  return serverConfig.mode === "desktop" || serverConfig.openAccess
     ? baseTarget
     : yield* serverAuth.issueStartupPairingUrl(baseTarget);
 });
@@ -595,7 +595,11 @@ const make = (options?: StartupOptions) =>
           } else {
             yield* Effect.logDebug("startup phase: browser open check");
             const startupBrowserTarget = yield* resolveStartupBrowserTarget;
-            if (serverConfig.mode !== "desktop") {
+            if (serverConfig.openAccess) {
+              yield* Effect.logInfo("Open access is on. No pairing is required.").pipe(
+                Effect.annotateLogs({ url: startupBrowserTarget }),
+              );
+            } else if (serverConfig.mode !== "desktop") {
               yield* Effect.logInfo(
                 "Authentication required. Open T3 Code using the pairing URL.",
               ).pipe(Effect.annotateLogs({ pairingUrl: startupBrowserTarget }));

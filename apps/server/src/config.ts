@@ -104,6 +104,11 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    /**
+     * Skip pairing and authenticate every request as one administrative
+     * session. Only safe when the listener is reachable from a trusted network.
+     */
+    readonly openAccess?: boolean | undefined;
   }
 >()("t3/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */

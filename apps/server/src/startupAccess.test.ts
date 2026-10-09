@@ -77,3 +77,15 @@ it("formats headless serve output with the connection string, token, pairing url
   expect(output).toContain("Pairing URL: http://192.168.1.42:3773/pair#token=PAIRCODE");
   assert.isTrue(output.includes("█") || output.includes("▀") || output.includes("▄"));
 });
+
+it("formats headless serve output without a pairing token when open access is on", () => {
+  const output = formatHeadlessServeOutput({
+    connectionString: "http://127.0.0.1:3773",
+    openAccess: true,
+  });
+
+  expect(output).toContain("Connection string: http://127.0.0.1:3773");
+  expect(output).toContain("Open access is on. No pairing is required.");
+  expect(output).not.toContain("Token:");
+  expect(output).not.toContain("Pairing URL:");
+});
