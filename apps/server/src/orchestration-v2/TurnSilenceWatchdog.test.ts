@@ -129,7 +129,7 @@ describe("TurnSilenceWatchdog", () => {
 
       yield* advance("2 hours");
       assert.lengthOf(dispatched, 1);
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("counts every provider event as activity", () => {
@@ -141,7 +141,7 @@ describe("TurnSilenceWatchdog", () => {
         yield* activity.observe(attemptId, commandItem("completed"));
       }
       assert.lengthOf(dispatched, 0);
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("gives an open tool call the longer limit", () => {
@@ -159,7 +159,7 @@ describe("TurnSilenceWatchdog", () => {
         command?.type === "run.interrupt" ? command.reason : undefined,
         "Turn stopped: no provider activity for 2 hours while a tool call was open",
       );
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("never stops a turn that waits on the user", () => {
@@ -176,7 +176,7 @@ describe("TurnSilenceWatchdog", () => {
       assert.lengthOf(dispatched, 0);
       yield* advance("1 minute");
       assert.lengthOf(dispatched, 1);
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("stops watching a turn that ended or was replaced by a newer attempt", () => {
@@ -195,7 +195,7 @@ describe("TurnSilenceWatchdog", () => {
       assert.lengthOf(dispatched, 0);
       yield* advance("10 minutes");
       assert.lengthOf(dispatched, 1);
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("retries a failed interrupt after another silent window", () => {
@@ -209,7 +209,7 @@ describe("TurnSilenceWatchdog", () => {
       yield* advance("1 minute");
       assert.lengthOf(dispatched, 2);
       assert.notEqual(dispatched[0]?.commandId, dispatched[1]?.commandId);
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("reads its limits from the environment", () => {
@@ -225,7 +225,7 @@ describe("TurnSilenceWatchdog", () => {
         command?.type === "run.interrupt" ? command.reason : undefined,
         "Turn stopped: no provider activity for 1 minute",
       );
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("is off when the silence timeout is 0", () => {
@@ -234,6 +234,6 @@ describe("TurnSilenceWatchdog", () => {
       yield* beginTurn;
       yield* advance("10 hours");
       assert.lengthOf(dispatched, 0);
-    }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 });
