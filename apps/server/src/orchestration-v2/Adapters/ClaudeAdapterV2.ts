@@ -122,6 +122,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   makeProviderFailure,
   makeProviderRetryTurnItem,
+  PROVIDER_PROCESS_EXITED_CODE,
 } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
@@ -3076,6 +3077,9 @@ export function makeClaudeAdapterV2(
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        // Set once the session itself is closing (release, shutdown), so a
+        // query that ends then is not read as a process that died.
+        const sessionClosing = yield* Ref.make(false);
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
@@ -5290,7 +5294,8 @@ export function makeClaudeAdapterV2(
         });
 
         const finalizeActiveTurnAfterQueryExit = Effect.fnUntraced(function* (
-          cause?: Cause.Cause<ClaudeAgentSdkQueryRunnerError>,
+          cause: Cause.Cause<ClaudeAgentSdkQueryRunnerError> | undefined,
+          closedOnPurpose: boolean,
         ) {
           const context = yield* Ref.get(activeTurn);
           if (context === null) {
@@ -5298,6 +5303,9 @@ export function makeClaudeAdapterV2(
           }
           const completedAt = yield* DateTime.now;
           const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
+          // Nothing here asked the CLI to stop, so its process died under the
+          // turn. The code lets orchestration resume the thread.
+          const processExited = !closedOnPurpose && !(yield* Ref.get(sessionClosing));
           yield* finalizeActiveTurn({
             context,
             status: interrupted ? "interrupted" : "failed",
@@ -5307,6 +5315,15 @@ export function makeClaudeAdapterV2(
               : {
                   failure: makeProviderFailure({
                     cause: cause === undefined ? undefined : Cause.squash(cause),
+                    ...(processExited
+                      ? {
+                          code: PROVIDER_PROCESS_EXITED_CODE,
+                          // A stream that just ends carries no reason of its own.
+                          ...(cause === undefined
+                            ? { message: "The Claude Code process exited unexpectedly mid-turn." }
+                            : {}),
+                        }
+                      : {}),
                     class: "transport_error",
                   }),
                 }),
@@ -7460,6 +7477,7 @@ export function makeClaudeAdapterV2(
                 if (ownsLiveQuery) {
                   yield* finalizeActiveTurnAfterQueryExit(
                     exit._tag === "Failure" ? exit.cause : undefined,
+                    context.stopping,
                   );
                   yield* endSubagentCallsOfClosedQuery(
                     context.nativeThreadId,
@@ -7807,6 +7825,7 @@ export function makeClaudeAdapterV2(
         );
 
         const closeSession = Effect.fnUntraced(function* () {
+          yield* Ref.set(sessionClosing, true);
           const existing = yield* Ref.get(queryContext);
           if (existing !== null) {
             yield* existing.query.close.pipe(Effect.ignore);

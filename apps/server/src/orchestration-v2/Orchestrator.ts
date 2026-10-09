@@ -87,6 +87,7 @@ import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "@t3tools/provider-core/server/notification";
 import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
+import { processExitResumeEffectId } from "./ProcessExitResume.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -4533,7 +4534,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const source = projection.runs.find((run) => run.id === command.restartContinuationOfRunId);
         if (
           !source ||
-          source.status !== "cancelled" ||
+          // A restart cancels the run it cuts. A provider process that exits
+          // mid-turn fails it, and only its own resume continues it.
+          (source.status !== "cancelled" &&
+            !(
+              source.status === "failed" &&
+              (yield* awaitsProcessExitResume(source).pipe(mapDispatchError(command)))
+            )) ||
           isRestartNoteSource(source, projection.providerTurns) ||
           projection.thread.archivedAt !== null ||
           projection.thread.deletedAt !== null ||
@@ -9343,17 +9350,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   /**
    * A run with a pending restart continuation has no outcome yet: restart
    * reconciliation cancelled it mid-turn, or cancelled the background work a
-   * settled turn was waiting on. The continuation's own run settles it, or
-   * RestartContinuation recovers the thread when it declines to continue.
+   * settled turn was waiting on. A run whose provider process died waits the
+   * same way on its process-exit resume. The continuation's own run settles it,
+   * or RestartContinuation recovers the thread when it declines to continue.
    */
-  const awaitsRestartContinuation = (run: OrchestrationV2Run) =>
+  const effectUnsettled = (effectId: string) =>
     effectOutbox
-      .get(`effect:restart-continuation:${run.id}`)
+      .get(effectId)
       .pipe(
         Effect.map(
           Option.exists((effect) => effect.status === "pending" || effect.status === "running"),
         ),
       );
+  const awaitsProcessExitResume = (run: OrchestrationV2Run) =>
+    effectUnsettled(processExitResumeEffectId(run.id));
+  const awaitsRestartContinuation = (run: OrchestrationV2Run) =>
+    effectUnsettled(`effect:restart-continuation:${run.id}`).pipe(
+      Effect.flatMap((pending) => (pending ? Effect.succeed(true) : awaitsProcessExitResume(run))),
+    );
 
   /**
    * A delegated child's result is held while its result run, or a run after it

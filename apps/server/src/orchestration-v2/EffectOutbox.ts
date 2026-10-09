@@ -7,6 +7,7 @@ import {
   RunAttemptId,
   ProviderApprovalDecision,
   ProviderUserInputAnswers,
+  PositiveInt,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -31,6 +32,15 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
+  }),
+  /**
+   * Resumes a thread whose provider process exited mid-turn. It waits out a
+   * backoff in its own lane, so it never holds up the thread's other effects.
+   */
+  Schema.Struct({
+    type: Schema.Literal("provider-runtime.resume-after-exit"),
+    sourceRunId: RunId,
+    attempt: PositiveInt,
   }),
   Schema.Struct({
     type: Schema.Literal("provider-session.detach"),
@@ -120,6 +130,7 @@ export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.T
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "provider-runtime.continue",
+  "provider-runtime.resume-after-exit",
   "provider-session.detach",
   "provider-thread.rollback",
   "checkpoint.capture",
@@ -314,8 +325,9 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     // effect waiting out a retry backoff still blocks later ones, so a turn
     // cannot start while a failed rollback is about to restore files. A claim
     // that skips restart continuations is not blocked by them either.
-    // Title generation is correlated metadata work, so it has its own
-    // per-thread lane and cannot delay provider lifecycle effects.
+    // Title generation is correlated metadata work, and a process-exit resume
+    // waits out a backoff, so each has its own per-thread lane and cannot
+    // delay provider lifecycle effects.
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
@@ -345,13 +357,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             )
             AND (
               (
-                candidate.effect_type = 'thread-title.generate'
-                AND active.effect_type = 'thread-title.generate'
+                candidate.effect_type IN ('thread-title.generate', 'provider-runtime.resume-after-exit')
+                AND active.effect_type = candidate.effect_type
               )
               OR
               (
-                candidate.effect_type != 'thread-title.generate'
-                AND active.effect_type != 'thread-title.generate'
+                candidate.effect_type NOT IN ('thread-title.generate', 'provider-runtime.resume-after-exit')
+                AND active.effect_type NOT IN ('thread-title.generate', 'provider-runtime.resume-after-exit')
               )
             )
         )

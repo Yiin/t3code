@@ -55,6 +55,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import { planProcessExitResume, processExitResumeEnabled } from "./ProcessExitResume.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
@@ -668,6 +669,19 @@ export const layer: Layer.Layer<
         const checkpointCaptureCommandId = CommandId.make(
           `command:effect:checkpoint.capture:${input.run.id}`,
         );
+        // A provider process that died mid-turn: note it on the run and, within
+        // the retry budget, resume the thread after a backoff.
+        const processExitResume =
+          input.terminal.status === "failed" && (yield* processExitResumeEnabled)
+            ? planProcessExitResume({
+                idAllocator,
+                run: input.run,
+                rootNode: input.rootNode,
+                providerThread: input.providerThread,
+                failure: input.terminal.failure,
+                completedAt,
+              })
+            : null;
         // Stopped runs capture too: their checkpoint is the rollback point for
         // the next message. The capture is enqueued with these terminal events,
         // ahead of any later run's start on this thread's effect lane.
@@ -688,7 +702,7 @@ export const layer: Layer.Layer<
                     },
                   },
                 ]
-              : [],
+              : [...(processExitResume?.effects ?? [])],
           events: [
             // Terminalize open run-owned subagent rows before the root run
             // settles so projections never keep a forever-running subagent card.
@@ -752,6 +766,20 @@ export const layer: Layer.Layer<
                   },
                 ]
               : []),
+            ...(processExitResume === null
+              ? []
+              : [
+                  {
+                    id: yield* allocateEventId(),
+                    type: "turn-item.updated" as const,
+                    threadId: input.run.threadId,
+                    runId: input.run.id,
+                    nodeId: input.rootNode.id,
+                    providerInstanceId: input.run.providerInstanceId,
+                    occurredAt: completedAt,
+                    payload: processExitResume.notice,
+                  },
+                ]),
             {
               id: runEventId,
               type: "run.updated",

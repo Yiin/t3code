@@ -56,6 +56,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import { processExitResumeEffectId } from "./ProcessExitResume.ts";
 import { ROLLBACK_FAILED_MESSAGE } from "./CheckpointRollbackService.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -3309,6 +3310,88 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         assert.lengthOf(projection.runs, 1);
         assert.equal(projection.runs[0]?.status, status);
       }),
+  );
+
+  it.effect("admits a continuation of a failed run only while its process-exit resume is due", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-process-exit-resume");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("process-exit-create"),
+        threadId,
+        projectId: ProjectId.make("restart-project"),
+        title: "Process exit",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-process-exit",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("process-exit-user-message"),
+        threadId,
+        messageId: MessageId.make("process-exit-user-message"),
+        text: "Original work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const original = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      const commandId = CommandId.make("process-exit-fail");
+      yield* eventSink.commitCommand({
+        commandId,
+        threadId,
+        commandType: "provider-runtime.reconcile",
+        acceptedAt: now,
+        events: [
+          {
+            id: EventId.make("process-exit-fail-event"),
+            type: "run.updated",
+            threadId,
+            runId: original.id,
+            occurredAt: now,
+            payload: { ...original, status: "failed", completedAt: now },
+          },
+        ],
+        effects: [
+          {
+            id: processExitResumeEffectId(original.id),
+            commandId,
+            threadId,
+            request: {
+              type: "provider-runtime.resume-after-exit",
+              sourceRunId: original.id,
+              attempt: 1,
+            },
+            availableAt: DateTime.add(now, { hours: 1 }),
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "server",
+        commandId: CommandId.make("process-exit-resume"),
+        threadId,
+        messageId: MessageId.make("process-exit-resume"),
+        text: "Continue where you left off.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        restartContinuationOfRunId: original.id,
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(projection.runs, 2);
+      assert.equal(projection.runs[1]?.restartContinuationOfRunId, original.id);
+    }),
   );
 
   it.effect("rejects settling a thread while a run is active", () =>
