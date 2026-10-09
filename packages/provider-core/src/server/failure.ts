@@ -31,6 +31,13 @@ export const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
 
 const DEFAULT_PROVIDER_FAILURE_MESSAGE = "Provider turn failed.";
 
+/**
+ * Failure code for a turn that ended because the provider process exited on
+ * its own mid-turn: not a Stop and not a session release. Orchestration
+ * resumes such a thread automatically.
+ */
+export const PROVIDER_PROCESS_EXITED_CODE = "provider_process_exited";
+
 /** Translate known categories without exposing arbitrary provider defect text. */
 function causeMessage(cause: unknown): string | undefined {
   const seen = new Set<unknown>();

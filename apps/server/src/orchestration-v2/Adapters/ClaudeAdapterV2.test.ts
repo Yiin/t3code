@@ -68,7 +68,10 @@ import {
   type ProviderAdapterV2TurnInput,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderContinuationRequest } from "@t3tools/provider-core/server/continuationRequests";
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import {
+  makeProviderFailure,
+  PROVIDER_PROCESS_EXITED_CODE,
+} from "@t3tools/provider-core/server/failure";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
@@ -5025,6 +5028,31 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "second turn terminal");
         assert.deepEqual(assistantTexts(), ["One.", "Two."]);
         assert.equal(harness.terminalEvents()[1]?.status, "failed");
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("marks a turn whose CLI process exits mid-turn as a process exit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-process-exit"),
+            text: "Babysit the deploy.",
+            attachments: [],
+          }),
+        );
+        // Nothing asked the CLI to stop; its stream just ends.
+        yield* Queue.shutdown(harness.sdkMessages);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
+        const terminal = harness.terminalEvents()[0];
+        assert.equal(terminal?.status, "failed");
+        assert.equal(terminal?.failure?.code, PROVIDER_PROCESS_EXITED_CODE);
+        assert.equal(terminal?.failure?.class, "transport_error");
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
   );

@@ -2189,6 +2189,51 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("keeps a delayed process-exit resume from holding up the thread's other effects", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const now = yield* DateTime.now;
+      const commandId = CommandId.make("command:foundation-process-exit-resume-lane");
+      const threadId = ThreadId.make("thread:foundation-process-exit-resume-lane");
+      const resumeEffectId = "effect:foundation-process-exit-resume-lane:a-resume";
+      const providerEffectId = "effect:foundation-process-exit-resume-lane:b-provider";
+      yield* outbox.enqueue([
+        {
+          id: resumeEffectId,
+          commandId,
+          threadId,
+          request: {
+            type: "provider-runtime.resume-after-exit",
+            sourceRunId: RunId.make("run:foundation-process-exit-resume-lane"),
+            attempt: 1,
+          },
+          availableAt: DateTime.add(now, { seconds: 60 }),
+        },
+        {
+          id: providerEffectId,
+          commandId,
+          threadId,
+          request: {
+            type: "provider-turn.start",
+            runId: RunId.make("run:foundation-process-exit-resume-lane:next"),
+          },
+        },
+      ]);
+
+      const provider = yield* outbox.claimNext({ workerId: "worker", leaseDurationMs: 30_000 });
+      assert.equal(Option.getOrUndefined(provider)?.id, providerEffectId);
+      yield* outbox.succeed({ effectId: providerEffectId, workerId: "worker" });
+      assert.isTrue(
+        Option.isNone(yield* outbox.claimNext({ workerId: "worker", leaseDurationMs: 30_000 })),
+      );
+      yield* outbox.cancelUnsettled({
+        threadId,
+        effectTypes: ["provider-runtime.resume-after-exit"],
+        reason: "Test cleanup.",
+      });
+    }).pipe(Effect.provide(Layer.fresh(layerEffectOutboxProvided))),
+  );
+
   it.effect("ignores deadlines blocked by a running effect on the same thread", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;

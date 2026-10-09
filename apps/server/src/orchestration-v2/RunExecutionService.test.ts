@@ -58,6 +58,10 @@ import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as TurnSilenceWatchdog from "./TurnSilenceWatchdog.ts";
+import {
+  makeProviderFailure,
+  PROVIDER_PROCESS_EXITED_CODE,
+} from "@t3tools/provider-core/server/failure";
 
 const driver = ProviderDriverKind.make("codex");
 
@@ -4267,5 +4271,134 @@ it.effect("reports the open turn's provider activity to the silence watchdog", (
       assert.equal(yield* Queue.take(ingested), "turn.terminal");
       while ((yield* activity.snapshot).length > 0) yield* Effect.yieldNow;
     }).pipe(Effect.provide(layerTest), Effect.timeout("2 seconds"));
+  }),
+);
+
+it.effect("schedules a resume when the provider process exits mid-turn", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:run-execution-process-exit");
+    const runId = RunId.make("run:run-execution-process-exit");
+    const attemptId = RunAttemptId.make("attempt:run-execution-process-exit");
+    const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+    const providerThreadId = ProviderThreadId.make("provider-thread:run-execution-process-exit");
+    const rootProviderTurnId = ProviderTurnId.make("provider-turn:run-execution-process-exit");
+    const writes: Array<{
+      readonly events: ReadonlyArray<{ readonly type: string; readonly payload?: unknown }>;
+      readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
+    }> = [];
+    const finalized = yield* Deferred.make<void>();
+    const layerTest = RunExecutionService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          McpAppModelContext.layerEmpty,
+          Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          Layer.mock(EventSink.EventSinkV2)({
+            write: () => Effect.succeed([]),
+            writeWithEffects: (input) =>
+              Effect.gen(function* () {
+                writes.push(input);
+                if (input.events.some((event) => event.type === "run.updated")) {
+                  yield* Deferred.succeed(finalized, undefined);
+                }
+                return [];
+              }),
+          }),
+          IdAllocator.layer,
+          Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            ingestNormalized: () => Effect.succeed([]),
+          }),
+          ServerSettings.layerTest(),
+        ),
+      ),
+    );
+    const events: ReadonlyArray<ProviderAdapterV2Event> = [
+      {
+        type: "turn.terminal",
+        driver,
+        providerThreadId,
+        providerTurnId: rootProviderTurnId,
+        runOrdinal: 1,
+        failureItemOrdinal: 1,
+        status: "failed",
+        failure: makeProviderFailure({
+          message: "The Claude Code process exited unexpectedly mid-turn.",
+          code: PROVIDER_PROCESS_EXITED_CODE,
+          class: "transport_error",
+        }),
+        threadDisposition: "reusable",
+      },
+    ];
+
+    yield* Effect.gen(function* () {
+      const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
+      yield* runExecution.startRootRun({
+        commandId: CommandId.make("command:run-execution-process-exit"),
+        appThread: { id: threadId } as OrchestrationV2AppThread,
+        providerSessionId: ProviderSessionId.make("session:run-execution-process-exit"),
+        session: {
+          events: Stream.fromIterable(events),
+          startTurn: () => Effect.void,
+        } as unknown as ProviderAdapterV2SessionRuntime,
+        run: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          userMessageId: MessageId.make("message:run-execution-process-exit:user"),
+          startedAt: null,
+        } as unknown as OrchestrationV2Run,
+        rootNode: {
+          id: NodeId.make("node:run-execution-process-exit"),
+        } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make("checkpoint-scope:run-execution-process-exit"),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: { id: providerThreadId, driver } as OrchestrationV2ProviderThread,
+        attempt: {
+          id: attemptId,
+          providerTurnId: rootProviderTurnId,
+        } as OrchestrationV2RunAttempt,
+        attemptId,
+        providerTurnOrdinal: 1,
+        message: {
+          messageId: MessageId.make("message:run-execution-process-exit:user"),
+          text: "Babysit the deploy.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: { instanceId: providerInstanceId, model: "claude-opus-4-7" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "readOnly",
+            access: { type: "fullAccess" },
+            networkAccess: false,
+          },
+        },
+      });
+    }).pipe(Effect.provide(layerTest));
+
+    yield* Deferred.await(finalized).pipe(Effect.timeout("2 seconds"));
+    const final = writes.find((write) =>
+      write.events.some((event) => event.type === "run.updated"),
+    );
+    assert.isDefined(final);
+    assert.deepEqual(
+      final!.effects.map((effect) => effect.request),
+      [{ type: "provider-runtime.resume-after-exit", sourceRunId: runId, attempt: 1 }],
+    );
+    const notice = final!.events.find(
+      (event) =>
+        event.type === "turn-item.updated" &&
+        (event.payload as { readonly type: string }).type === "system_notice",
+    );
+    assert.include(
+      (notice?.payload as { readonly message: string } | undefined)?.message ?? "",
+      "Resuming the session",
+    );
   }),
 );
