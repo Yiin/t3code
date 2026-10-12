@@ -4,6 +4,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
+import { ProviderInstanceId } from "@t3tools/contracts";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 
 import {
   claudeSignedOutMessage,
@@ -11,10 +13,61 @@ import {
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
   resolveClaudeHomePath,
+  resolveClaudeInstanceHome,
+  claudeInstanceEnvironment,
 } from "./ClaudeHome.ts";
 
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
   describe("Claude home resolution", () => {
+    it.effect("isolates added accounts while preserving default and explicit homes", () =>
+      Effect.gen(function* () {
+        const defaultId = ProviderInstanceId.make("claudeAgent");
+        const firstId = ProviderInstanceId.make("claude-work");
+        const secondId = ProviderInstanceId.make("claude-personal");
+        expect(yield* resolveClaudeInstanceHome(defaultId, { homePath: "" }, "/data/t3")).toBe("");
+        expect(
+          yield* resolveClaudeInstanceHome(
+            firstId,
+            { homePath: "/existing/root-login" },
+            "/data/t3",
+          ),
+        ).toBe("/existing/root-login");
+        const first = yield* resolveClaudeInstanceHome(firstId, { homePath: "" }, "/data/t3");
+        const second = yield* resolveClaudeInstanceHome(secondId, { homePath: "" }, "/data/t3");
+        expect(first).toBe("/data/t3/accounts/claudeAgent/instance-claude-work");
+        expect(first).not.toBe(second);
+      }),
+    );
+
+    it.effect("does not inherit another account's credentials into a named instance", () =>
+      Effect.gen(function* () {
+        const base = {
+          CLAUDE_CODE_OAUTH_TOKEN: "inherited-token",
+          ANTHROPIC_API_KEY: "inherited-key",
+          PATH: "/bin",
+        };
+        const isolated = yield* mergeProviderInstanceEnvironment(
+          claudeInstanceEnvironment(ProviderInstanceId.make("claude-work"), undefined),
+          base,
+        );
+        expect(isolated.CLAUDE_CODE_OAUTH_TOKEN).toBe("");
+        expect(isolated.ANTHROPIC_API_KEY).toBe("");
+        expect(isolated.PATH).toBe("/bin");
+        const explicit = yield* mergeProviderInstanceEnvironment(
+          claudeInstanceEnvironment(ProviderInstanceId.make("claude-work"), [
+            { name: "ANTHROPIC_API_KEY", value: "instance-key", sensitive: true },
+          ]),
+          base,
+        );
+        expect(explicit.ANTHROPIC_API_KEY).toBe("instance-key");
+        expect(
+          yield* mergeProviderInstanceEnvironment(
+            claudeInstanceEnvironment(ProviderInstanceId.make("claudeAgent"), undefined),
+            base,
+          ),
+        ).toBe(base);
+      }),
+    );
     it.effect("treats empty, ~/.claude, and the expanded default as the same Claude home", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

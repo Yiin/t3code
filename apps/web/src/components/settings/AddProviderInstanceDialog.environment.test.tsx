@@ -188,6 +188,37 @@ describe("AddProviderInstanceDialog environment routing", () => {
     });
   });
 
+  it("creates a separate Claude instance before offering sign-in", async () => {
+    let tree = renderDialog();
+    const group = visitElements(
+      tree,
+      (element) => element.props["aria-labelledby"] === "add-instance-driver-label",
+    );
+    (group!.props.onValueChange as (value: string) => void)("claudeAgent");
+    tree = renderDialog();
+    (button(tree, "Next").props.onClick as () => void)();
+    tree = renderDialog();
+    (button(tree, "Next").props.onClick as () => void)();
+    tree = renderDialog();
+    (button(tree, "Continue to sign-in").props.onClick as () => void)();
+    await Promise.resolve();
+
+    expect(settingsHooks.mutate).toHaveBeenCalledWith({
+      operation: "create",
+      instanceId: "claudeAgent_2",
+      instance: { driver: "claudeAgent", enabled: true, displayName: "Claude" },
+    });
+    expect(actions.onOpenChange).not.toHaveBeenCalled();
+    const authentication = visitElements(
+      renderDialog(),
+      (element) =>
+        typeof element.type === "function" &&
+        element.type.name === "ProviderWizardAuthenticationStep",
+    );
+    expect(authentication?.props.instanceId).toBe("claudeAgent_2");
+    expect(authentication?.props.environmentId).toBe(remoteEnvironmentId);
+  });
+
   it("reads and writes settings through the supplied environment", () => {
     render();
 

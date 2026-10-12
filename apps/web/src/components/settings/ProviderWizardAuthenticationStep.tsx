@@ -33,8 +33,10 @@ export function ProviderWizardAuthenticationStep({
   const signedIn =
     provider?.auth.status === "authenticated" ||
     (provider?.auth.status === "unknown" && auth?.phase === "succeeded");
-  const isDiscovering = !signedIn && !query.error && auth?.methods === undefined;
-  const canAuthenticate = (auth?.methods?.length ?? 0) > 0;
+  const canAuthenticate =
+    provider?.setup?.canAuthenticate === true || (auth?.methods?.length ?? 0) > 0;
+  const isDiscovering =
+    !signedIn && !canAuthenticate && !query.error && auth?.methods === undefined;
 
   return (
     <>

@@ -33,6 +33,7 @@ export interface ProviderAuthFlowContext {
     interaction: ProviderAuthInteraction,
     respond?: (response: ProviderAuthResponse) => Effect.Effect<void, ProviderSetupError>,
     complete?: (callbackUrl: string) => Effect.Effect<void, ProviderSetupError>,
+    authorizationUrl?: string,
   ) => Effect.Effect<void>;
   readonly verifying: Effect.Effect<void>;
 }
@@ -284,7 +285,7 @@ export const make = Effect.fn("ProviderAuthFlow.make")(function* (options: {
               expiresAt: flow.expiresAt,
               ...(returnUrl ? { returnUrl } : {}),
               ...(callbackMode ? { callbackMode } : {}),
-              setInteraction: (interaction, respond, complete) =>
+              setInteraction: (interaction, respond, complete, authorizationUrl) =>
                 Effect.gen(function* () {
                   if (active !== flow) return;
                   flow.respond = respond;
@@ -295,7 +296,7 @@ export const make = Effect.fn("ProviderAuthFlow.make")(function* (options: {
                     authorizationUrl:
                       interaction.type === "browser" || interaction.type === "deviceCode"
                         ? interaction.url
-                        : null,
+                        : (authorizationUrl ?? null),
                     message: "Complete sign-in to continue.",
                   });
                 }),

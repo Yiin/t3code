@@ -12,7 +12,7 @@
  *
  * @module provider/Drivers/ClaudeDriver
  */
-import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ClaudeSettings, ProviderDriverKind, TextGenerationError } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
@@ -20,6 +20,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -35,6 +36,7 @@ import {
 } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
+import { makeClaudeAuth, readClaudeAuthStatus } from "../ClaudeAuth.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
@@ -70,6 +72,8 @@ import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
+  resolveClaudeInstanceHome,
+  claudeInstanceEnvironment,
 } from "./ClaudeHome.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
@@ -109,7 +113,11 @@ export type ClaudeDriverEnv =
   | ProviderEventLoggers.ProviderEventLoggers
   | ServerConfig.ServerConfig;
 
-export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.Path> = {
+export const ClaudeDriver: ProviderDriver<
+  ClaudeSettings,
+  ClaudeDriverEnv,
+  Path.Path | ServerConfig.ServerConfig
+> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Claude",
@@ -123,7 +131,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const { cwd } = yield* ServerConfig.ServerConfig;
+      const { cwd, baseDir } = yield* ServerConfig.ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
       const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
@@ -131,7 +139,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       const modelCatalog = catalogService
         .current(DRIVER_KIND)
         .pipe(Effect.map(resolveClaudeModelCatalog));
-      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+      const instanceEnvironment = claudeInstanceEnvironment(instanceId, environment);
+      const processEnv = yield* mergeProviderInstanceEnvironment(instanceEnvironment);
       const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -139,6 +148,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       const effectiveConfig = {
         ...config,
         enabled,
+        homePath: yield* resolveClaudeInstanceHome(instanceId, config, baseDir),
         binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
       } satisfies ClaudeSettings;
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
@@ -161,12 +171,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           ? configDir
           : undefined,
       );
-      const stampIdentity = withInstanceIdentity({
+      const stampInstanceIdentity = withInstanceIdentity({
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,
         accentColor,
         continuationGroupKey,
+      });
+      const stampIdentity = (value: Parameters<typeof stampInstanceIdentity>[0]) => ({
+        ...stampInstanceIdentity(value),
+        setup: { canAuthenticate: true, canInstall: false },
+        auth: { ...value.auth, canLogout: true },
+        runtimePaths: { homePath: configDir, shadowHomePath: null },
       });
 
       const scopedLimitNames = yield* makeClaudeScopedLimitNames;
@@ -175,9 +191,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           instanceId,
           displayName,
           accentColor,
-          environment,
+          environment: instanceEnvironment,
           enabled,
-          config,
+          config: effectiveConfig,
         },
         { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
       ).pipe(
@@ -191,7 +207,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             }),
         ),
       );
-      const textGeneration = yield* makeClaudeTextGeneration(
+      const nativeTextGeneration = yield* makeClaudeTextGeneration(
         effectiveConfig,
         processEnv,
         modelCatalog,
@@ -241,7 +257,31 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
                   ),
               ),
             ),
-            Effect.map(stampIdentity),
+            Effect.flatMap((value) => {
+              if (
+                processEnv.ANTHROPIC_API_KEY ||
+                processEnv.ANTHROPIC_AUTH_TOKEN ||
+                processEnv.CLAUDE_CODE_USE_BEDROCK ||
+                processEnv.CLAUDE_CODE_USE_VERTEX ||
+                processEnv.CLAUDE_CODE_USE_FOUNDRY
+              )
+                return Effect.succeed(stampIdentity(value));
+              return Effect.scoped(readClaudeAuthStatus(effectiveConfig, processEnv, cwd)).pipe(
+                Effect.map((account) =>
+                  stampIdentity({
+                    ...value,
+                    auth: account.loggedIn
+                      ? {
+                          ...value.auth,
+                          status: "authenticated",
+                          ...(account.email?.trim() ? { email: account.email.trim() } : {}),
+                        }
+                      : { status: "unauthenticated" },
+                  }),
+                ),
+                Effect.catch(() => Effect.succeed(stampIdentity(value))),
+              );
+            }),
           ),
         ),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -346,6 +386,51 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           ),
         );
 
+      const auth = yield* makeClaudeAuth({
+        instanceId,
+        config: effectiveConfig,
+        environment: processEnv,
+        cwd,
+        onChanged: Cache.invalidateAll(capabilitiesProbeCache).pipe(
+          Effect.andThen(snapshot.refresh),
+          Effect.ignoreCause,
+        ),
+      });
+      yield* auth.subscribe("claude-snapshot").pipe(
+        Stream.filter((state) => state.phase === "failed" || state.phase === "cancelled"),
+        Stream.runForEach(() =>
+          Cache.invalidateAll(capabilitiesProbeCache).pipe(
+            Effect.andThen(snapshot.refresh),
+            Effect.ignoreCause,
+          ),
+        ),
+        Effect.forkScoped,
+      );
+
+      const protect = <A>(operation: string, task: Effect.Effect<A, TextGenerationError>) =>
+        auth.withAccess!(task).pipe(
+          Effect.scoped,
+          Effect.mapError(
+            (cause) =>
+              new TextGenerationError({
+                operation,
+                detail: "detail" in cause ? cause.detail : "Claude text generation failed.",
+              }),
+          ),
+        );
+      const textGeneration: ProviderInstance["textGeneration"] = {
+        generateCommitMessage: (value) =>
+          protect("generateCommitMessage", nativeTextGeneration.generateCommitMessage(value)),
+        generatePrContent: (value) =>
+          protect("generatePrContent", nativeTextGeneration.generatePrContent(value)),
+        generateBranchName: (value) =>
+          protect("generateBranchName", nativeTextGeneration.generateBranchName(value)),
+        generateThreadTitle: (value) =>
+          protect("generateThreadTitle", nativeTextGeneration.generateThreadTitle(value)),
+        generateReviewGuide: (value) =>
+          protect("generateReviewGuide", nativeTextGeneration.generateReviewGuide(value)),
+      };
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -357,6 +442,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         accentColor,
         enabled,
         snapshot,
+        auth,
         invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
         snapshotForCwd: (cwd: string) =>
           snapshot.getSnapshot.pipe(

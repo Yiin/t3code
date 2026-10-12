@@ -18,6 +18,8 @@ import {
   type UsageRecord,
 } from "@t3tools/provider-core/server/usage";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ServerConfig from "../../config.ts";
+import { resolveClaudeInstanceHome } from "./ClaudeHome.ts";
 
 /**
  * Parses one line of a Claude Code transcript.
@@ -103,16 +105,24 @@ export const claudeUsageFormat: TranscriptUsageFormat<void> = {
   parseProjected: (projected) => orEmpty(parseClaudeRecord(projected)),
 };
 
-export const claudeUsageReader: ProviderUsageReader<ClaudeSettings, Path.Path> = {
+export const claudeUsageReader: ProviderUsageReader<
+  ClaudeSettings,
+  Path.Path | ServerConfig.ServerConfig
+> = {
   kind: "transcripts",
   provider: "claude",
   format: claudeUsageFormat,
-  directories: Effect.fn("claudeUsageReader.directories")(function* ({ config, environment }) {
+  directories: Effect.fn("claudeUsageReader.directories")(function* ({
+    config,
+    environment,
+    instanceId,
+  }) {
     // An undecodable config has no trustworthy home to read.
     if (config === undefined) return [];
     const path = yield* Path.Path;
     const homeDirectory = yield* HostProcess.HomeDirectory;
-    const configured = config.homePath.trim();
+    const { baseDir } = yield* ServerConfig.ServerConfig;
+    const configured = (yield* resolveClaudeInstanceHome(instanceId, config, baseDir)).trim();
     const home = configured
       ? expandHomePath(configured, homeDirectory)
       : environment.CLAUDE_CONFIG_DIR?.trim() || path.join(homeDirectory, ".claude");

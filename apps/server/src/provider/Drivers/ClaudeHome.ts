@@ -1,4 +1,8 @@
-import type { ClaudeSettings } from "@t3tools/contracts";
+import type {
+  ClaudeSettings,
+  ProviderInstanceEnvironment,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -7,6 +11,37 @@ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const quotePath = Schema.encodeSync(Schema.fromJsonString(Schema.String));
+
+/** The default instance uses the CLI login; added accounts start with their own directory. */
+export const resolveClaudeInstanceHome = Effect.fn("resolveClaudeInstanceHome")(function* (
+  instanceId: ProviderInstanceId,
+  config: Pick<ClaudeSettings, "homePath">,
+  baseDir: string,
+) {
+  if (config.homePath.trim() || instanceId === "claudeAgent") return config.homePath;
+  const path = yield* Path.Path;
+  return path.join(
+    baseDir,
+    "accounts",
+    "claudeAgent",
+    `instance-${encodeURIComponent(instanceId)}`,
+  );
+});
+
+export function claudeInstanceEnvironment(
+  instanceId: ProviderInstanceId,
+  environment: ProviderInstanceEnvironment | undefined,
+): ProviderInstanceEnvironment {
+  if (instanceId === "claudeAgent") return environment ?? [];
+  return [
+    ...["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"].map((name) => ({
+      name,
+      value: "",
+      sensitive: true,
+    })),
+    ...(environment ?? []),
+  ];
+}
 
 /**
  * Resolve the Claude config directory the CLI would use: the instance's

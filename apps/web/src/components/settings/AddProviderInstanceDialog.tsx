@@ -39,6 +39,7 @@ import { ProviderSettingsForm, deriveProviderSettingsFields } from "./ProviderSe
 import { WizardPanel, WizardPopup, WizardHeader, WizardFooter } from "../ui/wizard";
 import {
   ADD_PROVIDER_WIZARD_STEPS,
+  CLAUDE_ACCOUNT_WIZARD_STEPS,
   ACP_REGISTRY_WIZARD_STEPS,
   LOCAL_ACP_WIZARD_STEPS,
   deriveAvailableInstanceId,
@@ -146,6 +147,8 @@ export function AddProviderInstanceDialog({
 
   const driverOption = providerClients.get(driver) ?? DEFAULT_DRIVER_OPTION;
   const isAcpRegistry = driver === ACP_REGISTRY_DRIVER_KIND;
+  const isClaude = driver === "claudeAgent";
+  const standardWizardSteps = isClaude ? CLAUDE_ACCOUNT_WIZARD_STEPS : ADD_PROVIDER_WIZARD_STEPS;
   const defaultIdentity: ProviderIdentityDraft = {
     label: driverOption.label,
     accentColor: "",
@@ -191,7 +194,9 @@ export function AddProviderInstanceDialog({
         previewLabel,
         null,
       ] as const)
-    : ([driverOption.label, previewLabel, null] as const);
+    : standardWizardSteps.map((_, index) =>
+        index === 0 ? driverOption.label : index === 1 ? previewLabel : null,
+      );
   const setConfigDraft = (config: Record<string, unknown> | undefined) => {
     setConfigByDriver((existing) => {
       const next = { ...existing };
@@ -215,7 +220,11 @@ export function AddProviderInstanceDialog({
     if (navigation.kind === "blocked") {
       setHasAttemptedSubmit(true);
     }
-    if (isAcpRegistry && !isLocalAcp && navigation.kind === "navigate" && navigation.step === 2) {
+    if (
+      navigation.kind === "navigate" &&
+      ((isAcpRegistry && !isLocalAcp && navigation.step === 2) ||
+        (isClaude && navigation.step === 3))
+    ) {
       void handleSave();
       return;
     }
@@ -234,7 +243,7 @@ export function AddProviderInstanceDialog({
               instanceIdError,
               selectionError: acpSelectionError,
             })
-        : resolveWizardNavigation(wizardStep, requestedStep, ADD_PROVIDER_WIZARD_STEPS.length, {
+        : resolveWizardNavigation(wizardStep, requestedStep, standardWizardSteps.length, {
             instanceIdError,
           }),
     );
@@ -348,10 +357,10 @@ export function AddProviderInstanceDialog({
       return;
     }
     onCreated?.(brandedId);
-    if (isAcpRegistry && !isLocalAcp) {
+    if ((isAcpRegistry && !isLocalAcp) || isClaude) {
       setCreatedInstanceId(brandedId);
       setIsSaving(false);
-      setWizardStep(2);
+      setWizardStep(isClaude ? 3 : 2);
       return;
     }
     toastManager.add({
@@ -394,7 +403,8 @@ export function AddProviderInstanceDialog({
               currentStep={wizardStep}
               summaries={wizardStepSummaries}
               instanceIdError={instanceIdError}
-              disabled={isSaving || isPreparingRegistryAgent}
+              steps={standardWizardSteps}
+              disabled={isSaving || isPreparingRegistryAgent || createdInstanceId !== null}
               onNavigation={applyWizardNavigation}
             />
           )}
@@ -700,7 +710,7 @@ export function AddProviderInstanceDialog({
                 >
                   {isSaving
                     ? "Adding..."
-                    : isAcpRegistry && !isLocalAcp
+                    : (isAcpRegistry && !isLocalAcp) || isClaude
                       ? "Continue to sign-in"
                       : "Add instance"}
                 </Button>

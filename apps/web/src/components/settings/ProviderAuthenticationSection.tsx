@@ -470,6 +470,11 @@ export function ProviderAuthenticationSection({
           ) : null}
         </>
       ) : null}
+      {provider.driver === "claudeAgent" && provider.runtimePaths?.homePath ? (
+        <p className="py-2 text-xs text-muted-foreground [overflow-wrap:anywhere]">
+          Account directory: <code className="select-all">{provider.runtimePaths.homePath}</code>
+        </p>
+      ) : null}
     </SettingsRow>
   );
 }

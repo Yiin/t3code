@@ -6,33 +6,29 @@ shared provider settings.
 
 ## Separate accounts or configurations
 
-Use a separate Claude config directory for each account. This also works for named
-presets that need different Claude settings or a router connection.
+Add a Claude instance in **Settings > Providers** and continue to sign-in. T3 Code
+creates a separate account directory under its data directory
+(`~/.t3/accounts/claudeAgent/` by default) when you leave the config-directory
+setting empty. It does not create profiles in `~/.agents` or copy account skills
+into `~/.agents/skills`. Open the browser link, sign into the intended Claude account, and paste the
+returned authorization code into T3 Code. Check the reported account before
+selecting the instance in the model picker.
 
-Keep your existing account in the default directory. On the environment's machine,
-create the second login:
+Use **Change account** in the instance's setup section to replace its login.
+**Sign out** removes that login. Both actions stop threads that share those
+credentials; thread history stays available. Cancelling an unfinished sign-in
+closes its login process.
 
-```bash
-mkdir -p ~/.claude_personal
-CLAUDE_CONFIG_DIR=~/.claude_personal claude auth login
-```
+The default Claude instance still uses Claude Code's existing login. To reuse a
+login from another directory, set **CLAUDE_CONFIG_DIR path** to that directory.
+An explicit path takes precedence over T3 Code's separate account directory.
+The setting changes `CLAUDE_CONFIG_DIR` while leaving `HOME` and the system
+keychain location intact.
 
-Add another Claude instance in **Settings > Providers**:
-
-| Instance        | Binary path | CLAUDE_CONFIG_DIR path |
-| --------------- | ----------- | ---------------------- |
-| Claude Work     | `claude`    | Leave empty            |
-| Claude Personal | `claude`    | `~/.claude_personal`   |
-
-An empty config-directory setting uses Claude Code's normal configuration. The
-custom setting changes `CLAUDE_CONFIG_DIR`, leaving `HOME` and the system keychain
-location intact. Use the same variable for the login command. Setting `HOME`
-instead can put credentials where this provider will not find them.
-
-Check the account reported in provider settings after signing in. Existing
-threads can switch only between Claude instances with the same config directory.
-Separate account directories stay isolated, including their local conversation
-state. Claude does not have Codex's shared-home and shadow-home arrangement.
+Separate account directories keep their credentials, settings, skills, and local
+conversation state separate. Claude does not use Codex's shared-home arrangement.
+Added instances do not inherit API keys or OAuth tokens from the server process;
+set credentials on the instance explicitly when needed.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.

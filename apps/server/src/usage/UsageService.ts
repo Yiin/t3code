@@ -380,7 +380,10 @@ export const make = Effect.gen(function* () {
       const { provider, format } = reader;
       const directories = yield* Effect.forEach(
         yield* usageInstances(driver, settings),
-        (instance) => reader.directories(instance),
+        (instance) =>
+          reader
+            .directories(instance)
+            .pipe(Effect.provideService(ServerConfig.ServerConfig, config)),
       );
       for (const { dir: directory, fileName } of directories.flat()) {
         const sourceKey = provider + "\0" + directory;

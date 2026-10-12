@@ -1068,6 +1068,13 @@ describe("UsageService", () => {
       const codexHome = NodePath.join(home, "codex-account");
       const alias = NodePath.join(home, "codex-alias");
       const claudeHome = NodePath.join(home, "claude-account");
+      const isolatedClaudeHome = NodePath.join(
+        home,
+        "usage-service-accounts-test",
+        "accounts",
+        "claudeAgent",
+        "instance-claude-isolated",
+      );
       const grokHome = NodePath.join(home, "grok-account");
       yield* Effect.promise(async () => {
         await NodeFSP.writeFile(transcript, claudeLine(1, 5));
@@ -1075,6 +1082,11 @@ describe("UsageService", () => {
         await NodeFSP.writeFile(
           NodePath.join(claudeHome, "projects", "session.jsonl"),
           claudeLine(2, 7),
+        );
+        await NodeFSP.mkdir(NodePath.join(isolatedClaudeHome, "projects"), { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(isolatedClaudeHome, "projects", "session.jsonl"),
+          claudeLine(3, 9),
         );
         await NodeFSP.mkdir(NodePath.join(codexHome, "sessions"), { recursive: true });
         await NodeFSP.symlink(codexHome, alias, "junction");
@@ -1125,6 +1137,12 @@ describe("UsageService", () => {
                 [ProviderInstanceId.make("claude-work")]: {
                   driver: ProviderDriverKind.make("claudeAgent"),
                   enabled: false,
+                  config: { homePath: claudeHome },
+                  environment: [{ name: "CLAUDE_CONFIG_DIR", value: claudeHome, sensitive: false }],
+                },
+                [ProviderInstanceId.make("claude-isolated")]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  enabled: false,
                   environment: [{ name: "CLAUDE_CONFIG_DIR", value: claudeHome, sensitive: false }],
                 },
                 [ProviderInstanceId.make("codex-work")]: {
@@ -1154,7 +1172,12 @@ describe("UsageService", () => {
         ),
       );
       const summary = yield* service.readSummary(WINDOW);
-      assert.strictEqual(totalOutputTokens(summary), 59);
+      assert.strictEqual(totalOutputTokens(summary), 68);
+      assert.isTrue(
+        summary.buckets.some(
+          (bucket) => bucket.provider === "claude" && bucket.totals.outputTokens === 9,
+        ),
+      );
       yield* Effect.promise(() =>
         NodeFSP.rename(
           NodePath.join(codexHome, "sessions", "rollout.jsonl"),
@@ -1170,10 +1193,10 @@ describe("UsageService", () => {
       assert.deepStrictEqual(removed.buckets, summary.buckets);
 
       const sources = summary.sources.filter((source) => source.status === "ok");
-      assert.strictEqual(sources.length, 4);
+      assert.strictEqual(sources.length, 5);
       assert.strictEqual(
         sources.reduce((sum, source) => sum + source.scannedFiles, 0),
-        4,
+        5,
       );
       assert.strictEqual(
         sources.filter((source) => source.fingerprint.provider === "codex").length,
