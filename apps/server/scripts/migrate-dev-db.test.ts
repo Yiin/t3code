@@ -142,6 +142,55 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
+  it.effect("copies stored values and preserves virtual and stored generated columns", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-generated-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-generated-dest-",
+      });
+      const source = yield* createFixtureSource(sourceDir);
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`CREATE TABLE generated_values (
+            "input" INTEGER NOT NULL,
+            virtual_value INTEGER GENERATED ALWAYS AS ("input" * 2) VIRTUAL,
+            stored_value INTEGER GENERATED ALWAYS AS ("input" + 3) STORED
+          )`;
+          yield* sql`INSERT INTO generated_values ("input") VALUES (7)`;
+        }),
+      );
+
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 1 },
+        { sharedHome: sourceDir },
+      );
+      yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          assert.deepStrictEqual(yield* sql`SELECT * FROM generated_values`, [
+            { input: 7, virtual_value: 14, stored_value: 10 },
+          ]);
+          yield* sql`UPDATE generated_values SET "input" = 10`;
+          assert.deepStrictEqual(yield* sql`SELECT * FROM generated_values`, [
+            { input: 10, virtual_value: 20, stored_value: 13 },
+          ]);
+        }),
+      );
+      const sourceValues = yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql`SELECT * FROM generated_values`;
+        }),
+      );
+      assert.deepStrictEqual(sourceValues, [{ input: 7, virtual_value: 14, stored_value: 10 }]);
+    }),
+  );
+
   it.effect("never copies a settled thread's rows, and new events append after the source's", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
