@@ -84,10 +84,7 @@ import { ClaudeExecutableFileCheck } from "../../provider/Drivers/ClaudeExecutab
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
-import {
-  makeProviderFailure,
-  PROVIDER_PROCESS_EXITED_CODE,
-} from "@t3tools/provider-core/server/failure";
+import { PROVIDER_PROCESS_EXITED_CODE } from "@t3tools/provider-core/server/failure";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ClaudeOrchestratorReplayHarness } from "./ClaudeAdapterV2.testkit.ts";
@@ -2621,7 +2618,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect(
-    "reuses a background shell's query for omitted and explicit Normal, but blocks Fast",
+    "reuses a background shell's query for Normal and Fast, but blocks a permission change",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -2660,13 +2657,28 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* harness.offerAndWait(turnOneResult);
           yield* Queue.take(harness.terminalReceipts);
 
+          // Fast needs a new process. The shell keeps the old one, so the
+          // prompt goes there and Fast waits for the shell to end.
+          yield* harness.runtime.startTurn(
+            turn(3, {
+              ...normal,
+              options: [{ id: "fastMode", value: true }],
+            }),
+          );
+          assert.strictEqual(harness.getOpenedOptions(), originalOptions);
+          assert.lengthOf(harness.offeredMessages, 3);
+          yield* harness.offerAndWait(turnOneResult);
+          yield* Queue.take(harness.terminalReceipts);
+
+          // The live process must not keep access the user took away.
           const refused = yield* harness.runtime
-            .startTurn(
-              turn(3, {
-                ...normal,
-                options: [{ id: "fastMode", value: true }],
+            .startTurn({
+              ...turn(4, normal),
+              runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                ...CLAUDE_TEST_RUNTIME_POLICY,
+                runtimeMode: "approval-required",
               }),
-            )
+            })
             .pipe(Effect.result);
           assert.equal(refused._tag, "Failure");
           if (refused._tag === "Failure") {
@@ -2676,7 +2688,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             );
           }
           assert.strictEqual(harness.getOpenedOptions(), originalOptions);
-          assert.lengthOf(harness.offeredMessages, 2);
+          assert.lengthOf(harness.offeredMessages, 3);
           assert.isTrue(yield* harness.hasPendingBackgroundWork);
         }).pipe(
           Effect.provide(
@@ -10485,7 +10497,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
-  it.effect("refuses a model change that would kill a running background subagent", () =>
+  it.effect("defers a model change until a running background subagent ends", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const SUBAGENT_TASK_ID = "task-model-change-running-subagent";
@@ -10590,7 +10602,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const settledTurn = terminals()[0]!;
 
         // The subagent runs inside the first CLI process. Another model needs
-        // another process, so the turn must not start and close this one.
+        // another process, so the prompt goes to this one and the model waits.
         const alternateModel = {
           ...CLAUDE_TEST_MODEL_SELECTION,
           model: "claude-haiku-4-5-20251001",
@@ -10608,14 +10620,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               modelSelection: alternateModel,
             }),
           );
-        const refused = yield* switchTurn("attempt-claude-model-change-running-subagent-b").pipe(
-          Effect.flip,
-        );
-        assert.equal(
-          makeProviderFailure({ cause: refused, class: "provider_error" }).message,
-          new ClaudeAdapterV2.ClaudeBackgroundWorkBlocksQueryReplacementError().message,
-        );
+        yield* switchTurn("attempt-claude-model-change-running-subagent-b");
         assert.lengthOf(processQueues, 1);
+        yield* Queue.offer(
+          firstProcess,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000904",
+            result: "Answered on the running process.",
+          }),
+        );
+        yield* awaitUntil(() => terminals().length === 2, "deferred turn terminal");
 
         // Stop ends the background work, so the switch may replace the process.
         yield* runtime.interruptTurn({
@@ -10635,7 +10649,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             result: "Switched model.",
           }),
         );
-        yield* awaitUntil(() => terminals().length === 2, "switched turn terminal");
+        yield* awaitUntil(() => terminals().length === 3, "switched turn terminal");
         yield* runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId,
@@ -10763,23 +10777,23 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ...CLAUDE_TEST_MODEL_SELECTION,
             model: "claude-haiku-4-5-20251001",
           } satisfies ModelSelection;
-          const failedStart = yield* runtime
+          const deferredStart = yield* runtime
             .startTurn(
               makeClaudeTestTurnInput({
                 threadId,
                 providerThread: { ...providerThread, status: "active" },
                 now,
                 attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-b"),
-                text: "Replace process but fail open.",
+                text: "Switch model while the shell runs.",
                 attachments: [],
                 providerTurnOrdinal: 2,
                 modelSelection: alternateModel,
               }),
             )
             .pipe(Effect.exit);
-          assert.isTrue(Exit.isFailure(failedStart));
-          // The shell runs in the first process, so it is never closed and
-          // no replacement is opened.
+          // The shell runs in the first process, so the prompt goes there:
+          // it is never closed and no replacement is opened.
+          assert.isTrue(Exit.isSuccess(deferredStart));
           assert.equal(openCount, 1);
           assert.isTrue(yield* hasPendingBackgroundWork);
         }).pipe(

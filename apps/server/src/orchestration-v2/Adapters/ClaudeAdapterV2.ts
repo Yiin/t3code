@@ -406,7 +406,7 @@ export class ClaudeBackgroundWorkBlocksQueryReplacementError extends Schema.Tagg
   {},
 ) {
   override get message(): string {
-    return "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
+    return "Claude is still running background agents or commands, and this permission change would end them. Wait for them to finish, or press Stop, then send the message again.";
   }
 }
 
@@ -2990,6 +2990,9 @@ interface ClaudeLiveQueryContext {
   readonly nativeThreadId: string;
   readonly query: ClaudeAgentSdkQuerySession;
   readonly queryPolicyKey: string;
+  // queryPolicyKey without the MCP connection. Only this part can make a
+  // turn replace a process that still runs background work.
+  readonly accessPolicyKey: string;
   readonly selectionKey: string;
   readonly closed: Deferred.Deferred<void, never>;
   // Retained for process-exit cleanup even when its last turn failed.
@@ -8216,9 +8219,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               : { allowedTools: queryPolicy.allowedTools }),
           });
           const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+          // The same key without the MCP connection: what the process may do.
+          const accessPolicyKey = claudeEffectiveQueryPolicyKey(
+            queryPolicy,
+            mcpOverrides.allowedTools === undefined
+              ? {}
+              : { allowedTools: mcpOverrides.allowedTools },
+          );
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
+          // Claude can switch its own mode mid-session (EnterPlanMode), and
+          // a denied ExitPlanMode leaves it there. Put the live process back
+          // in the thread's mode before the next prompt.
+          const reuseLiveQuery = Effect.fnUntraced(function* (live: ClaudeLiveQueryContext) {
+            if (live.permissionMode !== live.openedPermissionMode) {
+              yield* live.query.setPermissionMode(live.openedPermissionMode);
+              live.permissionMode = live.openedPermissionMode;
+            }
+            return live;
+          });
           // A continuation prompts nothing: it drains output the live process
           // already produced, so it keeps that process whatever its selection.
           if (
@@ -8234,19 +8254,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             existing.queryPolicyKey === queryPolicyKey &&
             existing.selectionKey === compiledSelection.queryIdentity
           ) {
-            // Claude can switch its own mode mid-session (EnterPlanMode), and
-            // a denied ExitPlanMode leaves it there. Put the live process back
-            // in the thread's mode before the next prompt.
-            if (existing.permissionMode !== existing.openedPermissionMode) {
-              yield* existing.query.setPermissionMode(existing.openedPermissionMode);
-              existing.permissionMode = existing.openedPermissionMode;
-            }
-            return existing;
+            return yield* reuseLiveQuery(existing);
           }
 
           // Background agents and shells run inside the CLI process, so a
-          // new selection would kill them and lose their results. Refuse until
-          // they finish or the user presses Stop, which closes the process.
+          // new process would kill them and lose their results. A new model
+          // or MCP connection waits: the prompt goes to the live process, and
+          // the first turn after the work ends opens the new one. A new access
+          // policy cannot wait, because the live process would keep access the
+          // user took away. It is refused until the work finishes or the user
+          // presses Stop, which closes the process.
           // Another native thread on this session is one the app thread has
           // left (Claude sessions serve one app thread), so it is replaced.
           if (
@@ -8255,7 +8272,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             !existing.stopping &&
             (yield* liveProcessRunsBackgroundWork(existing))
           ) {
-            return yield* new ClaudeBackgroundWorkBlocksQueryReplacementError();
+            if (existing.accessPolicyKey !== accessPolicyKey) {
+              return yield* new ClaudeBackgroundWorkBlocksQueryReplacementError();
+            }
+            yield* Effect.logInfo(
+              "Claude keeps its live process until background work ends; the new selection waits",
+              { threadId: turnInput.threadId, nativeThreadId },
+            );
+            return yield* reuseLiveQuery(existing);
           }
 
           // openQuery owns one live process. Closing it for another native
@@ -8359,6 +8383,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId,
             query: querySession,
             queryPolicyKey,
+            accessPolicyKey,
             selectionKey: compiledSelection.queryIdentity,
             closed,
             lastTurn: null,
