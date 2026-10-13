@@ -3,6 +3,7 @@ import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -15,6 +16,8 @@ import {
   resolveClaudeHomePath,
   resolveClaudeInstanceHome,
   claudeInstanceEnvironment,
+  isManagedClaudeAccountHome,
+  shareClaudeUserConfig,
 } from "./ClaudeHome.ts";
 
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
@@ -136,6 +139,62 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const second = yield* makeClaudeCapabilitiesCacheKey(config, "/repo-b");
         expect(first).not.toBe(second);
       }),
+    );
+  });
+
+  describe("shared user config", () => {
+    it.effect("treats only directories under accounts/claudeAgent as T3 account homes", () =>
+      Effect.gen(function* () {
+        expect(
+          yield* isManagedClaudeAccountHome("/data/t3/accounts/claudeAgent/instance-a", "/data/t3"),
+        ).toBe(true);
+        expect(yield* isManagedClaudeAccountHome("/data/t3/accounts/claudeAgent", "/data/t3")).toBe(
+          false,
+        );
+        expect(yield* isManagedClaudeAccountHome("/home/me/.claude_personal", "/data/t3")).toBe(
+          false,
+        );
+        expect(yield* isManagedClaudeAccountHome("", "/data/t3")).toBe(false);
+      }),
+    );
+
+    it.effect("links skills and settings into an account and keeps its login local", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-home-" });
+        const shared = path.join(root, "shared");
+        const account = path.join(root, "account");
+        yield* fileSystem.makeDirectory(path.join(shared, "skills", "lavish"), { recursive: true });
+        yield* fileSystem.writeFileString(path.join(shared, "skills", "lavish", "SKILL.md"), "x");
+        yield* fileSystem.writeFileString(path.join(shared, "settings.json"), "{}");
+        yield* fileSystem.writeFileString(path.join(shared, ".credentials.json"), "shared-login");
+        // The account already made its own skills directory before it was linked.
+        yield* fileSystem.makeDirectory(path.join(account, "skills", "synced"), {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(path.join(account, ".credentials.json"), "account-login");
+
+        yield* shareClaudeUserConfig({ accountHomePath: account, sharedHomePath: shared });
+        yield* shareClaudeUserConfig({ accountHomePath: account, sharedHomePath: shared });
+
+        expect(yield* fileSystem.readLink(path.join(account, "skills"))).toBe(
+          path.join(shared, "skills"),
+        );
+        expect(yield* fileSystem.readDirectory(path.join(account, "skills"))).toEqual(["lavish"]);
+        expect(yield* fileSystem.readLink(path.join(account, "settings.json"))).toBe(
+          path.join(shared, "settings.json"),
+        );
+        expect(yield* fileSystem.exists(path.join(account, "agents"))).toBe(false);
+        expect(yield* fileSystem.readFileString(path.join(account, ".credentials.json"))).toBe(
+          "account-login",
+        );
+        const unshared = yield* fileSystem.readDirectory(path.join(account, ".t3-unshared"));
+        expect(unshared).toHaveLength(1);
+        expect(
+          yield* fileSystem.readDirectory(path.join(account, ".t3-unshared", unshared[0]!)),
+        ).toEqual(["synced"]);
+      }).pipe(Effect.scoped),
     );
   });
 });

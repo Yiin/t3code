@@ -3,7 +3,10 @@ import type {
   ProviderInstanceEnvironment,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -27,6 +30,81 @@ export const resolveClaudeInstanceHome = Effect.fn("resolveClaudeInstanceHome")(
     `instance-${encodeURIComponent(instanceId)}`,
   );
 });
+
+/**
+ * User config that every T3 account directory shares with the default Claude
+ * home. Logins, account settings, and conversation state stay per account.
+ */
+export const CLAUDE_SHARED_USER_CONFIG = [
+  "CLAUDE.md",
+  "settings.json",
+  "skills",
+  "agents",
+  "commands",
+  "output-styles",
+  "hooks",
+  "plugins",
+] as const;
+
+/** Account directories that T3 creates and owns. A custom CLAUDE_CONFIG_DIR stays isolated. */
+export const isManagedClaudeAccountHome = Effect.fn("isManagedClaudeAccountHome")(function* (
+  homePath: string,
+  baseDir: string,
+) {
+  if (!homePath.trim()) return false;
+  const path = yield* Path.Path;
+  const accountsDir = path.resolve(baseDir, "accounts", "claudeAgent");
+  const relative = path.relative(accountsDir, path.resolve(homePath));
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
+});
+
+/**
+ * Link the user config of the shared Claude home into an account directory,
+ * so the account loads the same skills, agents, and settings as the CLI. A
+ * real entry that the account made before it was linked moves to
+ * `.t3-unshared/` instead of being deleted. An existing link is left alone.
+ * Failures only log: a missing skill must not stop the account from working.
+ */
+export const shareClaudeUserConfig = Effect.fn("shareClaudeUserConfig")(
+  function* (input: { readonly accountHomePath: string; readonly sharedHomePath: string }) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const accountHomePath = path.resolve(input.accountHomePath);
+    const sharedHomePath = path.resolve(input.sharedHomePath);
+    if (accountHomePath === sharedHomePath) return;
+    yield* fileSystem.makeDirectory(accountHomePath, { recursive: true });
+    for (const entry of CLAUDE_SHARED_USER_CONFIG) {
+      const targetPath = path.join(sharedHomePath, entry);
+      const linkPath = path.join(accountHomePath, entry);
+      yield* Effect.gen(function* () {
+        if (!(yield* fileSystem.exists(targetPath))) return;
+        if (Option.isSome(yield* fileSystem.readLink(linkPath).pipe(Effect.option))) return;
+        if (yield* fileSystem.exists(linkPath)) {
+          const unsharedDir = path.join(accountHomePath, ".t3-unshared");
+          const unsharedPath = path.join(unsharedDir, `${entry}.${yield* Clock.currentTimeMillis}`);
+          yield* fileSystem.makeDirectory(unsharedDir, { recursive: true });
+          yield* fileSystem.rename(linkPath, unsharedPath);
+          yield* Effect.logInfo("Moved account-local Claude config aside to share it", {
+            entry,
+            unsharedPath,
+          });
+        }
+        yield* fileSystem.symlink(targetPath, linkPath);
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not share Claude user config with an account", {
+            entry,
+            accountHomePath,
+            cause,
+          }),
+        ),
+      );
+    }
+  },
+  Effect.catch((cause) =>
+    Effect.logWarning("Could not prepare Claude account directory", { cause }),
+  ),
+);
 
 export function claudeInstanceEnvironment(
   instanceId: ProviderInstanceId,

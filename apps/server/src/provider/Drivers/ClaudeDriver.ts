@@ -72,7 +72,9 @@ import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
+  isManagedClaudeAccountHome,
   resolveClaudeInstanceHome,
+  shareClaudeUserConfig,
   claudeInstanceEnvironment,
 } from "./ClaudeHome.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -151,6 +153,15 @@ export const ClaudeDriver: ProviderDriver<
         homePath: yield* resolveClaudeInstanceHome(instanceId, config, baseDir),
         binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
       } satisfies ClaudeSettings;
+      if (yield* isManagedClaudeAccountHome(effectiveConfig.homePath, baseDir)) {
+        yield* shareClaudeUserConfig({
+          accountHomePath: effectiveConfig.homePath,
+          sharedHomePath: yield* resolveClaudeHomePath({ homePath: "" }, process.env),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
+      }
       const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
         resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
           binaryPath: effectiveConfig.binaryPath,

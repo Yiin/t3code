@@ -9,8 +9,7 @@ shared provider settings.
 Add a Claude instance in **Settings > Providers** and continue to sign-in. T3 Code
 creates a separate account directory under its data directory
 (`~/.t3/accounts/claudeAgent/` by default) when you leave the config-directory
-setting empty. It does not create profiles in `~/.agents` or copy account skills
-into `~/.agents/skills`. Open the browser link, sign into the intended Claude account, and paste the
+setting empty. Open the browser link, sign into the intended Claude account, and paste the
 returned authorization code into T3 Code. Check the reported account before
 selecting the instance in the model picker.
 
@@ -25,8 +24,13 @@ An explicit path takes precedence over T3 Code's separate account directory.
 The setting changes `CLAUDE_CONFIG_DIR` while leaving `HOME` and the system
 keychain location intact.
 
-Separate account directories keep their credentials, settings, skills, and local
-conversation state separate. Claude does not use Codex's shared-home arrangement.
+Each account directory links your user config from the default Claude home
+(`~/.claude`): `CLAUDE.md`, `settings.json`, `skills`, `agents`, `commands`,
+`output-styles`, `hooks`, and `plugins`. Every account loads the same skills and
+agents as the CLI. Credentials and conversation state stay in the account
+directory. If the account already had its own copy of a linked entry, T3 Code
+moves it to `.t3-unshared/` in that directory. A **CLAUDE_CONFIG_DIR path**
+outside `~/.t3/accounts/claudeAgent/` stays fully isolated.
 Added instances do not inherit API keys or OAuth tokens from the server process;
 set credentials on the instance explicitly when needed.
 
