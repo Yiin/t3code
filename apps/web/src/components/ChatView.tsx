@@ -7813,6 +7813,31 @@ export default function ChatView(props: ChatViewProps) {
       }),
     [feedbackSubmissions, routeThreadKey],
   );
+  const limitedRunId = activeThreadShell?.latestRun?.runId ?? null;
+  const limitedProviderInstanceId =
+    serverProjection?.runs.find((run) => run.id === limitedRunId)?.providerInstanceId ?? null;
+  // The reset belongs to the account that hit the limit. When the composer
+  // picks another account, Resume continues there now instead of waiting.
+  // Resolve the pick as the composer does: its picker can hand off to
+  // another account, so it uses modelPickerLockedProvider.
+  const composerPickedEntry = resolveComposerProviderSelection({
+    entries: providerInstanceEntries,
+    candidateInstanceIds: [
+      selectedProviderByThreadId,
+      activeRuntime?.providerInstanceId,
+      activeThread?.modelSelection.instanceId,
+      activeProjectDefaultModelSelection?.instanceId,
+    ],
+    lockedProvider: modelPickerLockedProvider,
+    lockedInstanceId: activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId,
+  }).selectedProviderEntry;
+  const limitSwitchedAccountEntry =
+    composerPickedEntry !== undefined &&
+    limitedProviderInstanceId !== null &&
+    resumableRunId === limitedRunId &&
+    composerPickedEntry.instanceId !== limitedProviderInstanceId
+      ? composerPickedEntry
+      : null;
   const limitRecoveryBanner =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -7823,6 +7848,13 @@ export default function ChatView(props: ChatViewProps) {
           stoppedAt: activeThreadShell.latestRun.completedAt ?? activeThreadShell.updatedAt,
           recovery: activeThreadShell.limitRecovery ?? null,
           snoozedUntil: activeThreadShell.snoozedUntil,
+          switchedAccount:
+            limitSwitchedAccountEntry === null
+              ? null
+              : {
+                  label: limitSwitchedAccountEntry.displayName,
+                  onResumeNow: () => void onResume(),
+                },
           onChange: async (limitRecovery) => {
             const result = await updateThreadMetadata({
               environmentId,

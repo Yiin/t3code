@@ -15,10 +15,15 @@ type RecoveryProps = {
   snoozedUntil: string | null;
   recovery: OrchestrationV2LimitRecovery | null;
   onChange: (recovery: OrchestrationV2LimitRecoveryUpdate) => Promise<void>;
+  /**
+   * Set when the composer picks a different provider account than the one
+   * that hit the limit. Its reset time does not apply to that account.
+   */
+  switchedAccount: { label: string; onResumeNow: () => void } | null;
 };
 
 export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBannerStackItem {
-  const { runId, resetAt, stoppedAt } = props;
+  const { runId, resetAt, stoppedAt, switchedAccount } = props;
   const canSchedule = resetAt !== null && Date.parse(resetAt) > Date.parse(stoppedAt);
   return {
     id: `usage-limit-recovery:${runId}`,
@@ -29,8 +34,63 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
     description: resetAt
       ? `Resets ${new Date(resetAt).toLocaleString()}`
       : "Reset time unavailable; retry manually",
-    actions: canSchedule ? <RecoveryActions key={`${runId}:${resetAt}`} {...props} /> : null,
+    actions: switchedAccount ? (
+      <SwitchedAccountActions
+        key={`${runId}:${resetAt}`}
+        {...props}
+        switchedAccount={switchedAccount}
+      />
+    ) : canSchedule ? (
+      <RecoveryActions key={`${runId}:${resetAt}`} {...props} />
+    ) : null,
   };
+}
+
+/** Another account can run now, so waiting for this account's reset is moot. */
+function SwitchedAccountActions({
+  runId,
+  resetAt,
+  recovery,
+  onChange,
+  switchedAccount,
+}: RecoveryProps & { switchedAccount: NonNullable<RecoveryProps["switchedAccount"]> }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scheduled =
+    recovery?.runId === runId && recovery.resetAt === resetAt && recovery.autoResume;
+  async function cancelAutoResume() {
+    if (resetAt === null) return;
+    setPending(true);
+    setError(null);
+    try {
+      await onChange({ runId, resetAt, autoResume: false });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not change limit recovery.");
+    }
+    setPending(false);
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button size="xs" variant="ghost" disabled={pending} onClick={switchedAccount.onResumeNow}>
+        {`Resume now on ${switchedAccount.label}`}
+      </Button>
+      {scheduled ? (
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={pending}
+          onClick={() => void cancelAutoResume()}
+        >
+          {pending ? "Saving..." : "Cancel auto-resume"}
+        </Button>
+      ) : null}
+      {error ? (
+        <p role="alert" className="basis-full text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: RecoveryProps) {
